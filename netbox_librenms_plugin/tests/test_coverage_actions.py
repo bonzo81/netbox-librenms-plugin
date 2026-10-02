@@ -347,10 +347,11 @@ class TestBulkImportConfirmView:
         # fetch_device_with_cache reads/writes the real Django cache; isolate tests so a
         # device cached by one doesn't satisfy another's lookup.
         from django.core.cache import cache
+        from netbox_librenms_plugin.tests.conftest import clear_test_cache
 
-        cache.clear()
+        clear_test_cache(cache)
         yield
-        cache.clear()
+        clear_test_cache(cache)
 
     @staticmethod
     def _make_view(settings, server, server_key):
@@ -552,6 +553,31 @@ class TestBulkImportConfirmView:
         assert b'name="enable_vc_detection" value="true"' in response.content
         assert response.context["vc_detection_enabled"] is True
         assert response.context["devices"][0]["validation"]["_vc_detection_enabled"] is True
+
+    def test_confirm_template_displays_a_failed_chassis_read_without_stack_members(self):
+        from django.template.loader import render_to_string
+
+        html = render_to_string(
+            "netbox_librenms_plugin/htmx/bulk_import_confirm.html",
+            {
+                "devices": [
+                    {
+                        "device_id": 9901,
+                        "device_name": "failed-chassis-read",
+                        "validation": {
+                            "virtual_chassis": {
+                                "is_stack": False,
+                                "detection_failed": True,
+                                "detection_error": "Inventory read failed",
+                            }
+                        },
+                    }
+                ],
+                "server_key": "default",
+            },
+        )
+
+        assert "Unable to display virtual chassis members: Inventory read failed" in html
 
 
 @pytest.mark.django_db

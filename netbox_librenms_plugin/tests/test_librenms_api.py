@@ -57,7 +57,7 @@ class TestLibreNMSAPIInit:
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-        api = LibreNMSAPI()
+        api = LibreNMSAPI(server_key="default")
 
         assert api.librenms_url == "https://legacy.example.com"
 
@@ -79,6 +79,7 @@ class TestLibreNMSAPIInit:
         api = LibreNMSAPI(server_key="ghost")
         assert api.server_key == "default"
 
+    @pytest.mark.django_db  # an unset key falls back to the stored selected_server, which is a DB read
     def test_init_non_string_server_key_falls_back_cleanly(self, mock_librenms_config):
         """An unhashable non-string server_key (e.g. a list) is treated as unset, not raised on at the dict membership check."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
@@ -165,28 +166,32 @@ class TestLibreNMSAPIInit:
         assert api.server_key == "primary"
         assert api.librenms_url == "https://primary.example.com"
 
+    @pytest.mark.django_db
     def test_init_stale_auto_selected_server_falls_back(self, mock_librenms_config):
         """Issue #110: a stale LibreNMSSettings.selected_server (no longer configured) must fall back to the first server rather than hard-fail — it was auto-resolved, not explicitly requested, so the KeyError guard must not fire."""
         mock_config = mock_librenms_config["mock_config"]
         mock_config.return_value = {
             "primary": {"librenms_url": "https://primary.example.com", "api_token": "t"},
         }
-        mock_settings = mock_librenms_config["mock_settings"]
-        mock_settings.objects.first.return_value.selected_server = "gone-server"
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "gone-server"})
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
         api = LibreNMSAPI()  # server_key=None -> auto-resolved from (stale) settings
         assert api.server_key == "primary"
 
+    @pytest.mark.django_db
     def test_init_blank_server_key_treated_as_non_explicit_falls_back(self, mock_librenms_config):
         """A blank/whitespace server_key is 'no key': a stale selected_server must still fall back, not hard-fail. Treating '' as explicit would mark the auto-resolved key explicit and defeat the issue #110 fallback (KeyError)."""
         mock_config = mock_librenms_config["mock_config"]
         mock_config.return_value = {
             "primary": {"librenms_url": "https://primary.example.com", "api_token": "t"},
         }
-        mock_settings = mock_librenms_config["mock_settings"]
-        mock_settings.objects.first.return_value.selected_server = "gone-server"
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"selected_server": "gone-server"})
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
@@ -1355,6 +1360,81 @@ class TestLibreNMSAPIPortsAndInventory:
         assert len(links_dict["links"]) == 1
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_get_device_links_no_links_404_is_empty_not_failure(self, mock_get, mock_librenms_config):
+        """Verify a no-links 404 returns an empty success so serial cable sync retains the cache snapshot."""
+        import requests as _requests
+
+        resp = _requests.models.Response()
+        resp.status_code = 404
+        resp._content = b'{"status":"error","message":"Device does not have any links"}'
+        resp.url = "https://example/api/v0/devices/13/links"
+        mock_get.return_value = resp
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, data = api.get_device_links(device_id=13)
+
+        assert success is True
+        assert data == {"status": "ok", "links": []}
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_get_device_links_missing_device_404_is_a_failure(self, mock_get, mock_librenms_config):
+        """A 404 for an unknown device must not be converted to an empty link list."""
+        import requests as _requests
+
+        resp = _requests.models.Response()
+        resp.status_code = 404
+        resp._content = b'{"status":"error","message":"Device not found"}'
+        resp.url = "https://example/api/v0/devices/13/links"
+        mock_get.return_value = resp
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, data = api.get_device_links(device_id=13)
+
+        assert success is False
+        assert data == "Device not found"
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_get_device_links_librenms_no_links_message_is_empty_success(self, mock_get, mock_librenms_config):
+        """LibreNMS also reports an empty link set as ``Links do not exist``."""
+        import requests as _requests
+
+        resp = _requests.models.Response()
+        resp.status_code = 404
+        resp._content = b'{"status":"error","message":"Links do not exist"}'
+        resp.url = "https://example/api/v0/devices/13/links"
+        mock_get.return_value = resp
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, data = api.get_device_links(device_id=13)
+
+        assert success is True
+        assert data == {"status": "ok", "links": []}
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
+    def test_get_device_links_non_404_http_error_still_fails(self, mock_get, mock_librenms_config):
+        """A genuine server error (500) must still surface as a failure — only a 404 means 'no links'."""
+        import requests as _requests
+
+        resp = _requests.models.Response()
+        resp.status_code = 500
+        resp._content = b'{"status":"error","message":"boom"}'
+        resp.url = "https://example/api/v0/devices/13/links"
+        mock_get.return_value = resp
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        api = LibreNMSAPI(server_key="default")
+        success, data = api.get_device_links(device_id=13)
+
+        assert success is False
+
+    @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_get_device_ips_success(self, mock_get, mock_librenms_config):
         """Verify retrieving device IP addresses."""
         mock_get.return_value.status_code = 200
@@ -1815,6 +1895,7 @@ class TestGetDeviceTransceiversResponseShape:
 
         assert success is False
         assert "Invalid JSON" in msg
+        assert "Error connecting" not in msg
 
     @patch("netbox_librenms_plugin.librenms_api.requests.get")
     def test_non_dict_response_returns_failure(self, mock_get, mock_librenms_config):
@@ -2546,7 +2627,8 @@ class TestResolvePortRelationships:
         assert 200 not in result["lag_members"]
 
     def test_sap_rows_stay_excluded_from_the_name_derived_sub_interface_fallback(self, mock_librenms_api):
-        """Rule 2 skips a SAP pair, but the name-derived fallback walks every port with an id,
+        """
+        Rule 2 skips a SAP pair, but the name-derived fallback walks every port with an id,
         not the filtered pairs, so a SAP child can still be recorded as a sub-interface."""
         ports = [
             {"port_id": 301, "ifName": "lag-1:10", "ifDescr": "lag-1:10", "ifType": "ipForward"},
@@ -3133,3 +3215,407 @@ class TestResolvePortRelationships:
 
         assert 999 not in result["lag_members"].values()
         assert result["lag_members"] == {201: 204}
+
+
+@pytest.mark.django_db  # _fetch_serial_port_sensors reads the SerialSensorTypePattern rows
+class TestGetSerialPortSensors:
+    """Cover response-shape branches in get_serial_port_sensors()."""
+
+    def _make_sensor(self, device_id, sensor_type="acsSerialPortTable", port_num=7):
+        return {
+            "sensor_id": 1000 + port_num,
+            "device_id": device_id,
+            "sensor_type": sensor_type,
+            "sensor_index": f"acsSerialPortTableStatus.{port_num}",
+            "sensor_descr": f"device-{port_num} Status",
+            "sensor_current": 2,
+            "group": "Serial Ports",
+        }
+
+    def test_empty_recognition_table_skips_the_instance_sensor_request(self, mock_librenms_api, librenms_server):
+        from netbox_librenms_plugin.models import SerialSensorTypePattern
+
+        SerialSensorTypePattern.objects.all().delete()
+        requests_seen = []
+
+        def response(**request):
+            requests_seen.append(request)
+            return 200, {"status": "ok", "sensors": []}
+
+        librenms_server.register("/api/v0/resources/sensors", response, method="GET")
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is True
+        assert data == []
+        assert requests_seen == []
+
+    def test_success_filters_by_device_and_type(self, mock_librenms_api, librenms_server):
+        sensors = [
+            self._make_sensor(12, port_num=7),
+            self._make_sensor(12, port_num=11),
+            self._make_sensor(99, port_num=3),  # different device
+            self._make_sensor(12, sensor_type="tempSensor", port_num=5),  # wrong type
+        ]
+        librenms_server.register("/api/v0/resources/sensors", {"status": "ok", "sensors": sensors})
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is True
+        assert len(data) == 2
+        assert all(s["device_id"] == 12 for s in data)
+        assert all(s["sensor_type"] == "acsSerialPortTable" for s in data)
+
+    def test_explicit_sensor_types_map_bypasses_db(self, mock_librenms_api, librenms_server):
+        """A caller-supplied recognition map filters without the live database rows."""
+        from netbox_librenms_plugin.models import SerialSensorTypePattern
+
+        SerialSensorTypePattern.objects.all().delete()  # a replay host may have no rows at all
+
+        sensors = [self._make_sensor(12, port_num=7)]
+        librenms_server.register("/api/v0/resources/sensors", {"status": "ok", "sensors": sensors})
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_serial_port_sensors(
+            device_id=12, sensor_types={"acsSerialPortTable": "ttyS{N}"}
+        )
+        assert success is True
+        assert len(data) == 1
+
+        # The DB-map path sees no rows, so it filters everything out.
+        success2, data2 = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        assert success2 is True
+        assert data2 == []
+
+    def test_cisco_async_line_survives_type_filter(self, mock_librenms_api, librenms_server):
+        """Cisco async-line sensors pass the serial type filter alongside Avocent, others are dropped."""
+        cisco = {
+            "sensor_id": 2002,
+            "device_id": 12,
+            "sensor_type": "OLD-CISCO-TS-MIB::ltsLineTable",
+            "sensor_index": "tsLineActive.2",
+            "sensor_descr": "peer Status",
+            "sensor_current": 0,
+            "group": "Serial Ports",
+        }
+        sensors = [
+            self._make_sensor(12, port_num=7),  # acsSerialPortTable
+            cisco,
+            self._make_sensor(12, sensor_type="tempSensor", port_num=5),  # unrelated -> excluded
+        ]
+        librenms_server.register("/api/v0/resources/sensors", {"status": "ok", "sensors": sensors})
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is True
+        assert {s["sensor_type"] for s in data} == {
+            "acsSerialPortTable",
+            "OLD-CISCO-TS-MIB::ltsLineTable",
+        }
+
+    def test_non_dict_sensor_item_fails_closed(self, mock_librenms_api, librenms_server):
+        """Verify a malformed non-dictionary sensor item fails closed instead of appearing as no serial sensors."""
+        sensors = ["bad-string", None, self._make_sensor(12, port_num=7)]
+        librenms_server.register("/api/v0/resources/sensors", {"status": "ok", "sensors": sensors})
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is False
+        assert "invalid sensor item" in msg.lower()
+
+    def test_non_string_sensor_type_is_skipped_without_dropping_the_serial_rows(
+        self, mock_librenms_api, librenms_server
+    ):
+        """Verify an unhashable sensor type is skipped so one malformed row cannot stop the instance-wide refresh."""
+        unreadable = self._make_sensor(12, port_num=8)
+        unreadable["sensor_type"] = ["acsSerialPortTable"]  # unhashable → TypeError on `in serial_types`
+        good = self._make_sensor(12, port_num=7)
+        librenms_server.register(
+            "/api/v0/resources/sensors",
+            {"status": "ok", "sensors": [unreadable, good]},
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is True
+        assert [sensor["sensor_id"] for sensor in data] == [good["sensor_id"]]
+
+    def test_unrelated_non_string_sensor_type_does_not_fail_the_serial_fetch(self, mock_librenms_api, librenms_server):
+        """One unrelated sensor on another device must not stop this device's serial refresh."""
+        unrelated = self._make_sensor(99, port_num=5)
+        unrelated["sensor_type"] = {"name": "tempSensor"}
+        good = self._make_sensor(12, port_num=7)
+        librenms_server.register(
+            "/api/v0/resources/sensors",
+            {"status": "ok", "sensors": [unrelated, good]},
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is True
+        assert [sensor["sensor_id"] for sensor in data] == [good["sensor_id"]]
+
+    def test_non_numeric_sensor_id_fails_closed(self, mock_librenms_api, librenms_server):
+        bad = self._make_sensor(12, port_num=8)
+        bad["sensor_id"] = "';alert(1);//"
+        librenms_server.register("/api/v0/resources/sensors", {"status": "ok", "sensors": [bad]})
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is False
+        assert "invalid sensor_id" in msg.lower()
+
+    def test_unrelated_sensor_id_does_not_fail_the_serial_fetch(self, mock_librenms_api, librenms_server):
+        """The endpoint returns every sensor on the instance, so only serial rows may fail it."""
+        unrelated = self._make_sensor(99, sensor_type="tempSensor", port_num=5)
+        unrelated["sensor_id"] = None
+        good = self._make_sensor(12, port_num=7)
+        librenms_server.register(
+            "/api/v0/resources/sensors",
+            {"status": "ok", "sensors": [unrelated, good]},
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is True
+        assert [sensor["sensor_id"] for sensor in data] == [good["sensor_id"]]
+
+    def test_a_malformed_serial_row_on_another_device_does_not_fail_the_requested_device(
+        self, mock_librenms_api, librenms_server
+    ):
+        """A malformed serial row on another device must not stop the requested device refresh."""
+        other = self._make_sensor(99, port_num=8)
+        other["sensor_id"] = "';alert(1);//"
+        good = self._make_sensor(12, port_num=7)
+        librenms_server.register(
+            "/api/v0/resources/sensors",
+            {"status": "ok", "sensors": [other, good]},
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is True
+        assert [sensor["sensor_id"] for sensor in data] == [good["sensor_id"]]
+
+    def test_a_malformed_sensor_deleted_on_another_device_does_not_fail_the_requested_device(
+        self, mock_librenms_api, librenms_server
+    ):
+        """A malformed sensor_deleted on another device must not stop the requested device refresh."""
+        other = self._make_sensor(99, port_num=8)
+        other["sensor_deleted"] = 2
+        good = self._make_sensor(12, port_num=7)
+        librenms_server.register(
+            "/api/v0/resources/sensors",
+            {"status": "ok", "sensors": [other, good]},
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is True
+        assert [sensor["sensor_id"] for sensor in data] == [good["sensor_id"]]
+
+    def test_unrelated_sensor_deleted_does_not_fail_the_serial_fetch(self, mock_librenms_api, librenms_server):
+        """One unrelated sensor with an out-of-contract sensor_deleted must not drop serial rows."""
+        unrelated = self._make_sensor(99, sensor_type="tempSensor", port_num=5)
+        unrelated["sensor_deleted"] = 2
+        good = self._make_sensor(12, port_num=7)
+        librenms_server.register(
+            "/api/v0/resources/sensors",
+            {"status": "ok", "sensors": [unrelated, good]},
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is True
+        assert [sensor["sensor_id"] for sensor in data] == [good["sensor_id"]]
+
+    @pytest.mark.parametrize("deleted_value", [True, 1.0], ids=["boolean", "float"])
+    def test_non_integer_sensor_deleted_on_a_serial_row_fails_closed(
+        self,
+        mock_librenms_api,
+        librenms_server,
+        deleted_value,
+    ):
+        """A serial row with an unreadable sensor_deleted is still a malformed response."""
+        bad = self._make_sensor(12, port_num=8)
+        bad["sensor_deleted"] = deleted_value
+        librenms_server.register("/api/v0/resources/sensors", {"status": "ok", "sensors": [bad]})
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is False
+        assert "invalid sensor_deleted" in msg.lower()
+
+    def test_empty_sensor_list_returns_empty(self, mock_librenms_api, librenms_server):
+        librenms_server.register("/api/v0/resources/sensors", {"status": "ok", "sensors": []})
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is True
+        assert data == []
+
+    def test_librenms_empty_inventory_404_returns_empty(self, mock_librenms_api, librenms_server):
+        """LibreNMS reports a valid empty sensor inventory as a specific 404 message."""
+        librenms_server.register(
+            "/api/v0/resources/sensors",
+            {"status": "error", "message": "Sensors do not exist"},
+            status=404,
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is True
+        assert data == []
+
+    def test_deleted_serial_sensors_are_excluded(self, mock_librenms_api, librenms_server):
+        """A discovery-deleted line must not become a live cable-sync row."""
+        active = self._make_sensor(12, port_num=7)
+        active["sensor_deleted"] = "0"
+        deleted = self._make_sensor(12, port_num=8)
+        deleted["sensor_deleted"] = 1
+        librenms_server.register(
+            "/api/v0/resources/sensors",
+            {"status": "ok", "sensors": [active, deleted]},
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is True
+        assert [sensor["sensor_id"] for sensor in data] == [active["sensor_id"]]
+
+    def test_missing_sensors_key_returns_failure(self, mock_librenms_api, librenms_server):
+        """status=ok but neither 'sensors' nor 'resources' present is a malformed response, not a successful zero-sensor result."""
+        librenms_server.register(
+            "/api/v0/resources/sensors",
+            {"status": "ok", "message": "no sensors key"},
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is False
+        assert "no sensors key" in msg
+
+    def test_falsy_present_sensors_value_returns_failure(self, mock_librenms_api, librenms_server):
+        """A present-but-non-list 'sensors' (e.g. "") must fail, not be coerced to an empty success."""
+        librenms_server.register("/api/v0/resources/sensors", {"status": "ok", "sensors": ""})
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is False
+        assert "missing sensor list" in msg.lower()
+
+    def test_non_ok_status_returns_error(self, mock_librenms_api, librenms_server):
+        librenms_server.register(
+            "/api/v0/resources/sensors",
+            {"status": "error", "message": "something went wrong"},
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is False
+        assert "wrong" in msg
+
+    def test_404_returns_error(self, mock_librenms_api, librenms_server):
+        librenms_server.register(
+            "/api/v0/resources/sensors",
+            {"status": "error", "message": "Resource does not exist"},
+            status=404,
+        )
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is False
+        assert "not found" in msg.lower()
+
+    def test_connection_error_returns_error(self, mock_librenms_api):
+        import unittest.mock as mock
+        import requests as req
+
+        with mock.patch(
+            "netbox_librenms_plugin.librenms_api.requests.get", side_effect=req.exceptions.ConnectionError("refused")
+        ):
+            success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is False
+        # "or error in msg" also accepted "Invalid JSON ... refused", so a connection error
+        # routed through the JSON branch would have passed. Pin the classification instead.
+        assert "refused" in msg
+        assert "Invalid JSON" not in msg
+
+    def test_recognized_type_change_applies_on_the_next_fetch(self, mock_librenms_api, librenms_server):
+        """Adding a recognized sensor type applies on the next fresh fetch."""
+        from netbox_librenms_plugin.models import SerialSensorTypePattern
+
+        sensor_type = "reviewSerialTable"
+        sensors = [self._make_sensor(12, sensor_type=sensor_type, port_num=7)]
+        requests_seen = []
+
+        def response(**request):
+            requests_seen.append(request)
+            return 200, {"status": "ok", "sensors": sensors}
+
+        librenms_server.register("/api/v0/resources/sensors", response, method="GET")
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        first_success, first_data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        SerialSensorTypePattern.objects.create(sensor_type=sensor_type, port_name_pattern="console{N}")
+        second_success, second_data = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert first_success is True and first_data == []
+        assert second_success is True and [sensor["sensor_type"] for sensor in second_data] == [sensor_type]
+        assert len(requests_seen) == 2
+
+    def test_failed_fetch_is_retried(self, mock_librenms_api, librenms_server):
+        """A transient failure does not prevent the next request from fetching again."""
+        good = [self._make_sensor(12, port_num=7)]
+        responses = iter(
+            [
+                {"status": "error", "message": "boom"},
+                {"status": "ok", "sensors": good},
+            ]
+        )
+        requests_seen = []
+
+        def response(**request):
+            requests_seen.append(request)
+            return 200, next(responses)
+
+        librenms_server.register("/api/v0/resources/sensors", response, method="GET")
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        ok1, msg1 = mock_librenms_api.get_serial_port_sensors(device_id=12)
+        ok2, data2 = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert ok1 is False and "boom" in msg1
+        assert len(requests_seen) == 2
+        assert ok2 is True and [s["device_id"] for s in data2] == [12]
+
+    def test_json_decode_error_reported_as_invalid_json(self, mock_librenms_api, librenms_server):
+        """A non-JSON 200 body must surface 'Invalid JSON', not be mislabeled 'Error connecting' — requests JSONDecodeError subclasses both ValueError and RequestException, so the ValueError handler must precede the RequestException one (mirrors get_port_stack)."""
+        librenms_server.register_raw("/api/v0/resources/sensors", "not-json", method="GET")
+        mock_librenms_api.librenms_url = librenms_server.url
+
+        success, msg = mock_librenms_api.get_serial_port_sensors(device_id=12)
+
+        assert success is False
+        assert "Invalid JSON" in msg
+        assert "Error connecting" not in msg

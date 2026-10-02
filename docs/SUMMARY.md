@@ -13,6 +13,7 @@
 * [Device Sync](device_sync/overview.md)
   * [Sync Tabs](device_sync/sync_tabs.md)
   * [Module Sync](device_sync/module_sync.md)
+  * [Cable Sync](device_sync/cable_sync.md)
   * [Virtual Chassis](device_sync/virtual_chassis.md)
 * [Configuration](configuration/overview.md)
   * [Import Settings](configuration/import_settings.md)

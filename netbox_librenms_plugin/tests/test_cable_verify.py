@@ -25,12 +25,7 @@ SERVER_KEY = "default"
 
 
 def _cable_device(tag, ifaces):
-    """Create a real Device named *tag* with named interfaces.
-
-    ``ifaces`` is a list of ``(name, librenms_port_id)`` — a non-None port id binds the interface's
-    ``librenms_id`` custom field for that server so the view's ``_librenms_id_q`` lookup resolves it.
-    Returns ``(device, {name: interface})``.
-    """
+    """Create a real device and return its interfaces, with optional LibreNMS port IDs for the default server."""
     from dcim.models import Device, DeviceRole, DeviceType, Interface, Manufacturer, Site
 
     mfr, _ = Manufacturer.objects.get_or_create(name=f"CblMfr-{tag}", slug=f"cblmfr-{tag}")
@@ -82,10 +77,11 @@ def _post_with_links(view, request, device, links):
 def _clear_cache_around_each_test():
     """Clear the real cache before and after each test so cache.set() link/port payloads (keyed by device PK, NOT rolled back with the test DB) can't feed a reused PK stale data."""
     from django.core.cache import cache
+    from netbox_librenms_plugin.tests.conftest import clear_test_cache
 
-    cache.clear()
+    clear_test_cache(cache)
     yield
-    cache.clear()
+    clear_test_cache(cache)
 
 
 @pytest.mark.django_db
@@ -102,7 +98,7 @@ class TestStaleFieldStripping:
         cable.save()
 
         view, request = _cable_view_and_request(
-            "stale", {"device_id": local.pk, "local_port_id": 100, "server_key": SERVER_KEY}
+            "stale", {"device_id": local.pk, "row_id": "100", "server_key": SERVER_KEY}
         )
         content = _post_with_links(
             view,
@@ -139,7 +135,7 @@ class TestStaleFieldStripping:
         local, lifaces = _cable_device("stale2-local", [("eth0", 100)])
 
         view, request = _cable_view_and_request(
-            "stale2", {"device_id": local.pk, "local_port_id": 100, "server_key": SERVER_KEY}
+            "stale2", {"device_id": local.pk, "row_id": "100", "server_key": SERVER_KEY}
         )
         content = _post_with_links(
             view,
@@ -181,7 +177,7 @@ class TestXSSEscaping:
         xss = '<script>alert("xss")</script>'
 
         view, request = _cable_view_and_request(
-            "xsslocal", {"device_id": local.pk, "local_port_id": 100, "server_key": SERVER_KEY}
+            "xsslocal", {"device_id": local.pk, "row_id": "100", "server_key": SERVER_KEY}
         )
         content = _post_with_links(
             view,
@@ -209,7 +205,7 @@ class TestXSSEscaping:
         xss_device = "<img src=x onerror=alert(1)>"
 
         view, request = _cable_view_and_request(
-            "xssremote", {"device_id": local.pk, "local_port_id": 100, "server_key": SERVER_KEY}
+            "xssremote", {"device_id": local.pk, "row_id": "100", "server_key": SERVER_KEY}
         )
         content = _post_with_links(
             view,
@@ -233,8 +229,7 @@ class TestXSSEscaping:
 
 
 def _cable_view_with_api(tag, body, *, api_server_key="default"):
-    """A real SingleCableVerifyView + real superuser request, with _librenms_api stubbed only to supply
-    the active-server fallback key (its constructor would otherwise need real LibreNMS config)."""
+    """Create a cable verification view and superuser request with only the active server key stubbed."""
     from django.contrib.auth import get_user_model
 
     from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
@@ -263,16 +258,9 @@ class TestServerKeyGuard:
         assert response.status_code == 200
 
     def test_valid_string_server_key_is_honoured_in_cache_namespace(self):
-        """A configured string key scopes the REAL links cache namespace, via the real classmethod check (#108/#109).
-
-        Unlike the old device_id="" version, this actually exercises the resolved server_key: it drives
-        the real LibreNMSAPI.get_available_servers() classmethod (patched to configure 'prod') and asserts
-        the resolved key threads into get_cache_key — so it fails if the membership check ever regresses.
-        """
+        """Verify a configured string key scopes the real links cache through the server membership check."""
         device, _ = _cable_device("guard-valid", [("eth0", 100)])
-        view, request = _cable_view_with_api(
-            "valid", {"device_id": device.pk, "local_port_id": 100, "server_key": "prod"}
-        )
+        view, request = _cable_view_with_api("valid", {"device_id": device.pk, "row_id": "100", "server_key": "prod"})
 
         captured = {}
         real_get_cache_key = view.get_cache_key
@@ -375,7 +363,7 @@ class TestSingleCableVerifyMisconfiguredDefault:
         }
         request = RequestFactory().post(
             "/verify/",
-            data=json.dumps({"device_id": device.pk, "local_port_id": "1", "server_key": "prod"}),
+            data=json.dumps({"device_id": device.pk, "row_id": "1", "server_key": "prod"}),
             content_type="application/json",
         )
         # RequestFactory skips AuthenticationMiddleware; the object-scoped device lookup reads
@@ -442,7 +430,7 @@ class TestVerifyDualNameFallback:
         }
         cache.set(view.get_cache_key(device, "links", "default"), {"links": [link]}, 300)
 
-        request = _make_request({"device_id": device.pk, "local_port_id": 555, "server_key": "default"})
+        request = _make_request({"device_id": device.pk, "row_id": "555", "server_key": "default"})
         response = view.post(request)
         payload = json.loads(response.content)
 
@@ -472,7 +460,7 @@ class TestVerifyDualNameFallback:
         }
         cache.set(view.get_cache_key(device, "links", "default"), {"links": [link]}, 300)
 
-        request = _make_request({"device_id": device.pk, "local_port_id": 7777, "server_key": "default"})
+        request = _make_request({"device_id": device.pk, "row_id": "7777", "server_key": "default"})
         response = view.post(request)
         payload = json.loads(response.content)
 
@@ -585,19 +573,14 @@ class TestOOBRowsNeverActionable:
         }
         cache.set(view.get_cache_key(local_dev, "links", "default"), {"links": [link]}, 300)
 
-        request = _make_request({"device_id": local_dev.pk, "local_port_id": 700, "server_key": "default"})
+        request = _make_request({"device_id": local_dev.pk, "row_id": "700", "server_key": "default"})
         payload = json.loads(view.post(request).content)
         actions = payload["formatted_row"]["actions"]
 
         assert ("Sync Cable" in actions) is expect_sync
 
     def test_oob_row_never_links_a_host_interface(self):
-        """Verify must not resolve an OOB row's local end against the HOST device.
-
-        The controller-managed port lives on the OOB device; a shared name (or colliding
-        stored librenms_id) would render a clickable HOST-interface link on it — mirrors
-        the enrich_local_port guard on the initial table render.
-        """
+        """Verify an OOB row never resolves its local end against a host interface with a shared name or LibreNMS ID."""
         from django.core.cache import cache
 
         from dcim.models import Interface
@@ -610,7 +593,7 @@ class TestOOBRowsNeverActionable:
         link = {"local_port": "eth0", "local_port_id": 700, "remote_device": "", "_source": "oob"}
         cache.set(view.get_cache_key(local_dev, "links", "default"), {"links": [link]}, 300)
 
-        request = _make_request({"device_id": local_dev.pk, "local_port_id": 700, "server_key": "default"})
+        request = _make_request({"device_id": local_dev.pk, "row_id": "700", "server_key": "default"})
         row = json.loads(view.post(request).content)["formatted_row"]
 
         assert "/dcim/interfaces/" not in row["local_port"]  # no host-interface link
@@ -639,7 +622,7 @@ class TestSingleCableVerifyServerKeyRouting:
         view = _make_view(server_key="default-server")
         self._seed(view, device, "production")  # links cached ONLY under 'production'
 
-        request = _make_request({"device_id": device.pk, "local_port_id": 700, "server_key": "production"})
+        request = _make_request({"device_id": device.pk, "row_id": "700", "server_key": "production"})
         with patch(
             "netbox_librenms_plugin.librenms_api.LibreNMSAPI.get_available_servers",
             return_value={"production": "Production"},
@@ -660,7 +643,7 @@ class TestSingleCableVerifyServerKeyRouting:
         view = _make_view(server_key="fallback-server")
         self._seed(view, device, "fallback-server")  # cached under the api's bound key
 
-        request = _make_request({"device_id": device.pk, "local_port_id": 700})  # POST omits server_key
+        request = _make_request({"device_id": device.pk, "row_id": "700"})  # POST omits server_key
         row = json.loads(view.post(request).content)["formatted_row"]
 
         assert "eth0" in row["local_port"]  # the fallback (api.server_key) cache key was used
@@ -672,7 +655,7 @@ class TestSingleCableVerifyServerKeyRouting:
         view = _make_view(server_key="default-server")
         self._seed(view, device, "staging")  # cached under 'staging' only
 
-        request = _make_request({"device_id": device.pk, "local_port_id": 700, "server_key": "production"})
+        request = _make_request({"device_id": device.pk, "row_id": "700", "server_key": "production"})
         row = json.loads(view.post(request).content)["formatted_row"]
 
         # No cross-server bleed: the 'production' lookup misses → the default Missing-Ports row.
@@ -729,9 +712,7 @@ class TestEnrichRemotePortEmptyPort:
 
 @pytest.mark.django_db
 class TestResolveLocalInterfaceCore:
-    """The shared id→dual-name resolution core used by BOTH enrich_local_port and the verify
-    re-resolution (extracted so the issue-#88 name fallback / precedence can't drift between
-    the two copies again)."""
+    """Verify both callers share LibreNMS ID precedence and dual-name fallback for local-interface resolution."""
 
     def _dev(self, name):
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
@@ -742,26 +723,49 @@ class TestResolveLocalInterfaceCore:
     def test_librenms_id_beats_name(self):
         from dcim.models import Interface
 
-        from netbox_librenms_plugin.views.base.cables_view import _resolve_local_interface
+        from netbox_librenms_plugin.utils import resolve_interface_on_device
 
         device, by_name = self._dev("core-id-wins")
         by_id = Interface.objects.create(device=device, name="other-name", type="1000base-t")
         by_id.custom_field_data["librenms_id"] = {"default": 4242}
         by_id.save()
 
-        got = _resolve_local_interface(device, "default", 4242, ["eth-by-name"])
+        got = resolve_interface_on_device(device, "default", 4242, ["eth-by-name"])
         assert got == by_id  # the stable id match wins over the name candidate
 
     def test_name_fallback_covers_all_candidates(self):
-        from netbox_librenms_plugin.views.base.cables_view import _resolve_local_interface
+        from netbox_librenms_plugin.utils import resolve_interface_on_device
 
         device, by_name = self._dev("core-name-fb")
         # No id match anywhere: the ALTERNATE candidate (issue #88) must still resolve.
-        got = _resolve_local_interface(device, "default", 9999, ["displayed-name", "eth-by-name"])
+        got = resolve_interface_on_device(device, "default", 9999, ["displayed-name", "eth-by-name"])
         assert got == by_name
 
     def test_empty_inputs_resolve_nothing(self):
-        from netbox_librenms_plugin.views.base.cables_view import _resolve_local_interface
+        from netbox_librenms_plugin.utils import resolve_interface_on_device
 
         device, _ = self._dev("core-empty")
-        assert _resolve_local_interface(device, "default", None, []) is None
+        assert resolve_interface_on_device(device, "default", None, []) is None
+
+    def test_two_name_matches_resolve_nothing(self):
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.utils import resolve_interface_on_device
+
+        device, first = self._dev("core-name-ambiguous")
+        second = Interface.objects.create(device=device, name="eth-alt", type="1000base-t")
+
+        assert resolve_interface_on_device(device, "default", None, [first.name, second.name]) is None
+
+    def test_two_id_matches_resolve_nothing(self):
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.utils import resolve_interface_on_device
+
+        device, _by_name = self._dev("core-id-ambiguous")
+        for name in ("eth-dup-a", "eth-dup-b"):
+            duplicate = Interface.objects.create(device=device, name=name, type="1000base-t")
+            duplicate.custom_field_data["librenms_id"] = {"default": 4242}
+            duplicate.save()
+
+        assert resolve_interface_on_device(device, "default", 4242, ["eth-by-name"]) is None

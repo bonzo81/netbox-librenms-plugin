@@ -1,0 +1,87 @@
+{% load helpers %}
+{% comment %}
+Force-confirm modal for the LibreNMS cable sync. Rendered as the #htmx-modal-content shell and
+injected via an out-of-band swap from _cable_sync_content.html when a sync would overwrite a cable.
+It shows the visible part of the NetBox trace for every cable that would be deleted. It blocks the
+force submit behind an unchecked confirmation checkbox.
+
+Context: conflicts (list of {interface, row_id, trace}), server_key, device_pk.
+{% endcomment %}
+<div class="modal-header bg-danger text-white">
+    <h5 class="modal-title" id="htmx-modal-label">
+        <i class="mdi mdi-alert-octagon me-1"></i>Overwrite protected cable(s)
+    </h5>
+    <button type="button" class="btn-close btn-close-white" onclick="closeHtmxModal()" aria-label="Close"></button>
+</div>
+<form method="post"
+      action="{% url 'plugins:netbox_librenms_plugin:sync_device_cables' device_pk %}"
+      hx-post="{% url 'plugins:netbox_librenms_plugin:sync_device_cables' device_pk %}"
+      hx-target="#cable-sync-content" hx-swap="innerHTML"
+      hx-disabled-elt="find button[type=submit]">
+    {% csrf_token %}
+    {% if server_key %}<input type="hidden" name="server_key" value="{{ server_key }}">{% endif %}
+    {% if origin_device_id %}<input type="hidden" name="origin_device_id" value="{{ origin_device_id }}">{% endif %}
+    {# Re-submit with force ON, only for the conflicting ports the user is being asked to confirm. #}
+    <input type="hidden" name="force" value="on">
+    {% for conflict in conflicts %}<input type="hidden" name="select" value="{{ conflict.row_id }}">
+    <input type="hidden" name="expected_local_id_{{ conflict.row_id }}" value="{{ conflict.expected_local_id }}">
+    <input type="hidden" name="expected_local_device_id_{{ conflict.row_id }}" value="{{ conflict.expected_local_device_id }}">
+    <input type="hidden" name="expected_remote_id_{{ conflict.row_id }}" value="{{ conflict.expected_remote_id }}">
+    <input type="hidden" name="expected_remote_device_id_{{ conflict.row_id }}" value="{{ conflict.expected_remote_device_id }}">
+    <input type="hidden" name="expected_cable_intent_{{ conflict.row_id }}" value="{{ conflict.expected_cable_intent }}">
+    {# Re-target the exact sync device the user confirmed (VC member overrides must survive). #}
+    {% if conflict.device_id %}<input type="hidden" name="device_selection_{{ conflict.row_id }}" value="{{ conflict.device_id }}">{% endif %}{% endfor %}
+
+    <div class="modal-body">
+        {# NetBox's .alert is display:flex, so wrap all text in ONE child div (else each inline #}
+        {# node becomes its own flex column and the sentence breaks into ragged vertical strips). #}
+        {# role="alert": the modal arrives via an OOB swap, so assistive tech only announces #}
+        {# this destructive warning if the banner is a live region. #}
+        <div class="alert alert-danger py-2 d-flex" role="alert">
+            <i class="mdi mdi-alert me-2 mt-1"></i>
+            <div>
+                <strong>{{ conflicts|length }} selected port{{ conflicts|length|pluralize }}</strong>
+                already terminate{{ conflicts|length|pluralize:"s," }} an existing cable. Forcing
+                the sync will
+                <strong>delete only the highlighted segment{{ conflicts|length|pluralize }}</strong>
+                directly attached to the endpoints — patch-panel trunks and the rest of the
+                path{{ conflicts|length|pluralize }} shown below stay in place — and connect the
+                port{{ conflicts|length|pluralize }} with a single LibreNMS-managed cable.
+            </div>
+        </div>
+
+        {% for conflict in conflicts %}
+        <div class="mb-3">
+            <div class="fw-semibold mb-1"><i class="mdi mdi-lan-connect me-1"></i>{{ conflict.interface }}</div>
+            {% for trace in conflict.trace %}
+            <ul class="list-unstyled ms-3 mb-1 small font-monospace border-start ps-3">
+                {% for hop in trace %}
+                <li>
+                    {{ hop.near }}
+                    {% if hop.cable %}{% if hop.cable in conflict.removed_cables %}<span class="text-danger">──[{{ hop.cable }}]──</span> <span class="badge bg-danger text-white">deleted</span>{% else %}<span class="text-body">──[{{ hop.cable }}]──</span> <span class="text-muted small">(stays)</span>{% endif %}{% else %}<span class="text-muted">════</span>{% endif %}
+                    {{ hop.far }}
+                </li>
+                {% empty %}
+                <li class="text-muted">(no trace)</li>
+                {% endfor %}
+            </ul>
+            {% endfor %}
+        </div>
+        {% endfor %}
+
+        <div class="form-check mt-3">
+            <input class="form-check-input" type="checkbox" id="cable-force-confirm"
+                   onchange="document.getElementById('cable-force-submit').disabled = !this.checked">
+            <label class="form-check-label fw-semibold text-danger" for="cable-force-confirm">
+                I understand this will permanently delete the highlighted cable segment{{ conflicts|length|pluralize }} above.
+            </label>
+        </div>
+    </div>
+
+    <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeHtmxModal()">Cancel</button>
+        <button type="submit" id="cable-force-submit" class="btn btn-danger" disabled>
+            <i class="mdi mdi-alert me-1"></i>Force overwrite &amp; sync
+        </button>
+    </div>
+</form>

@@ -1,22 +1,23 @@
 """
 Additional coverage tests for:
   - views/base/cables_view.py   (currently ~59%)
-  - views/base/ip_addresses_view.py (~62%)
+  - views/base/ip_addresses_view.py (~62%).
 
-All tests follow strict project conventions:
-  - Plain pytest classes, NO @pytest.mark.django_db
-  - Mock ALL database interactions with MagicMock
-  - Inline imports inside test methods
-  - assert x == y style
-  - Use object.__new__(ClassName) to bypass __init__
-  - No RequestFactory — mock request objects directly
+The page object and the request are REAL: the cable views resolve every object through
+``restrict(user, ...)``, so a MagicMock page object has no ``objects`` manager and a MagicMock
+request has no authenticated user. Only the LibreNMS HTTP client stays mocked, which is the
+external boundary these tests are about.
 """
 
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
+from netbox_librenms_plugin.tests.coverage_base_view_helpers import make_sync_page_device, make_sync_page_request
+from netbox_librenms_plugin.tests.view_test_helpers import post as view_post
+
+pytestmark = pytest.mark.django_db
 
 
 def _seed_lib_id(iface, value, server_key="default"):
@@ -57,25 +58,6 @@ def _q_leaves(q):
         else:
             leaves.add(child)
     return leaves
-
-
-def _mock_obj(model_name="device", pk=1, name="test-device"):
-    obj = MagicMock()
-    obj._meta = MagicMock()
-    obj._meta.model_name = model_name
-    obj.pk = pk
-    obj.name = name
-    obj.virtual_chassis = None
-    return obj
-
-
-def _mock_request(path="/plugins/librenms/device/1/cables/"):
-    req = MagicMock()
-    req.path = path
-    req.GET = {}
-    req.POST = {}
-    req.headers = {}
-    return req
 
 
 def _authorized_superuser(tag):
@@ -239,28 +221,26 @@ class TestGetObjectAndIpAddress:
         view.model = MagicMock()
         return view
 
-    @pytest.mark.django_db
-    def test_get_object_resolves_through_a_restricted_queryset(self):
-        """get_object returns a permitted object and 404s on one outside the caller's grant."""
+    def test_get_object_resolves_through_the_view_scope(self):
+        """Verify that get_object returns 404 for a primary key outside the request's constrained view scope."""
+        import pytest as pytest_mod
         from dcim.models import Device
+        from django.contrib.auth import get_user_model
         from django.http import Http404
 
-        from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.tests.view_test_helpers import (
-            make_request,
-            make_user_with_perms,
-            make_view,
-        )
-        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
-        allowed = make_device("getobj-allowed-cable")
-        hidden = make_device("getobj-hidden-cable")
-        user = make_user_with_perms("getobj-viewer-cable", [("view", Device)], constraints={"name": allowed.name})
-        view = make_view(BaseCableTableView, make_request("get", user=user))
-        view.model = Device
+        visible = make_device("cbv2-get-object-visible")
+        hidden = make_device("cbv2-get-object-hidden")
+        user = get_user_model().objects.create_user("cbv2-get-object")
+        user = grant(user, "view", Device, constraints={"pk": visible.pk})
 
-        assert view.get_object(allowed.pk).pk == allowed.pk
-        with pytest.raises(Http404):
+        view = DeviceCableTableView()
+        view.setup(make_request("get", user=user), pk=visible.pk)
+
+        assert view.get_object(visible.pk) == visible
+        with pytest_mod.raises(Http404):
             view.get_object(hidden.pk)
 
     def test_get_ip_address_with_primary_ip(self):
@@ -304,7 +284,7 @@ class TestGetPortsDataFailure:
         view = self._make_view()
         view._librenms_api.get_ports.return_value = (False, {})
 
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         with patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache:
             mock_cache.get.return_value = None
@@ -318,7 +298,7 @@ class TestGetPortsDataFailure:
         view = self._make_view()
         cached = {"ports": [{"port_id": 1, "ifName": "Gi0/0"}]}
 
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         with patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache:
             mock_cache.get.return_value = cached
@@ -332,7 +312,7 @@ class TestGetPortsDataFailure:
         """An OOB-only device (librenms_id None) must return empty ports BEFORE consulting the cache, so a stale host-ports snapshot from a prior mapped refresh can't resurface into the new render."""
         view = self._make_view()
         view.librenms_id = None
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         with patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache:
             mock_cache.get.return_value = {"ports": [{"port_id": 7, "ifName": "STALE-HOST-PORT"}]}
@@ -356,7 +336,7 @@ class TestGetLinksDataPortNameNone:
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
 
         view = object.__new__(BaseCableTableView)
-        view.request = _mock_request()
+        view.request = make_sync_page_request()
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
         view.librenms_id = 42
@@ -386,7 +366,7 @@ class TestGetLinksDataPortNameNone:
             ]
         }
 
-        obj = _mock_obj()
+        obj = make_sync_page_device()
 
         with (
             patch.object(view, "get_ports_data", return_value=ports_data),
@@ -409,15 +389,14 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
 
         view = object.__new__(BaseCableTableView)
-        view.request = _mock_request()
+        view.request = make_sync_page_request()
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "default"
         return view
 
     def test_oob_only_valid_empty_returns_empty_list_not_none(self):
         view = self._make_view()
-        obj = _mock_obj()
-        obj.consoleserverports.exists.return_value = False  # no serial CSP rows to append
+        obj = make_sync_page_device()
 
         # OOB-only: no host librenms_id, so the host get_device_links() call fails and records
         # _links_fetch_error even though no host fetch was meaningfully attempted; the OOB
@@ -460,8 +439,7 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
     def test_oob_only_skips_wasteful_host_link_and_port_calls(self):
         """An OOB-only device (no host librenms_id) must not issue host get_device_links(None)/get_ports(None) — those GET /devices/None/... and always 404; only the OOB controller id is fetched, and the OOB rows still render."""
         view = self._make_view()
-        obj = _mock_obj()
-        obj.consoleserverports.exists.return_value = False
+        obj = make_sync_page_device()
         view._librenms_api.get_librenms_id.return_value = None
         # Only the OOB controller (99) should ever reach the link/port fetches.
         view._librenms_api.get_device_links.return_value = (True, {"links": []})
@@ -491,8 +469,7 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
     def test_oob_non_numeric_id_is_coerced_not_passed_raw(self):
         """A non-numeric stored OOB id must fail closed (coerced to None), never reach get_device_links/get_ports as a garbage device URL."""
         view = self._make_view()
-        obj = _mock_obj()
-        obj.consoleserverports.exists.return_value = False
+        obj = make_sync_page_device()
         view._librenms_api.get_librenms_id.return_value = None  # OOB-only: no host id to fetch
         view._librenms_api.get_device_links.return_value = (True, {"links": []})
         view._librenms_api.get_ports.return_value = (True, {"ports": []})
@@ -524,8 +501,7 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
     def test_oob_corrupt_id_flags_fetch_failed_not_silently_dropped(self):
         """A linked OOB controller with a corrupt id must surface the failure, not silently drop it."""
         view = self._make_view()
-        obj = _mock_obj()
-        obj.consoleserverports.exists.return_value = False
+        obj = make_sync_page_device()
         view._librenms_api.get_librenms_id.return_value = None  # OOB-only: no host id
         view._librenms_api.get_device_links.return_value = (True, {"links": []})
         view._librenms_api.get_ports.return_value = (True, {"ports": []})
@@ -554,8 +530,7 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
     def test_oob_only_failed_oob_fetch_returns_none_not_empty(self):
         """The OOB-scoped exemption holds ONLY when the OOB fetch succeeded."""
         view = self._make_view()
-        obj = _mock_obj()
-        obj.consoleserverports.exists.return_value = False
+        obj = make_sync_page_device()
 
         view._librenms_api.get_librenms_id.return_value = None
 
@@ -592,8 +567,7 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
     def test_oob_only_malformed_links_payload_returns_none(self):
         """OOB fetch SUCCEEDS but returns a malformed links payload (links not a list)."""
         view = self._make_view()
-        obj = _mock_obj()
-        obj.consoleserverports.exists.return_value = False
+        obj = make_sync_page_device()
 
         view._librenms_api.get_librenms_id.return_value = None
 
@@ -629,8 +603,7 @@ class TestGetLinksDataOobOnlyEmptyRefresh:
     def test_failed_host_fetch_records_message_only_error(self):
         """A failed host links fetch may carry its detail under "message" (no "error" key)."""
         view = self._make_view()
-        obj = _mock_obj()
-        obj.consoleserverports.exists.return_value = False
+        obj = make_sync_page_device()
         view._librenms_api.get_librenms_id.return_value = 42  # host mapping present
 
         # Host fetch fails with a message-only body.
@@ -904,9 +877,17 @@ class TestCablePostHostFetchWarning:
         return view
 
     def _run(self, *, links_fetch_error, librenms_id):
+        from django.contrib.messages.storage.fallback import FallbackStorage
+        from django.test import RequestFactory
+
         view = self._make_view()
-        request = MagicMock()
-        request.POST.get.return_value = "default"
+        # post() gates on the real object-permission check before it warns, so the request needs
+        # a real authorized user.
+        request = RequestFactory().post("/cables/", {"server_key": "default"})
+        request.user = make_superuser()
+        request.headers = {}
+        request.session = {}
+        request._messages = FallbackStorage(request)
 
         def _prep(*a, **k):
             # Mirror get_links_data recording a host failure while other rows kept it "successful".
@@ -920,7 +901,7 @@ class TestCablePostHostFetchWarning:
             patch("netbox_librenms_plugin.views.mixins.render"),
             patch("netbox_librenms_plugin.utils.build_migrated_context", return_value={}),
         ):
-            view.post(request, pk=1)
+            view_post(view, request, pk=1)
         return [c.args[1] for c in mock_msgs.warning.call_args_list]
 
     def test_warns_on_host_fetch_failure_with_rows(self):
@@ -933,67 +914,13 @@ class TestCablePostHostFetchWarning:
         assert not any("host links fetch failed" in t for t in warn_texts)
 
 
-class TestCablePartialSnapshotNotCached:
-    """A fresh fetch that partially failed (host or OOB) must NOT be cached — later cached renders/verify would otherwise silently serve the incomplete cable set."""
-
-    def _make_view(self):
-        from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
-
-        view = object.__new__(BaseCableTableView)
-        view._librenms_api = MagicMock(server_key="default", cache_timeout=300)
-        view.get_cache_key = MagicMock(return_value="links-key")
-        view.get_table = MagicMock(return_value=MagicMock())
-        view.enrich_links_data = MagicMock(side_effect=lambda d, o, server_key=None: d)
-        return view
-
-    def _links_cache_sets(self, *, oob_failed, links_error, librenms_id):
-        view = self._make_view()
-
-        def fake_get_links(obj, server_key=None, sync_device=None):
-            view._oob_links_fetch_failed = oob_failed
-            view._links_fetch_error = links_error
-            view.librenms_id = librenms_id
-            return [{"local_port": "Gi0/0", "remote_port": "Gi0/1", "_source": "host"}]
-
-        view.get_links_data = MagicMock(side_effect=fake_get_links)
-        with (
-            patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                return_value=MagicMock(),
-            ),
-        ):
-            mock_cache.ttl.return_value = None
-            view._prepare_context(MagicMock(), MagicMock(virtual_chassis=None), fetch_fresh=True, server_key="default")
-        return [c for c in mock_cache.set.call_args_list if c.args and c.args[0] == "links-key"]
-
-    def test_oob_fetch_failure_not_cached(self):
-        assert self._links_cache_sets(oob_failed=True, links_error=None, librenms_id=42) == []
-
-    def test_host_fetch_failure_with_host_id_not_cached(self):
-        assert self._links_cache_sets(oob_failed=False, links_error="auth failed", librenms_id=42) == []
-
-    def test_oob_only_mapping_still_cached(self):
-        # librenms_id None + a host "failure" is an OOB-only mapping (absent host) → still cache it.
-        assert len(self._links_cache_sets(oob_failed=False, links_error="no host", librenms_id=None)) == 1
-
-    def test_clean_fresh_fetch_cached(self):
-        assert len(self._links_cache_sets(oob_failed=False, links_error=None, librenms_id=42)) == 1
-
-
 # =============================================================================
 # TestGetTableOverride  — BaseCableTableView.get_table (lines 302-305)
 # =============================================================================
 
 
 class TestCableTableHtmxUrl:
-    """_prepare_context sets table.htmx_url from the RESOLVED server scope.
-
-    Set in _prepare_context (not a base get_table override): DeviceCableTableView
-    overrides get_table without calling super, so a base override never ran for the
-    device tab — and the base's lazy self.librenms_api.server_key could point at a
-    different server than the resolved scope.
-    """
+    """Verify that _prepare_context sets table.htmx_url from the resolved server scope."""
 
     def _run_prepare(self, server_key, path="/cables/"):
         from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
@@ -1001,7 +928,7 @@ class TestCableTableHtmxUrl:
         view = object.__new__(BaseCableTableView)
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = "session-server"  # must NOT leak into the URL
-        view.request = _mock_request(path)
+        view.request = make_sync_page_request(path)
 
         mock_table = MagicMock()
         with (
@@ -1012,7 +939,9 @@ class TestCableTableHtmxUrl:
         ):
             mock_cache.get.return_value = {"links": []}
             mock_cache.ttl.return_value = 300
-            result = view._prepare_context(view.request, MagicMock(), fetch_fresh=False, server_key=server_key)
+            result = view._prepare_context(
+                view.request, make_sync_page_device(), fetch_fresh=False, server_key=server_key
+            )
         assert result is not None
         return mock_table
 
@@ -1027,7 +956,7 @@ class TestCableTableHtmxUrl:
         view = object.__new__(BaseCableTableView)
         view._librenms_api = MagicMock()
         view._librenms_api.server_key = None
-        view.request = _mock_request("/cables/")
+        view.request = make_sync_page_request("/cables/")
 
         mock_table = MagicMock()
         with (
@@ -1038,7 +967,7 @@ class TestCableTableHtmxUrl:
         ):
             mock_cache.get.return_value = {"links": []}
             mock_cache.ttl.return_value = 300
-            result = view._prepare_context(view.request, MagicMock(), fetch_fresh=False, server_key=None)
+            result = view._prepare_context(view.request, make_sync_page_device(), fetch_fresh=False, server_key=None)
 
         assert result is not None
         assert mock_table.htmx_url == "/cables/?tab=cables"
@@ -1060,8 +989,7 @@ class TestPostHandlerVC:
         view._librenms_api.server_key = "default"
         # dispatch() sets self.request in production; tests call post() directly, so set an
         # authorized request here for the object-permission gate (reads self.request.user).
-        view.request = _mock_request()
-        view.request.user.has_perm.return_value = True
+        view.request = make_sync_page_request()
         return view
 
     @pytest.mark.django_db
@@ -1075,7 +1003,7 @@ class TestPostHandlerVC:
         device = _real_cable_device("srvkey")  # non-VC → primary_device = selected_device
 
         mock_request = MagicMock()
-        mock_request.body = json.dumps({"device_id": device.pk, "local_port_id": 10, "server_key": "ghost"}).encode()
+        mock_request.body = json.dumps({"device_id": device.pk, "row_id": "10", "server_key": "ghost"}).encode()
 
         captured = {}
 
@@ -1098,90 +1026,80 @@ class TestPostHandlerVC:
         assert captured["server_key"] == "good"  # "ghost" is unconfigured → session key used
 
     @pytest.mark.django_db
-    def test_vc_member_resolution_calls_get_virtual_chassis_member(self):
-        """VC device → get_virtual_chassis_member called with device and local_port."""
+    def test_vc_member_resolution_uses_the_selected_member(self, client, settings):
+        """Verify resolves the local port on the posted member, not the one the port name implies."""
         import json
+        from copy import deepcopy
 
-        view = self._make_view()
-        view.request.user = _authorized_superuser("vcmember")
-        device = _real_cable_device("vcmember", vc=True)  # real VC device
+        from django.core.cache import cache
+        from django.urls import reverse
 
-        mock_request = MagicMock()
-        mock_request.body = json.dumps(
-            {
-                "device_id": device.pk,
-                "local_port_id": 10,
-                "server_key": "default",
-            }
-        ).encode()
+        from netbox_librenms_plugin.tests.conftest import make_superuser, make_virtual_chassis_members
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
-        mock_member = MagicMock()
-        mock_interface = MagicMock()
-        mock_interface.pk = 99
-        # librenms_id lookup returns the interface
-        mock_member.interfaces.filter.return_value.first.return_value = mock_interface
-
-        cached_links = {
-            "links": [
-                {
-                    "local_port_id": 10,
-                    "local_port": "Gi0/0",
-                    "remote_port": "Gi0/1",
-                    "remote_device": "switch-b",
-                    "remote_port_id": 20,
-                    "remote_device_id": 99,
-                }
-            ]
+        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+        plugin_config["netbox_librenms_plugin"]["servers"] = {
+            "default": {"librenms_url": "https://librenms.example.com", "api_token": "t", "verify_ssl": False}
         }
+        settings.PLUGINS_CONFIG = plugin_config
 
-        with (
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                return_value=device,
-            ),
-            patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
-            patch.object(view, "get_cache_key", return_value="test-key"),
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_virtual_chassis_member",
-                return_value=mock_member,
-            ) as mock_vc,
-            patch.object(
-                view,
-                "process_remote_device",
-                return_value={
-                    "local_port": "Gi0/0",
-                    "remote_port": "Gi0/1",
-                    "remote_device": "switch-b",
-                    "remote_port_id": 20,
-                    "remote_device_id": 99,
-                },
-            ) as mock_process_remote,
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.reverse",
-                return_value="/interface/99/",
-            ),
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_token",
-                return_value="csrf-token",
-            ),
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.escape",
-                side_effect=lambda x: x,
-            ),
-        ):
-            mock_cache.get.return_value = cached_links
-            view.post(mock_request)
+        # Position 1 is what the port name "Ethernet1/1" implies; the dropdown posted position 2.
+        _vc, (inferred_member, selected_member) = make_virtual_chassis_members("cbv2-vcmember")
+        selected_member.custom_field_data["librenms_id"] = {"default": 101}
+        selected_member.save(update_fields=["custom_field_data"])
 
-        mock_vc.assert_called_once_with(device, "Gi0/0")
-        # Verify server_key is forwarded to process_remote_device
-        assert mock_process_remote.called
-        call_kwargs = mock_process_remote.call_args[1]
-        assert call_kwargs.get("server_key") == "default"
+        # Both members carry the same interface name AND the same LibreNMS port id, so only the
+        # posted selection can decide which one the row binds to.
+        inferred_interface = make_interface(inferred_member, "Ethernet1/1")
+        selected_interface = make_interface(selected_member, "Ethernet1/1")
+        _seed_lib_id(inferred_interface, 10)
+        _seed_lib_id(selected_interface, 10)
 
+        remote_device = make_device("cbv2-vcmember-remote", librenms_cf={"default": 99})
+        remote_interface = make_interface(remote_device, "Ethernet0/1")
+        _seed_lib_id(remote_interface, 20)
 
-# =============================================================================
-# TestPostHandlerInterfaceNotFound  — lines 534-561
-# =============================================================================
+        view = DeviceCableTableView()
+        sync_owner = get_librenms_sync_device(selected_member, server_key="default") or selected_member
+        # The cache is not rolled back with the test transaction and device pks repeat across
+        # runs, so the key is released in a finally block below.
+        cache_key = view.get_cache_key(sync_owner, "links", "default")
+        cache.set(
+            cache_key,
+            {
+                "links": [
+                    {
+                        "local_port_id": 10,
+                        "local_port": "Ethernet1/1",
+                        "remote_port": "Ethernet0/1",
+                        "remote_device": remote_device.name,
+                        "remote_port_id": 20,
+                        "remote_device_id": 99,
+                    }
+                ]
+            },
+            timeout=300,
+        )
+
+        client.force_login(make_superuser("cbv2-vcmember-user"))
+        try:
+            response = client.post(
+                reverse("plugins:netbox_librenms_plugin:verify_cable"),
+                data=json.dumps({"device_id": selected_member.pk, "row_id": "10", "server_key": "default"}),
+                content_type="application/json",
+            )
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 200
+        row = response.json()["formatted_row"]
+        # The posted member owns the row. Re-inferring from the port name would bind position 1.
+        assert row["expected_local_id"] == selected_interface.pk
+        assert row["expected_local_device_id"] == selected_member.pk
+        assert row["expected_local_id"] != inferred_interface.pk
+        # The posted server key reached the remote resolver, which matched by scoped LibreNMS id.
+        assert row["expected_remote_id"] == remote_interface.pk
 
 
 class TestPostHandlerInterfaceNotFound:
@@ -1195,8 +1113,7 @@ class TestPostHandlerInterfaceNotFound:
         view._librenms_api.server_key = "default"
         # dispatch() sets self.request in production; tests call post() directly, so set an
         # authorized request here for the object-permission gate (reads self.request.user).
-        view.request = _mock_request()
-        view.request.user.has_perm.return_value = True
+        view.request = make_sync_page_request()
         return view
 
     @pytest.mark.django_db
@@ -1212,7 +1129,7 @@ class TestPostHandlerInterfaceNotFound:
         mock_request.body = json_mod.dumps(
             {
                 "device_id": device.pk,
-                "local_port_id": 10,
+                "row_id": "10",
                 "server_key": "default",
             }
         ).encode()
@@ -1279,7 +1196,7 @@ class TestPostHandlerInterfaceNotFound:
         mock_request.body = json_mod.dumps(
             {
                 "device_id": device.pk,
-                "local_port_id": 10,
+                "row_id": "10",
                 "server_key": "default",
             }
         ).encode()
@@ -1328,10 +1245,6 @@ class TestPostHandlerInterfaceNotFound:
             patch(
                 "netbox_librenms_plugin.views.base.cables_view.escape",
                 side_effect=lambda x: x,
-            ),
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_token",
-                return_value="csrf-token",
             ),
         ):
             mock_cache.get.return_value = cached_links
@@ -1418,7 +1331,7 @@ class TestIpAddressViewMethods:
         view._librenms_api.get_librenms_id.return_value = 99
         view._librenms_api.get_device_ips.return_value = (True, [{"port_id": 1}])
 
-        obj = _mock_obj()
+        obj = make_sync_page_device()
         result = view.get_ip_addresses(obj)
 
         view._librenms_api.get_librenms_id.assert_called_once_with(obj)
@@ -1432,7 +1345,7 @@ class TestIpAddressViewMethods:
         # bool is the canonical poison: int(True) == 1 would otherwise look valid.
         view._librenms_api.get_librenms_id.return_value = True
 
-        result = view.get_ip_addresses(_mock_obj())
+        result = view.get_ip_addresses(make_sync_page_device())
 
         view._librenms_api.get_device_ips.assert_not_called()
         assert result == (False, "Device not found in LibreNMS")
@@ -1460,8 +1373,7 @@ class TestEnrichIpDataPortInfo:
         view = self._make_view()
 
         ip_data = [{"port_id": 1, "ip_address": "10.0.0.1", "prefix_length": 24}]
-        obj = _mock_obj()
-        obj.get_absolute_url.return_value = "/device/1/"
+        obj = make_sync_page_device()
 
         port_info = {"ifName": "Gi0/0"}
         base_entry = {
@@ -1500,8 +1412,7 @@ class TestEnrichIpDataPortInfo:
         view = self._make_view()
 
         ip_data = [{"port_id": 1, "ip_address": "10.0.0.1", "prefix_length": 24}]
-        obj = _mock_obj()
-        obj.get_absolute_url.return_value = "/device/1/"
+        obj = make_sync_page_device()
 
         base_entry = {
             "ip_address": "10.0.0.1",
@@ -1558,8 +1469,8 @@ class TestPrepareContextInterfaceNameFieldNone:
         view._librenms_api.get_stored_librenms_id.return_value = True
         view._librenms_api.cache_timeout = 300
 
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
         # Cached IP rows present but NO mgmt_ip key → drives the cached_mgmt_ip_missing backfill.
         cached = {"ip_addresses": [{"port_id": 1, "ip_address": "10.0.0.1", "prefix_length": 24}]}
 
@@ -1585,8 +1496,8 @@ class TestPrepareContextInterfaceNameFieldNone:
 
         view = self._make_view()
 
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
         key = f"nblp-test-corrupt-{uuid4().hex}"
 
         cache.set(key, ["not", "a", "dict"])
@@ -1602,8 +1513,8 @@ class TestPrepareContextInterfaceNameFieldNone:
     def test_prepare_context_uses_request_object_interface_name_fallback(self):
         """A missing explicit name field must use the request and object preference."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
         # The cached field differs from the resolver's, so only the resolved value can
         # satisfy the assertion below.
         cached = {
@@ -1634,8 +1545,8 @@ class TestPrepareContextInterfaceNameFieldNone:
     def test_fetch_fresh_malformed_ip_payload_returns_none(self):
         """A success flag with a non-list get_ip_addresses() payload (or a list with non-dict entries) must be treated as a fetch failure — return None before enrichment so post() neither renders an empty table under a success banner nor caches the empty snapshot."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         with (
             patch("netbox_librenms_plugin.views.base.ip_addresses_view.cache") as mock_cache,
@@ -1657,8 +1568,8 @@ class TestPrepareContextInterfaceNameFieldNone:
     def test_fetch_fresh_dict_row_missing_ip_fields_returns_none(self):
         """A dict row that passes the container-shape check but lacks the address/prefix and port_id fields _create_base_ip_entry() reads would KeyError mid-enrichment and 500 the fresh-refresh path."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         with (
             patch("netbox_librenms_plugin.views.base.ip_addresses_view.cache") as mock_cache,
@@ -1678,8 +1589,8 @@ class TestPrepareContextInterfaceNameFieldNone:
     def test_fetch_fresh_unhashable_port_id_returns_none(self):
         """A row with a valid address/prefix pair but an unhashable port_id (e.g. {}) must fail closed: as a cache-dict key in _get_port_info() it would raise `unhashable type` and 500 the fresh-refresh path."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         with (
             patch("netbox_librenms_plugin.views.base.ip_addresses_view.cache") as mock_cache,
@@ -1702,8 +1613,8 @@ class TestPrepareContextInterfaceNameFieldNone:
     def test_cached_render_reuses_cached_ports_without_live_calls(self):
         """A warm-cache render must enrich from the cached ports_by_id map and never call get_port_by_id(), so the IP tab keeps working when LibreNMS is unavailable."""
         view = self._make_view()
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         cached_payload = {
             "ip_addresses": [{"ip_address": "10.0.0.5", "prefix_length": 32, "port_id": 5}],
@@ -1745,8 +1656,8 @@ class TestPrepareContextInterfaceNameFieldNone:
         view = self._make_view()
         view._librenms_api.cache_timeout = 300
         view._librenms_api.get_port_by_id.return_value = (True, {"port": [{"ifName": "Gi0/1"}]})
-        obj = _mock_obj()
-        request = _mock_request()
+        obj = make_sync_page_device()
+        request = make_sync_page_request()
 
         cached_payload = {  # NO ports_by_id key → pre-upgrade entry
             "ip_addresses": [{"ip_address": "10.0.0.5", "prefix_length": 32, "port_id": 5}],
@@ -1789,12 +1700,7 @@ class TestPrepareContextInterfaceNameFieldNone:
 
 @pytest.mark.django_db
 class TestSingleIPAddressVerifyViewGetObject:
-    """_get_object resolves the right real object by type (and untyped), scoped to the caller's perms.
-
-    Rewritten from get_object_or_404/Device.objects.filter call-shape mocks to real Device/VM rows:
-    the object-scoping added in this PR routes the lookup through ``Model.objects.restrict`` and reads
-    ``self.request.user``, which the old call-signature assertions never exercised.
-    """
+    """Verify that _get_object resolves typed and untyped real objects within the caller's permission scope."""
 
     def _view(self):
         from django.contrib.auth import get_user_model
@@ -1960,12 +1866,7 @@ class TestSingleIPAddressVerifyViewFindInCache:
 
 @pytest.mark.django_db
 class TestSingleIPAddressVerifyViewFindExistingIp:
-    """Real-DB tests for SingleIPAddressVerifyView._find_existing_ip.
-
-    _find_existing_ip queries the real IPAddress model the plugin owns, so these exercise the
-    actual ORM lookup (address + vrf scoping). Mocking IPAddress.objects here left the exact
-    filter kwargs unverified — a change to the lookup fields would pass while the real query broke.
-    """
+    """Verify that _find_existing_ip queries real IPAddress rows by address and VRF."""
 
     def _make_view(self):
         from netbox_librenms_plugin.views.base.ip_addresses_view import SingleIPAddressVerifyView
@@ -2197,7 +2098,6 @@ class TestSingleIPAddressVerifyViewPost:
         mock_obj = MagicMock()
         mock_obj.name = "device1"
         mock_obj.get_absolute_url.return_value = "/device/1/"
-
         cache_entry = {
             "ip_address": "10.0.0.1",
             "prefix_length": 24,
@@ -2269,7 +2169,6 @@ class TestSingleIPAddressVerifyViewPost:
         mock_obj = MagicMock()
         mock_obj.name = "device1"
         mock_obj.get_absolute_url.return_value = "/device/1/"
-
         mock_iface = MagicMock()
         mock_iface.name = "eth0"
         mock_iface.get_absolute_url.return_value = "/interface/1/"
@@ -2451,35 +2350,20 @@ class TestEnrichLocalPortVCNameFallback:
 class TestPostHandlerCanCreateCable:
     """Tests for SingleCableVerifyView.post() can_create_cable branch (lines 519-525)."""
 
-    def _make_view(self):
+    @pytest.mark.django_db
+    def test_can_create_cable_adds_sync_action(self):
+        """Verify that can_create_cable adds a sync action that submits the row through the table form."""
+        import json
+
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
         from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
 
-        view = object.__new__(SingleCableVerifyView)
-        view._librenms_api = MagicMock()
-        view._librenms_api.server_key = "default"
-        # dispatch() sets self.request in production; tests call post() directly, so set an
-        # authorized request here for the object-permission gate (reads self.request.user).
-        view.request = _mock_request()
-        view.request.user.has_perm.return_value = True
-        return view
-
-    @pytest.mark.django_db
-    def test_can_create_cable_adds_form_action(self):
-        """can_create_cable=True → formatted_row['actions'] contains form."""
-        import json as json_mod
-
-        view = self._make_view()
-        view.request.user = _authorized_superuser("cancreate")
-        device = _real_cable_device("cancreate", bound_port_id=10)  # local interface bound to librenms id 10
-
-        mock_request = MagicMock()
-        mock_request.body = json_mod.dumps(
-            {
-                "device_id": device.pk,
-                "local_port_id": 10,
-                "server_key": "default",
-            }
-        ).encode()
+        device = _real_cable_device("cancreate", bound_port_id=10)
+        remote_device = make_device("cbv2-cancreate-remote", librenms_cf={"default": 99})
+        remote_interface = make_interface(remote_device, "Gi0/1")
+        _seed_lib_id(remote_interface, 20)
 
         cached_links = {
             "links": [
@@ -2494,55 +2378,35 @@ class TestPostHandlerCanCreateCable:
             ]
         }
 
-        process_result = {
-            "local_port": "Gi0/0",
-            "remote_port": "Gi0/1",
-            "remote_device": "switch-b",
-            "remote_port_id": 20,
-            "remote_device_id": 99,
-            "netbox_remote_device_id": 5,
-            "remote_device_url": "/device/5/",
-            "remote_port_url": "/interface/20/",
-            "remote_port_name": "Gi0/1",
-            "cable_status": "No Cable",
-            "can_create_cable": True,  # triggers lines 519-525
-        }
+        request = make_request(
+            "post",
+            data=json.dumps(
+                {
+                    "device_id": device.pk,
+                    "row_id": "10",
+                    "server_key": "default",
+                }
+            ),
+            content_type="application/json",
+            user=_authorized_superuser("cancreate"),
+        )
+        view = SingleCableVerifyView()
+        view.setup(request)
+        view._librenms_api = MagicMock(server_key="default")
+        links_cache_key = view.get_cache_key(device, "links", "default")
+        cache.set(links_cache_key, cached_links, timeout=300)
 
-        with (
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_librenms_sync_device",
-                return_value=device,
-            ),
-            patch("netbox_librenms_plugin.views.base.cables_view.cache") as mock_cache,
-            patch.object(view, "get_cache_key", return_value="test-key"),
-            patch.object(view, "process_remote_device", return_value=process_result),
-            patch.object(view, "check_cable_status", return_value=process_result),
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.reverse",
-                side_effect=[
-                    "/dcim/interfaces/99/",
-                    "/plugins/librenms/sync/cables/1/",
-                ],
-            ),
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.escape",
-                side_effect=lambda x: x,
-            ),
-            patch(
-                "netbox_librenms_plugin.views.base.cables_view.get_token",
-                return_value="csrf-token",
-            ),
-        ):
-            mock_cache.get.return_value = cached_links
-            response = view.post(mock_request)
+        try:
+            response = view.post(request)
+            data = json.loads(response.content)
+        finally:
+            cache.delete(links_cache_key)
 
-        import json as json_mod2
-
-        data = json_mod2.loads(response.content)
         assert data["status"] == "success"
-        # can_create_cable=True → actions should contain a form
-        assert "form" in data["formatted_row"]["actions"]
+        assert 'name="sync_one"' in data["formatted_row"]["actions"]
+        assert 'value="10"' in data["formatted_row"]["actions"]
         assert "Sync Cable" in data["formatted_row"]["actions"]
+        assert data["formatted_row"]["can_create_cable"] is True
 
 
 # =============================================================================
@@ -2561,8 +2425,7 @@ class TestPostHandlerInterfaceNotFoundBranches:
         view._librenms_api.server_key = "default"
         # dispatch() sets self.request in production; tests call post() directly, so set an
         # authorized request here for the object-permission gate (reads self.request.user).
-        view.request = _mock_request()
-        view.request.user.has_perm.return_value = True
+        view.request = make_sync_page_request()
         return view
 
     def _run_post(self, view, process_result):
@@ -2576,7 +2439,7 @@ class TestPostHandlerInterfaceNotFoundBranches:
         mock_request.body = json_mod.dumps(
             {
                 "device_id": device.pk,
-                "local_port_id": 10,
+                "row_id": "10",
                 "server_key": "default",
             }
         ).encode()

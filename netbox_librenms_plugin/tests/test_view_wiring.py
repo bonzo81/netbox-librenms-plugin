@@ -2621,6 +2621,42 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         assert result["status"] == "invalid"
         assert not Cable.objects.filter(terminations__termination_id=csp.pk).exists()
 
+    def test_serial_cable_sync_requires_remote_change_permission(self):
+        """A view-only remote console port is reported as missing remote data."""
+        from dcim.models import Cable, ConsolePort, ConsoleServerPort, Device
+
+        from netbox_librenms_plugin.tests.conftest import make_serial_device
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        _acs, csps, _ = make_serial_device("scope-serial-view-acs", csp_names=["ttyS1"])
+        _router, _, cps = make_serial_device("scope-serial-view-router", cp_names=["console-A"])
+        csp, cp = csps[0], cps[0]
+        user = self._user(
+            "scope-serial-view",
+            [
+                (Device, "view", None),
+                (ConsoleServerPort, "change", None),
+                (ConsolePort, "view", None),
+                (Cable, "add", None),
+                (Cable, "change", None),
+            ],
+        )
+        view = SyncCablesView()
+        view.setup(self._request(user, {"server_key": "default"}))
+
+        result = view.handle_cable_creation(
+            {
+                "_source": "serial",
+                "local_port": "ttyS1",
+                "netbox_local_interface_id": csp.pk,
+                "netbox_remote_interface_id": cp.pk,
+            },
+            {"local_port_id": "ttyS1"},
+        )
+
+        assert result["status"] == "missing_remote"
+        assert not Cable.objects.filter(terminations__termination_id=csp.pk).exists()
+
     def test_oob_interface_reuse_refuses_an_interface_outside_the_grant(self):
         """AddAsOOBView reuses an interface whose pk comes from the OOB form, filtered only by device."""
         from dcim.models import Device, Interface

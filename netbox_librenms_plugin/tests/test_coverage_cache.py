@@ -37,6 +37,44 @@ def _store_indexed_search(server_key, metadata, *, cache_key=None):
     return cache_key
 
 
+def test_isolated_cache_config_preserves_worker_location_and_uses_a_unique_prefix():
+    from netbox_librenms_plugin.tests.conftest import _isolated_cache_config
+
+    original = {"default": {"BACKEND": "django_redis.cache.RedisCache", "LOCATION": "redis://cache:6379/0"}}
+
+    first = _isolated_cache_config(original)
+    second = _isolated_cache_config(original)
+
+    assert original["default"]["LOCATION"] == "redis://cache:6379/0"
+    assert first["default"]["LOCATION"] == "redis://cache:6379/0"
+    assert first["default"]["KEY_PREFIX"] != second["default"]["KEY_PREFIX"]
+
+
+def test_unique_cache_prefixes_isolate_real_backend_deletes(settings):
+    from copy import deepcopy
+
+    from django.core.cache import caches
+    from django.test import override_settings
+
+    from netbox_librenms_plugin.tests.conftest import _isolated_cache_config
+
+    base = deepcopy(settings.CACHES["default"])
+    first_config = _isolated_cache_config({"default": base})["default"]
+    second_config = _isolated_cache_config({"default": base})["default"]
+
+    with override_settings(CACHES={"first": first_config, "second": second_config}):
+        first = caches["first"]
+        second = caches["second"]
+        first.set("librenms_probe", "first", timeout=30)
+        second.set("librenms_probe", "second", timeout=30)
+
+        first.delete_pattern("librenms_*")
+
+        assert first.get("librenms_probe") is None
+        assert second.get("librenms_probe") == "second"
+        second.delete("librenms_probe")
+
+
 class TestCacheKeyContracts:
     def test_location_and_index_keys_are_scoped_to_the_server(self):
         from netbox_librenms_plugin.import_utils.cache import (

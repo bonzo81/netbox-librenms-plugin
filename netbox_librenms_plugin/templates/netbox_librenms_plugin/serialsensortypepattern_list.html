@@ -1,0 +1,27 @@
+{% extends 'generic/object_list.html' %}
+
+{% block tabs %}
+    {% include 'netbox_librenms_plugin/inc/_rules_patterns_tabs.html' with rules_tab_active="serialsensortypepattern" %}
+    {{ block.super }}
+{% endblock %}
+
+{% block content %}
+    <div class="alert alert-info">
+        <h4>Serial Sensor Types</h4>
+        <p>Console servers expose their serial lines as LibreNMS <strong>state sensors</strong>, not
+           interface-table rows. Each entry here makes one vendor's <code>sensor_type</code> recognized
+           by the Cables tab's serial console-port sync and names the matching local
+           ConsoleServerPorts — <code>{N}</code> is replaced by the sensor's port number.</p>
+        <p>Ships with Avocent ACS (<code>acsSerialPortTable</code> → <code>ttyS{N}</code>) and Cisco IOS
+           async lines (<code>OLD-CISCO-TS-MIB::ltsLineTable</code> → <code>Line {N}</code>). Add a row to surface a new
+           vendor; delete a row to stop recognizing one — matching is exact, including case.</p>
+    </div>
+    {{ block.super }}
+{% endblock %}
+
+{% block bulk_buttons %}
+    {{ block.super }}
+    <button type="submit" formaction="{% url 'plugins:netbox_librenms_plugin:serialsensortypepattern_bulk_export_yaml' %}" class="btn btn-sm btn-secondary">
+        <i class="mdi mdi-download"></i> Export Selected (YAML)
+    </button>
+{% endblock %}

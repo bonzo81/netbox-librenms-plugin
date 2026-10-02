@@ -109,7 +109,7 @@
               </div>
             </div>
           </div>
-        {% elif vc.is_stack and vc.detection_error %}
+        {% elif vc.detection_error %}
           <div class="alert alert-warning py-2 px-3 mt-3 mb-0 small">
             <i class="mdi mdi-alert"></i>
             Unable to display virtual chassis members: {{ vc.detection_error }}

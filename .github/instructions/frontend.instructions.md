@@ -53,7 +53,7 @@ description: Frontend patterns for templates, HTMX, and static assets
 - Keep server responses and HTMX targets in sync when modifying these fragments.
 
 ## Settings Page
-- `settings.html` uses a split-form pattern: two separate Django forms (`ServerConfigForm` + `ImportSettingsForm`) sharing one page, differentiated by a hidden `form_type` field (`"server_config"` or `"import_settings"`).
+- `settings.html` uses three separate Django forms (`ServerConfigForm`, `ImportSettingsForm`, and `CableSyncSettingsForm`) sharing one page, differentiated by a hidden `form_type` field. Keep cable provenance separate: its save also locks and updates a permission-scoped NetBox `Tag`, so its validation and transaction must not block unrelated server or import settings.
 - The test-connection button is an HTMX POST to `TestLibreNMSConnectionView`, returning an inline alert fragment.
 
 ## Paginator

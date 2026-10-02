@@ -1573,11 +1573,32 @@ function writeStoredSelection(table, selection) {
 function _rowCompanionInputs(row) {
     const values = {};
     row.querySelectorAll('select[name], input[type="hidden"][name]').forEach(function (input) {
-        if (input.name && input.name !== 'select') {
+        if (_isSelectionCompanionName(input.name)) {
             values[input.name] = input.value;
         }
     });
     return values;
+}
+
+/**
+ * Return whether a field belongs to the bulk selection rather than a row action form.
+ *
+ * @param {string} name - The submitted field name.
+ * @returns {boolean}
+ */
+function _isSelectionCompanionName(name) {
+    const cableSnapshotPrefixes = [
+        'expected_local_id_',
+        'expected_local_device_id_',
+        'expected_remote_id_',
+        'expected_remote_device_id_',
+    ];
+    return (
+        Boolean(name) &&
+        (name.startsWith('device_selection_') ||
+            name.startsWith('vlan_group_') ||
+            cableSnapshotPrefixes.some((prefix) => name.startsWith(prefix)))
+    );
 }
 
 /**
@@ -1623,8 +1644,24 @@ function restoreTableSelection(table) {
     let restored = false;
     table.querySelectorAll('td input[name="select"]:not(:disabled)').forEach(function (checkbox) {
         const entry = selection[checkbox.value];
-        if (!entry || checkbox.checked) return;
-        checkbox.checked = true;
+        if (!entry) return;
+        const row = checkbox.closest('tr');
+        const companionInputs = (entry && entry.inputs) || {};
+        if (row) {
+            row.querySelectorAll('select[name], input[type="hidden"][name]').forEach(function (input) {
+                if (!_isSelectionCompanionName(input.name)) return;
+                if (!Object.hasOwn(companionInputs, input.name)) return;
+                if (input.tomselect) {
+                    input.tomselect.setValue(companionInputs[input.name], true);
+                } else {
+                    input.value = companionInputs[input.name];
+                }
+            });
+        }
+        if (!checkbox.checked) {
+            checkbox.checked = true;
+            restored = true;
+        }
         // Restore how the row got there: a row the cascade added must still be released when
         // the row that needed it is cleared, rather than becoming a choice of the user's.
         if (entry.auto === 'required') {
@@ -1632,7 +1669,6 @@ function restoreTableSelection(table) {
         } else if (entry.auto === 'member') {
             checkbox.dataset[MEMBER_MARKER] = 'true';
         }
-        restored = true;
     });
     if (restored) {
         refreshRequiredSelections();
@@ -1751,6 +1787,7 @@ function injectOffPageSelections(form) {
 
             const companions = (selection[rowKey] && selection[rowKey].inputs) || {};
             Object.keys(companions).forEach(function (name) {
+                if (!_isSelectionCompanionName(name)) return;
                 const companion = document.createElement('input');
                 companion.type = 'hidden';
                 companion.name = name;
@@ -1881,6 +1918,10 @@ function initializeVCMemberSelect() {
             cableSelects.forEach(select => {
                 if (select.tomselect && !select.dataset.cableSelectInitialized) {
                     select.dataset.cableSelectInitialized = 'true';
+                    if (typeof select._lastVerifiedMember === 'undefined') {
+                        const selectedOption = select.querySelector('option[selected]');
+                        select._lastVerifiedMember = selectedOption ? selectedOption.value : select.value;
+                    }
                     select.tomselect.on('change', function (value) {
                         handleCableChange(select, value);
                     });
@@ -2680,18 +2721,65 @@ function handleInterfaceChange(select, value) {
  * @param {string} value - Selected device ID
  */
 function handleCableChange(select, value) {
+    // Resolve the row from the changed <select> itself: other loaded tabs carry their own
+    // tr[data-interface] rows, so a document-wide lookup can land on one of theirs.
+    const row = select.closest('tr');
+    const verifyContext = row?.closest('[data-cable-verify-url]');
+    const verifyUrl = verifyContext?.dataset.cableVerifyUrl;
     const csrfToken = getCsrfToken();
-    if (!csrfToken) return;  // missing token → abort rather than throw on `.value`
+    if (!csrfToken || !row || !verifyUrl) return;
 
-    fetch('/plugins/librenms_plugin/verify-cable/', {
+    if (select._cableVerifyController) {
+        select._cableVerifyController.abort();
+    }
+    const controller = new AbortController();
+    select._cableVerifyController = controller;
+
+    const selection = row.querySelector('td[data-col="selection"] input[name="select"]');
+    if (selection && !selection.dataset.verifyLocked) {
+        selection.dataset.verifyLocked = '1';
+        selection.dataset.wasDisabled = selection.disabled ? '1' : '0';
+        selection.disabled = true;
+    }
+    row.querySelectorAll('td[data-col="actions"] button:not([disabled])').forEach((button) => {
+        button.disabled = true;
+        button.dataset.verifyLocked = '1';
+    });
+
+    const restoreControls = () => {
+        if (selection?.dataset.verifyLocked) {
+            selection.disabled = selection.dataset.wasDisabled === '1';
+            delete selection.dataset.verifyLocked;
+            delete selection.dataset.wasDisabled;
+        }
+        row.querySelectorAll('td[data-col="actions"] button[data-verify-locked]').forEach((button) => {
+            button.disabled = false;
+            delete button.dataset.verifyLocked;
+        });
+        updateBulkActionButton();
+    };
+    const rollbackToLastVerified = () => {
+        if (select._lastVerifiedMember != null) {
+            if (select.tomselect && typeof select.tomselect.setValue === 'function') {
+                select.tomselect.setValue(select._lastVerifiedMember, true);
+            } else {
+                select.value = select._lastVerifiedMember;
+            }
+        }
+        restoreControls();
+    };
+
+    fetch(verifyUrl, {
         method: 'POST',
+        signal: controller.signal,
         headers: {
             'Content-Type': 'application/json',
             'X-CSRFToken': csrfToken
         },
         body: JSON.stringify({
             device_id: value,
-            local_port_id: select.dataset.interface,
+            origin_device_id: verifyContext?.dataset.cableOriginDeviceId || null,
+            row_id: select.dataset.interface,
             server_key: document.querySelector('input[name="server_key"]')?.value || null
         })
     })
@@ -2702,21 +2790,83 @@ function handleCableChange(select, value) {
             return response.json();
         })
         .then(data => {
-            const row = document.querySelector(`tr[data-interface="${select.dataset.rowId}"]`);
-
             if (data.status === 'success' && row) {
                 const formattedRow = data.formatted_row;
-                row.querySelector('td[data-col="local_port"]').innerHTML = formattedRow.local_port;
-                row.querySelector('td[data-col="remote_port"]').innerHTML = formattedRow.remote_port;
-                row.querySelector('td[data-col="remote_device"]').innerHTML = formattedRow.remote_device;
-                row.querySelector('td[data-col="cable_status"]').innerHTML = formattedRow.cable_status;
-                row.querySelector('td[data-col="actions"]').innerHTML = formattedRow.actions;
+                // Replace each cell content if present. A missing cell must not throw here: the
+                // success branch still has to restore the row controls below.
+                const cellMap = {
+                    local_port: formattedRow.local_port,
+                    remote_port: formattedRow.remote_port,
+                    remote_device: formattedRow.remote_device,
+                    cable_status: formattedRow.cable_status,
+                    actions: formattedRow.actions
+                };
+                for (const [col, html] of Object.entries(cellMap)) {
+                    const cell = row.querySelector(`td[data-col="${col}"]`);
+                    if (cell) {
+                        cell.innerHTML = html;
+                    } else {
+                        console.warn(`Cable row missing data-col="${col}" cell — skipping update`);
+                    }
+                }
+                if (selection) {
+                    delete selection.dataset.verifyLocked;
+                    delete selection.dataset.wasDisabled;
+                    selection.disabled = !formattedRow.can_create_cable;
+                    if (selection.disabled) selection.checked = false;
+                    const expectedValues = {
+                        expected_local_id: formattedRow.expected_local_id,
+                        expected_local_device_id: formattedRow.expected_local_device_id,
+                        expected_remote_id: formattedRow.expected_remote_id,
+                        expected_remote_device_id: formattedRow.expected_remote_device_id
+                    };
+                    Object.entries(expectedValues).forEach(([prefix, expectedValue]) => {
+                        const expectedName = `${prefix}_${select.dataset.interface}`;
+                        let expectedInput = row.querySelector(`input[name="${expectedName}"]`);
+                        if (!expectedInput) {
+                            expectedInput = document.createElement('input');
+                            expectedInput.type = 'hidden';
+                            expectedInput.name = expectedName;
+                            selection.closest('td').appendChild(expectedInput);
+                        }
+                        expectedInput.value = expectedValue || '';
+                    });
+                    const table = row.closest('table');
+                    if (table && SELECTABLE_TABLE_IDS.includes(table.id)) {
+                        persistTableSelection(table);
+                    }
+                    updateBulkActionButton();
+                }
+                select._lastVerifiedMember = value;
+                restoreControls();
+            } else {
+                console.error('Cable verification rejected:', data.error || data.message || 'Unknown error');
+                rollbackToLastVerified();
             }
         })
         .catch(error => {
+            if (error.name === 'AbortError') return;
             console.error('Error verifying cable:', error.message);
+            rollbackToLastVerified();
         });
 }
+
+// Picker controls can be replaced by the cable verification JSON response. Keep those controls
+// passive and delegate their request to the persistent HTMX loader in the cable tab.
+document.addEventListener('click', function (event) {
+    const button = event.target.closest('[data-cable-picker-url]');
+    if (!button || button.disabled) return;
+
+    const pickerUrl = button.dataset.cablePickerUrl;
+    const loader = button.closest('#cables')?.querySelector('[data-cable-picker-loader]');
+    if (!pickerUrl || !loader) return;
+
+    event.preventDefault();
+    loader.dispatchEvent(new CustomEvent('librenms:open-cable-picker', {
+        bubbles: true,
+        detail: { url: pickerUrl }
+    }));
+});
 
 /**
  * Handle VC member selection change for module verification.
@@ -3537,6 +3687,17 @@ function initializeVCReportButtons() {
     });
 }
 
+/**
+ * Show the shared #htmx-modal. Global companion to closeHtmxModal() for inline scripts
+ * shipped inside OOB-swapped modal content: htmx 2.x fires no afterSettle targeting an
+ * innerHTML OOB swap's target, so the page's afterSettle auto-show handler never sees
+ * OOB-delivered modal content — the OOB block calls this directly instead.
+ */
+function openHtmxModal() {
+    updateHtmxModalLabel();
+    showModal(document.getElementById('htmx-modal'));
+}
+
 function closeHtmxModal() {
     // Abort any in-flight VC report fetch
     if (typeof _activeVCReportController !== 'undefined' && _activeVCReportController) {
@@ -3587,9 +3748,17 @@ document.addEventListener('DOMContentLoaded', function () {
 
     // Configure HTMX to include CSRF token in all requests
     document.body.addEventListener('htmx:configRequest', function (event) {
-        const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]');
+        const csrfToken = getCsrfToken();
+        if (event.detail.elt?.matches('[data-cable-picker-loader]')) {
+            const pickerUrl = event.detail.triggeringEvent?.detail?.url;
+            if (!pickerUrl || !csrfToken) {
+                event.preventDefault();
+                return;
+            }
+            event.detail.path = pickerUrl;
+        }
         if (csrfToken) {
-            event.detail.headers['X-CSRFToken'] = csrfToken.value;
+            event.detail.headers['X-CSRFToken'] = csrfToken;
         }
         // Install Selected: the checked rows live in the table OUTSIDE the form, and htmx's
         // own submit listener (attached to the form at ITS DOMContentLoaded processNode,
@@ -3622,7 +3791,9 @@ document.addEventListener('DOMContentLoaded', function () {
                 offPageSelectionKeys(table).forEach((rowKey) => {
                     params.append('select', rowKey);
                     const companions = (stored[rowKey] && stored[rowKey].inputs) || {};
-                    Object.keys(companions).forEach((name) => params.append(name, companions[name]));
+                    Object.keys(companions)
+                        .filter(_isSelectionCompanionName)
+                        .forEach((name) => params.append(name, companions[name]));
                 });
                 clearStoredSelection(table);
             }

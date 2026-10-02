@@ -156,10 +156,13 @@ class TestLibreNMSAPIPortStack:
 
         ports_ok, ports_data = api.get_ports(42)
         stack_ok, port_stack = api.get_port_stack(42)
-        relationships = api.resolve_port_relationships(ports_data["ports"], port_stack, lag_patterns={})
-
+        # Assert the call outcomes before using the payloads: a failed call would otherwise raise
+        # an opaque TypeError/KeyError below instead of naming the API call that failed.
         assert ports_ok is True
         assert stack_ok is True
+
+        relationships = api.resolve_port_relationships(ports_data["ports"], port_stack, lag_patterns={})
+
         assert relationships["lag_members"] == {101: 102}
 
 

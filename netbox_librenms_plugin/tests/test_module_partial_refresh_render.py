@@ -1,4 +1,5 @@
-"""A partial module refresh renders nothing rather than a degraded table.
+"""
+A partial module refresh renders nothing rather than a degraded table.
 
 ``post()`` only fingerprints ``librenms_id``/``oob_librenms_id`` when it reads a snapshot back,
 so a truncated one would be served as complete until its TTL expired. The refresh therefore
@@ -174,5 +175,7 @@ class TestPartialModuleRefreshRendersEmpty:
             assert "no module rows were loaded" in warning, warning
         else:
             # The inventory failure returns before the partial-outcome warning, so the notice must
-            # not appear. Without this branch the parameter set asserts nothing.
-            assert "no module rows were loaded" not in warning, warning
+            # not appear. Checking every message catches it arriving as a separate one.
+            assert all("no module rows were loaded" not in text for text in message_texts(request)), message_texts(
+                request
+            )

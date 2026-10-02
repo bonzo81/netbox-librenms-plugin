@@ -1,12 +1,13 @@
 import logging
 
 from django.contrib import messages
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.http import HttpResponse
 from django.shortcuts import redirect, render
 from django.utils.html import escape
 from django.views import View
 
-from netbox_librenms_plugin.forms import ImportSettingsForm, ServerConfigForm
+from netbox_librenms_plugin.forms import CableSyncSettingsForm, ImportSettingsForm, ServerConfigForm
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.utils import save_user_pref
@@ -17,20 +18,22 @@ logger = logging.getLogger(__name__)
 
 class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
     """
-    View for managing plugin settings including server selection and import options.
-    Uses two separate forms for cleaner validation and separation of concerns.
+    Manage plugin settings, server selection, and import options.
+
+    Uses three separate forms for cleaner validation and separation of concerns.
     """
 
     template_name = "netbox_librenms_plugin/settings.html"
 
     def get(self, request):
-        """Display both settings forms."""
+        """Display all settings forms."""
         # Get or create the settings object
         settings, created = LibreNMSSettings.objects.get_or_create()
 
-        # Instantiate both forms
+        # Instantiate all three forms
         server_form = ServerConfigForm(instance=settings)
         import_form = ImportSettingsForm(instance=settings)
+        cable_sync_form = CableSyncSettingsForm(instance=settings)
 
         return render(
             request,
@@ -38,6 +41,7 @@ class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
             {
                 "server_form": server_form,
                 "import_form": import_form,
+                "cable_sync_form": cable_sync_form,
                 "object": settings,
             },
         )
@@ -58,6 +62,7 @@ class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
             # Process server configuration form
             server_form = ServerConfigForm(request.POST, instance=settings)
             import_form = ImportSettingsForm(instance=settings)  # Unbound form for display
+            cable_sync_form = CableSyncSettingsForm(instance=settings)  # Unbound form for display
 
             if server_form.is_valid():
                 server_form.save()
@@ -70,6 +75,7 @@ class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
         elif form_type == "import_settings":
             # Process import settings form
             server_form = ServerConfigForm(instance=settings)  # Unbound form for display
+            cable_sync_form = CableSyncSettingsForm(instance=settings)  # Unbound form for display
             import_form = ImportSettingsForm(request.POST, instance=settings)
 
             if import_form.is_valid():
@@ -104,18 +110,43 @@ class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
                 )
                 return redirect("plugins:netbox_librenms_plugin:settings")
 
+        elif form_type == "cable_sync_settings":
+            # Process cable-sync provenance settings form
+            server_form = ServerConfigForm(instance=settings)  # Unbound form for display
+            import_form = ImportSettingsForm(instance=settings)  # Unbound form for display
+            cable_sync_form = CableSyncSettingsForm(request.POST, instance=settings, user=request.user)
+
+            if cable_sync_form.is_valid():
+                try:
+                    cable_sync_form.save()
+                except PermissionDenied as exc:
+                    # The provenance Tag is a separate NetBox object: plugin write permission does
+                    # not imply Tag change permission. Re-render with the input instead of a bare
+                    # 403 page that discards it.
+                    cable_sync_form.add_error(None, str(exc))
+                except ValidationError as exc:
+                    # The tag name was taken between validation and the locked rename.
+                    cable_sync_form.add_error(None, exc)
+                else:
+                    messages.success(
+                        request,
+                        "Cable sync settings updated successfully.",
+                    )
+                    return redirect("plugins:netbox_librenms_plugin:settings")
+
         else:
             # Unknown form_type - shouldn't happen, but handle gracefully
             messages.error(request, "Invalid form submission.")
             return redirect("plugins:netbox_librenms_plugin:settings")
 
-        # If we get here, validation failed - render both forms
+        # If we get here, validation failed - render all forms
         return render(
             request,
             self.template_name,
             {
                 "server_form": server_form,
                 "import_form": import_form,
+                "cable_sync_form": cable_sync_form,
                 "object": settings,
                 "active_tab": form_type,  # Pass which tab should be active
             },
@@ -124,7 +155,8 @@ class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
 
 class TestLibreNMSConnectionView(LibreNMSPermissionMixin, View):
     """
-    HTMX view to test LibreNMS server connection.
+    Test a LibreNMS server connection through HTMX.
+
     Returns HTML fragment instead of JSON for HTMX compatibility.
     """
 
