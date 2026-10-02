@@ -1128,7 +1128,8 @@ class TestCheckAndCreateTheRemoteEnd:
         return server_key, local_device, local_interface, remote_device, row_id
 
     @pytest.mark.parametrize("method", ["get", "post"])
-    def test_non_htmx_expired_cache_returns_a_conflict(self, method, librenms_server, settings):
+    @pytest.mark.parametrize("hx_header", [None, "false"])
+    def test_non_htmx_expired_cache_returns_a_conflict(self, method, hx_header, librenms_server, settings):
         from django.core.cache import cache
         from netbox_librenms_plugin.tests.conftest import make_superuser
 
@@ -1138,6 +1139,7 @@ class TestCheckAndCreateTheRemoteEnd:
         response = getattr(client, method)(
             _remote_create_url(local),
             {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
+            **({"HTTP_HX_REQUEST": hx_header} if hx_header is not None else {}),
         )
         assert response.status_code == 409
         assert "Refresh" in response.content.decode()
