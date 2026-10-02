@@ -1142,6 +1142,41 @@ class TestCheckAndCreateTheRemoteEnd:
         assert response.status_code == 409
         assert "Refresh" in response.content.decode()
 
+    @pytest.mark.parametrize("refusal", ["expired", "local_changed", "row_missing", "server_removed"])
+    def test_htmx_remote_create_refusals_close_the_modal_and_show_the_reason(self, refusal, librenms_server, settings):
+        from dcim.models import Interface
+        from django.core.cache import cache
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        key, local, interface, remote, row_id = self._scenario("refused-create", librenms_server, settings)
+        data = {"expected_local_id": interface.pk, "row_id": row_id, "server_key": key}
+        reason = {
+            "expired": "Cached cable data expired",
+            "local_changed": "The local interface changed",
+            "row_missing": "Cable row not found",
+            "server_removed": "Selected LibreNMS server is no longer configured",
+        }[refusal]
+        if refusal == "expired":
+            cache.delete(_make_view().get_cache_key(local, "links", key))
+        elif refusal == "local_changed":
+            data["expected_local_id"] = interface.pk + 1000
+        elif refusal == "row_missing":
+            data["row_id"] = "missing-row"
+        else:
+            data["server_key"] = "removed-server"
+        response = _logged_in(make_superuser("refused-create-user")).post(
+            _remote_create_url(local), data, HTTP_HX_REQUEST="true"
+        )
+
+        assert response.status_code == 200
+        body = response.content.decode()
+        assert reason in body
+        assert 'id="htmx-modal-content" hx-swap-oob="innerHTML"' in body
+        assert "closeHtmxModal()" in body
+        assert not Interface.objects.filter(device=remote).exists()
+        interface.refresh_from_db()
+        assert interface.cable_id is None
+
     def test_the_check_reports_what_would_be_created(self, librenms_server, settings):
         """Step one: the far end is not modelled, so say what creating it would mean."""
         from netbox_librenms_plugin.tests.conftest import make_superuser
@@ -2192,3 +2227,25 @@ def test_remote_create_requires_a_valid_local_precondition(librenms_server, sett
     assert not Interface.objects.filter(device=remote).exists()
     interface.refresh_from_db()
     assert interface.cable_id is None
+
+
+def test_remote_port_record_uses_the_shared_identity_resolver():
+    """Keep the endpoint's deciding reader on the same rule as the cable table."""
+    import ast
+    import inspect
+
+    from netbox_librenms_plugin.views.sync import cables
+
+    (reader,) = [
+        node
+        for node in ast.walk(ast.parse(inspect.getsource(cables)))
+        if isinstance(node, ast.FunctionDef) and node.name == "_remote_port_record"
+    ]
+    assert any(
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "remote_port_ref"
+        for node in ast.walk(reader)
+    )
+    assert not any(
+        isinstance(node, ast.Constant) and node.value in ("remote_port_key", "remote_port_id")
+        for node in ast.walk(reader)
+    )

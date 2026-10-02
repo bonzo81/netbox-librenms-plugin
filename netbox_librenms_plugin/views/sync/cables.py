@@ -43,6 +43,7 @@ from netbox_librenms_plugin.utils import (
     resolve_interface_on_device,
     set_librenms_device_id,
 )
+from netbox_librenms_plugin.views.base.cables_view import remote_port_ref
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -1212,7 +1213,11 @@ class CableRemoteCreateView(SyncCablesView):
             return denied
         context, error = self._resolve_proposal(request, pk, request.POST)
         if error is not None:
-            return error
+            if request.headers.get("HX-Request") != "true":
+                return error
+            messages.error(request, error.content.decode(error.charset))
+            obj = self.restrict_object_or_404(Device, pk=pk)
+            return self._sync_response(request, obj, getattr(self, "_post_server_key", None), "", close_modal=True)
         obj = context["object"]
         server_key = context["server_key"]
         redirect_url = f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[obj.pk])}?tab=cables" + (
@@ -1286,7 +1291,7 @@ class CableRemoteCreateView(SyncCablesView):
         row_id = data.get("row_id", "")
         links = self.get_cached_links_data(request, obj)
         if links is None:
-            error = render_sync_cache_miss(request, "Cables")
+            error = render_sync_cache_miss(request, "Cables") if request.method == "GET" else None
             if error is None:
                 error = HttpResponse("Cached cable data expired. Refresh the Cables tab.", status=409)
             return None, error
@@ -1333,7 +1338,7 @@ class CableRemoteCreateView(SyncCablesView):
 
     def _remote_port_record(self, row):
         """Read the neighbour's port record, for the name and the type it would be created with."""
-        port_id = coerce_librenms_id(row.get("remote_port_key")) or coerce_librenms_id(row.get("remote_port_id"))
+        port_id = remote_port_ref(row)
         if port_id is None:
             return None
         success, data = self.librenms_api.get_port_by_id(port_id)
