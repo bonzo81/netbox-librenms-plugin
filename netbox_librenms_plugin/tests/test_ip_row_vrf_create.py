@@ -410,3 +410,30 @@ def test_vrf_identity_lookup_does_not_load_unrelated_vrfs(client, seeded, action
         post_init.disconnect(record_vrf, sender=VRF)
 
     assert len(loaded) == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("object_type", ["device", "vm"])
+def test_ip_table_refresh_refuses_repeated_server_keys(client, settings, recording_server, object_type):
+    """An ambiguous refresh POST must refuse the server before fetching a new snapshot."""
+    from django.contrib.messages import get_messages
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device, make_superuser, make_vm
+    from netbox_librenms_plugin.tests.recordings import load_recording
+
+    recording = load_recording("iosxe-subinterfaces")
+    server, _ = recording_server(recording, server_key="test")
+    configure_librenms_servers(settings, {"test": {"librenms_url": server.url, "api_token": "test-token"}})
+    owner = make_device("ambiguous-ip-refresh") if object_type == "device" else make_vm("ambiguous-ip-refresh")
+    owner.custom_field_data["librenms_id"] = {"test": {"id": recording["device_id"]}}
+    owner.save()
+    client.force_login(make_superuser("ambiguous-ip-refresh-user"))
+
+    response = client.post(
+        reverse(f"plugins:netbox_librenms_plugin:{object_type}_ipaddress_sync", kwargs={"pk": owner.pk}),
+        {"server_key": ["test", "test"]},
+    )
+
+    assert response.status_code == 200
+    assert any("no longer configured" in str(message) for message in get_messages(response.wsgi_request))
