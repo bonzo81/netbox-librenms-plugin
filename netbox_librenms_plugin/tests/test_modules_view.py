@@ -7015,3 +7015,40 @@ def test_vc_chassis_can_resolve_below_an_unattributed_stack_root():
     assert contexts[_inventory_item_key(inventory[0])]["resolution_source"] == "default"
     assert contexts[_inventory_item_key(inventory[1])]["selected_device"].pk == member.pk
     assert contexts[_inventory_item_key(inventory[2])]["selected_device"].pk == member.pk
+
+
+@pytest.mark.django_db
+def test_member_contexts_batch_interface_permissions_and_keep_action_scopes():
+    """Two permission reads cover every member without mixing view and change grants."""
+    from dcim.models import Interface
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    from netbox_librenms_plugin.tests.conftest import configured_server_key, make_device, make_interface
+    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms
+    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+    members = [make_device(f"permission-member-{index}") for index in range(3)]
+    interfaces = [make_interface(member, "Gi0/1") for member in members]
+    user = make_user_with_perms("member-permission-reader", [], plugin_write=False)
+    user = grant(user, "view", Interface, constraints={"pk__in": [interfaces[0].pk, interfaces[1].pk]})
+    user = grant(user, "change", Interface, constraints={"pk__in": [interfaces[1].pk, interfaces[2].pk]})
+    # Warm the real user permission cache before measuring the interface reads.
+    user.get_all_permissions()
+    view = object.__new__(BaseModuleTableView)
+    view._librenms_api = LibreNMSAPI(server_key=configured_server_key())
+    view.request = make_request("get", user=user)
+
+    with CaptureQueriesContext(connection) as queries:
+        contexts = view._build_member_contexts(members[0], members, [])
+
+    permission_queries = [
+        query["sql"]
+        for query in queries
+        if 'FROM "dcim_interface"' in query["sql"] and '"custom_field_data"' not in query["sql"]
+    ]
+    for index, interface in enumerate(interfaces):
+        assert contexts[members[index].pk]["viewable_interface_ids"] == ({interface.pk} if index < 2 else set())
+        assert contexts[members[index].pk]["changeable_interface_ids"] == ({interface.pk} if index > 0 else set())
+    assert len(permission_queries) == 2
