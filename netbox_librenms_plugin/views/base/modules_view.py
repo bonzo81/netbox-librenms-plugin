@@ -1456,6 +1456,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         holders = port_holders((_get_item_port_identity(item)[0] for item in items), server=server_key)
         member_contexts = {}
         context_members = vc_members if vc_members else [obj]
+        member_ids = [member.pk for member in context_members]
+        viewable_ids_by_member = {member_id: set() for member_id in member_ids}
+        for member_id, interface_id in (
+            self.restricted_queryset(Interface).filter(device_id__in=member_ids).values_list("device_id", "pk")
+        ):
+            viewable_ids_by_member[member_id].add(interface_id)
+        changeable_ids_by_member = {member_id: set() for member_id in member_ids}
+        for member_id, interface_id in (
+            self.restricted_queryset(Interface, "change")
+            .filter(device_id__in=member_ids)
+            .values_list("device_id", "pk")
+        ):
+            changeable_ids_by_member[member_id].add(interface_id)
         for member in context_members:
             device_bays, module_scoped_bays = self._get_module_bays(member)
             interfaces_by_pk, interfaces_by_name = self._build_interface_indexes(member)
@@ -1469,13 +1482,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 "interfaces_by_name": interfaces_by_name,
                 "port_holders": holders,
                 # The match reads every interface, so the table shows only one the user may view.
-                "viewable_interface_ids": frozenset(
-                    self.restricted_queryset(Interface).filter(device=member).values_list("pk", flat=True)
-                ),
+                "viewable_interface_ids": frozenset(viewable_ids_by_member[member.id]),
                 # The writer skips a choice outside the change scope, and then its template adoption too.
-                "changeable_interface_ids": frozenset(
-                    self.restricted_queryset(Interface, "change").filter(device=member).values_list("pk", flat=True)
-                ),
+                "changeable_interface_ids": frozenset(changeable_ids_by_member[member.id]),
                 "server_key": server_key,
             }
         return member_contexts
