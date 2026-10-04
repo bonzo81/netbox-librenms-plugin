@@ -703,11 +703,12 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         exists_in_netbox = bool(netbox_vlan)
         name_matches = netbox_vlan.name == librenms_name if netbox_vlan else False
         css_class = get_vlan_sync_css_class(exists_in_netbox, name_matches)
+        sync_actions = data.get("sync_actions", True)
         status_html = render_vlan_sync_action(
             vid,
             exists_in_netbox,
             name_matches,
-            actions_enabled=data.get("sync_actions", True),
+            actions_enabled=sync_actions if isinstance(sync_actions, bool) else True,
         )
 
         return JsonResponse(

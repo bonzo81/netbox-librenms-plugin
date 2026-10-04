@@ -7,6 +7,8 @@ The view behaviour itself lives in test_coverage_device_fields.py and test_view_
 import ast
 from pathlib import Path
 
+import pytest
+
 HELPER = "rebind_api_for_posted_server"
 
 
@@ -36,17 +38,43 @@ def _reads_one_raw_server_key(call):
     )
 
 
+def _reads_raw_posted_server_key(node):
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get":
+        payload = node.func.value
+        key = node.args[0] if node.args else None
+    elif isinstance(node, ast.Subscript):
+        payload, key = node.value, node.slice
+    else:
+        return False
+    return (
+        isinstance(payload, ast.Attribute)
+        and payload.attr == "POST"
+        and isinstance(key, ast.Constant)
+        and key.value == "server_key"
+    )
+
+
 def _loose_rebind_lines(tree):
     allowed = _helper_line_ranges(tree)
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
+    offenders = set()
+    for function in ast.walk(tree):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
-        if not (isinstance(node.func, ast.Attribute) and node.func.attr == "rebind_api_for_server"):
+        rebinds = [
+            node
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "rebind_api_for_server"
+        ]
+        if not rebinds:
             continue
-        if any(start <= node.lineno <= end for start, end in allowed):
-            continue
-        if _reads_one_raw_server_key(node):
-            yield node.lineno
+        reads = [node for node in ast.walk(function) if _reads_raw_posted_server_key(node)]
+        reads.extend(call for call in rebinds if _reads_one_raw_server_key(call))
+        offenders.update(
+            node.lineno for node in reads if not any(start <= node.lineno <= end for start, end in allowed)
+        )
+    yield from sorted(offenders)
 
 
 def test_no_view_rebinds_from_a_single_raw_server_key_value():
@@ -70,3 +98,29 @@ def view(request):
     )
 
     assert list(_loose_rebind_lines(tree)) == [3]
+
+
+@pytest.mark.parametrize("read", ['request.POST.get("server_key")', 'request.POST["server_key"]'])
+def test_indirect_posted_server_key_reads_are_detected(read):
+    """Neither assignment nor subscripting may discard repeated posted values."""
+    tree = ast.parse(f"def view(request):\n    key = {read}\n    self.rebind_api_for_server(key)\n")
+    assert list(_loose_rebind_lines(tree)) == [2]
+
+
+def test_subscript_argument_posted_server_key_read_is_detected():
+    tree = ast.parse('def view(request):\n    self.rebind_api_for_server(request.POST["server_key"])\n')
+    assert list(_loose_rebind_lines(tree)) == [2]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "self.rebind_api_for_posted_server(request.POST)",
+        'keys = request.POST.getlist("server_key"); self.rebind_api_for_server(keys[0])',
+        'key = job_data.get("server_key"); self.rebind_api_for_server(parsed.server_key)',
+        'key = request.GET.get("server_key"); self.rebind_api_for_server(key)',
+    ],
+)
+def test_unrelated_reads_do_not_trigger_the_posted_server_key_guard(body):
+    tree = ast.parse(f"def view(request):\n    {body}\n")
+    assert list(_loose_rebind_lines(tree)) == []

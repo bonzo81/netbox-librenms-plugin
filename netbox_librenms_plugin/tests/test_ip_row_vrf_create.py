@@ -380,3 +380,33 @@ class TestRefusals:
 
         assert not VRF.objects.exists()
         assert any("migrated" in text for text in _messages(response, "danger"))
+
+
+@pytest.mark.parametrize("action", ["render", "create"])
+def test_vrf_identity_lookup_does_not_load_unrelated_vrfs(client, seeded, action):
+    """Only the dropdown loads unrelated VRFs during rendering and create re-derivation."""
+    from django.db.models.signals import post_init
+    from ipam.models import VRF
+
+    unrelated = VRF.objects.create(name="unrelated-routing-domain", rd="65000:99")
+    owner = seeded("vrf-candidate-scope")
+    client = _superuser_client(client)
+    loaded = []
+
+    def record_vrf(sender, instance, **kwargs):
+        if instance.pk == unrelated.pk:
+            loaded.append(instance.pk)
+
+    post_init.connect(record_vrf, sender=VRF)
+    try:
+        if action == "render":
+            rows = _rows(client, owner)
+            assert all(_offers_create(rows[row_id]) for row_id in RD_ROWS)
+        else:
+            response = _create(client, owner, RD_ROWS[0])
+            assert response.status_code == 302
+            assert VRF.objects.filter(name=RD_VRF[0], rd=RD_VRF[1]).exists()
+    finally:
+        post_init.disconnect(record_vrf, sender=VRF)
+
+    assert len(loaded) == 1

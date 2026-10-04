@@ -7,6 +7,7 @@ from urllib.parse import quote_plus
 from dcim.models import Device, Interface
 from django.contrib import messages
 from django.core.cache import cache
+from django.db.models import Q
 from django.http import Http404, JsonResponse
 from django.urls import reverse
 from django.utils import timezone
@@ -217,9 +218,12 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             bound_evidence=(bound_port_cache, set(prefetched_data["interfaces_by_librenms_id"])),
         )
         vrf_identities = self._resolve_vrf_identities(port_data_cache, ip_data, fetch_vrf_identities)
-        # Every VRF decides a match, so a VRF the user cannot view still blocks a create; only a
-        # viewable one is ever suggested or listed.
-        vrf_suggestions = self._load_vrf_suggestions(vrf_identities, prefetched_data["all_vrfs"])
+        # A matching VRF the user cannot view still blocks a create; only a viewable one
+        # is ever suggested or listed.
+        candidate_rds = {identity["rd"] for identity in vrf_identities.values() if identity["rd"]}
+        candidate_names = {identity["name"] for identity in vrf_identities.values()}
+        candidate_vrfs = VRF.objects.filter(Q(rd__in=candidate_rds) | Q(name__in=candidate_names))
+        vrf_suggestions = self._load_vrf_suggestions(vrf_identities, candidate_vrfs)
         visible_vrf_ids = {vrf.pk for vrf in prefetched_data["vrfs"]}
         vrf_create_url = reverse(
             "plugins:netbox_librenms_plugin:create_ip_row_vrf",
@@ -395,9 +399,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 # an IPv4-compatible IPv6 row still matches.
                 ip_addresses_map[str(ip_interface(str(ip.address)))].append(ip)
 
-        # The dropdown lists only VRFs the user may view; the create rule reads every VRF.
+        # The dropdown lists only VRFs the user may view; identity matching is scoped separately.
         vrfs = list(self.restricted_queryset(VRF))
-        all_vrfs = list(VRF.objects.all())
 
         return {
             "interfaces_by_librenms_id": interfaces_by_librenms_id,
@@ -409,7 +412,6 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             "device": obj,
             "ip_addresses_map": ip_addresses_map,
             "vrfs": vrfs,
-            "all_vrfs": all_vrfs,
         }
 
     def _load_port_names(self, port_data_cache, ip_data, *, bound_evidence=None):
@@ -1015,8 +1017,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         interface_name_field = get_interface_name_field(request, obj)
         # Rebind the API to the POSTed server so the live IP/management-IP fetches hit the
         # same LibreNMS instance the cached rows are namespaced under (multi-server tabs).
-        posted_server_key = request.POST.get("server_key")
-        server_key = self.rebind_api_for_server(posted_server_key)
+        server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             # rebind_api_for_server() returned None to avoid building a missing/misconfigured

@@ -2005,8 +2005,7 @@ document.addEventListener('htmx:configRequest', function (e) {
         .map(function (tableId) { return document.getElementById(tableId); })
         .filter(function (table) { return table && form.contains(table); });
     if (!tables.length) return;
-    const submitter = e.detail.triggeringEvent && e.detail.triggeringEvent.submitter;
-    const consumed = SINGLE_ROW_SUBMITTERS.includes(submitter && submitter.name)
+    const consumed = SINGLE_ROW_SUBMITTERS.some(name => e.detail.parameters.has(name))
         ? {}
         : consumeOffPageSelections(tables, e.detail.parameters);
     consumedOffPageSelections.set(form, consumed);

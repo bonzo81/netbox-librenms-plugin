@@ -699,8 +699,16 @@ def test_vlan_status_action_uses_data_facts_when_css_class_is_widened(
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     ("sync_actions", "expected_actions"),
-    [(True, True), (False, False), (None, True)],
-    ids=["actions-enabled", "actions-disabled", "actions-default-enabled"],
+    [
+        pytest.param(True, True, id="actions-enabled"),
+        pytest.param(False, False, id="actions-disabled"),
+        pytest.param(None, True, id="actions-default-enabled"),
+        pytest.param(0, True, id="zero-default-enabled"),
+        pytest.param("", True, id="empty-string-default-enabled"),
+        pytest.param([], True, id="list-default-enabled"),
+        pytest.param({}, True, id="object-default-enabled"),
+        pytest.param("false", True, id="string-default-enabled"),
+    ],
 )
 def test_verify_vlan_group_returns_the_shared_status_cell(client, sync_actions, expected_actions):
     """The verify endpoint re-renders status through the shared server-side renderer."""

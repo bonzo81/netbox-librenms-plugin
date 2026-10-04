@@ -4150,3 +4150,30 @@ def test_refreshed_cable_picker_uses_the_persistent_htmx_loader(page):
     assert request.headers.get("x-csrftoken") == "token"
     page.wait_for_selector("#htmx-modal-content .modal-title")
     expect(page.locator("#htmx-modal")).to_have_class(re.compile(r"(?:^|\s)show(?:\s|$)"))
+
+
+@pytest.mark.parametrize("action", ["sync_one", "rebind_one", "create_vrf"])
+def test_programmatic_single_row_submit_keeps_off_page_selection(page, action):
+    """A real HTMX request with a row action needs no SubmitEvent to preserve bulk rows."""
+    bodies = []
+
+    def answer(route):
+        bodies.append(route.request.post_data)
+        route.fulfill(status=204)
+
+    page.route(HTMX_SYNC_URL, answer)
+    page.set_content(_htmx_sync_form())
+    _add_page_scripts(page)
+    page.evaluate("writeStoredSelection(document.querySelector('table'), {'101': {inputs: {}, auto: ''}})")
+    page.evaluate(
+        """action => htmxTest.ajax('POST', document.getElementById('sync-form').action, {
+            source: document.getElementById('sync-form'),
+            target: '#tab-content',
+            values: {[action]: '201'}
+        })""",
+        action,
+    )
+
+    assert (action, "201") in _selection_form_pairs(bodies[0])
+    assert ("select", "101") not in _selection_form_pairs(bodies[0])
+    assert list(page.evaluate("readStoredSelection(document.querySelector('table'))")) == ["101"]
