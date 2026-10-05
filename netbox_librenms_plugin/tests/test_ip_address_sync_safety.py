@@ -2178,6 +2178,74 @@ def test_sync_creates_an_independent_global_row_when_other_vrfs_are_ambiguous(cl
     assert red_ip.assigned_object == red_interface
 
 
+def _bound_device_on_a_refreshed_ip_row(client, settings, live_librenms, name, address, prefix_length):
+    """Return a device whose interface is bound to LibreNMS port 7001, with that IP row in the snapshot."""
+    _configure_test_server(settings)
+    device = make_device(name, librenms_cf={"default": {"id": 42}})
+    target = make_interface(device, "Ethernet1", iface_type="1000base-t")
+    target.custom_field_data["librenms_id"] = {"default": 7001}
+    target.save(update_fields=["custom_field_data"])
+    client.force_login(make_superuser(f"{name}-user"))
+    assert _refresh_ip_snapshot(client, device, address, prefix_length, live_librenms).status_code == 200
+    return device, target
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(("address", "prefix_length"), [("198.18.13.10", 24), ("2001:db8:13::10", 64)])
+def test_ip_sync_gives_a_created_ip_a_netaddr_address(client, settings, live_librenms, address, prefix_length):
+    """A post_save receiver that parses the address, as netbox-dns IPAM sync does, must see a netaddr value."""
+    row_id = f"{address}/{prefix_length}"
+    device, target = _bound_device_on_a_refreshed_ip_row(
+        client, settings, live_librenms, f"ip-netaddr-create-{prefix_length}", address, prefix_length
+    )
+
+    with _receiver_parses_the_saved_ip_address():
+        response = client.post(
+            reverse(
+                "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+                kwargs={"object_type": "device", "pk": device.pk},
+            ),
+            {"server_key": "default", "select": row_id, f"vrf_{row_id}": ""},
+            HTTP_HX_REQUEST="true",
+        )
+
+    assert response.status_code == 200
+    assert not [text for text in _message_texts(response) if "Failed" in text]
+    assert IPAddress.objects.get(address=row_id, vrf=None).assigned_object == target
+
+
+@pytest.mark.django_db
+def test_confirmed_prefix_change_gives_the_ip_a_netaddr_address(client, settings, live_librenms):
+    """The confirmed prefix change saves a netaddr address, so a post_save receiver can parse it."""
+    row_id = "198.18.14.10/24"
+    device, target = _bound_device_on_a_refreshed_ip_row(
+        client, settings, live_librenms, "ip-netaddr-prefix", "198.18.14.10", 24
+    )
+    existing = IPAddress.objects.create(address="198.18.14.10/32", status="active")
+    sync_url = reverse(
+        "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+        kwargs={"object_type": "device", "pk": device.pk},
+    )
+    response = client.post(
+        sync_url, {"server_key": "default", "select": row_id, f"vrf_{row_id}": ""}, HTTP_HX_REQUEST="true"
+    )
+    conflict = response.context["conflicts"][0]
+    assert "different prefix length" in conflict["reason"]
+
+    with _receiver_parses_the_saved_ip_address():
+        force_response = client.post(
+            sync_url,
+            {"server_key": "default", "force_conflict": row_id, "conflict_intent": conflict["intent"]},
+            HTTP_HX_REQUEST="true",
+        )
+
+    assert force_response.status_code == 200
+    assert not [text for text in _message_texts(force_response) if "Failed" in text]
+    existing.refresh_from_db()
+    assert str(existing.address) == row_id
+    assert existing.assigned_object == target
+
+
 @pytest.mark.django_db
 @pytest.mark.parametrize("address,prefix", [("2001:db8:2::10", 64), ("::198.18.0.1", 128)])
 def test_vrf_change_requires_confirmation_and_moves_the_identified_row(
