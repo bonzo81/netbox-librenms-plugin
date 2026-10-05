@@ -5,6 +5,8 @@ import logging
 import re
 from urllib.parse import parse_qs, urlencode, urlparse
 
+import netaddr
+
 from django.contrib import messages
 from django.core.cache import cache
 from django.core.exceptions import ObjectDoesNotExist, PermissionDenied, ValidationError
@@ -3609,7 +3611,9 @@ class AddAsOOBView(
         try:
             with transaction.atomic():
                 return (
-                    IPAddress.objects.create(address=f"{parsed}{mask}", assigned_object=interface, status="active"),
+                    IPAddress.objects.create(
+                        address=netaddr.IPNetwork(f"{parsed}{mask}"), assigned_object=interface, status="active"
+                    ),
                     None,
                 )
         except IntegrityError:

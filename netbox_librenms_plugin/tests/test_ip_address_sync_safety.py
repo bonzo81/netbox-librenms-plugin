@@ -3,15 +3,18 @@
 import json
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from copy import deepcopy
 from threading import Barrier, BrokenBarrierError
 from unittest.mock import patch
 
+import netaddr
 import pytest
 from django.apps import apps
 from django.contrib.messages import get_messages
 from django.core.cache import cache
 from django.db import close_old_connections, connection
+from django.db.models.signals import post_save
 from django.test import Client
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
@@ -217,6 +220,20 @@ class TestIPAddressTableSelectionColumn:
         assert len(cells) == 2
         for cell, port_id in zip(cells, (7002, 7003), strict=True):
             assert f'value="192.0.2.12/24@{port_id}"' in cell, f"duplicate must carry its port id: {cell!r}"
+
+
+@contextmanager
+def _receiver_parses_the_saved_ip_address():
+    """Connect a post_save receiver that parses IPAddress.address the way netbox-dns IPAM sync does."""
+
+    def parse_address(sender, instance, **kwargs):
+        netaddr.IPAddress(instance.address)  # raises on a str CIDR, accepts a netaddr.IPNetwork
+
+    post_save.connect(parse_address, sender=IPAddress, dispatch_uid="test-parse-saved-ip-address")
+    try:
+        yield
+    finally:
+        post_save.disconnect(sender=IPAddress, dispatch_uid="test-parse-saved-ip-address")
 
 
 def _ip_snapshot_key(obj):
@@ -600,6 +617,34 @@ def test_oob_permission_preflight_matches_prefixed_addresses(address):
     request = make_request("post", {"oob_interface_id": str(interface.pk)}, user=user)
 
     assert AddAsOOBView._missing_oob_ip_permissions(request, address, device=device) is None
+
+
+@pytest.mark.django_db
+def test_add_as_oob_gives_the_created_ip_a_netaddr_address(client, live_librenms):
+    """A post_save receiver that parses the address, as netbox-dns IPAM sync does, must see a netaddr value."""
+    device = make_device("oob-netaddr-host", serial="OOB-NETADDR-1")
+    interface = make_interface(device, "iDRAC", iface_type="1000base-t")
+    live_librenms.server.device_info_response(
+        device_id=5302,
+        hostname="oob-netaddr-host-idrac",
+        hardware="iDRAC9",
+        os="idrac",
+        serial="OOB-NETADDR-1",
+        ip="198.18.31.5",
+    )
+    client.force_login(make_superuser("oob-netaddr-user"))
+
+    with _receiver_parses_the_saved_ip_address():
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:device_add_as_oob", args=[5302]),
+            {"existing_device_id": str(device.pk), "server_key": "default", "oob_interface_id": str(interface.pk)},
+            HTTP_HX_REQUEST="true",
+        )
+
+    assert response.status_code == 200
+    device.refresh_from_db()
+    assert str(device.oob_ip.address) == "198.18.31.5/32"
+    assert device.oob_ip.assigned_object == interface
 
 
 @pytest.mark.parametrize(
