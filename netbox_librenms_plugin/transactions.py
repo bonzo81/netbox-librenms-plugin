@@ -146,9 +146,11 @@ def run_transaction(work):
        next attempt; any other exception propagates unchanged. Rule 2 is the one exception.
     2. ``work`` left the attempt marked for rollback: it caught a database error without a
        savepoint of its own (or called ``set_rollback(True)``). The next statement then raises
-       ``TransactionManagementError``. When the attempt recorded a conflict, the next attempt
-       starts; otherwise the runner raises ``TransactionManagementError``, also when ``work``
-       returned normally.
+       ``TransactionManagementError``. When the caught error came from a plain query, Django does
+       not mark the attempt, and PostgreSQL fails the next statement with SQLSTATE ``25P02``
+       (transaction aborted) instead. When the attempt recorded a conflict, either error starts
+       the next attempt; otherwise the error propagates, and an attempt marked for rollback raises
+       ``TransactionManagementError`` also when ``work`` returned normally.
     3. ``work`` returned, but it caught a lock conflict of a statement or a recorded conflict
        (``recorded_conflict``), or the deferred constraint check met a lock conflict: the attempt
        rolls back and the next attempt starts.
@@ -209,6 +211,11 @@ def _run_attempt(work, connection):
                 except TransactionManagementError:
                     # The work caught an error without a savepoint; a recorded conflict decides.
                     if connection.needs_rollback and recorder.conflicts:
+                        raise _SwallowedConflict("; ".join(recorder.conflicts)) from None
+                    raise
+                except DatabaseError as exc:
+                    # A caught plain-query conflict leaves no needs_rollback; PostgreSQL aborts the next query.
+                    if database_error_sqlstate(exc) == "25P02" and recorder.conflicts:
                         raise _SwallowedConflict("; ".join(recorder.conflicts)) from None
                     raise
                 if recorder.conflicts:

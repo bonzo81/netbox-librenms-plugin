@@ -385,6 +385,32 @@ def test_a_conflict_caught_without_a_savepoint_is_retried_even_when_a_query_foll
 
 
 @pytest.mark.django_db
+def test_a_plain_query_conflict_caught_without_a_savepoint_is_retried_when_postgresql_aborts_the_next_query():
+    """A plain query does not mark the attempt for rollback, so the next query fails with 25P02 instead."""
+    from dcim.models import Site
+
+    locked_pk = _committed_row_pk()
+    calls = []
+
+    def work():
+        calls.append(len(calls) + 1)
+        if len(calls) == 1:
+            try:
+                lock_row_nowait(ContentType, locked_pk)
+            except OperationalError:
+                pass
+        return _site(f"runner-aborted-conflict-{len(calls)}").pk
+
+    with second_connection() as other:
+        lock_row(other, ContentType, locked_pk)
+        committed_pk = run_transaction(work)
+
+    assert calls == [1, 2]
+    assert Site.objects.get(pk=committed_pk).name == "runner-aborted-conflict-2"
+    assert not Site.objects.filter(name="runner-aborted-conflict-1").exists()
+
+
+@pytest.mark.django_db
 def test_work_that_caught_a_database_error_without_a_savepoint_never_reports_success():
     """The caught error left the attempt only a rollback, so the runner raises instead of returning."""
     from dcim.models import Site
