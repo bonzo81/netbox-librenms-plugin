@@ -1076,10 +1076,16 @@ def test_a_sync_post_and_the_tab_it_renders_read_the_rules_once(superuser_client
 _TYPE_WRITERS = {
     (
         "views/imports/actions.py",
-        "_resolve_oob_interface",
+        "AddAsOOBView._resolve_oob_interface",
     ): "OOB management interface creation uses the neutral other type",
-    ("views/sync/cables.py", "_create_remote_interface"): "remote creation uses the type from its checked proposal",
-    ("views/sync/modules.py", "get"): "unsaved interface used only to display the template type label",
+    (
+        "views/sync/cables.py",
+        "CableRemoteCreateView._create_remote_interface",
+    ): "remote creation uses the type from its checked proposal",
+    (
+        "views/sync/modules.py",
+        "ModuleInterfaceTypePreviewView.get",
+    ): "unsaved interface used only to display the template type label",
     ("interface_sync.py", "update_interface_from_port"): "the writer; the value comes from planned_interface_type",
     ("interface_diff.py", "type_change_refusal"): "the unsaved copy that NetBox validates",
     ("views/sync/modules.py", "_apply_module_interface_type"): "module apply, after type_change_refusal",
@@ -1128,10 +1134,12 @@ def _type_writes(source):
     """
     found = []
 
-    def visit(node, function):
+    def visit(node, function, scope=""):
         for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                visit(child, child.name)
+            if isinstance(child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                qualified = f"{scope}{child.name}"
+                is_class = isinstance(child, ast.ClassDef)
+                visit(child, function if is_class else qualified, f"{qualified}.")
                 continue
             if isinstance(child, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
                 targets = child.targets if isinstance(child, ast.Assign) else [child.target]
@@ -1149,7 +1157,7 @@ def _type_writes(source):
                 found.append((function, child.lineno, ast.unparse(child.args[2])))
             elif isinstance(child, ast.Call) and (value := _orm_type_write(child)) is not None:
                 found.append((function, child.lineno, ast.unparse(value)))
-            visit(child, function)
+            visit(child, function, scope)
 
     visit(ast.parse(source), None)
     return found
@@ -1159,6 +1167,15 @@ def test_the_type_guard_finds_both_write_forms():
     source = "def f(i):\n    i.type = 'lag'\n    g = lambda: setattr(i, 'type', old)\n"
 
     assert _type_writes(source) == [("f", 2, "'lag'"), ("f", 3, "old")]
+
+
+def test_the_type_guard_keys_each_write_by_its_qualified_function():
+    source = (
+        "class A:\n    def get(self, i):\n        i.type = 'lag'\n"
+        "class B:\n    def get(self, i):\n        def inner():\n            i.type = 'virtual'\n"
+    )
+
+    assert [site[0] for site in _type_writes(source)] == ["A.get", "B.get.inner"]
 
 
 def test_the_type_guard_finds_the_orm_write_forms():
