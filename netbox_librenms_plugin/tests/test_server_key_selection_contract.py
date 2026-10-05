@@ -38,7 +38,23 @@ def _reads_one_raw_server_key(call):
     )
 
 
-def _reads_raw_posted_server_key(node):
+def _is_posted_server_key_getlist(node):
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "getlist"
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr == "POST"
+        and any(isinstance(arg, ast.Constant) and arg.value == "server_key" for arg in node.args)
+    )
+
+
+def _reads_raw_posted_server_key(node, getlist_names=frozenset()):
+    if isinstance(node, ast.Subscript) and (
+        _is_posted_server_key_getlist(node.value)
+        or (isinstance(node.value, ast.Name) and node.value.id in getlist_names)
+    ):
+        return True
     if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "get":
         payload = node.func.value
         key = node.args[0] if node.args else None
@@ -69,7 +85,14 @@ def _loose_rebind_lines(tree):
         ]
         if not rebinds:
             continue
-        reads = [node for node in ast.walk(function) if _reads_raw_posted_server_key(node)]
+        getlist_names = {
+            target.id
+            for node in ast.walk(function)
+            if isinstance(node, ast.Assign) and _is_posted_server_key_getlist(node.value)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+        reads = [node for node in ast.walk(function) if _reads_raw_posted_server_key(node, getlist_names)]
         reads.extend(call for call in rebinds if _reads_one_raw_server_key(call))
         offenders.update(
             node.lineno for node in reads if not any(start <= node.lineno <= end for start, end in allowed)
@@ -115,8 +138,20 @@ def test_subscript_argument_posted_server_key_read_is_detected():
 @pytest.mark.parametrize(
     "body",
     [
-        "self.rebind_api_for_posted_server(request.POST)",
+        'self.rebind_api_for_server(request.POST.getlist("server_key")[0])',
         'keys = request.POST.getlist("server_key"); self.rebind_api_for_server(keys[0])',
+    ],
+)
+def test_indexed_getlist_server_key_reads_are_detected(body):
+    """An indexed getlist() value discards repeated posted values too."""
+    tree = ast.parse(f"def view(request):\n    {body}\n")
+    assert list(_loose_rebind_lines(tree)) == [2]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "self.rebind_api_for_posted_server(request.POST)",
         'key = job_data.get("server_key"); self.rebind_api_for_server(parsed.server_key)',
         'key = request.GET.get("server_key"); self.rebind_api_for_server(key)',
     ],
