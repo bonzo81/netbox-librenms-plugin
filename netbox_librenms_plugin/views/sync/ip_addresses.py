@@ -986,7 +986,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             )
 
         ip_obj = IPAddress.objects.create(
-            # netaddr, as NetBox loads it: save() keeps a str as is, and post_save receivers parse the value.
+            # netaddr, as NetBox loads it: post_save receivers and NetBox 4.4's Device.clean() read this value.
             address=netaddr.IPNetwork(str(parsed)),
             assigned_object=interface,
             status="active",
