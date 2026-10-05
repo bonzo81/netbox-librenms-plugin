@@ -2954,6 +2954,7 @@ class CreatePlatformFromImportView(
                 target = (
                     self.restricted_queryset(target_model, "change").select_for_update(of=("self",)).get(pk=target_pk)
                 )
+                target.snapshot()
                 target.platform = platform
                 target.full_clean()
                 target.save()

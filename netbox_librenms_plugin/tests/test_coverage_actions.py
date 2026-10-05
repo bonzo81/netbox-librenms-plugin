@@ -4486,6 +4486,30 @@ class TestCreatePlatformAssignmentIndependence:
         assert b' id="htmx-modal-content"' in response.content
         assert b"hx-swap-oob" in response.content
 
+    def test_the_assignment_change_record_keeps_the_previous_platform(self, client):
+        from core.models import ObjectChange
+        from dcim.models import Device, Platform
+        from django.contrib.contenttypes.models import ContentType
+
+        target = self._mapped_device("platform-change-record-target")
+        previous = Platform.objects.create(
+            name="Previous OS", slug="previous-os", manufacturer=target.device_type.manufacturer
+        )
+        Device.objects.filter(pk=target.pk).update(platform=previous)
+
+        response = self._client_post(client, target, "Replacement OS")
+
+        assert response.status_code == 200
+        replacement = Platform.objects.get(name="Replacement OS")
+        change = ObjectChange.objects.get(
+            changed_object_type=ContentType.objects.get_for_model(Device), changed_object_id=target.pk
+        )
+        assert change.prechange_data is not None
+        assert (change.prechange_data["platform"], change.postchange_data["platform"]) == (
+            previous.pk,
+            replacement.pk,
+        )
+
     def _client_post(self, client, device, platform_name):
         """Post the modal form through the whole request stack, the lock-conflict middleware included."""
         client.force_login(make_superuser("platform-lock-user"))
