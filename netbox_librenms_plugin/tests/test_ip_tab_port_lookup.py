@@ -151,6 +151,7 @@ class TestIpRowInterfaceNames:
     @pytest.mark.parametrize("port_count", [4, 16])
     def test_assignment_port_lookup_work_grows_with_ports_and_rows(self, live_librenms, monkeypatch, port_count):
         from netbox_librenms_plugin import utils
+        from netbox_librenms_plugin.views.base import ip_addresses_view
 
         device = make_device("ip-linear-assignments", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
         ports = _seed(live_librenms, port_count)
@@ -168,6 +169,8 @@ class TestIpRowInterfaceNames:
             return original(value)
 
         monkeypatch.setattr(utils, "normalize_librenms_port_id", record_conversion)
+        # ip_assignment_ports() calls the view module's own imported binding.
+        monkeypatch.setattr(ip_addresses_view, "normalize_librenms_port_id", record_conversion)
         enriched = view.enrich_ip_data(rows, device, "ifName", server_key=SERVER_KEY)
 
         assert len(enriched) == port_count
