@@ -113,7 +113,7 @@ ALLOWED = [
             ("views/sync/device_fields.py", "ConvertLegacyLibreNMSIdView.post", "ValidationError"),
             ("views/sync/interfaces.py", "SyncInterfacesView._apply_relationship_edge", "ValidationError"),
             ("views/sync/interfaces.py", "_BaseRelationshipSyncView._link_attempt", "ValidationError"),
-            ("views/sync/ip_addresses.py", "CreateVRFFromIPRowView._create_vrf", "ValidationError"),
+            ("views/sync/ip_addresses.py", "CreateVRFFromIPRowView._create_vrf", "IntegrityError, ValidationError"),
             ("views/sync/migrate.py", "MoveInterfaceToWinnerView.post", "ValidationError"),
             ("views/sync/migrate.py", "MoveInterfaceToWinnerView.post", "IntegrityError, ValidationError"),
             ("views/sync/modules.py", "AddBayTemplateView._map_existing_bay", "IntegrityError, ValidationError"),
