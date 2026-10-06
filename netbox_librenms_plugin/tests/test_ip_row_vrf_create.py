@@ -206,6 +206,75 @@ class TestVRFVisibility:
         refusals = _messages(response, "danger")
         assert len(refusals) == 1 and "Secret VRF" not in refusals[0]
 
+    @pytest.mark.parametrize(
+        "rival",
+        [pytest.param({"name": RD_VRF[0]}, id="name"), pytest.param({"name": "Secret VRF", "rd": RD_VRF[1]}, id="rd")],
+    )
+    def test_a_hidden_vrf_created_after_the_row_was_derived_is_not_disclosed(self, client, seeded, monkeypatch, rival):
+        from ipam.models import VRF
+
+        from netbox_librenms_plugin.views.sync.ip_addresses import CreateVRFFromIPRowView
+
+        owner = seeded(f"vrf-hidden-late-{rival['name']}")
+        client = self._constrained_client(client, f"vrf-hidden-late-{rival['name']}")
+        grant(get_user(client), "add", VRF)
+        original = CreateVRFFromIPRowView._creatable_vrf_identity
+
+        def rival_created_after_derivation(view, *args, **kwargs):
+            identity = original(view, *args, **kwargs)
+            VRF.objects.create(**rival)
+            return identity
+
+        monkeypatch.setattr(CreateVRFFromIPRowView, "_creatable_vrf_identity", rival_created_after_derivation)
+
+        response = _create(client, owner, RD_ROWS[0])
+
+        assert list(VRF.objects.values_list("name", flat=True)) == [rival["name"]]
+        refusals = _messages(response, "danger")
+        assert len(refusals) == 1
+        assert "already has" not in refusals[0] and RD_VRF[0] not in refusals[0] and RD_VRF[1] not in refusals[0]
+
+    @pytest.mark.parametrize("hidden", [True, False], ids=["hidden", "viewable"])
+    @pytest.mark.parametrize("rejected_by", ["unique-check", "constraint"])
+    def test_an_rd_taken_after_the_locked_check_is_disclosed_only_to_a_viewer(
+        self, client, seeded, monkeypatch, hidden, rejected_by
+    ):
+        """No lock covers the RD, so a rival can commit between the check and the save."""
+        from ipam.models import VRF
+
+        from netbox_librenms_plugin.views.sync import ip_addresses
+
+        owner = seeded(f"vrf-rd-race-{hidden}-{rejected_by}")
+        if hidden:
+            client = self._constrained_client(client, f"vrf-rd-race-{rejected_by}")
+            grant(get_user(client), "add", VRF)
+        else:
+            client = _superuser_client(client)
+        original = ip_addresses._vrf_collision_refusal
+        calls = []
+
+        def rival_commits_after_the_check(user, name, rd):
+            calls.append(name)
+            if len(calls) == 1:
+                VRF.objects.create(name="Secret VRF", rd=RD_VRF[1])
+                return None
+            return original(user, name, rd)
+
+        monkeypatch.setattr(ip_addresses, "_vrf_collision_refusal", rival_commits_after_the_check)
+        if rejected_by == "constraint":
+            monkeypatch.setattr(VRF, "validate_unique", lambda self, exclude=None: None)
+
+        response = _create(client, owner, RD_ROWS[0])
+
+        assert len(calls) == 2
+        # The rival shares the view's transaction here, so the refusal rolls both back.
+        assert not VRF.objects.exists()
+        refusals = _messages(response, "danger")
+        assert len(refusals) == 1
+        assert ("already has" in refusals[0]) is not hidden
+        if hidden:
+            assert RD_VRF[1] not in refusals[0] and "Route distinguisher" not in refusals[0]
+
     def test_a_viewable_matching_vrf_is_still_suggested(self, client, seeded):
         from ipam.models import VRF
 

@@ -9,6 +9,7 @@ from django.core import signing
 from django.core.cache import cache
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
+from django.db.models import Q
 from django.http import Http404, HttpResponse
 from django.shortcuts import redirect, render
 from django.urls import reverse
@@ -1353,6 +1354,19 @@ class _VRFCreateRefusedError(Exception):
     """A Create VRF precondition failed; the message is safe to show the caller."""
 
 
+def _vrf_collision_refusal(user, name, rd):
+    """Return the refusal for a VRF that holds *name* or *rd* now, or ``None``; only a viewer of every clash is told."""
+    clash = VRF.objects.filter(Q(name=name) | Q(rd=rd)) if rd is not None else VRF.objects.filter(name=name)
+    clash_pks = set(clash.values_list("pk", flat=True))
+    if not clash_pks:
+        return None
+    if set(VRF.objects.restrict(user, "view").filter(pk__in=clash_pks).values_list("pk", flat=True)) != clash_pks:
+        return _VRFCreateRefusedError("NetBox cannot create this VRF. Refresh the IP data and try again.")
+    return _VRFCreateRefusedError(
+        f"NetBox already has a VRF named '{name}' or with that route distinguisher. Refresh the IP data and try again."
+    )
+
+
 class CreateVRFFromIPRowView(SyncIPAddressesView):
     """
     Create the NetBox VRF that one IP row's LibreNMS VRF names, when NetBox has none.
@@ -1468,23 +1482,21 @@ class CreateVRFFromIPRowView(SyncIPAddressesView):
         rd = identity["rd"] or None
         # Serializes two creates of one name; NetBox's unique RD constraint settles the RD race.
         acquire_advisory_transaction_lock(vrf_create_lock_identity(name))
-        if VRF.objects.filter(name=name).exists() or (rd is not None and VRF.objects.filter(rd=rd).exists()):
-            raise _VRFCreateRefusedError(
-                f"NetBox already has a VRF named '{name}' or with that route distinguisher. "
-                "Refresh the IP data and try again."
-            )
+        if (refusal := _vrf_collision_refusal(request.user, name, rd)) is not None:
+            raise refusal
         vrf = VRF(name=name, rd=rd)
         try:
             with transaction.atomic():
                 vrf.full_clean()
                 vrf.save()
-        except ValidationError as exc:
+        except (ValidationError, IntegrityError) as exc:
+            # A VRF with this RD can commit after the check.
+            if (refusal := _vrf_collision_refusal(request.user, name, rd)) is not None:
+                raise refusal from exc
+            if isinstance(exc, IntegrityError):
+                raise
             detail = "; ".join(exc.messages)
             raise _VRFCreateRefusedError(f"NetBox does not accept the LibreNMS VRF '{name}': {detail}") from exc
-        except IntegrityError as exc:
-            raise _VRFCreateRefusedError(
-                f"NetBox already has a VRF with route distinguisher {rd}. Refresh the IP data and try again."
-            ) from exc
         # The model-level grant says nothing about WHICH VRFs the user may add; a constrained grant rolls back.
         if not VRF.objects.restrict(request.user, "add").filter(pk=vrf.pk).exists():
             raise _VRFCreateRefusedError(f"You may not add the NetBox VRF '{name}'.")
