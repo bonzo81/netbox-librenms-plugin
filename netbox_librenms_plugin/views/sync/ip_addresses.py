@@ -1358,8 +1358,8 @@ def _vrf_collision_refusal(user, name, rd, *, collided=False):
     """
     Return the refusal for a VRF that holds *name* or *rd*, or ``None`` when none does.
 
-    Only a user who may view every colliding VRF is told about it. *collided* means NetBox
-    already reported a collision, so a VRF that is gone again by the re-read still refuses.
+    Only a user who may view every colliding VRF is told about it. *collided* means NetBox's
+    unique check reported a collision, so a VRF that is gone again by the re-read still refuses.
     """
     clash = VRF.objects.filter(Q(name=name) | Q(rd=rd)) if rd is not None else VRF.objects.filter(name=name)
     clash_pks = set(clash.values_list("pk", flat=True))
@@ -1496,12 +1496,12 @@ class CreateVRFFromIPRowView(SyncIPAddressesView):
                 vrf.full_clean()
                 vrf.save()
         except (ValidationError, IntegrityError) as exc:
-            # A VRF with this RD can commit after the check; the RD is the VRF's only unique field.
-            collided = isinstance(exc, IntegrityError) or any(
-                error.code == "unique" for error in getattr(exc, "error_dict", {}).get("rd", [])
-            )
+            # A VRF with this RD can commit after the check. Only an IntegrityError that a VRF explains is refused.
+            collided = any(error.code == "unique" for error in getattr(exc, "error_dict", {}).get("rd", []))
             if (refusal := _vrf_collision_refusal(request.user, name, rd, collided=collided)) is not None:
                 raise refusal from exc
+            if isinstance(exc, IntegrityError):
+                raise
             detail = "; ".join(exc.messages)
             raise _VRFCreateRefusedError(f"NetBox does not accept the LibreNMS VRF '{name}': {detail}") from exc
         # The model-level grant says nothing about WHICH VRFs the user may add; a constrained grant rolls back.

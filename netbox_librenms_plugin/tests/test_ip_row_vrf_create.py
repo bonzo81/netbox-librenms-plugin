@@ -5,6 +5,7 @@ import re
 import pytest
 from django.contrib.auth import get_user
 from django.contrib.messages import get_messages
+from django.db import IntegrityError
 from django.urls import reverse
 
 from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
@@ -267,6 +268,12 @@ class TestVRFVisibility:
         if rejected_by == "constraint":
             monkeypatch.setattr(VRF, "validate_unique", lambda self, exclude=None: None)
 
+        if rejected_by == "constraint" and rival_vanishes:
+            # No VRF explains the IntegrityError, so it is not turned into a refusal.
+            with pytest.raises(IntegrityError):
+                _create(client, owner, RD_ROWS[0])
+            assert len(calls) == 2
+            return
         response = _create(client, owner, RD_ROWS[0])
 
         assert response.status_code == 302
