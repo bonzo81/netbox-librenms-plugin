@@ -236,29 +236,32 @@ class TestVRFVisibility:
 
     @pytest.mark.parametrize("hidden", [True, False], ids=["hidden", "viewable"])
     @pytest.mark.parametrize("rejected_by", ["unique-check", "constraint"])
+    @pytest.mark.parametrize("rival_vanishes", [False, True], ids=["rival-stays", "rival-vanishes"])
     def test_an_rd_taken_after_the_locked_check_is_disclosed_only_to_a_viewer(
-        self, client, seeded, monkeypatch, hidden, rejected_by
+        self, client, seeded, monkeypatch, hidden, rejected_by, rival_vanishes
     ):
-        """No lock covers the RD, so a rival can commit between the check and the save."""
+        """No lock covers the RD, so a rival can commit between the check and the save, and go before the re-read."""
         from ipam.models import VRF
 
         from netbox_librenms_plugin.views.sync import ip_addresses
 
-        owner = seeded(f"vrf-rd-race-{hidden}-{rejected_by}")
+        owner = seeded(f"vrf-rd-race-{hidden}-{rejected_by}-{rival_vanishes}")
         if hidden:
-            client = self._constrained_client(client, f"vrf-rd-race-{rejected_by}")
+            client = self._constrained_client(client, f"vrf-rd-race-{rejected_by}-{rival_vanishes}")
             grant(get_user(client), "add", VRF)
         else:
             client = _superuser_client(client)
         original = ip_addresses._vrf_collision_refusal
         calls = []
 
-        def rival_commits_after_the_check(user, name, rd):
+        def rival_commits_after_the_check(user, name, rd, **kwargs):
             calls.append(name)
             if len(calls) == 1:
                 VRF.objects.create(name="Secret VRF", rd=RD_VRF[1])
                 return None
-            return original(user, name, rd)
+            if rival_vanishes:
+                VRF.objects.filter(name="Secret VRF").delete()
+            return original(user, name, rd, **kwargs)
 
         monkeypatch.setattr(ip_addresses, "_vrf_collision_refusal", rival_commits_after_the_check)
         if rejected_by == "constraint":
@@ -266,13 +269,14 @@ class TestVRFVisibility:
 
         response = _create(client, owner, RD_ROWS[0])
 
+        assert response.status_code == 302
         assert len(calls) == 2
         # The rival shares the view's transaction here, so the refusal rolls both back.
         assert not VRF.objects.exists()
         refusals = _messages(response, "danger")
         assert len(refusals) == 1
-        assert ("already has" in refusals[0]) is not hidden
-        if hidden:
+        assert ("already has" in refusals[0]) is not (hidden or rival_vanishes)
+        if hidden or rival_vanishes:
             assert RD_VRF[1] not in refusals[0] and "Route distinguisher" not in refusals[0]
 
     def test_a_viewable_matching_vrf_is_still_suggested(self, client, seeded):
