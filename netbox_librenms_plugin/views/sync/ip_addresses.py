@@ -1514,6 +1514,8 @@ class CreateVRFFromIPRowView(SyncIPAddressesView):
                 vrf.save()
         except (ValidationError, IntegrityError) as exc:
             # A VRF with this RD can commit after the check. Only an IntegrityError that a VRF explains is refused.
+            # Only the error code is read, never its text.
+            # nosemgrep: caught-error-text  # noqa: ERA001
             collided = any(error.code == "unique" for error in getattr(exc, "error_dict", {}).get("rd", []))
             if (refusal := _vrf_collision_refusal(request.user, name, rd, collided=collided)) is not None:
                 raise refusal from exc
