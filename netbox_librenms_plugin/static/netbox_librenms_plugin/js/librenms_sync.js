@@ -4274,6 +4274,8 @@ document.body.addEventListener('closeModal', closeHtmxModal);
  */
 
 function initializeScripts() {
+    // The row selection restore reads the auto-select switch, so the menu is restored first.
+    initializeSyncOptionMenus();
     initializeCheckboxes();
     initializeVCMemberSelect();
     initializeVRFSelects();
@@ -4281,7 +4283,6 @@ function initializeScripts() {
     initializeVlanModalSave();
     initializeFilters();
     initializeCountdowns();
-    initializeSyncOptionMenus();
     initializeCheckboxListeners();
     initializeBulkEditApply();
     updateInterfaceNameField();
