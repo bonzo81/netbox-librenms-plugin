@@ -165,6 +165,59 @@ def test_ip_reset_does_not_save_an_unchanged_key(page, menu_page):
     assert _posted(saved) == [("create_missing_interfaces", False)]
 
 
+def _fail_saves(page, failure, count=1):
+    """Make the first *count* save-pref requests fail with HTTP 500 or a network error, and record them."""
+    failed = []
+
+    def _fail(route):
+        if len(failed) >= count:
+            route.fallback()
+            return
+        failed.append(route.request)
+        if failure == "abort":
+            route.abort()
+        else:
+            route.fulfill(status=500, content_type="text/plain", body="Server Error")
+
+    # Playwright runs the route registered last first, so this one sees each save before the fixture's.
+    page.route(f"**{SAVE_PREF_PATH}", _fail)
+    return failed
+
+
+@pytest.mark.parametrize("failure", ["http_500", "abort"])
+def test_a_failed_save_goes_again_with_the_next_change(page, menu_page, failure):
+    saved = menu_page()
+    failed = _fail_saves(page, failure)
+    page.check("#create-missing-interfaces-toggle-cb")
+    _settle(page, failed, 1)
+    assert _posted(failed) == [("create_missing_interfaces", True)]
+
+    page.check("#set-primary-ip-toggle-cb")
+    _settle(page, saved, 2)
+
+    assert _posted(saved) == [("set_primary_ip", True), ("create_missing_interfaces", True)]
+
+    # The retry succeeded, so the next change does not send that key again.
+    page.uncheck("#set-primary-ip-toggle-cb")
+    _settle(page, saved, 3)
+
+    assert _posted(saved)[2:] == [("set_primary_ip", False)]
+
+
+def test_a_failed_save_that_the_user_replaced_is_not_sent_again(page, menu_page):
+    saved = menu_page()
+    failed = _fail_saves(page, "http_500")
+    page.check("#create-missing-interfaces-toggle-cb")
+    page.uncheck("#create-missing-interfaces-toggle-cb")
+    _settle(page, saved, 1)
+
+    page.check("#set-primary-ip-toggle-cb")
+    _settle(page, saved, 2)
+
+    assert _posted(failed) == [("create_missing_interfaces", True)]
+    assert _posted(saved) == [("create_missing_interfaces", False), ("set_primary_ip", True)]
+
+
 def _swap_menu(page, **menu_state):
     """Replace the menu as an HTMX tab swap does, with markup rendered from *menu_state*."""
     page.evaluate(
@@ -206,6 +259,30 @@ def test_a_swap_rendered_before_a_reset_keeps_the_defaults(page, menu_page):
 
     assert not _checked(page, "#exclude-name")
     assert page.locator("#interface-sync-options-count").inner_text() == "0"
+    assert len(saved) == 1
+
+
+@pytest.mark.parametrize("failure", ["http_500", "abort"])
+def test_a_swap_sends_a_failed_save_again_with_the_latest_choice(page, menu_page, failure):
+    saved = menu_page()
+    failed = _fail_saves(page, failure, count=2)
+    page.check("#exclude-mtu")
+    page.check("#exclude-description")
+    _settle(page, failed, 2)
+
+    # The stale render predates both failed saves.
+    _swap_menu(page)
+    _settle(page, saved, 1)
+
+    latest = {"auto_select_lag_members": True, "exclude_columns": ["mtu", "description"]}
+    assert _posted(saved) == [("interface_sync_options", latest)]
+    assert _checked(page, "#exclude-mtu")
+    assert _checked(page, "#exclude-description")
+
+    # The retry succeeded, so a second swap sends nothing.
+    _swap_menu(page)
+    _settle(page, saved, 2)
+
     assert len(saved) == 1
 
 
