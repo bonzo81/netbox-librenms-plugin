@@ -1257,3 +1257,42 @@ rules:
           - pattern-regex: \b(?:cf|custom_field_data)\s*\.\s*librenms_id\b
           - pattern-regex: \b(?:cf|custom_field_data)\s*\|\s*\w+\s*:\s*["']librenms_id["']
       - pattern-not-inside: "{# ... #}"
+  - id: conflict-raised-without-record
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This code raises a conflict class directly. Raise it through recorded_conflict(...), so the
+      run_transaction runner retries the attempt also when a broad handler in the work catches it.
+      When you add a TransactionConflict subclass, add its name to this rule.
+    metadata:
+      category: correctness
+      references:
+        - "netbox_librenms_plugin/transactions.py"
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/transactions.py"
+    patterns:
+      - pattern-either:
+          - pattern: raise $CONFLICT(...)
+          - pattern: raise $CONFLICT
+      - pattern-not: raise recorded_conflict(...)
+      - metavariable-regex:
+          metavariable: $CONFLICT
+          regex: ^([\w.]+\.)?(TransactionConflict|ConcurrentRowChange|IdentityBusy|MappingChanged|LibreNMSPortBindingBusy)$
+  - id: no-lock-on-exists
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This query ends a select_for_update() chain with exists() or count(). It locks no row that
+      the code reads after it, and exists() clears the select list, so Django can emit a bare
+      FOR UPDATE over joined tables. Lock and read the rows, for example with get() or a list.
+    metadata:
+      category: correctness
+    patterns:
+      - pattern-either:
+          - pattern: $QUERYSET.select_for_update(...).$TERMINAL(...)
+          - pattern: $QUERYSET.select_for_update(...). ... .$TERMINAL(...)
+      - metavariable-regex:
+          metavariable: $TERMINAL
+          regex: ^(exists|count)$
