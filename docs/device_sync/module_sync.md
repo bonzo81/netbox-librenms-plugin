@@ -36,7 +36,7 @@ Only an install action (**Install**, **Install Carrier**) shows its label in the
 - **Install Branch**: installs the module and all its installable children
 - **Update Serial** / **Update Interface**: updates the serial of an installed module, or links a matching NetBox interface to it
 - **Replace** / **Move**: replaces a mismatched module, or moves a module with the same serial from another bay
-- **Review Interface Types**: on an installed module whose interface types differ from its module template (you need the change interface permission), opens a preview of the differing interfaces and applies the template types you select
+- **Review Interface Types**: on an installed module whose interface types differ from its module template (you need the view permission for devices, modules and interfaces, and the change permission for interfaces), opens a preview of the differing interfaces and applies the template types you select
 - **Add Bay Mapping** / **Add Type Mapping** / **Map Existing Bay** / **Add Module Type**: resolve "No Bay" or "No Type" statuses without leaving the page
 - **Add Bay Template**: if the device type is missing a module bay template, this button creates it inline
 
