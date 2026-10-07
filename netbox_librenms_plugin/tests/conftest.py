@@ -14,6 +14,7 @@ import pytest
 import requests
 
 from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change, seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.parallel import isolated_test_database_name
 
 _TEST_DATABASE_BASE_NAME = os.environ["TEST_DB_NAME"]
@@ -44,14 +45,6 @@ def configured_server_key():
     return next(iter(LibreNMSAPI.get_available_servers()))
 
 
-def apply_mapping_change(obj, change):
-    """Test setup: put a built mapping change on *obj*, with no claim, no owner check and no save."""
-    from netbox_librenms_plugin.server_mappings import _put_on
-
-    _put_on(obj, change)
-    return obj
-
-
 def seed_own_mapping(obj, identity, server_key="default"):
     """Test setup: put the own ID that ``assign_own`` builds on *obj*, unsaved, as the old setter did."""
     from netbox_librenms_plugin.server_mappings import assign_own
@@ -62,8 +55,7 @@ def seed_own_mapping(obj, identity, server_key="default"):
 def persist_test_server_mapping(obj, server_key):
     """Persist the server mapping required by a real sync-page request."""
     if read_mapping(obj).own_id(server_key) is None:
-        seed_own_mapping(obj, obj.pk, server_key)
-        obj.save(update_fields=["custom_field_data"])
+        seed_mapping(obj, server_key, own=obj.pk)
 
 
 def _isolated_cache_config(caches_config):
@@ -475,14 +467,13 @@ def _shared_infra():
 
 
 def make_device(name, *, serial="", librenms_cf=None):
-    """Create a real Device on the shared infra, optionally seeding its librenms_id CF."""
+    """Create a real Device on the shared infra, optionally seeding the raw stored mapping *librenms_cf*."""
     from dcim.models import Device
 
     site, _mfr, dtype, role = _shared_infra()
     dev = Device.objects.create(name=name, device_type=dtype, role=role, site=site, status="active", serial=serial)
     if librenms_cf is not None:
-        dev.custom_field_data["librenms_id"] = librenms_cf
-        dev.save()
+        seed_stored_mapping(dev, librenms_cf, save=True)
     return dev
 
 
@@ -679,9 +670,7 @@ def map_device_to_librenms(device, librenms_id=None, *, server_key, oob=None):
         entry["id"] = librenms_id
     if oob is not None:
         entry["oob"] = oob
-    device.custom_field_data["librenms_id"] = {server_key: entry}
-    device.save(update_fields=["custom_field_data"])
-    return device
+    return seed_stored_mapping(device, {server_key: entry}, save=True)
 
 
 @pytest.fixture
