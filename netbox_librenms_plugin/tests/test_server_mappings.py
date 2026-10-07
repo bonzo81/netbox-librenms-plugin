@@ -680,6 +680,19 @@ class TestBulkRead:
             read_mappings(Interface.objects.all(), fields=("name", "custom_field_data"))
 
 
+@pytest.mark.django_db
+class TestSeedMappingHelper:
+    """The test helper ``seed_mapping(save=True)`` always persists the mapping."""
+
+    def test_a_seed_already_on_the_object_is_still_saved(self):
+        device = _dev()
+        seed_mapping(device, own=42, save=False)
+
+        seed_mapping(device, own=42)
+
+        assert read_mapping(type(device).objects.get(pk=device.pk)).own_id("default") == 42
+
+
 def _locked(obj):
     return type(obj).objects.select_for_update().get(pk=obj.pk)
 

@@ -824,6 +824,13 @@ def _same_stored(first, second) -> bool:
     return first == second
 
 
+def _put_stored_value(obj, value) -> frozenset:
+    """Set a copy of the raw stored *value* on *obj* with no check; return the storage fields a save writes."""
+    _space_of(type(obj))
+    obj.custom_field_data[_MAPPING_KEY] = copy.deepcopy(value)
+    return _STORAGE_FIELDS
+
+
 def _change(obj, stored_after, outcome=None, *, claims=(), group=None) -> MappingChange:
     stored_before = _stored_value(obj)
     changed = not _same_stored(stored_after, stored_before)
@@ -1542,8 +1549,7 @@ def _put_on(row, change) -> frozenset:
     """Set only the mapping of *change* on *row*, and return the storage fields that a save must write."""
     if not change.changed:
         return frozenset()
-    row.custom_field_data[_MAPPING_KEY] = copy.deepcopy(change._stored)
-    return _STORAGE_FIELDS
+    return _put_stored_value(row, change._stored)
 
 
 def persist_merge(change: MergeChange, *, write: Callable[[], object]):
@@ -1598,4 +1604,4 @@ def copy_persisted_mapping(source, target) -> None:
     """
     if type(source) is not type(target) or source.pk is None or source.pk != target.pk:
         raise ValueError("A mapping copies only between two reads of one row.")
-    target.custom_field_data[_MAPPING_KEY] = copy.deepcopy(source.custom_field_data.get(_MAPPING_KEY))
+    _put_stored_value(target, _stored_value(source))
