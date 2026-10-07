@@ -1423,6 +1423,7 @@ def test_configured_unmapped_server_action_invalidates_mapped_snapshots_without_
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason=(
         "Two transitions for different servers in one request delete each other's source. "
         "No view reaches this today: ordinary views schedule once, and the migration views "
@@ -1450,6 +1451,7 @@ def test_request_transitions_for_different_servers_preserve_both_sources(setting
         _seed_snapshot("ports", device, server_key, payload)
     _seed_snapshot("ports", device, idle_server, {"snapshot": "idle-server"})
     request = RequestFactory().post("/sync")
+    request.htmx = HtmxDetails(request)
     request.user = make_superuser("cache-multi-server-request-transitions-user")
 
     with claim_sync_subjects(sync_subject_key(device)), transaction.atomic():
