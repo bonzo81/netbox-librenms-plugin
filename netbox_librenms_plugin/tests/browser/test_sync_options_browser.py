@@ -1,4 +1,4 @@
-"""The interface "Sync options" menu saves its whole state as a user preference; the IP menu saves nothing."""
+"""The interface and IP "Sync options" menus save the user's choice as preferences and keep it across a stale tab swap."""
 
 import json
 from pathlib import Path
@@ -6,14 +6,12 @@ from pathlib import Path
 import pytest
 
 SCRIPT_PATH = Path(__file__).parents[2] / "static" / "netbox_librenms_plugin" / "js" / "librenms_sync.js"
-MENU_TEMPLATE = (
-    Path(__file__).parents[2] / "templates" / "netbox_librenms_plugin" / "inc" / "_interface_sync_options.html"
-)
+TEMPLATE_DIR = Path(__file__).parents[2] / "templates" / "netbox_librenms_plugin"
 SAVE_PREF_PATH = "/plugins/librenms_plugin/save-user-pref/"
 HTMX_PATH = Path(__file__).parent / "vendor" / "htmx.min.js"
 # NetBox has no `htmx` global, so the test publishes the API under another name.
 HTMX_SCRIPT = f"window.htmxTest = (function () {{\n{HTMX_PATH.read_text()}\n; return htmx; }})();"
-TAB_PATH = "/browser-interface-tab/"
+TAB_PATH = "/browser-sync-tab/"
 CSRF_TOKEN = "browser-csrf-token"
 COLUMNS = [
     ("name", "Name"),
@@ -26,18 +24,9 @@ COLUMNS = [
     ("description", "Description"),
 ]
 
-# The URL is present so only the script's wiring keeps the IP menu from saving.
-IP_MENU = f"""
-<div class="dropdown" id="ip-sync-options" data-save-pref-url="{SAVE_PREF_PATH}">
-  <input class="ip-sync-option" type="checkbox" id="ip-option" data-default-checked="false">
-  <span id="ip-sync-options-count">0</span>
-  <button type="button" id="reset-ip-sync-options">Reset</button>
-</div>
-"""
 
-
-def _menu_markup(auto_select=True, excluded=()):
-    """Render the real menu include with the context shape the interfaces tab view builds."""
+def _render(template_name, context):
+    """Render a real plugin template with ``{% url %}`` pointed at the fixture save URL."""
     from django.template import Context, Engine, Library
 
     urls = Library()
@@ -49,6 +38,12 @@ def _menu_markup(auto_select=True, excluded=()):
 
     engine = Engine()
     engine.template_builtins.append(urls)
+    template = engine.from_string((TEMPLATE_DIR / template_name).read_text(encoding="utf-8"))
+    return template.render(Context(context, use_l10n=False))
+
+
+def _menu_markup(auto_select=True, excluded=()):
+    """Render the interface menu with the context shape the interfaces tab view builds."""
     sync_options = {
         "auto_select_lag_members": auto_select,
         "auto_select_lag_members_default": True,
@@ -57,13 +52,18 @@ def _menu_markup(auto_select=True, excluded=()):
             for value, label in COLUMNS
         ],
     }
-    template = engine.from_string(MENU_TEMPLATE.read_text(encoding="utf-8"))
-    return template.render(Context({"sync_options": sync_options}, use_l10n=False))
+    return _render("inc/_interface_sync_options.html", {"sync_options": sync_options})
+
+
+def _ip_menu_markup(set_primary=False, create_missing=False):
+    """Render the IP menu with the context the IP tab view builds."""
+    ip_sync = {"set_primary_ip": set_primary, "create_missing_interfaces": create_missing}
+    return _render("inc/_ip_sync_options.html", {"ip_sync": ip_sync})
 
 
 @pytest.fixture
 def menu_page(page):
-    """Load the menu and the real plugin script, and record every save-pref request."""
+    """Load both menus and the real plugin script, and record every save-pref request."""
     saved = []
 
     def _answer(route):
@@ -72,13 +72,13 @@ def menu_page(page):
 
     page.route(f"**{SAVE_PREF_PATH}", _answer)
 
-    def _load(**menu_state):
+    def _load(interface=None, ip=None):
         page.set_content(
             f'<input type="hidden" name="csrfmiddlewaretoken" value="{CSRF_TOKEN}">'
-            f"{_menu_markup(**menu_state)}{IP_MENU}"
+            f"{_menu_markup(**(interface or {}))}{_ip_menu_markup(**(ip or {}))}"
         )
         page.add_script_tag(path=str(SCRIPT_PATH))
-        page.evaluate("initializeSyncOptionMenus()")
+        page.evaluate("initializeScripts()")
         return saved
 
     return _load
@@ -94,12 +94,15 @@ def _settle(page, saved, count):
     page.wait_for_timeout(200)
 
 
-def _posted_value(request):
-    assert request.method == "POST"
-    assert request.headers["x-csrftoken"] == CSRF_TOKEN
-    payload = json.loads(request.post_data)
-    assert payload["key"] == "interface_sync_options"
-    return payload["value"]
+def _posted(saved):
+    """Return each saved preference as ``(key, value)``, after checking it is a CSRF-protected POST."""
+    pairs = []
+    for request in saved:
+        assert request.method == "POST"
+        assert request.headers["x-csrftoken"] == CSRF_TOKEN
+        payload = json.loads(request.post_data)
+        pairs.append((payload["key"], payload["value"]))
+    return pairs
 
 
 def test_toggling_an_option_saves_the_whole_menu_once(page, menu_page):
@@ -108,39 +111,58 @@ def test_toggling_an_option_saves_the_whole_menu_once(page, menu_page):
     page.check("#exclude-mtu")
     _settle(page, saved, 1)
 
-    assert [_posted_value(request) for request in saved] == [
-        {"auto_select_lag_members": True, "exclude_columns": ["mtu"]}
-    ]
+    assert _posted(saved) == [("interface_sync_options", {"auto_select_lag_members": True, "exclude_columns": ["mtu"]})]
 
     page.uncheck("#autoSelectLagMembers")
     _settle(page, saved, 2)
 
-    assert [_posted_value(request) for request in saved][1:] == [
-        {"auto_select_lag_members": False, "exclude_columns": ["mtu"]}
+    assert _posted(saved)[1:] == [
+        ("interface_sync_options", {"auto_select_lag_members": False, "exclude_columns": ["mtu"]})
     ]
     assert page.locator("#interface-sync-options-count").inner_text() == "2"
 
 
 def test_reset_saves_the_factory_defaults_once(page, menu_page):
-    saved = menu_page(auto_select=False, excluded=("name", "vlans", "description"))
+    saved = menu_page(interface={"auto_select": False, "excluded": ("name", "vlans", "description")})
     assert page.locator("#interface-sync-options-count").inner_text() == "4"
 
     page.click("#reset-interface-sync-options")
     _settle(page, saved, 1)
 
-    assert [_posted_value(request) for request in saved] == [{"auto_select_lag_members": True, "exclude_columns": []}]
+    assert _posted(saved) == [("interface_sync_options", {"auto_select_lag_members": True, "exclude_columns": []})]
     assert page.locator("#interface-sync-options-count").inner_text() == "0"
 
 
-def test_the_ip_menu_saves_nothing(page, menu_page):
+def test_an_ip_option_change_saves_only_its_own_key(page, menu_page):
     saved = menu_page()
 
-    page.check("#ip-option")
-    page.click("#reset-ip-sync-options")
-    _settle(page, saved, 0)
+    page.check("#create-missing-interfaces-toggle-cb")
+    _settle(page, saved, 1)
+    page.check("#set-primary-ip-toggle-cb")
+    _settle(page, saved, 2)
 
-    assert saved == []
+    assert _posted(saved) == [("create_missing_interfaces", True), ("set_primary_ip", True)]
+    assert page.locator("#ip-sync-options-count").inner_text() == "2"
+    assert page.locator("#interface-sync-options-count").inner_text() == "0"
+
+
+def test_ip_reset_saves_each_changed_key_once(page, menu_page):
+    saved = menu_page(ip={"set_primary": True, "create_missing": True})
+
+    page.click("#reset-ip-sync-options")
+    _settle(page, saved, 2)
+
+    assert _posted(saved) == [("set_primary_ip", False), ("create_missing_interfaces", False)]
     assert page.locator("#ip-sync-options-count").inner_text() == "0"
+
+
+def test_ip_reset_does_not_save_an_unchanged_key(page, menu_page):
+    saved = menu_page(ip={"create_missing": True})
+
+    page.click("#reset-ip-sync-options")
+    _settle(page, saved, 1)
+
+    assert _posted(saved) == [("create_missing_interfaces", False)]
 
 
 def _swap_menu(page, **menu_state):
@@ -175,7 +197,7 @@ def test_a_swap_rendered_before_the_save_keeps_the_latest_choice(page, menu_page
 
 
 def test_a_swap_rendered_before_a_reset_keeps_the_defaults(page, menu_page):
-    saved = menu_page(excluded=("name",))
+    saved = menu_page(interface={"excluded": ("name",)})
     page.click("#reset-interface-sync-options")
     _settle(page, saved, 1)
 
@@ -205,29 +227,52 @@ def _tab_markup(**menu_state):
     )
 
 
+# The management IP row, which "Set Primary IP" ticks, and another row.
+IP_ROWS = (
+    '<tr data-mgmt-ip="true"><td data-col="selection">'
+    '<input type="checkbox" name="select" value="198.18.0.1/24" id="ip-mgmt"></td><td>198.18.0.1/24</td></tr>'
+    '<tr><td data-col="selection">'
+    '<input type="checkbox" name="select" value="198.18.0.2/24" id="ip-other"></td><td>198.18.0.2/24</td></tr>'
+)
+
+
+def _ip_tab_markup(**menu_state):
+    """The swappable IP tab: the menu and a table whose rows the server renders unchecked."""
+    return (
+        f"{_ip_menu_markup(**menu_state)}"
+        '<table id="librenms-ipaddress-table"><thead><tr><th><input type="checkbox" class="toggle"></th>'
+        f"<th>Address</th></tr></thead><tbody>{IP_ROWS}</tbody></table>"
+    )
+
+
 @pytest.fixture
-def tab_page(page):
-    """Serve the interface tab and let a real HTMX swap run the production initializer."""
-    page.route(f"**{SAVE_PREF_PATH}", lambda route: route.fulfill(status=200, body='{"status": "ok"}'))
+def swap_page(page):
+    """Serve a sync tab and let a real HTMX swap run the production initializer."""
+    saved = []
+
+    def _answer(route):
+        saved.append(route.request)
+        route.fulfill(status=200, content_type="application/json", body='{"status": "ok"}')
+
+    page.route(f"**{SAVE_PREF_PATH}", _answer)
     stale = {}
     page.route(f"**{TAB_PATH}", lambda route: route.fulfill(status=200, content_type="text/html", body=stale["html"]))
 
-    def _load(**menu_state):
+    def _load(tab_html):
         page.set_content(
             f'<input type="hidden" name="csrfmiddlewaretoken" value="{CSRF_TOKEN}">'
             '<input type="hidden" name="server_key" value="production">'
-            f'<div id="interface-sync-content">{_tab_markup(**menu_state)}</div>'
+            f'<div id="tab-content">{tab_html}</div>'
         )
         page.add_script_tag(content=HTMX_SCRIPT)
         page.add_script_tag(path=str(SCRIPT_PATH))
         page.evaluate("initializeScripts()")
+        return saved
 
-    def _swap(**menu_state):
-        stale["html"] = _tab_markup(**menu_state)
-        page.evaluate(
-            "url => htmxTest.ajax('GET', url, {target: '#interface-sync-content', swap: 'innerHTML'})", TAB_PATH
-        )
-        page.wait_for_function("document.getElementById('interface-sync-options').dataset.initialized === 'true'")
+    def _swap(tab_html, menu_id):
+        stale["html"] = tab_html
+        page.evaluate("url => htmxTest.ajax('GET', url, {target: '#tab-content', swap: 'innerHTML'})", TAB_PATH)
+        page.wait_for_function(f"document.getElementById('{menu_id}').dataset.initialized === 'true'")
 
     return _load, _swap
 
@@ -236,29 +281,68 @@ def _selected(page):
     return set(page.evaluate("Array.from(document.querySelectorAll('input[name=select]:checked')).map(cb => cb.value)"))
 
 
-def test_a_stale_swap_does_not_pull_in_a_parent_the_user_turned_auto_select_off_for(page, tab_page):
-    load, swap = tab_page
-    load()
+def test_a_stale_swap_does_not_pull_in_a_parent_the_user_turned_auto_select_off_for(page, swap_page):
+    load, swap = swap_page
+    load(_tab_markup())
     page.uncheck("#autoSelectLagMembers")
     page.check("#cb-4302")
     assert _selected(page) == {"4302"}
 
     # The swap renders the stored preference from before the save: auto-select on.
-    swap()
+    swap(_tab_markup(), "interface-sync-options")
 
     assert not _checked(page, "#autoSelectLagMembers")
     assert _selected(page) == {"4302"}
 
 
-def test_a_stale_swap_keeps_the_parent_after_reset_turned_auto_select_on(page, tab_page):
-    load, swap = tab_page
-    load(auto_select=False)
+def test_a_stale_swap_keeps_the_parent_after_reset_turned_auto_select_on(page, swap_page):
+    load, swap = swap_page
+    load(_tab_markup(auto_select=False))
     page.click("#reset-interface-sync-options")
     page.check("#cb-4302")
     assert _selected(page) == {"4301", "4302"}
 
     # The swap renders the stored preference from before the Reset: auto-select off.
-    swap(auto_select=False)
+    swap(_tab_markup(auto_select=False), "interface-sync-options")
 
     assert _checked(page, "#autoSelectLagMembers")
     assert _selected(page) == {"4301", "4302"}
+
+
+def test_a_stale_ip_swap_keeps_the_switches_and_the_management_row(page, swap_page):
+    load, swap = swap_page
+    saved = load(_ip_tab_markup())
+    page.check("#set-primary-ip-toggle-cb")
+    page.check("#create-missing-interfaces-toggle-cb")
+    _settle(page, saved, 2)
+    assert _checked(page, "#ip-mgmt")
+
+    # The swap renders the stored preferences from before these saves: both off.
+    swap(_ip_tab_markup(), "ip-sync-options")
+    _settle(page, saved, 2)
+
+    assert _checked(page, "#set-primary-ip-toggle-cb")
+    assert _checked(page, "#create-missing-interfaces-toggle-cb")
+    assert _checked(page, "#ip-mgmt")
+    assert not _checked(page, "#ip-other")
+    assert page.locator("#ip-sync-options-count").inner_text() == "2"
+    assert len(saved) == 2
+
+
+def test_a_stale_ip_swap_after_reset_keeps_the_switches_off(page, swap_page):
+    load, swap = swap_page
+    saved = load(_ip_tab_markup(set_primary=True, create_missing=True))
+    assert _checked(page, "#ip-mgmt")
+    page.click("#reset-ip-sync-options")
+    _settle(page, saved, 2)
+    assert not _checked(page, "#ip-mgmt")
+
+    # The swap renders the stored preferences from before the Reset: both on.
+    swap(_ip_tab_markup(set_primary=True, create_missing=True), "ip-sync-options")
+    _settle(page, saved, 2)
+
+    assert not _checked(page, "#set-primary-ip-toggle-cb")
+    assert not _checked(page, "#create-missing-interfaces-toggle-cb")
+    assert not _checked(page, "#ip-mgmt")
+    assert page.locator("#ip-sync-options-count").inner_text() == "0"
+    assert len(saved) == 2

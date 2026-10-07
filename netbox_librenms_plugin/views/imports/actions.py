@@ -97,8 +97,10 @@ from netbox_librenms_plugin.transactions import (
     update_existing_row,
 )
 from netbox_librenms_plugin.utils import (
+    CREATE_MISSING_INTERFACES_PREFERENCE,
     IMPORT_CONTEXT_COLUMNS_PREFERENCE,
     INTERFACE_SYNC_OPTIONS_PREFERENCE,
+    SET_PRIMARY_IP_PREFERENCE,
     acquire_advisory_transaction_lock,
     coerce_model_pk,
     normalize_serial,
@@ -4149,7 +4151,8 @@ class SaveUserPrefView(LibreNMSPermissionMixin, View):
         "import_columns": IMPORT_CONTEXT_COLUMNS_PREFERENCE,
         "use_sysname": "plugins.netbox_librenms_plugin.use_sysname",
         "strip_domain": "plugins.netbox_librenms_plugin.strip_domain",
-        "set_primary_ip": "plugins.netbox_librenms_plugin.set_primary_ip",
+        "set_primary_ip": SET_PRIMARY_IP_PREFERENCE,
+        "create_missing_interfaces": CREATE_MISSING_INTERFACES_PREFERENCE,
         "interface_name_field": "plugins.netbox_librenms_plugin.interface_name_field",
         "interface_sync_options": INTERFACE_SYNC_OPTIONS_PREFERENCE,
     }
@@ -4187,6 +4190,9 @@ class SaveUserPrefView(LibreNMSPermissionMixin, View):
             if validated_columns is None:
                 return JsonResponse({"error": "Invalid import columns"}, status=400)
             value = list(validated_columns)
+
+        if key in ("set_primary_ip", "create_missing_interfaces") and not isinstance(value, bool):
+            return JsonResponse({"error": "Invalid preference value"}, status=400)
 
         if key == "interface_sync_options":
             value = validate_interface_sync_options(value)
