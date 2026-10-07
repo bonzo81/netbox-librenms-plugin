@@ -526,8 +526,11 @@ def test_an_option_only_scan_keeps_the_default_targets():
     tests = set((REPOSITORY_ROOT / "netbox_librenms_plugin" / "tests").rglob("*.py"))
     # Precondition: there is a test tree to lose in the first place.
     assert tests, "no test files found to scan"
+    templates = set((REPOSITORY_ROOT / "netbox_librenms_plugin" / "templates").rglob("*.html"))
+    assert templates, "no templates found to scan"
     scanned = _scanned(_scan("--json"))
     assert not tests - scanned, f"the option-only scan omitted {len(tests - scanned)} test files"
+    assert not templates - scanned, f"the option-only scan omitted {len(templates - scanned)} templates"
 
 
 def test_an_explicit_target_replaces_the_defaults():
@@ -548,6 +551,7 @@ def test_an_exclude_option_accepts_an_existing_path():
 def test_each_rule_applies_to_its_declared_paths(tmp_path):
     """The path scoping is the rules' real boundary, so pin it against a staged tree, not fixtures."""
     http_call = "import requests\nrequests.get(url)\n"
+    mapping_write = 'device.custom_field_data["librenms_id"] = {"default": 5}\n'
     sources = {
         # Flagged: a direct HTTP call outside the client.
         "netbox_librenms_plugin/worker.py": http_call,
@@ -562,6 +566,12 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
             http_call + "from django.test import TestCase\n"
             "class TestWorker:\n    def check(self):\n        self.assertEqual(1, 1)\n"
         ),
+        # Flagged: tests and templates are in the scope of the mapping rules.
+        "netbox_librenms_plugin/tests/test_seed.py": mapping_write,
+        "netbox_librenms_plugin/templates/netbox_librenms_plugin/seed.html": "{{ object.cf.librenms_id }}\n",
+        # Clean: the mapping module and migrations are the only places that may touch the storage.
+        "netbox_librenms_plugin/server_mappings.py": mapping_write,
+        "netbox_librenms_plugin/migrations/0099_seed.py": mapping_write,
     }
     for name, source in sources.items():
         staged = tmp_path / name
@@ -576,4 +586,6 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
         ("netbox_librenms_plugin/worker.py", "no-requests-outside-http-client"),
         ("netbox_librenms_plugin/tests/test_worker.py", "no-django-testcase-in-tests"),
         ("netbox_librenms_plugin/tests/test_worker.py", "no-unittest-assertions"),
+        ("netbox_librenms_plugin/tests/test_seed.py", "no-stored-mapping-access"),
+        ("netbox_librenms_plugin/templates/netbox_librenms_plugin/seed.html", "no-stored-mapping-access-template"),
     }, found
