@@ -1080,53 +1080,102 @@ function initializeSyncOptions(rootId, optionSelector, countId, resetId, store) 
     updateCount();
 }
 
+// Each preference save waits for the one before it, so the server stores the last state the user chose.
+let syncOptionSaving = Promise.resolve();
+
 /**
- * Keep the interface sync options menu as the user's preference.
+ * Queue one user preference save.
+ *
+ * @param {HTMLElement} root - The menu root, which carries the save-pref URL
+ * @param {string} key - The preference key
+ * @param {*} value - The preference value
+ */
+function saveSyncOptionPreference(root, key, value) {
+    const savePrefUrl = root.dataset.savePrefUrl;
+    if (!savePrefUrl) return;
+    const csrfToken = getCsrfToken();
+    if (!csrfToken) {
+        console.debug(`Failed to save ${key} pref: missing CSRF token`);
+        return;
+    }
+    syncOptionSaving = syncOptionSaving.then(() => fetch(savePrefUrl, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrfToken},
+        body: JSON.stringify({key: key, value: value})
+    })).then(response => {
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+    }).catch(error => console.debug(`Failed to save ${key} pref:`, error.message));
+}
+
+/**
+ * Keep a sync options menu as user preferences.
  *
  * A tab swap can render the menu from a stored value that a queued save has not replaced yet,
  * so the swapped-in menu gets the last choice made on this page.
+ *
+ * @param {Object<string, {read: Function, write: Function}>} preferences - Per preference key,
+ *     read(options) returns its value and write(options, value) applies it
+ * @returns {{restore: Function, save: Function}} The store for initializeSyncOptions
  */
-const interfaceSyncOptionsStore = {
-    chosen: null,
-    // Each save waits for the one before it, so the server stores the last state the user chose.
-    saving: Promise.resolve(),
+function syncOptionStore(preferences) {
+    const chosen = {};
+    let current = {};
+    const values = (options) => Object.fromEntries(
+        Object.entries(preferences).map(([key, preference]) => [key, preference.read(options)])
+    );
+    return {
+        restore(options) {
+            Object.entries(chosen).forEach(([key, value]) => preferences[key].write(options, value));
+            current = values(options);
+        },
+        save(root, options) {
+            const next = values(options);
+            Object.keys(next).forEach((key) => {
+                if (JSON.stringify(next[key]) === JSON.stringify(current[key])) return;
+                chosen[key] = next[key];
+                saveSyncOptionPreference(root, key, next[key]);
+            });
+            current = next;
+        }
+    };
+}
 
-    restore(options) {
-        if (!this.chosen) return;
-        options.forEach((option) => {
-            option.checked = option.name === 'auto_select_lag_members'
-                ? this.chosen.auto_select_lag_members
-                : this.chosen.exclude_columns.includes(option.value);
-        });
-    },
+/** A preference held by one checkbox, found by its ID. */
+function checkboxPreference(id) {
+    const find = (options) => options.find((option) => option.id === id);
+    return {
+        read: (options) => Boolean(find(options)?.checked),
+        write: (options, value) => {
+            const option = find(options);
+            if (option) option.checked = value;
+        }
+    };
+}
 
-    save(root, options) {
-        const autoSelect = options.find((option) => option.name === 'auto_select_lag_members');
-        const value = {
-            auto_select_lag_members: Boolean(autoSelect?.checked),
+const interfaceSyncOptionStore = syncOptionStore({
+    interface_sync_options: {
+        read: (options) => ({
+            auto_select_lag_members: Boolean(
+                options.find((option) => option.name === 'auto_select_lag_members')?.checked
+            ),
             exclude_columns: options
                 .filter((option) => option.name === 'exclude_columns' && option.checked)
                 .map((option) => option.value)
-        };
-        this.chosen = value;
-        const savePrefUrl = root.dataset.savePrefUrl;
-        if (!savePrefUrl) return;
-        const csrfToken = getCsrfToken();
-        if (!csrfToken) {
-            console.debug('Failed to save interface_sync_options pref: missing CSRF token');
-            return;
-        }
-        this.saving = this.saving.then(() => fetch(savePrefUrl, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrfToken},
-            body: JSON.stringify({key: 'interface_sync_options', value: value})
-        })).then(response => {
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}`);
-            }
-        }).catch(error => console.debug('Failed to save interface_sync_options pref:', error.message));
+        }),
+        write: (options, value) => options.forEach((option) => {
+            option.checked = option.name === 'auto_select_lag_members'
+                ? value.auto_select_lag_members
+                : value.exclude_columns.includes(option.value);
+        })
     }
-};
+});
+
+const ipSyncOptionStore = syncOptionStore({
+    set_primary_ip: checkboxPreference('set-primary-ip-toggle-cb'),
+    create_missing_interfaces: checkboxPreference('create-missing-interfaces-toggle-cb')
+});
 
 function initializeSyncOptionMenus() {
     initializeSyncOptions(
@@ -1134,14 +1183,37 @@ function initializeSyncOptionMenus() {
         '.interface-sync-option',
         'interface-sync-options-count',
         'reset-interface-sync-options',
-        interfaceSyncOptionsStore
+        interfaceSyncOptionStore
     );
     initializeSyncOptions(
         'ip-sync-options',
         '.ip-sync-option',
         'ip-sync-options-count',
-        'reset-ip-sync-options'
+        'reset-ip-sync-options',
+        ipSyncOptionStore
     );
+}
+
+/**
+ * Keep the management-IP row selected while "Set Primary IP" is on.
+ *
+ * Runs after the menu is restored, so the row follows the user's latest choice.
+ */
+function initializePrimaryIpToggle() {
+    const toggle = document.getElementById('set-primary-ip-toggle-cb');
+    if (!toggle || toggle.dataset.mgmtRowBound === 'true') return;
+    toggle.dataset.mgmtRowBound = 'true';
+    const selectManagementRow = () => {
+        document.querySelectorAll('tr[data-mgmt-ip="true"] input[name="select"]').forEach((box) => {
+            box.checked = toggle.checked;
+        });
+    };
+    selectManagementRow();
+    toggle.addEventListener('change', () => {
+        selectManagementRow();
+        // Store the change too, or the next swap restores the row from the old selection.
+        commitSelectionChange(document.getElementById('librenms-ipaddress-table'));
+    });
 }
 
 // ============================================
@@ -4274,8 +4346,9 @@ document.body.addEventListener('closeModal', closeHtmxModal);
  */
 
 function initializeScripts() {
-    // The row selection restore reads the auto-select switch, so the menu is restored first.
+    // The row selection restore reads the menu switches, so the menu is restored first.
     initializeSyncOptionMenus();
+    initializePrimaryIpToggle();
     initializeCheckboxes();
     initializeVCMemberSelect();
     initializeVRFSelects();

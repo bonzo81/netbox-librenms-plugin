@@ -1851,23 +1851,40 @@ def same_host(a, b) -> bool:
         return False
 
 
+SET_PRIMARY_IP_PREFERENCE = "plugins.netbox_librenms_plugin.set_primary_ip"
+CREATE_MISSING_INTERFACES_PREFERENCE = "plugins.netbox_librenms_plugin.create_missing_interfaces"
+
+
+def _resolve_sync_toggle(request, keys, preference):
+    """Return the request toggle, else the user's saved boolean, else ``False``; a non-boolean saved value counts as absent."""
+    value = read_request_toggle(request, keys)
+    if value is not None:
+        return is_truthy_parameter(value)
+    pref = get_user_pref(request, preference)
+    return pref if isinstance(pref, bool) else False
+
+
 def resolve_create_missing_interfaces(request) -> bool:
     """
     Resolve the "create a missing NetBox interface before assigning the IP" flag.
 
-    POST wins, then GET, then ``False`` (opt-in). The IP-sync template renders the toggle
-    from this value, so a table refresh restores what the user selected instead of
-    silently reverting to off.
+    POST wins, then GET, then the user's saved preference
+    ``plugins.netbox_librenms_plugin.create_missing_interfaces``, then ``False`` (opt-in).
+    The IP-sync template renders the toggle from this value, so a table refresh restores
+    what the user selected instead of silently reverting to off.
 
     Args:
-        request (HttpRequest): Request used to resolve the toggle value.
+        request (HttpRequest): Request used to resolve the toggle and user preference values.
 
     Returns:
         bool: Whether missing NetBox interfaces can be created before IP assignment.
 
     """
-    value = read_request_toggle(request, ("create-missing-interfaces-toggle", "create_missing_interfaces"))
-    return is_truthy_parameter(value) if value is not None else False
+    return _resolve_sync_toggle(
+        request,
+        ("create-missing-interfaces-toggle", "create_missing_interfaces"),
+        CREATE_MISSING_INTERFACES_PREFERENCE,
+    )
 
 
 def resolve_set_primary_ip(request) -> bool:
@@ -1879,7 +1896,7 @@ def resolve_set_primary_ip(request) -> bool:
 
     1. POST/GET ``set-primary-ip-toggle`` (or ``set_primary_ip``) wins
        -- set by the IP-sync tab toggle.
-    2. Otherwise the user's saved preference
+    2. Otherwise the user's saved boolean preference
        ``plugins.netbox_librenms_plugin.set_primary_ip``.
     3. Otherwise ``False`` (opt-in).
 
@@ -1894,15 +1911,9 @@ def resolve_set_primary_ip(request) -> bool:
         bool: Whether the matching synced management IP can become the primary IP.
 
     """
-    value = read_request_toggle(request, ("set-primary-ip-toggle", "set_primary_ip-toggle", "set_primary_ip"))
-    if value is not None:
-        return is_truthy_parameter(value)
-
-    pref = get_user_pref(request, "plugins.netbox_librenms_plugin.set_primary_ip")
-    if pref is not None:
-        return is_truthy_parameter(pref) if isinstance(pref, str) else bool(pref)
-
-    return False
+    return _resolve_sync_toggle(
+        request, ("set-primary-ip-toggle", "set_primary_ip-toggle", "set_primary_ip"), SET_PRIMARY_IP_PREFERENCE
+    )
 
 
 INTERFACE_NAME_PREFERENCE_PATH = "plugins.netbox_librenms_plugin.interface_name_field"

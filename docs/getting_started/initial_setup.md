@@ -75,7 +75,7 @@ For best results, align chassis member positions with interface naming patterns.
     - Confirm member assignments for virtual chassis
 2. Exclude columns to exclude from interface sync
     - Sync only the values you want to sync
-    - The plugin remembers your choices in the **Sync options** menu for your user, across page loads and syncs. **Reset to defaults** restores the factory settings.
+    - The plugin remembers your choices in the **Sync options** menu for your user, across page loads and syncs. This applies to the Interfaces tab and to the IP Addresses tab (**Set Primary IP** and **Create missing interfaces**). **Reset to defaults** restores the factory settings.
 3. Sync VLANs first to ensure that VLANs are created in NetBox before syncing interfaces, allowing for proper VLAN assignments. Use the VLAN tab on the device sync page to create VLANs from LibreNMS data.
 4. Selecting a row selects what that row depends on
     - With "Auto-select related interfaces" on, checking a sub-interface also checks its parent, and that parent's aggregate, and so on up the chain
