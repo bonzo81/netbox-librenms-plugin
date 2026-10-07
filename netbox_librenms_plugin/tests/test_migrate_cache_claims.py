@@ -9,12 +9,12 @@ from ipam.models import IPAddress
 from netbox_librenms_plugin.sync_cache import SyncTab
 from netbox_librenms_plugin.tests.cache_test_helpers import seed_every_tab, snapshot_state
 from netbox_librenms_plugin.tests.conftest import (
-    apply_mapping_change,
     configure_librenms_servers,
     ip_on,
     make_device,
     make_interface,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 from netbox_librenms_plugin.server_mappings import mark_migrated
 

@@ -7,6 +7,8 @@ platform matching, and conversion helper functions.
 
 import pytest
 
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping, stored_mapping_for_test
+
 
 def _two_member_vc(name, cf_first, cf_second):
     """Create a real VirtualChassis with two members (vc_position 1 then 2), seeding each member's ``librenms_id`` custom field with *cf_first* / *cf_second* (use ``_UNSET`` / skip by passing None to leave it empty)."""
@@ -19,13 +21,13 @@ def _two_member_vc(name, cf_first, cf_second):
     first.virtual_chassis = vc
     first.vc_position = 1
     if cf_first is not None:
-        first.custom_field_data["librenms_id"] = cf_first
+        seed_stored_mapping(first, cf_first)
     first.save()
     second = make_device(f"{name}-m2")
     second.virtual_chassis = vc
     second.vc_position = 2
     if cf_second is not None:
-        second.custom_field_data["librenms_id"] = cf_second
+        seed_stored_mapping(second, cf_second)
     second.save()
     return first, second
 
@@ -1793,7 +1795,7 @@ class TestLibreNMSIdQueryMatchesDecoder:
         from netbox_librenms_plugin.server_mappings import MappingRole, find_mapping
 
         dev = make_device(f"id-form-{len(stored)}-{namespaced}")
-        dev.custom_field_data["librenms_id"] = {"default": stored} if namespaced else stored
+        seed_stored_mapping(dev, {"default": stored} if namespaced else stored)
         dev.save()
 
         found = find_mapping(Device.objects.all(), server="default", identity=42, roles=tuple(MappingRole))
@@ -1820,7 +1822,7 @@ class TestLibreNMSIdQueryMatchesDecoder:
         from netbox_librenms_plugin.server_mappings import MappingRole, find_mapping
 
         dev = make_device(f"id-number-{stored!r}")
-        dev.custom_field_data["librenms_id"] = shape(stored)
+        seed_stored_mapping(dev, shape(stored))
         dev.save()
 
         found = find_mapping(Device.objects.all(), server="default", identity=42, roles=tuple(MappingRole))
@@ -1837,11 +1839,11 @@ class TestLibreNMSIdQueryMatchesDecoder:
         from netbox_librenms_plugin.server_mappings import MappingRole, find_mapping
 
         dev = make_device("id-form-wide")
-        dev.custom_field_data["librenms_id"] = {"default": wide}
+        seed_stored_mapping(dev, {"default": wide})
         dev.save()
         dev.refresh_from_db()
 
-        assert coerce_librenms_id(dev.custom_field_data["librenms_id"]["default"]) is None
+        assert coerce_librenms_id(stored_mapping_for_test(dev)["default"]) is None
         assert find_mapping(Device.objects.all(), server="default", identity=wide, roles=tuple(MappingRole)) is None
 
 

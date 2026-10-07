@@ -21,6 +21,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis,
     transactional_db_with_all_apps,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
 from netbox_librenms_plugin.tests.lock_conflict_helpers import (
     aborting_statement,
     failing_statement,
@@ -589,8 +590,7 @@ class TestInterfaceBinding:
         target = make_device("bind-target")
         owner_device = make_device("bind-existing-owner")
         owner = make_interface(owner_device, "Ethernet21")
-        owner.custom_field_data["librenms_id"] = {"default": 221}
-        owner.save(update_fields=["custom_field_data"])
+        seed_mapping(owner, "default", own=221)
 
         result = _bind_interface_librenms_id(
             target,
@@ -734,7 +734,7 @@ def test_a_bind_that_read_its_interface_before_a_concurrent_bind_keeps_the_winne
         # The name chooses again under the lock, and the name now belongs to the winner's port.
         assert loser_result["reason"] == "Ethernet30 is already bound to a different LibreNMS port; not overwriting"
     interface.refresh_from_db()
-    assert interface.custom_field_data["librenms_id"] == expected_mapping
+    assert stored_mapping_for_test(interface) == expected_mapping
 
 
 @transactional_db_with_all_apps()
@@ -776,7 +776,7 @@ def test_a_bind_whose_bound_interface_was_renamed_still_binds_it():
         status="active",
     )
     interface = make_interface(device, "Ethernet30")
-    interface.custom_field_data["librenms_id"] = {"default": 305}
+    seed_mapping(interface, "default", own=305, save=False)
     interface.save()
 
     def rename():
@@ -794,7 +794,7 @@ def test_a_bind_whose_bound_interface_was_renamed_still_binds_it():
     assert result == {"status": "bound", "interface": "Ethernet31", "port_id": 305, "changed": True}
     interface.refresh_from_db()
     assert (interface.name, interface.module_id) == ("Ethernet31", module.pk)
-    assert interface.custom_field_data["librenms_id"] == {"default": 305}
+    assert stored_mapping_for_test(interface) == {"default": 305}
 
 
 class TestBranchCollection:
@@ -1516,8 +1516,7 @@ class TestInstallAndUpdateViews:
             device.virtual_chassis = vc
             device.vc_position = position
             device.save()
-        page.custom_field_data["librenms_id"] = {"default": {"id": 77}}
-        page.save(update_fields=["custom_field_data"])
+        seed_stored_mapping(page, {"default": {"id": 77}}, save=True)
         module_type = ModuleType.objects.create(manufacturer=member_mfr, model="TargetRulesModule")
         # Scoped to the MEMBER's manufacturer, so only a target-resolved lookup finds it.
         InventoryIgnoreRule.objects.create(
@@ -3282,7 +3281,7 @@ def test_refresh_drops_out_of_spec_oob_inventory(live_librenms, oob_index, oob_p
 
     from netbox_librenms_plugin.server_mappings import attach_oob
 
-    from netbox_librenms_plugin.tests.conftest import apply_mapping_change
+    from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
     from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     device = make_device("signed-inventory", librenms_cf={"default": 777})

@@ -19,6 +19,7 @@ from netbox_librenms_plugin.tests.conftest import (
     transactional_db_with_all_apps,
 )
 from netbox_librenms_plugin.tests.import_server_helpers import librenms_device
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping_row, stored_mapping_for_test
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 
@@ -148,7 +149,7 @@ def test_device_link_adds_secondary_mapping_and_prefers_the_previous_sole_mappin
 
     assert response.status_code == 200
     device.refresh_from_db()
-    assert device.custom_field_data["librenms_id"] == {
+    assert stored_mapping_for_test(device) == {
         "primary": {
             "id": 48101,
             "oob": {"id": 48102, "type": "bmc", "version": "1.0"},
@@ -176,7 +177,7 @@ def test_device_link_replacing_unusable_entry_prefers_the_previous_sole_mapping(
 
     assert response.status_code == 200
     device.refresh_from_db()
-    assert device.custom_field_data["librenms_id"] == {
+    assert stored_mapping_for_test(device) == {
         "primary": 42,
         "secondary": 48202,
         "_preferred_server": "primary",
@@ -186,8 +187,7 @@ def test_device_link_replacing_unusable_entry_prefers_the_previous_sole_mapping(
 @pytest.mark.django_db
 def test_vm_link_uses_the_same_second_server_mapping_contract(client, servers):
     vm = make_vm("edge-link-vm")
-    vm.custom_field_data["librenms_id"] = {"primary": 48301}
-    vm.save(update_fields=["custom_field_data"])
+    seed_mapping(vm, "primary", own=48301)
     _register_import_device(
         servers.secondary,
         librenms_device(48401, vm.name),
@@ -203,7 +203,7 @@ def test_vm_link_uses_the_same_second_server_mapping_contract(client, servers):
 
     assert response.status_code == 200
     vm.refresh_from_db()
-    assert vm.custom_field_data["librenms_id"] == {
+    assert stored_mapping_for_test(vm) == {
         "primary": 48301,
         "secondary": 48401,
         "_preferred_server": "primary",
@@ -213,8 +213,7 @@ def test_vm_link_uses_the_same_second_server_mapping_contract(client, servers):
 @pytest.mark.django_db
 def test_vm_validation_is_read_only_and_offers_an_explicit_link(client, servers):
     vm = make_vm("edge-link-vm-preview")
-    vm.custom_field_data["librenms_id"] = {"primary": 48501}
-    vm.save(update_fields=["custom_field_data"])
+    seed_mapping(vm, "primary", own=48501)
     _register_import_device(
         servers.secondary,
         librenms_device(48601, vm.name),
@@ -229,7 +228,7 @@ def test_vm_validation_is_read_only_and_offers_an_explicit_link(client, servers)
     assert 'name="existing_device_type" value="virtualmachine"' in html
     assert 'name="action" value="link"' in html
     vm.refresh_from_db()
-    assert vm.custom_field_data["librenms_id"] == {"primary": 48501}
+    assert stored_mapping_for_test(vm) == {"primary": 48501}
 
 
 @pytest.mark.django_db
@@ -245,7 +244,7 @@ def test_primary_ip_match_changes_only_after_explicit_update_and_link(client, se
         from virtualization.models import VMInterface
 
         target = make_vm("existing-primary-ip-vm")
-        target.custom_field_data["librenms_id"] = {"primary": 48901}
+        seed_mapping(target, "primary", own=48901, save=False)
         interface = VMInterface.objects.create(virtual_machine=target, name="eth0")
         device_id = 49001
         address = "198.18.1.20/32"
@@ -263,7 +262,7 @@ def test_primary_ip_match_changes_only_after_explicit_update_and_link(client, se
 
     target.refresh_from_db()
     expected_primary_id = 48701 if object_kind == "device" else 48901
-    assert target.custom_field_data["librenms_id"] == {"primary": expected_primary_id}
+    assert stored_mapping_for_test(target) == {"primary": expected_primary_id}
     preview_html = preview.content.decode()
     assert 'name="action" value="update"' in preview_html
     assert f'name="existing_device_type" value="{target._meta.model_name}"' in preview_html
@@ -277,7 +276,7 @@ def test_primary_ip_match_changes_only_after_explicit_update_and_link(client, se
     assert response.status_code == 200
     target.refresh_from_db()
     assert target.name == renamed
-    assert target.custom_field_data["librenms_id"] == {
+    assert stored_mapping_for_test(target) == {
         "primary": expected_primary_id,
         "secondary": device_id,
         "_preferred_server": "primary",
@@ -300,7 +299,7 @@ def test_serial_match_changes_only_after_explicit_update_and_link(client, server
 
     device.refresh_from_db()
     assert device.name == "existing-serial-device"
-    assert device.custom_field_data["librenms_id"] == {"primary": 49101}
+    assert stored_mapping_for_test(device) == {"primary": 49101}
     assert "Serial match" in preview.content.decode()
     assert 'name="action" value="update"' in preview.content.decode()
 
@@ -313,7 +312,7 @@ def test_serial_match_changes_only_after_explicit_update_and_link(client, server
     assert response.status_code == 200
     device.refresh_from_db()
     assert device.name == "renamed-serial-device"
-    assert device.custom_field_data["librenms_id"] == {
+    assert stored_mapping_for_test(device) == {
         "primary": 49101,
         "secondary": 49201,
         "_preferred_server": "primary",
@@ -335,11 +334,7 @@ def test_link_reloads_locked_mapping_state_before_adding_the_active_server(clien
         if not concurrent_change_applied and 'FROM "dcim_device"' in sql and "FOR UPDATE" in sql:
             concurrent_change_applied = True
             current = type(device).objects.get(pk=device.pk)
-            current.custom_field_data["librenms_id"]["concurrent"] = {
-                "id": 49102,
-                "oob": {"id": 49103, "type": "bmc"},
-            }
-            current.save(update_fields=["custom_field_data"])
+            seed_mapping(current, "concurrent", own=49102, oob=49103, oob_type="bmc")
         return execute(sql, params, many, context)
 
     with connection.execute_wrapper(add_mapping_before_target_lock), CaptureQueriesContext(connection) as queries:
@@ -353,7 +348,7 @@ def test_link_reloads_locked_mapping_state_before_adding_the_active_server(clien
     assert concurrent_change_applied
     assert any('FROM "dcim_device"' in query["sql"] and "FOR UPDATE" in query["sql"] for query in queries)
     device.refresh_from_db()
-    assert device.custom_field_data["librenms_id"] == {
+    assert stored_mapping_for_test(device) == {
         "primary": 49101,
         "concurrent": {
             "id": 49102,
@@ -369,8 +364,7 @@ def test_vm_link_rechecks_device_id_collisions_after_validation(client, servers)
     from django.db import connection
 
     vm = make_vm("cross-model-link-target")
-    vm.custom_field_data["librenms_id"] = {"primary": 49501}
-    vm.save(update_fields=["custom_field_data"])
+    seed_mapping(vm, "primary", own=49501)
     device = make_device("cross-model-link-owner", librenms_cf={"primary": 49502})
     _register_import_device(
         servers.secondary,
@@ -384,9 +378,7 @@ def test_vm_link_rechecks_device_id_collisions_after_validation(client, servers)
         nonlocal concurrent_mapping_added
         if not concurrent_mapping_added and 'FROM "virtualization_virtualmachine"' in sql and "FOR UPDATE" in sql:
             concurrent_mapping_added = True
-            type(device).objects.filter(pk=device.pk).update(
-                custom_field_data={"librenms_id": {"primary": 49502, "secondary": 49601}}
-            )
+            seed_stored_mapping_row(device, {"primary": 49502, "secondary": 49601})
         return execute(sql, params, many, context)
 
     with connection.execute_wrapper(add_device_mapping_before_target_lock):
@@ -400,7 +392,7 @@ def test_vm_link_rechecks_device_id_collisions_after_validation(client, servers)
     assert response.status_code == 200
     assert b"already assigned to device" in response.content
     vm.refresh_from_db()
-    assert vm.custom_field_data["librenms_id"] == {"primary": 49501}
+    assert stored_mapping_for_test(vm) == {"primary": 49501}
 
 
 @transactional_db_with_all_apps()
@@ -411,8 +403,7 @@ def test_device_and_vm_links_serialize_one_cross_model_id_claim(servers):
 
     device = make_device("concurrent-cross-model-device", librenms_cf={"primary": 49701})
     vm = make_vm("concurrent-cross-model-vm")
-    vm.custom_field_data["librenms_id"] = {"primary": 49702}
-    vm.save(update_fields=["custom_field_data"])
+    seed_mapping(vm, "primary", own=49702)
     first_fetch_completed = Event()
     fetch_barrier = Barrier(2)
     response_names = iter((device.name, vm.name))
@@ -472,7 +463,7 @@ def test_device_and_vm_links_serialize_one_cross_model_id_claim(servers):
 
     device.refresh_from_db()
     vm.refresh_from_db()
-    mappings = [device.custom_field_data["librenms_id"], vm.custom_field_data["librenms_id"]]
+    mappings = [stored_mapping_for_test(device), stored_mapping_for_test(vm)]
     owners = [mapping for mapping in mappings if mapping.get("secondary") == 49801]
     assert [status for status, _content in outcomes] == [200, 200]
     # Two racing lookups plus the winner's post-action re-read; a fourth would be an unnoticed refetch.
@@ -515,7 +506,7 @@ def test_a_link_that_meets_a_held_claim_answers_try_again_and_writes_nothing(cli
     assert REQUEST_FAILED_EVENT in response["HX-Trigger"]
     assert not list(get_messages(response.wsgi_request))
     device.refresh_from_db()
-    assert device.custom_field_data["librenms_id"] == {"primary": 49901}
+    assert stored_mapping_for_test(device) == {"primary": 49901}
 
 
 @pytest.mark.django_db
@@ -539,7 +530,7 @@ def test_link_preserves_established_preference_and_every_other_mapping(client, s
 
     assert response.status_code == 200
     device.refresh_from_db()
-    assert device.custom_field_data["librenms_id"] == {
+    assert stored_mapping_for_test(device) == {
         "primary": 49301,
         "archive": {"id": 49302, "oob": {"id": 49303, "type": "bmc"}},
         "secondary": 49401,

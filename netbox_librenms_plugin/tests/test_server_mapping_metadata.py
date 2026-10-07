@@ -13,6 +13,7 @@ from netbox_librenms_plugin.server_mappings import (
     read_mapping,
 )
 from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis_members, seed_own_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
 
 
 def test_reserved_preference_key_is_rejected_in_server_configuration():
@@ -62,22 +63,20 @@ def test_identity_reader_and_writer_reject_reserved_metadata_key():
     """Keyed identity access fails fast before it can read or overwrite metadata."""
     from dcim.models import Device
 
-    obj = Device(custom_field_data={"librenms_id": {PREFERRED_SERVER_FIELD: "primary"}})
+    obj = seed_stored_mapping(Device(), {PREFERRED_SERVER_FIELD: "primary"})
 
     with pytest.raises(ValueError, match="reserved for object metadata"):
         read_mapping(obj).own_id(PREFERRED_SERVER_FIELD)
     with pytest.raises(ValueError, match="reserved for object metadata"):
         seed_own_mapping(obj, 42, PREFERRED_SERVER_FIELD)
-    assert obj.custom_field_data["librenms_id"] == {PREFERRED_SERVER_FIELD: "primary"}
+    assert stored_mapping_for_test(obj) == {PREFERRED_SERVER_FIELD: "primary"}
 
 
 @pytest.mark.django_db
 def test_numeric_preference_metadata_cannot_become_vc_mapping_owner():
     """VC owner discovery ignores metadata even when its malformed value looks like an ID."""
     _chassis, (metadata_member, mapping_owner) = make_virtual_chassis_members("reserved-owner", count=2)
-    metadata_member.custom_field_data["librenms_id"] = {PREFERRED_SERVER_FIELD: "13522"}
-    metadata_member.save(update_fields=["custom_field_data"])
-    mapping_owner.custom_field_data["librenms_id"] = {"primary": 13523}
-    mapping_owner.save(update_fields=["custom_field_data"])
+    seed_stored_mapping(metadata_member, {PREFERRED_SERVER_FIELD: "13522"}, save=True)
+    seed_mapping(mapping_owner, "primary", own=13523)
 
     assert get_librenms_sync_device(metadata_member, server_key=None) == mapping_owner

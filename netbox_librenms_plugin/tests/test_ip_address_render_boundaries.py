@@ -260,7 +260,7 @@ class TestRefreshWithAnUnknownServer:
     def test_unknown_server_key_re_renders_the_migrated_partial(self, client, live_librenms):
         """The error re-render keeps the migrated move card, resolved from the active server."""
         from netbox_librenms_plugin.server_mappings import mark_migrated
-        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
 
         winner = make_device("ip-refresh-winner")
         donor = make_device("ip-refresh-donor", librenms_cf={SERVER_KEY: {"id": 4306}})

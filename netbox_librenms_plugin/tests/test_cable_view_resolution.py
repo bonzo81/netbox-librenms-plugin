@@ -27,6 +27,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_view
 
 SERVER_KEY = "default"
@@ -54,9 +55,7 @@ def _view(user=None):
 
 def _set_librenms_id(obj, librenms_id):
     """Seed the multi-server librenms_id custom field the resolution indexes read."""
-    obj.custom_field_data["librenms_id"] = {SERVER_KEY: librenms_id}
-    obj.save()
-    return obj
+    return seed_mapping(obj, SERVER_KEY, own=librenms_id)
 
 
 def _link(**overrides):
@@ -607,8 +606,7 @@ class TestPrepareContextIncompleteRefresh:
         make_device("ctx-ambiguous-owner-a", librenms_cf={server_key: 8801})
         make_device("ctx-ambiguous-owner-b", librenms_cf={server_key: 8801})
         target, _csps, _ = make_serial_device("ctx-ambiguous-target", csp_names=["ttyS0"])
-        target.custom_field_data["librenms_id"] = {server_key: None}
-        target.save()
+        seed_stored_mapping(target, {server_key: None}, save=True)
         librenms_server.register(
             f"/api/v0/devices/{target.name}",
             {"status": "ok", "devices": [{"device_id": 8801}]},
@@ -643,8 +641,7 @@ class TestPrepareContextIncompleteRefresh:
 
         server_key = _point_at(settings, librenms_server.url)
         device, (csp,), _ = make_serial_device("ctx-serialskip-device", csp_names=["ttyS0"])
-        device.custom_field_data["librenms_id"] = {server_key: 8802}
-        device.save()
+        seed_mapping(device, server_key, own=8802)
         librenms_server.register("/api/v0/devices/8802/links", {"status": "ok", "links": []})
         # Device is viewable; its ConsoleServerPorts are NOT, which is what skips the serial source.
         user = make_user_with_perms("ctx-serialskip-user", [])
@@ -683,10 +680,11 @@ class TestPrepareContextReadOnlyDonor:
 
         server_key = _point_at(settings, "https://librenms.example.invalid")
         donor = make_device("ctx-donor-device")
-        donor.custom_field_data["librenms_id"] = {
-            server_key: {"_migrated_to": {"device_id": 4242, "server_key": server_key, "at": "2026-09-16T00:00:00Z"}}
-        }
-        donor.save()
+        seed_stored_mapping(
+            donor,
+            {server_key: {"_migrated_to": {"device_id": 4242, "server_key": server_key, "at": "2026-09-16T00:00:00Z"}}},
+            save=True,
+        )
         peer = make_device("ctx-donor-peer")
         make_interface(peer, "Gi1/1")
         make_interface(donor, "Gi0/1")

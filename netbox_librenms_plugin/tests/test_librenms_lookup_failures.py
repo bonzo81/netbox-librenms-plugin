@@ -22,6 +22,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_vm,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 
 ABSENT_DEVICE_ID = 4041
 ERRORING_DEVICE_ID = 1255
@@ -379,11 +380,11 @@ def test_status_lists_report_each_discovery_conflict_once(
         targets = [make_device(f"{prefix}-{suffix}", librenms_cf={server_key: None}) for suffix in ("a", "b")]
     else:
         owner = make_vm("duplicate-vm-owner")
-        owner.custom_field_data["librenms_id"] = {server_key: CONFLICTING_DEVICE_ID}
+        seed_mapping(owner, server_key, own=CONFLICTING_DEVICE_ID, save=False)
         owner.save()
         targets = [make_vm(f"{prefix}-{suffix}") for suffix in ("a", "b")]
         for target in targets:
-            target.custom_field_data["librenms_id"] = {server_key: None}
+            seed_stored_mapping(target, {server_key: None})
             target.save()
 
     for target in targets:

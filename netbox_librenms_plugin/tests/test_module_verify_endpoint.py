@@ -12,6 +12,8 @@ import json
 
 import pytest
 
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
 
 SERVER_KEY = "default"
 LIBRENMS_ID = 42
@@ -98,7 +100,7 @@ class TestSingleModuleVerifyRow:
         from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type, make_superuser
 
         device = make_device_with_module_bays("module-verify-row", ["Bay 1"], serial="CHASSIS-1")
-        device.custom_field_data["librenms_id"] = {SERVER_KEY: LIBRENMS_ID}
+        seed_mapping(device, SERVER_KEY, own=LIBRENMS_ID, save=False)
         device.save()
         make_module_type("LC-24")
         _register_inventory(librenms_server, INVENTORY)
@@ -133,7 +135,7 @@ class TestSingleModuleVerifyRow:
         from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type, make_superuser
 
         device = make_device_with_module_bays("module-verify-depth", ["Bay 1"], serial="CHASSIS-2")
-        device.custom_field_data["librenms_id"] = {SERVER_KEY: LIBRENMS_ID}
+        seed_mapping(device, SERVER_KEY, own=LIBRENMS_ID, save=False)
         device.save()
         make_module_type("LC-24")
         _register_inventory(librenms_server, INVENTORY)
@@ -160,7 +162,7 @@ class TestSingleModuleVerifyRow:
         from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_superuser
 
         device = make_device_with_module_bays("module-verify-carrier", ["Carrier Bay"])
-        device.custom_field_data["librenms_id"] = {SERVER_KEY: LIBRENMS_ID}
+        seed_mapping(device, SERVER_KEY, own=LIBRENMS_ID, save=False)
         device.save()
         carrier_type = ModuleType.objects.create(
             manufacturer=device.device_type.manufacturer,
@@ -212,7 +214,7 @@ class TestSingleModuleVerifyRow:
             member.virtual_chassis = chassis
             member.vc_position = position
             member.save(update_fields=["virtual_chassis", "vc_position"])
-        first.custom_field_data["librenms_id"] = {SERVER_KEY: LIBRENMS_ID}
+        seed_mapping(first, SERVER_KEY, own=LIBRENMS_ID, save=False)
         first.save()
         make_module_type("LC-24")
         inventory = [{**INVENTORY[0], "entPhysicalParentRelPos": 1}]

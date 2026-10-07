@@ -22,6 +22,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
 )
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
 from netbox_librenms_plugin.tests.view_test_helpers import (
     grant,
     make_request,
@@ -937,8 +938,7 @@ class TestInterfaceContextOOBRows:
 
         device = make_device("table-malformed-related-binding")
         lag = make_interface(device, "Port-Channel1", iface_type="lag")
-        lag.custom_field_data["librenms_id"] = {"default": {"id": "junk"}}
-        lag.save(update_fields=["custom_field_data"])
+        seed_stored_mapping(lag, {"default": {"id": "junk"}}, save=True)
         source = make_interface(device, "Ethernet1")
         seed_own_mapping(source, 10, "default")
         source.lag = lag
@@ -2675,7 +2675,7 @@ class TestSyncInterfacesViewPost:
         child.refresh_from_db()
         parent.refresh_from_db()
         assert child.parent_id == parent.pk
-        assert parent.custom_field_data.get("librenms_id") is None
+        assert stored_mapping_for_test(parent) is None
 
     def test_cross_page_parent_keeps_unsubmitted_vlan_group(self):
         from types import SimpleNamespace
@@ -3663,11 +3663,10 @@ class TestSyncInterfacesViewPost:
             owner_filter = {"virtual_machine": obj}
             permissions = [("view", VirtualMachine), ("add", VMInterface), ("change", VMInterface)]
 
-        existing = interface_model.objects.create(
-            **owner_filter,
-            name="Ethernet",
-            description="original description",
-            custom_field_data={"librenms_id": {"default": stored_entry}},
+        existing = seed_stored_mapping(
+            interface_model(**owner_filter, name="Ethernet", description="original description"),
+            {"default": stored_entry},
+            save=True,
         )
         user = make_user_with_perms(f"corrupt-name-fallback-{object_type}", permissions)
         request = _make_request(
@@ -3704,7 +3703,7 @@ class TestSyncInterfacesViewPost:
 
         assert response.status_code == 302
         existing.refresh_from_db()
-        assert existing.custom_field_data["librenms_id"] == {"default": stored_entry}
+        assert stored_mapping_for_test(existing) == {"default": stored_entry}
         assert read_mapping(existing).own_id("default") is None
         assert existing.description == "original description"
         assert interface_model.objects.filter(**owner_filter, name="Ethernet").count() == 1
@@ -4448,8 +4447,7 @@ class TestSyncInterfacesViewPost:
 
         device = make_device("padded-stable-port-id")
         interface = make_interface(device, "oldname")
-        interface.custom_field_data["librenms_id"] = {"default": "0010"}
-        interface.save()
+        seed_stored_mapping(interface, {"default": "0010"}, save=True)
         user = make_user_with_perms(
             "padded-stable-port-id",
             [("view", Device), ("add", Interface), ("change", Interface)],
@@ -4767,8 +4765,7 @@ class TestSyncInterfacesViewSyncInterfaceVM:
 
         vm = make_vm("vmsync-portid")
         matched = VMInterface.objects.create(virtual_machine=vm, name="eth0")
-        matched.custom_field_data["librenms_id"] = {"default": 55}
-        matched.save()
+        seed_mapping(matched, "default", own=55)
         librenms_port = {**_PORT_KEYS_UNSET, "ifName": "renamed-in-librenms", "port_id": 55}
 
         _post_sync(client, settings, vm, [librenms_port], [55])
@@ -5791,7 +5788,8 @@ class TestSyncInterfaceParentViewRealPermissions:
         from types import SimpleNamespace
 
         from netbox_librenms_plugin.server_mappings import mark_migrated
-        from netbox_librenms_plugin.tests.conftest import apply_mapping_change, seed_own_mapping
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         donor = make_device("parent-migrated-donor")
@@ -6187,8 +6185,7 @@ class TestRelationshipSyncObjectScope:
         for interface, port_id in ((child, 10), (visible_parent, 20)):
             seed_own_mapping(interface, port_id, "default")
             interface.save()
-        hidden_duplicate.custom_field_data["librenms_id"] = {"default": hidden_stored_id}
-        hidden_duplicate.save()
+        seed_stored_mapping(hidden_duplicate, {"default": hidden_stored_id}, save=True)
         user = make_user_with_perms(
             "hidden-duplicate-parent-id",
             [("view", Device), ("add", Interface)],

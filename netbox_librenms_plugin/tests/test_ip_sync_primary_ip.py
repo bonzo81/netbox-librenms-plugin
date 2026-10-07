@@ -17,6 +17,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     seed_own_mapping,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
 from netbox_librenms_plugin.tests.view_test_helpers import assert_update_logged, make_view, missing_pk
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
@@ -280,7 +281,7 @@ class TestPrimaryIPFromManagementAddress:
         assert list(Interface.objects.filter(device=device)) == [interface]
         device.refresh_from_db()
         assert device.primary_ip4_id is None
-        assert device.custom_field_data.get("librenms_id") is None
+        assert stored_mapping_for_test(device) is None
 
     def test_management_row_without_an_interface_reports_primary_not_set(self, client, live_librenms):
         """An unmatched management row is reported apart from an ordinary unmatched row."""

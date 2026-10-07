@@ -21,6 +21,7 @@ from django.conf import settings
 from django.core.cache import cache as real_cache
 from django.test import RequestFactory, override_settings
 from netbox_librenms_plugin.server_mappings import resolve_device_port
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 
 SERVER_KEY = "default"
 
@@ -64,8 +65,7 @@ def _cable_device(tag, ifaces):
     for name, port_id in ifaces:
         iface = Interface.objects.create(device=device, name=name, type="1000base-t")
         if port_id is not None:
-            iface.custom_field_data = {"librenms_id": {SERVER_KEY: port_id}}
-            iface.save()
+            seed_mapping(iface, SERVER_KEY, own=port_id)
         made[name] = iface
     return device, made
 
@@ -727,8 +727,7 @@ class TestResolveLocalInterfaceCore:
 
         device, by_name = self._dev("core-id-wins")
         by_id = Interface.objects.create(device=device, name="other-name", type="1000base-t")
-        by_id.custom_field_data["librenms_id"] = {"default": 4242}
-        by_id.save()
+        seed_mapping(by_id, "default", own=4242)
 
         got = resolve_device_port(device, server="default", port_id=4242, name_candidates=["eth-by-name"])
         assert got == by_id  # the stable id match wins over the name candidate
@@ -762,7 +761,6 @@ class TestResolveLocalInterfaceCore:
         device, _by_name = self._dev("core-id-ambiguous")
         for name in ("eth-dup-a", "eth-dup-b"):
             duplicate = Interface.objects.create(device=device, name=name, type="1000base-t")
-            duplicate.custom_field_data["librenms_id"] = {"default": 4242}
-            duplicate.save()
+            seed_stored_mapping(duplicate, {"default": 4242}, save=True)
 
         assert resolve_device_port(device, server="default", port_id=4242, name_candidates=["eth-by-name"]) is None

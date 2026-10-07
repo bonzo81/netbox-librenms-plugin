@@ -27,6 +27,7 @@ from netbox_librenms_plugin.tests.conftest import (
     map_device_to_librenms,
     transactional_db_with_all_apps,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import mapping_from_change_record
 from netbox_librenms_plugin.tests.test_serial_cables_view import _make_view
 
 
@@ -1028,7 +1029,7 @@ class TestTheCreateAffordance:
 
     def test_a_migrated_owner_loses_the_remote_create_action(self):
         from netbox_librenms_plugin.server_mappings import mark_migrated
-        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
 
         server_key, local_device, _, remote_device, row = _create_setup("create-migrated")
         assert self._affordance(row, local_device)
@@ -1410,8 +1411,8 @@ class TestCheckAndCreateTheRemoteEnd:
         assert changes.filter(action="create").count() == 1
         # The cable save that follows writes the whole row again, so only the change record shows the partial save.
         binding = changes.filter(action="update").first()
-        assert binding.prechange_data["custom_fields"].get("librenms_id") is None
-        assert binding.postchange_data["custom_fields"].get("librenms_id") == {server_key: 500}
+        assert mapping_from_change_record(binding, before=True) is None
+        assert mapping_from_change_record(binding, before=False) == {server_key: 500}
 
     @pytest.mark.parametrize("drift", ["owner", "migration"])
     def test_remote_create_rechecks_the_local_owner_after_proposal_resolution(
@@ -1421,7 +1422,7 @@ class TestCheckAndCreateTheRemoteEnd:
 
         from netbox_librenms_plugin.tests.conftest import make_superuser
         from netbox_librenms_plugin.server_mappings import mark_migrated
-        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
         from netbox_librenms_plugin.views.sync.cables import CableRemoteCreateView
 
         server_key, local_device, local_interface, remote_device, row_id = self._scenario(
@@ -1478,7 +1479,7 @@ class TestCheckAndCreateTheRemoteEnd:
 
         from netbox_librenms_plugin.tests.conftest import make_superuser
         from netbox_librenms_plugin.server_mappings import mark_migrated
-        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
 
         server_key, local_device, local_interface, remote_device, row_id = self._scenario(
             "mk-migrated", librenms_server, settings
@@ -1500,7 +1501,7 @@ class TestCheckAndCreateTheRemoteEnd:
 
         from netbox_librenms_plugin.tests.conftest import make_superuser
         from netbox_librenms_plugin.server_mappings import mark_migrated
-        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
         from netbox_librenms_plugin.views.sync.cables import CableRemoteCreateView
 
         server_key, local_device, local_interface, remote_device, row_id = self._scenario(

@@ -48,6 +48,10 @@ from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
     synced_interface,
 )
 from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
+from netbox_librenms_plugin.tests.mapping_fixtures import (
+    custom_fields_without_mapping,
+    mapping_from_change_record,
+)
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, messages_on
 from netbox_librenms_plugin.views.mixins import VlanAssignmentMixin
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
@@ -323,9 +327,10 @@ def test_the_before_state_of_a_row_holds_the_old_mac_and_the_old_custom_field_da
         old_mac.pk,
         old_custom_fields,
     )
-    assert (change.postchange_data["primary_mac_address"], change.postchange_data["custom_fields"]) == (
-        new_mac.pk,
-        {**old_custom_fields, "librenms_id": {SERVER_KEY: 10}},
+    assert change.postchange_data["primary_mac_address"] == new_mac.pk
+    assert mapping_from_change_record(change, before=False) == {SERVER_KEY: 10}
+    assert custom_fields_without_mapping(change.postchange_data["custom_fields"]) == custom_fields_without_mapping(
+        old_custom_fields
     )
 
 

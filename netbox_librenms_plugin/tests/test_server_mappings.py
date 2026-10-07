@@ -38,12 +38,18 @@ from netbox_librenms_plugin.server_mappings import (
     resolve_device_port,
 )
 from netbox_librenms_plugin.tests.conftest import (
-    apply_mapping_change,
     make_device,
     make_interface,
     make_virtual_chassis_members,
     make_vm,
     transactional_db_with_all_apps,
+)
+from netbox_librenms_plugin.tests.mapping_fixtures import (
+    apply_mapping_change,
+    seed_mapping,
+    seed_stored_mapping,
+    seed_stored_mapping_row,
+    stored_mapping_for_test,
 )
 
 _UNSET = object()
@@ -55,8 +61,7 @@ def _dev(librenms_value=_UNSET, *, name=None):
     """Create a real Device, optionally seeding its ``librenms_id`` custom field."""
     dev = make_device(name or f"libreid-dev-{next(_counter)}")
     if librenms_value is not _UNSET:
-        dev.custom_field_data["librenms_id"] = librenms_value
-        dev.save()
+        seed_stored_mapping(dev, librenms_value, save=True)
     return dev
 
 
@@ -69,16 +74,14 @@ def _find(identity, server="default", *, roles=BOTH_ROLES, queryset=None):
 
 
 def _bind(interface, value):
-    interface.custom_field_data["librenms_id"] = value
-    interface.save()
-    return interface
+    return seed_stored_mapping(interface, value, save=True)
 
 
 def _decoded(value):
     """Return the snapshot of a stored value, read from an unsaved Device (no query)."""
     from dcim.models import Device
 
-    return read_mapping(Device(custom_field_data={"librenms_id": value}))
+    return read_mapping(seed_stored_mapping(Device(), value))
 
 
 def _merge_into_winner(winner, donor, server):
@@ -121,7 +124,7 @@ class TestOwnIdentityRead:
         dev = _dev("42")
         assert read_mapping(dev).own_id("default") == 42
         assert read_mapping(dev).own_id("production") == 42
-        assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] == "42"
+        assert stored_mapping_for_test(Device.objects.get(pk=dev.pk)) == "42"
 
     def test_returns_none_for_bare_boolean(self):
         """A bool is an int subclass, so bare True/False must not count as a valid ID."""
@@ -162,7 +165,7 @@ class TestReadPurity:
             assert name_match_may_be_port(loaded, server="default", port_id=42)
 
         reloaded = Device.objects.get(pk=loaded.pk)
-        assert reloaded.custom_field_data["librenms_id"] == stored
+        assert stored_mapping_for_test(reloaded) == stored
         assert reloaded.last_updated == last_updated
         assert ObjectChange.objects.count() == change_count
 
@@ -170,8 +173,7 @@ class TestReadPurity:
         dev = _dev({"default": {"id": 42, "oob": {"id": 7, "type": "idrac"}}})
         earlier = read_mapping(dev)
 
-        dev.custom_field_data["librenms_id"]["default"]["oob"]["type"] = "ilo"
-        dev.custom_field_data["librenms_id"]["default"]["id"] = 43
+        seed_stored_mapping(dev, {"default": {"id": 43, "oob": {"id": 7, "type": "ilo"}}})
         later = read_mapping(dev)
 
         assert (earlier.own_id("default"), earlier.server("default").oob_type) == (42, "idrac")
@@ -189,7 +191,7 @@ class TestReadPurity:
         from dcim.models import Site
 
         with pytest.raises(TypeError):
-            read_mapping(SimpleNamespace(custom_field_data={"librenms_id": 42}))
+            read_mapping(SimpleNamespace(custom_field_data={}))
         with pytest.raises(TypeError):
             identity_q(Site, server="default", identities=(42,), roles=BOTH_ROLES)
 
@@ -631,10 +633,8 @@ class TestMappedDeviceServers:
 
     def test_every_chassis_member_contributes(self):
         _chassis, (first, second) = make_virtual_chassis_members("mapped-servers", count=2)
-        first.custom_field_data["librenms_id"] = {"a": 1}
-        first.save()
-        second.custom_field_data["librenms_id"] = "7"
-        second.save()
+        seed_mapping(first, "a", own=1)
+        seed_stored_mapping(second, "7", save=True)
 
         assert mapped_device_servers(first) == ("a",)
         assert mapped_device_servers(first, active_server="b") == ("a", "b")
@@ -730,8 +730,7 @@ class TestPersistMapping:
 
         device = _dev()
         owner = make_vm(f"persist-owner-{next(_counter)}")
-        owner.custom_field_data["librenms_id"] = {"default": 7102}
-        owner.save()
+        seed_mapping(owner, "default", own=7102)
         writes = []
         with transaction.atomic():
             row = _locked(device)
@@ -764,7 +763,7 @@ class TestPersistMapping:
 
         device = _dev({"other": 7105})
         stale = assign_own(device, "default", 7106)
-        type(device).objects.filter(pk=device.pk).update(custom_field_data={"librenms_id": {"other": 7107}})
+        seed_stored_mapping_row(device, {"other": 7107})
         writes = []
         with transaction.atomic(), pytest.raises(MappingChanged):
             persist_mapping(_locked(device), stale, write=_record_writes(writes))
@@ -776,8 +775,9 @@ class TestPersistMapping:
 
         device = _dev({"other": 7108})
         change = assign_own(device, "default", 7109)
-        stored = {**device.custom_field_data, "unrelated_field": "edited"}
-        type(device).objects.filter(pk=device.pk).update(custom_field_data=stored)
+        row = type(device).objects.get(pk=device.pk)
+        row.custom_field_data["unrelated_field"] = "edited"
+        type(device).objects.filter(pk=device.pk).update(custom_field_data=row.custom_field_data)
         with transaction.atomic():
             persist_mapping(_locked(device), change, write=_record_writes([]))
 
@@ -811,7 +811,9 @@ def test_a_change_kept_across_a_savepoint_rollback_is_claimed_and_checked_again(
 
     device = make_device(f"retained-change-{competitor}")
     vm = make_vm(f"retained-change-competitor-{competitor}")
-    bound = json.dumps({"librenms_id": {"default": 7201}})
+    from virtualization.models import VirtualMachine
+
+    bound = json.dumps(seed_stored_mapping(VirtualMachine(), {"default": 7201}).custom_field_data)
 
     class _RolledBack(Exception):
         pass
@@ -910,7 +912,7 @@ class TestConvertLegacy:
 
         dev = _dev(42)
         apply_mapping_change(dev, convert_legacy(dev, "production"))
-        assert dev.custom_field_data["librenms_id"] == {"production": 42}
+        assert stored_mapping_for_test(dev) == {"production": 42}
 
     def test_returns_false_when_already_dict(self):
 
@@ -925,7 +927,7 @@ class TestConvertLegacy:
 
         dev = _dev(True)
         assert convert_legacy(dev, "default").changed is False
-        assert dev.custom_field_data["librenms_id"] is True  # unchanged
+        assert stored_mapping_for_test(dev) is True  # unchanged
 
     def test_does_not_save(self):
         """convert_legacy must NOT persist: persistence is the writer's."""
@@ -933,13 +935,13 @@ class TestConvertLegacy:
 
         dev = _dev(7)
         apply_mapping_change(dev, convert_legacy(dev, "default"))
-        assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] == 7
+        assert stored_mapping_for_test(Device.objects.get(pk=dev.pk)) == 7
 
     def test_preserves_value_in_migrated_dict(self):
 
         dev = _dev(99)
         apply_mapping_change(dev, convert_legacy(dev, "secondary"))
-        assert dev.custom_field_data["librenms_id"]["secondary"] == 99
+        assert stored_mapping_for_test(dev)["secondary"] == 99
 
 
 @pytest.mark.django_db
@@ -1030,7 +1032,7 @@ class TestAssignOwn:
     def test_stores_int_for_valid_device_id(self):
         dev = _dev(None)
         apply_mapping_change(dev, assign_own(dev, "primary", 42))
-        assert dev.custom_field_data["librenms_id"] == {"primary": 42}
+        assert stored_mapping_for_test(dev) == {"primary": 42}
 
     @pytest.mark.parametrize(("stored", "identity"), [(None, "not-an-int"), ({"primary": 10}, None), (None, True)])
     def test_an_invalid_id_is_skipped_and_claims_nothing(self, stored, identity):
@@ -1043,7 +1045,7 @@ class TestAssignOwn:
     def test_adds_new_server_key_to_existing_dict(self):
         dev = _dev({"primary": 5})
         apply_mapping_change(dev, assign_own(dev, "secondary", 20))
-        assert dev.custom_field_data["librenms_id"] == {"primary": 5, "secondary": 20}
+        assert stored_mapping_for_test(dev) == {"primary": 5, "secondary": 20}
 
     def test_string_integer_is_coerced(self):
         change = assign_own(_dev(), "primary", "42")
@@ -1053,7 +1055,7 @@ class TestAssignOwn:
     def test_unexpected_cf_type_reset_to_empty(self):
         dev = _dev("unexpected-string")
         apply_mapping_change(dev, assign_own(dev, "primary", 5))
-        assert dev.custom_field_data["librenms_id"] == {"primary": 5}
+        assert stored_mapping_for_test(dev) == {"primary": 5}
 
     def test_the_same_id_is_unchanged(self):
         change = assign_own(_dev({"primary": 5}), "primary", 5)
@@ -1065,7 +1067,7 @@ class TestAssignOwn:
         with django_assert_num_queries(0):
             change = assign_own(dev, "primary", 6)
         assert change.changed is True
-        assert dev.custom_field_data["librenms_id"] == {"primary": 5}
+        assert stored_mapping_for_test(dev) == {"primary": 5}
 
 
 class TestLegacyClassificationPositivity:
@@ -1146,7 +1148,7 @@ class TestLibreNMSIdAcceptedFormsContract:
         assert read_mapping(device).legacy.readable_id == resolved
         assert read_mapping(device).legacy.queryable_id is None
         device.refresh_from_db()
-        assert device.custom_field_data["librenms_id"] == stored
+        assert stored_mapping_for_test(device) == stored
         assert _find(resolved) is None
 
     @pytest.mark.parametrize("stored,_resolved", TOLERATED + READER_ONLY, ids=lambda v: repr(v))
@@ -1157,7 +1159,7 @@ class TestLibreNMSIdAcceptedFormsContract:
         device = _dev(stored)
         seed_own_mapping(device, 99, "primary")
 
-        assert device.custom_field_data["librenms_id"] == stored
+        assert stored_mapping_for_test(device) == stored
 
 
 @pytest.mark.django_db
@@ -1168,13 +1170,13 @@ class TestConvertLegacyRejectsNonPositive:
 
         obj = _dev(0)
         assert convert_legacy(obj, "default").changed is False
-        assert obj.custom_field_data["librenms_id"] == 0  # left untouched, not {"default": 0}
+        assert stored_mapping_for_test(obj) == 0  # left untouched, not {"default": 0}
 
     def test_negative_is_not_migrated(self):
 
         obj = _dev("-5")
         assert convert_legacy(obj, "default").changed is False
-        assert obj.custom_field_data["librenms_id"] == "-5"
+        assert stored_mapping_for_test(obj) == "-5"
 
 
 @pytest.mark.django_db
@@ -1204,7 +1206,7 @@ class TestOOBHelpers:
 
         dev = _dev({"primary": {"id": 42, "oob": {"id": 17, "type": "drac", "ip": "10.0.0.5"}}})
         seed_own_mapping(dev, 99, server_key="primary")
-        assert dev.custom_field_data["librenms_id"] == {
+        assert stored_mapping_for_test(dev) == {
             "primary": {"id": 99, "oob": {"id": 17, "type": "drac", "ip": "10.0.0.5"}}
         }
 
@@ -1213,7 +1215,7 @@ class TestOOBHelpers:
 
         dev = _dev({"primary": 42})
         seed_own_mapping(dev, 99, server_key="primary")
-        assert dev.custom_field_data["librenms_id"] == {"primary": 99}
+        assert stored_mapping_for_test(dev) == {"primary": 99}
 
     # ── find_by_librenms_id: dict-with-id and oob id lookups ─────────────────
 
@@ -1245,7 +1247,7 @@ class TestOOBHelpers:
         dev = _dev({"primary": {"id": 42, "oob": oob_data}})
         entry = read_mapping(dev).server("primary")
         assert (entry.oob_recorded, entry.oob_id, entry.oob_type) == (True, 17, "drac")
-        assert dev.custom_field_data["librenms_id"]["primary"]["oob"] == oob_data
+        assert stored_mapping_for_test(dev)["primary"]["oob"] == oob_data
 
     # ── attach_oob ────────────────────────────────────────────────────────────
 
@@ -1254,7 +1256,7 @@ class TestOOBHelpers:
 
         dev = _dev({"primary": 42})
         apply_mapping_change(dev, attach_oob(dev, "primary", 17, oob_type="drac"))
-        assert dev.custom_field_data["librenms_id"]["primary"]["oob"] == {"id": 17, "type": "drac"}
+        assert stored_mapping_for_test(dev)["primary"]["oob"] == {"id": 17, "type": "drac"}
         assert read_mapping(dev).oob_id("primary") == 17
 
     def test_set_oob_promotes_bare_int_entry(self):
@@ -1298,7 +1300,7 @@ class TestOOBHelpers:
 
         dev = _dev({"primary": {"id": None}})
         apply_mapping_change(dev, attach_oob(dev, "primary", 17, oob_type="idrac"))  # must not raise
-        assert dev.custom_field_data["librenms_id"]["primary"]["oob"] == {"id": 17, "type": "idrac"}
+        assert stored_mapping_for_test(dev)["primary"]["oob"] == {"id": 17, "type": "idrac"}
 
     def test_set_oob_lenient_on_empty_host_string(self):
         """An empty/whitespace host string is treated leniently (→ fresh dict), not an error."""
@@ -1321,7 +1323,7 @@ class TestOOBHelpers:
 
         dev = _dev({"default": 99})
         apply_mapping_change(dev, attach_oob(dev, "default", 55, oob_type="OOB"))  # should not raise
-        assert dev.custom_field_data["librenms_id"]["default"]["oob"]["type"] == "oob"
+        assert stored_mapping_for_test(dev)["default"]["oob"]["type"] == "oob"
 
     def test_set_oob_does_not_save(self):
         """attach_oob must NOT persist: persistence is the writer's (verified by reload)."""
@@ -1330,7 +1332,7 @@ class TestOOBHelpers:
         dev = _dev({"primary": 42})
         apply_mapping_change(dev, attach_oob(dev, "primary", 17, oob_type="ilo"))
         # DB row still holds the bare-int entry; the OOB promotion lives only in memory.
-        assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] == {"primary": 42}
+        assert stored_mapping_for_test(Device.objects.get(pk=dev.pk)) == {"primary": 42}
 
     # ── clear_oob ─────────────────────────────────────────────────────────────
 
@@ -1339,13 +1341,13 @@ class TestOOBHelpers:
         dev = _dev({"primary": {"id": 42, "oob": {"id": 17, "type": "drac"}}})
         apply_mapping_change(dev, clear_oob(dev, "primary"))
         assert not read_mapping(dev).has_oob("primary")
-        assert dev.custom_field_data["librenms_id"]["primary"] == {"id": 42}
+        assert stored_mapping_for_test(dev)["primary"] == {"id": 42}
 
     def test_clear_oob_is_noop_when_no_oob(self):
 
         dev = _dev({"primary": {"id": 42}})
         apply_mapping_change(dev, clear_oob(dev, "primary"))
-        assert dev.custom_field_data["librenms_id"] == {"primary": {"id": 42}}
+        assert stored_mapping_for_test(dev) == {"primary": {"id": 42}}
 
     def test_clear_oob_does_not_save(self):
         """clear_oob must NOT persist: persistence is the writer's (verified by reload)."""
@@ -1353,7 +1355,7 @@ class TestOOBHelpers:
 
         dev = _dev({"primary": {"id": 42, "oob": {"id": 17, "type": "bmc"}}})
         apply_mapping_change(dev, clear_oob(dev, "primary"))
-        assert Device.objects.get(pk=dev.pk).custom_field_data["librenms_id"] == {
+        assert stored_mapping_for_test(Device.objects.get(pk=dev.pk)) == {
             "primary": {"id": 42, "oob": {"id": 17, "type": "bmc"}}
         }
 
@@ -1371,7 +1373,7 @@ class TestMergeLinks:
         donor = self._make_dev("idrac-jhw6nc4", {"default": {"id": 99}})
         summary = _merge_into_winner(winner, donor, "default")
 
-        assert winner.custom_field_data["librenms_id"]["default"]["id"] == 99
+        assert stored_mapping_for_test(winner)["default"]["id"] == 99
         assert summary["host_id_from_donor"] == 99
         assert summary["donor_id_demoted_to_oob"] is None
 
@@ -1383,7 +1385,7 @@ class TestMergeLinks:
         donor = self._make_dev("router-spare", {"default": {"id": "99"}})
         summary = _merge_into_winner(winner, donor, "default")
 
-        stored = winner.custom_field_data["librenms_id"]["default"]["id"]
+        stored = stored_mapping_for_test(winner)["default"]["id"]
         assert stored == 99
         assert isinstance(stored, int)
         assert summary["host_id_from_donor"] == 99
@@ -1395,9 +1397,9 @@ class TestMergeLinks:
         donor = self._make_dev("idrac-jhw6nc4", {"default": {"id": 99}})
         summary = _merge_into_winner(winner, donor, "default")
 
-        assert winner.custom_field_data["librenms_id"]["default"]["id"] == 42
-        assert winner.custom_field_data["librenms_id"]["default"]["oob"]["id"] == 99
-        assert winner.custom_field_data["librenms_id"]["default"]["oob"]["type"] == "idrac"
+        assert stored_mapping_for_test(winner)["default"]["id"] == 42
+        assert stored_mapping_for_test(winner)["default"]["oob"]["id"] == 99
+        assert stored_mapping_for_test(winner)["default"]["oob"]["type"] == "idrac"
         assert summary["donor_id_demoted_to_oob"] == {"id": 99, "type": "idrac"}
 
     def test_distinct_donor_host_and_oob_with_only_one_winner_slot_fails_closed(self):
@@ -1409,7 +1411,7 @@ class TestMergeLinks:
         with pytest.raises(ValueError, match="two distinct LibreNMS links"):
             _merge_into_winner(winner, donor, "default")
 
-        assert winner.custom_field_data["librenms_id"]["default"] == {"id": 42}
+        assert stored_mapping_for_test(winner)["default"] == {"id": 42}
 
     def test_donor_id_demoted_to_oob_generic_when_no_pattern_in_name(self):
         """Donor id is always demoted; type falls back to 'oob' when no keyword in name."""
@@ -1418,8 +1420,8 @@ class TestMergeLinks:
         donor = self._make_dev("eve-ng-03-spare", {"default": {"id": 99}})
         summary = _merge_into_winner(winner, donor, "default")
 
-        assert winner.custom_field_data["librenms_id"]["default"]["id"] == 42
-        assert winner.custom_field_data["librenms_id"]["default"]["oob"] == {"id": 99, "type": "oob"}
+        assert stored_mapping_for_test(winner)["default"]["id"] == 42
+        assert stored_mapping_for_test(winner)["default"]["oob"] == {"id": 99, "type": "oob"}
         assert summary["donor_id_demoted_to_oob"] == {"id": 99, "type": "oob"}
 
     def test_blank_only_donor_oob_does_not_persist_empty_oob_slot(self):
@@ -1433,7 +1435,7 @@ class TestMergeLinks:
         donor = self._make_dev("host-don", {"default": {"oob": {"id": "  "}}})  # blank id, nothing else
         summary = _merge_into_winner(winner, donor, "default")
 
-        entry = winner.custom_field_data["librenms_id"]["default"]
+        entry = stored_mapping_for_test(winner)["default"]
         assert "oob" not in entry, f"empty oob slot persisted: {entry}"
         assert summary["oob_from_donor"] is None
 
@@ -1448,10 +1450,10 @@ class TestMergeLinks:
         winner = self._make_dev("eve-ng-02", {"default": {"id": 42}})
         _merge_into_winner(winner, self._make_dev("blank-oob", {"default": {"oob": {"id": " "}}}), "default")
         # The blank-only oob left the slot free, not occupied by {}.
-        assert "oob" not in winner.custom_field_data["librenms_id"]["default"]
+        assert "oob" not in stored_mapping_for_test(winner)["default"]
 
         summary = _merge_into_winner(winner, self._make_dev("idrac-jhw6nc4", {"default": {"id": 99}}), "default")
-        assert winner.custom_field_data["librenms_id"]["default"]["oob"]["id"] == 99
+        assert stored_mapping_for_test(winner)["default"]["oob"]["id"] == 99
         assert summary["donor_id_demoted_to_oob"] == {"id": 99, "type": "idrac"}
 
     def test_demoted_oob_type_prefers_vendor_token_over_generic(self):
@@ -1463,7 +1465,7 @@ class TestMergeLinks:
         donor = self._make_dev("leaf01-oob-idrac9", {"default": {"id": 99}})
         summary = _merge_into_winner(winner, donor, "default")
 
-        assert winner.custom_field_data["librenms_id"]["default"]["oob"] == {"id": 99, "type": "idrac"}
+        assert stored_mapping_for_test(winner)["default"]["oob"] == {"id": 99, "type": "idrac"}
         assert summary["donor_id_demoted_to_oob"] == {"id": 99, "type": "idrac"}
 
     def test_winner_inherits_donor_oob_when_winner_has_none(self):
@@ -1472,7 +1474,7 @@ class TestMergeLinks:
         donor = self._make_dev("eve-ng-02-old", {"default": {"oob": {"id": 77, "type": "ipmi"}}})
         summary = _merge_into_winner(winner, donor, "default")
 
-        assert winner.custom_field_data["librenms_id"]["default"]["oob"] == {"id": 77, "type": "ipmi"}
+        assert stored_mapping_for_test(winner)["default"]["oob"] == {"id": 77, "type": "ipmi"}
         assert summary["oob_from_donor"] == {"id": 77, "type": "ipmi"}
 
     def test_malformed_donor_oob_id_fails_closed_on_inherit(self):
@@ -1532,7 +1534,7 @@ class TestMergeLinks:
         with pytest.raises(ValueError, match="already holds both a LibreNMS host id and an OOB link"):
             _merge_into_winner(winner, donor, "default")
         # The donor's link must be left untouched (nothing captured, no partial mutation of winner).
-        assert winner.custom_field_data["librenms_id"]["default"] == {"id": 100, "oob": {"id": 50, "type": "idrac"}}
+        assert stored_mapping_for_test(winner)["default"] == {"id": 100, "oob": {"id": 50, "type": "idrac"}}
 
     def test_duplicate_donor_host_id_with_winner_holding_both_slots_is_allowed(self):
         """A donor host id equal to the winner's is a duplicate mapping, not an orphan, so it is allowed."""
@@ -1541,7 +1543,7 @@ class TestMergeLinks:
         donor = self._make_dev("eve-ng-02-dup", {"default": {"id": 100}})
         summary = _merge_into_winner(winner, donor, "default")
         # Winner is unchanged (same host id, keeps its own oob); nothing was demoted or dropped.
-        assert winner.custom_field_data["librenms_id"]["default"] == {"id": 100, "oob": {"id": 50, "type": "idrac"}}
+        assert stored_mapping_for_test(winner)["default"] == {"id": 100, "oob": {"id": 50, "type": "idrac"}}
         assert summary["donor_id_demoted_to_oob"] is None
 
     def test_donor_oob_id_coerced_to_int_on_inherit(self):
@@ -1551,7 +1553,7 @@ class TestMergeLinks:
         donor = self._make_dev("eve-ng-02-old", {"default": {"oob": {"id": "77", "type": "ipmi"}}})
         summary = _merge_into_winner(winner, donor, "default")
 
-        assert winner.custom_field_data["librenms_id"]["default"]["oob"] == {"id": 77, "type": "ipmi"}
+        assert stored_mapping_for_test(winner)["default"]["oob"] == {"id": 77, "type": "ipmi"}
         assert summary["oob_from_donor"] == {"id": 77, "type": "ipmi"}
 
     def test_blank_donor_oob_id_is_lenient_and_dropped(self):
@@ -1561,7 +1563,7 @@ class TestMergeLinks:
         donor = self._make_dev("idrac-x", {"default": {"oob": {"id": "   ", "type": "drac"}}})
         summary = _merge_into_winner(winner, donor, "default")
 
-        inherited = winner.custom_field_data["librenms_id"]["default"]["oob"]
+        inherited = stored_mapping_for_test(winner)["default"]["oob"]
         assert inherited == {"type": "drac"}  # blank id dropped, type preserved
         assert "id" not in inherited
         assert summary["oob_from_donor"] == {"type": "drac"}
@@ -1577,11 +1579,11 @@ class TestMergeLinks:
         donor = self._make_dev("idrac-host", {"default": {"id": 99, "oob": {"type": "idrac"}}})
         summary = _merge_into_winner(winner, donor, "default")
 
-        oob = winner.custom_field_data["librenms_id"]["default"]["oob"]
+        oob = stored_mapping_for_test(winner)["default"]["oob"]
         assert oob == {"id": 99, "type": "idrac"}  # host id preserved + type metadata folded in
         assert summary["donor_id_demoted_to_oob"] == {"id": 99, "type": "idrac"}
         assert summary["oob_from_donor"] is None  # not the useless metadata-only inherit path
-        assert winner.custom_field_data["librenms_id"]["default"]["id"] == 50
+        assert stored_mapping_for_test(winner)["default"]["id"] == 50
 
     def test_donor_host_id_with_corrupt_oob_id_still_fails_closed(self):
         # A donor host id paired with a non-blank unparseable oob id must still fail closed: the
@@ -1600,7 +1602,7 @@ class TestMergeLinks:
         donor = self._make_dev("eve-ng-02-old", {"default": {"oob": {"id": 77, "type": "ipmi"}}})
         summary = _merge_into_winner(winner, donor, "default")
 
-        assert winner.custom_field_data["librenms_id"]["default"]["oob"] == {"id": 11, "type": "drac"}
+        assert stored_mapping_for_test(winner)["default"]["oob"] == {"id": 11, "type": "drac"}
         assert summary["oob_from_donor"] is None
 
     def test_legacy_bare_int_raises(self):
@@ -1652,7 +1654,7 @@ class TestMergeLinks:
         donor = self._make_dev("router-spare", {"default": {"id": 99}})
         summary = _merge_into_winner(winner, donor, "default")
         # Winner's blank id is "no id" → it inherits the donor's host id rather than raising.
-        assert winner.custom_field_data["librenms_id"]["default"]["id"] == 99
+        assert stored_mapping_for_test(winner)["default"]["id"] == 99
         assert summary["host_id_from_donor"] == 99
 
     def test_malformed_donor_id_raises_clear_error_in_demote_branch(self):
@@ -1711,7 +1713,7 @@ class TestMarkMigrated:
         donor = _dev({"default": {"id": 99, "oob": {"id": 11, "type": "drac"}}})
         apply_mapping_change(donor, mark_migrated(donor, 42, "default", at="2025-01-01T00:00:00Z"))
 
-        entry = donor.custom_field_data["librenms_id"]["default"]
+        entry = stored_mapping_for_test(donor)["default"]
         assert "id" not in entry
         assert "oob" not in entry
         assert entry["_migrated_to"] == {
@@ -1725,7 +1727,7 @@ class TestMarkMigrated:
         donor = _dev({"default": {"id": 99}})
         apply_mapping_change(donor, mark_migrated(donor, 42, "default"))
 
-        ts = donor.custom_field_data["librenms_id"]["default"]["_migrated_to"]["at"]
+        ts = stored_mapping_for_test(donor)["default"]["_migrated_to"]["at"]
         # Contract: an ISO-8601 UTC string ending in "Z" (tolerate fractional seconds).
         assert ts.endswith("Z")
         from datetime import datetime
@@ -1753,7 +1755,7 @@ class TestMarkMigrated:
             with pytest.raises(ValueError):
                 apply_mapping_change(donor, mark_migrated(donor, 99, "default"))
             # Untouched: no marker stamped, original value preserved for the caller to migrate.
-            assert donor.custom_field_data["librenms_id"] == legacy
+            assert stored_mapping_for_test(donor) == legacy
 
     def test_fails_closed_on_corrupt_per_server_entry(self):
         """A corrupt per-server entry (bool/list/float/unparseable string) must raise, not collapse.
@@ -1770,7 +1772,7 @@ class TestMarkMigrated:
             with pytest.raises(ValueError):
                 apply_mapping_change(donor, mark_migrated(donor, 99, "default"))
             # The raise happens before any mutation: no marker stamped, entry untouched.
-            assert donor.custom_field_data["librenms_id"] == {"default": corrupt}
+            assert stored_mapping_for_test(donor) == {"default": corrupt}
 
     def test_blank_or_numeric_string_per_server_entry_does_not_raise(self):
         """A blank string is "no link" (collapse to {}); a numeric string is a valid id — neither raises."""
@@ -1778,12 +1780,12 @@ class TestMarkMigrated:
         # Blank string → no recoverable link → collapses to {} and stamps the marker (no raise).
         donor = _dev({"default": ""})
         apply_mapping_change(donor, mark_migrated(donor, 99, "default", at="2025-01-01T00:00:00Z"))
-        assert donor.custom_field_data["librenms_id"]["default"]["_migrated_to"]["device_id"] == 99
+        assert stored_mapping_for_test(donor)["default"]["_migrated_to"]["device_id"] == 99
 
         # Numeric string → a real id → also valid, marker stamped, id cleared.
         donor2 = _dev({"default": "77"})
         apply_mapping_change(donor2, mark_migrated(donor2, 99, "default", at="2025-01-01T00:00:00Z"))
-        entry = donor2.custom_field_data["librenms_id"]["default"]
+        entry = stored_mapping_for_test(donor2)["default"]
         assert "id" not in entry
         assert entry["_migrated_to"]["device_id"] == 99
 
@@ -1796,7 +1798,7 @@ class TestMarkMigrated:
             with pytest.raises(ValueError):
                 apply_mapping_change(donor, mark_migrated(donor, 99, "default"))
             # The raise happens before any mutation: no marker stamped, oob preserved to migrate first.
-            assert donor.custom_field_data["librenms_id"]["default"] == {"oob": corrupt_oob}
+            assert stored_mapping_for_test(donor)["default"] == {"oob": corrupt_oob}
 
     def test_valid_or_blank_nested_oob_does_not_raise(self):
         """A well-formed oob (numeric/blank id, or empty dict) is popped and the marker is stamped."""
@@ -1804,7 +1806,7 @@ class TestMarkMigrated:
         for ok_oob in ({"id": 55}, {"id": "55"}, {"id": ""}, {}):
             donor = _dev({"default": {"oob": ok_oob}})
             apply_mapping_change(donor, mark_migrated(donor, 99, "default", at="2025-01-01T00:00:00Z"))
-            entry = donor.custom_field_data["librenms_id"]["default"]
+            entry = stored_mapping_for_test(donor)["default"]
             assert "oob" not in entry
             assert entry["_migrated_to"]["device_id"] == 99
 
@@ -1822,7 +1824,7 @@ class TestMarkMigrated:
             with pytest.raises(ValueError):
                 apply_mapping_change(donor, mark_migrated(donor, 99, "default"))
             # The raise happens before any mutation: no marker stamped, id preserved to migrate first.
-            assert donor.custom_field_data["librenms_id"]["default"] == {"id": corrupt_id}
+            assert stored_mapping_for_test(donor)["default"] == {"id": corrupt_id}
 
     def test_valid_or_blank_dict_host_id_does_not_raise(self):
         """A dict entry with a numeric/blank/absent id is popped and the marker stamped (no raise)."""
@@ -1830,7 +1832,7 @@ class TestMarkMigrated:
         for ok_id in ({"id": 55}, {"id": "55"}, {"id": ""}, {"id": None}, {}):
             donor = _dev({"default": dict(ok_id)})
             apply_mapping_change(donor, mark_migrated(donor, 99, "default", at="2025-01-01T00:00:00Z"))
-            entry = donor.custom_field_data["librenms_id"]["default"]
+            entry = stored_mapping_for_test(donor)["default"]
             assert "id" not in entry
             assert entry["_migrated_to"]["device_id"] == 99
 
@@ -1844,7 +1846,7 @@ class TestMarkMigrated:
         donor.refresh_from_db()
 
         # The entry now holds only _migrated_to — no id, no oob.
-        entry = donor.cf["librenms_id"]["default"]
+        entry = stored_mapping_for_test(donor)["default"]
         assert entry.get("id") is None
         assert entry.get("oob") is None
 
@@ -1852,36 +1854,36 @@ class TestMarkMigrated:
         assert _find(99) is None
 
 
-class TestNormalizeMergeEntry:
-    """_normalize_merge_entry: the shared fail-closed shape validation for the merge winner/donor entries."""
+@pytest.mark.django_db
+class TestMergeEntryNormalization:
+    """merge_links: the shared fail-closed shape validation of the winner and donor entries."""
 
     @staticmethod
-    def _norm(entry, *, copy=True, owner="winner"):
-        from netbox_librenms_plugin.server_mappings import _normalize_merge_entry
-
-        return _normalize_merge_entry(entry, owner_label=owner, owner_name="X", server_key="default", copy_dict=copy)
+    def _merged_winner_entry(entry):
+        winner = _dev({"default": entry}, name=f"winner-{next(_counter)}")
+        apply_mapping_change(winner, merge_links(winner, _dev({}), "default").winner)
+        return stored_mapping_for_test(winner)["default"]
 
     def test_coerces_scalars_and_blank_to_no_link(self):
-        assert self._norm(42) == {"id": 42}
-        assert self._norm("42") == {"id": 42}
-        assert self._norm("") == {}  # blank string is a genuine "no active link"
-        assert self._norm(None) == {}
+        assert self._merged_winner_entry(42) == {"id": 42}
+        assert self._merged_winner_entry("42") == {"id": 42}
+        assert self._merged_winner_entry("") == {}  # blank string is a genuine "no active link"
+        assert self._merged_winner_entry(None) == {}
 
     def test_fails_closed_on_corrupt_shapes(self):
-        import pytest
-
         with pytest.raises(ValueError, match="unparseable"):
-            self._norm("abc")  # non-blank, non-numeric string
+            self._merged_winner_entry("abc")  # non-blank, non-numeric string
         with pytest.raises(ValueError, match="unsupported"):
-            self._norm([1])  # list
+            self._merged_winner_entry([1])  # list
         with pytest.raises(ValueError, match="unsupported"):
-            self._norm(True)  # bool is never a valid id
+            self._merged_winner_entry(True)  # bool is never a valid id
 
-    def test_dict_copy_flag_controls_isolation(self):
-        src = {"id": 5, "oob": {"id": 7}}
-        # Winner entry is copied (it is mutated downstream): mutating the result must not touch src.
-        copied = self._norm(src, copy=True)
-        copied["id"] = 99
-        assert src["id"] == 5
-        # Donor entry is read-only: returned as-is (same object).
-        assert self._norm(src, copy=False, owner="donor") is src
+    def test_a_merge_changes_neither_side_in_place(self):
+        winner = _dev({"default": {"id": 5}})
+        donor = _dev({"default": {"oob": {"id": 7, "type": "ipmi"}}})
+
+        merge = merge_links(winner, donor, "default")
+
+        assert merge.summary["oob_from_donor"] == {"id": 7, "type": "ipmi"}
+        assert stored_mapping_for_test(winner) == {"default": {"id": 5}}
+        assert stored_mapping_for_test(donor) == {"default": {"oob": {"id": 7, "type": "ipmi"}}}

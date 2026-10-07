@@ -7,6 +7,7 @@ import pytest
 
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import make_cluster, make_device, make_vm, seed_own_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import mapping_from_change_record
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, missing_pk
 
@@ -121,7 +122,7 @@ class TestCreateVmFromLibrenms:
             changed_object_type=ContentType.objects.get_for_model(VirtualMachine), changed_object_id=vm.pk
         )
         assert [change.action for change in changes] == ["create"]
-        assert changes.get().postchange_data["custom_fields"]["librenms_id"] == {SERVER_KEY: 6102}
+        assert mapping_from_change_record(changes.get(), before=False) == {SERVER_KEY: 6102}
 
     def test_validated_name_precedes_raw_name_recomputation(self):
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms

@@ -10,6 +10,7 @@ from django.urls import reverse
 
 from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
 from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device, make_superuser, make_vm
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms, make_view
 
 SERVER_KEY = "test"
@@ -58,7 +59,7 @@ def seeded(recording_server, settings):
             owner, view_class = make_device(name, librenms_cf=librenms_cf), DeviceIPAddressTableView
         else:
             owner, view_class = make_vm(name), VMIPAddressTableView
-            owner.custom_field_data["librenms_id"] = librenms_cf
+            seed_stored_mapping(owner, librenms_cf)
             owner.save()
         view = make_view(view_class, None, librenms_api=api)
         view.librenms_api.cache_timeout = 300
@@ -470,7 +471,7 @@ class TestRefusals:
         from ipam.models import VRF
 
         from netbox_librenms_plugin.server_mappings import mark_migrated
-        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
 
         owner = seeded("vrf-migrated")
         apply_mapping_change(owner, mark_migrated(owner, make_device("vrf-migrated-winner").pk, SERVER_KEY))
@@ -526,7 +527,7 @@ def test_ip_table_refresh_refuses_repeated_server_keys(client, settings, recordi
     server, _ = recording_server(recording, server_key="test")
     configure_librenms_servers(settings, {"test": {"librenms_url": server.url, "api_token": "test-token"}})
     owner = make_device("ambiguous-ip-refresh") if object_type == "device" else make_vm("ambiguous-ip-refresh")
-    owner.custom_field_data["librenms_id"] = {"test": {"id": recording["device_id"]}}
+    seed_stored_mapping(owner, {"test": {"id": recording["device_id"]}})
     owner.save()
     client.force_login(make_superuser("ambiguous-ip-refresh-user"))
 

@@ -6,6 +6,7 @@ import pytest
 
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
+from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view, message_texts
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 
@@ -60,12 +61,16 @@ class TestSeedInventoryMatchesTheReaderContract:
         from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
 
         view, device = self._view_and_device("trusted-payload-cf", 11)
-        trusted_module_inventory_payload(device, [], server_key="default", librenms_id=11)
+        stale_cf = device.cf
+        trusted_module_inventory_payload(device, [], server_key="default", librenms_id=12)
 
         # cf is a cached_property over the APPLICABLE custom fields, not the raw column, so it
         # must recompute rather than be the same object the write went into.
+        assert device.cf is not stale_cf
         assert device.cf is not device.custom_field_data
-        assert device.cf["librenms_id"] == device.custom_field_data["librenms_id"]
+        # The contract is NetBox's cf cache itself, which no mapping helper reads.
+        cached = device.cf["librenms_id"]  # nosemgrep: no-stored-mapping-access
+        assert cached == stored_mapping_for_test(device) == {"default": 12}
 
     def test_the_helper_refuses_to_seed_without_a_librenms_id(self):
         """A defaulted id would cache an entry the reader always rejects, faking a cache miss."""

@@ -6,6 +6,7 @@ from time import sleep
 import pytest
 
 from netbox_librenms_plugin.constants import LIBRENMS_PORTS_COLUMNS
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping_row, stored_mapping_for_test
 
 
 def configure_servers(settings, servers):
@@ -251,7 +252,7 @@ class TestGetLibreNMSIdDictServerKey:
 
         assert api.get_librenms_id(device) == 23
         device.refresh_from_db()
-        assert device.custom_field_data["librenms_id"]["primary"] == "23"
+        assert stored_mapping_for_test(device)["primary"] == "23"
 
     def test_zero_mapping_is_ignored_and_discovered(self, settings, librenms_server):
         """A zero mapping is invalid, so hostname discovery replaces it."""
@@ -269,7 +270,7 @@ class TestGetLibreNMSIdDictServerKey:
         result = api_for(settings, librenms_server.url).get_librenms_id(device)
 
         assert result == 31
-        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"]["default"] == 31
+        assert stored_mapping_for_test(Device.objects.get(pk=device.pk))["default"] == 31
 
     def test_store_librenms_id_via_hostname_lookup(self, settings, librenms_server):
         """A hostname lookup writes only the bound server mapping."""
@@ -287,7 +288,7 @@ class TestGetLibreNMSIdDictServerKey:
         result = api_for(settings, librenms_server.url, key="primary").get_librenms_id(device)
 
         assert result == 42
-        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == {
+        assert stored_mapping_for_test(Device.objects.get(pk=device.pk)) == {
             "default": 11,
             "primary": 42,
         }
@@ -977,7 +978,7 @@ class TestStorelibrenmsId:
 
         api._store_librenms_id(device, 42)
 
-        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"]["default"] == 42
+        assert stored_mapping_for_test(Device.objects.get(pk=device.pk))["default"] == 42
 
     def test_storing_the_mapping_keeps_the_caller_s_other_unsaved_custom_fields(self, settings, librenms_server):
         """The claim reads a second row, so copying its whole field data would drop unsaved edits."""
@@ -998,8 +999,8 @@ class TestStorelibrenmsId:
         api._store_librenms_id(device, 42)
 
         assert device.custom_field_data["store_note"] == "unsaved"
-        assert device.custom_field_data["librenms_id"]["default"] == 42
-        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"]["default"] == 42
+        assert stored_mapping_for_test(device)["default"] == 42
+        assert stored_mapping_for_test(Device.objects.get(pk=device.pk))["default"] == 42
 
     def test_the_store_builds_on_the_locked_row_not_the_callers_older_read(self, settings, librenms_server):
         """A mapping that another operation added after the caller's read stays, and reaches the caller too."""
@@ -1008,16 +1009,14 @@ class TestStorelibrenmsId:
         from netbox_librenms_plugin.tests.conftest import make_device
 
         device = make_device("store-after-a-concurrent-link", librenms_cf={"default": None})
-        Device.objects.filter(pk=device.pk).update(
-            custom_field_data={"librenms_id": {"default": None, "secondary": 77}}
-        )
+        seed_stored_mapping_row(device, {"default": None, "secondary": 77})
         api = api_for(settings, librenms_server.url)
 
         api._store_librenms_id(device, 42)
 
         expected = {"default": 42, "secondary": 77}
-        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == expected
-        assert device.custom_field_data["librenms_id"] == expected
+        assert stored_mapping_for_test(Device.objects.get(pk=device.pk)) == expected
+        assert stored_mapping_for_test(device) == expected
 
     def test_a_read_after_the_store_sees_the_mapping_on_the_callers_instance(self, settings, librenms_server):
         """The store copies the mapping onto the caller's object, and no earlier snapshot hides it."""
@@ -1058,6 +1057,7 @@ class TestStorelibrenmsId:
         from django.core.cache import cache
         from extras.models import CustomField
 
+        from netbox_librenms_plugin.server_mappings import can_store_device_mapping
         from netbox_librenms_plugin.tests.conftest import make_device
 
         device = make_device("store-cached-device")
@@ -1065,7 +1065,7 @@ class TestStorelibrenmsId:
         # unreachable until the field is gone.
         CustomField.objects.filter(name="librenms_id").delete()
         device.refresh_from_db()
-        assert "librenms_id" not in device.cf
+        assert not can_store_device_mapping(device)
 
         api = api_for(settings, librenms_server.url)
         cache_key = api._get_cache_key(device)
@@ -1089,7 +1089,7 @@ class TestStorelibrenmsId:
         api._store_librenms_id(interface, 42)
 
         interface.refresh_from_db()
-        assert interface.custom_field_data.get("librenms_id") in (None, {})
+        assert stored_mapping_for_test(interface) in (None, {})
         assert cache.get(cache_key) == 42
 
     def test_unsaved_device_id_is_cached_without_row_locking(self, settings, librenms_server):
@@ -1160,9 +1160,9 @@ def test_discovered_mapping_and_vm_import_serialize_one_librenms_id_claim(settin
 
     device.refresh_from_db()
     vm = VirtualMachine.objects.filter(name="discovered-claim-race-vm").first()
-    mappings = [device.custom_field_data.get("librenms_id", {})]
+    mappings = [stored_mapping_for_test(device) or {}]
     if vm is not None:
-        mappings.append(vm.custom_field_data.get("librenms_id", {}))
+        mappings.append(stored_mapping_for_test(vm) or {})
     assert len(claim_keys) == 2
     assert len(set(claim_keys)) == 1
     assert sorted(outcomes) == [False, True]

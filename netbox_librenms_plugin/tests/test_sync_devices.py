@@ -9,6 +9,7 @@ from django.core.cache import cache
 from django.urls import reverse
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, make_vm
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping_row, stored_mapping_for_test
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
@@ -319,8 +320,7 @@ class TestRemoveServerMappingView:
         from virtualization.models import VirtualMachine
 
         vm = make_vm("remove-orphaned-vm-mapping")
-        vm.custom_field_data["librenms_id"] = {"orphaned-server": 42}
-        vm.save(update_fields=["custom_field_data"])
+        seed_mapping(vm, "orphaned-server", own=42)
         user = make_user_with_perms("remove-orphaned-vm-writer", [("change", VirtualMachine)])
         client.force_login(user)
 
@@ -333,7 +333,7 @@ class TestRemoveServerMappingView:
         assert response.url == reverse("plugins:netbox_librenms_plugin:vm_librenms_sync", args=[vm.pk])
         assert _messages(response, "success") == ["Removed LibreNMS mapping for server 'orphaned-server'."]
         vm.refresh_from_db()
-        assert vm.custom_field_data["librenms_id"] is None
+        assert stored_mapping_for_test(vm) is None
 
     @pytest.mark.parametrize("stored", ["²", 0, -1, True])
     def test_a_legacy_value_the_reader_cannot_resolve_has_no_mapping_to_remove(self, client, settings, stored):
@@ -346,7 +346,7 @@ class TestRemoveServerMappingView:
         assert response.status_code == 302
         assert _messages(response, "warning") == ["No mapping found for server 'default'."]
         device.refresh_from_db()
-        assert device.custom_field_data["librenms_id"] == stored
+        assert stored_mapping_for_test(device) == stored
 
     @pytest.mark.parametrize("stored", ["42", "+42", "4_2", " 42 ", 42])
     def test_a_legacy_value_the_reader_resolves_is_removable_under_default(self, client, settings, stored):
@@ -359,7 +359,7 @@ class TestRemoveServerMappingView:
         assert response.status_code == 302
         assert _messages(response, "success") == ["Removed LibreNMS mapping for server 'default'."]
         device.refresh_from_db()
-        assert device.custom_field_data["librenms_id"] is None
+        assert stored_mapping_for_test(device) is None
 
     def test_a_legacy_value_is_removable_only_under_default(self, client, settings):
         _configure_only_other_server(settings)
@@ -370,7 +370,7 @@ class TestRemoveServerMappingView:
 
         assert _messages(response, "warning") == ["No mapping found for server 'retired'."]
         device.refresh_from_db()
-        assert device.custom_field_data["librenms_id"] == "+42"
+        assert stored_mapping_for_test(device) == "+42"
 
     def test_a_readable_legacy_value_stays_when_default_is_configured(self, client):
         device = make_device("remove-legacy-protected-default", librenms_cf="+42")
@@ -383,7 +383,7 @@ class TestRemoveServerMappingView:
             "Remove the server from plugin configuration first, then retry."
         ]
         device.refresh_from_db()
-        assert device.custom_field_data["librenms_id"] == "+42"
+        assert stored_mapping_for_test(device) == "+42"
 
     def test_a_legacy_value_is_rechecked_on_the_locked_row(self, client, settings):
         from django.db import connection
@@ -398,7 +398,7 @@ class TestRemoveServerMappingView:
             def __call__(self, execute, sql, params, many, context):
                 if not self.fired and 'FROM "dcim_device"' in sql and "FOR UPDATE" in sql.upper():
                     self.fired = True
-                    type(device).objects.filter(pk=device.pk).update(custom_field_data={"librenms_id": "²"})
+                    seed_stored_mapping_row(device, "²")
                 return execute(sql, params, many, context)
 
         lock_hook = CorruptBeforeLock()
@@ -408,7 +408,7 @@ class TestRemoveServerMappingView:
         assert lock_hook.fired
         assert _messages(response) == ["Mapping for server 'default' was already removed."]
         device.refresh_from_db()
-        assert device.custom_field_data["librenms_id"] == "²"
+        assert stored_mapping_for_test(device) == "²"
 
     def test_a_readable_legacy_value_needs_change_permission_to_remove(self, client, settings):
         from dcim.models import Device
@@ -422,7 +422,7 @@ class TestRemoveServerMappingView:
         assert response.status_code == 302
         assert _messages(response, "error") == ["Missing permissions: dcim.change_device"]
         device.refresh_from_db()
-        assert device.custom_field_data["librenms_id"] == "+42"
+        assert stored_mapping_for_test(device) == "+42"
 
     def test_mapping_removal_preserves_unrelated_legacy_device_state(self, client):
         from dcim.models import Device
@@ -440,5 +440,5 @@ class TestRemoveServerMappingView:
         assert response.status_code == 302
         assert _messages(response, "success") == ["Removed LibreNMS mapping for server 'orphaned-server'."]
         device.refresh_from_db()
-        assert device.custom_field_data["librenms_id"] is None
+        assert stored_mapping_for_test(device) is None
         assert device.face == "front"
