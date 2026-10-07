@@ -10,6 +10,10 @@ MENU_TEMPLATE = (
     Path(__file__).parents[2] / "templates" / "netbox_librenms_plugin" / "inc" / "_interface_sync_options.html"
 )
 SAVE_PREF_PATH = "/plugins/librenms_plugin/save-user-pref/"
+HTMX_PATH = Path(__file__).parent / "vendor" / "htmx.min.js"
+# NetBox has no `htmx` global, so the test publishes the API under another name.
+HTMX_SCRIPT = f"window.htmxTest = (function () {{\n{HTMX_PATH.read_text()}\n; return htmx; }})();"
+TAB_PATH = "/browser-interface-tab/"
 CSRF_TOKEN = "browser-csrf-token"
 COLUMNS = [
     ("name", "Name"),
@@ -144,7 +148,7 @@ def _swap_menu(page, **menu_state):
     page.evaluate(
         """(html) => {
             document.getElementById('interface-sync-options').outerHTML = html;
-            initializeSyncOptionMenus();
+            initializeScripts();
         }""",
         _menu_markup(**menu_state),
     )
@@ -181,3 +185,80 @@ def test_a_swap_rendered_before_a_reset_keeps_the_defaults(page, menu_page):
     assert not _checked(page, "#exclude-name")
     assert page.locator("#interface-sync-options-count").inner_text() == "0"
     assert len(saved) == 1
+
+
+# A sub-interface (4302) and the parent it requires (4301).
+TAB_ROWS = (
+    '<tr data-port-id="4301"><td data-col="selection">'
+    '<input type="checkbox" name="select" value="4301" id="cb-4301"></td><td>et-0/0/6</td></tr>'
+    '<tr data-port-id="4302" data-parent-port-id="4301" data-parent-name="et-0/0/6"><td data-col="selection">'
+    '<input type="checkbox" name="select" value="4302" id="cb-4302"></td><td>et-0/0/6.0</td></tr>'
+)
+
+
+def _tab_markup(**menu_state):
+    """The swappable interface tab: the menu and a table whose rows the server renders unchecked."""
+    return (
+        f"{_menu_markup(**menu_state)}"
+        '<table id="librenms-interface-table"><thead><tr><th><input type="checkbox" class="toggle"></th>'
+        f"<th>Name</th></tr></thead><tbody>{TAB_ROWS}</tbody></table>"
+    )
+
+
+@pytest.fixture
+def tab_page(page):
+    """Serve the interface tab and let a real HTMX swap run the production initializer."""
+    page.route(f"**{SAVE_PREF_PATH}", lambda route: route.fulfill(status=200, body='{"status": "ok"}'))
+    stale = {}
+    page.route(f"**{TAB_PATH}", lambda route: route.fulfill(status=200, content_type="text/html", body=stale["html"]))
+
+    def _load(**menu_state):
+        page.set_content(
+            f'<input type="hidden" name="csrfmiddlewaretoken" value="{CSRF_TOKEN}">'
+            '<input type="hidden" name="server_key" value="production">'
+            f'<div id="interface-sync-content">{_tab_markup(**menu_state)}</div>'
+        )
+        page.add_script_tag(content=HTMX_SCRIPT)
+        page.add_script_tag(path=str(SCRIPT_PATH))
+        page.evaluate("initializeScripts()")
+
+    def _swap(**menu_state):
+        stale["html"] = _tab_markup(**menu_state)
+        page.evaluate(
+            "url => htmxTest.ajax('GET', url, {target: '#interface-sync-content', swap: 'innerHTML'})", TAB_PATH
+        )
+        page.wait_for_function("document.getElementById('interface-sync-options').dataset.initialized === 'true'")
+
+    return _load, _swap
+
+
+def _selected(page):
+    return set(page.evaluate("Array.from(document.querySelectorAll('input[name=select]:checked')).map(cb => cb.value)"))
+
+
+def test_a_stale_swap_does_not_pull_in_a_parent_the_user_turned_auto_select_off_for(page, tab_page):
+    load, swap = tab_page
+    load()
+    page.uncheck("#autoSelectLagMembers")
+    page.check("#cb-4302")
+    assert _selected(page) == {"4302"}
+
+    # The swap renders the stored preference from before the save: auto-select on.
+    swap()
+
+    assert not _checked(page, "#autoSelectLagMembers")
+    assert _selected(page) == {"4302"}
+
+
+def test_a_stale_swap_keeps_the_parent_after_reset_turned_auto_select_on(page, tab_page):
+    load, swap = tab_page
+    load(auto_select=False)
+    page.click("#reset-interface-sync-options")
+    page.check("#cb-4302")
+    assert _selected(page) == {"4301", "4302"}
+
+    # The swap renders the stored preference from before the Reset: auto-select off.
+    swap(auto_select=False)
+
+    assert _checked(page, "#autoSelectLagMembers")
+    assert _selected(page) == {"4301", "4302"}
