@@ -7,18 +7,21 @@ from copy import deepcopy
 import pytest
 from dcim.models import Device, Interface
 from django.contrib.auth import get_user_model
+from django.contrib.messages import get_messages
 from django.core.cache import cache
 from django.test import RequestFactory
 from django.urls import reverse
+from ipam.models import IPAddress
 from netbox.config import get_config
 
 from netbox_librenms_plugin.tests._html_helpers import open_tags
-from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_device
+from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_device, make_interface
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.test_ip_address_sync_safety import _configure_test_server, _serve_librenms_ip_rows
 from netbox_librenms_plugin.utils import resolve_create_missing_interfaces, resolve_set_primary_ip
 from netbox_librenms_plugin.views.imports.actions import SaveUserPrefView
+from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
 PREFERENCE = "plugins.netbox_librenms_plugin.interface_sync_options"
 SERVER_KEY = "default"
@@ -323,30 +326,124 @@ class TestIPOptionPreferences:
 
         assert IP_TOGGLES[key][1](_request(user)) is False
 
-    @pytest.mark.parametrize(("saved", "posted", "owner_action"), [(True, None, "change"), (True, "off", "view")])
-    def test_a_saved_primary_ip_choice_sets_the_owner_permission_only_without_a_posted_toggle(
-        self, saved, posted, owner_action
+
+SYNC_ADDRESS = "198.18.51.10"
+SYNC_ROW = f"{SYNC_ADDRESS}/24"
+
+
+def _missing_permissions(response):
+    """Return the permission gate's refusal message, or None when the gate let the sync through."""
+    return next(
+        (str(message) for message in get_messages(response.wsgi_request) if "Missing permissions" in str(message)),
+        None,
+    )
+
+
+@pytest.mark.django_db
+class TestSavedIPChoicesThroughTheSyncView:
+    """A saved switch decides the sync's permissions only when the POST carries no toggle for it."""
+
+    def _sync(self, client, settings, live_librenms, *, name, saved_key, extra_perms, toggles):
+        _configure_test_server(settings)
+        device = make_device(name, librenms_cf={SERVER_KEY: {"id": 42}})
+        interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+        seed_mapping(interface, SERVER_KEY, own=7051)
+        user = make_user_with_perms(
+            f"{name}-user",
+            [("view", Device), ("view", Interface), ("add", IPAddress), ("change", IPAddress), *extra_perms],
+        )
+        _store_raw(user, True, IP_PREFERENCES[saved_key])
+        client.force_login(user)
+        rows = [{"address": SYNC_ADDRESS, "prefix_length": 24, "port_id": 7051, "interface": "Ethernet1"}]
+        _serve_librenms_ip_rows(live_librenms.server, rows, device_name=device.name, management_ip=SYNC_ADDRESS)
+        refresh = client.post(
+            reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk]),
+            {"server_key": SERVER_KEY, "interface_name_field": "ifName"},
+            HTTP_HX_REQUEST="true",
+        )
+        assert refresh.status_code == 200
+        response = client.post(
+            reverse(
+                "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+                kwargs={"object_type": "device", "pk": device.pk},
+            ),
+            {"server_key": SERVER_KEY, "select": SYNC_ROW, f"vrf_{SYNC_ROW}": "", **toggles},
+            HTTP_HX_REQUEST="true",
+        )
+        device.refresh_from_db()
+        return response, device, interface
+
+    def test_a_posted_off_toggle_needs_no_owner_change_right_and_sets_no_primary_ip(
+        self, client, settings, live_librenms
     ):
-        user = _user("ip-option-permission")
-        _store_raw(user, saved, IP_PREFERENCES["set_primary_ip"])
-        data = {} if posted is None else {"set-primary-ip-toggle": posted}
-        view = SyncIPAddressesView()
-        view.request = _request(user, data)
+        response, device, interface = self._sync(
+            client,
+            settings,
+            live_librenms,
+            name="saved-primary-off",
+            saved_key="set_primary_ip",
+            extra_perms=[],
+            toggles={"set-primary-ip-toggle": "off"},
+        )
 
-        assert SyncIPAddressesView._owner_action(view.request) == owner_action
-        assert (("change", Device) in view._required_permissions("device")["POST"]) is (owner_action == "change")
+        assert _missing_permissions(response) is None
+        assert IPAddress.objects.get(address=SYNC_ROW).assigned_object == interface
+        assert device.primary_ip4_id is None
 
-    @pytest.mark.parametrize(("saved", "posted", "required"), [(True, None, True), (True, "off", False)])
-    def test_a_saved_create_missing_choice_sets_the_interface_permissions_only_without_a_posted_toggle(
-        self, saved, posted, required
+    def test_without_a_posted_toggle_the_saved_choice_demands_the_owner_change_right(
+        self, client, settings, live_librenms
     ):
-        user = _user("ip-option-create-permission")
-        _store_raw(user, saved, IP_PREFERENCES["create_missing_interfaces"])
-        data = {} if posted is None else {"create-missing-interfaces-toggle": posted}
-        view = SyncIPAddressesView()
-        view.request = _request(user, data)
+        response, device, _interface = self._sync(
+            client,
+            settings,
+            live_librenms,
+            name="saved-primary-denied",
+            saved_key="set_primary_ip",
+            extra_perms=[],
+            toggles={},
+        )
 
-        assert (("add", Interface) in view._required_permissions("device")["POST"]) is required
+        # The gate answers htmx with a redirect and a message, not a 403.
+        assert "change_device" in _missing_permissions(response)
+        assert not IPAddress.objects.filter(address=SYNC_ROW).exists()
+        assert device.primary_ip4_id is None
+
+    def test_without_a_posted_toggle_the_saved_choice_sets_the_primary_ip(self, client, settings, live_librenms):
+        response, device, interface = self._sync(
+            client,
+            settings,
+            live_librenms,
+            name="saved-primary-set",
+            saved_key="set_primary_ip",
+            extra_perms=[("change", Device)],
+            toggles={},
+        )
+
+        assert _missing_permissions(response) is None
+        address = IPAddress.objects.get(address=SYNC_ROW)
+        assert address.assigned_object == interface
+        assert device.primary_ip4_id == address.pk
+
+    @pytest.mark.parametrize(("toggles", "allowed"), [({"create-missing-interfaces-toggle": "off"}, True), ({}, False)])
+    def test_a_saved_create_missing_choice_demands_interface_rights_only_without_a_posted_toggle(
+        self, client, settings, live_librenms, toggles, allowed
+    ):
+        response, _device, interface = self._sync(
+            client,
+            settings,
+            live_librenms,
+            name=f"saved-create-{allowed}",
+            saved_key="create_missing_interfaces",
+            extra_perms=[],
+            toggles=toggles,
+        )
+
+        if allowed:
+            assert _missing_permissions(response) is None
+            assert IPAddress.objects.get(address=SYNC_ROW).assigned_object == interface
+        else:
+            assert "add_interface" in _missing_permissions(response)
+            assert not IPAddress.objects.filter(address=SYNC_ROW).exists()
 
 
 def _ip_toggles(html):
