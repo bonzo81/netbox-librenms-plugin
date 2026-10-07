@@ -409,6 +409,23 @@ rules:
               StartsWith|NotStartsWith|EndsWith|NotEndsWith|HasAttr|
               NotHasAttr|IsSubclass|NotIsSubclass
             )$
+  - id: xfail-needs-raises
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Give pytest.mark.xfail the exception that the recorded defect raises, with raises=. Without
+      it, any error satisfies the marker, so a test whose setup fails looks like the defect.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/tests/**"]
+    patterns:
+      - pattern-either:
+          - pattern: pytest.mark.xfail(...)
+          - patterns:
+              - pattern: pytest.mark.xfail
+              - pattern-not-inside: pytest.mark.xfail(...)
+      - pattern-not: pytest.mark.xfail(..., raises=$EXCEPTION, ...)
   - id: no-selected-fuzzy-apis
     languages: [python]
     severity: WARNING
