@@ -1035,7 +1035,7 @@ function initializeCountdowns() {
  * @param {string} countId - Changed-options badge element ID
  * @param {string} resetId - Reset button element ID
  * @param {Object} [store] - Keeps the user's choice: save(root, options) runs once per user change
- *     and once per Reset; restore(options) runs before the first count
+ *     and once per Reset; restore(root, options) runs before the first count
  */
 function initializeSyncOptions(rootId, optionSelector, countId, resetId, store) {
     const root = document.getElementById(rootId);
@@ -1075,7 +1075,7 @@ function initializeSyncOptions(rootId, optionSelector, countId, resetId, store) 
         updateCount();
         if (store) store.save(root, options);
     });
-    store?.restore(options);
+    store?.restore(root, options);
     root.dataset.initialized = 'true';
     updateCount();
 }
@@ -1089,14 +1089,15 @@ let syncOptionSaving = Promise.resolve();
  * @param {HTMLElement} root - The menu root, which carries the save-pref URL
  * @param {string} key - The preference key
  * @param {*} value - The preference value
+ * @returns {Promise<boolean>} Resolves to false only when the POST was sent and failed
  */
 function saveSyncOptionPreference(root, key, value) {
     const savePrefUrl = root.dataset.savePrefUrl;
-    if (!savePrefUrl) return;
+    if (!savePrefUrl) return Promise.resolve(true);
     const csrfToken = getCsrfToken();
     if (!csrfToken) {
         console.debug(`Failed to save ${key} pref: missing CSRF token`);
-        return;
+        return Promise.resolve(true);
     }
     syncOptionSaving = syncOptionSaving.then(() => fetch(savePrefUrl, {
         method: 'POST',
@@ -1106,7 +1107,12 @@ function saveSyncOptionPreference(root, key, value) {
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
         }
-    }).catch(error => console.debug(`Failed to save ${key} pref:`, error.message));
+        return true;
+    }).catch(error => {
+        console.debug(`Failed to save ${key} pref:`, error.message);
+        return false;
+    });
+    return syncOptionSaving;
 }
 
 /**
@@ -1114,6 +1120,7 @@ function saveSyncOptionPreference(root, key, value) {
  *
  * A tab swap can render the menu from a stored value that a queued save has not replaced yet,
  * so the swapped-in menu gets the last choice made on this page.
+ * A key whose save failed is sent again, with its last choice, by the next save or restore.
  *
  * @param {Object<string, {read: Function, write: Function}>} preferences - Per preference key,
  *     read(options) returns its value and write(options, value) applies it
@@ -1121,21 +1128,31 @@ function saveSyncOptionPreference(root, key, value) {
  */
 function syncOptionStore(preferences) {
     const chosen = {};
+    const failed = new Set();
     let current = {};
     const values = (options) => Object.fromEntries(
         Object.entries(preferences).map(([key, preference]) => [key, preference.read(options)])
     );
+    const send = (root, key) => {
+        // Saves finish in queue order, so the last save of a key decides whether it failed.
+        failed.delete(key);
+        saveSyncOptionPreference(root, key, chosen[key]).then((saved) => {
+            if (saved) failed.delete(key);
+            else failed.add(key);
+        });
+    };
     return {
-        restore(options) {
+        restore(root, options) {
             Object.entries(chosen).forEach(([key, value]) => preferences[key].write(options, value));
             current = values(options);
+            Array.from(failed).forEach((key) => send(root, key));
         },
         save(root, options) {
             const next = values(options);
             Object.keys(next).forEach((key) => {
-                if (JSON.stringify(next[key]) === JSON.stringify(current[key])) return;
+                if (JSON.stringify(next[key]) === JSON.stringify(current[key]) && !failed.has(key)) return;
                 chosen[key] = next[key];
-                saveSyncOptionPreference(root, key, next[key]);
+                send(root, key);
             });
             current = next;
         }
