@@ -1694,6 +1694,79 @@ def resolve_import_context_columns(request):
     return IMPORT_CONTEXT_COLUMNS_DEFAULT if validated is None else validated
 
 
+# The interface sync POST reads these values from its ``exclude_columns`` field; the dict order is the menu order.
+INTERFACE_SYNC_EXCLUDE_COLUMNS = {
+    "name": "Name",
+    "type": "Type",
+    "speed": "Speed",
+    "vlans": "VLANs",
+    "mac_address": "MAC",
+    "mtu": "MTU",
+    "enabled": "Enabled",
+    "description": "Description",
+}
+INTERFACE_SYNC_OPTIONS_DEFAULT = {"auto_select_lag_members": True, "exclude_columns": ()}
+INTERFACE_SYNC_OPTIONS_PREFERENCE = "plugins.netbox_librenms_plugin.interface_sync_options"
+
+
+def validate_interface_sync_options(value):
+    """
+    Validate and normalize an interface "Sync options" menu preference.
+
+    Args:
+        value (object): The stored or submitted preference value.
+
+    Returns:
+        dict | None: The value with its columns in menu order, or None when the value is invalid.
+
+    """
+    if not isinstance(value, dict) or value.keys() != INTERFACE_SYNC_OPTIONS_DEFAULT.keys():
+        return None
+    auto_select = value["auto_select_lag_members"]
+    columns = value["exclude_columns"]
+    if not isinstance(auto_select, bool) or not isinstance(columns, list):
+        return None
+    if any(not isinstance(column, str) or column not in INTERFACE_SYNC_EXCLUDE_COLUMNS for column in columns):
+        return None
+    if len(columns) != len(set(columns)):
+        return None
+    return {
+        "auto_select_lag_members": auto_select,
+        "exclude_columns": [column for column in INTERFACE_SYNC_EXCLUDE_COLUMNS if column in columns],
+    }
+
+
+def interface_sync_options_menu(request):
+    """
+    Build the interface "Sync options" menu state from the user's choice and the factory defaults.
+
+    A stored value that does not validate counts as absent, so the menu shows the factory defaults.
+
+    Args:
+        request (HttpRequest): Request for the user who owns the preference.
+
+    Returns:
+        dict: The switch state and one entry per exclude column, each with its factory default.
+
+    """
+    options = validate_interface_sync_options(get_user_pref(request, INTERFACE_SYNC_OPTIONS_PREFERENCE))
+    if options is None:
+        options = INTERFACE_SYNC_OPTIONS_DEFAULT
+    return {
+        "auto_select_lag_members": options["auto_select_lag_members"],
+        "auto_select_lag_members_default": INTERFACE_SYNC_OPTIONS_DEFAULT["auto_select_lag_members"],
+        "exclude_columns": [
+            {
+                "value": column,
+                "label": label,
+                "checked": column in options["exclude_columns"],
+                "default_checked": column in INTERFACE_SYNC_OPTIONS_DEFAULT["exclude_columns"],
+            }
+            for column, label in INTERFACE_SYNC_EXCLUDE_COLUMNS.items()
+        ],
+    }
+
+
 _TRUTHY_PARAMETER_VALUES = frozenset({"on", "true", "1"})
 
 
