@@ -283,10 +283,14 @@ rules:
               metavariable: $CREATE
               regex: ^(create|get_or_create|update_or_create)$
       - patterns:
-          - pattern: |
-              ipam.models.IPAddress.objects. ... .$CREATE(..., $DEFAULTS={..., "address": $ADDRESS, ...}, ...)
-          - pattern-not: |
-              ipam.models.IPAddress.objects. ... .$CREATE(..., $DEFAULTS={..., "address": netaddr.IPNetwork(...), ...}, ...)
+          - pattern-either:
+              - patterns:
+                  - pattern: |
+                      ipam.models.IPAddress.objects. ... .$CREATE(..., $DEFAULTS={..., "address": $ADDRESS, ...}, ...)
+                  - pattern-not: |
+                      ipam.models.IPAddress.objects. ... .$CREATE(..., $DEFAULTS={..., "address": netaddr.IPNetwork(...), ...}, ...)
+              - pattern: |
+                  ipam.models.IPAddress.objects. ... .$CREATE(..., $DEFAULTS={..., **$VALUES, ...}, ...)
           - metavariable-regex:
               metavariable: $CREATE
               regex: ^(get_or_create|update_or_create)$

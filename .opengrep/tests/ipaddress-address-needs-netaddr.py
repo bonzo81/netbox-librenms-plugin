@@ -75,6 +75,14 @@ def expanded_kwargs(values, parsed):
     IPAddress.objects.filter(vrf=None).update_or_create(**values)
     # ok: ipaddress-address-needs-netaddr
     IPAddress.objects.filter(**values)
+    # ruleid: ipaddress-address-needs-netaddr
+    IPAddress.objects.get_or_create(pk=1, defaults={**values})
+    # ruleid: ipaddress-address-needs-netaddr
+    IPAddress.objects.update_or_create(pk=1, create_defaults={"status": "active", **values})
+    # ruleid: ipaddress-address-needs-netaddr
+    IPAddress.objects.filter(vrf=None).update_or_create(pk=1, defaults={**values})
+    # ok: ipaddress-address-needs-netaddr
+    IPAddress.objects.get_or_create(pk=1, defaults={"status": "active"})
     # A ** expansion hides the address, so it is reported even next to a netaddr address.
     # ruleid: ipaddress-address-needs-netaddr
     IPAddress.objects.create(address=netaddr.IPNetwork(str(parsed)), **{"status": "active"})
