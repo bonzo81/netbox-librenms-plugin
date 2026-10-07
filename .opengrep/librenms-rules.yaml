@@ -1074,3 +1074,186 @@ rules:
     pattern-either:
       - pattern: isinstance($V, list) and len($V) == 2 and isinstance($V[0], int)
       - pattern: $V[1] if isinstance($V, list) else $V
+  - id: no-stored-mapping-access
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This code reads or writes the stored LibreNMS mapping key in a custom field container. Only
+      server_mappings.py knows how a mapping is stored. Read a mapping with read_mapping(), write
+      it with a builder and persist_mapping(), and in tests use the helpers in
+      tests/mapping_fixtures.py.
+    metadata:
+      category: maintainability
+      references:
+        - "netbox_librenms_plugin/server_mappings.py"
+    paths:
+      exclude:
+        - "**/server_mappings.py"
+        - "**/migrations/**"
+    mode: taint
+    options:
+      # A method call on the container, such as .get("other"), does not carry the container on.
+      taint_only_propagate_through_assignments: true
+    pattern-sources:
+      - pattern: $OBJ.custom_field_data
+      - pattern: $OBJ.cf
+      # The custom fields of a serialized object, such as a change record.
+      - pattern: $DATA["custom_fields"]
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $CONTAINER["librenms_id"]
+              - pattern: $CONTAINER.get("librenms_id", ...)
+              - pattern: $CONTAINER.pop("librenms_id", ...)
+              - pattern: $CONTAINER.setdefault("librenms_id", ...)
+              - pattern: '"librenms_id" in $CONTAINER'
+              - pattern: '"librenms_id" not in $CONTAINER'
+          - focus-metavariable: $CONTAINER
+  - id: no-stored-mapping-access-container
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This code removes the stored LibreNMS mapping key, or replaces, copies or changes the whole
+      custom field container that holds the mapping, or builds a container with the mapping key.
+      Use the mapping API in server_mappings.py, and in tests the helpers in
+      tests/mapping_fixtures.py.
+    metadata:
+      category: maintainability
+      references:
+        - "netbox_librenms_plugin/server_mappings.py"
+    paths:
+      exclude:
+        - "**/server_mappings.py"
+        - "**/migrations/**"
+    pattern-either:
+      - patterns:
+          - pattern-either:
+              - pattern: del $OBJ.$CONTAINER["librenms_id"]
+              - pattern: $OBJ.$CONTAINER = $VALUE
+              - pattern: $OBJ.$CONTAINER |= $VALUE
+              - pattern: copy.deepcopy($OBJ.$CONTAINER, ...)
+              - pattern: copy.copy($OBJ.$CONTAINER)
+              - pattern: dict($OBJ.$CONTAINER)
+              - pattern: '{**$OBJ.$CONTAINER, ...}'
+              - pattern: '$OBJ.$CONTAINER == {..., "librenms_id": $VALUE, ...}'
+              - pattern: '{..., "librenms_id": $VALUE, ...} == $OBJ.$CONTAINER'
+              - patterns:
+                  - pattern: $OBJ.$CONTAINER.$METHOD(...)
+                  - metavariable-regex:
+                      metavariable: $METHOD
+                      regex: ^(copy|clear|popitem)$
+              # An update that can set the key: the key itself, or a value that is not a literal.
+              - pattern: '$OBJ.$CONTAINER.update({..., "librenms_id": $VALUE, ...}, ...)'
+              - pattern: $OBJ.$CONTAINER.update(..., librenms_id=$VALUE, ...)
+              - pattern: $OBJ.$CONTAINER.update(..., **$VALUES, ...)
+              - patterns:
+                  - pattern: $OBJ.$CONTAINER.update($VALUE, ...)
+                  - pattern-not: '$OBJ.$CONTAINER.update({...}, ...)'
+          - metavariable-regex:
+              metavariable: $CONTAINER
+              regex: ^(custom_field_data|cf)$
+      - patterns:
+          - pattern: '$CALL(..., $CONTAINER={..., "librenms_id": $VALUE, ...}, ...)'
+          - metavariable-regex:
+              metavariable: $CONTAINER
+              regex: ^(custom_field_data|cf)$
+      - pattern: '{..., "custom_field_data": {..., "librenms_id": $VALUE, ...}, ...}'
+  - id: no-stored-mapping-access-orm
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This ORM lookup, projection, ordering or field path names the stored LibreNMS mapping.
+      Query mappings with identity_q(), find_mapping() or read_mappings() in server_mappings.py,
+      and in tests read a change record with mapping_from_change_record().
+    metadata:
+      category: maintainability
+      references:
+        - "netbox_librenms_plugin/server_mappings.py"
+    paths:
+      exclude:
+        - "**/server_mappings.py"
+        - "**/migrations/**"
+    pattern-either:
+      - patterns:
+          - pattern: $CALL(..., $LOOKUP=$VALUE, ...)
+          - metavariable-regex:
+              metavariable: $LOOKUP
+              regex: ^(\w+__)?custom_field_data__librenms_id(__\w+)?$
+      - pattern: '"=~/^-?(\w+__)?custom_field_data__librenms_id(__|$)/"'
+      # A dotted path into serialized data, such as a change record.
+      - pattern: '"=~/^custom_fields\.librenms_id($|\.)/"'
+      - pattern-regex: \bf["']-?(\w+__)?custom_field_data__librenms_id\b
+      # The whole container projected, with the mapping in it.
+      - patterns:
+          - pattern-either:
+              - pattern: $QUERYSET.values(..., $FIELD, ...)
+              - pattern: $QUERYSET.values_list(..., $FIELD, ...)
+          - metavariable-regex:
+              metavariable: $FIELD
+              regex: ^["'](\w+__)?custom_field_data["']$
+  - id: no-stored-mapping-access-private
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This code uses a private name of server_mappings.py outside that module. The private names
+      hold the storage of the mapping. Use the public mapping API, and in tests the helpers in
+      tests/mapping_fixtures.py, the one reviewed test seam.
+    metadata:
+      category: maintainability
+      references:
+        - "netbox_librenms_plugin/server_mappings.py"
+        - "netbox_librenms_plugin/tests/mapping_fixtures.py"
+    paths:
+      exclude:
+        - "**/server_mappings.py"
+        - "**/migrations/**"
+    pattern-either:
+      - patterns:
+          - pattern-either:
+              - pattern: from $MODULE import $NAME
+              - pattern: from $MODULE import $NAME as $ALIAS
+          - metavariable-regex:
+              metavariable: $MODULE
+              regex: ^(\.+|netbox_librenms_plugin\.)?server_mappings$
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: ^_
+      - patterns:
+          - pattern-either:
+              - pattern: netbox_librenms_plugin.server_mappings.$NAME
+              - patterns:
+                  - pattern-inside: |
+                      from $PACKAGE import server_mappings as $MODULE
+                      ...
+                  - pattern: $MODULE.$NAME
+              - patterns:
+                  - pattern-inside: |
+                      from $PACKAGE import server_mappings
+                      ...
+                  - pattern: server_mappings.$NAME
+          # Name resolution also matches a bare use of an imported name; the import is the finding.
+          - pattern-regex: \.\s*_\w+
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: ^_
+      # A patch target string.
+      - pattern: '"=~/^netbox_librenms_plugin\.server_mappings\._/"'
+  - id: no-stored-mapping-access-template
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      This template reads the stored LibreNMS mapping from a custom field container. Give the
+      template a context variable that the view derives through read_mapping(), such as
+      has_librenms_id.
+    metadata:
+      category: maintainability
+      references:
+        - "netbox_librenms_plugin/server_mappings.py"
+    paths:
+      include:
+        - "*.html"
+    patterns:
+      - pattern-either:
+          - pattern-regex: \b(?:cf|custom_field_data)\s*\.\s*librenms_id\b
+          - pattern-regex: \b(?:cf|custom_field_data)\s*\|\s*\w+\s*:\s*["']librenms_id["']
+      - pattern-not-inside: "{# ... #}"

@@ -1,0 +1,22 @@
+<!-- ruleid: no-stored-mapping-access-template -->
+{{ object.cf.librenms_id }}
+<!-- ruleid: no-stored-mapping-access-template -->
+{% if object.custom_field_data.librenms_id %}mapped{% endif %}
+<!-- ruleid: no-stored-mapping-access-template -->
+{{ object.custom_field_data|get_item:"librenms_id" }}
+<!-- ruleid: no-stored-mapping-access-template -->
+{% with stored=device.cf|get_item:'librenms_id' %}{{ stored }}{% endwith %}
+<!-- ruleid: no-stored-mapping-access-template -->
+<!-- {{ object.cf.librenms_id }} -->
+<!-- ok: no-stored-mapping-access-template -->
+{% if has_librenms_id %}{{ librenms_id_is_legacy }}{% endif %}
+<!-- ok: no-stored-mapping-access-template -->
+{% if sync_device_has_librenms_id %}{{ librenms_device_id }}{% endif %}
+<!-- ok: no-stored-mapping-access-template -->
+{% if validation.existing_match_type == 'librenms_id' %}matched{% endif %}
+<!-- ok: no-stored-mapping-access-template -->
+<li>Uses the custom field 'librenms_id' on NetBox devices</li>
+<!-- ok: no-stored-mapping-access-template -->
+{{ object.cf.operator_note }}
+<!-- ok: no-stored-mapping-access-template -->
+{# The old read was object.cf.librenms_id. #}
