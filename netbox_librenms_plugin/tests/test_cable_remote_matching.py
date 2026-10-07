@@ -2016,21 +2016,47 @@ class TestTheFarEndPortHasOneRule:
     ALLOWED_READERS = frozenset(
         {
             ("utils.py", "assign_cable_row_ids"),
-            ("views/base/cables_view.py", "<module>"),
+            ("views/base/cables_view.py", "_RAW_LINK_KEYS"),
             ("views/base/cables_view.py", "remote_port_ref"),
-            ("views/base/cables_view.py", "_collect_cable_links"),
-            ("views/base/cables_view.py", "_attach_remote_port_aliases"),
-            ("views/base/cables_view.py", "_best_duplicate_row"),
-            ("views/base/cables_view.py", "_set_remote_create_affordance"),
+            ("views/base/cables_view.py", "BaseCableTableView._collect_cable_links"),
+            ("views/base/cables_view.py", "BaseCableTableView._attach_remote_port_aliases"),
+            ("views/base/cables_view.py", "BaseCableTableView._best_duplicate_row"),
+            ("views/base/cables_view.py", "BaseCableTableView._set_remote_create_affordance"),
             ("views/base/cables_view.py", "cable_row_ports"),
-            ("views/sync/cables.py", "_remote_port_record"),
-            ("views/sync/cables.py", "_create_remote_interface"),
+            ("views/sync/cables.py", "CableRemoteCreateView._create_remote_interface"),
         }
     )
 
     @staticmethod
-    def _readers():
-        """Return (module, outermost function) for each use of the two far-end port keys in the plugin."""
+    def _readers_in(tree, module):
+        """Return (module, qualified outermost function or assigned name) for each use of the two far-end port keys."""
+        import ast
+
+        readers = set()
+
+        def visit(node, outer, scope):
+            for child in ast.iter_child_nodes(node):
+                if isinstance(child, ast.ClassDef):
+                    visit(child, outer, f"{scope}{child.name}.")
+                    continue
+                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    visit(child, outer or f"{scope}{child.name}", scope)
+                    continue
+                if outer is None and isinstance(child, (ast.Assign, ast.AnnAssign)):
+                    targets = child.targets if isinstance(child, ast.Assign) else [child.target]
+                    names = [target.id for target in targets if isinstance(target, ast.Name)]
+                    visit(child, f"{scope}{names[0]}" if len(names) == len(targets) == 1 else None, scope)
+                    continue
+                if isinstance(child, ast.Constant) and child.value in ("remote_port_key", "remote_port_id"):
+                    readers.add((module, outer or f"{scope}<body>"))
+                visit(child, outer, scope)
+
+        visit(tree, None, "")
+        return readers
+
+    @classmethod
+    def _readers(cls):
+        """Return the far-end port key readers of every plugin module outside the tests and data shapes."""
         import ast
         from pathlib import Path
 
@@ -2038,29 +2064,38 @@ class TestTheFarEndPortHasOneRule:
 
         root = Path(netbox_librenms_plugin.__file__).parent
         readers = set()
-
-        def visit(node, module, outer):
-            for child in ast.iter_child_nodes(node):
-                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    visit(child, module, outer or child.name)
-                    continue
-                if isinstance(child, ast.Constant) and child.value in ("remote_port_key", "remote_port_id"):
-                    readers.add((module, outer or "<module>"))
-                visit(child, module, outer)
-
         for path in sorted(root.rglob("*.py")):
             relative = path.relative_to(root)
             if relative.parts[0] in ("tests", "data_shapes"):
                 continue
-            visit(ast.parse(path.read_text()), relative.as_posix(), None)
+            readers |= cls._readers_in(ast.parse(path.read_text()), relative.as_posix())
         return readers
 
     def test_no_other_function_reads_the_far_end_port_keys(self):
         """A drift guard: a second order of the two keys made the dedupe and the lookup disagree."""
-        readers = self._readers()
+        assert self._readers() == self.ALLOWED_READERS
 
-        assert ("views/base/cables_view.py", "remote_port_ref") in readers
-        assert readers <= self.ALLOWED_READERS
+    def test_a_reader_is_keyed_by_its_class_and_assigned_name(self):
+        """An allowed method name in another class, or another module-level name, is not allowed."""
+        import ast
+
+        source = (
+            "class Other:\n"
+            "    def _create_remote_interface(self, row):\n"
+            "        return row['remote_port_key']\n"
+            "    LOOKUP = 'remote_port_id'\n"
+            "OTHER_KEYS = {'remote_port_key'}\n"
+            "print('remote_port_id')\n"
+        )
+        readers = self._readers_in(ast.parse(source), "views/sync/cables.py")
+
+        assert readers == {
+            ("views/sync/cables.py", "Other._create_remote_interface"),
+            ("views/sync/cables.py", "Other.LOOKUP"),
+            ("views/sync/cables.py", "OTHER_KEYS"),
+            ("views/sync/cables.py", "<body>"),
+        }
+        assert not readers & self.ALLOWED_READERS
 
 
 @pytest.mark.django_db
