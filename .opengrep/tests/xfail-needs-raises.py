@@ -26,6 +26,16 @@ def test_names_the_exception():
     assert False
 
 
+# ruleid: xfail-needs-raises
+@pytest.mark.xfail(strict=True, raises=None, reason="recorded defect")
+def test_raises_none():
+    assert False
+
+
+# ok: xfail-needs-raises
+xfail = pytest.mark.xfail
+
+
 # ok: xfail-needs-raises
 @pytest.mark.skip(reason="not an xfail")
 def test_skip():

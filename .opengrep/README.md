@@ -52,7 +52,7 @@ unchecked until that review.
 | `no-direct-htmx-request-header-read` | error | Code reads the `HX-Request` header (or `HTTP_HX_REQUEST`) instead of `request.htmx`. |
 | `no-django-testcase-in-tests` | warning | A test directly imports or inherits Django `TestCase`. Dynamic bases are outside this check. |
 | `no-unittest-assertions` | warning | A test calls a `self` method with a unittest assertion API name. |
-| `xfail-needs-raises` | error | A test marks an expected failure with `pytest.mark.xfail` and does not name the exception with `raises=`. |
+| `xfail-needs-raises` | error | A test marks an expected failure with `pytest.mark.xfail` and does not name the exception with `raises=`, or gives `raises=None`. An alias of the marker is not followed. |
 | `no-selected-fuzzy-apis` | warning | Code calls selected approximate-selection APIs. This does not prove exact-only selection. |
 
 ## Scope

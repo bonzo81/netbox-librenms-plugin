@@ -419,13 +419,18 @@ rules:
       category: correctness
     paths:
       include: ["**/netbox_librenms_plugin/tests/**"]
-    patterns:
-      - pattern-either:
+    pattern-either:
+      - patterns:
           - pattern: pytest.mark.xfail(...)
-          - patterns:
-              - pattern: pytest.mark.xfail
-              - pattern-not-inside: pytest.mark.xfail(...)
-      - pattern-not: pytest.mark.xfail(..., raises=$EXCEPTION, ...)
+          - pattern-not: pytest.mark.xfail(..., raises=$EXCEPTION, ...)
+      - pattern: pytest.mark.xfail(..., raises=None, ...)
+      # A bare marker on a function. An alias of the marker is not followed.
+      - patterns:
+          - pattern: pytest.mark.xfail
+          - pattern-not-inside: pytest.mark.xfail(...)
+          - pattern-inside: |
+              @pytest.mark.xfail
+              def $FUNC(...): ...
   - id: no-selected-fuzzy-apis
     languages: [python]
     severity: WARNING
