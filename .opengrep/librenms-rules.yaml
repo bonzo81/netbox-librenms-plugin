@@ -424,13 +424,13 @@ rules:
           - pattern: pytest.mark.xfail(...)
           - pattern-not: pytest.mark.xfail(..., raises=$EXCEPTION, ...)
       - pattern: pytest.mark.xfail(..., raises=None, ...)
-      # A bare marker on a function. An alias of the marker is not followed.
+      # A bare marker, but not an alias assignment; the use of an alias is not followed.
       - patterns:
           - pattern: pytest.mark.xfail
           - pattern-not-inside: pytest.mark.xfail(...)
-          - pattern-inside: |
-              @pytest.mark.xfail
-              def $FUNC(...): ...
+          - pattern-not-inside: pytest.mark.xfail.with_args(..., raises=$EXCEPTION, ...)
+          - pattern-not-inside: $ALIAS = pytest.mark.xfail
+      - pattern: pytestmark = pytest.mark.xfail
   - id: no-selected-fuzzy-apis
     languages: [python]
     severity: WARNING
