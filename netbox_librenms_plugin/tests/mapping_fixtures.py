@@ -105,3 +105,10 @@ def mapping_from_change_record(change, *, before):
     if data is None:
         raise ValueError(f"The change record has no {'before' if before else 'after'}-state.")
     return data["custom_fields"].get(_MAPPING_KEY)
+
+
+def custom_fields_without_mapping(custom_fields):
+    """Return a copy of a custom field container without the stored mapping, to compare the other fields."""
+    rest = copy.deepcopy(custom_fields)
+    rest.pop(_MAPPING_KEY, None)
+    return rest

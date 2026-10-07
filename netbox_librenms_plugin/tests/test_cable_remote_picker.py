@@ -30,6 +30,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis,
     persist_test_server_mapping,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.test_serial_cables_view import _make_view
 
 SERVER_KEY = configured_server_key()
@@ -555,7 +556,8 @@ class TestRemotePickerEndpoint:
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.server_mappings import mark_migrated
-        from netbox_librenms_plugin.tests.conftest import apply_mapping_change, seed_own_mapping
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("migrated-selected-member")
@@ -637,7 +639,7 @@ class TestRemotePickerEndpoint:
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.server_mappings import mark_migrated
-        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("migrated-donor")
@@ -683,7 +685,8 @@ class TestRemotePickerEndpoint:
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.server_mappings import mark_migrated
-        from netbox_librenms_plugin.tests.conftest import apply_mapping_change, seed_own_mapping
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("migrated-vc-origin")
@@ -765,7 +768,8 @@ class TestRemotePickerEndpoint:
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.server_mappings import mark_migrated
-        from netbox_librenms_plugin.tests.conftest import apply_mapping_change, seed_own_mapping
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("force-origin")
@@ -851,7 +855,8 @@ class TestRemotePickerEndpoint:
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.conftest import make_ip
         from netbox_librenms_plugin.server_mappings import mark_migrated
-        from netbox_librenms_plugin.tests.conftest import apply_mapping_change, seed_own_mapping
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("migrated-cache-owner")
@@ -1221,8 +1226,7 @@ class TestRemotePickerEndpoint:
 
         client = self._client("duplicate-link-rows")
         local_device = make_device("picker-duplicate-link-local")
-        local_device.custom_field_data["librenms_id"] = 10
-        local_device.save()
+        seed_stored_mapping(local_device, 10, save=True)
         local = make_interface(local_device, "Ethernet1")
         first_device = make_device("picker-duplicate-link-first")
         make_interface(first_device, "Ethernet1")
@@ -1754,8 +1758,7 @@ class TestRemotePickerEndpoint:
         first = make_device("picker-vc-topology-first")
         second = make_device("picker-vc-topology-second")
         make_virtual_chassis("picker-vc-topology", first, second)
-        first.custom_field_data["librenms_id"] = {SERVER_KEY: 600}
-        first.save()
+        seed_mapping(first, SERVER_KEY, own=600)
         first_local = make_interface(first, "Ethernet1")
         second_local = make_interface(second, "Ethernet1")
         remote_device = make_device("picker-vc-topology-remote")
@@ -2336,8 +2339,7 @@ class TestManualRepointOfExistingCable:
         client = self._client_e2e("expiry-post")
         acs, csp, _old, link, picker_url = self._seed_cabled("expiry-post")
         _t, _, (new_cp,) = make_serial_device("expiry-post-target", cp_names=["console"])
-        acs.custom_field_data["librenms_id"] = {SERVER_KEY: 13}
-        acs.save(update_fields=["custom_field_data"])
+        seed_mapping(acs, SERVER_KEY, own=13)
 
         clear_test_cache(cache)  # the snapshot expired between render and pick
 
@@ -2381,8 +2383,7 @@ class TestManualRepointOfExistingCable:
 
         client = self._client_e2e("expiry-get")
         acs, _csp, _old, link, picker_url = self._seed_cabled("expiry-get")
-        acs.custom_field_data["librenms_id"] = {SERVER_KEY: 13}
-        acs.save(update_fields=["custom_field_data"])
+        seed_mapping(acs, SERVER_KEY, own=13)
 
         clear_test_cache(cache)
 
@@ -2862,8 +2863,7 @@ class TestRemotePickerObjectScope:
         first = make_device("picker-verify-scope-first")
         second = make_device("picker-verify-scope-second")
         make_virtual_chassis("picker-verify-scope-vc", first, second)
-        first.custom_field_data["librenms_id"] = {SERVER_KEY: 500}
-        first.save()
+        seed_mapping(first, SERVER_KEY, own=500)
         first_local = make_interface(first, "Ethernet1")
         second_local = make_interface(second, "Ethernet1")
         remote_device = make_device("picker-verify-scope-remote")

@@ -19,6 +19,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     stamp_rule_decision,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 
 def _import_record(device_id=4101, **validation):
@@ -1115,8 +1116,7 @@ class TestInterfaceTableFields:
         interface.save()
         interface = type(interface).objects.get(pk=interface.pk)
         mismatch = str(table.render_librenms_id(42, _row(interface)))
-        interface.custom_field_data["librenms_id"] = {"default": 42}
-        interface.save()
+        seed_mapping(interface, "default", own=42)
         interface = type(interface).objects.get(pk=interface.pk)
         matched = str(table.render_librenms_id(42, _row(interface)))
 

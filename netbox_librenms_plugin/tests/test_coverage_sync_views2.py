@@ -19,6 +19,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     seed_own_mapping,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 from netbox_librenms_plugin.utils import get_librenms_cable_tag
 from netbox_librenms_plugin.views.sync.cables import SyncCablesView
@@ -348,8 +349,7 @@ class TestIPAddressWriteFailures:
 
     def test_vm_address_is_assigned_to_a_real_vm_interface(self, client, live_librenms):
         vm = make_vm("ip-vm")
-        vm.custom_field_data["librenms_id"] = {SERVER_KEY: {"id": 125}}
-        vm.save(update_fields=["custom_field_data"])
+        seed_stored_mapping(vm, {SERVER_KEY: {"id": 125}}, save=True)
         interface = VMInterface.objects.create(virtual_machine=vm, name="eth0")
         _set_id(interface, 8351)
         row_id = "198.18.125.10/24"

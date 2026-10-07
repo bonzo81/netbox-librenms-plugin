@@ -7,7 +7,6 @@ from virtualization.models import VMInterface
 
 from netbox_librenms_plugin.server_mappings import mark_migrated, read_mapping
 from netbox_librenms_plugin.tests.conftest import (
-    apply_mapping_change,
     cable_together,
     ip_on,
     make_device,
@@ -16,6 +15,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_vm,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change, seed_stored_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import (
     assert_update_logged,
     grant,
@@ -87,10 +87,9 @@ class TestMigrationMarkerContract:
     @pytest.mark.parametrize("candidate", [None, True, False, 0, -1, "", "1", " 1 ", "+1", "1.0", 1.0])
     def test_a_marker_without_a_positive_integer_winner_is_no_marker(self, candidate):
         donor = make_device(f"marker-bad-winner-{candidate!r}")
-        donor.custom_field_data["librenms_id"] = {
-            SERVER_KEY: {"_migrated_to": {"device_id": candidate, "server_key": SERVER_KEY}}
-        }
-        donor.save(update_fields=["custom_field_data"])
+        seed_stored_mapping(
+            donor, {SERVER_KEY: {"_migrated_to": {"device_id": candidate, "server_key": SERVER_KEY}}}, save=True
+        )
 
         assert _resolve_winner_for_donor(donor, SERVER_KEY) == (None, None)
 

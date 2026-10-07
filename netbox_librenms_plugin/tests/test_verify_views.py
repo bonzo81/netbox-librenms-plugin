@@ -14,6 +14,7 @@ from django.conf import settings
 from django.test import RequestFactory, override_settings
 
 from netbox_librenms_plugin.tests.conftest import configured_server_key, make_superuser
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
 from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
@@ -941,7 +942,8 @@ class TestSingleInterfaceVerifyView:
         )
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser
         from netbox_librenms_plugin.server_mappings import mark_migrated
-        from netbox_librenms_plugin.tests.conftest import apply_mapping_change, seed_own_mapping
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
 
         _virtual_chassis, (page_device, selected_device) = make_virtual_chassis_members("verify-migrated-page")
         winner = make_device("verify-migrated-winner")
@@ -1708,7 +1710,7 @@ def _make_vc_member_device(name="srvkey-vc-dev"):
     device.vc_position = 1
     # A dict-form librenms_id mapping: get_librenms_sync_device reads this dict with the
     # caller's server_key, so an unhashable key actually reaches cf_dict.get(["a"]).
-    device.custom_field_data["librenms_id"] = {"alpha": 4242}
+    seed_mapping(device, "alpha", own=4242, save=False)
     device.save()
     return device
 

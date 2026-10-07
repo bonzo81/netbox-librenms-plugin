@@ -28,6 +28,7 @@ from netbox_librenms_plugin.tests.cache_test_helpers import (
 from netbox_librenms_plugin.tests.cache_test_helpers import (
     snapshot_state as _snapshot_state,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 SERVER_KEY = "default"
 
@@ -464,8 +465,7 @@ class TestOneFlushPerObject:
         device = make_device("signal-failing-assignment-model", librenms_cf={SERVER_KEY: 7})
         interface = make_interface(device, "Ethernet1")
         virtual_machine = make_vm("signal-valid-assignment-model")
-        virtual_machine.custom_field_data["librenms_id"] = {SERVER_KEY: 8}
-        virtual_machine.save(update_fields=["custom_field_data"])
+        seed_mapping(virtual_machine, SERVER_KEY, own=8)
         vm_interface = VMInterface.objects.create(virtual_machine=virtual_machine, name="Ethernet1")
         keys = _seed_every_tab(virtual_machine)
         monkeypatch.setitem(cache_signals.OWNER_COLUMNS, "dcim.interface", ("missing_owner_id",))

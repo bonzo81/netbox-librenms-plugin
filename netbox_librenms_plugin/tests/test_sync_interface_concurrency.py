@@ -602,7 +602,8 @@ def test_inline_relationship_rechecks_migrated_donor_after_lock():
     from netbox_librenms_plugin.tests.conftest import make_device, make_interface
     from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, post
     from netbox_librenms_plugin.server_mappings import mark_migrated
-    from netbox_librenms_plugin.tests.conftest import apply_mapping_change, seed_own_mapping
+    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
     server_key = configured_server_key()

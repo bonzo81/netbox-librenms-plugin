@@ -15,6 +15,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis,
     make_vm,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 SERVER_KEY = "test-server"
@@ -758,8 +759,7 @@ class TestValidateDeviceForImport:
 
     def test_vm_id_match_forces_vm_mode_and_populates_clusters(self):
         vm = make_vm("validation-linked-vm")
-        vm.custom_field_data["librenms_id"] = {SERVER_KEY: 5405}
-        vm.save()
+        seed_mapping(vm, SERVER_KEY, own=5405)
         payload = _device_payload(5405, hostname=vm.name, sysName=vm.name, serial="-")
 
         result = self._validate(payload)
@@ -794,8 +794,7 @@ class TestValidateDeviceForImport:
     def test_cross_model_id_collision_is_terminal(self):
         device = make_device("validation-cross-device", librenms_cf={SERVER_KEY: 5408})
         vm = make_vm("validation-cross-vm")
-        vm.custom_field_data["librenms_id"] = {SERVER_KEY: 5408}
-        vm.save()
+        seed_stored_mapping(vm, {SERVER_KEY: 5408}, save=True)
 
         result = self._validate(_device_payload(5408, hostname="unmatched-cross", serial="-"))
 
@@ -807,8 +806,7 @@ class TestValidateDeviceForImport:
         first = make_vm("validation-ambiguous-vm-a")
         second = make_vm("validation-ambiguous-vm-b", cluster=make_cluster("Validation VM ID cluster"))
         for vm in (first, second):
-            vm.custom_field_data["librenms_id"] = {SERVER_KEY: 5421}
-            vm.save()
+            seed_stored_mapping(vm, {SERVER_KEY: 5421}, save=True)
 
         result = self._validate(_device_payload(5421, hostname="unmatched-vm-id", serial="-"))
 
@@ -818,8 +816,7 @@ class TestValidateDeviceForImport:
 
     def test_vm_id_with_ambiguous_device_owners_is_terminal(self):
         vm = make_vm("validation-vm-with-device-collision")
-        vm.custom_field_data["librenms_id"] = {SERVER_KEY: 5422}
-        vm.save()
+        seed_stored_mapping(vm, {SERVER_KEY: 5422}, save=True)
         make_device("validation-device-collision-a", librenms_cf={SERVER_KEY: 5422})
         make_device("validation-device-collision-b", librenms_cf={SERVER_KEY: 5422})
 
@@ -830,8 +827,7 @@ class TestValidateDeviceForImport:
 
     def test_legacy_vm_id_and_name_drift_offer_both_migrations(self):
         vm = make_vm("validation-legacy-vm")
-        vm.custom_field_data["librenms_id"] = " 5423 "
-        vm.save()
+        seed_stored_mapping(vm, " 5423 ", save=True)
 
         result = self._validate(_device_payload(5423, hostname="validation-renamed-vm", serial="-"))
 
@@ -852,8 +848,7 @@ class TestValidateDeviceForImport:
 
     def test_vm_hostname_match_uses_the_real_vm_and_link_state(self):
         vm = make_vm("validation-hostname-vm")
-        vm.custom_field_data["librenms_id"] = {SERVER_KEY: 99}
-        vm.save()
+        seed_mapping(vm, SERVER_KEY, own=99)
 
         result = self._validate(
             _device_payload(5424, hostname=vm.name, sysName=vm.name, serial="-"),
@@ -1565,8 +1560,7 @@ class TestImportSingleDevice:
 
         _api, _server = librenms_api
         owner = make_vm("import-vm-id-owner")
-        owner.custom_field_data["librenms_id"] = {SERVER_KEY: 5609}
-        owner.save()
+        seed_mapping(owner, SERVER_KEY, own=5609)
         site, device_type, role = self._infrastructure("vm-conflict")
 
         result = import_single_device(

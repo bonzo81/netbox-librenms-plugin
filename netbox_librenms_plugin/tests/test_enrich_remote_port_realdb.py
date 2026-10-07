@@ -14,6 +14,8 @@ assertions fail — a genuine red→green guard.
 
 import pytest
 
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
 
 def _make_view():
     from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
@@ -66,12 +68,7 @@ class TestEnrichRemotePortLibrenmsIdRealDB:
         from dcim.models import Interface
 
         device = _make_device("switch-a", "a")
-        Interface.objects.create(
-            device=device,
-            name="ge-0/0/77",
-            type="1000base-t",
-            custom_field_data={"librenms_id": {"default": 20}},
-        )
+        seed_mapping(Interface(device=device, name="ge-0/0/77", type="1000base-t"), "default", own=20)
 
         view = _make_view()
         link = {"remote_port": "reported-different-name", "remote_port_id": 999}

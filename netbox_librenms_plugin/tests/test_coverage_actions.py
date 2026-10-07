@@ -22,6 +22,12 @@ from netbox_librenms_plugin.tests.conftest import (
     transactional_db_with_all_apps,
 )
 from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
+from netbox_librenms_plugin.tests.mapping_fixtures import (
+    seed_mapping,
+    seed_stored_mapping,
+    seed_stored_mapping_row,
+    stored_mapping_for_test,
+)
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server as run_librenms_server
 from netbox_librenms_plugin.tests.test_modules_view import configure_servers as configure_test_servers
 from netbox_librenms_plugin.tests.view_test_helpers import (
@@ -1890,7 +1896,7 @@ class TestDeviceConflictActionView:
         assert view_message_texts(request, "error") == ["You do not have permission to perform this action."]
         assert Device.objects.count() == device_count
         reloaded = Device.objects.get(pk=existing_device.pk)
-        assert reloaded.custom_field_data["librenms_id"][self.server_key] == {"id": 10}
+        assert stored_mapping_for_test(reloaded)[self.server_key] == {"id": 10}
 
     def test_missing_action_renders_htmx_error_toast(self):
         view = self._make_view()
@@ -2660,7 +2666,7 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         assert response.status_code == 200
         assert response.headers.get("HX-Reswap") == "none"
         assert b"already in JSON format" in response.content
-        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == {self.server_key: 42}
+        assert stored_mapping_for_test(Device.objects.get(pk=device.pk)) == {self.server_key: 42}
 
     def test_rejects_a_legacy_id_that_is_not_the_active_device_id(self):
         """Reject a signed legacy ID that differs from the active LibreNMS device ID."""
@@ -2690,7 +2696,7 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         assert response.headers.get("HX-Reswap") == "none"
         assert b"does not match the active device ID" in response.content
         assert b"already in JSON format" not in response.content
-        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == "+99"
+        assert stored_mapping_for_test(Device.objects.get(pk=device.pk)) == "+99"
 
     def test_refuses_a_reader_only_legacy_form_even_when_a_rival_owns_the_id(self):
         """Refuse the reader-only "4_2": under int() the rival's single match would pass the ambiguity guard."""
@@ -2721,15 +2727,15 @@ class TestDeviceConflictActionMigrateLibreNMSId:
             view,
             request,
             42,
-            lambda: Device.objects.filter(pk=rival.pk).update(custom_field_data={"librenms_id": {self.server_key: 42}}),
+            lambda: seed_stored_mapping_row(rival, {self.server_key: 42}),
         )
 
         assert response.status_code == 200
         assert response.headers.get("HX-Reswap") == "none"
         assert b"is not a plain positive integer" in response.content
         assert b"does not match the active device ID" not in response.content
-        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == "4_2"
-        assert Device.objects.get(pk=rival.pk).custom_field_data["librenms_id"] == {self.server_key: 42}
+        assert stored_mapping_for_test(Device.objects.get(pk=device.pk)) == "4_2"
+        assert stored_mapping_for_test(Device.objects.get(pk=rival.pk)) == {self.server_key: 42}
 
     def test_rejects_a_vm_migration_without_force_because_no_vm_confirms_a_serial(self):
         """VMs need force: only Device ID matches set serial_confirmed (import_utils/device_operations.py:802)."""
@@ -2737,8 +2743,7 @@ class TestDeviceConflictActionMigrateLibreNMSId:
 
         view = self._make_view()
         vm = make_vm("migrate-force-vm")
-        vm.custom_field_data["librenms_id"] = 42
-        vm.save()
+        seed_stored_mapping(vm, 42, save=True)
         self.librenms_server.device_info_response(
             device_id=42,
             hostname="migrate-force-vm",
@@ -2766,7 +2771,7 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         assert response.status_code == 200
         assert response.headers.get("HX-Reswap") == "none"
         assert b"Serial number not confirmed" in response.content
-        assert VirtualMachine.objects.get(pk=vm.pk).custom_field_data["librenms_id"] == 42
+        assert stored_mapping_for_test(VirtualMachine.objects.get(pk=vm.pk)) == 42
 
     def test_migrates_a_device_and_persists_the_dict_format(self):
         """Migrate a confirmed Device mapping and render the updated import row."""
@@ -2791,7 +2796,7 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         assert response.status_code == 200
         assert response["HX-Trigger"] == "closeModal"
         assert response.content.strip()
-        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == {self.server_key: 42}
+        assert stored_mapping_for_test(Device.objects.get(pk=device.pk)) == {self.server_key: 42}
 
     def test_migrates_a_vm_when_force_is_supplied(self):
         """Migrate a VM mapping when the request explicitly supplies force."""
@@ -2799,8 +2804,7 @@ class TestDeviceConflictActionMigrateLibreNMSId:
 
         view = self._make_view()
         vm = make_vm("migrate-forced-vm")
-        vm.custom_field_data["librenms_id"] = 42
-        vm.save()
+        seed_stored_mapping(vm, 42, save=True)
         self.librenms_server.device_info_response(
             device_id=42,
             hostname="migrate-forced-vm",
@@ -2828,7 +2832,7 @@ class TestDeviceConflictActionMigrateLibreNMSId:
 
         assert response.status_code == 200
         assert response["HX-Trigger"] == "closeModal"
-        assert VirtualMachine.objects.get(pk=vm.pk).custom_field_data["librenms_id"] == {self.server_key: 42}
+        assert stored_mapping_for_test(VirtualMachine.objects.get(pk=vm.pk)) == {self.server_key: 42}
 
     def test_vm_migration_rejects_a_device_claim_created_after_validation(self):
         """Reject a Device claim that appears after validation and keep the VM mapping unchanged."""
@@ -2843,8 +2847,7 @@ class TestDeviceConflictActionMigrateLibreNMSId:
             librenms_cf={self.server_key: 99},
         )
         vm = make_vm("migrate-cross-model-vm")
-        vm.custom_field_data["librenms_id"] = 42
-        vm.save(update_fields=["custom_field_data"])
+        seed_stored_mapping(vm, 42, save=True)
         self.librenms_server.device_info_response(
             device_id=42,
             hostname="migrate-cross-model-vm",
@@ -2873,9 +2876,7 @@ class TestDeviceConflictActionMigrateLibreNMSId:
                 view,
                 request,
                 42,
-                lambda: Device.objects.filter(pk=device.pk).update(
-                    custom_field_data={"librenms_id": {self.server_key: 42}}
-                ),
+                lambda: seed_stored_mapping_row(device, {self.server_key: 42}),
             )
 
         assert response.status_code == 200
@@ -2883,8 +2884,8 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         assert b"already assigned to device" in response.content
         # The device-identity claim takes its lock without a wait.
         assert any("pg_try_advisory_xact_lock" in query["sql"] for query in queries.captured_queries)
-        assert VirtualMachine.objects.get(pk=vm.pk).custom_field_data["librenms_id"] == 42
-        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == {self.server_key: 42}
+        assert stored_mapping_for_test(VirtualMachine.objects.get(pk=vm.pk)) == 42
+        assert stored_mapping_for_test(Device.objects.get(pk=device.pk)) == {self.server_key: 42}
 
     def test_fails_closed_when_the_row_is_deleted_between_validation_and_the_lock(self):
         """Fail closed when the validated Device is deleted before the locked re-read."""
@@ -2939,15 +2940,13 @@ class TestDeviceConflictActionMigrateLibreNMSId:
             view,
             request,
             42,
-            lambda: Device.objects.filter(pk=device.pk).update(
-                custom_field_data={"librenms_id": {self.server_key: 42}}
-            ),
+            lambda: seed_stored_mapping_row(device, {self.server_key: 42}),
         )
 
         assert response.status_code == 200
         assert response.headers.get("HX-Reswap") == "none"
         assert b"already in JSON format" in response.content
-        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == {self.server_key: 42}
+        assert stored_mapping_for_test(Device.objects.get(pk=device.pk)) == {self.server_key: 42}
 
     def test_fails_closed_when_the_legacy_id_changes_under_the_lock(self):
         """Preserve a concurrent legacy ID change found by the locked re-read."""
@@ -2971,13 +2970,13 @@ class TestDeviceConflictActionMigrateLibreNMSId:
             view,
             request,
             42,
-            lambda: Device.objects.filter(pk=device.pk).update(custom_field_data={"librenms_id": 99}),
+            lambda: seed_stored_mapping_row(device, 99),
         )
 
         assert response.status_code == 200
         assert response.headers.get("HX-Reswap") == "none"
         assert b"changed under lock" in response.content
-        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == 99
+        assert stored_mapping_for_test(Device.objects.get(pk=device.pk)) == 99
 
     def test_fails_closed_when_a_rival_claims_the_id_under_the_lock(self):
         """Preserve both mappings when a concurrent rival makes the ID ambiguous."""
@@ -3006,14 +3005,14 @@ class TestDeviceConflictActionMigrateLibreNMSId:
             view,
             request,
             42,
-            lambda: Device.objects.filter(pk=rival.pk).update(custom_field_data={"librenms_id": {self.server_key: 42}}),
+            lambda: seed_stored_mapping_row(rival, {self.server_key: 42}),
         )
 
         assert response.status_code == 200
         assert response.headers.get("HX-Reswap") == "none"
         assert b"ambiguous" in response.content
-        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == 42
-        assert Device.objects.get(pk=rival.pk).custom_field_data["librenms_id"] == {self.server_key: 42}
+        assert stored_mapping_for_test(Device.objects.get(pk=device.pk)) == 42
+        assert stored_mapping_for_test(Device.objects.get(pk=rival.pk)) == {self.server_key: 42}
 
 
 @pytest.mark.django_db
@@ -3123,7 +3122,7 @@ class TestDeviceConflictActionBranches:
         self._assert_htmx_error(response, "Missing validated conflict target")
         reloaded = Device.objects.get(pk=target.pk)
         assert reloaded.name == "branches-missing-validation-target"
-        assert "librenms_id" not in reloaded.custom_field_data
+        assert stored_mapping_for_test(reloaded) is None
 
     def test_rejects_a_posted_device_that_differs_from_the_validated_target(self):
         from dcim.models import Device
@@ -3146,7 +3145,7 @@ class TestDeviceConflictActionBranches:
         )
         reloaded = Device.objects.get(pk=target.pk)
         assert reloaded.name == "branches-mismatch-posted-target"
-        assert "librenms_id" not in reloaded.custom_field_data
+        assert stored_mapping_for_test(reloaded) is None
 
     def test_rejects_a_validated_vm_with_the_same_pk_as_the_posted_device(self):
         from dcim.models import Device
@@ -3210,7 +3209,7 @@ class TestDeviceConflictActionBranches:
         )
         reloaded = Device.objects.get(pk=target.pk)
         assert reloaded.device_type_id != reported_type.pk
-        assert "librenms_id" not in reloaded.custom_field_data
+        assert stored_mapping_for_test(reloaded) is None
 
     def test_rejects_an_invalid_device_id_from_the_live_payload(self):
         from dcim.models import Device
@@ -3252,7 +3251,7 @@ class TestDeviceConflictActionBranches:
         self._assert_htmx_error(response, "Invalid or missing LibreNMS device_id in payload")
         reloaded = Device.objects.get(pk=target.pk)
         assert reloaded.name == "branches-invalid-payload-id-target"
-        assert "librenms_id" not in reloaded.custom_field_data
+        assert stored_mapping_for_test(reloaded) is None
 
     def test_rejects_a_legacy_mapping_inside_the_lock(self):
         from dcim.models import Device
@@ -3275,7 +3274,7 @@ class TestDeviceConflictActionBranches:
         )
         reloaded = Device.objects.get(pk=target.pk)
         assert reloaded.name == "branches-legacy-link-target"
-        assert reloaded.custom_field_data["librenms_id"] == 42
+        assert stored_mapping_for_test(reloaded) == 42
 
     def test_link_sets_the_name_mapping_and_device_type_then_renders_the_row(self):
         from dcim.models import Device, DeviceType
@@ -3307,7 +3306,7 @@ class TestDeviceConflictActionBranches:
         reloaded = Device.objects.get(pk=target.pk)
         assert reloaded.name == "branches-link-source-name"
         assert reloaded.device_type_id == reported_type.pk
-        assert reloaded.custom_field_data["librenms_id"] == {self.server_key: 42}
+        assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
 
     def test_update_sets_the_name_serial_mapping_and_device_type_then_renders_the_row(self):
         from dcim.models import Device, DeviceType
@@ -3344,7 +3343,7 @@ class TestDeviceConflictActionBranches:
         assert reloaded.name == "branches-update-source-name"
         assert reloaded.serial == "BRANCHES-UPDATE-NEW"
         assert reloaded.device_type_id == reported_type.pk
-        assert reloaded.custom_field_data["librenms_id"] == {self.server_key: 42}
+        assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
 
     def test_update_reports_a_real_serial_conflict(self):
         from dcim.models import Device
@@ -3379,7 +3378,7 @@ class TestDeviceConflictActionBranches:
         reloaded = Device.objects.get(pk=target.pk)
         assert reloaded.name == "branches-update-conflict-target"
         assert reloaded.serial == "BRANCHES-UPDATE-CONFLICT-OLD"
-        assert reloaded.custom_field_data["librenms_id"] == {self.server_key: 42}
+        assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
 
     def test_update_serial_sets_the_serial_mapping_and_device_type_then_renders_the_row(self):
         from dcim.models import Device, DeviceType
@@ -3416,7 +3415,7 @@ class TestDeviceConflictActionBranches:
         assert reloaded.name == "branches-update-serial-target"
         assert reloaded.serial == "BRANCHES-UPDATE-SERIAL-NEW"
         assert reloaded.device_type_id == reported_type.pk
-        assert reloaded.custom_field_data["librenms_id"] == {self.server_key: 42}
+        assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
 
     def test_update_serial_reports_a_real_serial_conflict(self):
         from dcim.models import Device
@@ -3451,7 +3450,7 @@ class TestDeviceConflictActionBranches:
         reloaded = Device.objects.get(pk=target.pk)
         assert reloaded.name == "branches-update-serial-conflict-target"
         assert reloaded.serial == "BRANCHES-UPDATE-SERIAL-CONFLICT-OLD"
-        assert reloaded.custom_field_data["librenms_id"] == {self.server_key: 42}
+        assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
 
     def test_sync_name_sets_the_name_then_renders_the_row(self):
         from dcim.models import Device
@@ -3473,7 +3472,7 @@ class TestDeviceConflictActionBranches:
         self._assert_success(response)
         reloaded = Device.objects.get(pk=target.pk)
         assert reloaded.name == "branches-sync-name-source"
-        assert reloaded.custom_field_data["librenms_id"] == {self.server_key: 42}
+        assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
 
     @pytest.mark.django_db(transaction=True)
     def test_sync_name_reports_a_real_database_name_collision(self):
@@ -3785,7 +3784,7 @@ class TestDeviceConflictActionBranches:
         self._assert_htmx_error(response, "Device not found after action")
         reloaded = Device.objects.get(pk=target.pk)
         assert reloaded.name == "branches-post-action-missing-source"
-        assert reloaded.custom_field_data["librenms_id"] == {self.server_key: 42}
+        assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
 
 
 @pytest.mark.django_db
@@ -4927,7 +4926,7 @@ class TestAddAsOOBViewPost:
         assert view_message_texts(request, "error") == ["You do not have permission to perform this action."]
         assert Device.objects.count() == device_count
         reloaded = Device.objects.get(pk=existing_device.pk)
-        assert reloaded.custom_field_data["librenms_id"][self.server_key] == {"id": 10}
+        assert stored_mapping_for_test(reloaded)[self.server_key] == {"id": 10}
 
     def test_invalid_existing_device_id_returns_htmx_error(self):
         """POST with a non-integer existing_device_id returns HTMX error — the failure is the int() conversion, which raises before any ORM lookup, so the manager is never hit."""
@@ -5082,7 +5081,7 @@ class TestAddAsOOBViewPost:
         # The real attach_oob + _save_device persisted under the active key: reload from
         # the DB and confirm the incoming controller id (17) landed in oob with the generic
         # sentinel type, while the host id (10) is preserved.
-        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"][self.server_key]
+        entry = stored_mapping_for_test(Device.objects.get(pk=existing_device.pk))[self.server_key]
         assert entry["id"] == 10
         assert entry["oob"] == {"id": 17, "type": "oob"}
 
@@ -5131,7 +5130,7 @@ class TestAddAsOOBViewPost:
         sync_reloaded = Device.objects.get(pk=sync_member.pk)
         sync_entry = read_mapping(sync_reloaded).server(self.server_key)
         assert (sync_entry.oob_id, sync_entry.oob_type) == (17, "oob")
-        assert sync_reloaded.custom_field_data["librenms_id"][self.server_key]["id"] == 10  # host id kept
+        assert stored_mapping_for_test(sync_reloaded)[self.server_key]["id"] == 10  # host id kept
         # The selected non-sync member got NO orphan OOB link written to it.
         assert not read_mapping(Device.objects.get(pk=selected_member.pk)).has_oob(self.server_key)
 
@@ -5156,7 +5155,7 @@ class TestAddAsOOBViewPost:
         def write_legacy_mapping():
             # This lands after the real unlocked validation and before the select_for_update
             # re-fetch. The unlocked in-memory instance still carries the dict form.
-            Device.objects.filter(pk=existing_device.pk).update(custom_field_data={"librenms_id": 42})
+            seed_stored_mapping_row(existing_device, 42)
 
         response = self._post_after_validation(view, request, 17, write_legacy_mapping)
 
@@ -5164,7 +5163,7 @@ class TestAddAsOOBViewPost:
         assert b"legacy" in response.content.lower()
         assert response["HX-Reswap"] == "none"
         # The universal-fallback id was NOT silently namespaced under one server.
-        assert Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"] == 42
+        assert stored_mapping_for_test(Device.objects.get(pk=existing_device.pk)) == 42
 
     def test_existing_different_oob_ip_kept_but_user_warned(self):
         """A different existing oob_ip is kept, but a deferred WARNING tells the user it was not changed."""
@@ -5202,7 +5201,7 @@ class TestAddAsOOBViewPost:
 
         assert response.status_code == 200
         # The OOB link still committed (the attach itself succeeds)…
-        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"][self.server_key]
+        entry = stored_mapping_for_test(Device.objects.get(pk=existing_device.pk))[self.server_key]
         assert entry["oob"] == {"id": 17, "type": "oob"}
         # …the existing oob_ip was NOT overwritten…
         assert Device.objects.get(pk=existing_device.pk).oob_ip_id == existing_ip.pk
@@ -5286,7 +5285,7 @@ class TestAddAsOOBViewPost:
         response = post_view(view, request, device_id=17)
 
         assert response.status_code == 200
-        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"][self.server_key]
+        entry = stored_mapping_for_test(Device.objects.get(pk=existing_device.pk))[self.server_key]
         assert entry["oob"] == {"id": 17, "type": "oob"}
         assert Device.objects.get(pk=existing_device.pk).oob_ip_id is None
         broadcast.refresh_from_db()
@@ -5321,9 +5320,7 @@ class TestAddAsOOBViewPost:
         )
 
         def claim_incoming_id():
-            Device.objects.filter(pk=conflicting_device.pk).update(
-                custom_field_data={"librenms_id": {self.server_key: {"id": 17}}}
-            )
+            seed_stored_mapping_row(conflicting_device, {self.server_key: {"id": 17}})
 
         response = self._post_after_validation(view, request, 17, claim_incoming_id)
 
@@ -5333,9 +5330,9 @@ class TestAddAsOOBViewPost:
         assert b"already assigned to device &#x27;&lt;script&gt;the-idrac&lt;/script&gt;&#x27;" in response.content
         assert b"&amp;lt;script&amp;gt;" not in response.content
         # Nothing attached: the host device's entry gained no oob sub-block.
-        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"][self.server_key]
+        entry = stored_mapping_for_test(Device.objects.get(pk=existing_device.pk))[self.server_key]
         assert entry == {"id": 10}
-        conflict_entry = Device.objects.get(pk=conflicting_device.pk).custom_field_data["librenms_id"][self.server_key]
+        conflict_entry = stored_mapping_for_test(Device.objects.get(pk=conflicting_device.pk))[self.server_key]
         assert conflict_entry == {"id": 17}
 
     def test_aborts_when_librenms_id_is_owned_by_a_vm(self):
@@ -5363,16 +5360,14 @@ class TestAddAsOOBViewPost:
         )
 
         def claim_incoming_id():
-            type(conflicting_vm).objects.filter(pk=conflicting_vm.pk).update(
-                custom_field_data={"librenms_id": {self.server_key: {"id": 17}}}
-            )
+            seed_stored_mapping_row(conflicting_vm, {self.server_key: {"id": 17}})
 
         response = self._post_after_validation(view, request, 17, claim_incoming_id)
 
         assert response.status_code == 200
         assert response["HX-Reswap"] == "none"
         assert b"already assigned to VM" in response.content
-        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"][self.server_key]
+        entry = stored_mapping_for_test(Device.objects.get(pk=existing_device.pk))[self.server_key]
         assert entry == {"id": 10}
 
     def test_aborts_when_incoming_id_is_own_host_id(self):
@@ -5394,9 +5389,7 @@ class TestAddAsOOBViewPost:
         )
 
         def relink_host_to_incoming_id():
-            Device.objects.filter(pk=existing_device.pk).update(
-                custom_field_data={"librenms_id": {self.server_key: {"id": 17}}}
-            )
+            seed_stored_mapping_row(existing_device, {self.server_key: {"id": 17}})
 
         response = self._post_after_validation(view, request, 17, relink_host_to_incoming_id)
 
@@ -5404,7 +5397,7 @@ class TestAddAsOOBViewPost:
         assert response["HX-Reswap"] == "none"
         assert b"this device&#x27;s host link" in response.content
         # No oob sub-block was written, and the host id is untouched.
-        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"][self.server_key]
+        entry = stored_mapping_for_test(Device.objects.get(pk=existing_device.pk))[self.server_key]
         assert entry == {"id": 17}
 
     def test_aborts_when_locked_oob_type_changed_concurrently(self):
@@ -5426,9 +5419,7 @@ class TestAddAsOOBViewPost:
         )
 
         def change_oob_type():
-            Device.objects.filter(pk=existing_device.pk).update(
-                custom_field_data={"librenms_id": {self.server_key: {"id": 10, "oob": {"id": 17, "type": "ilo"}}}}
-            )
+            seed_stored_mapping_row(existing_device, {self.server_key: {"id": 10, "oob": {"id": 17, "type": "ilo"}}})
 
         response = self._post_after_validation(view, request, 17, change_oob_type)
 
@@ -5436,7 +5427,7 @@ class TestAddAsOOBViewPost:
         assert response["HX-Reswap"] == "none"
         assert b"modified concurrently" in response.content
         # The stored type is preserved (not overwritten with the stale modal's "oob").
-        oob = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"][self.server_key]["oob"]
+        oob = stored_mapping_for_test(Device.objects.get(pk=existing_device.pk))[self.server_key]["oob"]
         assert oob == {"id": 17, "type": "ilo"}
 
 
@@ -5556,7 +5547,7 @@ class TestPromoteToHostViewPost:
         assert view_message_texts(request, "error") == ["You do not have permission to perform this action."]
         assert Device.objects.count() == device_count
         reloaded = Device.objects.get(pk=existing_device.pk)
-        assert reloaded.custom_field_data["librenms_id"][self.server_key] == {"id": 10}
+        assert stored_mapping_for_test(reloaded)[self.server_key] == {"id": 10}
 
     def test_no_promote_candidate_returns_htmx_error(self):
         """When validation has no promote_to_host, the endpoint reports promotion N/A."""
@@ -5642,9 +5633,7 @@ class TestPromoteToHostViewPost:
         )
 
         def claim_incoming_id():
-            Device.objects.filter(pk=conflicting_device.pk).update(
-                custom_field_data={"librenms_id": {self.server_key: {"id": 17}}}
-            )
+            seed_stored_mapping_row(conflicting_device, {self.server_key: {"id": 17}})
 
         response = self._post_after_validation(view, request, 17, claim_incoming_id)
 
@@ -5654,9 +5643,9 @@ class TestPromoteToHostViewPost:
         assert b"&amp;lt;script&amp;gt;" not in response.content
         # The source device must be left unchanged (still host id 10, no OOB).
         existing_device.refresh_from_db()
-        assert existing_device.custom_field_data["librenms_id"][self.server_key] == {"id": 10}
+        assert stored_mapping_for_test(existing_device)[self.server_key] == {"id": 10}
         conflicting_device.refresh_from_db()
-        assert conflicting_device.custom_field_data["librenms_id"][self.server_key] == {"id": 17}
+        assert stored_mapping_for_test(conflicting_device)[self.server_key] == {"id": 17}
 
     def test_promote_rejected_when_a_vm_claimed_the_host_id_after_validation(self):
         """A VM claim created after validation must block the Device promotion."""
@@ -5676,9 +5665,7 @@ class TestPromoteToHostViewPost:
         )
 
         def claim_incoming_id():
-            type(conflicting_vm).objects.filter(pk=conflicting_vm.pk).update(
-                custom_field_data={"librenms_id": {self.server_key: {"id": 17}}}
-            )
+            seed_stored_mapping_row(conflicting_vm, {self.server_key: {"id": 17}})
 
         response = self._post_after_validation(view, request, 17, claim_incoming_id)
 
@@ -5686,7 +5673,7 @@ class TestPromoteToHostViewPost:
         assert response["HX-Reswap"] == "none"
         assert b"already assigned to VM" in response.content
         existing_device.refresh_from_db()
-        assert existing_device.custom_field_data["librenms_id"][self.server_key] == {"id": 10}
+        assert stored_mapping_for_test(existing_device)[self.server_key] == {"id": 10}
 
     def test_happy_path_generic_oob_sentinel_promotes_and_demotes_link(self):
         """End-to-end VIEW-level regression for issue #89: POST to PromoteToHostView with the generic 'oob' sentinel as the existing controller type."""
@@ -5717,7 +5704,7 @@ class TestPromoteToHostViewPost:
 
         # Reload from the DB: host id swapped to 17, previous link (10) demoted to the OOB
         # slot with the generic sentinel type.
-        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"][self.server_key]
+        entry = stored_mapping_for_test(Device.objects.get(pk=existing_device.pk))[self.server_key]
         assert entry["id"] == 17
         assert entry["oob"] == {"id": 10, "type": "oob"}
 
@@ -5759,7 +5746,7 @@ class TestPromoteToHostViewPost:
         assert b"update the platform first" in response.content
         reloaded = Device.objects.get(pk=existing_device.pk)
         assert reloaded.platform_id is None  # the bad override was never persisted
-        assert reloaded.custom_field_data["librenms_id"][self.server_key] == {"id": 10}  # host swap not committed
+        assert stored_mapping_for_test(reloaded)[self.server_key] == {"id": 10}  # host swap not committed
 
     def test_aborts_when_incoming_host_id_owned_by_another_device(self):
         """The incoming host id must not already belong to another NetBox device."""
@@ -5782,9 +5769,7 @@ class TestPromoteToHostViewPost:
         )
 
         def claim_incoming_id():
-            Device.objects.filter(pk=conflicting_device.pk).update(
-                custom_field_data={"librenms_id": {self.server_key: {"id": 17}}}
-            )
+            seed_stored_mapping_row(conflicting_device, {self.server_key: {"id": 17}})
 
         response = self._post_after_validation(view, request, 17, claim_incoming_id)
 
@@ -5792,9 +5777,9 @@ class TestPromoteToHostViewPost:
         assert response["HX-Reswap"] == "none"
         assert b"already assigned to device &#x27;promote-thief&#x27;" in response.content
         # Nothing committed: the host slot is unchanged and no OOB slot was written.
-        entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"][self.server_key]
+        entry = stored_mapping_for_test(Device.objects.get(pk=existing_device.pk))[self.server_key]
         assert entry == {"id": 10}
-        conflict_entry = Device.objects.get(pk=conflicting_device.pk).custom_field_data["librenms_id"][self.server_key]
+        conflict_entry = stored_mapping_for_test(Device.objects.get(pk=conflicting_device.pk))[self.server_key]
         assert conflict_entry == {"id": 17}
 
 
@@ -5976,7 +5961,7 @@ class TestMergeNetBoxDevicesViewOOBTransfer(_MergeViewHarness):
         winner.refresh_from_db()
         assert donor.oob_ip_id == oob_ip.pk
         assert winner.oob_ip_id is None
-        entry = donor.custom_field_data["librenms_id"][self.server_key]
+        entry = stored_mapping_for_test(donor)[self.server_key]
         assert entry == {"id": 10}
         assert "_migrated_to" not in entry
 
@@ -6053,7 +6038,7 @@ class TestMergeNetBoxDevicesViewVCSyncDevice(_MergeViewHarness):
 
     def _entry(self, device):
         device.refresh_from_db()
-        return (device.custom_field_data.get("librenms_id") or {}).get(self.server_key) or {}
+        return (stored_mapping_for_test(device) or {}).get(self.server_key) or {}
 
     def test_winner_is_non_sync_vc_member_link_lands_on_sync_device(self):
         """Winner is a non-sync VC member whose sync sibling already holds a host id; the donor's id must merge onto the sync sibling (into its OOB half) and NEVER onto the raw winner member — otherwise two members of one chassis hold ``librenms_id`` (split brain)."""
@@ -6157,7 +6142,7 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
 
         assert classify_conflict(caught.value)
         donor.refresh_from_db()
-        assert donor.custom_field_data["librenms_id"][self.server_key] == {"id": 10}
+        assert stored_mapping_for_test(donor)[self.server_key] == {"id": 10}
 
     def test_orphan_host_id_merge_fails_closed_and_leaves_donor_unmigrated(self):
         """A winner holding both host id + oob and a donor with a distinct host-id-only link fails closed."""
@@ -6179,7 +6164,7 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
         assert b"&amp;lt;script&amp;gt;" not in resp.content
         # Donor's link is preserved and it was NOT marked migrated (no orphaned LibreNMS host).
         donor.refresh_from_db()
-        entry = donor.custom_field_data["librenms_id"][self.server_key]
+        entry = stored_mapping_for_test(donor)[self.server_key]
         assert entry == {"id": 200}
         assert "_migrated_to" not in entry
 
@@ -6203,7 +6188,7 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
         assert resp["HX-Reswap"] == "none"
         assert b"Cannot merge" in resp.content
         donor.refresh_from_db()
-        entry = donor.custom_field_data["librenms_id"][self.server_key]
+        entry = stored_mapping_for_test(donor)[self.server_key]
         assert entry == {"id": 5, "oob": {"id": "abc"}}
         assert "_migrated_to" not in entry
 
@@ -6228,8 +6213,8 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
         assert b"integrity constraint" in resp.content
         donor.refresh_from_db()
         winner.refresh_from_db()
-        assert donor.custom_field_data["librenms_id"] == {self.server_key: {"id": 10}}
-        assert winner.custom_field_data["librenms_id"] == {self.server_key: {"id": 20}}
+        assert stored_mapping_for_test(donor) == {self.server_key: {"id": 10}}
+        assert stored_mapping_for_test(winner) == {self.server_key: {"id": 20}}
 
     def test_oob_transfer_valueerror_fails_closed_and_rolls_back(self, monkeypatch):
         """A ValueError from the oob_ip transfer (the TOCTOU race the lock guards) fails closed with rollback, not a 500."""
@@ -6263,7 +6248,7 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
         winner.refresh_from_db()
         assert donor.oob_ip_id == oob_ip.pk
         assert winner.oob_ip_id is None
-        entry = donor.custom_field_data["librenms_id"][self.server_key]
+        entry = stored_mapping_for_test(donor)[self.server_key]
         assert entry == {"id": 10}
         assert "_migrated_to" not in entry
 
@@ -6294,7 +6279,7 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
         winner.refresh_from_db()
         assert donor.oob_ip_id == oob_ip.pk
         assert winner.oob_ip_id is None
-        assert donor.custom_field_data["librenms_id"][self.server_key] == {"id": 10}
+        assert stored_mapping_for_test(donor)[self.server_key] == {"id": 10}
 
     def test_device_lock_database_error_fails_closed_without_leaking_backend_text(self, monkeypatch):
         """A DB failure while locking the merge pair returns a safe retry toast, not a 500."""
@@ -6316,8 +6301,8 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
         assert b"forced primary lock timeout" not in resp.content
         donor.refresh_from_db()
         winner.refresh_from_db()
-        assert donor.custom_field_data["librenms_id"][self.server_key] == {"id": 10}
-        assert winner.custom_field_data["librenms_id"][self.server_key] == {"id": 20}
+        assert stored_mapping_for_test(donor)[self.server_key] == {"id": 10}
+        assert stored_mapping_for_test(winner)[self.server_key] == {"id": 20}
 
 
 @pytest.mark.django_db
@@ -7111,16 +7096,19 @@ class TestBuildIdServerInfoRejectsNonPositiveIds:
         from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
 
         device = make_device("idsrv")
-        device.custom_field_data["librenms_id"] = {
-            "s_zero_int": 0,
-            "s_zero_str": "0",
-            "s_dict_zero": {"id": 0},
-            "s_neg": -5,
-            "s_bool": True,
-            "s_good": 42,
-            "s_good_dict": {"id": 7},
-        }
-        device.save()
+        seed_stored_mapping(
+            device,
+            {
+                "s_zero_int": 0,
+                "s_zero_str": "0",
+                "s_dict_zero": {"id": 0},
+                "s_neg": -5,
+                "s_bool": True,
+                "s_good": 42,
+                "s_good_dict": {"id": 7},
+            },
+            save=True,
+        )
 
         result = DeviceValidationDetailsView._build_id_server_info(device)
 
@@ -7132,11 +7120,14 @@ class TestBuildIdServerInfoRejectsNonPositiveIds:
         from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
 
         device = make_device("idsrv-oob")
-        device.custom_field_data["librenms_id"] = {
-            "host_srv": {"id": 10},
-            "oob_srv": {"oob": {"id": 99}},  # OOB-only link: no host "id"
-        }
-        device.save()
+        seed_stored_mapping(
+            device,
+            {
+                "host_srv": {"id": 10},
+                "oob_srv": {"oob": {"id": 99}},  # OOB-only link: no host "id"
+            },
+            save=True,
+        )
 
         result = DeviceValidationDetailsView._build_id_server_info(device)
 
@@ -7786,8 +7777,7 @@ class TestConflictActionsObjectScope:
 
         def claim_during_inventory_fetch(api, *args, **kwargs):
             result = get_inventory(api, *args, **kwargs)
-            conflict.custom_field_data = {"librenms_id": {"default": 4242}}
-            conflict.save(update_fields=["custom_field_data"])
+            seed_mapping(conflict, "default", own=4242)
             return result
 
         with patch.object(LibreNMSAPI, "get_device_inventory", claim_during_inventory_fetch):
@@ -7802,7 +7792,7 @@ class TestConflictActionsObjectScope:
             assert str(conflict.pk) not in body
             assert "already assigned to another object outside your view scope" in body
         target.refresh_from_db()
-        assert not target.custom_field_data.get("librenms_id")
+        assert not stored_mapping_for_test(target)
 
     def _post_add_as_oob(self, user, target, ip="", extra_post=None):
         """Drive OOB attachment through real HTTP validation and object permissions."""
@@ -7853,8 +7843,7 @@ class TestConflictActionsObjectScope:
 
         def claim_during_inventory_fetch(api, *args, **kwargs):
             result = get_inventory(api, *args, **kwargs)
-            conflict.custom_field_data = {"librenms_id": {"default": 4343}}
-            conflict.save(update_fields=["custom_field_data"])
+            seed_mapping(conflict, "default", own=4343)
             return result
 
         with patch.object(LibreNMSAPI, "get_device_inventory", claim_during_inventory_fetch):
@@ -7870,7 +7859,7 @@ class TestConflictActionsObjectScope:
             assert str(conflict.pk) not in body
             assert "already assigned to another object outside your view scope" in body
         target.refresh_from_db()
-        assert not target.custom_field_data.get("librenms_id")
+        assert not stored_mapping_for_test(target)
 
     def test_conflict_action_cannot_link_an_out_of_scope_device(self):
         """A pk-constrained change_device grant clears the model-level gate but must not link a device outside its scope."""
@@ -7883,7 +7872,7 @@ class TestConflictActionsObjectScope:
         response = self._post_conflict(user, out_of_scope)
 
         assert b"Existing device not found" in response.content
-        assert "librenms_id" not in Device.objects.get(pk=out_of_scope.pk).custom_field_data
+        assert stored_mapping_for_test(Device.objects.get(pk=out_of_scope.pk)) is None
 
     def test_conflict_action_still_links_the_in_scope_device(self):
         """The device the grant DOES cover resolves through the restricted lookup (no over-block)."""
@@ -7895,7 +7884,7 @@ class TestConflictActionsObjectScope:
         response = self._post_conflict(user, in_scope)
 
         assert b"Existing device not found" not in response.content
-        assert Device.objects.get(pk=in_scope.pk).custom_field_data["librenms_id"]["default"] == 4242
+        assert stored_mapping_for_test(Device.objects.get(pk=in_scope.pk))["default"] == 4242
 
     def test_add_as_oob_cannot_attach_to_an_out_of_scope_device(self):
         """AddAsOOB must object-scope its target too: a constrained grant cannot attach an OOB link elsewhere."""
@@ -7908,7 +7897,7 @@ class TestConflictActionsObjectScope:
         response = self._post_add_as_oob(user, out_of_scope)
 
         assert b"Existing device not found" in response.content
-        assert "librenms_id" not in Device.objects.get(pk=out_of_scope.pk).custom_field_data
+        assert stored_mapping_for_test(Device.objects.get(pk=out_of_scope.pk)) is None
 
     def test_add_as_oob_still_attaches_to_the_in_scope_device(self):
         """The in-scope device still resolves and receives the OOB link."""
@@ -7920,7 +7909,7 @@ class TestConflictActionsObjectScope:
         response = self._post_add_as_oob(user, in_scope)
 
         assert b"Existing device not found" not in response.content
-        stored = Device.objects.get(pk=in_scope.pk).custom_field_data["librenms_id"]["default"]
+        stored = stored_mapping_for_test(Device.objects.get(pk=in_scope.pk))["default"]
         assert stored["oob"]["id"] == 4343
 
     @pytest.mark.parametrize("ip", ["192.0.2.77", "2001:db8::77"])
@@ -7941,7 +7930,7 @@ class TestConflictActionsObjectScope:
         assert oob_ip.vrf is None
         assert oob_ip.assigned_object.name == "idrac"
         assert oob_ip.assigned_object.device_id == device.pk
-        assert device.custom_field_data["librenms_id"]["default"]["oob"]["id"] == 4343
+        assert stored_mapping_for_test(device)["default"]["oob"]["id"] == 4343
         texts = [str(m) for m in get_messages(self.last_request)]
         assert f"Set OOB IP {ip} on interface idrac." in texts
 
@@ -7954,7 +7943,7 @@ class TestConflictActionsObjectScope:
         response = self._post_conflict(make_superuser(), target)
 
         assert b"Existing device not found" not in response.content
-        assert Device.objects.get(pk=target.pk).custom_field_data["librenms_id"]["default"] == 4242
+        assert stored_mapping_for_test(Device.objects.get(pk=target.pk))["default"] == 4242
 
     @staticmethod
     def _vc_pair(name, *, sync_cf):
@@ -7982,9 +7971,9 @@ class TestConflictActionsObjectScope:
         response = self._post_add_as_oob(user, selected)
 
         assert b"Existing device not found" in response.content
-        sync_entry = Device.objects.get(pk=sync.pk).custom_field_data["librenms_id"]["default"]
+        sync_entry = stored_mapping_for_test(Device.objects.get(pk=sync.pk))["default"]
         assert sync_entry == {"id": 30}  # no OOB half written onto the unauthorized sibling
-        assert "librenms_id" not in Device.objects.get(pk=selected.pk).custom_field_data
+        assert stored_mapping_for_test(Device.objects.get(pk=selected.pk)) is None
 
     def test_add_as_oob_writes_the_vc_sync_device_when_it_is_in_scope(self):
         """Widening the grant to the sync sibling lets the same attach through (no over-block)."""
@@ -8005,7 +7994,7 @@ class TestConflictActionsObjectScope:
         response = self._post_add_as_oob(user, selected)
 
         assert b"Existing device not found" not in response.content
-        sync_entry = Device.objects.get(pk=sync.pk).custom_field_data["librenms_id"]["default"]
+        sync_entry = stored_mapping_for_test(Device.objects.get(pk=sync.pk))["default"]
         assert sync_entry["id"] == 30
         assert sync_entry["oob"]["id"] == 4343
 
@@ -8092,7 +8081,7 @@ class TestPromoteAndMergeObjectScope:
         response = self._post_promote(user, out_of_scope)
 
         assert b"Existing device not found" in response.content
-        entry = Device.objects.get(pk=out_of_scope.pk).custom_field_data["librenms_id"]["default"]
+        entry = stored_mapping_for_test(Device.objects.get(pk=out_of_scope.pk))["default"]
         assert entry["id"] == 10  # untouched: no host swap, no OOB demotion
         assert "oob" not in entry
 
@@ -8106,7 +8095,7 @@ class TestPromoteAndMergeObjectScope:
         response = self._post_promote(user, in_scope)
 
         assert b"Existing device not found" not in response.content
-        entry = Device.objects.get(pk=in_scope.pk).custom_field_data["librenms_id"]["default"]
+        entry = stored_mapping_for_test(Device.objects.get(pk=in_scope.pk))["default"]
         assert entry["id"] == 55
         assert entry["oob"]["id"] == 10
 
@@ -8123,7 +8112,7 @@ class TestPromoteAndMergeObjectScope:
             nonlocal concurrent_write_applied
             if not concurrent_write_applied and "FOR UPDATE" in sql and 'FROM "dcim_device"' in sql:
                 concurrent_write_applied = True
-                Device.objects.filter(pk=target.pk).update(custom_field_data={"librenms_id": 10})
+                seed_stored_mapping_row(target, 10)
             return execute(sql, params, many, context)
 
         with connection.execute_wrapper(concurrent_legacy_write):
@@ -8131,7 +8120,7 @@ class TestPromoteAndMergeObjectScope:
 
         assert concurrent_write_applied
         assert b"Convert mapping" in response.content
-        assert Device.objects.get(pk=target.pk).custom_field_data["librenms_id"] == 10
+        assert stored_mapping_for_test(Device.objects.get(pk=target.pk)) == 10
 
     def test_promote_rejects_an_unviewable_device_type_override(self):
         """A catalog ID outside the user's view scope cannot change the promoted device type."""
@@ -8180,8 +8169,8 @@ class TestPromoteAndMergeObjectScope:
         # The disclosure gate withdraws the whole suggestion when either candidate is out of
         # scope, so the refusal now happens before the winner/donor pks are resolved.
         assert b"does not match the validation result" in response.content
-        assert "_migrated_to" not in Device.objects.get(pk=donor.pk).custom_field_data["librenms_id"]["default"]
-        assert "oob" not in Device.objects.get(pk=winner.pk).custom_field_data["librenms_id"]["default"]
+        assert "_migrated_to" not in stored_mapping_for_test(Device.objects.get(pk=donor.pk))["default"]
+        assert "oob" not in stored_mapping_for_test(Device.objects.get(pk=winner.pk))["default"]
 
     def test_merge_succeeds_when_both_sides_are_in_scope(self):
         """A superuser (unrestricted queryset) still merges both candidates."""
@@ -8193,7 +8182,7 @@ class TestPromoteAndMergeObjectScope:
         response = self._post_merge(make_superuser(), winner, donor)
 
         assert b"Winner or donor device not found" not in response.content
-        donor_entry = Device.objects.get(pk=donor.pk).custom_field_data["librenms_id"]["default"]
+        donor_entry = stored_mapping_for_test(Device.objects.get(pk=donor.pk))["default"]
         assert donor_entry["_migrated_to"]["device_id"] == winner.pk
 
     def test_merge_cannot_write_an_out_of_scope_vc_sync_device(self):
@@ -8208,10 +8197,10 @@ class TestPromoteAndMergeObjectScope:
         response = self._post_merge(user, winner, m2)
 
         assert b"Winner or donor device not found" in response.content
-        sync_entry = Device.objects.get(pk=m1.pk).custom_field_data["librenms_id"]["default"]
+        sync_entry = stored_mapping_for_test(Device.objects.get(pk=m1.pk))["default"]
         assert sync_entry["id"] == 30  # link not cleared
         assert "_migrated_to" not in sync_entry  # not stamped
-        assert "oob" not in Device.objects.get(pk=winner.pk).custom_field_data["librenms_id"]["default"]
+        assert "oob" not in stored_mapping_for_test(Device.objects.get(pk=winner.pk))["default"]
 
     def test_merge_runs_when_the_vc_sync_device_is_also_in_scope(self):
         """Widening the grant to the sync sibling lets the same merge through (no over-block)."""
@@ -8224,7 +8213,7 @@ class TestPromoteAndMergeObjectScope:
         response = self._post_merge(user, winner, m2)
 
         assert b"Winner or donor device not found" not in response.content
-        sync_entry = Device.objects.get(pk=m1.pk).custom_field_data["librenms_id"]["default"]
+        sync_entry = stored_mapping_for_test(Device.objects.get(pk=m1.pk))["default"]
         assert "id" not in sync_entry
         assert sync_entry["_migrated_to"]["device_id"] == winner.pk
-        assert Device.objects.get(pk=winner.pk).custom_field_data["librenms_id"]["default"]["oob"]["id"] == 30
+        assert stored_mapping_for_test(Device.objects.get(pk=winner.pk))["default"]["oob"]["id"] == 30

@@ -21,6 +21,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_vm,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, post as view_post
 
 pytestmark = pytest.mark.django_db
@@ -41,12 +42,6 @@ def _request(payload, *, path="/verify/"):
 def _json(response):
     """Decode a direct JsonResponse call."""
     return json.loads(response.content)
-
-
-def _seed_librenms_id(obj, value, server_key="default"):
-    """Store one real per-server LibreNMS ID mapping."""
-    obj.custom_field_data["librenms_id"] = {server_key: value}
-    obj.save(update_fields=["custom_field_data"])
 
 
 def _post_ip(payload):
@@ -428,8 +423,8 @@ class TestCableVerifyEndpoint:
 
         server_key = SingleCableVerifyView()._render_server_key()
         assert server_key is not None
-        _seed_librenms_id(local_interface, 1010, server_key)
-        _seed_librenms_id(remote_interface, 1111, server_key)
+        seed_mapping(local_interface, server_key, own=1010)
+        seed_mapping(remote_interface, server_key, own=1111)
         cable = cable_together(local_interface, remote_interface)
         row = {
             "local_port": "stale-local-name",

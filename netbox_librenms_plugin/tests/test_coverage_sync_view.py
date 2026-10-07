@@ -14,6 +14,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
     make_vm,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 
@@ -145,8 +146,7 @@ class TestSyncPageRouting:
     ):
         _vc, members = make_virtual_chassis_members("sync-stale", count=2)
         viewed, mapped = members
-        mapped.custom_field_data["librenms_id"] = {SERVER_KEY: 6604}
-        mapped.save()
+        seed_mapping(mapped, SERVER_KEY, own=6604)
 
         response = logged_in_client.get(_sync_url(viewed), {"server_key": "retired"})
 
@@ -164,8 +164,7 @@ class TestSyncPageRouting:
     ):
         _vc, members = make_virtual_chassis_members("sync-vc-delegate", count=2)
         linked, viewed = members
-        linked.custom_field_data["librenms_id"] = {SERVER_KEY: 6605}
-        linked.save()
+        seed_mapping(linked, SERVER_KEY, own=6605)
         _register_device(librenms_server, 6605, linked.name)
 
         response = logged_in_client.get(_sync_url(viewed))
@@ -185,10 +184,8 @@ class TestSyncPageRouting:
     ):
         _vc, members = make_virtual_chassis_members(f"sync-vc-notice-{delegation_shown}", count=2)
         linked, viewed = members
-        linked.custom_field_data["librenms_id"] = {SERVER_KEY: 6609}
-        linked.save()
-        viewed.custom_field_data["librenms_id"] = viewed_mapping
-        viewed.save()
+        seed_mapping(linked, SERVER_KEY, own=6609)
+        seed_stored_mapping(viewed, viewed_mapping, save=True)
         _register_device(librenms_server, 6609, linked.name)
 
         response = logged_in_client.get(_sync_url(viewed))
@@ -202,8 +199,7 @@ class TestSyncPageRouting:
     def test_vc_member_with_own_mapping_remains_the_lookup_device(self, logged_in_client, librenms_server):
         _vc, members = make_virtual_chassis_members("sync-vc-own", count=2)
         viewed = members[1]
-        viewed.custom_field_data["librenms_id"] = {SERVER_KEY: 6606}
-        viewed.save()
+        seed_mapping(viewed, SERVER_KEY, own=6606)
         _register_device(librenms_server, 6606, viewed.name)
 
         response = logged_in_client.get(_sync_url(viewed))
@@ -214,7 +210,7 @@ class TestSyncPageRouting:
     def test_vc_context_reports_the_linked_members_primary_ip(self, logged_in_client, librenms_server):
         _vc, members = make_virtual_chassis_members("sync-vc-ip", count=2)
         linked, viewed = members
-        linked.custom_field_data["librenms_id"] = {SERVER_KEY: 6607}
+        seed_mapping(linked, SERVER_KEY, own=6607, save=False)
         interface = make_interface(linked, "management")
         primary_ip = make_ip("198.18.50.7/32", assigned_object=interface)
         linked.primary_ip4 = primary_ip
@@ -228,8 +224,7 @@ class TestSyncPageRouting:
 
     def test_vm_page_uses_the_vm_mapping_and_vm_tabs(self, logged_in_client, librenms_server):
         vm = make_vm("sync-page-vm")
-        vm.custom_field_data["librenms_id"] = {SERVER_KEY: 6608}
-        vm.save()
+        seed_mapping(vm, SERVER_KEY, own=6608)
         _register_device(librenms_server, 6608, vm.name)
 
         response = logged_in_client.get(_sync_url(vm))
@@ -279,8 +274,7 @@ class TestServerMappingContext:
     @pytest.mark.parametrize("value", [None, 42, "42", [], True, {}])
     def test_non_scoped_or_empty_values_have_no_mapping_list(self, librenms_server, value):
         device = make_device(f"mapping-none-{type(value).__name__}")
-        device.custom_field_data["librenms_id"] = value
-        device.save()
+        seed_stored_mapping(device, value, save=True)
 
         assert self._mappings(device) is None
 
@@ -549,8 +543,7 @@ class TestVirtualChassisInventory:
     def test_the_serials_form_submits_the_active_server_and_tab(self, logged_in_client, librenms_server):
         """AssignVCSerialView can only preserve the context the rendered form posts."""
         _vc, members = make_virtual_chassis_members("inventory-form-context", count=2)
-        members[0].custom_field_data["librenms_id"] = {SERVER_KEY: 6643}
-        members[0].save()
+        seed_mapping(members[0], SERVER_KEY, own=6643)
         _register_device(
             librenms_server,
             6643,

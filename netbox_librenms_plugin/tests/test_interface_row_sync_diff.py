@@ -11,6 +11,7 @@ from dcim.models import Interface
 
 from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, stamp_rule_decision
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
 
 SERVER_KEY = "default"
 
@@ -224,8 +225,7 @@ class TestTheDiffMatchesTheWriter:
 
     def test_an_interface_with_no_stored_id_differs_on_librenms_id(self):
         _device, interface = _synced_interface("diff-no-id")
-        interface.custom_field_data["librenms_id"] = None
-        interface.save()
+        seed_stored_mapping(interface, None, save=True)
 
         assert _state(_row(interface)).differing_fields == ("librenms_id",)
 

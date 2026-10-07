@@ -29,7 +29,6 @@ from netbox_librenms_plugin.sync_cache import (
 )
 from netbox_librenms_plugin.tests.conftest import (
     _PORT_KEYS_UNSET,
-    apply_mapping_change,
     configure_librenms_servers,
     configure_no_librenms_servers,
     ip_on,
@@ -42,6 +41,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     seed_own_mapping,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change, seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
 from netbox_librenms_plugin.server_mappings import mark_migrated
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
@@ -538,10 +538,8 @@ def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapsh
     settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["primary"]["cache_timeout"] = 60
     settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["secondary"]["cache_timeout"] = 600
     _chassis, (page_device, secondary_owner, sibling) = make_virtual_chassis_members("cache-scope", count=3)
-    page_device.custom_field_data["librenms_id"] = {"primary": {"id": 41}}
-    page_device.save(update_fields=["custom_field_data"])
-    secondary_owner.custom_field_data["librenms_id"] = {"secondary": {"id": 42}}
-    secondary_owner.save(update_fields=["custom_field_data"])
+    seed_stored_mapping(page_device, {"primary": {"id": 41}}, save=True)
+    seed_stored_mapping(secondary_owner, {"secondary": {"id": 42}}, save=True)
 
     source_payload = {
         "ports": [
@@ -658,8 +656,7 @@ def test_a_sibling_refresh_clears_the_shared_tab_block_on_every_member(
     """A shared-tab refresh on one VC member must unblock that tab on its siblings."""
     _configure_servers(settings)
     _chassis, (owner, sibling) = make_virtual_chassis_members("cache-shared-state")
-    owner.custom_field_data["librenms_id"] = {"primary": {"id": 61}}
-    owner.save(update_fields=["custom_field_data"])
+    seed_stored_mapping(owner, {"primary": {"id": 61}}, save=True)
     remote_device = make_device("cache-shared-state-remote", librenms_cf={"primary": {"id": 62}})
     local = make_interface(sibling, "Ethernet1", iface_type="1000base-t")
     remote = make_interface(remote_device, "Ethernet2", iface_type="1000base-t")
@@ -748,8 +745,7 @@ def test_fully_skipped_interface_request_preserves_all_snapshots(client, setting
     """A request that writes nothing must not invalidate another tab."""
     _configure_servers(settings)
     _chassis, (device, _sibling) = make_virtual_chassis_members("cache-noop", count=2)
-    device.custom_field_data["librenms_id"] = {"primary": {"id": 51}}
-    device.save(update_fields=["custom_field_data"])
+    seed_stored_mapping(device, {"primary": {"id": 51}}, save=True)
     source_payload = {"ports": [], "port_stack_relationships": {}}
     ip_payload = {"ip_addresses": [{"ip_with_mask": "198.18.20.10/24"}]}
     _seed_snapshot("ports", device, "primary", source_payload)
@@ -784,8 +780,7 @@ def test_selected_interface_that_already_matches_preserves_other_snapshots(
     _configure_servers(settings)
     device = make_device("cache-interface-unchanged", librenms_cf={"primary": {"id": 52}})
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
-    interface.custom_field_data["librenms_id"] = {"primary": 7002}
-    interface.save(update_fields=["custom_field_data"])
+    seed_mapping(interface, "primary", own=7002)
     source_payload = {
         "ports": [{"port_id": 7002, "ifName": interface.name}],
         "port_stack_relationships": {},
@@ -827,8 +822,7 @@ def test_ip_sync_invalidates_other_tabs_after_creating_an_address(
     settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["primary"]["cache_timeout"] = 60
     device = make_device("cache-ip-writer", librenms_cf={"primary": {"id": 61}})
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
-    interface.custom_field_data["librenms_id"] = {"primary": 7101}
-    interface.save(update_fields=["custom_field_data"])
+    seed_mapping(interface, "primary", own=7101)
     address = "198.18.61.10/24"
     ip_payload = {
         "ip_addresses": [
@@ -2849,11 +2843,9 @@ def test_cache_mutation_resolves_the_shared_owner_once_per_server(
     """The post-commit cleanup must not re-resolve the chassis owner for every tab."""
     _configure_servers(settings)
     _chassis, (page_device, _sibling) = make_virtual_chassis_members("cache-owner-resolution", count=2)
-    page_device.custom_field_data["librenms_id"] = {"primary": {"id": 61}}
-    page_device.save(update_fields=["custom_field_data"])
+    seed_stored_mapping(page_device, {"primary": {"id": 61}}, save=True)
     interface = make_interface(page_device, "Ethernet1", iface_type="1000base-t")
-    interface.custom_field_data["librenms_id"] = {"primary": 7101}
-    interface.save(update_fields=["custom_field_data"])
+    seed_mapping(interface, "primary", own=7101)
     source_payload = {
         # ifAlias: only a real field change makes the sync a mutation, and only a mutation
         # reaches the post-commit cleanup this test counts.

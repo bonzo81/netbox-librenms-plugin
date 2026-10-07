@@ -1244,7 +1244,7 @@ class TestPostInventoryRefresh:
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
         from netbox_librenms_plugin.server_mappings import mark_migrated
-        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         active_key, _ = server_keys
@@ -1453,7 +1453,7 @@ class TestPostInventoryRefresh:
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
         from netbox_librenms_plugin.server_mappings import attach_oob
-        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         server_key, _ = server_keys
@@ -1491,7 +1491,7 @@ class TestPostInventoryRefresh:
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
         from netbox_librenms_plugin.server_mappings import attach_oob
-        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         server_key, _ = server_keys
@@ -1522,6 +1522,7 @@ class TestPostInventoryRefresh:
         """A linked OOB controller whose stored id is Boolean or non-numeric must fail closed like the interfaces and cables tabs. Do not fetch the garbage id or cache a host-only snapshot. Warn the user instead. A falsy check would conflate this state with no OOB link and silently drop the controller rows until TTL."""
         from django.core.cache import cache
 
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping, stored_mapping_for_test
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
@@ -1530,11 +1531,11 @@ class TestPostInventoryRefresh:
         view = DeviceModuleTableView()
         cache_key, stale_payload = _seed_snapshot(view, device, server_key)
         # The custom field is user-editable through the NetBox UI and API, so a corrupt value is real state.
-        device.custom_field_data["librenms_id"][server_key] = {
-            "id": 777,
-            "oob": {"id": "not-a-number", "type": "oob"},
-        }
-        device.save(update_fields=["custom_field_data"])
+        seed_stored_mapping(
+            device,
+            {**stored_mapping_for_test(device), server_key: {"id": 777, "oob": {"id": "not-a-number", "type": "oob"}}},
+            save=True,
+        )
         cache.set(cache_key, stale_payload)
         self._register_successful_refresh(librenms_server)
         corrupt_oob_requests = []
@@ -1626,7 +1627,7 @@ class TestPostInventoryRefresh:
         from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
         from netbox_librenms_plugin.server_mappings import attach_oob
-        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         server_key, _ = server_keys
@@ -1673,7 +1674,7 @@ class TestPostInventoryRefresh:
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
         from netbox_librenms_plugin.server_mappings import attach_oob
-        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         server_key, _ = server_keys
@@ -1714,7 +1715,11 @@ class TestPostInventoryRefresh:
             trusted_module_inventory_payload,
         )
         from netbox_librenms_plugin.server_mappings import attach_oob
-        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
+        from netbox_librenms_plugin.tests.mapping_fixtures import (
+            apply_mapping_change,
+            seed_stored_mapping,
+            stored_mapping_for_test,
+        )
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         server_key, _ = server_keys
@@ -1727,8 +1732,9 @@ class TestPostInventoryRefresh:
         cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
         cache.set(cache_key, payload)
         # The custom field is user-editable, and the UI or API can store the numeric id as a string.
-        device.custom_field_data["librenms_id"][server_key]["oob"]["id"] = "5"
-        device.save(update_fields=["custom_field_data"])
+        stored = stored_mapping_for_test(device)
+        stored[server_key]["oob"]["id"] = "5"
+        seed_stored_mapping(device, stored, save=True)
         cache.set(cache_key, payload)
         request = make_request("get", {"server_key": server_key})
 
@@ -6176,7 +6182,7 @@ class TestGetContextDataOOBCacheFingerprint:
 
         from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
         from netbox_librenms_plugin.server_mappings import attach_oob
-        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         server_key, _ = server_keys
@@ -6240,6 +6246,7 @@ class TestGetContextDataOOBCacheFingerprint:
         """Verify a string main device ID matches the equivalent cached integer ID."""
         from django.core.cache import cache
 
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping, stored_mapping_for_test
         from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
@@ -6247,8 +6254,7 @@ class TestGetContextDataOOBCacheFingerprint:
         device = _mapped_device("module-cache-string-main-id", server_key)
         view = DeviceModuleTableView()
         cache_key, payload = _seed_snapshot(view, device, server_key)
-        device.custom_field_data["librenms_id"][server_key] = "777"
-        device.save(update_fields=["custom_field_data"])
+        seed_stored_mapping(device, {**stored_mapping_for_test(device), server_key: "777"}, save=True)
         cache.set(cache_key, payload)
         request = make_request("get", {"server_key": server_key})
 
@@ -6262,6 +6268,7 @@ class TestGetContextDataOOBCacheFingerprint:
         """Verify a corrupt linked OOB ID invalidates the cache instead of matching a missing OOB link."""
         from django.core.cache import cache
 
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping, stored_mapping_for_test
         from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
@@ -6270,11 +6277,11 @@ class TestGetContextDataOOBCacheFingerprint:
         view = DeviceModuleTableView()
         cache_key, stale_payload = _seed_snapshot(view, device, server_key)
         # The custom field is user-editable through the NetBox UI and API, so a corrupt value is real state.
-        device.custom_field_data["librenms_id"][server_key] = {
-            "id": 777,
-            "oob": {"id": "garbage", "type": "oob"},
-        }
-        device.save(update_fields=["custom_field_data"])
+        seed_stored_mapping(
+            device,
+            {**stored_mapping_for_test(device), server_key: {"id": 777, "oob": {"id": "garbage", "type": "oob"}}},
+            save=True,
+        )
         cache.set(cache_key, stale_payload)
         request = make_request("get", {"server_key": server_key})
 
@@ -6289,7 +6296,7 @@ class TestGetContextDataOOBCacheFingerprint:
 
         from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
         from netbox_librenms_plugin.server_mappings import attach_oob
-        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         server_key, _ = server_keys
@@ -6349,6 +6356,7 @@ class TestInterfacePortIdActiveServerScope:
     def test_reads_port_id_under_active_server_not_default_client(self):
         """With _active_server_key set, the port holders are read for THAT server."""
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
         from netbox_librenms_plugin.tests.view_test_helpers import make_request
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
@@ -6356,8 +6364,8 @@ class TestInterfacePortIdActiveServerScope:
         iface = make_interface(device, "Gi0/1")
         bound_key = self._real_configured_api().server_key
         assert bound_key != "server2", "the alternate key must differ from the bound client key"
-        iface.custom_field_data["librenms_id"] = {bound_key: 111, "server2": 222}
-        iface.save()
+        seed_mapping(iface, bound_key, own=111, save=False)
+        seed_mapping(iface, "server2", own=222)
 
         view = object.__new__(BaseModuleTableView)
         view._librenms_api = self._real_configured_api()
@@ -6372,11 +6380,12 @@ class TestInterfacePortIdActiveServerScope:
     def test_get_stored_librenms_id_honors_explicit_server_key(self):
         """LibreNMSAPI.get_stored_librenms_id(obj, server_key=...) reads that server's dict entry."""
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
         device = make_device("mod-verify-scope-api")
         iface = make_interface(device, "Gi0/2")
-        iface.custom_field_data["librenms_id"] = {self._real_configured_api().server_key: 111, "server2": 222}
-        iface.save()
+        seed_mapping(iface, self._real_configured_api().server_key, own=111, save=False)
+        seed_mapping(iface, "server2", own=222)
 
         api = self._real_configured_api()
         assert api.get_stored_librenms_id(iface) == 111  # bound client key
@@ -6506,6 +6515,7 @@ def test_a_name_match_bound_to_another_port_is_not_shown(client, settings, ifnam
     from django.urls import reverse
 
     from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
     from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
     from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
@@ -6517,8 +6527,7 @@ def test_a_name_match_bound_to_another_port_is_not_shown(client, settings, ifnam
     for name, binding in (("Ethernet1/1", ifname_binding), ("Uplink1", ifdescr_binding)):
         interfaces[name] = make_interface(device, name)
         if binding is not None:
-            interfaces[name].custom_field_data["librenms_id"] = binding
-            interfaces[name].save(update_fields=["custom_field_data"])
+            seed_stored_mapping(interfaces[name], binding, save=True)
     item = {
         "entPhysicalIndex": 82,
         "entPhysicalClass": "module",
