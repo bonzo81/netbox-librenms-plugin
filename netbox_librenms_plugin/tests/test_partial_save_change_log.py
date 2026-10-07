@@ -28,6 +28,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import mapping_from_change_record, stored_mapping_for_test
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, trusted_module_inventory_payload
 from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
 from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
@@ -180,8 +181,8 @@ def test_binding_a_port_to_a_module_interface_records_the_module_and_the_port(cl
     assert interface.module_id == module.pk
     assert interface.last_updated > before
     change = _update(interface)
-    assert (change.prechange_data["module"], change.prechange_data["custom_fields"].get("librenms_id")) == (None, None)
-    assert (change.postchange_data["module"], change.postchange_data["custom_fields"].get("librenms_id")) == (
+    assert (change.prechange_data["module"], mapping_from_change_record(change, before=True)) == (None, None)
+    assert (change.postchange_data["module"], mapping_from_change_record(change, before=False)) == (
         module.pk,
         {SERVER_KEY: 8801},
     )
@@ -332,8 +333,8 @@ def test_a_mapping_change_saves_with_the_other_columns_in_one_record():
         "partial-save-mapping",
         "partial-save-mapping-linked",
     )
-    assert change.prechange_data["custom_fields"]["librenms_id"] == {"other": 7301}
-    assert change.postchange_data["custom_fields"]["librenms_id"] == {
+    assert mapping_from_change_record(change, before=True) == {"other": 7301}
+    assert mapping_from_change_record(change, before=False) == {
         "other": 7301,
         SERVER_KEY: 7302,
         "_preferred_server": "other",
@@ -401,10 +402,9 @@ def test_a_merge_saves_each_side_once_and_a_refusal_rolls_the_group_back():
     with _change_logging("partial-save-merge-user"), transaction.atomic():
         merge = merge_links(winner, donor, SERVER_KEY)
         persist_merge(merge, write=save_both)
-    assert _update(donor).postchange_data["custom_fields"]["librenms_id"][SERVER_KEY]["_migrated_to"]["device_id"] == (
-        winner.pk
-    )
-    assert _update(winner).postchange_data["custom_fields"]["librenms_id"] == {
+    donor_mapping = mapping_from_change_record(_update(donor), before=False)
+    assert donor_mapping[SERVER_KEY]["_migrated_to"]["device_id"] == winner.pk
+    assert mapping_from_change_record(_update(winner), before=False) == {
         SERVER_KEY: {"id": 7304, "oob": {"id": 7305, "type": "oob"}}
     }
 
@@ -419,7 +419,7 @@ def test_reading_a_string_librenms_id_saves_nothing_and_records_no_change():
     assert _stored_last_updated(device) == before
     assert _changes(device, "update") == []
     device.refresh_from_db()
-    assert device.custom_field_data["librenms_id"] == {SERVER_KEY: "42"}
+    assert stored_mapping_for_test(device) == {SERVER_KEY: "42"}
 
 
 def test_a_primary_ip_set_on_its_own_records_the_previous_address():
