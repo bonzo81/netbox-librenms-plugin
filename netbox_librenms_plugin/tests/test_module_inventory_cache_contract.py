@@ -284,7 +284,7 @@ class TestTrustedPayloadMatchesTheDeviceMapping:
 
         device = make_device(f"trusted-payload-{case}", librenms_cf=librenms_cf)
 
-        with pytest.raises(AssertionError, match="declined the write"):
+        with pytest.raises(ValueError, match="skipped the seed"):
             trusted_module_inventory_payload(device, [], librenms_id=librenms_id)
 
     def test_a_written_mapping_still_returns_the_payload(self):

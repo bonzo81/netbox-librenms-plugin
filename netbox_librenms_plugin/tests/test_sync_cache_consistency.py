@@ -39,7 +39,6 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis_members,
     make_vm,
-    seed_own_mapping,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change, seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
@@ -296,8 +295,7 @@ def test_virtual_machine_unsupported_cache_fragment_returns_404(client, settings
     """A valid tab name that is unsupported for VMs must fail closed without a key error."""
     _configure_servers(settings)
     vm = make_vm("cache-unsupported-fragment")
-    seed_own_mapping(vm, 6402, "primary")
-    vm.save(update_fields=["custom_field_data"])
+    seed_mapping(vm, "primary", own=6402)
     client.force_login(make_superuser("cache-unsupported-fragment-user"))
     url = reverse(
         "plugins:netbox_librenms_plugin:sync_cache_fragment",
@@ -317,8 +315,8 @@ def test_cable_cache_fragment_does_not_rewrite_the_snapshot(client, settings, pr
     local = make_interface(local_device, "Ethernet1")
     remote_device = make_device("cache-only-cable-remote", librenms_cf={"primary": {"id": 6404}})
     remote = make_interface(remote_device, "Ethernet2")
-    seed_own_mapping(local, 7403, "primary")
-    seed_own_mapping(remote, 7404, "primary")
+    seed_mapping(local, "primary", own=7403, save=False)
+    seed_mapping(remote, "primary", own=7404, save=False)
     local.save(update_fields=["custom_field_data"])
     remote.save(update_fields=["custom_field_data"])
     payload = {
@@ -660,8 +658,8 @@ def test_a_sibling_refresh_clears_the_shared_tab_block_on_every_member(
     remote_device = make_device("cache-shared-state-remote", librenms_cf={"primary": {"id": 62}})
     local = make_interface(sibling, "Ethernet1", iface_type="1000base-t")
     remote = make_interface(remote_device, "Ethernet2", iface_type="1000base-t")
-    seed_own_mapping(local, 7481, "primary")
-    seed_own_mapping(remote, 7482, "primary")
+    seed_mapping(local, "primary", own=7481, save=False)
+    seed_mapping(remote, "primary", own=7482, save=False)
     local.save(update_fields=["custom_field_data"])
     remote.save(update_fields=["custom_field_data"])
 
@@ -865,11 +863,9 @@ def test_partial_ip_commit_invalidates_other_tabs_before_conflict_confirmation(
     _configure_servers(settings)
     device = make_device("cache-ip-partial-conflict", librenms_cf={"primary": {"id": 612}})
     conflict_target = make_interface(device, "Ethernet1", iface_type="1000base-t")
-    seed_own_mapping(conflict_target, 7121, "primary")
-    conflict_target.save(update_fields=["custom_field_data"])
+    seed_mapping(conflict_target, "primary", own=7121)
     safe_target = make_interface(device, "Ethernet2", iface_type="1000base-t")
-    seed_own_mapping(safe_target, 7122, "primary")
-    safe_target.save(update_fields=["custom_field_data"])
+    seed_mapping(safe_target, "primary", own=7122)
     current = make_interface(device, "Ethernet3", iface_type="1000base-t")
     conflict_address = "198.18.62.10/24"
     safe_address = "198.18.62.11/24"
@@ -936,8 +932,8 @@ def test_htmx_mutation_does_not_repeat_cache_notice_on_next_navigation(client, s
     device = make_device("cache-parent-immediate-notice", librenms_cf={"primary": {"id": 611}})
     parent = make_interface(device, "Ethernet1", iface_type="1000base-t")
     child = make_interface(device, "Ethernet1.100", iface_type="virtual")
-    seed_own_mapping(parent, 7111, "primary")
-    seed_own_mapping(child, 7112, "primary")
+    seed_mapping(parent, "primary", own=7111, save=False)
+    seed_mapping(child, "primary", own=7112, save=False)
     parent.save(update_fields=["custom_field_data"])
     child.save(update_fields=["custom_field_data"])
     ports_payload = {
@@ -1100,8 +1096,8 @@ def test_cable_sync_invalidates_other_tabs_after_creating_a_cable(
     remote_device = make_device("cache-cable-remote", librenms_cf={"primary": {"id": 64}})
     local = make_interface(device, "Ethernet1", iface_type="1000base-t")
     remote = make_interface(remote_device, "Ethernet2", iface_type="1000base-t")
-    seed_own_mapping(local, 7201, "primary")
-    seed_own_mapping(remote, 7202, "primary")
+    seed_mapping(local, "primary", own=7201, save=False)
+    seed_mapping(remote, "primary", own=7202, save=False)
     local.save(update_fields=["custom_field_data"])
     remote.save(update_fields=["custom_field_data"])
     links_payload = {
@@ -1745,8 +1741,8 @@ def test_inline_relationship_noop_preserves_other_snapshots(
     device = make_device("cache-parent-noop", librenms_cf={"primary": {"id": 644}})
     parent = make_interface(device, "Ethernet1", iface_type="1000base-t")
     child = make_interface(device, "Ethernet1.100", iface_type="virtual")
-    seed_own_mapping(parent, 7441, "primary")
-    seed_own_mapping(child, 7442, "primary")
+    seed_mapping(parent, "primary", own=7441, save=False)
+    seed_mapping(child, "primary", own=7442, save=False)
     parent.save(update_fields=["custom_field_data"])
     child.parent = parent
     child.save(update_fields=["custom_field_data", "parent"])
@@ -1838,8 +1834,8 @@ def test_partial_cable_refresh_keeps_rows_from_available_sources(client, setting
     remote_device = make_device("cache-cable-partial-remote", librenms_cf={"primary": {"id": 648}})
     local = make_interface(device, "Ethernet1", iface_type="1000base-t")
     remote = make_interface(remote_device, "Ethernet2", iface_type="1000base-t")
-    seed_own_mapping(local, 7471, "primary")
-    seed_own_mapping(remote, 7472, "primary")
+    seed_mapping(local, "primary", own=7471, save=False)
+    seed_mapping(remote, "primary", own=7472, save=False)
     local.save(update_fields=["custom_field_data"])
     remote.save(update_fields=["custom_field_data"])
     client.force_login(make_superuser("cache-cable-partial-user"))
@@ -1926,8 +1922,8 @@ def test_cable_refresh_without_a_cached_snapshot_reports_failure_not_success(
     remote_device = make_device("cache-cable-nosnap-remote", librenms_cf={"primary": {"id": 662}})
     local = make_interface(device, "Ethernet1", iface_type="1000base-t")
     remote = make_interface(remote_device, "Ethernet2", iface_type="1000base-t")
-    seed_own_mapping(local, 7481, "primary")
-    seed_own_mapping(remote, 7482, "primary")
+    seed_mapping(local, "primary", own=7481, save=False)
+    seed_mapping(remote, "primary", own=7482, save=False)
     local.save(update_fields=["custom_field_data"])
     remote.save(update_fields=["custom_field_data"])
     user = make_superuser("cache-cable-nosnap-user")
@@ -2094,8 +2090,8 @@ def test_a_failed_cable_cache_write_does_not_claim_there_is_nothing_to_show(
     remote_device = make_device("cache-cable-rows-remote", librenms_cf={"primary": {"id": 662}})
     local = make_interface(device, "Ethernet1", iface_type="1000base-t")
     remote = make_interface(remote_device, "Ethernet42", iface_type="1000base-t")
-    seed_own_mapping(local, 7481, "primary")
-    seed_own_mapping(remote, 7482, "primary")
+    seed_mapping(local, "primary", own=7481, save=False)
+    seed_mapping(remote, "primary", own=7482, save=False)
     local.save(update_fields=["custom_field_data"])
     remote.save(update_fields=["custom_field_data"])
     client.force_login(make_superuser("cache-cable-rows-user"))
@@ -2929,8 +2925,7 @@ def test_virtual_machine_sync_page_omits_the_cables_pane(client, settings, prima
     """A VM has no cable sync, so neither its tab nor its pane may render."""
     _configure_servers(settings)
     vm = make_vm("cache-vm-cables")
-    seed_own_mapping(vm, 7601, "primary")
-    vm.save(update_fields=["custom_field_data"])
+    seed_mapping(vm, "primary", own=7601)
     client.force_login(make_superuser("cache-vm-cables-user"))
     url = reverse("plugins:netbox_librenms_plugin:vm_librenms_sync", args=[vm.pk])
 
@@ -2983,8 +2978,7 @@ def test_blocked_tab_skips_the_virtual_chassis_inventory_lookup(
     """A cache-only render must not fetch Virtual Chassis inventory, which has no snapshot."""
     _configure_servers(settings)
     _virtual_chassis, (member, _second) = make_virtual_chassis_members("cache-blocked-vc")
-    seed_own_mapping(member, 7803, "primary")
-    member.save(update_fields=["custom_field_data"])
+    seed_mapping(member, "primary", own=7803)
     cache.set(
         "librenms_device_info_primary_7803",
         (True, {"device_id": 7803, "sysName": member.name, "hostname": member.name}),
@@ -3039,8 +3033,7 @@ def test_failed_duplicate_selection_keeps_the_committed_rows_invalidation(
     _configure_servers(settings)
     device = make_device("cache-ip-duplicate-rows", librenms_cf={"primary": {"id": 68}})
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
-    seed_own_mapping(interface, 7801, "primary")
-    interface.save(update_fields=["custom_field_data"])
+    seed_mapping(interface, "primary", own=7801)
     address = "2001:db8:68::10/64"
     verbose_address = "2001:0DB8:0068:0000:0000:0000:0000:0010/64"
     ip_payload = {
@@ -3094,8 +3087,7 @@ def test_a_cache_only_render_reports_the_vc_inventory_as_not_loaded(client, sett
     _configure_servers(settings)
     _virtual_chassis, members = make_virtual_chassis_members("cacheonly-vc-inventory")
     device = members[0]
-    seed_own_mapping(device, 7801, "primary")
-    device.save(update_fields=["custom_field_data"])
+    seed_mapping(device, "primary", own=7801)
     user = make_superuser("cache-only-vc-inventory-user")
     client.force_login(user)
     url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])

@@ -1750,7 +1750,6 @@ class TestInstallAndUpdateViews:
         from dcim.models import Device, Interface, Module
 
         from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
         device = make_device("module-interface-scope", librenms_cf={"default": 2})
@@ -1758,8 +1757,7 @@ class TestInstallAndUpdateViews:
         module = install_module(device, bay.name, "INTERFACE-SCOPE-CARD")
         hidden = make_interface(device, "Te1/1/1")
         allowed = make_interface(device, "Te1/1/2")
-        seed_own_mapping(hidden, 42, "default")
-        hidden.save(update_fields=["custom_field_data"])
+        seed_mapping(hidden, own=42)
         user = make_user_with_perms("module-interface-scope", [("view", Device), ("view", Module)])
         user = grant(user, "change", Interface, constraints={"pk": allowed.pk})
         item = _inventory_item(

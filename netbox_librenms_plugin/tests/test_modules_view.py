@@ -1052,11 +1052,10 @@ def _two_server_keys(settings, server, prefix):
 def _mapped_device(name, server_key, librenms_id=777):
     """Create a real device carrying a real LibreNMS mapping under *server_key*."""
     from netbox_librenms_plugin.tests.conftest import make_device
-    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
     device = make_device(name)
-    seed_own_mapping(device, librenms_id, server_key)
-    device.save(update_fields=["custom_field_data"])
+    seed_mapping(device, server_key, own=librenms_id)
     return device
 
 
@@ -1366,14 +1365,13 @@ class TestPostInventoryRefresh:
             make_request,
             trusted_module_inventory_payload,
         )
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         bound_key, scoped_key = server_keys
         _, members = make_virtual_chassis_members("module-cache-scoped-vc", count=2)
         bound_device, scoped_device = members
-        seed_own_mapping(bound_device, 701, bound_key)
-        bound_device.save(update_fields=["custom_field_data"])
+        seed_mapping(bound_device, bound_key, own=701)
         payload = trusted_module_inventory_payload(scoped_device, [], server_key=scoped_key, librenms_id=777)
         view = DeviceModuleTableView()
         view._librenms_api = LibreNMSAPI(server_key=bound_key)
@@ -4920,15 +4918,14 @@ class TestMatchedInterfaceLinking:
 
     def _make_interface(self, device, name, *, port_id=None, module=None):
         from netbox_librenms_plugin.tests.conftest import make_interface
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
         interface = make_interface(device, name)
         if module is not None:
             interface.module = module
             interface.save(update_fields=["module"])
         if port_id is not None:
-            seed_own_mapping(interface, port_id, "test-server")
-            interface.save(update_fields=["custom_field_data"])
+            seed_mapping(interface, "test-server", own=port_id)
         return interface
 
     def test_netbox_forbids_two_interfaces_sharing_a_name_on_one_device(self):

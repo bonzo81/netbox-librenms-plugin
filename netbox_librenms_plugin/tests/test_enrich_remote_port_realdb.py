@@ -49,10 +49,8 @@ class TestEnrichRemotePortLibrenmsIdRealDB:
             name="ge-0/0/77",
             type="1000base-t",
         )
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
-        seed_own_mapping(iface, 20, "default")
-        iface.save(update_fields=["custom_field_data"])
+        seed_mapping(iface, own=20)
 
         view = _make_view()
         # Reported port name deliberately != iface.name; match must come from remote_port_id.
@@ -92,10 +90,8 @@ class TestEnrichRemotePortLibrenmsIdRealDB:
             name="xe-1/0/5",
             type="10gbase-x-sfpp",
         )
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
-        seed_own_mapping(iface, 21, "default")
-        iface.save(update_fields=["custom_field_data"])
+        seed_mapping(iface, own=21)
 
         view = _make_view()
         # "Gi1/0/99" → slot 1 (member_pos), but != iface.name "xe-1/0/5".

@@ -16,8 +16,8 @@ from netbox_librenms_plugin.tests.conftest import (
     make_ip,
     make_superuser,
     make_vm,
-    seed_own_mapping,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view
 
 
@@ -42,8 +42,7 @@ def _messages(response, level=None):
 
 def _set_librenms_id(obj, value):
     """Store a LibreNMS id on a real object through the production writer."""
-    seed_own_mapping(obj, value, SERVER_KEY)
-    obj.save(update_fields=["custom_field_data"])
+    seed_mapping(obj, SERVER_KEY, own=value)
 
 
 def _ip_view(live_librenms, request=None):

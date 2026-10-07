@@ -6,8 +6,8 @@ from decimal import Decimal
 import pytest
 
 from netbox_librenms_plugin.server_mappings import read_mapping
-from netbox_librenms_plugin.tests.conftest import make_cluster, make_device, make_vm, seed_own_mapping
-from netbox_librenms_plugin.tests.mapping_fixtures import mapping_from_change_record
+from netbox_librenms_plugin.tests.conftest import make_cluster, make_device, make_vm
+from netbox_librenms_plugin.tests.mapping_fixtures import mapping_from_change_record, seed_mapping
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, missing_pk
 
@@ -245,7 +245,7 @@ class TestCreateVmFromLibrenms:
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
 
         owner = make_vm("vm-import-vm-owner")
-        seed_own_mapping(owner, 6108, SERVER_KEY)
+        seed_mapping(owner, SERVER_KEY, own=6108, save=False)
         owner.save()
 
         with pytest.raises(ValueError) as excinfo:
@@ -303,7 +303,7 @@ class TestBulkImportVms:
 
         api, server = librenms_api
         existing = make_vm("bulk-existing-vm")
-        seed_own_mapping(existing, 6203, SERVER_KEY)
+        seed_mapping(existing, SERVER_KEY, own=6203, save=False)
         existing.save()
         server.device_info_response(device_id=6203, hostname=existing.name)
 

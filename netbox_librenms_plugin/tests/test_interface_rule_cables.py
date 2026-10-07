@@ -29,8 +29,8 @@ from netbox_librenms_plugin.tests.conftest import (
     make_interface,
     make_superuser,
     map_device_to_librenms,
-    seed_own_mapping,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.test_cable_overwrite import _confirmed_intent
 from netbox_librenms_plugin.tests.test_interface_rule_writes import _platform, _port
 from netbox_librenms_plugin.utils import assign_cable_row_ids
@@ -43,7 +43,7 @@ IGNORE = InterfaceTypeMapping.ACTION_IGNORE
 
 def _bound(device, name, port_id):
     interface = make_interface(device, name, iface_type="10gbase-x-sfpp")
-    seed_own_mapping(interface, port_id, SERVER_KEY)
+    seed_mapping(interface, SERVER_KEY, own=port_id, save=False)
     interface.save()
     return interface
 
@@ -498,7 +498,7 @@ def test_the_gate_decides_with_the_binding_and_platform_read_under_the_lock(clie
 
     def change_state():
         if change == "binding-to-unknown":
-            seed_own_mapping(link.remote, 888, SERVER_KEY)
+            seed_mapping(link.remote, SERVER_KEY, own=888, save=False)
             link.remote.save()
         else:
             moved_to = ignoring if change == "platform-to-ignored" else plain

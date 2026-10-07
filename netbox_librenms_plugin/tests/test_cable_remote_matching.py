@@ -931,7 +931,7 @@ class TestDuplicatesAreGoneFromTheRenderedRows:
 
     def test_two_protocols_grouped_by_the_port_record_resolve_one_interface(self):
         """The dedupe key and the table lookup read one far-end port: the matched record."""
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
         server_key = configured_server_key()
         local_device = make_device("dedupe-ref-local")
@@ -939,10 +939,10 @@ class TestDuplicatesAreGoneFromTheRenderedRows:
         remote_device = make_device("dedupe-ref-remote")
         map_device_to_librenms(remote_device, 9, server_key=server_key)
         matched = make_interface(remote_device, "port-a")
-        seed_own_mapping(matched, 500, server_key)
+        seed_mapping(matched, server_key, own=500, save=False)
         matched.save()
         stale = make_interface(remote_device, "port-b")
-        seed_own_mapping(stale, 501, server_key)
+        seed_mapping(stale, server_key, own=501, save=False)
         stale.save()
 
         rows = _make_view().enrich_links_data(
@@ -1686,7 +1686,8 @@ class TestCheckAndCreateTheRemoteEnd:
         """The created end is port 500. A binder that moves it to port 901 before the lock makes the row stale."""
         from dcim.models import Cable, Interface
 
-        from netbox_librenms_plugin.tests.conftest import make_superuser, seed_own_mapping
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         server_key, local_device, local_interface, remote_device, row_id = self._scenario(
@@ -1696,7 +1697,7 @@ class TestCheckAndCreateTheRemoteEnd:
 
         def rebind_then_lock(view, local_term, remote_term, **kwargs):
             rebound = Interface.objects.get(pk=remote_term.pk)
-            seed_own_mapping(rebound, 901, server_key)
+            seed_mapping(rebound, server_key, own=901, save=False)
             rebound.save()
             return real_lock(view, local_term, remote_term, **kwargs)
 
@@ -1713,11 +1714,11 @@ class TestCheckAndCreateTheRemoteEnd:
     def test_a_hidden_renamed_remote_port_cannot_be_bound_twice(self, librenms_server, settings):
         from dcim.models import Cable, Device, Interface
         from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
         server_key, local, near, remote, row_id = self._scenario("hidden-bound-port", librenms_server, settings)
         existing = make_interface(remote, "renamed-port")
-        seed_own_mapping(existing, 500, server_key)
+        seed_mapping(existing, server_key, own=500, save=False)
         existing.save()
         user = make_user_with_perms(
             "hidden-bound-port",
@@ -2078,7 +2079,7 @@ class TestTheVerifiedRowRendersLikeTheTable:
 @pytest.mark.parametrize("patch_path", [False, True])
 def test_remote_port_identity_resolves_a_renamed_interface(client, advertised_id, patch_path):
     from netbox_librenms_plugin.tests.conftest import cable_together, make_patch_panel, make_superuser
-    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
     key = configured_server_key()
     local = make_device("port-identity-local")
@@ -2087,11 +2088,11 @@ def test_remote_port_identity_resolves_a_renamed_interface(client, advertised_id
     map_device_to_librenms(remote, 9, server_key=key)
     # The matched port record (key 500) names the far end; an advertised ID it overrides is stale.
     far = make_interface(remote, "renamed-interface")
-    seed_own_mapping(far, 500, key)
+    seed_mapping(far, key, own=500, save=False)
     far.save()
     if advertised_id is not None:
         other = make_interface(remote, "other-interface")
-        seed_own_mapping(other, advertised_id, key)
+        seed_mapping(other, key, own=advertised_id, save=False)
         other.save()
     if patch_path:
         _panel, front, rear = make_patch_panel("port-identity-panel")
@@ -2476,13 +2477,13 @@ def test_remote_create_is_not_offered_for_a_chassis_member_out_of_view(librenms_
 def test_remote_create_refuses_a_port_already_bound_on_another_device(librenms_server, settings):
     from dcim.models import Interface
     from netbox_librenms_plugin.tests.conftest import make_superuser
-    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
     key, local, local_interface, remote, row_id = TestCheckAndCreateTheRemoteEnd()._scenario(
         "create-foreign-port", librenms_server, settings
     )
     holder = make_interface(make_device("create-foreign-holder"), "private-held-port")
-    seed_own_mapping(holder, 500, key)
+    seed_mapping(holder, key, own=500, save=False)
     holder.save()
     response = _logged_in(make_superuser("create-foreign-port-user")).post(
         _remote_create_url(local), {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": key}
