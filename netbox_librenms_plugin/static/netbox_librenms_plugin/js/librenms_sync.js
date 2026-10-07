@@ -1034,9 +1034,10 @@ function initializeCountdowns() {
  * @param {string} optionSelector - Selector for controls inside the dropdown
  * @param {string} countId - Changed-options badge element ID
  * @param {string} resetId - Reset button element ID
- * @param {Function} [persist] - Called with (root, options) once per user change, and once per Reset
+ * @param {Object} [store] - Keeps the user's choice: save(root, options) runs once per user change
+ *     and once per Reset; restore(options) runs before the first count
  */
-function initializeSyncOptions(rootId, optionSelector, countId, resetId, persist) {
+function initializeSyncOptions(rootId, optionSelector, countId, resetId, store) {
     const root = document.getElementById(rootId);
     if (!root || root.dataset.initialized === 'true') return;
 
@@ -1058,7 +1059,7 @@ function initializeSyncOptions(rootId, optionSelector, countId, resetId, persist
     let resetting = false;
     options.forEach((option) => option.addEventListener('change', () => {
         updateCount();
-        if (persist && !resetting) persist(root, options);
+        if (store && !resetting) store.save(root, options);
     }));
     resetButton?.addEventListener('click', () => {
         // Reset saves the menu once below, not once per control it flips.
@@ -1072,46 +1073,60 @@ function initializeSyncOptions(rootId, optionSelector, countId, resetId, persist
         });
         resetting = false;
         updateCount();
-        if (persist) persist(root, options);
+        if (store) store.save(root, options);
     });
+    store?.restore(options);
     root.dataset.initialized = 'true';
     updateCount();
 }
 
-// Each save waits for the one before it, so the server stores the last state the user chose.
-let interfaceSyncOptionsSaving = Promise.resolve();
-
 /**
- * Save the whole interface sync options menu as the user's preference.
+ * Keep the interface sync options menu as the user's preference.
  *
- * @param {HTMLElement} root - The menu root, which carries the save-pref URL
- * @param {HTMLInputElement[]} options - The menu's controls
+ * A tab swap can render the menu from a stored value that a queued save has not replaced yet,
+ * so the swapped-in menu gets the last choice made on this page.
  */
-function saveInterfaceSyncOptions(root, options) {
-    const savePrefUrl = root.dataset.savePrefUrl;
-    if (!savePrefUrl) return;
-    const csrfToken = getCsrfToken();
-    if (!csrfToken) {
-        console.debug('Failed to save interface_sync_options pref: missing CSRF token');
-        return;
-    }
-    const autoSelect = options.find((option) => option.name === 'auto_select_lag_members');
-    const value = {
-        auto_select_lag_members: Boolean(autoSelect?.checked),
-        exclude_columns: options
-            .filter((option) => option.name === 'exclude_columns' && option.checked)
-            .map((option) => option.value)
-    };
-    interfaceSyncOptionsSaving = interfaceSyncOptionsSaving.then(() => fetch(savePrefUrl, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrfToken},
-        body: JSON.stringify({key: 'interface_sync_options', value: value})
-    })).then(response => {
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
+const interfaceSyncOptionsStore = {
+    chosen: null,
+    // Each save waits for the one before it, so the server stores the last state the user chose.
+    saving: Promise.resolve(),
+
+    restore(options) {
+        if (!this.chosen) return;
+        options.forEach((option) => {
+            option.checked = option.name === 'auto_select_lag_members'
+                ? this.chosen.auto_select_lag_members
+                : this.chosen.exclude_columns.includes(option.value);
+        });
+    },
+
+    save(root, options) {
+        const autoSelect = options.find((option) => option.name === 'auto_select_lag_members');
+        const value = {
+            auto_select_lag_members: Boolean(autoSelect?.checked),
+            exclude_columns: options
+                .filter((option) => option.name === 'exclude_columns' && option.checked)
+                .map((option) => option.value)
+        };
+        this.chosen = value;
+        const savePrefUrl = root.dataset.savePrefUrl;
+        if (!savePrefUrl) return;
+        const csrfToken = getCsrfToken();
+        if (!csrfToken) {
+            console.debug('Failed to save interface_sync_options pref: missing CSRF token');
+            return;
         }
-    }).catch(error => console.debug('Failed to save interface_sync_options pref:', error.message));
-}
+        this.saving = this.saving.then(() => fetch(savePrefUrl, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrfToken},
+            body: JSON.stringify({key: 'interface_sync_options', value: value})
+        })).then(response => {
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+        }).catch(error => console.debug('Failed to save interface_sync_options pref:', error.message));
+    }
+};
 
 function initializeSyncOptionMenus() {
     initializeSyncOptions(
@@ -1119,7 +1134,7 @@ function initializeSyncOptionMenus() {
         '.interface-sync-option',
         'interface-sync-options-count',
         'reset-interface-sync-options',
-        saveInterfaceSyncOptions
+        interfaceSyncOptionsStore
     );
     initializeSyncOptions(
         'ip-sync-options',

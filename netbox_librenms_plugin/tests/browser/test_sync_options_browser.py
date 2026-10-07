@@ -137,3 +137,47 @@ def test_the_ip_menu_saves_nothing(page, menu_page):
 
     assert saved == []
     assert page.locator("#ip-sync-options-count").inner_text() == "0"
+
+
+def _swap_menu(page, **menu_state):
+    """Replace the menu as an HTMX tab swap does, with markup rendered from *menu_state*."""
+    page.evaluate(
+        """(html) => {
+            document.getElementById('interface-sync-options').outerHTML = html;
+            initializeSyncOptionMenus();
+        }""",
+        _menu_markup(**menu_state),
+    )
+
+
+def _checked(page, selector):
+    return page.locator(selector).is_checked()
+
+
+def test_a_swap_rendered_before_the_save_keeps_the_latest_choice(page, menu_page):
+    saved = menu_page()
+    page.check("#exclude-description")
+    page.uncheck("#autoSelectLagMembers")
+    _settle(page, saved, 2)
+
+    # The sync response rendered the stored preference from before these saves.
+    _swap_menu(page)
+    _settle(page, saved, 2)
+
+    assert _checked(page, "#exclude-description")
+    assert not _checked(page, "#autoSelectLagMembers")
+    assert page.locator("#interface-sync-options-count").inner_text() == "2"
+    assert len(saved) == 2
+
+
+def test_a_swap_rendered_before_a_reset_keeps_the_defaults(page, menu_page):
+    saved = menu_page(excluded=("name",))
+    page.click("#reset-interface-sync-options")
+    _settle(page, saved, 1)
+
+    _swap_menu(page, excluded=("name",))
+    _settle(page, saved, 1)
+
+    assert not _checked(page, "#exclude-name")
+    assert page.locator("#interface-sync-options-count").inner_text() == "0"
+    assert len(saved) == 1
