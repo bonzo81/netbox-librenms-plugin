@@ -47,6 +47,18 @@ def aliases(device, change):
     stored["librenms_id"] = 7
     # ruleid: no-stored-mapping-access
     value = stored.get("librenms_id")
+    # ruleid: no-stored-mapping-access
+    stored.update({"librenms_id": 5})
+    # ruleid: no-stored-mapping-access
+    stored.update(librenms_id=5)
+    # ruleid: no-stored-mapping-access
+    stored.update(**change.values)
+    # ruleid: no-stored-mapping-access
+    stored.update(change.values)
+    # ruleid: no-stored-mapping-access
+    stored.update({"operator_note": "kept", **change.values})
+    # ok: no-stored-mapping-access
+    stored.update({"operator_note": "kept"})
     fields = device.cf
     # ruleid: no-stored-mapping-access
     assert "librenms_id" in fields
@@ -99,6 +111,10 @@ def container_escape(device, other, Device, queryset):
     device.custom_field_data.update(librenms_id=5)
     # ruleid: no-stored-mapping-access-container
     device.custom_field_data.update(**other.values)
+    # ruleid: no-stored-mapping-access-container
+    device.custom_field_data.update({"operator_note": "kept", **other.custom_field_data})
+    # ruleid: no-stored-mapping-access-container
+    device.custom_field_data.update({"operator_note": "kept", **other.values})
     # ok: no-stored-mapping-access-container
     device.custom_field_data.update({"operator_note": "kept"})
     # ok: no-stored-mapping-access-container
