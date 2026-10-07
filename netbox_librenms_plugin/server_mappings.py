@@ -1175,13 +1175,12 @@ def mark_migrated(donor, winner_pk: int, server: str, *, at: str | None = None) 
     return _change(donor, value)
 
 
-def _normalize_merge_entry(entry, *, owner_label, owner_name, server_key, copy_dict):
+def _normalize_merge_entry(entry, *, owner_label, owner_name, server_key):
     """
     Coerce one side's entry on the merge server to a dict, failing closed on a corrupt shape.
 
     A bare int (or numeric string) becomes ``{"id": N}``; a blank or None entry becomes ``{}``. A
     non-blank unparseable string, or an unsupported type, is corrupt state and raises ValueError.
-    *copy_dict* returns a dict entry as a shallow copy (the winner's entry is changed later).
     """
     if isinstance(entry, int) and not isinstance(entry, bool):
         return {"id": entry}
@@ -1194,7 +1193,7 @@ def _normalize_merge_entry(entry, *, owner_label, owner_name, server_key, copy_d
             )
         return {"id": coerced} if coerced else {}
     if isinstance(entry, dict):
-        return dict(entry) if copy_dict else entry
+        return entry
     if entry is None:
         return {}
     raise ValueError(
@@ -1243,10 +1242,10 @@ def _merged_winner_value(winner_stored, donor_stored, winner, donor, server_key)
         raise ValueError("Cannot merge: one or both devices have a legacy bare-integer or corrupt librenms_id.")
 
     winner_entry = _normalize_merge_entry(
-        winner_cf.get(server_key), owner_label="winner", owner_name=winner.name, server_key=server_key, copy_dict=True
+        winner_cf.get(server_key), owner_label="winner", owner_name=winner.name, server_key=server_key
     )
     donor_entry = _normalize_merge_entry(
-        donor_cf.get(server_key), owner_label="donor", owner_name=donor.name, server_key=server_key, copy_dict=False
+        donor_cf.get(server_key), owner_label="donor", owner_name=donor.name, server_key=server_key
     )
     donor_oob = _extract_oob_entry("donor", donor.name, donor_entry, server_key)
     # Coerce both IDs first, so a malformed but truthy winner ID never takes the demote path.
