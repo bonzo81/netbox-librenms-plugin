@@ -972,8 +972,11 @@ class LibreNMSAPI:
                 'lag_members':    {member_port_id: aggregate_port_id}
                 'sub_interfaces': {child_port_id: parent_port_id}
                 'bridge_members': {member_port_id: bridge_port_id}
-                'stacked_ports':  Unclassified port pairs and their name-source evidence.
-                'diagnostics':    Claims, conflicts, fallback sources, and patterns by kind.
+                'stacked_ports':  {port_id: [partner_port_id, ...]} for each pair no rule
+                                  classified (symmetric, no direction, partners sorted)
+                'diagnostics':    pair counts (pairs_seen, _malformed, _unresolved_end,
+                                  _skipped_sap, _usable, _unclassified), per-kind claimed,
+                                  edges, conflicted and from_fallback, and the patterns in use
 
         """
         from netbox_librenms_plugin.constants import DEFAULT_INTERFACE_NAME_FIELD, INTERFACE_NAME_FIELDS
