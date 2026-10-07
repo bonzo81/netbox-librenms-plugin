@@ -63,6 +63,8 @@ unchecked until that review.
 | `no-stored-mapping-access-orm` | error | A `custom_field_data__librenms_id` lookup, projection or ordering, also across a relation such as `device__`; a projection of the whole container; or a `custom_fields.librenms_id` path. |
 | `no-stored-mapping-access-private` | error | An import or attribute access of a private name of `server_mappings`, or a patch target string that names one. |
 | `no-stored-mapping-access-template` | error | A template that reads `cf.librenms_id` or `custom_field_data.librenms_id`, or looks the key up with a filter. |
+| `conflict-raised-without-record` | error | A raise of a `TransactionConflict` or `ConcurrentRowChange` class that does not go through `recorded_conflict(...)`. |
+| `no-lock-on-exists` | error | A `select_for_update()` chain that ends in `exists()` or `count()`. |
 
 ## Scope
 
@@ -80,6 +82,8 @@ The `no-stored-mapping-access` rules exclude only `server_mappings.py` and `migr
 templates are in their scope. In tests, `tests/mapping_fixtures.py` is the one reviewed seam: its
 import of the private storage adapter carries a suppression. Tests seed and inspect a mapping only
 through its helpers. The template rule applies to `.html` files.
+`conflict-raised-without-record` excludes tests and `transactions.py`, where the runner raises its
+own conflict after the last attempt.
 The remaining rules apply to Python files in the scan target.
 
 Opengrep 1.30.0 skips test directories during directory scans. The scan script expands the default
@@ -215,6 +219,13 @@ local or module string constant. A key built at run time is outside the check. T
 - The template rule reads `cf` and `custom_field_data` by name. It does not see a container
   that the view passes under another name. It skips a `{# ... #}` comment. It reports an HTML
   comment, because Django renders the template code in it.
+
+`conflict-raised-without-record` knows the conflict classes by name, also with a module prefix.
+It does not see a conflict that is raised from a variable. When you add a `TransactionConflict`
+subclass, add its name to the rule and a fixture line.
+
+`no-lock-on-exists` checks one method chain. It does not see a locked queryset in a variable that a
+later statement ends with `exists()` or `count()`.
 
 ## `--taint-intrafile` is required
 

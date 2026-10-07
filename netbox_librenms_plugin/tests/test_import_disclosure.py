@@ -552,6 +552,7 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
     """The path scoping is the rules' real boundary, so pin it against a staged tree, not fixtures."""
     http_call = "import requests\nrequests.get(url)\n"
     mapping_write = 'device.custom_field_data["librenms_id"] = {"default": 5}\n'
+    conflict_raise = 'raise MappingChanged("changed")\n'
     sources = {
         # Flagged: a direct HTTP call outside the client.
         "netbox_librenms_plugin/worker.py": http_call,
@@ -567,11 +568,14 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
             "class TestWorker:\n    def check(self):\n        self.assertEqual(1, 1)\n"
         ),
         # Flagged: tests and templates are in the scope of the mapping rules.
-        "netbox_librenms_plugin/tests/test_seed.py": mapping_write,
+        "netbox_librenms_plugin/tests/test_seed.py": mapping_write + conflict_raise,
         "netbox_librenms_plugin/templates/netbox_librenms_plugin/seed.html": "{{ object.cf.librenms_id }}\n",
         # Clean: the mapping module and migrations are the only places that may touch the storage.
         "netbox_librenms_plugin/server_mappings.py": mapping_write,
         "netbox_librenms_plugin/migrations/0099_seed.py": mapping_write,
+        # Flagged: a conflict raised without its record. Clean: the runner's own raise.
+        "netbox_librenms_plugin/claims.py": conflict_raise,
+        "netbox_librenms_plugin/transactions.py": conflict_raise,
     }
     for name, source in sources.items():
         staged = tmp_path / name
@@ -588,4 +592,5 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
         ("netbox_librenms_plugin/tests/test_worker.py", "no-unittest-assertions"),
         ("netbox_librenms_plugin/tests/test_seed.py", "no-stored-mapping-access"),
         ("netbox_librenms_plugin/templates/netbox_librenms_plugin/seed.html", "no-stored-mapping-access-template"),
+        ("netbox_librenms_plugin/claims.py", "conflict-raised-without-record"),
     }, found
