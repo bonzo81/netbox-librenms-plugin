@@ -14,7 +14,7 @@ import pytest
 import requests
 
 from netbox_librenms_plugin.server_mappings import read_mapping
-from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change, seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.parallel import isolated_test_database_name
 
 _TEST_DATABASE_BASE_NAME = os.environ["TEST_DB_NAME"]
@@ -43,13 +43,6 @@ def configured_server_key():
     from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
     return next(iter(LibreNMSAPI.get_available_servers()))
-
-
-def seed_own_mapping(obj, identity, server_key="default"):
-    """Test setup: put the own ID that ``assign_own`` builds on *obj*, unsaved, as the old setter did."""
-    from netbox_librenms_plugin.server_mappings import assign_own
-
-    return apply_mapping_change(obj, assign_own(obj, server_key, identity))
 
 
 def persist_test_server_mapping(obj, server_key):

@@ -48,7 +48,7 @@ def _synced_interface(tag, **overrides):
     """Return a device and an interface that a sync of :func:`_port` would leave untouched."""
     from dcim.models import MACAddress
 
-    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
     _mapping()
     device = make_device(tag)
@@ -59,7 +59,7 @@ def _synced_interface(tag, **overrides):
     interface.description = "Uplink"
     for field, value in overrides.items():
         setattr(interface, field, value)
-    seed_own_mapping(interface, 42, SERVER_KEY)
+    seed_mapping(interface, SERVER_KEY, own=42, save=False)
     interface.save()
     mac = MACAddress.objects.create(mac_address="AA:BB:CC:DD:EE:FF")
     interface.mac_addresses.add(mac)
@@ -470,12 +470,12 @@ class TestThePerRowButtonSyncsOneRow:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         server_key = configure_default_librenms_server(settings)
         device = make_device(tag)
-        seed_own_mapping(device, 1, server_key)
+        seed_mapping(device, server_key, own=1, save=False)
         device.save()
         ports = [
             _port(port_id=10, ifName="Ethernet10", ifDescr="Ethernet10", ifAlias="Ten"),

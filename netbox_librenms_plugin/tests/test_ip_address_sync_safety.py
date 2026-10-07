@@ -383,7 +383,6 @@ class TestManagementIpLiveLookup:
     def test_management_ip_reads_the_live_device_endpoint_and_degrades_on_a_fault(self, settings, librenms_server):
         """A 200 yields the management IP; a faulting endpoint yields None so the sync is never blocked."""
         from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
         from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
         configure_librenms_servers(
@@ -391,7 +390,7 @@ class TestManagementIpLiveLookup:
             {"default": {"librenms_url": librenms_server.url, "api_token": "token", "verify_ssl": False}},
         )
         device = make_device("mgmt-ip-live-lookup")
-        seed_own_mapping(device, 9903, "default")
+        seed_mapping(device, own=9903, save=False)
         device.save()
         # A real instance: __init__ binds _librenms_api, and the lazy property builds the
         # configured client from it.
@@ -512,7 +511,6 @@ def _sync_cached_ips(device_pk, user_pk, row_ids, lock_wrapper):
 )
 def test_concurrent_global_ip_sync_creates_one_address(settings):
     """Two requests for one global host must not create duplicate IP rows."""
-    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
     _configure_test_server(settings)
     user = make_superuser("global-ip-concurrency-user")
@@ -523,8 +521,7 @@ def test_concurrent_global_ip_sync_creates_one_address(settings):
     ]
     for port_id, device in enumerate(devices, start=7040):
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
-        seed_own_mapping(interface, port_id, "default")
-        interface.save(update_fields=["custom_field_data"])
+        seed_mapping(interface, own=port_id)
         cache.set(
             _ip_snapshot_key(device),
             {
@@ -566,7 +563,6 @@ def test_concurrent_global_ip_sync_creates_one_address(settings):
 )
 def test_concurrent_bulk_ip_sync_orders_host_locks_before_interface_scope(settings):
     """Opposite bulk orders must not deadlock on host and Device locks."""
-    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
     _configure_test_server(settings)
     user = make_superuser("bulk-ip-lock-order-user")
@@ -576,8 +572,7 @@ def test_concurrent_bulk_ip_sync_orders_host_locks_before_interface_scope(settin
         make_interface(device, "Ethernet2", iface_type="1000base-t"),
     ]
     for port_id, interface in zip((7041, 7042), interfaces, strict=True):
-        seed_own_mapping(interface, port_id, "default")
-        interface.save(update_fields=["custom_field_data"])
+        seed_mapping(interface, own=port_id)
 
     rows = [
         {
@@ -1841,13 +1836,11 @@ def test_invalid_force_all_confirmation_reports_the_confirmation_error(client, s
 @pytest.mark.django_db
 def test_invalid_confirmation_is_not_reported_as_an_ip_address(client, settings):
     """A bad confirmation token must remain separate from per-address results."""
-    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
     _configure_test_server(settings)
     device = make_device("mixed-invalid-confirmation", librenms_cf={"default": {"id": 42}})
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
-    seed_own_mapping(interface, 7021, "default")
-    interface.save(update_fields=["custom_field_data"])
+    seed_mapping(interface, own=7021)
     row_id = "198.18.19.21/24"
     cache.set(
         _ip_snapshot_key(device),
@@ -1895,13 +1888,11 @@ def test_interface_scope_change_during_lock_is_reported_as_a_failure(client, set
     from dcim.models import Device, Interface
     from django.db import connection
 
-    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
-
     _configure_test_server(settings)
     device = make_device("interface-lock-view-scope", librenms_cf={"default": {"id": 42}})
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     interface.description = "managed"
-    seed_own_mapping(interface, 7030, "default")
+    seed_mapping(interface, own=7030, save=False)
     interface.save()
     user = make_user_with_perms("interface-lock-view-scope-user", [])
     user = grant(user, "view", Device, constraints={"pk": device.pk})
@@ -2030,13 +2021,11 @@ def test_existing_ip_outside_change_scope_is_reported_without_mutation(client, s
     """A natural-key match outside the caller's change scope must stay unchanged."""
     from dcim.models import Device, Interface
 
-    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
-
     _configure_test_server(settings)
     device = make_device("ip-change-scope")
     target = make_interface(device, "Ethernet1", iface_type="1000base-t")
     original = make_interface(device, "Ethernet2", iface_type="1000base-t")
-    seed_own_mapping(target, 7020, "default")
+    seed_mapping(target, own=7020, save=False)
     target.save()
     protected_ip = IPAddress.objects.create(
         address="198.18.20.10/24",
@@ -2099,12 +2088,10 @@ def test_ip_sync_does_not_write_after_interface_owner_disappears(client, setting
     """A row whose Device disappears before its lock must not create an IP address."""
     from django.db import connection
 
-    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
-
     _configure_test_server(settings)
     device = make_device("ip-owner-disappears")
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
-    seed_own_mapping(interface, 7021, "default")
+    seed_mapping(interface, own=7021, save=False)
     interface.save()
     cache.set(
         _ip_snapshot_key(device),
@@ -2827,13 +2814,12 @@ def test_ambiguous_port_identity_cannot_bind_an_unrelated_named_interface(
     client, settings, cached_port_id, live_librenms
 ):
     """A stale name must not override an ambiguous stable LibreNMS port identity."""
-    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
     _configure_test_server(settings)
     device = make_device("ambiguous-ip-port", librenms_cf={"default": {"id": 42}})
     for name, port_id in [("duplicate-a", 7), ("duplicate-b", 7), ("eth0", 9)]:
         interface = make_interface(device, name)
-        seed_own_mapping(interface, port_id, "default")
+        seed_mapping(interface, own=port_id, save=False)
         interface.save()
     cache.set(
         f"librenms_ip_addresses_device_{device.pk}_default",

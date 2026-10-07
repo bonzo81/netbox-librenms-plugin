@@ -17,8 +17,8 @@ from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_superuser,
     make_vm,
-    seed_own_mapping,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
     SERVER_KEY,
     SYNCED,
@@ -42,7 +42,7 @@ def _device_owner(tag):
 
 def _vm_owner(tag):
     vm = make_vm(f"before-state-{tag}")
-    seed_own_mapping(vm, 40, SERVER_KEY)
+    seed_mapping(vm, SERVER_KEY, own=40, save=False)
     vm.save()
     return vm, VMInterface
 

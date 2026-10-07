@@ -949,18 +949,16 @@ class TestLibreNMSIdRoundtrip:
     """The reader sees the value that an applied builder change sets."""
 
     def test_set_then_get_returns_same_value(self):
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         dev = _dev()
-        seed_own_mapping(dev, 42, "production")
+        seed_mapping(dev, "production", own=42, save=False)
         assert read_mapping(dev).own_id("production") == 42
 
     def test_set_multiple_servers_get_correct_each(self):
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         dev = _dev()
-        seed_own_mapping(dev, 10, "primary")
-        seed_own_mapping(dev, 20, "secondary")
+        seed_mapping(dev, "primary", own=10, save=False)
+        seed_mapping(dev, "secondary", own=20, save=False)
         assert read_mapping(dev).own_id("primary") == 10
         assert read_mapping(dev).own_id("secondary") == 20
 
@@ -1154,11 +1152,12 @@ class TestLibreNMSIdAcceptedFormsContract:
     @pytest.mark.parametrize("stored,_resolved", TOLERATED + READER_ONLY, ids=lambda v: repr(v))
     def test_the_setter_keeps_every_value_the_reader_resolves(self, stored, _resolved):
         """assign_own refuses a legacy value, so it never resets a mapping the reader still resolves."""
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         device = _dev(stored)
-        seed_own_mapping(device, 99, "primary")
+        change = assign_own(device, "primary", 99)
+        apply_mapping_change(device, change)
 
+        assert change.outcome is ChangeOutcome.SKIPPED_LEGACY
         assert stored_mapping_for_test(device) == stored
 
 
@@ -1202,19 +1201,17 @@ class TestOOBHelpers:
     # ── assign_own: oob preservation ─────────────────────────────────────────
 
     def test_set_preserves_oob_when_entry_has_oob(self):
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         dev = _dev({"primary": {"id": 42, "oob": {"id": 17, "type": "drac", "ip": "10.0.0.5"}}})
-        seed_own_mapping(dev, 99, server_key="primary")
+        seed_mapping(dev, "primary", own=99, save=False)
         assert stored_mapping_for_test(dev) == {
             "primary": {"id": 99, "oob": {"id": 17, "type": "drac", "ip": "10.0.0.5"}}
         }
 
     def test_set_bare_int_when_no_oob_present(self):
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         dev = _dev({"primary": 42})
-        seed_own_mapping(dev, 99, server_key="primary")
+        seed_mapping(dev, "primary", own=99, save=False)
         assert stored_mapping_for_test(dev) == {"primary": 99}
 
     # ── find_by_librenms_id: dict-with-id and oob id lookups ─────────────────

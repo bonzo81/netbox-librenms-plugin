@@ -14,7 +14,8 @@ from tenancy.models import Tenant
 
 from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, seed_own_mapping
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view
 
 SERVER_KEY = "default"
@@ -43,8 +44,7 @@ _RD_CIDR = f"{_RD_ADDRESS['ipv4_address']}/{_RD_ADDRESS['ipv4_prefixlen']}"
 
 
 def _set_librenms_id(obj, value):
-    seed_own_mapping(obj, value, SERVER_KEY)
-    obj.save(update_fields=["custom_field_data"])
+    seed_mapping(obj, SERVER_KEY, own=value)
 
 
 def _request():

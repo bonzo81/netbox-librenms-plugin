@@ -136,11 +136,10 @@ class TestRealView:
         from dcim.models import Device
 
         from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceSerialView
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
         dev = make_device("seam-serial")
-        seed_own_mapping(dev, 42, "default")
-        dev.save(update_fields=["custom_field_data"])
+        seed_mapping(dev, own=42)
         live_librenms.server.device_info_response(device_id=42, hostname=dev.name, serial="SN-SEAM")
         request = make_request("post")
         view = make_view(UpdateDeviceSerialView, request)
@@ -154,11 +153,10 @@ class TestRealView:
         from dcim.models import Device
 
         from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceSerialView
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
         dev = make_device("seam-denied")
-        seed_own_mapping(dev, 42, "default")
-        dev.save(update_fields=["custom_field_data"])
+        seed_mapping(dev, own=42)
         live_librenms.server.device_info_response(device_id=42, hostname=dev.name, serial="SN-DENIED")
         user = make_user_with_perms("seam-viewer", [("view", Device)])
         request = make_request("post", user=user)
@@ -175,13 +173,12 @@ class TestRealView:
         from django.http import Http404
 
         from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceSerialView
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
         from dcim.models import Device
 
         mine = make_device("seam-scoped-mine")
         theirs = make_device("seam-scoped-theirs")
-        seed_own_mapping(mine, 42, "default")
-        mine.save(update_fields=["custom_field_data"])
+        seed_mapping(mine, own=42)
         live_librenms.server.device_info_response(device_id=42, hostname=mine.name, serial="SN-X")
         user = make_user_with_perms("seam-scoped", [("change", Device)], constraints={"name": "seam-scoped-mine"})
         request = make_request("post", user=user)

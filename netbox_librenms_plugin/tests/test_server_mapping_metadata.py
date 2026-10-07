@@ -8,11 +8,12 @@ from django.core.exceptions import ImproperlyConfigured
 from netbox_librenms_plugin import LibreNMSSyncConfig
 from netbox_librenms_plugin.server_mappings import (
     PREFERRED_SERVER_FIELD,
+    assign_own,
     get_librenms_sync_device,
     mapped_device_servers,
     read_mapping,
 )
-from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis_members, seed_own_mapping
+from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis_members
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
 
 
@@ -68,7 +69,7 @@ def test_identity_reader_and_writer_reject_reserved_metadata_key():
     with pytest.raises(ValueError, match="reserved for object metadata"):
         read_mapping(obj).own_id(PREFERRED_SERVER_FIELD)
     with pytest.raises(ValueError, match="reserved for object metadata"):
-        seed_own_mapping(obj, 42, PREFERRED_SERVER_FIELD)
+        assign_own(obj, PREFERRED_SERVER_FIELD, 42)
     assert stored_mapping_for_test(obj) == {PREFERRED_SERVER_FIELD: "primary"}
 
 

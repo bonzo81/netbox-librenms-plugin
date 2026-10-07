@@ -172,12 +172,12 @@ def test_unknown_remote_hostname_preserves_rows_and_skips_name_lookup(hostname):
 def test_remote_device_id_resolves_with_malformed_hostname():
     """A valid remote ID remains usable when the advertised hostname is malformed."""
     from netbox_librenms_plugin.tests.conftest import make_device
-    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
 
     device = make_device("remote-id-without-name")
     # The canonical writer, so the test pins ID resolution rather than a hand-built field shape.
-    seed_own_mapping(device, 42)
+    seed_mapping(device, own=42, save=False)
     device.save()
     found, matched, error = BaseCableTableView().get_device_by_id_or_name(42, [], "default")
     assert found == device

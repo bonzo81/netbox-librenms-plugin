@@ -33,9 +33,8 @@ from netbox_librenms_plugin.tests.conftest import (
     make_interface,
     make_superuser,
     make_virtual_chassis_members,
-    seed_own_mapping,
 )
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
@@ -72,7 +71,7 @@ def _device(name, platform=None):
 
 def _bound(device, name, port_id, iface_type="other"):
     interface = make_interface(device, name, iface_type=iface_type)
-    seed_own_mapping(interface, port_id, SERVER_KEY)
+    seed_mapping(interface, SERVER_KEY, own=port_id, save=False)
     interface.save()
     return interface
 
