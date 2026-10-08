@@ -21,6 +21,7 @@ def _table(device=None, **overrides):
         "can_add_module": True,
         "can_change_module": True,
         "can_change_interface": True,
+        "can_review_interface_types": True,
         "can_delete_module": True,
         "can_add_module_bay_template": True,
         "can_add_module_type": True,

@@ -252,34 +252,43 @@ class TestModuleInterfaceTypeTab:
         assert 'hx-sync="#htmx-modal-content:replace"' in content
         assert 'hx-disabled-elt="this"' in content
 
-    @pytest.mark.parametrize("view_interfaces", [False, True])
-    def test_type_review_action_requires_interface_view_permission(self, settings, view_interfaces):
+    @pytest.mark.parametrize("missing_view", [None, "device", "module", "interface"])
+    def test_type_review_action_shows_only_when_the_preview_opens(self, client, settings, missing_view):
+        import re
+        from html import unescape
+
         from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
         from django.core.cache import cache
         from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
-        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
         configure_default_librenms_server(settings)
-        device, module = _module_with_templates("type-preview-scope", [("Ethernet1", "10gbase-x-sfpp")])
+        device, module = _module_with_templates(f"type-preview-{missing_view}", [("Ethernet1", "10gbase-x-sfpp")])
         Interface.objects.create(device=device, module=module, name="Ethernet1", type="1000base-t")
+        views = {"device": Device, "module": Module, "interface": Interface}
         user = make_user_with_perms(
-            "type-preview-scope",
-            [
-                ("view", Device),
-                ("view", Module),
-                ("view", ModuleBay),
-                ("view", ModuleType),
-                ("change", Interface),
-            ],
+            f"type-preview-{missing_view}",
+            [("view", model) for name, model in views.items() if name != missing_view]
+            + [("view", ModuleBay), ("view", ModuleType), ("change", Interface)],
         )
-        if view_interfaces:
-            user = grant(user, "view", Interface)
         key = _seed_module_tab(device, module)
         try:
             content = _render_module_tab(device, user)
         finally:
             cache.delete(key)
-        assert ('data-action="review-interface-types"' in content) is view_interfaces
+        button = re.search(r'<button[^>]*data-action="review-interface-types"[^>]*>', content)
+        preview_url = reverse("plugins:netbox_librenms_plugin:module_interface_type_preview", kwargs={"pk": device.pk})
+        if button:
+            preview_url = unescape(re.search(r'hx-get="([^"]+)"', button.group(0)).group(1))
+        else:
+            preview_url += f"?module_id={module.pk}&server_key=default&selected_device_id={device.pk}"
+        client.force_login(user)
+
+        response = client.get(preview_url, HTTP_HX_REQUEST="true")
+
+        # A denied HTMX preview answers 200 with HX-Redirect and a "Missing permissions" message.
+        opened = response.status_code == 200 and not response.has_header("HX-Redirect")
+        assert (button is not None, opened) == (missing_view is None, missing_view is None)
 
     @pytest.mark.parametrize("template_type", ["", "1000base-t"], ids=["untyped-template", "matching-type"])
     def test_real_tab_omits_action_when_no_template_type_differs(self, settings, template_type):
@@ -370,10 +379,10 @@ class TestModuleInterfaceTypeTable:
     @pytest.mark.parametrize(
         "table_kwargs,record",
         [
-            ({"can_change_interface": False}, {"installed_module_id": 1}),
-            ({"can_change_interface": True}, {}),
+            ({"can_review_interface_types": False}, {"installed_module_id": 1}),
+            ({"can_review_interface_types": True}, {}),
         ],
-        ids=["no-change-permission", "no-installed-module"],
+        ids=["no-review-permission", "no-installed-module"],
     )
     def test_preview_action_requires_change_permission_and_installed_module(self, table_kwargs, record):
         from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable

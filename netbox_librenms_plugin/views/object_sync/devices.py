@@ -6,6 +6,7 @@ from django.http import JsonResponse
 from django.urls import reverse
 from django.views import View
 from ipam.models import VLAN, VLANGroup
+from utilities.permissions import get_permission_for_model
 from utilities.views import ViewTab, register_model_view
 
 from netbox_librenms_plugin.constants import PERM_VIEW_PLUGIN, is_supported_interface_name_field
@@ -817,6 +818,8 @@ class DeviceModuleTableView(BaseModuleTableView):
 
     def get_table(self, data, obj):
         """Return the module sync table."""
+        from ..sync.modules import module_interface_type_preview_permissions
+
         user = self.request.user
         has_write_permission = self.has_write_permission()
         server_key = getattr(self, "_active_server_key", None) or self.librenms_api.server_key
@@ -829,6 +832,14 @@ class DeviceModuleTableView(BaseModuleTableView):
             can_add_module=has_write_permission and user.has_perm("dcim.add_module"),
             can_change_module=has_write_permission and user.has_perm("dcim.change_module"),
             can_change_interface=has_write_permission and user.has_perm("dcim.change_interface"),
+            can_review_interface_types=(
+                has_write_permission
+                and user.has_perm("dcim.change_interface")
+                and all(
+                    user.has_perm(get_permission_for_model(model, action))
+                    for action, model in module_interface_type_preview_permissions()
+                )
+            ),
             can_delete_module=has_write_permission and user.has_perm("dcim.delete_module"),
             can_add_module_bay_template=(has_write_permission and user.has_perm("dcim.add_modulebaytemplate")),
             can_add_module_type=(has_write_permission and user.has_perm("dcim.add_moduletype")),

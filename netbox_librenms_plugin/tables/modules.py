@@ -95,6 +95,7 @@ class LibreNMSModuleTable(tables.Table):
         can_add_module=False,
         can_change_module=False,
         can_change_interface=False,
+        can_review_interface_types=False,
         can_delete_module=False,
         can_add_module_bay_template=False,
         can_add_module_type=False,
@@ -113,6 +114,7 @@ class LibreNMSModuleTable(tables.Table):
         self.can_add_module = can_add_module
         self.can_change_module = can_change_module
         self.can_change_interface = can_change_interface
+        self.can_review_interface_types = can_review_interface_types
         self.can_delete_module = can_delete_module
         self.can_add_module_bay_template = can_add_module_bay_template
         self.can_add_module_type = can_add_module_type
@@ -812,7 +814,7 @@ class LibreNMSModuleTable(tables.Table):
             )
 
         if (
-            getattr(self, "can_change_interface", False)
+            getattr(self, "can_review_interface_types", False)
             and record.get("interface_type_mismatch_count")
             and record.get("installed_module_id")
         ):

@@ -2530,13 +2530,20 @@ def _apply_module_interface_type(interface, template_type, current_type, offered
     return "updated", None
 
 
+def module_interface_type_preview_permissions():
+    """Return the (action, model) grants that the interface type preview needs."""
+    from dcim.models import Device, Interface, Module
+
+    return [("view", Device), ("view", Module), ("view", Interface)]
+
+
 class ModuleInterfaceTypePreviewView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
     """Render the current module interface type differences."""
 
     def get(self, request, pk):
         from dcim.models import Device, Interface, Module
 
-        self.required_object_permissions = {"GET": [("view", Device), ("view", Module), ("view", Interface)]}
+        self.required_object_permissions = {"GET": module_interface_type_preview_permissions()}
         if error := self.require_object_permissions("GET"):
             return error
 
