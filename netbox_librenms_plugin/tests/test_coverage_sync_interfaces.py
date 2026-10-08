@@ -5572,7 +5572,7 @@ class TestBulkRelationshipRobustness:
         port_ids = [8101, "8102", 8103, 810, *range(9100, 9100 + RELATIONSHIP_CANDIDATE_BATCH_SIZE)]
 
         batch = port_ids[:RELATIONSHIP_CANDIDATE_BATCH_SIZE]
-        sql = str(Interface.objects.filter(relationship_candidate_q("default", batch, ())).query)
+        sql = str(Interface.objects.filter(relationship_candidate_q(Interface, "default", batch, ())).query)
 
         assert sql.count(" ~ ") == 4
         assert relationship_candidate_ids(device, "default", port_ids, ()) == expected
