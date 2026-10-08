@@ -44,6 +44,12 @@ def test_with_args_without_raises():
     assert False
 
 
+# ruleid: xfail-needs-raises
+@pytest.mark.xfail.with_args(raises=None, reason="recorded defect")
+def test_with_args_raises_none():
+    assert False
+
+
 # ok: xfail-needs-raises
 xfail = pytest.mark.xfail
 

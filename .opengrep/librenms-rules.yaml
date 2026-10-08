@@ -424,6 +424,7 @@ rules:
           - pattern: pytest.mark.xfail(...)
           - pattern-not: pytest.mark.xfail(..., raises=$EXCEPTION, ...)
       - pattern: pytest.mark.xfail(..., raises=None, ...)
+      - pattern: pytest.mark.xfail.with_args(..., raises=None, ...)
       # A bare marker, but not an alias assignment; the use of an alias is not followed.
       - patterns:
           - pattern: pytest.mark.xfail
