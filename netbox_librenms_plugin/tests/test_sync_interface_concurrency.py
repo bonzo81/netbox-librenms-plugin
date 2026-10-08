@@ -2,6 +2,7 @@
 
 import os
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from threading import Event
 
 import pytest
@@ -12,6 +13,7 @@ from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
     configured_server_key,
     make_virtual_chassis_members,
+    run_in_threads,
 )
 
 
@@ -1163,6 +1165,22 @@ def test_direct_actions_refuse_a_concurrent_port_claim_without_leftovers(setting
         assert existing.cable is None
 
 
+def test_run_in_threads_raises_the_failure_that_broke_the_barrier_at_once():
+    """A peer at the barrier fails at once, and the error of the failed call is raised, not BrokenBarrierError."""
+    from threading import Barrier
+    from time import monotonic
+
+    barrier = Barrier(2)
+
+    def fail():
+        raise ValueError("the real failure")
+
+    started = monotonic()
+    with pytest.raises(ValueError, match="the real failure"):
+        run_in_threads(partial(barrier.wait, timeout=5), fail, barriers=(barrier,), timeout=10)
+    assert monotonic() - started < 2
+
+
 def test_opposite_order_port_claims_refuse_without_deadlock():
     from threading import Barrier
     from django.db import close_old_connections, connections, transaction
@@ -1184,7 +1202,9 @@ def test_opposite_order_port_claims_refuse_without_deadlock():
         finally:
             connections.close_all()
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [executor.submit(claim_in_order, 9301, 9302), executor.submit(claim_in_order, 9302, 9301)]
-        for future in futures:
-            future.result(timeout=10)
+    run_in_threads(
+        partial(claim_in_order, 9301, 9302),
+        partial(claim_in_order, 9302, 9301),
+        barriers=(first_claims_ready, second_claims_done),
+        timeout=10,
+    )

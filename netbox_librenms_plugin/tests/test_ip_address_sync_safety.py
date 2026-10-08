@@ -2,9 +2,9 @@
 
 import json
 
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from copy import deepcopy
+from functools import partial
 from threading import Barrier, BrokenBarrierError
 from unittest.mock import patch
 
@@ -30,6 +30,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis_members,
     make_vm,
+    run_in_threads,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms, make_view
 
@@ -509,12 +510,14 @@ def test_concurrent_global_ip_sync_creates_one_address(settings):
 
     lookup_barrier = Barrier(2)
     lookup_wrappers = [_IPHostLookupBarrier(lookup_barrier) for _device in devices]
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [
-            executor.submit(_sync_cached_ip, device.pk, user.pk, row_id, wrapper)
+    statuses = run_in_threads(
+        *(
+            partial(_sync_cached_ip, device.pk, user.pk, row_id, wrapper)
             for device, wrapper in zip(devices, lookup_wrappers, strict=True)
-        ]
-        statuses = [future.result(timeout=60) for future in futures]
+        ),
+        barriers=(lookup_barrier,),
+        timeout=60,
+    )
 
     assert sorted(statuses) == [200, 302]
     assert all(wrapper.lookup_seen for wrapper in lookup_wrappers)
@@ -570,12 +573,14 @@ def test_concurrent_bulk_ip_sync_orders_host_locks_before_interface_scope(settin
     barrier = Barrier(2)
     wrappers = [_FirstHostAdvisoryBarrier(barrier) for _ in range(2)]
     row_ids = [row["ip_with_mask"] for row in rows]
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [
-            executor.submit(_sync_cached_ips, device.pk, user.pk, selected, wrapper)
+    outcomes = run_in_threads(
+        *(
+            partial(_sync_cached_ips, device.pk, user.pk, selected, wrapper)
             for selected, wrapper in zip((row_ids, list(reversed(row_ids))), wrappers, strict=True)
-        ]
-        outcomes = [future.result(timeout=60) for future in futures]
+        ),
+        barriers=(barrier,),
+        timeout=60,
+    )
 
     assert [status for status, _messages in outcomes] == [302, 302]
     assert all(not any("Failed to sync" in message for message in messages) for _, messages in outcomes)

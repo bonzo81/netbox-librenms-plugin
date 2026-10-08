@@ -2,8 +2,10 @@
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from itertools import chain
+from threading import BrokenBarrierError
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -760,6 +762,31 @@ def ip_on(device, address, ifname, *, iface_type="1000base-t"):
 def delete_keeping_pk(obj):
     """Delete the row via the queryset so the in-memory instance keeps its pk."""
     type(obj).objects.filter(pk=obj.pk).delete()
+
+
+def run_in_threads(*calls, barriers, timeout):
+    """
+    Run each zero-argument call in its own thread and return the results in call order.
+
+    A call that fails aborts *barriers*, so a peer that waits at one fails at once and does not wait
+    for its timeout. The failure is raised, not the BrokenBarrierError of a peer.
+    """
+
+    def run(call):
+        try:
+            return call()
+        except BaseException:
+            for barrier in barriers:
+                barrier.abort()
+            raise
+
+    with ThreadPoolExecutor(max_workers=len(calls)) as executor:
+        futures = [executor.submit(run, call) for call in calls]
+        failures = [error for future in futures if (error := future.exception(timeout=timeout)) is not None]
+    failures.sort(key=lambda error: isinstance(error, BrokenBarrierError))
+    if failures:
+        raise failures[0]
+    return [future.result() for future in futures]
 
 
 def make_superuser(username="review-su"):
