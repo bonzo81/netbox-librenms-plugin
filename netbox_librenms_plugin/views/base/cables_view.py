@@ -29,6 +29,7 @@ from netbox_librenms_plugin.utils import (
     apply_cable_manual_picks,
     assign_cable_row_ids,
     build_librenms_id_qs,
+    build_librenms_ids_qs,
     cable_far_terminations,
     cable_has_librenms_tag,
     cable_is_point_to_point,
@@ -597,10 +598,8 @@ class BaseCableTableView(
         sorted_remote_ids = sorted(remote_ids)
         # Chunked so a wide page cannot build one unbounded OR chain.
         for offset in range(0, len(sorted_remote_ids), 32):
-            id_q = Q(pk__isnull=True) & Q(pk__isnull=False)
-            for remote_id in sorted_remote_ids[offset : offset + 32]:
-                id_q |= _librenms_id_q(server_key, remote_id, include_oob=False)
-            device_pks.update(Device.objects.filter(id_q).values_list("pk", flat=True))
+            host_q, _oob_q = build_librenms_ids_qs(server_key, sorted_remote_ids[offset : offset + 32])
+            device_pks.update(Device.objects.filter(host_q).values_list("pk", flat=True))
         catalog_devices = list(Device.objects.filter(pk__in=device_pks).select_related("virtual_chassis"))
         visible_device_ids = set(
             self._viewable_queryset(Device)
@@ -732,9 +731,11 @@ class BaseCableTableView(
             for port_id in sorted(evidence["ids"])
         ]
         for offset in range(0, len(id_candidate_items), 32):
-            candidate_q = Q(pk__isnull=True) & Q(pk__isnull=False)
-            for owner_id, port_id in id_candidate_items[offset : offset + 32]:
-                candidate_q |= Q(device_id=owner_id) & _librenms_id_q(server_key, port_id)
+            chunk = id_candidate_items[offset : offset + 32]
+            # One regex per JSON path. The catalog keys each match by its own (device, ID) and name, so
+            # a match that pairs one owner with the ID of another owner is never read.
+            host_q, oob_q = build_librenms_ids_qs(server_key, {port_id for _owner_id, port_id in chunk})
+            candidate_q = Q(device_id__in={owner_id for owner_id, _port_id in chunk}) & (host_q | oob_q)
             candidate_pks.update(Interface.objects.filter(candidate_q).values_list("pk", flat=True))
         catalog_interfaces = list(
             Interface.objects.filter(pk__in=candidate_pks)

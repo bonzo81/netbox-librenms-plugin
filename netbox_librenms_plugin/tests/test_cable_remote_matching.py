@@ -610,6 +610,42 @@ class TestRemotePortAliasesAreFetched:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.django_db
+def test_the_link_context_reads_a_page_of_ids_with_one_regex_per_path():
+    """A page of neighbours costs one regex per JSON path per query, and each row finds its own end."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    from netbox_librenms_plugin.utils import set_librenms_device_id
+
+    server_key = configured_server_key()
+    local = make_device("regex-count-local")
+    links, expected = [], {}
+    for index in range(12):
+        remote = make_device(f"regex-count-peer-{index}")
+        map_device_to_librenms(remote, 7300 + index, server_key=server_key)
+        interface = make_interface(remote, "Gi0/1")
+        set_librenms_device_id(interface, 5300 + index, server_key)
+        interface.save(update_fields=["custom_field_data"])
+        expected[(remote.pk, 5300 + index)] = [interface]
+        links.append(
+            _row(
+                remote_device=remote.name,
+                remote_device_id=7300 + index,
+                remote_port_id=5300 + index,
+                local_port_id=100 + index,
+                link_id=index,
+            )
+        )
+
+    with CaptureQueriesContext(connection) as queries:
+        context = _make_view()._build_normal_link_context(links, local, server_key)
+
+    regex_counts = [query["sql"].count(" ~ ") for query in queries if " ~ " in query["sql"]]
+    assert regex_counts and max(regex_counts) <= 4
+    assert {key: context["interface_ids_by_device"][key] for key in expected} == expected
+
+
 def _dedupe(rows):
     """Run the real protocol de-duplication over already-enriched rows."""
     from netbox_librenms_plugin.views.base.cables_view import BaseCableTableView
