@@ -3773,14 +3773,20 @@ class AmbiguousLibreNMSIdError(LookupError):
     """
 
 
-def librenms_id_text_pattern(value: int) -> str:
-    """Return the SQL regex for the stored text forms of a coerce_librenms_id() result that it also reads."""
-    return rf"^{_ID_TEXT_SPACE}{_ID_TEXT_SIGN}0{{0,{_ID_TEXT_MAX_DIGITS - len(str(value))}}}{value}{_ID_TEXT_SPACE}$"
+def librenms_id_text_pattern(*values: int) -> str:
+    """Return one SQL regex for the stored text forms of these coerce_librenms_id() results that it also reads."""
+    forms = "|".join(f"0{{0,{_ID_TEXT_MAX_DIGITS - len(str(value))}}}{value}" for value in values)
+    return rf"^{_ID_TEXT_SPACE}{_ID_TEXT_SIGN}(?:{forms}){_ID_TEXT_SPACE}$"
 
 
 def build_librenms_id_qs(server_key, value):
+    """Build ``(host_q, oob_q)`` for one librenms_id; see :func:`build_librenms_ids_qs`."""
+    return build_librenms_ids_qs(server_key, [value])
+
+
+def build_librenms_ids_qs(server_key, values):
     """
-    Build ``(host_q, oob_q)`` Q objects matching every stored form of a librenms_id under server_key.
+    Build ``(host_q, oob_q)`` Q objects matching every stored form of any of these librenms_ids under server_key.
 
     Single source of truth for the librenms_id JSON-path coverage shared by
     :func:`find_by_librenms_id` and ``cables_view._librenms_id_q``, so the two can't drift on
@@ -3790,13 +3796,13 @@ def build_librenms_id_qs(server_key, value):
     text form by :func:`librenms_id_text_pattern`, so it finds exactly what coerce_librenms_id() reads.
 
     Fails closed on an invalid server key or value (bool / None / zero / negative / non-numeric
-    string): it returns match-nothing predicates rather than building a lookup that could hit a
-    corrupt legacy row. Callers may still pre-validate for their own control flow, but no longer
+    string): it drops an invalid value, and returns match-nothing predicates when no valid value is
+    left, rather than building a lookup that could hit a corrupt legacy row. Callers may still pre-validate for their own control flow, but no longer
     have to for safety.
 
     Args:
         server_key (str): The LibreNMS server key whose JSON sub-key is matched.
-        value (int | str): The already-validated LibreNMS id.
+        values (Iterable[int | str]): The already-validated LibreNMS ids.
 
     Returns:
         tuple[Q, Q]: ``(host_q, oob_q)`` — host-identity predicates (scalar / ``__id`` / legacy
@@ -3814,12 +3820,13 @@ def build_librenms_id_qs(server_key, value):
     # that could match a corrupt legacy row (e.g. ``custom_field_data__librenms_id="abc"``). Callers
     # still validate for their own reasons, but this makes the shared builder the last line of
     # defence.
-    normalized_value = coerce_librenms_id(value)
-    if normalized_value is None:
+    normalized_values = sorted({coerce_librenms_id(value) for value in values} - {None})
+    if not normalized_values:
         match_none = Q(pk__in=[])
         return match_none, match_none
     # Text regex only: jsonb equality would also find a float 42.0 that the decoder rejects.
-    numeric_pattern = librenms_id_text_pattern(normalized_value)
+    # One alternation per JSON path: N values must not cost N predicates per path.
+    numeric_pattern = librenms_id_text_pattern(*normalized_values)
     host_q = (
         Q(**{f"custom_field_data__librenms_id__{server_key}__regex": numeric_pattern})
         | Q(**{f"custom_field_data__librenms_id__{server_key}__id__regex": numeric_pattern})
@@ -4035,12 +4042,9 @@ class PortDisclosure:
         ports = list(ports)
         new_ids = {port_id for port_id, _owner in ports if port_id not in self._bindings}
         if new_ids:
-            match = Q(pk__in=[])
-            for port_id in new_ids:
-                host_q, oob_q = build_librenms_id_qs(self._server_key, port_id)
-                match |= host_q | oob_q
+            host_q, oob_q = build_librenms_ids_qs(self._server_key, new_ids)
             for model in (Interface, VMInterface):
-                for interface in model.objects.filter(match):
+                for interface in model.objects.filter(host_q | oob_q):
                     port_id = get_librenms_device_id(interface, self._server_key, auto_save=False)
                     if port_id in new_ids:
                         self._bindings.setdefault(port_id, []).append(interface)

@@ -5636,6 +5636,35 @@ class TestBulkRelationshipRobustness:
         # AttributeError ('list' object has no attribute 'items').
         view._sync_interface_relationships(device, [], {"lag_members": [1, 2], "sub_interfaces": ["x"]}, "default")
 
+    def test_relationship_candidates_cost_one_regex_per_path_and_match_exactly(self, db):
+        """A full batch of port IDs builds one regex per JSON path, and each ID finds only its own row."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.interface_relationships import (
+            RELATIONSHIP_CANDIDATE_BATCH_SIZE,
+            relationship_candidate_ids,
+            relationship_candidate_q,
+        )
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        device = make_device("rel-candidates")
+        expected = set()
+        for name, value in (("Et1", {"default": 8101}), ("Et2", {"default": {"id": "008102"}}), ("Et3", "8103")):
+            interface = make_interface(device, name)
+            interface.custom_field_data["librenms_id"] = value
+            interface.save(update_fields=["custom_field_data"])
+            expected.add(interface.pk)
+        decoy = make_interface(device, "Et4")
+        decoy.custom_field_data["librenms_id"] = {"default": 81010}
+        decoy.save(update_fields=["custom_field_data"])
+        port_ids = [8101, "8102", 8103, 810, *range(9100, 9100 + RELATIONSHIP_CANDIDATE_BATCH_SIZE)]
+
+        batch = port_ids[:RELATIONSHIP_CANDIDATE_BATCH_SIZE]
+        sql = str(Interface.objects.filter(relationship_candidate_q("default", batch, ())).query)
+
+        assert sql.count(" ~ ") == 4
+        assert relationship_candidate_ids(device, "default", port_ids, ()) == expected
+
     def test_bulk_lag_persist_does_not_clobber_concurrent_edits(self, db):
         """The bulk LAG persist writes only the changed FK/type columns, so a concurrent edit to other fields of the stale in-memory objects isn't lost (no full-row overwrite)."""
         from dcim.models import Interface

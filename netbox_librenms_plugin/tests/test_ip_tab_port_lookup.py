@@ -607,6 +607,37 @@ class TestIpRowVrfSuggestions:
 
 
 @pytest.mark.django_db
+def test_port_disclosure_preload_binds_each_stored_form_with_one_regex_per_path():
+    """Many ports cost one regex per JSON path, and each stored text form still binds only its own port."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from netbox_librenms_plugin.utils import PortDisclosure
+
+    device = make_device("disclosure-preload-device")
+    stored = {
+        "scalar": {SERVER_KEY: 7101},
+        "dict": {SERVER_KEY: {"id": "007102"}},
+        "legacy": " +7103 ",
+        "longer": {SERVER_KEY: 71010},
+    }
+    for name, value in stored.items():
+        interface = make_interface(device, name)
+        interface.custom_field_data["librenms_id"] = value
+        interface.save(update_fields=["custom_field_data"])
+    bound = [7101, 7102, 7103]
+    disclose = PortDisclosure(make_superuser("disclosure-preload-user"), SERVER_KEY)
+
+    with CaptureQueriesContext(connection) as queries:
+        disclose.preload([(port_id, None) for port_id in [*bound, 710, *range(9000, 9040)]])
+
+    binding_sql = [query["sql"] for query in queries if 'FROM "dcim_interface"' in query["sql"]]
+    assert [sql.count(" ~ ") for sql in binding_sql] == [4]
+    assert [port_id for port_id in [*bound, 710, 9000] if disclose(port_id, None)] == bound
+
+
+@pytest.mark.django_db
 class TestWarmRenderWithoutACachedPortMap:
     """A snapshot cached before ports_by_id existed still renders."""
 

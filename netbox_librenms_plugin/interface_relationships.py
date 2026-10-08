@@ -8,7 +8,7 @@ from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.utils import (
-    build_librenms_id_qs,
+    build_librenms_ids_qs,
     get_librenms_device_id,
     interface_name_fallback_matches_port,
     invert_relationship_edges,
@@ -89,16 +89,10 @@ def interface_queryset_for_object(obj):
 
 def relationship_candidate_q(server_key, port_ids, names):
     """Build one query for stable IDs and safe name hints."""
-    candidate_q = Q(pk__in=[])
-    unique_port_ids = {
-        (type(port_id).__name__, str(port_id)): port_id
-        for port_id in port_ids
-        if normalize_librenms_port_id(port_id) is not None
-    }
-    for marker in sorted(unique_port_ids):
-        port_id = unique_port_ids[marker]
-        host_q, oob_q = build_librenms_id_qs(server_key, port_id)
-        candidate_q |= host_q | oob_q
+    host_q, oob_q = build_librenms_ids_qs(
+        server_key, [port_id for port_id in port_ids if normalize_librenms_port_id(port_id) is not None]
+    )
+    candidate_q = host_q | oob_q
     unique_names = sorted({name for name in names if isinstance(name, str) and name})
     if unique_names:
         candidate_q |= Q(name__in=unique_names)
