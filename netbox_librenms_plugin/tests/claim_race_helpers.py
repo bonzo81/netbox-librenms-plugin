@@ -1,11 +1,13 @@
 """Shared helpers for real database LibreNMS identity claim races."""
 
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from threading import Barrier
 from typing import TypeVar
 
 from django.db import close_old_connections, connection
+
+from netbox_librenms_plugin.tests.conftest import run_in_threads
 
 
 _Result = TypeVar("_Result")
@@ -34,8 +36,8 @@ def run_librenms_id_claim_race(*operations: Callable[[], _Result]) -> tuple[list
         finally:
             connection.close()
 
-    with ThreadPoolExecutor(max_workers=len(operations)) as executor:
-        futures = [executor.submit(run, operation) for operation in operations]
-        outcomes = [future.result(timeout=30) for future in futures]
+    outcomes = run_in_threads(
+        *(partial(run, operation) for operation in operations), barriers=(claim_barrier,), timeout=30
+    )
 
     return outcomes, claim_keys
