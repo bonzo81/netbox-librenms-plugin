@@ -15,7 +15,7 @@ from tenancy.models import Tenant
 from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view
 
 SERVER_KEY = "default"
@@ -622,9 +622,7 @@ def test_port_disclosure_preload_binds_each_stored_form_with_one_regex_per_path(
         "longer": {SERVER_KEY: 71010},
     }
     for name, value in stored.items():
-        interface = make_interface(device, name)
-        interface.custom_field_data["librenms_id"] = value
-        interface.save(update_fields=["custom_field_data"])
+        seed_stored_mapping(make_interface(device, name), value, save=True)
     bound = [7101, 7102, 7103]
     disclose = PortDisclosure(make_superuser("disclosure-preload-user"), SERVER_KEY)
 

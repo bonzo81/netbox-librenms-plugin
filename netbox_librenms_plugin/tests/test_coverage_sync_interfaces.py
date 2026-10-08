@@ -5504,13 +5504,8 @@ class TestBulkRelationshipRobustness:
         device = make_device("rel-candidates")
         expected = set()
         for name, value in (("Et1", {"default": 8101}), ("Et2", {"default": {"id": "008102"}}), ("Et3", "8103")):
-            interface = make_interface(device, name)
-            interface.custom_field_data["librenms_id"] = value
-            interface.save(update_fields=["custom_field_data"])
-            expected.add(interface.pk)
-        decoy = make_interface(device, "Et4")
-        decoy.custom_field_data["librenms_id"] = {"default": 81010}
-        decoy.save(update_fields=["custom_field_data"])
+            expected.add(seed_stored_mapping(make_interface(device, name), value, save=True).pk)
+        seed_stored_mapping(make_interface(device, "Et4"), {"default": 81010}, save=True)
         port_ids = [8101, "8102", 8103, 810, *range(9100, 9100 + RELATIONSHIP_CANDIDATE_BATCH_SIZE)]
 
         batch = port_ids[:RELATIONSHIP_CANDIDATE_BATCH_SIZE]
