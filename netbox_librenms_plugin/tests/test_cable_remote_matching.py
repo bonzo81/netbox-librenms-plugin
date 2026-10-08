@@ -618,7 +618,7 @@ def test_the_link_context_reads_a_page_of_ids_with_one_regex_per_path():
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
 
-    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
     server_key = configured_server_key()
     local = make_device("regex-count-local")
@@ -627,8 +627,7 @@ def test_the_link_context_reads_a_page_of_ids_with_one_regex_per_path():
         remote = make_device(f"regex-count-peer-{index}")
         map_device_to_librenms(remote, 7300 + index, server_key=server_key)
         interface = make_interface(remote, "Gi0/1")
-        seed_own_mapping(interface, 5300 + index, server_key)
-        interface.save()
+        seed_mapping(interface, server_key, own=5300 + index)
         expected[(remote.pk, 5300 + index)] = [interface]
         links.append(
             _row(
