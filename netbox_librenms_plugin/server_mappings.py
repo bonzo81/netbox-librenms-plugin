@@ -337,26 +337,28 @@ def read_mappings(queryset, *, fields: Iterable[str]) -> tuple[MappedRecord, ...
     return tuple(records)
 
 
-def _identity_predicates(server_key, value) -> tuple[Q, Q]:
+def _identity_predicates(server_key, values) -> tuple[Q, Q]:
     """
-    Return ``(own_q, oob_q)`` matching every stored form of *value* under *server_key*.
+    Return ``(own_q, oob_q)`` matching every stored form of any of *values* under *server_key*.
 
     Matches the namespaced scalar, the dict-with-id form, the legacy bare value and the OOB
     sub-key, in every text form that coerce_librenms_id() reads (so ``"042"`` and ``" 42 "`` match
-    JSON ``42``). An invalid server key or value matches nothing.
+    JSON ``42``). An invalid value is dropped. An invalid server key, or no valid value, matches
+    nothing.
     """
     match_none = Q(pk__in=[])
     try:
         server_key = require_server_key(server_key)
     except ValueError:
         return match_none, match_none
-    normalized_value = coerce_librenms_id(value)
-    if normalized_value is None:
+    normalized_values = sorted({coerce_librenms_id(value) for value in values} - {None})
+    if not normalized_values:
         return match_none, match_none
 
     storage = f"{_STORAGE_FIELD}__{_MAPPING_KEY}"
     # Text regex only: jsonb equality would also find a float 42.0 that the decoder rejects.
-    numeric_pattern = librenms_id_text_pattern(normalized_value)
+    # One alternation per JSON path: N values must not cost N predicates per path.
+    numeric_pattern = librenms_id_text_pattern(*normalized_values)
     own_q = (
         Q(**{f"{storage}__{server_key}__regex": numeric_pattern})
         | Q(**{f"{storage}__{server_key}__id__regex": numeric_pattern})
@@ -382,13 +384,12 @@ def identity_q(model, *, server: str, identities: Iterable, roles: Iterable[Mapp
     """
     _space_of(model)
     roles = _require_roles(roles)
+    own_q, oob_q = _identity_predicates(server, identities)
     predicate = Q(pk__in=[])
-    for identity in identities:
-        own_q, oob_q = _identity_predicates(server, identity)
-        if MappingRole.OWN in roles:
-            predicate |= own_q
-        if MappingRole.OOB in roles:
-            predicate |= oob_q
+    if MappingRole.OWN in roles:
+        predicate |= own_q
+    if MappingRole.OOB in roles:
+        predicate |= oob_q
     return predicate
 
 
@@ -427,7 +428,7 @@ def find_mapping(queryset, *, server: str, identity, roles: Iterable[MappingRole
     # The predicates apply the same rule; checking it first skips the query.
     if coerce_librenms_id(identity) is None:
         return None
-    own_q, oob_q = _identity_predicates(server, identity)
+    own_q, oob_q = _identity_predicates(server, [identity])
     own_q = own_q if MappingRole.OWN in roles else Q(pk__in=[])
     oob_q = oob_q if MappingRole.OOB in roles else Q(pk__in=[])
 
