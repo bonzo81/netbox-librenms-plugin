@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from urllib.parse import parse_qs
 
 import pytest
 
@@ -423,3 +424,43 @@ def test_a_stale_ip_swap_after_reset_keeps_the_switches_off(page, swap_page):
     assert not _checked(page, "#ip-mgmt")
     assert page.locator("#ip-sync-options-count").inner_text() == "0"
     assert len(saved) == 2
+
+
+IP_SUBMIT_PATH = "/browser-sync-ip/"
+# A second page of the IP table: no management row on it.
+IP_PAGE_TWO_ROWS = (
+    '<tr><td data-col="selection">'
+    '<input type="checkbox" name="select" value="198.18.0.3/24" id="ip-third"></td><td>198.18.0.3/24</td></tr>'
+)
+
+
+def _ip_form_markup(rows, **menu_state):
+    """One page of the IP tab, with the table inside the form that submits the selection."""
+    return (
+        f"{_ip_menu_markup(**menu_state)}"
+        f'<form id="ip-sync-form" method="post" action="{IP_SUBMIT_PATH}">'
+        '<table id="librenms-ipaddress-table"><thead><tr><th><input type="checkbox" class="toggle"></th>'
+        f'<th>Address</th></tr></thead><tbody>{rows}</tbody></table><button type="submit" id="ip-submit">Sync</button>'
+        "</form>"
+    )
+
+
+def test_turning_set_primary_ip_off_drops_the_off_page_management_row(page, swap_page):
+    load, swap = swap_page
+    load(_ip_form_markup(IP_ROWS, set_primary=True))
+    assert _checked(page, "#ip-mgmt")
+    page.check("#ip-other")
+
+    swap(_ip_form_markup(IP_PAGE_TWO_ROWS, set_primary=True), "ip-sync-options")
+    page.check("#ip-third")
+    page.uncheck("#set-primary-ip-toggle-cb")
+
+    posted = []
+    page.route(
+        f"**{IP_SUBMIT_PATH}",
+        lambda route: (posted.append(route.request.post_data), route.fulfill(status=200, body="ok")),
+    )
+    page.click("#ip-submit")
+    page.wait_for_function("document.body.textContent.trim() === 'ok'")
+
+    assert sorted(parse_qs(posted[0])["select"]) == ["198.18.0.2/24", "198.18.0.3/24"]
