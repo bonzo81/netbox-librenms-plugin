@@ -432,6 +432,30 @@ rules:
           - pattern-not-inside: pytest.mark.xfail.with_args(..., raises=$EXCEPTION, ...)
           - pattern-not-inside: $ALIAS = pytest.mark.xfail
       - pattern: pytestmark = pytest.mark.xfail
+  - id: barrier-needs-run-in-threads
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Run the threads of a test that creates a threading.Barrier with
+      tests.conftest.run_in_threads(..., barriers=...). Without it, a thread that fails leaves its
+      peers at the barrier until the timeout, and the BrokenBarrierError of a peer hides the failure.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/tests/**"]
+    patterns:
+      - pattern-either:
+          - pattern: ThreadPoolExecutor(...)
+          - pattern: $MODULE.ThreadPoolExecutor(...)
+          - pattern: Thread(...)
+          - pattern: $MODULE.Thread(...)
+      - pattern-either:
+          - pattern-inside: |
+              $BARRIER = Barrier(...)
+              ...
+          - pattern-inside: |
+              $BARRIER = threading.Barrier(...)
+              ...
   - id: no-selected-fuzzy-apis
     languages: [python]
     severity: WARNING

@@ -53,6 +53,7 @@ unchecked until that review.
 | `no-django-testcase-in-tests` | warning | A test directly imports or inherits Django `TestCase`. Dynamic bases are outside this check. |
 | `no-unittest-assertions` | warning | A test calls a `self` method with a unittest assertion API name. |
 | `xfail-needs-raises` | error | A test marks an expected failure with `pytest.mark.xfail` and does not name the exception with `raises=`, or gives `raises=None`. An alias of the marker is not followed. |
+| `barrier-needs-run-in-threads` | error | A test creates a `threading.Barrier` and then starts threads with `ThreadPoolExecutor` or `Thread`, not with `tests.conftest.run_in_threads`. |
 | `no-selected-fuzzy-apis` | warning | Code calls selected approximate-selection APIs. This does not prove exact-only selection. |
 
 ## Scope
@@ -97,6 +98,10 @@ so the rule reports it outright. Filters such as `filter(address=...)` are allow
 infer the type of an assigned object, so it checks `.address =` and `setattr(..., "address", ...)`
 only in files that import `IPAddress` from `ipam.models` or import `ipam.models` itself. A value
 passed in as a `netaddr.IPNetwork` variable is also reported; wrap the value at the call.
+
+The Barrier rule checks a test function that assigns a `Barrier(...)` or `threading.Barrier(...)` before it
+starts a thread. It does not follow a barrier that another function creates, a thread that a helper starts,
+or a handshake with an `Event`.
 
 The URL rule checks `<str:pk>` and `<pk>` in literal routes and local string constants.
 It leaves `<str:id>` alone because external IDs can contain text. The `pk` name is a package
