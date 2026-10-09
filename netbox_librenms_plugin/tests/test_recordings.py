@@ -98,6 +98,8 @@ def test_bundled_inventory_display_text_is_anonymized(recording):
     import re
 
     allowed = re.compile(r"(?:entity-[0-9a-f]{6}(?: \d+(?:/(?:\d+|[xc]\d+))+)?)|(?:\d+(?:/(?:\d+|[xc]\d+))+)")
+    # A description may also keep the Junos Virtual Chassis markers that VC detection reads.
+    junos_descr = re.compile(r"(?:FPC(?: \d+)? entity-[0-9a-f]{6})|(?:entity-[0-9a-f]{6} Virtual Chassis)")
     for key, value in recording.get("responses", {}).items():
         body = unwrap_response(value)[1]
         if "/inventory/" not in key or not isinstance(body, dict):
@@ -105,7 +107,9 @@ def test_bundled_inventory_display_text_is_anonymized(recording):
         for item in body.get("inventory") or []:
             for field in ("entPhysicalName", "entPhysicalDescr"):
                 if isinstance(item, dict) and item.get(field):
-                    assert allowed.fullmatch(item[field]), (recording["name"], field, item[field])
+                    value = item[field]
+                    kept = field == "entPhysicalDescr" and junos_descr.fullmatch(value)
+                    assert allowed.fullmatch(value) or kept, (recording["name"], field, value)
 
 
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
