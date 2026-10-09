@@ -1,3 +1,5 @@
+import json
+
 import django_tables2 as tables
 from django.utils.html import format_html, mark_safe
 from netbox.tables.columns import ToggleColumn
@@ -16,6 +18,10 @@ class IPAddressTable(tables.Table):
         elif kwargs.get("data") is not None:
             kwargs["data"] = identify_ip_sync_rows(list(kwargs["data"]))
         super().__init__(*args, **kwargs)
+        # Set Primary IP selects the management row also from a page that does not render it.
+        self.attrs["data-mgmt-rows"] = json.dumps(
+            list(dict.fromkeys(row["row_id"] for row in self.data if row.get("is_mgmt_ip") and row["row_id"]))
+        )
         # Identify the owning sync tab so the paginator links (inc/paginator.html builds
         # ?tab={{ table.tab }}) keep the user on the IP Addresses tab. Without this, table.tab
         # renders empty and paging falls back to the default (Interfaces) tab.

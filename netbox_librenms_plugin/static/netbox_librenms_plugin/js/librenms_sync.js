@@ -1224,6 +1224,15 @@ function initializePrimaryIpToggle() {
         document.querySelectorAll('tr[data-mgmt-ip="true"] input[name="select"]').forEach((box) => {
             box.checked = toggle.checked;
         });
+        const table = document.getElementById('librenms-ipaddress-table');
+        if (!table || !toggle.checked) return;
+        // A management row on another page has no checkbox, so it goes into the stored selection.
+        const visible = new Set(Array.from(table.querySelectorAll('td input[name="select"]'), (box) => box.value));
+        const selection = readStoredSelection(table);
+        JSON.parse(table.dataset.mgmtRows || '[]').forEach((key) => {
+            if (!visible.has(key)) selection[key] = {inputs: {}, auto: '', mgmt: true};
+        });
+        writeStoredSelection(table, selection);
     };
     selectManagementRow();
     toggle.addEventListener('change', () => {
