@@ -48,7 +48,8 @@ test-useful while losing identifying detail:
 - **Pseudonymized deterministically:** serials, hostnames, all model SKUs,
   and the `os` become `SN-…` / `device-…` / `MODEL-…` / `os-…` tokens. The mapping is stable,
   so cross-references (a device serial that equals a stack member's serial, which identifies
-  the master) still match. `hardware`, `remote_platform`, `entPhysicalModelName`, and
+  the master) still match. A placeholder serial such as `BUILTIN`, `-` or `N/A` stays unchanged,
+  because VC detection ignores it. `hardware`, `remote_platform`, `entPhysicalModelName`, and
   transceiver `model` share one model map per recording. Whitespace and case variants
   yield one token. Generic and absent-model placeholders stay unchanged. Tests can
   key ModuleType and ModuleTypeMapping rows to these tokens. `ifName` gets *pattern-aware* anonymization: structured interface names (slots,

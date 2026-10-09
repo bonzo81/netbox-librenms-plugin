@@ -28,6 +28,7 @@ from netbox_librenms_plugin.constants import (
     LIBRENMS_GLOBAL_ROUTING_INSTANCE,
     LIBRENMS_PLACEHOLDER_VALUES,
     MODULE_MODEL_PLACEHOLDERS,
+    is_stack_serial_placeholder,
 )
 from netbox_librenms_plugin.data_shapes.ports import (
     ANON_INTERFACE_NAME_PREFIX,
@@ -755,7 +756,7 @@ def _anon_value(key, value, rules, container=None):  # noqa: C901
         if isinstance(value, bool) or not isinstance(value, (str, int, float)):
             return value
         serial = str(value).strip()
-        return f"SN-{_hash(serial, salt)}" if serial and serial != "-" else value
+        return f"SN-{_hash(serial, salt)}" if serial and not is_stack_serial_placeholder(serial) else value
     if key in MODEL_KEYS:
         if isinstance(value, bool) or not isinstance(value, (str, int, float)):
             return value

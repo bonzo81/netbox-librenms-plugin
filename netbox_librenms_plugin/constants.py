@@ -88,6 +88,29 @@ def is_module_model_placeholder(value):
     return not isinstance(value, str) or value.strip().lower() in MODULE_MODEL_PLACEHOLDERS
 
 
+# Serial strings that name no hardware, so they are no stack identity evidence. "0" is absent on
+# purpose: zero is a real-but-falsey serial. The anonymizer keeps these values as they are.
+STACK_SERIAL_PLACEHOLDERS = frozenset(
+    {
+        "-",
+        "builtin",
+        "n/a",
+        "na",
+        "none",
+        "not available",
+        "notavailable",
+        "null",
+        "unknown",
+        "unspecified",
+    }
+)
+
+
+def is_stack_serial_placeholder(serial: str) -> bool:
+    """Return whether a trimmed serial string is a placeholder that names no hardware."""
+    return serial.casefold() in STACK_SERIAL_PLACEHOLDERS
+
+
 # Junos Virtual Chassis ENTITY descriptions: the root names the Virtual Chassis, each member is an
 # "FPC" row, and an "FPC <n> ..." row names member n. VC detection and the anonymizer read these.
 JUNOS_VC_ROOT_DESCR_MARKER = "Virtual Chassis"
