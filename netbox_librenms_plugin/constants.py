@@ -83,6 +83,10 @@ INTERFACE_SYNC_EXTRA_FIELDS = ("enabled", "mac_address", "librenms_id", "vlans")
 MODULE_MODEL_PLACEHOLDERS = frozenset({"", "-", "builtin", "default", "n/a", "na", "none", "unknown", "unspecified"})
 
 
+# Model name values that mark a generic or empty container, which is no real hardware.
+GENERIC_CONTAINER_MODELS = frozenset({"", "builtin", "default", "n/a"})
+
+
 def is_module_model_placeholder(value):
     """Return whether *value* is a LibreNMS model string that names no hardware."""
     return not isinstance(value, str) or value.strip().lower() in MODULE_MODEL_PLACEHOLDERS
