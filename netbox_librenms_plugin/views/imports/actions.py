@@ -61,7 +61,6 @@ from netbox_librenms_plugin.import_utils import (
     validate_device_for_import,
     visible_object_label,
 )
-from netbox_librenms_plugin.import_utils.bulk_import import ambiguous_stack_groups, stack_identity
 from netbox_librenms_plugin.import_validation_helpers import (
     apply_cluster_to_validation,
     apply_host_to_validation,
@@ -1338,18 +1337,10 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         }
 
         collisions = scope_bulk_collisions(detect_bulk_collisions(devices), request.user)
-        stack_ambiguities = ambiguous_stack_groups(
-            (
-                entry["device_id"],
-                stack_identity(entry["validation"].get("virtual_chassis", {}), entry["device_id"]),
-            )
-            for entry in devices
-            if not entry["is_vm"]
-        )
         # After collision detection, which must key on the unrestricted matches to stop two rows
         # writing the same NetBox device.
         scope_validation_disclosures([entry.get("validation") for entry in devices], request.user)
-        if collisions or stack_ambiguities:
+        if collisions:
             # Render at 200 (not 4xx): this is an interstitial modal swapped
             # into #htmx-modal-content, exactly like the confirm step. A non-2xx
             # status makes HTMX skip the swap and route the body through
@@ -1358,13 +1349,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             return render(
                 request,
                 "netbox_librenms_plugin/htmx/bulk_import_collision.html",
-                {
-                    "collisions": collisions,
-                    "stack_ambiguities": stack_ambiguities,
-                    "stack_block_message": classify_bulk_precheck(
-                        collisions, [], stack_ambiguities, [entry["device_id"] for entry in devices], {}
-                    ).stack_block_message,
-                },
+                {"collisions": collisions},
             )
 
         return render(
@@ -1579,7 +1564,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                         "No background worker was available.",
                     )
 
-        # Re-run the object-collision and stack-ambiguity checks before any synchronous import.
+        # Re-run the object-collision check before any synchronous import.
         # The confirm preview is advisory. A stale confirm form or scripted POST reaches this view
         # directly, so the import path must enforce the same blockers. This runs on the SYNCHRONOUS
         # path only: it sits after the background-job dispatch above, so a batch that enqueued a job
@@ -1589,7 +1574,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         # its virtual-chassis inventory can't be read, and that check is per row.
         precheck_skip_msg = None
         if parsed_ids:
-            collisions, unresolved, stack_ambiguities = detect_collisions_for_device_ids(
+            collisions, unresolved = detect_collisions_for_device_ids(
                 parsed_ids,
                 self.librenms_api,
                 libre_devices_cache=libre_devices_cache,
@@ -1600,13 +1585,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 vm_device_ids=vm_imports,
                 user=request.user,
             )
-            outcome = classify_bulk_precheck(
-                collisions,
-                unresolved,
-                stack_ambiguities,
-                device_ids_to_import,
-                vm_imports,
-            )
+            outcome = classify_bulk_precheck(collisions, unresolved, device_ids_to_import, vm_imports)
             if outcome.blocked:
                 # Block the whole batch with the same message that ImportDevicesJob logs.
                 if is_htmx:
@@ -1614,12 +1593,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     return render(
                         request,
                         "netbox_librenms_plugin/htmx/bulk_import_collision.html",
-                        {
-                            "stack_block_message": outcome.stack_block_message,
-                            "collisions": outcome.collisions,
-                            "oob": True,
-                            "stack_ambiguities": outcome.stack_ambiguities,
-                        },
+                        {"collisions": outcome.collisions, "oob": True},
                     )
                 messages.error(request, outcome.block_message)
                 return redirect(active_import_url)

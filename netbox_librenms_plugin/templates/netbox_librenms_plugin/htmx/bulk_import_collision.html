@@ -1,25 +1,13 @@
-{# Bulk-import warning for a NetBox object collision or ambiguous serial-less stacks. #}
+{# Bulk-import warning for a NetBox object collision. #}
 {% if oob %}<div id="htmx-modal-content" hx-swap-oob="innerHTML">{% endif %}
 <div class="modal-header">
   <h5 class="modal-title text-danger">
     <i class="mdi mdi-alert-octagon"></i>
-    {% if stack_ambiguities and collisions %}
-      Bulk import blocked: stack ambiguities and NetBox object collisions
-    {% elif stack_ambiguities %}
-      Bulk import blocked: ambiguous serial-less stacks
-    {% else %}
-      Bulk import blocked: NetBox object collisions
-    {% endif %}
+    Bulk import blocked: NetBox object collisions
   </h5>
   <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
 </div>
 <div class="modal-body">
-  {% if stack_ambiguities %}
-  <div class="alert alert-danger {% if collisions %}mb-3{% else %}mb-0{% endif %}">
-    <i class="mdi mdi-alert-octagon me-1"></i>
-    {{ stack_block_message }}
-  </div>
-  {% endif %}
   {% if collisions %}
   <div class="alert alert-danger mb-3">
     <div>
