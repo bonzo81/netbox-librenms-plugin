@@ -535,7 +535,7 @@ def create_virtual_chassis_with_members(  # noqa: C901
     original_vc_position = master_device.vc_position
 
     # Find master's actual VC position from members_info.
-    # Priority: is_master flag (set during detection) → serial match → default 1.
+    # Priority: is_master flag (set during detection) → serial match → first slot (0 on a 0-based stack, else 1).
     # The ENTITY-MIB serial carries the vendor's decoration ("S/N BCFB9793" on Juniper) while the
     # stored device serial does not. Resolve the rule chain once here, before the first comparison,
     # so master matching, the member loop and the member-count check all read the same value.
@@ -549,7 +549,9 @@ def create_virtual_chassis_with_members(  # noqa: C901
         )
 
     _master_serial = normalize_stack_serial(master_device.serial)
-    _master_pos = 1
+    # Callers can omit the master's own row, so a 1-based stack keeps slot 1 for the master.
+    _reported = [pos for m in members_info if is_vc_position(pos := _as_int(m.get("position")))]
+    _master_pos = min([*_reported, 1])
     _master_member = next((m for m in members_info if m.get("is_master")), None)
     if _master_member:
         _found_pos = _as_int(_master_member.get("position"))
