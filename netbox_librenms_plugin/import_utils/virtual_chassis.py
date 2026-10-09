@@ -221,6 +221,15 @@ def chassis_serial_key(device):
     return vc_serial_key(getattr(getattr(master, "device_type", None), "manufacturer", None))
 
 
+def members_by_serial_key(vc_members, serial_key) -> dict:
+    """Return ``{serial key: member}``; a key that two members share names neither, so it is left out."""
+    by_key = {}
+    for member in vc_members:
+        if key := serial_key(member.serial):
+            by_key.setdefault(key, []).append(member)
+    return {key: members[0] for key, members in by_key.items() if len(members) == 1}
+
+
 def identify_vc_master(members: list, device_serial, serial_key) -> dict | None:
     """
     Return the stack member that is the imported device, or None when no single member is.
@@ -359,7 +368,7 @@ class _Attribution:
     def __init__(self, rows, vc_members, serial_key):
         self.vc_members = vc_members
         self.serial_key = serial_key
-        self.by_serial = {key: member for member in vc_members if (key := serial_key(member.serial))}
+        self.by_serial = members_by_serial_key(vc_members, serial_key)
         self.by_index = {index: row for row in rows if (index := row.get("entPhysicalIndex")) is not None}
         self.stack = _stack_rows(rows)
         self.results = {}
