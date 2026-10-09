@@ -23,7 +23,7 @@ If the inventory matches neither shape, the device is imported as a single devic
 
 ## Member Positions
 
-On import, each member gets the position number that the device reports for it. Junos numbers its members from 0 (`ge-0/0/0` is on member 0), so a Junos Virtual Chassis gets positions 0, 1, and so on. Cisco StackWise numbers its members from 1. If a member reports no position, a negative position, or the same position as another member, the plugin uses the inventory order, starting at 1.
+On import, each member gets the position number that the device reports for it. Junos numbers its members from 0 (`ge-0/0/0` is on member 0), so a Junos Virtual Chassis gets positions 0, 1, and so on. Cisco StackWise numbers its members from 1. If any member reports no position, a negative position, or the same position as another member, the plugin numbers all members in inventory order, starting at 1, so that no two members share a position.
 
 ## How It Works
 

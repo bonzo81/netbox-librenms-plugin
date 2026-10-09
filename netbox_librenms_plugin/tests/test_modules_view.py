@@ -7128,6 +7128,22 @@ def test_a_junos_row_inherits_the_nearer_serial_over_its_fpc():
 
 
 @pytest.mark.django_db
+def test_a_named_junos_psu_follows_its_fpc_serial_over_the_fpc_position():
+    """NetBox numbers the members the other way round; the FPC serial decides, and its PSU follows it."""
+    master, member = _junos_vc_members("junos-swapped")
+    # FPC 1 (slot 1, position 1) carries the serial of the NetBox device at position 0, and the reverse.
+    master.serial, member.serial = "12350", "12345"
+    for device in (master, member):
+        device.save(update_fields=["serial"])
+
+    owner = _owners(member, [master, member], _junos_vc_inventory())
+
+    assert owner[121] == master
+    assert owner[4] == master
+    assert owner[2] == member
+
+
+@pytest.mark.django_db
 def test_junos_fpcs_sharing_a_slot_follow_the_detected_positions():
     """Two FPCs that both report slot 1 get positions 1 and 2 from detection; module sync must agree."""
     from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members

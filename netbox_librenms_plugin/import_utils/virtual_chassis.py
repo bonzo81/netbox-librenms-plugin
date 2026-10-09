@@ -37,12 +37,9 @@ def _clone_virtual_chassis_data(data: dict | None) -> dict:
     if not data:
         return empty_virtual_chassis_data()
 
-    members = []
-    for idx, member in enumerate(data.get("members", [])):
-        member_copy = member.copy()
-        position = _as_int(member_copy.get("position"))
-        member_copy["position"] = position if is_vc_position(position) else idx + 1
-        members.append(member_copy)
+    members = [member.copy() for member in data.get("members", [])]
+    for member, position in zip(members, _member_positions([m.get("position") for m in members]), strict=True):
+        member["position"] = position
 
     member_count = data.get("member_count") or len(members)
 
@@ -260,16 +257,16 @@ class VCMemberRows(NamedTuple):
 
     root_index: object
     positions: dict
-    # Junos only: {FPC slot: member position} for slots that exactly one FPC reports.
+    # Junos only: {FPC slot: FPC row index} for slots that exactly one FPC reports.
     fpc_slots: dict
 
-    def position_named_by(self, row: dict) -> int | None:
+    def fpc_named_by(self, row: dict):
         """
-        Return the member position that a Junos "FPC <n> ..." row names, or None.
+        Return the raw index of the FPC row that a Junos "FPC <n> ..." row names, or None.
 
         Only a row directly under the Junos root that is no member row (a PSU or fan tray) names
-        its member this way. Slot n maps to the FPC that reports slot n, and the result is that
-        FPC's detected position. A slot that no FPC or more than one FPC reports names nothing.
+        its FPC this way, and it belongs to whatever member that FPC row resolves to. A slot that
+        no FPC or more than one FPC reports names nothing.
         """
         if row.get("entPhysicalContainedIn") != self.root_index or row.get("entPhysicalIndex") in self.positions:
             return None
@@ -291,7 +288,7 @@ def vc_member_rows(rows) -> VCMemberRows:
 
     Returns:
         VCMemberRows: The stack root's raw ``entPhysicalIndex``, ``{entPhysicalIndex: member position}``
-            and, for a Junos stack, the unambiguous FPC slots.
+            and, for a Junos stack, ``{FPC slot: FPC row index}`` for the slots that one FPC reports.
 
     """
     root, member_rows, members = _extract(rows, None)
@@ -300,9 +297,8 @@ def vc_member_rows(rows) -> VCMemberRows:
     fpc_slots = {}
     if all(_is_junos_fpc(row) for row in member_rows):
         slots = [_as_int(row.get("entPhysicalParentRelPos")) for row in member_rows]
-        position_by_index = {member["index"]: member["position"] for member in members}
         fpc_slots = {
-            slot: position_by_index[row.get("entPhysicalIndex")]
+            slot: row.get("entPhysicalIndex")
             for row, slot in zip(member_rows, slots, strict=True)
             if is_vc_position(slot) and slots.count(slot) == 1
         }
@@ -480,10 +476,8 @@ def update_vc_member_suggested_names(vc_data: dict, master_name: str) -> dict:
 
     # Load naming pattern once to avoid a DB query per member
     vc_pattern = _load_vc_member_name_pattern()
-    for idx, member in enumerate(vc_data.get("members", [])):
-        position = _as_int(member.get("position"))
-        if not is_vc_position(position):
-            position = idx + 1
+    members = vc_data.get("members", [])
+    for member, position in zip(members, _member_positions([m.get("position") for m in members]), strict=True):
         member["position"] = position
         member["suggested_name"] = _generate_vc_member_name(
             master_name, position, serial=normalize_stack_serial(member.get("serial")), pattern=vc_pattern
@@ -503,12 +497,12 @@ def _as_int(value) -> int | None:
 
 
 def _member_positions(raw_positions: list) -> list[int]:
-    """Return the reported member positions; a missing, negative or shared one becomes the row order from 1."""
+    """Return the reported member positions, or row order from 1 when any is missing, negative or shared."""
     parsed = [_as_int(raw) for raw in raw_positions]
-    return [
-        position if is_vc_position(position) and parsed.count(position) == 1 else idx + 1
-        for idx, position in enumerate(parsed)
-    ]
+    if all(is_vc_position(position) for position in parsed) and len(set(parsed)) == len(parsed):
+        return parsed
+    # Repairing one member at a time could reuse a slot that another member reports.
+    return list(range(1, len(parsed) + 1))
 
 
 def _sync_module_bay_counter(device: Device) -> None:

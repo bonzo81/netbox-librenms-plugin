@@ -1373,7 +1373,7 @@ class TestVCPositionHandling:
         [
             ("switch-01", [1, 2], ["switch-01-M1", "switch-01-M2"]),
             ("router", [3], ["router-M3"]),
-            ("sw", [0, -1], ["sw-M0", "sw-M2"]),
+            ("sw", [0, -1], ["sw-M1", "sw-M2"]),
         ],
     )
     def test_update_vc_member_suggested_names_uses_real_settings(
@@ -1401,9 +1401,11 @@ class TestVCPositionHandling:
         result = update_vc_member_suggested_names(vc_data, master_name)
 
         assert [member["suggested_name"] for member in result["members"]] == expected_names
-        assert [member["position"] for member in result["members"]] == [
-            position if position >= 0 else index for index, position in enumerate(positions, start=1)
-        ]
+        # One invalid position numbers the whole stack in row order from 1.
+        valid = all(position >= 0 for position in positions)
+        assert [member["position"] for member in result["members"]] == (
+            positions if valid else list(range(1, len(positions) + 1))
+        )
 
 
 # ---------------------------------------------------------------------------
