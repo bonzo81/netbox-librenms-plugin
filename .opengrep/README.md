@@ -201,15 +201,16 @@ local or module string constant. A key built at run time is outside the check. T
   in the same file. It does not follow it through a call result, such as `dict(...)` or
   `.get("other")`; the container rule reports a copy itself. A value assigned from an expression
   that holds the container, such as `{"cf": device.cf}`, counts as the container.
+- The access rule also reports `clear()`, `popitem()` and `|=` on an alias of the container. A
+  copy of an alias, such as `fields.copy()` or `dict(fields)`, is outside the check.
 - The container rule checks a direct `obj.custom_field_data` or `obj.cf` only, not a local alias.
   It reports a container literal with the key only in a `custom_field_data=` or `cf=` keyword, in a
   `"custom_field_data"` dict entry, or in an `==` comparison with the container. A dict with the
   key in a local variable, such as `{**old_custom_fields, "librenms_id": ...}`, is outside the
   check: it has the same shape as a LibreNMS API payload.
 - The container rule reports an `update()` with the key in a dict literal or a keyword, or with an
-  argument that is not a dict literal, because it cannot prove that such a value has no key. An
-  `update()` with a dict literal that has no key is not reported, also when the literal expands
-  another dict with `**`.
+  argument that is not a dict literal, because it cannot prove that such a value has no key. Only
+  an `update()` with a dict literal that has neither the key nor a `**` expansion is not reported.
 - The ORM rule matches the lookup path at the start of a string or a keyword name, after any
   relation prefix. A path that code builds from parts is outside the check.
 - A raw SQL statement that writes `custom_field_data` is outside the check.

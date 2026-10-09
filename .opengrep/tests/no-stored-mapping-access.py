@@ -59,6 +59,12 @@ def aliases(device, change):
     stored.update({"operator_note": "kept", **change.values})
     # ok: no-stored-mapping-access
     stored.update({"operator_note": "kept"})
+    # ruleid: no-stored-mapping-access
+    stored.clear()
+    # ruleid: no-stored-mapping-access
+    stored.popitem()
+    # ruleid: no-stored-mapping-access
+    stored |= change.values
     fields = device.cf
     # ruleid: no-stored-mapping-access
     assert "librenms_id" in fields
