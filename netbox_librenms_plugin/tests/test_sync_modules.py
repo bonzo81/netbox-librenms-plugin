@@ -897,13 +897,14 @@ class TestSharedInstaller:
         assert result["reason"] == "bay already occupied"
         assert result["module_pk"] == occupant.pk
 
-    def test_placeholder_serial_is_stored_as_blank(self):
+    @pytest.mark.parametrize("placeholder", ["-", "BUILTIN", "none", "Not Available"])
+    def test_placeholder_serial_is_stored_as_blank(self, placeholder):
         from dcim.models import Module
 
-        device = make_device("installer-placeholder")
+        device = make_device(f"installer-placeholder-{len(placeholder)}")
         bay = make_module_bay(device, "Slot 1")
-        module_type = make_module_type("PLACEHOLDER-CARD")
-        item = _inventory_item(1, module_type.model, bay.name, serial="-")
+        module_type = make_module_type(f"PLACEHOLDER-CARD-{len(placeholder)}")
+        item = _inventory_item(1, module_type.model, bay.name, serial=placeholder)
 
         result = _run_install_single(device, item, {1: item}, {module_type.model: module_type})
 

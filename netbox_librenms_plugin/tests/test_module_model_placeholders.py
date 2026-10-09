@@ -9,7 +9,7 @@ same wrong ModuleType or none resolve at all. Treat the placeholder as absent an
 
 import pytest
 
-PLACEHOLDERS = ["unspecified", "unknown", "n/a", "builtin", "UNSPECIFIED", "Builtin"]
+PLACEHOLDERS = ["unspecified", "unknown", "n/a", "builtin", "UNSPECIFIED", "Builtin", "null", "Not Available"]
 
 
 @pytest.mark.django_db
@@ -187,25 +187,14 @@ class TestTransceiverMergeTreatsPlaceholdersAsMissing:
     """The merge only replaced an empty or literally "builtin" model, so "unspecified" stuck."""
 
     @staticmethod
-    def _merge(settings, server, existing_model):
-        """Merge one transceiver over one ENTITY-MIB row, through the real HTTP client."""
+    def _merge_rows(settings, server, transceiver, inventory):
+        """Merge one transceiver into ENTITY-MIB rows, through the real HTTP client."""
         from netbox_librenms_plugin.tests.test_modules_view import _real_api_view
 
         view = _real_api_view(settings, server, librenms_id=101)
         server.register(
             "/api/v0/devices/101/transceivers",
-            {
-                "status": "ok",
-                "transceivers": [
-                    {
-                        "entity_physical_index": 300,
-                        "port_id": 99,
-                        "model": "SFP-10G-LR",
-                        "serial": "ABC123",
-                        "type": "SFP+",
-                    }
-                ],
-            },
+            {"status": "ok", "transceivers": [{"port_id": 99, **transceiver}]},
             method="GET",
         )
         server.register(
@@ -213,6 +202,13 @@ class TestTransceiverMergeTreatsPlaceholdersAsMissing:
             {"status": "ok", "ports": [{"port_id": 99, "ifName": "Eth2/1"}]},
             method="GET",
         )
+        merged, error = view._merge_transceiver_data(inventory)
+        assert error is None
+        return merged
+
+    def _merge(self, settings, server, existing_model):
+        """Merge one transceiver over one ENTITY-MIB row."""
+        transceiver = {"entity_physical_index": 300, "model": "SFP-10G-LR", "serial": "ABC123", "type": "SFP+"}
         inventory = [
             {
                 "entPhysicalIndex": 300,
@@ -224,11 +220,36 @@ class TestTransceiverMergeTreatsPlaceholdersAsMissing:
                 "entPhysicalContainedIn": 0,
             }
         ]
-        merged, error = view._merge_transceiver_data(inventory)
-        assert error is None
-        return merged[0]
+        return self._merge_rows(settings, server, transceiver, inventory)[0]
 
-    @pytest.mark.parametrize("placeholder", ["unspecified", "unknown", "n/a", "builtin"])
+    @pytest.mark.parametrize("placeholder", ["none", "BUILTIN", "Not Available"])
+    def test_a_placeholder_serial_does_not_hide_a_transceiver(self, settings, librenms_server, placeholder):
+        """Two rows that both report no serial are not one part, so the API transceiver gets its row."""
+        fan = {
+            "entPhysicalIndex": 20,
+            "entPhysicalName": "Fan 1",
+            "entPhysicalClass": "fan",
+            "entPhysicalModelName": "FAN-1",
+            "entPhysicalSerialNum": placeholder,
+            "entPhysicalContainedIn": 0,
+        }
+        transceiver = {"entity_physical_index": 300, "model": "SFP-10G-LR", "serial": placeholder, "type": "SFP+"}
+
+        merged = self._merge_rows(settings, librenms_server, transceiver, [fan])
+
+        assert [row["entPhysicalIndex"] for row in merged] == [20, 300]
+        assert merged[1]["entPhysicalSerialNum"] == ""
+
+    @pytest.mark.parametrize("placeholder", ["unspecified", "none", "BUILTIN"])
+    def test_a_placeholder_transceiver_model_falls_back_to_its_type(self, settings, librenms_server, placeholder):
+        """The API type names the part better than a model string that names nothing."""
+        transceiver = {"entity_physical_index": 300, "model": placeholder, "serial": "ABC123", "type": "SFP+"}
+
+        merged = self._merge_rows(settings, librenms_server, transceiver, [])
+
+        assert merged[0]["entPhysicalModelName"] == "SFP+"
+
+    @pytest.mark.parametrize("placeholder", ["unspecified", "unknown", "n/a", "builtin", "null"])
     def test_a_placeholder_model_is_supplemented_from_the_transceiver_api(self, settings, librenms_server, placeholder):
         assert self._merge(settings, librenms_server, placeholder)["entPhysicalModelName"] == "SFP-10G-LR"
 
