@@ -664,7 +664,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         for hint in hints:
             if not hint:
                 continue
-            match = re.match(r"^\D*([1-9]\d*)[/:\-].*", hint)
+            match = re.match(r"^\D*(\d+)[/:\-].*", hint)
             if not match:
                 continue
             hinted_member = cls._vc_member_at_position(vc_members, match.group(1))
