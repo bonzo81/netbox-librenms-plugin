@@ -9,10 +9,9 @@ from django.views import View
 
 from netbox_librenms_plugin.constants import (
     GENERIC_CONTAINER_MODELS,
-    LIBRENMS_PLACEHOLDER_VALUES as _PLACEHOLDER_VALUES,
     MAIN_INVENTORY_SOURCE,
     OOB_INVENTORY_SOURCE,
-    is_module_model_placeholder,
+    is_librenms_placeholder,
 )
 from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory, chassis_serial_key
 from netbox_librenms_plugin.librenms_ids import (
@@ -111,7 +110,7 @@ def _clean_librenms_value(value) -> str:
 
     """
     text = _normalize_librenms_text(value)
-    return "" if text.lower() in _PLACEHOLDER_VALUES else text
+    return "" if is_librenms_placeholder(text) else text
 
 
 def _inventory_item_offsettable(item: dict) -> bool:
@@ -214,7 +213,7 @@ def _matches_target_device(
         return False
     if rule.match_type == rule.MATCH_SERIAL_DEVICE:
         item_serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
-        device_serial = "" if device_identity.serial.lower() in _PLACEHOLDER_VALUES else device_identity.serial
+        device_serial = "" if is_librenms_placeholder(device_identity.serial) else device_identity.serial
         return bool(item_serial and device_serial and item_serial == device_serial)
     if rule.match_type == rule.MATCH_MODEL_DEVICE_TYPE:
         if _normalize_librenms_text(item.get("entPhysicalClass")) == "chassis":
@@ -1844,12 +1843,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             if existing is not None:
                 # Supplement existing inventory item if model/serial is missing or a placeholder
                 existing_model = _clean_librenms_value(existing.get("entPhysicalModelName"))
-                # Any placeholder counts as missing, not just "builtin": a row reporting
-                # "unspecified" was never supplemented, even when the API knew the part number.
-                if is_module_model_placeholder(existing_model) and display_model:
+                if not existing_model and display_model:
                     existing["entPhysicalModelName"] = display_model
                 existing_serial = _clean_librenms_value(existing.get("entPhysicalSerialNum"))
-                if (not existing_serial or existing_serial.lower() == "builtin") and serial:
+                if not existing_serial and serial:
                     existing["entPhysicalSerialNum"] = serial
                     inv_serials.add(serial)
                 if port_id:
@@ -3287,10 +3284,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             row["can_replace"] = True
         elif matched_type is not None:
             # Normalize both serials: treat None, empty, whitespace, and placeholder values as absent
-            nb_serial = (installed.serial or "").strip()
-            if nb_serial.lower() in _PLACEHOLDER_VALUES:
-                nb_serial = ""
-            lnms_serial = serial if serial.lower() not in _PLACEHOLDER_VALUES else ""
+            nb_serial = _clean_librenms_value(installed.serial)
+            lnms_serial = _clean_librenms_value(serial)
             if lnms_serial and lnms_serial != nb_serial:
                 row["status"] = "Serial Mismatch"
                 row["can_update_serial"] = True
@@ -3967,7 +3962,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         if not item_serial:
             return None
         item_model = _clean_librenms_value(item.get("entPhysicalModelName")).lower()
-        if not item_model or item_model in _PLACEHOLDER_VALUES:
+        if not item_model:
             return None
 
         visited: set = set()
@@ -4034,7 +4029,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             if row.get("_source") == OOB_INVENTORY_SOURCE or row.get("status") == "Integrated":
                 continue
             serial = row.get("serial", "")
-            if not serial or serial.lower() in _PLACEHOLDER_VALUES:
+            if is_librenms_placeholder(serial):
                 continue
             if self._shares_serial_with_ancestor(row, index_map):
                 continue

@@ -2983,6 +2983,17 @@ class TestBuildRowSerialMismatch:
         assert "row_class" not in row
         assert not row.get("can_update_serial")
 
+    @pytest.mark.parametrize("placeholder", ["BUILTIN", "none", "null", "unspecified", "Not Available"])
+    def test_a_placeholder_librenms_serial_is_no_serial_mismatch(self, placeholder):
+        """A serial that names no hardware must not offer to overwrite the blank NetBox serial."""
+        view = self._view()
+        _installed, module_bays, module_types = self._make_installed_rows("")
+
+        row = view._build_row(self._make_item(serial=placeholder), {}, module_bays, module_types)
+
+        assert row["status"] == "Installed"
+        assert not row.get("can_update_serial")
+
 
 @pytest.mark.django_db
 class TestDetectSerialConflicts:
@@ -3007,6 +3018,18 @@ class TestDetectSerialConflicts:
             view._detect_serial_conflicts(table_data)
         assert "serial_conflict_module" not in table_data[0]
         assert "serial_conflict_module" not in table_data[1]
+
+    @pytest.mark.parametrize("placeholder", ["BUILTIN", "none", "Not Available"])
+    def test_a_placeholder_serial_names_no_installed_module(self, placeholder):
+        """A NetBox module stored with a placeholder serial is not the part another row reports."""
+        view = self._view()
+        self._make_module(f"placeholder-{len(placeholder)}", placeholder)
+        row = {"can_install": True, "serial": placeholder, "status": "Matched"}
+
+        view._detect_serial_conflicts([row])
+
+        assert "serial_conflict_module" not in row
+        assert row["can_install"] is True
 
     def test_a_row_with_no_action_flags_is_still_checked(self):
         """Identity must not depend on bay matching having succeeded — that was the defect."""
@@ -3261,6 +3284,20 @@ class TestCheckIgnoreRules:
         item = {"entPhysicalName": "Optics0/0/0/0-IDPROM", "entPhysicalSerialNum": "XYZ999"}
         parent = {"entPhysicalName": "Optics0/0/0/0", "entPhysicalSerialNum": "ABC123"}
         assert self._check(item, parent, [self._rule()]) is None
+
+    @pytest.mark.parametrize("placeholder", ["BUILTIN", "none", "Not Available"])
+    def test_a_shared_placeholder_serial_is_no_parent_match(self, placeholder):
+        """Two rows that both report no serial are not one part, so the serial check fails."""
+        item = {"entPhysicalName": "Optics0/0/0/0-IDPROM", "entPhysicalSerialNum": placeholder}
+        parent = {"entPhysicalName": "Optics0/0/0/0", "entPhysicalSerialNum": placeholder}
+        assert self._check(item, parent, [self._rule()]) is None
+
+    @pytest.mark.parametrize("placeholder", ["BUILTIN", "none", "Not Available"])
+    def test_a_placeholder_device_serial_matches_no_row(self, placeholder):
+        """A device without a real serial must not claim a row that also reports none."""
+        rule = self._rule(match_type="serial_matches_device", pattern="", action="transparent")
+        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": placeholder}
+        assert self._check(item, None, [rule], device_serial=placeholder) is None
 
     def test_match_with_no_parent_not_skipped(self):
         """Name matches, require_serial=True, but no parent → conservative: NOT skipped."""
@@ -5401,7 +5438,7 @@ class TestFindIntegratingAncestor:
     def test_returns_none_for_placeholder_serial(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        for placeholder in ("", "N/A", "Unknown", "-"):
+        for placeholder in ("", "N/A", "Unknown", "-", "BUILTIN", "none", "Not Available"):
             xiom = {
                 "entPhysicalIndex": 100,
                 "entPhysicalClass": "xioModule",
@@ -5417,6 +5454,27 @@ class TestFindIntegratingAncestor:
                 "entPhysicalContainedIn": 100,
             }
             assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda])) is None, placeholder
+
+    @pytest.mark.parametrize("placeholder", ["BUILTIN", "unspecified", "none", "null"])
+    def test_returns_none_for_placeholder_model(self, placeholder):
+        """A shared serial with a model that names nothing is no proof of one card."""
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        xiom = {
+            "entPhysicalIndex": 100,
+            "entPhysicalClass": "xioModule",
+            "entPhysicalSerialNum": "S",
+            "entPhysicalModelName": placeholder,
+            "entPhysicalContainedIn": 0,
+        }
+        mda = {
+            "entPhysicalIndex": 200,
+            "entPhysicalClass": "mdaModule",
+            "entPhysicalSerialNum": "S",
+            "entPhysicalModelName": placeholder,
+            "entPhysicalContainedIn": 100,
+        }
+        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda])) is None
 
     def test_skips_chassis_ancestor(self):
         """A chassis ancestor sharing serial (the device serial!) must NEVER be matched."""
