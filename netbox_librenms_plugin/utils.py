@@ -34,6 +34,7 @@ from netbox_librenms_plugin.constants import (
     PORT_ID_SOURCE_COLLISION_REASON,
     REPORTED_NAME_PORT_COLLISION_REASON,
     is_module_model_placeholder,
+    is_stack_serial_placeholder,
     is_supported_interface_name_field,
 )
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_host_address
@@ -3087,27 +3088,10 @@ def normalize_serial(value) -> str:
     return "" if value is None else str(value).strip()
 
 
-# "0" is deliberately absent: normalize_serial documents zero as a real-but-falsey serial.
-_STACK_SERIAL_PLACEHOLDERS = frozenset(
-    {
-        "-",
-        "builtin",
-        "n/a",
-        "na",
-        "none",
-        "not available",
-        "notavailable",
-        "null",
-        "unknown",
-        "unspecified",
-    }
-)
-
-
 def normalize_stack_serial(value) -> str:
     """Return a serial usable as stack identity evidence, preserving numeric zero."""
     serial = normalize_serial(value)
-    return "" if serial.casefold() in _STACK_SERIAL_PLACEHOLDERS else serial
+    return "" if is_stack_serial_placeholder(serial) else serial
 
 
 def find_devices_by_serial(serial: str, limit: int = 2) -> list:
