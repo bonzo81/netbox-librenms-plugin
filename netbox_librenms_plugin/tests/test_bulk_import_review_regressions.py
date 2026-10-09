@@ -554,6 +554,41 @@ def test_a_manufacturer_serial_rule_identifies_the_master(live_librenms, device_
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("override", [None, 0, "not-an-id"], ids=["none", "missing", "garbage"])
+def test_an_unusable_device_type_override_fails_the_row_in_precheck_and_import(live_librenms, override):
+    """The precheck and the device write read one effective DeviceType, so both reject the override."""
+    from dcim.models import Device, DeviceType
+
+    from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+    from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
+
+    device_id = 96391
+    members = [_chassis(100, "OVR-A", position=1), _chassis(200, "OVR-B", position=2)]
+    prerequisites, row = _importable_row(live_librenms, device_id, f"stack-override-{override}", members=members)
+    if override == 0:
+        override = DeviceType.objects.order_by("-pk").values_list("pk", flat=True).first() + 100000
+    mappings = {**prerequisites, "device_type_id": override}
+
+    result = bulk_import_devices_shared(
+        [device_id],
+        server_key="default",
+        manual_mappings_per_device={device_id: mappings},
+        libre_devices_cache={device_id: row},
+        user=make_superuser(f"stack-override-{device_id}-user"),
+    )
+    single = import_single_device(
+        device_id, server_key="default", manual_mappings=mappings, libre_device=row, user=make_superuser("ovr-single")
+    )
+
+    assert result["success"] == []
+    assert result["failed"] == [{"device_id": device_id, "error": "Selected device type is unavailable"}]
+    assert single["success"] is False
+    assert single["error"] == "Selected device type is unavailable"
+    assert not Device.objects.filter(name=row["hostname"]).exists()
+
+
+@pytest.mark.django_db
 def test_a_failed_module_bay_count_write_fails_the_chassis_create():
     """The count write is part of the chassis transaction: its error must fail the create, not break it silently."""
     from dcim.models import VirtualChassis

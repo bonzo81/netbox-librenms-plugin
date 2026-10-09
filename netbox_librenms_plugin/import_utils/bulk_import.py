@@ -37,7 +37,9 @@ from .cache import (
 from .collisions import detect_bulk_collisions, scope_bulk_collisions
 from .device_operations import (
     VALIDATION_ERROR_ISSUE_PREFIX,
+    DeviceTypeOverrideError,
     _describe_existing_librenms_link,
+    effective_import_device_type,
     import_single_device,
     resolve_device_by_host_ip,
     validate_device_for_import,
@@ -362,14 +364,6 @@ def classify_bulk_precheck(collisions, unresolved, device_ids, vm_imports) -> Bu
     )
 
 
-def _import_manufacturer(device_type_id):
-    """Return the Manufacturer of the DeviceType a row imports as, or None when it is not resolved."""
-    from dcim.models import DeviceType
-
-    device_type = DeviceType.objects.filter(pk=device_type_id).select_related("manufacturer").first()
-    return device_type.manufacturer if device_type else None
-
-
 def stack_key(vc_data, device_id) -> str:
     """Return the key of one physical stack: its member serials, or the device when none is usable."""
     member_serials = sorted(
@@ -555,12 +549,21 @@ def bulk_import_devices_shared(  # noqa: C901
                 device_mappings.update(manual_mappings_per_device[device_id])
 
             # The master is matched with the serial rules of the DeviceType this row imports as.
+            try:
+                device_type = effective_import_device_type(
+                    validation["device_type"].get("device_type"), device_mappings
+                )
+            except DeviceTypeOverrideError as exc:
+                failed_list.append({"device_id": device_id, "error": str(exc)})
+                if job and job.logger:
+                    job.logger.error(f"Cannot import device {device_id}: {exc}")
+                else:
+                    logger.error(f"Cannot import device {device_id}: {exc}")
+                continue
             # A stack whose master is unknown imports standalone, so it needs no chassis permission.
             creates_vc = vc_data.get("is_stack", False) and (
                 identify_vc_master(
-                    vc_data["members"],
-                    libre_device.get("serial"),
-                    _import_manufacturer(device_mappings.get("device_type_id")),
+                    vc_data["members"], libre_device.get("serial"), getattr(device_type, "manufacturer", None)
                 )
                 is not None
             )
