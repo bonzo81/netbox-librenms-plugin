@@ -774,6 +774,8 @@ class LibreNMSAPIMixin:
         # don't need to pass it themselves; the `**context` spread comes last only so that if one
         # ever does set it explicitly, that value still wins (defensive — no caller relies on it).
         merged = {"has_write_permission": self.has_write_permission(), **context}
+        # Only the partial response renders the messages; the full page renders them once in base.html.
+        merged["sync_partial_response"] = True
         return render(request, self.partial_template_name, {**merged, **build_migrated_context(obj, server_key)})
 
     def rebind_api_for_posted_server(self, data):

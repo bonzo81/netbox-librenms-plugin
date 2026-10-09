@@ -21,8 +21,8 @@ def row(page: Page, name: str | int):
 
 
 def toasts(page: Page):
-    """Return the toast container locator; every sync-tab partial repeats that id."""
-    return page.locator("#django-messages").first
+    """Return the toast container locator."""
+    return page.locator("#django-messages")
 
 
 def dom_click(page: Page, selector: str) -> None:
