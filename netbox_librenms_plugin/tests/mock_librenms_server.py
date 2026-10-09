@@ -1039,14 +1039,15 @@ def load_stub_recordings(recording_names, recordings_dir=DEFAULT_RECORDINGS_DIR)
     return [load_recording_from_directory(name, recordings_dir) for name in recording_names]
 
 
-def main(argv=None):
-    """Run the persistent development stub used by the devcontainer service."""
+def build_stub_server(argv=None):
+    """Parse the stub command line and return the server and the recording names it serves."""
     parser = argparse.ArgumentParser(description="Serve anonymized LibreNMS data-shape recordings over HTTP")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8001)
     parser.add_argument("--token", default="dev-stub-token")
     parser.add_argument("--recordings-dir", default=str(DEFAULT_RECORDINGS_DIR))
     parser.add_argument("--recording", action="append", dest="recordings")
+    parser.add_argument("--quiet", action="store_true", help="Do not log each request")
     args = parser.parse_args(argv)
 
     names = args.recordings or list(DEFAULT_STUB_RECORDINGS)
@@ -1056,13 +1057,16 @@ def main(argv=None):
         api_token=args.token,
         host=args.host,
         port=args.port,
-        quiet=False,
+        quiet=args.quiet,
     )
-    print(
-        f"LibreNMS development stub listening on {args.host}:{server._server.server_address[1]} "
-        f"with recordings: {', '.join(names)}",
-        flush=True,
-    )
+    return server, names
+
+
+def main(argv=None):
+    """Run the persistent development stub used by the devcontainer service."""
+    server, names = build_stub_server(argv)
+    host, port = server._server.server_address[:2]
+    print(f"LibreNMS development stub listening on {host}:{port} with recordings: {', '.join(names)}", flush=True)
     try:
         server._server.serve_forever()
     except KeyboardInterrupt:
