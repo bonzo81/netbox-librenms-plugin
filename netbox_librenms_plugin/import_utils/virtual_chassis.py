@@ -278,6 +278,20 @@ def _member_entries(rows: list, *, model_field: str) -> list[dict]:
     return members
 
 
+# The member shapes that :func:`extract_vc_stack` recognizes; the data-shape signature records them.
+VC_MEMBER_SHAPE_CHASSIS = "chassis"
+VC_MEMBER_SHAPE_JUNOS_FPC = "junos-fpc"
+
+
+class VcStack(NamedTuple):
+    """A stack that :func:`extract_vc_stack` found: its root row, member rows, members and member shape."""
+
+    root: dict | None
+    member_rows: list
+    members: list
+    shape: str | None
+
+
 def extract_vc_members(rows: list) -> list[dict]:
     """
     Return the Virtual Chassis members that ENTITY-MIB inventory rows describe.
@@ -301,26 +315,27 @@ def extract_vc_members(rows: list) -> list[dict]:
         list[dict]: The members in position order, or [] when the rows describe no stack.
 
     """
-    return _extract(rows)[2]
+    return extract_vc_stack(rows).members
 
 
-def _extract(rows) -> tuple:
-    """Return the stack root, its member rows and the members for :func:`extract_vc_members`; (None, [], []) for no stack."""
+def extract_vc_stack(rows: list) -> VcStack:
+    """Return the stack that :func:`extract_vc_members` reads, with the member shape that matched."""
     rows = [row for row in rows if isinstance(row, dict)]
     roots = [row for row in rows if _as_int(row.get("entPhysicalContainedIn")) == 0]
     parent_index = select_vc_parent_index(roots)
     if parent_index is None:
-        return None, [], []
+        return VcStack(None, [], [], None)
     root = next(row for row in roots if _as_int(row.get("entPhysicalIndex")) == parent_index)
     children = [row for row in rows if _as_int(row.get("entPhysicalContainedIn")) == parent_index]
 
     chassis = [row for row in children if row.get("entPhysicalClass") == "chassis"]
     if len(chassis) >= 2:
-        return root, chassis, _member_entries(chassis, model_field="entPhysicalModelName")
+        members = _member_entries(chassis, model_field="entPhysicalModelName")
+        return VcStack(root, chassis, members, VC_MEMBER_SHAPE_CHASSIS)
     fpcs = _junos_fpc_rows(root, children)
     if fpcs:
-        return root, fpcs, _member_entries(fpcs, model_field="entPhysicalName")
-    return None, [], []
+        return VcStack(root, fpcs, _member_entries(fpcs, model_field="entPhysicalName"), VC_MEMBER_SHAPE_JUNOS_FPC)
+    return VcStack(None, [], [], None)
 
 
 class _StackRows(NamedTuple):
@@ -342,19 +357,21 @@ class _StackRows(NamedTuple):
 
 def _stack_rows(rows) -> _StackRows:
     """Return the stack root, the member rows' positions and the Junos FPC slots of an inventory."""
-    root, member_rows, members = _extract(rows)
-    if root is None:
+    stack = extract_vc_stack(rows)
+    if stack.root is None:
         return _StackRows(None, {}, {})
     fpc_slots = {}
-    if all(_is_junos_fpc(row) for row in member_rows):
-        slots = [_as_int(row.get("entPhysicalParentRelPos")) for row in member_rows]
+    if stack.shape == VC_MEMBER_SHAPE_JUNOS_FPC:
+        slots = [_as_int(row.get("entPhysicalParentRelPos")) for row in stack.member_rows]
         fpc_slots = {
             slot: row.get("entPhysicalIndex")
-            for row, slot in zip(member_rows, slots, strict=True)
+            for row, slot in zip(stack.member_rows, slots, strict=True)
             if is_vc_position(slot) and slots.count(slot) == 1
         }
     return _StackRows(
-        root.get("entPhysicalIndex"), {member["index"]: member["position"] for member in members}, fpc_slots
+        stack.root.get("entPhysicalIndex"),
+        {member["index"]: member["position"] for member in stack.members},
+        fpc_slots,
     )
 
 
