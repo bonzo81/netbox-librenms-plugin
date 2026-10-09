@@ -11,7 +11,7 @@ class TestCreateVirtualChassisWithMembers:
         from netbox_librenms_plugin.tests.conftest import make_device
 
         master = make_device(f"{tag}-master", serial=master_serial)
-        master_row = {"serial": master_serial, "position": 1, "name": "Master", "is_master": True}
+        master_row = {"serial": master_serial, "position": 1, "name": "Master"}
         virtual_chassis = create_virtual_chassis_with_members(
             master,
             [master_row, *members],
@@ -52,17 +52,24 @@ class TestCreateVirtualChassisWithMembers:
             ("MEMBER-4", 4),
         ]
 
-    def test_master_serial_entry_is_not_duplicated(self):
-        _master, virtual_chassis = self._create(
-            "master-serial",
-            [
-                {"serial": "MASTER", "position": 2, "name": "Duplicate master"},
-                {"serial": "MEMBER", "position": 3, "name": "Member"},
-            ],
-        )
+    def test_two_rows_with_the_master_serial_create_nothing(self):
+        """No single member is the master, so creation refuses before it writes a duplicate device."""
+        from dcim.models import Device, VirtualChassis
 
-        assert list(virtual_chassis.members.values_list("serial", flat=True)).count("MASTER") == 1
-        assert virtual_chassis.members.filter(serial="MEMBER", vc_position=3).exists()
+        from netbox_librenms_plugin.import_utils.virtual_chassis import VirtualChassisMasterUnknownError
+
+        with pytest.raises(VirtualChassisMasterUnknownError):
+            self._create(
+                "master-serial",
+                [
+                    {"serial": "MASTER", "position": 2, "name": "Duplicate master"},
+                    {"serial": "MEMBER", "position": 3, "name": "Member"},
+                ],
+            )
+
+        assert Device.objects.filter(serial="MASTER").count() == 1
+        assert not Device.objects.filter(serial="MEMBER").exists()
+        assert not VirtualChassis.objects.filter(name="master-serial-master").exists()
 
     def test_server_key_is_part_of_domain(self):
         master, virtual_chassis = self._create("server-domain", [], server_key="production")
@@ -89,7 +96,7 @@ class TestStackMemberSerials:
         virtual_chassis = create_virtual_chassis_with_members(
             master,
             [
-                {"serial": "MASTER", "position": 1, "name": "Master", "is_master": True},
+                {"serial": "MASTER", "position": 1, "name": "Master"},
                 {"serial": value, "position": 2, "name": "Member 2"},
             ],
             {"device_id": master.pk},

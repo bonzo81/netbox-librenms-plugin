@@ -1585,7 +1585,7 @@ class TestVirtualChassisHTTPIntegration:
         assert get_virtual_chassis_data(object(), None)["is_stack"] is False
 
     def test_detects_stack_from_real_http_inventory(self, settings, librenms_server):
-        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data, identify_vc_master
 
         device_id = 42
         librenms_server.device_info_response(device_id=device_id, hostname="stack-master", serial="MEMBER-1")
@@ -1597,7 +1597,7 @@ class TestVirtualChassisHTTPIntegration:
         assert result["is_stack"] is True
         assert result["member_count"] == 2
         assert [member["position"] for member in result["members"]] == [1, 2]
-        assert result["members"][0]["is_master"] is True
+        assert identify_vc_master(result["members"], "MEMBER-1") is result["members"][0]
         assert result["members"][0]["suggested_name"] == "stack-master-M1"
 
     def test_negative_result_is_cached_until_forced_refresh(self, settings, librenms_server):
@@ -1745,7 +1745,7 @@ class TestCreateVirtualChassisWithMembers:
 
         virtual_chassis = create_virtual_chassis_with_members(
             master,
-            [{"serial": "MASTER-SERIAL", "position": 1, "is_master": True}],
+            [{"serial": "MASTER-SERIAL", "position": 1}],
             {"device_id": 101},
             server_key="test-server",
         )
@@ -1765,7 +1765,7 @@ class TestCreateVirtualChassisWithMembers:
 
         master = make_device("stack-master", serial="MASTER-SERIAL")
         members = [
-            {"serial": "MASTER-SERIAL", "position": 1, "name": "Master", "is_master": True},
+            {"serial": "MASTER-SERIAL", "position": 1, "name": "Master"},
             {"serial": "MEMBER-SERIAL", "position": 2, "name": "Member"},
         ]
 
