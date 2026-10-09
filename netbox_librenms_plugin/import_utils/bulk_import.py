@@ -1,9 +1,8 @@
 """Bulk import orchestration for devices and filter processing."""
 
-import hashlib
 import logging
 from dataclasses import dataclass
-from typing import List, Literal
+from typing import List
 
 from dcim.models import Device, VirtualChassis
 from django.core.cache import cache
@@ -122,17 +121,15 @@ def detect_collisions_for_device_ids(
     job=None,
     vm_device_ids=None,
     user=None,
-) -> tuple[list[dict], list, list[dict]]:
+) -> tuple[list[dict], list]:
     """
-    Detect NetBox object collisions and ambiguous stack identities for a batch.
+    Detect NetBox object collisions for a batch, and the rows that cannot be checked.
 
     Validates each device just enough to read the collision-relevant match fields
     (``include_vc_detection=False``), then groups rows that target the same NetBox
-    object. It also reads virtual chassis data for Device rows to find serial-less
-    fingerprint collisions. A later import can reuse these reads while the configured
-    virtual chassis cache remains valid. Cache-disabled, expired, and blocked batches
-    pay for the inventory reads here, and successful stack detection can also query the
-    virtual chassis member naming setting.
+    object. It also reads virtual chassis data for Device rows, so a row whose stack
+    inventory cannot be read is unresolved. A later import can reuse these reads while
+    the configured virtual chassis cache remains valid.
 
     This enforces the bulk-confirm collision block on the import paths that do NOT pass
     through the confirm modal — the direct ``BulkImportDevicesView`` POST and the
@@ -157,12 +154,10 @@ def detect_collisions_for_device_ids(
             the user's view scope are redacted before the result reaches a template or job log.
 
     Returns:
-        tuple[list[dict], list, list[dict]]: ``(collisions, unresolved_ids,
-            stack_ambiguities)``. ``collisions`` contains the groups from
-            :func:`detect_bulk_collisions`. ``unresolved_ids`` contains ids that could not be
-            validated or whose virtual chassis inventory could not be assessed, plus every
-            unscanned id after cancellation. ``stack_ambiguities`` contains serial-less
-            fingerprint groups shared by two or more distinct Device ids.
+        tuple[list[dict], list]: ``(collisions, unresolved_ids)``. ``collisions`` contains the
+            groups from :func:`detect_bulk_collisions`. ``unresolved_ids`` contains ids that could
+            not be validated or whose virtual chassis inventory could not be assessed, plus every
+            unscanned id after cancellation.
 
     """
     use_sysname = (sync_options or {}).get("use_sysname", True)
@@ -174,7 +169,6 @@ def detect_collisions_for_device_ids(
     vm_id_set = set(vm_device_ids or ())
     devices = []
     unresolved_ids = []
-    stack_identities = []
     device_ids = list(device_ids)
     for idx, device_id in enumerate(device_ids, start=1):
         # Same cancellation cadence as the import loops below (first id, then every 5th):
@@ -254,11 +248,8 @@ def detect_collisions_for_device_ids(
             # guard can't silently drift from the producer's wording.
             unresolved_ids.append(device_id)
             continue
-        if device_id not in vm_id_set:
-            identity = stack_identity(get_virtual_chassis_data(api, device_id), device_id)
-            if identity.basis == "unknown":
-                unresolved_ids.append(device_id)
-            stack_identities.append((device_id, identity))
+        if device_id not in vm_id_set and get_virtual_chassis_data(api, device_id).get("detection_failed"):
+            unresolved_ids.append(device_id)
         devices.append(
             {
                 "device_id": device_id,
@@ -269,8 +260,7 @@ def detect_collisions_for_device_ids(
     collisions = detect_bulk_collisions(devices)
     if user is not None:
         collisions = scope_bulk_collisions(collisions, user)
-    stack_ambiguities = ambiguous_stack_groups(stack_identities)
-    return collisions, unresolved_ids, stack_ambiguities
+    return collisions, unresolved_ids
 
 
 @dataclass
@@ -284,18 +274,16 @@ class BulkPrecheckOutcome:
     "Import blocked" vs "Bulk import blocked").
 
     Semantics:
-        * ``blocked``: two LibreNMS rows resolve to the same NetBox object, or two serial-less
-          stacks share one member fingerprint. The WHOLE batch is blocked and nothing imports.
+        * ``blocked``: two LibreNMS rows resolve to the same NetBox object. The WHOLE batch is
+          blocked and nothing imports.
         * ``skipped_ids`` (unresolved rows): a row whose LibreNMS info couldn't be fetched/validated
           to collision-check it. These are SKIPPED, not a whole-batch block — a transient miss on
           one row no longer drops the entire import — but they are NOT imported either (importing an
           un-collision-checked row could bypass the collision guard). The rest import normally.
 
     Attributes:
-        blocked: True when either whole-batch blocker exists; import nothing.
+        blocked: True when a collision blocks the whole batch; import nothing.
         collisions: The collision groups (for the HTMX modal / job log).
-        stack_ambiguities: Serial-less stack fingerprint groups that block the batch.
-        stack_block_message: Stack-only copy for the separate modal alert.
         block_message: Shared collision-block copy (``""`` when not blocked).
         skipped_ids: Unresolved ids to skip (import the rest).
         skip_message: Shared copy naming skipped rows in an unblocked batch (``""`` otherwise).
@@ -306,27 +294,24 @@ class BulkPrecheckOutcome:
 
     blocked: bool
     collisions: list
-    stack_ambiguities: list
     block_message: str
-    stack_block_message: str
     skipped_ids: list
     skip_message: str
     importable_device_ids: list
     importable_vm_imports: dict
 
 
-def classify_bulk_precheck(collisions, unresolved, stack_ambiguities, device_ids, vm_imports) -> BulkPrecheckOutcome:
+def classify_bulk_precheck(collisions, unresolved, device_ids, vm_imports) -> BulkPrecheckOutcome:
     """
-    Turn a collision and stack-identity scan into the shared import decision.
+    Turn a collision scan into the shared import decision.
 
-    See :class:`BulkPrecheckOutcome` for the block-vs-skip semantics. NetBox object collisions and
-    ambiguous stack fingerprints block the whole batch. Unresolved rows are excluded from the
-    importable sets and surfaced via ``skip_message`` while the rest import.
+    See :class:`BulkPrecheckOutcome` for the block-vs-skip semantics. NetBox object collisions
+    block the whole batch. Unresolved rows are excluded from the importable sets and surfaced via
+    ``skip_message`` while the rest import.
 
     Args:
         collisions: Collision groups from :func:`detect_bulk_collisions`.
         unresolved: Ids that couldn't be collision-checked (fetch/validation miss).
-        stack_ambiguities: Serial-less stack fingerprint groups from the precheck.
         device_ids: The batch's device-import ids.
         vm_imports: The batch's VM imports mapping (``{device_id: manual_mappings}``).
 
@@ -339,7 +324,7 @@ def classify_bulk_precheck(collisions, unresolved, stack_ambiguities, device_ids
     importable_vm_imports = {d: v for d, v in vm_imports.items() if d not in unresolved_set}
 
     skip_message = ""
-    if unresolved and not collisions and not stack_ambiguities:
+    if unresolved and not collisions:
         ids = ", ".join(str(d) for d in unresolved)
         skip_message = (
             f"Skipped {len(unresolved)} selected row(s) (id(s): {ids}): their LibreNMS data "
@@ -348,22 +333,7 @@ def classify_bulk_precheck(collisions, unresolved, stack_ambiguities, device_ids
             f"their outcome, then retry the skipped rows individually."
         )
 
-    block_messages = []
-    stack_block_message = ""
-    if stack_ambiguities:
-        if len(stack_ambiguities) == 1:
-            ids = ", ".join(str(device_id) for device_id in stack_ambiguities[0]["device_ids"])
-            subject = f"LibreNMS device ids {ids}"
-        else:
-            groups = "; ".join(
-                f"[{', '.join(str(device_id) for device_id in group['device_ids'])}]" for group in stack_ambiguities
-            )
-            subject = f"LibreNMS device id groups {groups}"
-        stack_block_message = (
-            f"Bulk import blocked: {subject} are serial-less stacks whose members are indistinguishable. "
-            "Import these devices individually, or populate chassis serials in LibreNMS."
-        )
-        block_messages.append(stack_block_message)
+    block_message = ""
     if collisions:
         scoped = any("target_visible" in group for group in collisions)
         visible_pks = [group["nb_device_pk"] for group in collisions if group.get("target_visible") is True]
@@ -373,19 +343,16 @@ def classify_bulk_precheck(collisions, unresolved, stack_ambiguities, device_ids
             target_detail = " Target details are omitted when they are outside your view scope."
         else:
             target_detail = ""
-        block_messages.append(
+        block_message = (
             f"Bulk import blocked: {len(collisions)} NetBox object collision(s) in this batch."
             f"{target_detail} Two or more selected LibreNMS devices resolve to the same NetBox "
             f"object; resolve each individually, or deselect the duplicates."
         )
-    block_message = " ".join(block_messages)
 
     return BulkPrecheckOutcome(
-        blocked=bool(collisions or stack_ambiguities),
+        blocked=bool(collisions),
         collisions=collisions,
-        stack_ambiguities=stack_ambiguities,
         block_message=block_message,
-        stack_block_message=stack_block_message,
         skipped_ids=list(unresolved),
         skip_message=skip_message,
         importable_device_ids=importable_device_ids,
@@ -393,50 +360,12 @@ def classify_bulk_precheck(collisions, unresolved, stack_ambiguities, device_ids
     )
 
 
-@dataclass(frozen=True)
-class StackIdentity:
-    """A stack deduplication key and the evidence used to derive it."""
-
-    key: str
-    basis: Literal["serials", "fingerprint", "device", "unknown"]
-
-
-def stack_identity(vc_data, device_id) -> StackIdentity:
-    """
-    Return a stack deduplication key and the evidence used to derive it.
-
-    Member serials identify a stack best. Without them a fingerprint over member
-    name/model/position still groups the members. With no member identity at all
-    there is nothing to group on, so the key falls back to the device: a shared key
-    would let the first such stack suppress virtual-chassis creation for every other
-    one in the same batch.
-    """
-    if vc_data.get("detection_failed"):
-        return StackIdentity(f"librenms-stack-unknown-{device_id}", "unknown")
-
+def stack_key(vc_data, device_id) -> str:
+    """Return the key of one physical stack: its member serials, or the device when none is usable."""
     member_serials = sorted(
-        serial for m in vc_data.get("members", []) if (serial := normalize_stack_serial(m.get("serial")))
+        serial for member in vc_data.get("members", []) if (serial := normalize_stack_serial(member.get("serial")))
     )
-    if member_serials:
-        return StackIdentity(f"librenms-stack-{','.join(member_serials)}", "serials")
-    member_parts = sorted(
-        f"{m.get('name', '')}/{m.get('model', '')}:{m.get('position', 0)}" for m in vc_data.get("members", [])
-    )
-    if not member_parts:
-        return StackIdentity(f"librenms-stack-device-{device_id}", "device")
-    fingerprint = hashlib.sha256(",".join(member_parts).encode()).hexdigest()[:12]
-    return StackIdentity(f"librenms-stack-{fingerprint}", "fingerprint")
-
-
-def ambiguous_stack_groups(identities):
-    """Group distinct rows whose serial-less stack identity is the same guess."""
-    fingerprint_stack_ids = {}
-    for device_id, identity in identities:
-        if identity.basis == "fingerprint":
-            fingerprint_stack_ids.setdefault(identity.key, set()).add(device_id)
-    return [
-        {"key": key, "device_ids": sorted(ids)} for key, ids in sorted(fingerprint_stack_ids.items()) if len(ids) >= 2
-    ]
+    return f"librenms-stack-{','.join(member_serials)}" if member_serials else f"librenms-stack-device-{device_id}"
 
 
 def bulk_import_devices_shared(  # noqa: C901
@@ -677,7 +606,7 @@ def bulk_import_devices_shared(  # noqa: C901
                 # Handle virtual chassis creation for stacks
                 if creates_vc:
                     # One key per physical stack, so VC creation is triggered only once for it.
-                    vc_domain = stack_identity(vc_data, device_id).key
+                    vc_domain = stack_key(vc_data, device_id)
 
                     # Only create VC if we haven't processed this stack yet.
                     # Permission was already validated before device import.
