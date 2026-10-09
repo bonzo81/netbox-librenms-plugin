@@ -439,10 +439,24 @@ def _ip_form_markup(rows, **menu_state):
     return (
         f"{_ip_menu_markup(**menu_state)}"
         f'<form id="ip-sync-form" method="post" action="{IP_SUBMIT_PATH}">'
-        '<table id="librenms-ipaddress-table"><thead><tr><th><input type="checkbox" class="toggle"></th>'
+        # The server names the management row on every page, also where the row is not rendered.
+        """<table id="librenms-ipaddress-table" data-mgmt-rows='["198.18.0.1/24"]'>"""
+        '<thead><tr><th><input type="checkbox" class="toggle"></th>'
         f'<th>Address</th></tr></thead><tbody>{rows}</tbody></table><button type="submit" id="ip-submit">Sync</button>'
         "</form>"
     )
+
+
+def _submitted_selection(page):
+    """Submit the IP form and return the posted ``select`` values."""
+    posted = []
+    page.route(
+        f"**{IP_SUBMIT_PATH}",
+        lambda route: (posted.append(route.request.post_data), route.fulfill(status=200, body="ok")),
+    )
+    page.click("#ip-submit")
+    page.wait_for_function("document.body.textContent.trim() === 'ok'")
+    return sorted(parse_qs(posted[0])["select"])
 
 
 def test_turning_set_primary_ip_off_drops_the_off_page_management_row(page, swap_page):
@@ -455,12 +469,27 @@ def test_turning_set_primary_ip_off_drops_the_off_page_management_row(page, swap
     page.check("#ip-third")
     page.uncheck("#set-primary-ip-toggle-cb")
 
-    posted = []
-    page.route(
-        f"**{IP_SUBMIT_PATH}",
-        lambda route: (posted.append(route.request.post_data), route.fulfill(status=200, body="ok")),
-    )
-    page.click("#ip-submit")
-    page.wait_for_function("document.body.textContent.trim() === 'ok'")
+    assert _submitted_selection(page) == ["198.18.0.2/24", "198.18.0.3/24"]
 
-    assert sorted(parse_qs(posted[0])["select"]) == ["198.18.0.2/24", "198.18.0.3/24"]
+
+def test_turning_set_primary_ip_on_selects_the_off_page_management_row(page, swap_page):
+    load, swap = swap_page
+    load(_ip_form_markup(IP_ROWS))
+    assert not _checked(page, "#ip-mgmt")
+
+    swap(_ip_form_markup(IP_PAGE_TWO_ROWS), "ip-sync-options")
+    page.check("#ip-third")
+    page.check("#set-primary-ip-toggle-cb")
+
+    assert page.locator("#librenms-ipaddress-table-offpage-selection span").inner_text() == (
+        "1 more row is selected on another page."
+    )
+    assert _submitted_selection(page) == ["198.18.0.1/24", "198.18.0.3/24"]
+
+
+def test_a_saved_set_primary_ip_selects_the_management_row_from_another_page(page, swap_page):
+    load, _swap = swap_page
+    load(_ip_form_markup(IP_PAGE_TWO_ROWS, set_primary=True))
+    page.check("#ip-third")
+
+    assert _submitted_selection(page) == ["198.18.0.1/24", "198.18.0.3/24"]

@@ -519,6 +519,31 @@ class TestRenderingTheIPMenu:
             _store_raw(user, "on", path)
         assert _ip_toggles(self._fragment(client, device)) == off
 
+    def test_the_table_names_the_management_row_on_a_page_that_does_not_render_it(
+        self, client, settings, live_librenms
+    ):
+        _configure_test_server(settings)
+        device = make_device("ip-option-render-mgmt", librenms_cf={SERVER_KEY: {"id": 42}})
+        client.force_login(_user("ip-option-render-mgmt-user"))
+        # NetBox's paginator moves up to 5 orphan rows onto the last page, so the last of 8 rows is not on page 1.
+        rows = [
+            {"address": f"198.18.41.{n}", "prefix_length": 24, "port_id": 7040 + n, "interface": f"Ethernet{n}"}
+            for n in range(1, 9)
+        ]
+        _serve_librenms_ip_rows(live_librenms.server, rows, device_name=device.name, management_ip="198.18.41.8")
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk]),
+            {"server_key": SERVER_KEY, "interface_name_field": "ifName", "ipaddresses_per_page": "1"},
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert response.status_code == 200
+        html = response.content.decode()
+        assert not [tag for tag in open_tags(html, "tr") if tag.get("data-mgmt-ip") == "true"]
+        (table,) = [tag for tag in open_tags(html, "table") if tag.get("id") == "librenms-ipaddress-table"]
+        assert json.loads(table["data-mgmt-rows"]) == ["198.18.41.8/24"]
+
     def test_a_posted_toggle_beats_the_saved_choice_on_refresh(self, client, settings, live_librenms):
         _configure_test_server(settings)
         device = make_device("ip-option-render-posted", librenms_cf={SERVER_KEY: {"id": 42}})
