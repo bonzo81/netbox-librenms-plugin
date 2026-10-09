@@ -1781,6 +1781,23 @@ class TestCreateVirtualChassisWithMembers:
         ]
         assert virtual_chassis.master_id == master.pk
 
+    @pytest.mark.parametrize(("reported", "expected_master"), [((0, 1), 0), ((1, 2), 1), ((2, 3), 1)])
+    def test_an_unidentified_master_takes_the_stacks_first_slot(self, reported, expected_master):
+        """Without a master match, the imported device takes the first slot: 0 on a 0-based stack, else 1."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        master = make_device(f"unmatched-master-{reported[0]}", serial="")
+        members = [{"serial": f"UNMATCHED-{reported[0]}-{position}", "position": position} for position in reported]
+
+        virtual_chassis = create_virtual_chassis_with_members(
+            master, members, {"device_id": 103 + reported[0]}, server_key="test-server"
+        )
+
+        master.refresh_from_db()
+        assert master.vc_position == expected_master
+        assert virtual_chassis.master_id == master.pk
+
 
 @pytest.mark.django_db
 class TestSyncModuleBayCounter:
