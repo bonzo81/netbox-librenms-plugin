@@ -166,7 +166,7 @@ docker compose -f tests/e2e/docker/docker-compose.yml down -v
 ```
 
 - `setup.sh` installs the one wheel in `dist/`, or the wheel path that you give as its argument. `NETBOX_CONTAINER_TAG` is a `netboxcommunity/netbox` image tag.
-- `NETBOX_PORT` sets the host port of NetBox (default 8000). Set it for the test run too. `COMPOSE_PROJECT_NAME` gives the stack its own name. `setup.sh` writes both to `tests/e2e/docker/.env`, so later `docker compose` commands use the same values.
+- `NETBOX_PORT` sets the host port of NetBox (default 8000). Set it for the test run too. `COMPOSE_PROJECT_NAME` gives the stack its own name and its own NetBox image, `<project name>-netbox:<NETBOX_CONTAINER_TAG>`. Give each concurrent stack its own project name. `setup.sh` writes both to `tests/e2e/docker/.env`, so later `docker compose` commands use the same values.
 - Behind a TLS-intercepting proxy, `setup.sh` passes the proxy variables to the image build and gives the build the CA bundle in `SSL_CERT_FILE`.
 - A failed test keeps its Playwright trace in `test-results/`. Open it with `playwright show-trace`.
 

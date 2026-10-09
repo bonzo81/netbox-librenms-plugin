@@ -30,7 +30,8 @@ x-netbox-environment: &netbox-environment
 
 services:
   netbox:
-    image: &netbox-image netbox-librenms-e2e:${NETBOX_CONTAINER_TAG:?run setup.sh first}
+    # The project name keeps the image of each concurrent stack apart.
+    image: &netbox-image ${COMPOSE_PROJECT_NAME}-netbox:${NETBOX_CONTAINER_TAG:?run setup.sh first}
     build:
       context: .
       args:
