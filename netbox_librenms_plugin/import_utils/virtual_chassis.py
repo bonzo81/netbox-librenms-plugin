@@ -153,6 +153,15 @@ def select_vc_parent_index(root_rows: list) -> int | None:
     return None
 
 
+def is_vc_root(row: dict, rows) -> bool:
+    """Return whether *row* is the root that holds the stack members, as :func:`extract_vc_members` picks it."""
+    if row.get("entPhysicalClass") not in ("stack", "chassis") or _as_int(row.get("entPhysicalContainedIn")) != 0:
+        return False
+    roots = [item for item in rows if isinstance(item, dict) and _as_int(item.get("entPhysicalContainedIn")) == 0]
+    index = select_vc_parent_index(roots)
+    return index is not None and _as_int(row.get("entPhysicalIndex")) == index
+
+
 def _is_junos_vc_root(row: dict) -> bool:
     """Return whether *row* is a chassis root whose description names a Junos Virtual Chassis."""
     descr = row.get("entPhysicalDescr")

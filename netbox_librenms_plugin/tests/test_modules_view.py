@@ -7159,6 +7159,55 @@ def test_vc_chassis_can_resolve_below_an_unattributed_stack_root():
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("root_class", ["stack", "chassis"])
+@pytest.mark.parametrize("root_name", ["Switch stack", "StackSub-0/0"])
+def test_a_vc_root_at_position_zero_does_not_claim_member_zero(root_class, root_name):
+    """The root holds the members; its own position 0 or "0/0" name is not member 0."""
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+    from netbox_librenms_plugin.views.base.modules_view import _inventory_item_key
+
+    _chassis, members = make_virtual_chassis_members(f"root-zero-{root_class}-{len(root_name)}", count=2)
+    for member in members:
+        member.vc_position -= 1
+        member.serial = ""
+        member.save(update_fields=["vc_position", "serial"])
+    first, second = members
+    inventory = [
+        {
+            "entPhysicalIndex": 140,
+            "entPhysicalClass": root_class,
+            "entPhysicalName": root_name,
+            "entPhysicalParentRelPos": 0,
+            "entPhysicalContainedIn": 0,
+        },
+        {
+            "entPhysicalIndex": 141,
+            "entPhysicalClass": "chassis",
+            "entPhysicalName": "Chassis",
+            "entPhysicalParentRelPos": 1,
+            "entPhysicalContainedIn": 140,
+        },
+        {
+            "entPhysicalIndex": 142,
+            "entPhysicalClass": "powerSupply",
+            "entPhysicalName": "PSU",
+            "entPhysicalContainedIn": 141,
+        },
+    ]
+    index_map = {item["entPhysicalIndex"]: item for item in inventory}
+
+    # The page is member 1, so a stack child takes its own position 1 and a chassis root's child stays on the page.
+    _default, contexts = _make_view()._build_inventory_ignore_contexts(
+        second, inventory, index_map, [first, second], lambda _manufacturer: []
+    )
+
+    owner = {item["entPhysicalIndex"]: contexts[_inventory_item_key(item)]["selected_device"] for item in inventory}
+    assert contexts[_inventory_item_key(inventory[0])]["resolution_source"] == "default"
+    assert owner[141] == second
+    assert owner[142] == second
+
+
+@pytest.mark.django_db
 def test_member_contexts_batch_interface_permissions_and_keep_action_scopes():
     """Two permission reads cover every member without mixing view and change grants."""
     from dcim.models import Interface
