@@ -6988,6 +6988,101 @@ def test_vc_descendant_local_position_does_not_override_parent_member():
     assert contexts[_inventory_item_key(inventory[1])]["selected_device"].pk == page.pk
 
 
+def _junos_vc_inventory():
+    """Return the reporter's EX4400 VC rows plus one synthetic PIC under FPC 1."""
+
+    def row(index, entity_class, descr, *, serial="", position=0, contained_in=1, name="", model=""):
+        return {
+            "entPhysicalIndex": index,
+            "entPhysicalClass": entity_class,
+            "entPhysicalDescr": descr,
+            "entPhysicalName": name,
+            "entPhysicalModelName": model,
+            "entPhysicalSerialNum": serial,
+            "entPhysicalParentRelPos": position,
+            "entPhysicalContainedIn": contained_in,
+        }
+
+    psu = {"name": "JPSU-550-C-DC-AFO", "model": "640-107104"}
+    fpc = {"name": "EX4400-24X-S", "model": "650-151094"}
+    return [
+        row(1, "chassis", "Juniper Virtual Chassis Switch", serial="12345", contained_in=0),
+        row(2, "powerSupply", "FPC 0 Power Supply 0", serial="12346", position=0, **psu),
+        row(4, "powerSupply", "FPC 1 Power Supply 0", serial="12348", position=2, **psu),
+        row(30, "fan", "FPC 1 Fan Tray 0", position=10, name="Fan Module, Airflow Out (AFO)"),
+        row(120, "container", "FPC: EX4400-24X @ 0/*/*", serial="12345", position=0, **fpc),
+        row(121, "container", "FPC: EX4400-24X @ 1/*/*", serial="12350", position=1, **fpc),
+        row(1210, "module", "PIC: 4x10G SFP+ @ 1/2/*", position=2, contained_in=121, name="PIC 2", model="PIC-4X10G"),
+        row(271, "other", "Routing Engine 1", serial="12351", position=1, name="EX4400-24X-S", model="BUILTIN"),
+    ]
+
+
+def _junos_vc_members(tag):
+    """Return a real two-member VC numbered like Junos: master at 0, member at 1."""
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+
+    _chassis, (master, member) = make_virtual_chassis_members(tag, count=2)
+    for device, position, serial in ((master, 0, "12345"), (member, 1, "12350")):
+        device.vc_position = position
+        device.serial = serial
+        device.save(update_fields=["vc_position", "serial"])
+    return master, member
+
+
+@pytest.mark.django_db
+def test_junos_vc_rows_on_the_page_belong_to_the_member_they_name(client, settings):
+    """Junos rows under the one VC root belong to the member their FPC names, not to the root's master."""
+    from django.core.cache import cache
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    configure_servers(
+        settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
+    )
+    master, member = _junos_vc_members("junos-modules")
+    payload = trusted_module_inventory_payload(master, _junos_vc_inventory(), librenms_id=9355)
+    cache.set(DeviceModuleTableView().get_cache_key(master, "inventory", server_key="default"), payload, 300)
+    cache.set("librenms_device_info_default_9355", (True, {"device_id": 9355, "hostname": master.name}), 300)
+    client.force_login(make_superuser("junos-modules-user"))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[master.pk]),
+        {"tab": "modules", "server_key": "default"},
+    )
+
+    assert response.status_code == 200
+    owners = {
+        row["ent_physical_index"]: row["selected_device_id"] for row in response.context["module_sync"]["table"].data
+    }
+    assert owners[2] == master.pk
+    assert owners[4] == member.pk
+    # The FPC 1 container carries the member serial, so it is transparent and its PIC is a row.
+    assert owners[1210] == member.pk
+
+
+@pytest.mark.django_db
+def test_junos_vc_member_attribution_skips_routing_engine_numbers():
+    """A fan names its member in the description; a Routing Engine number is not a member id."""
+    from netbox_librenms_plugin.views.base.modules_view import _inventory_item_key
+
+    master, member = _junos_vc_members("junos-attribution")
+    inventory = _junos_vc_inventory()
+    index_map = {item["entPhysicalIndex"]: item for item in inventory}
+
+    _default, contexts = _make_view()._build_inventory_ignore_contexts(
+        master, inventory, index_map, [master, member], lambda _manufacturer: []
+    )
+
+    owner = {item["entPhysicalIndex"]: contexts[_inventory_item_key(item)]["selected_device"] for item in inventory}
+    # Fan tray parent positions are 10 and 11 for member 1, so only the description names it.
+    assert owner[30] == member
+    assert owner[121] == member
+    assert owner[271] == master
+
+
 @pytest.mark.django_db
 def test_vc_chassis_can_resolve_below_an_unattributed_stack_root():
     """A generic stack root must not suppress a chassis member position."""
