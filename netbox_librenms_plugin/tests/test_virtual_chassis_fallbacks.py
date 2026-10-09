@@ -155,7 +155,7 @@ class TestStackDetectionCarriesItsMembers:
         assert detected["detection_error"] is None
 
     def test_members_survive_even_when_no_chassis_reports_a_serial(self, settings, librenms_server):
-        """The serial-less path still carries members, which is what keeps the domain key stable."""
+        """A serial-less stack is still detected, so the import can say that it has no master."""
         from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
 
         _seed_stack(librenms_server, 902, serials=("", ""))
@@ -166,6 +166,7 @@ class TestStackDetectionCarriesItsMembers:
         assert detected["is_stack"] is True
         assert [m["serial"] for m in detected["members"]] == ["", ""]
         assert len(detected["members"]) == 2
+        assert not any(m["is_master"] for m in detected["members"])
 
 
 @pytest.mark.django_db
@@ -512,7 +513,6 @@ class TestCreateVirtualChassisWithMembers:
     "serial", ["-", " N/A ", "NA", "none", "not available", "notavailable", "null", "UnKnOwN", "unspecified"]
 )
 def test_placeholder_stack_detection_and_creation_preserve_distinct_members(settings, librenms_server, serial):
-    from netbox_librenms_plugin.import_utils.bulk_import import stack_identity
     from netbox_librenms_plugin.import_utils.virtual_chassis import (
         VirtualChassisMasterUnknownError,
         create_virtual_chassis_with_members,
@@ -525,7 +525,6 @@ def test_placeholder_stack_detection_and_creation_preserve_distinct_members(sett
     detected = detect_virtual_chassis_from_inventory(api, 981)
     assert detected["member_count"] == 3
     assert not any(member["is_master"] for member in detected["members"])
-    assert stack_identity(detected, 981).basis == "fingerprint"
     master = make_device("placeholder-stack-master", serial=serial)
     unrelated = make_device("placeholder-stack-unrelated", serial=serial)
     # A placeholder names no master, so creation refuses before it writes anything.
@@ -540,7 +539,7 @@ def test_placeholder_stack_detection_and_creation_preserve_distinct_members(sett
 
 @pytest.mark.django_db
 def test_zero_stack_serial_remains_identity_evidence(settings, librenms_server):
-    from netbox_librenms_plugin.import_utils.bulk_import import stack_identity
+    from netbox_librenms_plugin.import_utils.bulk_import import stack_key
     from netbox_librenms_plugin.import_utils.virtual_chassis import (
         create_virtual_chassis_with_members,
         detect_virtual_chassis_from_inventory,
@@ -551,7 +550,7 @@ def test_zero_stack_serial_remains_identity_evidence(settings, librenms_server):
     _seed_stack(librenms_server, 982, serials=(0, "REAL-MEMBER"))
     detected = detect_virtual_chassis_from_inventory(api, 982)
     assert [member["is_master"] for member in detected["members"]] == [True, False]
-    assert stack_identity(detected, 982).basis == "serials"
+    assert stack_key(detected, 982) == "librenms-stack-0,REAL-MEMBER"
     master = make_device("zero-stack-master", serial="0")
     vc = create_virtual_chassis_with_members(master, detected["members"], {"device_id": 982})
     assert sorted(vc.members.values_list("serial", flat=True)) == ["0", "REAL-MEMBER"]
