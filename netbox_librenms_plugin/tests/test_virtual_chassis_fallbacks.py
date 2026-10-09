@@ -244,7 +244,7 @@ class TestDetectVirtualChassisFailures:
             result = vc_module.detect_virtual_chassis_from_inventory(api, device_id)
 
         assert result["detection_failed"] is True
-        assert result["detection_error"] == "LibreNMS child chassis inventory request failed"
+        assert result["detection_error"] == "LibreNMS child inventory request failed"
         # A refused member lookup is a handled API failure, not a detection crash.
         assert "Error detecting virtual chassis" not in caplog.text
 

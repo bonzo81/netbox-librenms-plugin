@@ -12,6 +12,19 @@ The plugin automatically detects Virtual Chassis configurations and displays all
 
 > **Note:** LibreNMS treats a Virtual Chassis as a single logical device. Only one member (the sync device) should have the `librenms_id` custom field set.
 
+## Stack Detection
+
+On import, the plugin reads the ENTITY-MIB inventory root and its direct children. It detects a stack from one of two shapes:
+
+- **Chassis members:** two or more `chassis` rows directly under the stack (or chassis) root, for example Cisco StackWise. The member whose serial matches the LibreNMS device serial is the master.
+- **Junos Virtual Chassis:** one `chassis` root whose description contains "Virtual Chassis", with two or more `container` rows directly under it whose description starts with "FPC". Each FPC must have its own serial, and the root serial must match exactly one FPC, which is the master. The member model is the FPC name (for example `EX4400-24X-S`).
+
+If the inventory matches neither shape, the device is imported as a single device. The **VC Serials** dialog on the LibreNMS Sync page lists the same members.
+
+## Member Positions
+
+On import, each member gets the position number that the device reports for it. Junos numbers its members from 0 (`ge-0/0/0` is on member 0), so a Junos Virtual Chassis gets positions 0, 1, and so on. Cisco StackWise numbers its members from 1. If a member reports no position, a negative position, or the same position as another member, the plugin uses the inventory order, starting at 1.
+
 ## How It Works
 
 ### Member Selection

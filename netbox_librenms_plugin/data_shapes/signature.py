@@ -9,6 +9,7 @@ match and a reason, never an authoritative decision.
 """
 
 import re
+from urllib.parse import parse_qs
 
 from netbox_librenms_plugin.data_shapes.anonymize import pseudonymize_os
 from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
@@ -25,6 +26,7 @@ from netbox_librenms_plugin.data_shapes.recordings_store import (
     SERIAL_SENSORS_UNAVAILABLE,
     recording_meta,
 )
+from netbox_librenms_plugin.import_utils.virtual_chassis import extract_vc_members, select_vc_parent_index
 
 # Vendor kinship for the *similarity* signal only — NOT for collapsing distinct OSes into one
 # "covered" verdict. ios / iosxr / nxos share a vendor but their ifName/ifDescr conventions differ,
@@ -98,6 +100,13 @@ def _body(recording, predicate):
     return None
 
 
+def _contained_in_query(route_key):
+    """Return the entPhysicalContainedIn value of an inventory route key, or None."""
+    query = route_key.split("?", 1)[1] if "?" in route_key else ""
+    values = parse_qs(query).get("entPhysicalContainedIn")
+    return values[0] if values else None
+
+
 def _inventory_items(body):
     """Return the ``inventory`` list from an inventory response body, or []."""
     if isinstance(body, dict) and isinstance(body.get("inventory"), list):
@@ -145,20 +154,23 @@ def compute_shape_signature(recording):
         if isinstance(devices, list) and devices and isinstance(devices[0], dict):
             os_name = devices[0].get("os")
 
-    # Virtual chassis: root container class + chassis members under it.
-    root_items = _inventory_items(_body(recording, lambda k: "entPhysicalContainedIn=0" in k))
+    # Virtual chassis: root container class + the members VC detection finds under it.
+    root_items = _inventory_items(_body(recording, lambda k: _contained_in_query(k) == "0"))
     root_class = None
     if any(i.get("entPhysicalClass") == "stack" for i in root_items):
         root_class = "stack"
     elif any(i.get("entPhysicalClass") == "chassis" for i in root_items):
         root_class = "chassis"
-    chassis = [i for i in _inventory_items(_body(recording, lambda k: "entPhysicalClass=chassis" in k))]
-    positions = [i.get("entPhysicalParentRelPos") for i in chassis if isinstance(i.get("entPhysicalParentRelPos"), int)]
+    parent_index = select_vc_parent_index(root_items)
+    child_items = []
+    if parent_index is not None:
+        child_items = _inventory_items(_body(recording, lambda k: _contained_in_query(k) == str(parent_index)))
+    members = extract_vc_members([*root_items, *child_items])
     vc = {
-        "present": len(chassis) > 1,
+        "present": bool(members),
         "root_class": root_class,
-        "member_count": len(chassis),
-        "position_base": min(positions) if positions else None,
+        "member_count": len(members),
+        "position_base": min(member["position"] for member in members) if members else None,
     }
 
     # LAG + sub-interface styles from ports. LAG detection mirrors the client's

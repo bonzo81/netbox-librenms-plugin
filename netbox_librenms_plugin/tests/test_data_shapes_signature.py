@@ -27,6 +27,18 @@ def test_signature_cisco_stackwise():
     assert sig["sub_interfaces"]["present"] is False
 
 
+def test_signature_junos_fpc_virtual_chassis():
+    """A Junos VC fingerprints its FPC members the way VC detection counts them."""
+    sig = compute_shape_signature(load_recording("juniper-ex4400-vc-2member"))
+    assert sig["os"] == pseudonymize_os("junos")
+    assert sig["virtual_chassis"] == {
+        "present": True,
+        "root_class": "chassis",
+        "member_count": 2,
+        "position_base": 0,
+    }
+
+
 def _vrf_signature_recording(vrfs, *, ports=None):
     return {
         "schema_version": 1,

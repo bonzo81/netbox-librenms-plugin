@@ -41,7 +41,15 @@
         }
       ]
     },
-    "GET /api/v0/inventory/384090667?entPhysicalClass=chassis&entPhysicalContainedIn=1": {
+    "GET /api/v0/devices/384090667/ports": {
+      "status": "ok",
+      "ports": []
+    },
+    "GET /api/v0/devices/384090667/port_stack": {
+      "status": "ok",
+      "mappings": []
+    },
+    "GET /api/v0/inventory/384090667?entPhysicalContainedIn=1": {
       "status": "ok",
       "inventory": [
         {
@@ -75,14 +83,6 @@
           "entPhysicalContainedIn": 1
         }
       ]
-    },
-    "GET /api/v0/devices/384090667/ports": {
-      "status": "ok",
-      "ports": []
-    },
-    "GET /api/v0/devices/384090667/port_stack": {
-      "status": "ok",
-      "mappings": []
     }
   },
   "expected": {
