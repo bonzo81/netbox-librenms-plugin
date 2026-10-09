@@ -57,6 +57,13 @@
       <p class="mb-3">
         This device is part of a <strong>{{ vc_data.member_count }}-member</strong> stack/virtual chassis.
       </p>
+      {% if not vc_data.master_identified %}
+      <div class="alert alert-warning py-2 px-3 small">
+        <i class="mdi mdi-alert"></i>
+        No member matches the device serial, so the stack master could not be identified.
+        The import creates the device without a virtual chassis.
+      </div>
+      {% endif %}
 
       {% if vc_data.members %}
       <h6 class="mb-3">Stack Members:</h6>

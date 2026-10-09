@@ -19,7 +19,7 @@ On import, the plugin reads the ENTITY-MIB inventory root and its direct childre
 - **Chassis members:** two or more `chassis` rows directly under the stack (or chassis) root, for example Cisco StackWise. The member whose serial matches the LibreNMS device serial is the master.
 - **Junos Virtual Chassis:** one `chassis` root whose description contains "Virtual Chassis", with two or more `container` rows directly under it whose description starts with "FPC". Each FPC must have its own serial, and the root serial must match exactly one FPC, which is the master. The member model is the FPC name (for example `EX4400-24X-S`).
 
-If the inventory matches neither shape, the device is imported as a single device. The **VC Serials** dialog on the LibreNMS Sync page lists the same members.
+Master matching applies the serial normalization rules first, so a decorated serial such as Juniper's `S/N BCFB9793` still matches. If detection finds a stack but no member matches the device serial, the import creates the device without a virtual chassis and shows a warning. The Virtual Chassis details dialog and the import confirmation say so before the import. If the inventory matches neither shape, the device is imported as a single device. The **VC Serials** dialog on the LibreNMS Sync page lists the same members.
 
 ## Member Positions
 
