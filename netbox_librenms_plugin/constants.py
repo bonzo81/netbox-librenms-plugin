@@ -88,6 +88,13 @@ def is_module_model_placeholder(value):
     return not isinstance(value, str) or value.strip().lower() in MODULE_MODEL_PLACEHOLDERS
 
 
+# Junos Virtual Chassis ENTITY descriptions: the root names the Virtual Chassis, each member is an
+# "FPC" row, and an "FPC <n> ..." row names member n. VC detection and the anonymizer read these.
+JUNOS_VC_ROOT_DESCR_MARKER = "Virtual Chassis"
+JUNOS_FPC_DESCR_PREFIX = "FPC"
+JUNOS_FPC_MEMBER_DESCR_RE = re.compile(r"^FPC (?P<member>\d+) ")
+
+
 # OOB management controller detection
 # Trailing \d*\b restricts matches to whole tokens (optionally with a numeric suffix like
 # iDRAC9 / drac9) so a prefix collision inside an unrelated word — e.g. "dracut", "ipmitool"
