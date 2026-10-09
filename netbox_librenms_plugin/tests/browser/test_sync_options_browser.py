@@ -85,14 +85,9 @@ def menu_page(page):
     return _load
 
 
-def _settle(page, saved, count):
-    """Wait until *count* saves arrived, then let any extra save arrive before the caller counts them."""
-    for _ in range(250):
-        if len(saved) >= count:
-            break
-        page.wait_for_timeout(20)
-    # Saves run one after another, so an extra save would follow the last expected one.
-    page.wait_for_timeout(200)
+def _settle(page):
+    """Wait until every queued save has its answer; an action queues its saves before it returns."""
+    page.evaluate("syncOptionSaving")
 
 
 def _posted(saved):
@@ -110,12 +105,12 @@ def test_toggling_an_option_saves_the_whole_menu_once(page, menu_page):
     saved = menu_page()
 
     page.check("#exclude-mtu")
-    _settle(page, saved, 1)
+    _settle(page)
 
     assert _posted(saved) == [("interface_sync_options", {"auto_select_lag_members": True, "exclude_columns": ["mtu"]})]
 
     page.uncheck("#autoSelectLagMembers")
-    _settle(page, saved, 2)
+    _settle(page)
 
     assert _posted(saved)[1:] == [
         ("interface_sync_options", {"auto_select_lag_members": False, "exclude_columns": ["mtu"]})
@@ -128,7 +123,7 @@ def test_reset_saves_the_factory_defaults_once(page, menu_page):
     assert page.locator("#interface-sync-options-count").inner_text() == "4"
 
     page.click("#reset-interface-sync-options")
-    _settle(page, saved, 1)
+    _settle(page)
 
     assert _posted(saved) == [("interface_sync_options", {"auto_select_lag_members": True, "exclude_columns": []})]
     assert page.locator("#interface-sync-options-count").inner_text() == "0"
@@ -138,9 +133,9 @@ def test_an_ip_option_change_saves_only_its_own_key(page, menu_page):
     saved = menu_page()
 
     page.check("#create-missing-interfaces-toggle-cb")
-    _settle(page, saved, 1)
+    _settle(page)
     page.check("#set-primary-ip-toggle-cb")
-    _settle(page, saved, 2)
+    _settle(page)
 
     assert _posted(saved) == [("create_missing_interfaces", True), ("set_primary_ip", True)]
     assert page.locator("#ip-sync-options-count").inner_text() == "2"
@@ -151,7 +146,7 @@ def test_ip_reset_saves_each_changed_key_once(page, menu_page):
     saved = menu_page(ip={"set_primary": True, "create_missing": True})
 
     page.click("#reset-ip-sync-options")
-    _settle(page, saved, 2)
+    _settle(page)
 
     assert _posted(saved) == [("set_primary_ip", False), ("create_missing_interfaces", False)]
     assert page.locator("#ip-sync-options-count").inner_text() == "0"
@@ -161,7 +156,7 @@ def test_ip_reset_does_not_save_an_unchanged_key(page, menu_page):
     saved = menu_page(ip={"create_missing": True})
 
     page.click("#reset-ip-sync-options")
-    _settle(page, saved, 1)
+    _settle(page)
 
     assert _posted(saved) == [("create_missing_interfaces", False)]
 
@@ -190,17 +185,17 @@ def test_a_failed_save_goes_again_with_the_next_change(page, menu_page, failure)
     saved = menu_page()
     failed = _fail_saves(page, failure)
     page.check("#create-missing-interfaces-toggle-cb")
-    _settle(page, failed, 1)
+    _settle(page)
     assert _posted(failed) == [("create_missing_interfaces", True)]
 
     page.check("#set-primary-ip-toggle-cb")
-    _settle(page, saved, 2)
+    _settle(page)
 
     assert _posted(saved) == [("set_primary_ip", True), ("create_missing_interfaces", True)]
 
     # The retry succeeded, so the next change does not send that key again.
     page.uncheck("#set-primary-ip-toggle-cb")
-    _settle(page, saved, 3)
+    _settle(page)
 
     assert _posted(saved)[2:] == [("set_primary_ip", False)]
 
@@ -210,10 +205,10 @@ def test_a_failed_save_that_the_user_replaced_is_not_sent_again(page, menu_page)
     failed = _fail_saves(page, "http_500")
     page.check("#create-missing-interfaces-toggle-cb")
     page.uncheck("#create-missing-interfaces-toggle-cb")
-    _settle(page, saved, 1)
+    _settle(page)
 
     page.check("#set-primary-ip-toggle-cb")
-    _settle(page, saved, 2)
+    _settle(page)
 
     assert _posted(failed) == [("create_missing_interfaces", True)]
     assert _posted(saved) == [("create_missing_interfaces", False), ("set_primary_ip", True)]
@@ -238,11 +233,11 @@ def test_a_swap_rendered_before_the_save_keeps_the_latest_choice(page, menu_page
     saved = menu_page()
     page.check("#exclude-description")
     page.uncheck("#autoSelectLagMembers")
-    _settle(page, saved, 2)
+    _settle(page)
 
     # The sync response rendered the stored preference from before these saves.
     _swap_menu(page)
-    _settle(page, saved, 2)
+    _settle(page)
 
     assert _checked(page, "#exclude-description")
     assert not _checked(page, "#autoSelectLagMembers")
@@ -253,10 +248,10 @@ def test_a_swap_rendered_before_the_save_keeps_the_latest_choice(page, menu_page
 def test_a_swap_rendered_before_a_reset_keeps_the_defaults(page, menu_page):
     saved = menu_page(interface={"excluded": ("name",)})
     page.click("#reset-interface-sync-options")
-    _settle(page, saved, 1)
+    _settle(page)
 
     _swap_menu(page, excluded=("name",))
-    _settle(page, saved, 1)
+    _settle(page)
 
     assert not _checked(page, "#exclude-name")
     assert page.locator("#interface-sync-options-count").inner_text() == "0"
@@ -269,11 +264,12 @@ def test_a_swap_sends_a_failed_save_again_with_the_latest_choice(page, menu_page
     failed = _fail_saves(page, failure, count=2)
     page.check("#exclude-mtu")
     page.check("#exclude-description")
-    _settle(page, failed, 2)
+    _settle(page)
+    assert len(failed) == 2
 
     # The stale render predates both failed saves.
     _swap_menu(page)
-    _settle(page, saved, 1)
+    _settle(page)
 
     latest = {"auto_select_lag_members": True, "exclude_columns": ["mtu", "description"]}
     assert _posted(saved) == [("interface_sync_options", latest)]
@@ -282,7 +278,7 @@ def test_a_swap_sends_a_failed_save_again_with_the_latest_choice(page, menu_page
 
     # The retry succeeded, so a second swap sends nothing.
     _swap_menu(page)
-    _settle(page, saved, 2)
+    _settle(page)
 
     assert len(saved) == 1
 
@@ -392,12 +388,12 @@ def test_a_stale_ip_swap_keeps_the_switches_and_the_management_row(page, swap_pa
     saved = load(_ip_tab_markup())
     page.check("#set-primary-ip-toggle-cb")
     page.check("#create-missing-interfaces-toggle-cb")
-    _settle(page, saved, 2)
+    _settle(page)
     assert _checked(page, "#ip-mgmt")
 
     # The swap renders the stored preferences from before these saves: both off.
     swap(_ip_tab_markup(), "ip-sync-options")
-    _settle(page, saved, 2)
+    _settle(page)
 
     assert _checked(page, "#set-primary-ip-toggle-cb")
     assert _checked(page, "#create-missing-interfaces-toggle-cb")
@@ -412,12 +408,12 @@ def test_a_stale_ip_swap_after_reset_keeps_the_switches_off(page, swap_page):
     saved = load(_ip_tab_markup(set_primary=True, create_missing=True))
     assert _checked(page, "#ip-mgmt")
     page.click("#reset-ip-sync-options")
-    _settle(page, saved, 2)
+    _settle(page)
     assert not _checked(page, "#ip-mgmt")
 
     # The swap renders the stored preferences from before the Reset: both on.
     swap(_ip_tab_markup(set_primary=True, create_missing=True), "ip-sync-options")
-    _settle(page, saved, 2)
+    _settle(page)
 
     assert not _checked(page, "#set-primary-ip-toggle-cb")
     assert not _checked(page, "#create-missing-interfaces-toggle-cb")
