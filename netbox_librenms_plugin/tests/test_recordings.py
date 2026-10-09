@@ -596,7 +596,10 @@ def test_recording_has_required_schema(recording):
 
 
 def _assert_virtual_chassis(api, device_id, expected):
-    from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
+    from netbox_librenms_plugin.import_utils.virtual_chassis import (
+        detect_virtual_chassis_from_inventory,
+        identify_vc_master,
+    )
 
     result = detect_virtual_chassis_from_inventory(api, device_id)
 
@@ -612,7 +615,8 @@ def _assert_virtual_chassis(api, device_id, expected):
     if "member_positions" in expected:
         assert [m["position"] for m in result["members"]] == expected["member_positions"]
     if "master_position" in expected:
-        assert [m["position"] for m in result["members"] if m["is_master"]] == [expected["master_position"]]
+        _found, device = api.get_device_info(device_id)
+        assert identify_vc_master(result["members"], device["serial"])["position"] == expected["master_position"]
 
 
 def _assert_port_relationships(api, device_id, recording, expected):

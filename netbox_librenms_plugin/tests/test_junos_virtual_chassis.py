@@ -46,6 +46,8 @@ def _detect(recording_server, recording):
 
 
 def test_fpc_members_carry_their_member_number_serial_and_model(recording_server):
+    from netbox_librenms_plugin.import_utils.virtual_chassis import identify_vc_master
+
     recording = load_recording(_RECORDING)
     fpcs = {
         row["entPhysicalIndex"]: row for row in _rows(recording, _CHILDREN_KEY) if row["entPhysicalIndex"] in (120, 121)
@@ -60,7 +62,9 @@ def test_fpc_members_carry_their_member_number_serial_and_model(recording_server
         fpcs[120]["entPhysicalSerialNum"],
         fpcs[121]["entPhysicalSerialNum"],
     ]
-    assert [member["is_master"] for member in result["members"]] == [True, False]
+    # The LibreNMS device serial is the root serial, which FPC 0 carries.
+    device = unwrap_response(recording["responses"][f"GET /api/v0/devices/{_DEVICE_ID}"])[1]["devices"][0]
+    assert identify_vc_master(result["members"], device["serial"]) is result["members"][0]
     # Junos reports the member model as the FPC name; the model-name field holds a part number.
     assert [member["model"] for member in result["members"]] == [
         fpcs[120]["entPhysicalName"],

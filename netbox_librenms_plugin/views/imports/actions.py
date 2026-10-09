@@ -61,6 +61,7 @@ from netbox_librenms_plugin.import_utils import (
     validate_device_for_import,
     visible_object_label,
 )
+from netbox_librenms_plugin.import_utils.virtual_chassis import vc_master_view
 from netbox_librenms_plugin.import_validation_helpers import (
     apply_cluster_to_validation,
     apply_host_to_validation,
@@ -112,6 +113,7 @@ from netbox_librenms_plugin.utils import (
     validate_interface_sync_options,
     validation_error_detail,
     exception_text_for,
+    match_librenms_hardware_to_device_type,
 )
 from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
@@ -1201,6 +1203,14 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 validation["virtual_chassis"] = update_vc_member_suggested_names(
                     validation["virtual_chassis"], device_name
                 )
+            if validation.get("virtual_chassis", {}).get("is_stack"):
+                # Preview the master the way import will match it: with the resolved DeviceType's rules.
+                device_type = (validation.get("device_type") or {}).get("device_type")
+                validation["virtual_chassis"] = vc_master_view(
+                    validation["virtual_chassis"],
+                    libre_device.get("serial"),
+                    getattr(device_type, "manufacturer", None),
+                )
 
             from dcim.models import DeviceRole, Rack
             from virtualization.models import Cluster
@@ -1847,7 +1857,14 @@ class DeviceVCDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 status=200,
             )
 
-        vc_data = get_virtual_chassis_data(self.librenms_api, device_id)
+        # Preview the master the way import will match it: with the matched DeviceType's rules.
+        match = match_librenms_hardware_to_device_type(libre_device.get("hardware") or "")
+        device_type = match.get("device_type") if match and match.get("matched") else None
+        vc_data = vc_master_view(
+            get_virtual_chassis_data(self.librenms_api, device_id),
+            libre_device.get("serial"),
+            getattr(device_type, "manufacturer", None),
+        )
 
         context = {
             "libre_device": libre_device,
