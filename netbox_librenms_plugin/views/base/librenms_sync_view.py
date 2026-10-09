@@ -10,7 +10,11 @@ from netbox.views import generic
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.import_utils import _determine_device_name
-from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name, extract_vc_members
+from netbox_librenms_plugin.import_utils.virtual_chassis import (
+    _generate_vc_member_name,
+    chassis_serial_key,
+    extract_vc_members,
+)
 from netbox_librenms_plugin.server_mappings import get_librenms_sync_device, mapped_device_servers, read_mapping
 from netbox_librenms_plugin.server_selection import (
     ServerSelectionState,
@@ -29,7 +33,6 @@ from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_user_pref,
     match_librenms_hardware_to_device_type,
-    normalize_inventory_serial,
     resolve_naming_preferences,
     save_user_pref,
 )
@@ -815,28 +818,15 @@ class BaseLibreNMSSyncView(
         vc_members = obj.virtual_chassis.members.all()
 
         # The ENTITY-MIB serial carries the vendor's decoration ("S/N BCFB9793" on Juniper) while
-        # the stored member serial does not, so compare and display the normalized value.
-        master = obj.virtual_chassis.master or obj
-        manufacturer = getattr(getattr(master, "device_type", None), "manufacturer", None)
-        # One lazy cache for the whole loop: apply_normalization_rules fills it on the first
-        # component that needs normalizing and reuses it for the rest, so a stack costs one read
-        # instead of one per component and an inventory with no serials costs none.
-        serial_rules: dict = {}
+        # the stored member serial does not, so compare and display the serial key.
+        serial_key = chassis_serial_key(obj)
 
         result = []
         for component in extract_vc_members(inventory):
-            serial = normalize_inventory_serial(
-                component["serial"], manufacturer=manufacturer, preloaded_rules=serial_rules
-            )
-            if not serial or serial == "-":
+            serial = serial_key(component["serial"])
+            if not serial:
                 continue
-
-            # Check if this serial is already assigned to a VC member
-            assigned_member = None
-            for member in vc_members:
-                if member.serial and member.serial.strip() == serial.strip():
-                    assigned_member = member
-                    break
+            assigned_member = next((member for member in vc_members if serial_key(member.serial) == serial), None)
 
             result.append(
                 {

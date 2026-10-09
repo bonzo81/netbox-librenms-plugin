@@ -8,13 +8,13 @@ from django.utils import timezone
 from django.views import View
 
 from netbox_librenms_plugin.constants import (
-    GENERIC_CONTAINER_MODELS as _GENERIC_CONTAINER_MODELS,
+    GENERIC_CONTAINER_MODELS,
     LIBRENMS_PLACEHOLDER_VALUES as _PLACEHOLDER_VALUES,
     MAIN_INVENTORY_SOURCE,
     OOB_INVENTORY_SOURCE,
     is_module_model_placeholder,
 )
-from netbox_librenms_plugin.import_utils.virtual_chassis import vc_member_rows
+from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory, chassis_serial_key
 from netbox_librenms_plugin.librenms_ids import (
     coerce_librenms_id,
     normalize_librenms_port_id,
@@ -526,11 +526,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         sync_device = get_librenms_sync_device(obj, server_key=server_key)
         return sync_device or obj
 
-    @staticmethod
-    def _normalize_serial(value):
-        """Normalize serial values for reliable cross-source comparison."""
-        return _clean_librenms_value(value)
-
     def _count_adoptable_template_interfaces(self, module):
         """Count standalone interfaces that match an installed module's interface templates."""
         from dcim.models import Interface
@@ -597,143 +592,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         ]
 
     @staticmethod
-    def _vc_member_at_position(vc_members, position):
-        """Return the VC member at a normalized position, or None."""
-        try:
-            position = int(position)
-        except (TypeError, ValueError):
-            return None
-        if not is_vc_position(position):
-            return None
-        return next((member for member in vc_members if getattr(member, "vc_position", None) == position), None)
-
-    @staticmethod
-    def _vc_member_rows(inventory_data):
-        """Return the stack rows of the main inventory; OOB controller rows are no stack members."""
-        return vc_member_rows(item for item in inventory_data if item.get("_source") != OOB_INVENTORY_SOURCE)
-
-    @staticmethod
-    def _vc_member_from_one(vc_members, position):
-        """Return the VC member at a position of 1 or more, or None."""
-        try:
-            position = int(position)
-        except (TypeError, ValueError):
-            return None
-        return BaseModuleTableView._vc_member_at_position(vc_members, position) if position >= 1 else None
-
-    @classmethod
-    def _infer_vc_member_for_item(cls, obj, item, index_map, vc_members, *, member_rows, inherited_member=None):
-        """
-        Infer VC member ownership for an inventory item using LibreNMS ENTITY data.
-
-        Args:
-            obj (Device): The page device, the owner when no evidence names a member.
-            item (dict): The inventory row to attribute.
-            index_map (dict): Inventory rows keyed by raw ``entPhysicalIndex``.
-            vc_members (list): The NetBox Virtual Chassis members.
-            member_rows (VCMemberRows): The stack rows from :func:`vc_member_rows`, computed once
-                for the whole inventory.
-            inherited_member (Device | None): The owner of the row's parent, for a shape that is no
-                recognized stack.
-
-        Returns:
-            tuple: (Device, source) where source is a short reason string.
-
-        """
-        if not vc_members:
-            return obj, "default"
-
-        member_by_serial = {
-            cls._normalize_serial(getattr(member, "serial", "")): member
-            for member in vc_members
-            if cls._normalize_serial(getattr(member, "serial", ""))
+    def _attribute_to_members(obj, inventory_data, vc_members):
+        """Return ``{item key: (Device, source)}`` for the main inventory, with *obj* for an unowned row."""
+        rows = [item for item in inventory_data if item.get("_source") != OOB_INVENTORY_SOURCE]
+        # Without members every row stays on the page, so the serial rules are not read.
+        owners = attribute_inventory(rows, vc_members, chassis_serial_key(obj) if vc_members else None)
+        return {
+            _inventory_item_key(item): (member or obj, source)
+            for item, (member, source) in zip(rows, owners, strict=True)
         }
-
-        item_serial = cls._normalize_serial(item.get("entPhysicalSerialNum"))
-        if item_serial and item_serial in member_by_serial:
-            return member_by_serial[item_serial], "serial"
-
-        if member_rows.positions:
-            return cls._infer_vc_member_in_stack(obj, item, index_map, vc_members, member_by_serial, member_rows)
-        return cls._infer_vc_member_without_stack(obj, item, index_map, vc_members, member_by_serial, inherited_member)
-
-    @classmethod
-    def _infer_vc_member_in_stack(cls, obj, item, index_map, vc_members, member_by_serial, member_rows):
-        """Attribute a row of a recognized stack to the member row it is or sits under."""
-        # Walk up to the stack root, which owns no member: a nearer serial wins over a member row.
-        current = item
-        visited = set()
-        while isinstance(current, dict) and current.get("entPhysicalIndex") != member_rows.root_index:
-            if id(current) in visited:
-                break
-            visited.add(id(current))
-            serial = cls._normalize_serial(current.get("entPhysicalSerialNum"))
-            if current is not item and serial and serial in member_by_serial:
-                return member_by_serial[serial], "ancestor-serial"
-            if current.get("entPhysicalIndex") in member_rows.positions:
-                member = cls._member_row_owner(current, vc_members, member_by_serial, member_rows)
-                if member is None:
-                    break
-                return member, "position" if current is item else "parent-context"
-            # A Junos PSU or fan tray under the root names its FPC as "FPC <n> ..." and follows it.
-            fpc = index_map.get(member_rows.fpc_named_by(current))
-            if fpc is not None:
-                member = cls._member_row_owner(fpc, vc_members, member_by_serial, member_rows)
-                if member is None:
-                    break
-                return member, "junos-member" if current is item else "parent-context"
-            current = index_map.get(current.get("entPhysicalContainedIn"))
-        return obj, "default"
-
-    @classmethod
-    def _member_row_owner(cls, row, vc_members, member_by_serial, member_rows):
-        """Return the member that a member row resolves to: its serial first, then its detected position."""
-        serial = cls._normalize_serial(row.get("entPhysicalSerialNum"))
-        if serial and serial in member_by_serial:
-            return member_by_serial[serial]
-        return cls._vc_member_at_position(vc_members, member_rows.positions.get(row.get("entPhysicalIndex")))
-
-    @classmethod
-    def _infer_vc_member_without_stack(cls, obj, item, index_map, vc_members, member_by_serial, inherited_member):
-        """Attribute a row of an unrecognized shape with the position and name heuristic."""
-        # Walk ancestors to find a serial tied to a VC member.
-        parent_idx = item.get("entPhysicalContainedIn", 0)
-        visited = set()
-        while parent_idx and parent_idx in index_map and parent_idx not in visited:
-            visited.add(parent_idx)
-            parent = index_map[parent_idx]
-            parent_serial = cls._normalize_serial(parent.get("entPhysicalSerialNum"))
-            if parent_serial and parent_serial in member_by_serial:
-                return member_by_serial[parent_serial], "ancestor-serial"
-            parent_idx = parent.get("entPhysicalContainedIn", 0)
-
-        # A descendant's parentRelPos is its hardware slot, not its Virtual Chassis position.
-        # Inherit the parent context unless this item or an ancestor supplied member serial evidence.
-        if inherited_member is not None:
-            return inherited_member, "parent-context"
-
-        # This shape has no member rows, so any row's position or name hint from 1 names a member.
-        positioned_member = cls._vc_member_from_one(vc_members, item.get("entPhysicalParentRelPos"))
-        if positioned_member is not None:
-            return positioned_member, "position"
-
-        # Name/model hint fallback: common "<position>/..." prefixes.
-        hints = [
-            _normalize_librenms_text(item.get("entPhysicalName")),
-            _normalize_librenms_text(item.get("entPhysicalDescr")),
-            _normalize_librenms_text(item.get("entPhysicalModelName")),
-        ]
-        for hint in hints:
-            if not hint:
-                continue
-            match = re.match(r"^\D*([1-9]\d*)[/:\-].*", hint)
-            if not match:
-                continue
-            hinted_member = cls._vc_member_from_one(vc_members, match.group(1))
-            if hinted_member is not None:
-                return hinted_member, "name-hint"
-
-        return obj, "default"
 
     def post(self, request, pk):  # noqa: C901
         """Fetch inventory from LibreNMS, cache it, and render the module sync table."""
@@ -1092,7 +959,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         default_ignore_context, item_ignore_contexts = self._build_inventory_ignore_contexts(
             obj,
             inventory_data,
-            index_map,
             vc_members,
             get_enabled_ignore_rules,
         )
@@ -1206,13 +1072,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         cls,
         obj,
         inventory_data,
-        index_map,
         vc_members,
         get_enabled_ignore_rules,
     ):
         """Return the page policy and per-item policies for attributed VC members."""
         policy_cache = {}
-        member_rows = cls._vc_member_rows(inventory_data)
+        owners = cls._attribute_to_members(obj, inventory_data, vc_members)
 
         def policy_for(device):
             device_id = getattr(device, "pk", None)
@@ -1227,54 +1092,17 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         default_context = policy_for(obj)
         item_contexts = {}
-
-        def context_for(item, resolving=None):
-            """Resolve one item after its parent so weak child hints cannot replace ownership."""
+        for item in inventory_data:
             item_key = _inventory_item_key(item)
-            if item_key in item_contexts:
-                return item_contexts[item_key]
             if item.get("_source") == OOB_INVENTORY_SOURCE:
-                item_contexts[item_key] = {
-                    **default_context,
-                    "selected_device": obj,
-                    "resolution_source": OOB_INVENTORY_SOURCE,
-                }
-                return item_contexts[item_key]
-
-            resolving = set() if resolving is None else resolving
-            inherited_member = None
-            parent = index_map.get(item.get("entPhysicalContainedIn"))
-            if parent is not None and _inventory_item_key(parent) not in resolving:
-                parent_context = context_for(parent, resolving | {item_key})
-                # A generic stack/container root can only fall back to the page device. It has not
-                # established ownership, so let a chassis child use its own position or name hint.
-                parent_class = _normalize_librenms_text(parent.get("entPhysicalClass"))
-                parent_model = _normalize_librenms_text(parent.get("entPhysicalModelName")).lower()
-                generic_root = parent_context["resolution_source"] == "default" and (
-                    parent_class == "stack"
-                    or (parent_class == "container" and parent_model in _GENERIC_CONTAINER_MODELS)
-                )
-                if not generic_root:
-                    inherited_member = parent_context["selected_device"]
-
-            selected_device, resolution_source = cls._infer_vc_member_for_item(
-                obj,
-                item,
-                index_map,
-                vc_members,
-                member_rows=member_rows,
-                inherited_member=inherited_member,
-            )
-            policy = policy_for(selected_device)
+                selected_device, resolution_source = obj, OOB_INVENTORY_SOURCE
+            else:
+                selected_device, resolution_source = owners[item_key]
             item_contexts[item_key] = {
-                **policy,
+                **(default_context if item.get("_source") == OOB_INVENTORY_SOURCE else policy_for(selected_device)),
                 "selected_device": selected_device,
                 "resolution_source": resolution_source,
             }
-            return item_contexts[item_key]
-
-        for item in inventory_data:
-            context_for(item)
         return default_context, item_contexts
 
     @staticmethod
@@ -1312,7 +1140,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             )
             if anc_class in INVENTORY_CLASSES or _class_is_included(ancestor, ancestor_rules):
                 anc_model = _normalize_librenms_text(ancestor.get("entPhysicalModelName")).lower()
-                if anc_model in _GENERIC_CONTAINER_MODELS:
+                if anc_model in GENERIC_CONTAINER_MODELS:
                     current_idx = ancestor.get("entPhysicalContainedIn", 0)
                     continue
                 return True
@@ -1406,7 +1234,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 continue
             # Skip items with generic model names (not real hardware), regardless of class.
             model = _normalize_librenms_text(item.get("entPhysicalModelName")).lower()
-            if model in _GENERIC_CONTAINER_MODELS:
+            if model in GENERIC_CONTAINER_MODELS:
                 continue
             # Walk up ancestor chain; skip if any ancestor is an inventory-class item.
             # Transparent ancestors are treated as generic containers.
@@ -1487,16 +1315,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         ignore_contexts = ignore_contexts or {}
 
         table_data = []
-        member_rows = None  # read once, only when a row has no attributed context
+        owners = None  # read once, only when a row has no attributed context
 
         for item in top_items:
             ignore_context = ignore_contexts.get(_inventory_item_key(item))
             if ignore_context is None:
-                if member_rows is None:
-                    member_rows = self._vc_member_rows(index_map.values())
-                target_device, resolution_source = self._infer_vc_member_for_item(
-                    obj, item, index_map, vc_members, member_rows=member_rows
-                )
+                if owners is None:
+                    rows = [*index_map.values(), *(row for row in top_items if row.get("entPhysicalIndex") is None)]
+                    owners = self._attribute_to_members(obj, rows, vc_members)
+                target_device, resolution_source = owners[_inventory_item_key(item)]
                 target_ignore_rules = ignore_rules
                 target_device_identity = device_identity
                 target_manufacturer = manufacturer
@@ -2466,7 +2293,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 )
                 continue
             model = _normalize_librenms_text(child.get("entPhysicalModelName")).lower()
-            if model and model not in _GENERIC_CONTAINER_MODELS:
+            if model and model not in GENERIC_CONTAINER_MODELS:
                 results.append((depth, child))
                 # Continue looking for deeper components (e.g., SFPs inside converters)
                 self._collect_descendants(
@@ -3033,7 +2860,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             visited.add(current_idx)
             ancestor = index_map[current_idx]
             model = _normalize_librenms_text(ancestor.get("entPhysicalModelName")).lower()
-            if model and model not in _GENERIC_CONTAINER_MODELS:
+            if model and model not in GENERIC_CONTAINER_MODELS:
                 # Found the parent with a real model; container_idx is the intermediate container
                 break
             cls = ancestor.get("entPhysicalClass") or ""

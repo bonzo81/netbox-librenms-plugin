@@ -629,7 +629,11 @@ class TestBulkImportConfirmView:
     def test_confirm_template_says_a_stack_without_a_master_imports_standalone(self, master_identified):
         from django.template.loader import render_to_string
 
-        from netbox_librenms_plugin.import_utils.virtual_chassis import _clone_virtual_chassis_data, vc_master_view
+        from netbox_librenms_plugin.import_utils.virtual_chassis import (
+            _clone_virtual_chassis_data,
+            vc_master_view,
+            vc_serial_key,
+        )
 
         members = [{"position": 1, "serial": "SN-1"}, {"position": 2, "serial": "SN-2"}]
         html = render_to_string(
@@ -643,6 +647,7 @@ class TestBulkImportConfirmView:
                             "virtual_chassis": vc_master_view(
                                 _clone_virtual_chassis_data({"is_stack": True, "member_count": 2, "members": members}),
                                 "SN-1" if master_identified else "ROOT",
+                                vc_serial_key(),
                             )
                         },
                     }

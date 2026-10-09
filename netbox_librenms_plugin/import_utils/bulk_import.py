@@ -48,12 +48,12 @@ from .filters import _safe_disabled, get_librenms_devices_for_import
 from .permissions import check_user_permissions, require_permissions
 from .virtual_chassis import (
     VC_MASTER_UNKNOWN_WARNING,
-    VirtualChassisMasterUnknownError,
     create_virtual_chassis_with_members,
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
     identify_vc_master,
     prefetch_vc_data_for_devices,
+    vc_serial_key,
 )
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
@@ -560,13 +560,16 @@ def bulk_import_devices_shared(  # noqa: C901
                 else:
                     logger.error(f"Cannot import device {device_id}: {exc}")
                 continue
-            # A stack whose master is unknown imports standalone, so it needs no chassis permission.
-            creates_vc = vc_data.get("is_stack", False) and (
-                identify_vc_master(
-                    vc_data["members"], libre_device.get("serial"), getattr(device_type, "manufacturer", None)
+            # The one master decision for this row; a stack whose master is unknown imports standalone,
+            # so it needs no chassis permission.
+            master_member = None
+            if vc_data.get("is_stack", False):
+                master_member = identify_vc_master(
+                    vc_data["members"],
+                    libre_device.get("serial"),
+                    vc_serial_key(getattr(device_type, "manufacturer", None)),
                 )
-                is not None
-            )
+            creates_vc = master_member is not None
             if creates_vc:
                 has_vc_perm, _ = check_user_permissions(user, ["dcim.add_virtualchassis"])
                 if not has_vc_perm:
@@ -640,6 +643,7 @@ def bulk_import_devices_shared(  # noqa: C901
                                 vc_data["members"],
                                 libre_device,
                                 server_key=api.server_key,
+                                master_member=master_member,
                             )
                             vc_created_count += 1
                             log_msg = f"Created VC '{vc.name}' during bulk import for device {device_id}"
@@ -650,10 +654,7 @@ def bulk_import_devices_shared(  # noqa: C901
                         except Exception as vc_error:
                             # Remove from set on failure so retry is possible
                             processed_vc_domains.discard(vc_domain)
-                            if isinstance(vc_error, VirtualChassisMasterUnknownError):
-                                # The stored serial no longer names one member; fail closed like the precheck.
-                                warn_msg = VC_MASTER_UNKNOWN_WARNING.format(device_id=device_id)
-                            elif classify_conflict(vc_error):
+                            if classify_conflict(vc_error):
                                 # The device committed in its own transaction; only the chassis is missing.
                                 warn_msg = (
                                     f"Imported device {device_id}, but another operation was changing the same "

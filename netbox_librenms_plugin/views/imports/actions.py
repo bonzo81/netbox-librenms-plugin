@@ -65,7 +65,7 @@ from netbox_librenms_plugin.import_utils.device_operations import (
     effective_import_device_type,
     match_import_device_type,
 )
-from netbox_librenms_plugin.import_utils.virtual_chassis import vc_master_view
+from netbox_librenms_plugin.import_utils.virtual_chassis import vc_master_view, vc_serial_key
 from netbox_librenms_plugin.import_validation_helpers import (
     apply_cluster_to_validation,
     apply_host_to_validation,
@@ -1212,7 +1212,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 validation["virtual_chassis"] = vc_master_view(
                     validation["virtual_chassis"],
                     libre_device.get("serial"),
-                    getattr(device_type, "manufacturer", None),
+                    vc_serial_key(getattr(device_type, "manufacturer", None)),
                 )
 
             from dcim.models import DeviceRole, Rack
@@ -1866,7 +1866,7 @@ class DeviceVCDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         vc_data = vc_master_view(
             get_virtual_chassis_data(self.librenms_api, device_id),
             libre_device.get("serial"),
-            getattr(device_type, "manufacturer", None),
+            vc_serial_key(getattr(device_type, "manufacturer", None)),
         )
 
         context = {

@@ -1585,7 +1585,11 @@ class TestVirtualChassisHTTPIntegration:
         assert get_virtual_chassis_data(object(), None)["is_stack"] is False
 
     def test_detects_stack_from_real_http_inventory(self, settings, librenms_server):
-        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data, identify_vc_master
+        from netbox_librenms_plugin.import_utils.virtual_chassis import (
+            get_virtual_chassis_data,
+            identify_vc_master,
+            vc_serial_key,
+        )
 
         device_id = 42
         librenms_server.device_info_response(device_id=device_id, hostname="stack-master", serial="MEMBER-1")
@@ -1597,7 +1601,7 @@ class TestVirtualChassisHTTPIntegration:
         assert result["is_stack"] is True
         assert result["member_count"] == 2
         assert [member["position"] for member in result["members"]] == [1, 2]
-        assert identify_vc_master(result["members"], "MEMBER-1") is result["members"][0]
+        assert identify_vc_master(result["members"], "MEMBER-1", vc_serial_key()) is result["members"][0]
         assert result["members"][0]["suggested_name"] == "stack-master-M1"
 
     def test_negative_result_is_cached_until_forced_refresh(self, settings, librenms_server):
@@ -1743,11 +1747,9 @@ class TestCreateVirtualChassisWithMembers:
 
         master = make_device("vc-master", serial="MASTER-SERIAL")
 
+        members = [{"serial": "MASTER-SERIAL", "position": 1}]
         virtual_chassis = create_virtual_chassis_with_members(
-            master,
-            [{"serial": "MASTER-SERIAL", "position": 1}],
-            {"device_id": 101},
-            server_key="test-server",
+            master, members, {"device_id": 101}, server_key="test-server", master_member=members[0]
         )
 
         master.refresh_from_db()
@@ -1770,10 +1772,7 @@ class TestCreateVirtualChassisWithMembers:
         ]
 
         virtual_chassis = create_virtual_chassis_with_members(
-            master,
-            members,
-            {"device_id": 102},
-            server_key="test-server",
+            master, members, {"device_id": 102}, server_key="test-server", master_member=members[0]
         )
 
         created_members = list(virtual_chassis.members.order_by("vc_position"))
@@ -1783,26 +1782,13 @@ class TestCreateVirtualChassisWithMembers:
         ]
         assert virtual_chassis.master_id == master.pk
 
-    def test_a_stack_without_a_master_creates_nothing(self):
-        """Guessing the master's slot splits the stack into more devices than switches, so creation refuses."""
-        from dcim.models import Device, VirtualChassis
+    def test_a_stack_without_a_matching_member_names_no_master(self):
+        """Guessing the master's slot splits the stack into more devices than switches, so none is named."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import identify_vc_master, vc_serial_key
 
-        from netbox_librenms_plugin.import_utils.virtual_chassis import (
-            VirtualChassisMasterUnknownError,
-            create_virtual_chassis_with_members,
-        )
-        from netbox_librenms_plugin.tests.conftest import make_device
-
-        master = make_device("unmatched-master", serial="ROOT")
         members = [{"serial": "UNMATCHED-A", "position": 1}, {"serial": "", "position": 2}]
 
-        with pytest.raises(VirtualChassisMasterUnknownError):
-            create_virtual_chassis_with_members(master, members, {"device_id": 103}, server_key="test-server")
-
-        master.refresh_from_db()
-        assert master.virtual_chassis is None
-        assert not VirtualChassis.objects.filter(domain="librenms-test-server-103").exists()
-        assert not Device.objects.filter(serial="UNMATCHED-A").exists()
+        assert identify_vc_master(members, "ROOT", vc_serial_key()) is None
 
 
 @pytest.mark.django_db
