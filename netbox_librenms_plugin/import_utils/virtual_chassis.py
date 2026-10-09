@@ -1,7 +1,7 @@
 """Virtual chassis detection, creation, and management."""
 
 import logging
-from typing import List
+from typing import List, NamedTuple
 
 from dcim.models import Device, VirtualChassis
 from django.core.cache import cache
@@ -153,15 +153,6 @@ def select_vc_parent_index(root_rows: list) -> int | None:
     return None
 
 
-def is_vc_root(row: dict, rows) -> bool:
-    """Return whether *row* is the root that holds the stack members, as :func:`extract_vc_members` picks it."""
-    if row.get("entPhysicalClass") not in ("stack", "chassis") or _as_int(row.get("entPhysicalContainedIn")) != 0:
-        return False
-    roots = [item for item in rows if isinstance(item, dict) and _as_int(item.get("entPhysicalContainedIn")) == 0]
-    index = select_vc_parent_index(roots)
-    return index is not None and _as_int(row.get("entPhysicalIndex")) == index
-
-
 def _is_junos_vc_root(row: dict) -> bool:
     """Return whether *row* is a chassis root whose description names a Junos Virtual Chassis."""
     descr = row.get("entPhysicalDescr")
@@ -278,25 +269,58 @@ def extract_vc_members(rows: list, device_serial=None) -> list[dict]:
         list[dict]: The members in position order, or [] when the rows describe no stack.
 
     """
+    return _extract(rows, device_serial)[1]
+
+
+def _extract(rows, device_serial) -> tuple:
+    """Return the stack root's raw index and the members for :func:`extract_vc_members`; (None, []) for no stack."""
     rows = [row for row in rows if isinstance(row, dict)]
     roots = [row for row in rows if _as_int(row.get("entPhysicalContainedIn")) == 0]
     parent_index = select_vc_parent_index(roots)
     if parent_index is None:
-        return []
+        return None, []
     root = next(row for row in roots if _as_int(row.get("entPhysicalIndex")) == parent_index)
     children = [row for row in rows if _as_int(row.get("entPhysicalContainedIn")) == parent_index]
 
     chassis = [row for row in children if row.get("entPhysicalClass") == "chassis"]
     if len(chassis) >= 2:
-        return _member_entries(
-            chassis, model_field="entPhysicalModelName", master_serial=normalize_stack_serial(device_serial)
+        master_serial = normalize_stack_serial(device_serial)
+        return root.get("entPhysicalIndex"), _member_entries(
+            chassis, model_field="entPhysicalModelName", master_serial=master_serial
         )
     fpcs = _junos_fpc_rows(root, children)
     if fpcs:
-        return _member_entries(
-            fpcs, model_field="entPhysicalName", master_serial=normalize_stack_serial(root.get("entPhysicalSerialNum"))
+        master_serial = normalize_stack_serial(root.get("entPhysicalSerialNum"))
+        return root.get("entPhysicalIndex"), _member_entries(
+            fpcs, model_field="entPhysicalName", master_serial=master_serial
         )
-    return []
+    return None, []
+
+
+class VCMemberRows(NamedTuple):
+    """The inventory rows that :func:`extract_vc_members` reads as a stack, keyed by raw index."""
+
+    root_index: object
+    positions: dict
+
+
+def vc_member_rows(rows) -> VCMemberRows:
+    """
+    Return the stack root and the member rows of an inventory, from :func:`extract_vc_members`.
+
+    Only a member row's position is a member number. Module sync reads it to attribute rows,
+    so it shares one stack definition with import detection and the serials modal. With no
+    stack, ``root_index`` is None and ``positions`` is empty.
+
+    Args:
+        rows: Inventory rows that hold the roots and at least their direct children.
+
+    Returns:
+        VCMemberRows: The stack root's raw ``entPhysicalIndex`` and ``{entPhysicalIndex: member position}``.
+
+    """
+    root_index, members = _extract(rows, None)
+    return VCMemberRows(root_index, {member["index"]: member["position"] for member in members})
 
 
 def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> dict | None:
