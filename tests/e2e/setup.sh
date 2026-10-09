@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build the NetBox image with the plugin wheel and start the end-to-end stack.
-# Usage: NETBOX_CONTAINER_TAG=v4.7 tests/compose_e2e/setup.sh [path/to/plugin.whl]
+# Usage: NETBOX_CONTAINER_TAG=v4.7 tests/e2e/setup.sh [path/to/plugin.whl]
 # Without a wheel argument, the script takes the one wheel in dist/.
 set -euo pipefail
 

@@ -5,9 +5,12 @@ The suite is black-box: it drives the NetBox of the compose stack in docker/ thr
 and its REST API, and never imports the plugin. setup.sh builds and starts the stack.
 """
 
+import json
 import os
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from pathlib import Path
+from uuid import uuid4
 
 import pytest
 import requests
@@ -15,8 +18,21 @@ from playwright.sync_api import Page
 
 USERNAME = "admin"
 PASSWORD = "admin"
+# The plugin server key of the stub in docker/plugins.py.
+SERVER_KEY = "e2e"
+# The stub reports this location for a recording that has none, and the recordings that have one use it too.
+SITE_NAME = "Lab"
 REQUEST_TIMEOUT = 30
 JOB_END_STATES = ("completed", "errored", "failed")
+RECORDINGS_DIR = Path(__file__).parents[2] / "netbox_librenms_plugin/data_shapes/recordings"
+MAPPINGS_API = "plugins/librenms_plugin"
+
+
+def recorded(name: str, route: str) -> dict:
+    """Return the body that a recording, which the stub also serves, holds for one GET route."""
+    body = json.loads((RECORDINGS_DIR / f"{name}.json").read_text())["responses"][f"GET {route}"]
+    # A recorded response is either the body or a [status, body] pair.
+    return body[1] if isinstance(body, list) else body
 
 
 class NetBoxAPI:
@@ -54,6 +70,18 @@ class NetBoxAPI:
         found = self.list(path, **lookup)
         assert len(found) <= 1, f"{len(found)} objects in /api/{path}/ match {lookup}"
         return found[0] if found else self.create(path, data)
+
+    def delete_modules(self, device_id: int) -> None:
+        """Delete every module of a device. A parent module takes the modules in its bays with it."""
+        while modules := self.list("dcim/modules", device_id=device_id):
+            self.delete(f"dcim/modules/{modules[0]['id']}")
+
+    def installed_modules(self, device_id: int) -> dict[str, tuple[str, str]]:
+        """Return {module bay name: (module type model, serial)} for the modules of a device."""
+        return {
+            module["module_bay"]["name"]: (module["module_type"]["model"], module["serial"])
+            for module in self.list("dcim/modules", device_id=device_id)
+        }
 
     def wait_for_job(self, job_id: int, timeout: float = 180) -> dict:
         """Poll a background job until it ends, and return it."""
@@ -97,6 +125,67 @@ def netbox_api(netbox_url: str) -> Iterator[NetBoxAPI]:
     finally:
         api.delete(f"users/tokens/{token['id']}")
         session.close()
+
+
+@pytest.fixture(scope="session")
+def placement(netbox_api: NetBoxAPI) -> dict:
+    """Return the site and the device role that the seeded and imported devices use."""
+    site = netbox_api.get_or_create("dcim/sites", {"name": SITE_NAME}, {"name": SITE_NAME, "slug": "lab"})
+    role = netbox_api.get_or_create(
+        "dcim/device-roles", {"slug": "e2e-switch"}, {"name": "E2E Switch", "slug": "e2e-switch", "color": "2196f3"}
+    )
+    return {"site": site, "role": role}
+
+
+@pytest.fixture(scope="module")
+def module_device(netbox_api: NetBoxAPI, placement: dict) -> Iterator[Callable[..., dict]]:
+    """
+    Return a factory that seeds a device for the module sync tab, linked to one stub device.
+
+    The factory takes the LibreNMS device id, the module bay names of the device type, and
+    {LibreNMS model: module bay names of its module type}. Every object has a name of its own,
+    and the teardown deletes only what the factory created.
+    """
+    created: list[str] = []
+
+    def _create(path: str, data: dict) -> dict:
+        obj = netbox_api.create(path, data)
+        created.append(f"{path}/{obj['id']}")
+        return obj
+
+    def factory(librenms_id: int, device_bays: list[str], module_types: dict[str, list[str]]) -> dict:
+        run = uuid4().hex[:12]
+        manufacturer = _create("dcim/manufacturers", {"name": f"E2E Modules {run}", "slug": f"e2e-modules-{run}"})
+        device_type = _create(
+            "dcim/device-types",
+            {"manufacturer": manufacturer["id"], "model": f"E2E-MODULES-{run}", "slug": f"e2e-modules-{run}"},
+        )
+        for name in device_bays:
+            netbox_api.create("dcim/module-bay-templates", {"device_type": device_type["id"], "name": name})
+        for model, bays in module_types.items():
+            module_type = _create("dcim/module-types", {"manufacturer": manufacturer["id"], "model": model})
+            for name in bays:
+                netbox_api.create("dcim/module-bay-templates", {"module_type": module_type["id"], "name": name})
+            # Scoped to the manufacturer, so it wins over a global mapping for the same model.
+            _create(
+                f"{MAPPINGS_API}/module-type-mappings",
+                {"librenms_model": model, "netbox_module_type": module_type["id"], "manufacturer": manufacturer["id"]},
+            )
+        return _create(
+            "dcim/devices",
+            {
+                "name": f"e2e-modules-{run}",
+                "device_type": device_type["id"],
+                "role": placement["role"]["id"],
+                "site": placement["site"]["id"],
+                "custom_fields": {"librenms_id": {SERVER_KEY: librenms_id}},
+            },
+        )
+
+    yield factory
+    # Devices first, so their modules no longer hold the module types; then the newest objects first.
+    for path in sorted(reversed(created), key=lambda path: not path.startswith("dcim/devices/")):
+        netbox_api.delete(path)
 
 
 @pytest.fixture(scope="session")
