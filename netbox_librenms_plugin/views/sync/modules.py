@@ -1190,7 +1190,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             else []
         )
         default_context, ignore_contexts = BaseModuleTableView._build_inventory_ignore_contexts(
-            page_device, cached_data, index_map, vc_members, get_enabled_ignore_rules
+            page_device, cached_data, vc_members, get_enabled_ignore_rules
         )
         root = index_map.get(parent_index)
         if root is not None and ignore_contexts[_inventory_item_key(root)]["selected_device"].pk != target_device.pk:

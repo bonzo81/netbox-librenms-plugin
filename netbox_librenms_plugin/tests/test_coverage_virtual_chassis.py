@@ -17,6 +17,7 @@ class TestCreateVirtualChassisWithMembers:
             [master_row, *members],
             {"device_id": master.pk},
             server_key=server_key,
+            master_member=master_row,
         )
         return master, virtual_chassis
 
@@ -52,24 +53,17 @@ class TestCreateVirtualChassisWithMembers:
             ("MEMBER-4", 4),
         ]
 
-    def test_two_rows_with_the_master_serial_create_nothing(self):
-        """No single member is the master, so creation refuses before it writes a duplicate device."""
-        from dcim.models import Device, VirtualChassis
+    def test_two_rows_with_the_master_serial_name_no_master(self):
+        """No single member is the master, so the import creates no chassis and no duplicate device."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import identify_vc_master, vc_serial_key
 
-        from netbox_librenms_plugin.import_utils.virtual_chassis import VirtualChassisMasterUnknownError
+        members = [
+            {"serial": "MASTER", "position": 1, "name": "Master"},
+            {"serial": "MASTER", "position": 2, "name": "Duplicate master"},
+            {"serial": "MEMBER", "position": 3, "name": "Member"},
+        ]
 
-        with pytest.raises(VirtualChassisMasterUnknownError):
-            self._create(
-                "master-serial",
-                [
-                    {"serial": "MASTER", "position": 2, "name": "Duplicate master"},
-                    {"serial": "MEMBER", "position": 3, "name": "Member"},
-                ],
-            )
-
-        assert Device.objects.filter(serial="MASTER").count() == 1
-        assert not Device.objects.filter(serial="MEMBER").exists()
-        assert not VirtualChassis.objects.filter(name="master-serial-master").exists()
+        assert identify_vc_master(members, "MASTER", vc_serial_key()) is None
 
     def test_server_key_is_part_of_domain(self):
         master, virtual_chassis = self._create("server-domain", [], server_key="production")
@@ -93,14 +87,12 @@ class TestStackMemberSerials:
         from netbox_librenms_plugin.tests.conftest import make_device
 
         master = make_device("serial-boundary-master", serial="MASTER")
+        members = [
+            {"serial": "MASTER", "position": 1, "name": "Master"},
+            {"serial": value, "position": 2, "name": "Member 2"},
+        ]
         virtual_chassis = create_virtual_chassis_with_members(
-            master,
-            [
-                {"serial": "MASTER", "position": 1, "name": "Master"},
-                {"serial": value, "position": 2, "name": "Member 2"},
-            ],
-            {"device_id": master.pk},
-            server_key="default",
+            master, members, {"device_id": master.pk}, server_key="default", master_member=members[0]
         )
 
         assert virtual_chassis.members.count() == 2

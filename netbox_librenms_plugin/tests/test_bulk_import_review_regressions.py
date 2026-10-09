@@ -606,11 +606,9 @@ def test_a_failed_module_bay_count_write_fails_the_chassis_create():
             lambda sql, params: sql.startswith('UPDATE "dcim_device" SET "module_bay_count"'), "40P01"
         ) as failed,
     ):
+        members = [{"serial": "MASTER-SERIAL", "position": 1}, {"serial": "MEMBER-SERIAL", "position": 2}]
         create_virtual_chassis_with_members(
-            master,
-            [{"serial": "MASTER-SERIAL", "position": 1}, {"serial": "MEMBER-SERIAL", "position": 2}],
-            {"device_id": 96321},
-            server_key="default",
+            master, members, {"device_id": 96321}, server_key="default", master_member=members[0]
         )
 
     assert failed, "precondition: the count write ran"

@@ -73,7 +73,7 @@ def test_a_missing_member_position_numbers_the_whole_stack_in_row_order(live_lib
     import copy
 
     from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
-    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView, _inventory_item_key
+    from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory, chassis_serial_key
 
     recording = copy.deepcopy(load_recording("juniper-ex4400-vc-2member"))
     for key, value in recording["responses"].items():
@@ -94,12 +94,10 @@ def test_a_missing_member_position_numbers_the_whole_stack_in_row_order(live_lib
         2: fpc_serials[121],
     }
     index_map = {row["entPhysicalIndex"]: row for row in inventory}
-    _default, contexts = BaseModuleTableView._build_inventory_ignore_contexts(
-        chassis.master, inventory, index_map, list(members.values()), lambda _manufacturer: []
-    )
+    owners = attribute_inventory(inventory, list(members.values()), chassis_serial_key(chassis.master))
     psu = index_map[4]
     assert psu["entPhysicalDescr"].startswith("FPC 1 ")
-    assert contexts[_inventory_item_key(psu)]["selected_device"] == members[2]
+    assert owners[inventory.index(psu)][0] == members[2]
 
 
 class TestOneBasedStackKeepsPortZeroLocal:
