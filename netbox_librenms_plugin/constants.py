@@ -98,6 +98,7 @@ STACK_SERIAL_PLACEHOLDERS = frozenset(
     {
         "-",
         "builtin",
+        "default",
         "n/a",
         "na",
         "none",
