@@ -141,6 +141,33 @@
     }
   },
   {
+    "name": "juniper-ex4400-vc-2member",
+    "signature": {
+      "os": "os-990f10",
+      "virtual_chassis": {
+        "present": true,
+        "root_class": "chassis",
+        "member_count": 2,
+        "position_base": 0
+      },
+      "lag": {
+        "present": false,
+        "ieee8023ad": false,
+        "name_prefix": null
+      },
+      "sub_interfaces": {
+        "present": false,
+        "styles": []
+      },
+      "port_stack": false,
+      "vlans": false,
+      "transceivers": false,
+      "serial": false,
+      "vrf": false,
+      "oob": false
+    }
+  },
+  {
     "name": "juniper-vc-2member",
     "signature": {
       "os": "os-990f10",

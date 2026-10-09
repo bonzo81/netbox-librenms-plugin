@@ -185,11 +185,6 @@
       ],
       "count": 4
     },
-    "GET /api/v0/inventory/309126529?entPhysicalClass=chassis&entPhysicalContainedIn=1": {
-      "status": "ok",
-      "inventory": [],
-      "count": 0
-    },
     "GET /api/v0/inventory/309126529/all": {
       "status": "ok",
       "inventory": [
@@ -2110,6 +2105,11 @@
           "channels": 4
         }
       ]
+    },
+    "GET /api/v0/inventory/309126529?entPhysicalContainedIn=1": {
+      "status": "ok",
+      "inventory": [],
+      "count": 0
     }
   },
   "expected": {

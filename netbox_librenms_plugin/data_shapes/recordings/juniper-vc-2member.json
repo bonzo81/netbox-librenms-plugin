@@ -41,7 +41,7 @@
         }
       ]
     },
-    "GET /api/v0/inventory/674660074?entPhysicalClass=chassis&entPhysicalContainedIn=10": {
+    "GET /api/v0/inventory/674660074?entPhysicalContainedIn=10": {
       "status": "ok",
       "inventory": [
         {
