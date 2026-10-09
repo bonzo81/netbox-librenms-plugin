@@ -76,6 +76,23 @@ def test_install_toast_renders_once(modules_page):
     expect(toast).to_be_visible()
 
 
+def test_dismissed_toast_stays_hidden_after_a_later_swap(modules_page):
+    """NetBox shows every toast that is not showing after each HTMX swap, so a dismissed toast must not come back."""
+    page = modules_page
+    tab.refresh_modules(page, NAMES[0])
+    tab.install_row(page, NAMES[0])
+    toasts = tab.toasts(page).locator(".toast")
+    expect(toasts.first).to_be_visible()
+    for close in toasts.locator("[data-bs-dismiss=toast]").all():
+        close.click()
+    expect(toasts.filter(visible=True)).to_have_count(0)
+
+    page.get_by_role("button", name="Capture data shape").click()
+    page.wait_for_selector("#htmx-modal.show")
+
+    expect(toasts.filter(visible=True)).to_have_count(0)
+
+
 def test_second_action_in_a_row_also_swaps(modules_page, netbox_api, seeded_device):
     """A second row action right after the first one swaps in place as well."""
     page = modules_page
