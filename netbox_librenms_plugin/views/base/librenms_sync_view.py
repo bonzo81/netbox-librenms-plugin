@@ -10,7 +10,7 @@ from netbox.views import generic
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.import_utils import _determine_device_name
-from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
+from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name, extract_vc_members
 from netbox_librenms_plugin.server_mappings import get_librenms_sync_device, mapped_device_servers, read_mapping
 from netbox_librenms_plugin.server_selection import (
     ServerSelectionState,
@@ -790,13 +790,16 @@ class BaseLibreNMSSyncView(
         """
         Fetch inventory serials for Virtual Chassis members.
 
+        The members come from :func:`extract_vc_members`, the same definition that import
+        detection uses, so a Junos VC lists its FPC members and not the root chassis.
+
         Args:
             obj: NetBox device object (VC member)
 
         Returns:
             list: [
                 {
-                    'description': 'Chassis component description',
+                    'description': 'Member component description',
                     'serial': 'serial number',
                     'model': 'model name',
                     'assigned_member': Device object or None (if serial matches existing assignment)
@@ -807,9 +810,6 @@ class BaseLibreNMSSyncView(
         success, inventory = self.librenms_api.get_device_inventory(self.librenms_id)
         if not success:
             return []
-
-        # Filter for chassis components
-        chassis_components = [item for item in inventory if item.get("entPhysicalClass") == "chassis"]
 
         # Get all VC members
         vc_members = obj.virtual_chassis.members.all()
@@ -824,9 +824,9 @@ class BaseLibreNMSSyncView(
         serial_rules: dict = {}
 
         result = []
-        for component in chassis_components:
+        for component in extract_vc_members(inventory):
             serial = normalize_inventory_serial(
-                component.get("entPhysicalSerialNum"), manufacturer=manufacturer, preloaded_rules=serial_rules
+                component["serial"], manufacturer=manufacturer, preloaded_rules=serial_rules
             )
             if not serial or serial == "-":
                 continue
@@ -840,9 +840,9 @@ class BaseLibreNMSSyncView(
 
             result.append(
                 {
-                    "description": component.get("entPhysicalDescr", "-"),
+                    "description": component["description"] or "-",
                     "serial": serial,
-                    "model": component.get("entPhysicalModelName", "-"),
+                    "model": component["model"] or "-",
                     "assigned_member": assigned_member,
                 }
             )

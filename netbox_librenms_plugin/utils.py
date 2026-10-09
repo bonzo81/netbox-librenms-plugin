@@ -3091,6 +3091,7 @@ def normalize_serial(value) -> str:
 _STACK_SERIAL_PLACEHOLDERS = frozenset(
     {
         "-",
+        "builtin",
         "n/a",
         "na",
         "none",

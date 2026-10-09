@@ -77,7 +77,9 @@ Schema version 1 treats `entPhysicalName` and `entPhysicalDescr` as private disp
 replaces the text with a deterministic `entity-...` token. It preserves only a bounded terminal
 slash locator, such as `1/1` or `2/x1`, when the module hierarchy reader needs that locator. This
 keeps synthetic transceivers nested without publishing the surrounding label. Model tokens
-stay in the separate `entPhysicalModelName` field.
+stay in the separate `entPhysicalModelName` field. An `entPhysicalDescr` also keeps the
+Junos Virtual Chassis markers that VC detection reads: `Virtual Chassis` on the root, and a
+leading `FPC` or `FPC <n>` on member rows (for example `FPC 1 entity-...`).
 
 Schema version 1 does not capture operator-specific inventory-ignore rules or module-bay mappings.
 It therefore does not promise to replay arbitrary name-based rules. A future schema that declares

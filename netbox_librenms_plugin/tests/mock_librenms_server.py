@@ -336,31 +336,31 @@ class MockLibreNMSServer:
                 self.register(path, _recording_variant_handler(path, variants), method=method)
 
     def vc_inventory_callable(self, device_id: int, root_items: list, children_by_parent_index: dict):
-        """Register VC inventory responses for root and chassis-filtered child queries."""
-        root = root_items
-        children = children_by_parent_index
+        """Register VC inventory responses for the root query and the direct-children queries."""
+        # LibreNMS always reports the containment column, so rows without it get their parent here.
+        root = [{"entPhysicalContainedIn": 0, **item} for item in root_items]
+        children = {
+            idx: [{"entPhysicalContainedIn": idx, **item} for item in items]
+            for idx, items in children_by_parent_index.items()
+        }
 
         def _handler(method, path, query, headers, body):
             contained_in = query.get("entPhysicalContainedIn", [None])[0]
+            phy_class = query.get("entPhysicalClass", [None])[0]
             if contained_in == "0":
-                return 200, {"status": "ok", "inventory": root}
-            if contained_in is not None:
-                # Require entPhysicalClass=chassis for child queries so tests catch
-                # any regression where the production code stops sending the class filter.
-                phy_class = query.get("entPhysicalClass", [None])[0]
-                if phy_class != "chassis":
-                    return 200, {"status": "ok", "inventory": []}
+                items = root
+            elif contained_in is not None:
                 try:
                     idx = int(contained_in)
                 except (TypeError, ValueError):
                     return 404, {"status": "error", "message": "bad contained_in"}
                 items = children.get(idx, [])
-                return 200, {"status": "ok", "inventory": items}
-            # No filter → return all (fallback for /all)
-            all_items = list(root)
-            for v in children.values():
-                all_items.extend(v)
-            return 200, {"status": "ok", "inventory": all_items}
+            else:
+                # No filter → return all (fallback for /all)
+                items = [*root, *(item for values in children.values() for item in values)]
+            if phy_class is not None:
+                items = [item for item in items if item.get("entPhysicalClass") == phy_class]
+            return 200, {"status": "ok", "inventory": items}
 
         self.register(f"/api/v0/inventory/{device_id}", _handler, method="GET")
         self.register(f"/api/v0/inventory/{device_id}/all", _handler, method="GET")

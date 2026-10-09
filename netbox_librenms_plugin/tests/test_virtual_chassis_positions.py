@@ -48,7 +48,9 @@ def _import_recording(live_librenms, recording, tag):
     return VirtualChassis.objects.get(domain=f"librenms-default-{device_id}")
 
 
-@pytest.mark.parametrize("recording_name", ["juniper-vc-2member", "cisco-stackwise-3member"])
+@pytest.mark.parametrize(
+    "recording_name", ["juniper-ex4400-vc-2member", "juniper-vc-2member", "cisco-stackwise-3member"]
+)
 def test_an_imported_stack_puts_each_member_at_its_reported_number(live_librenms, recording_name):
     from netbox_librenms_plugin.utils import get_virtual_chassis_member
 

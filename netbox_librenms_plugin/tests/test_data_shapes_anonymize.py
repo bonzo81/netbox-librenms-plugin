@@ -74,7 +74,7 @@ def test_logic_bearing_fields_preserved():
     assert root["entPhysicalIndex"] == 1
 
     members = _response(
-        anon, f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalClass=chassis&entPhysicalContainedIn=1"
+        anon, f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalContainedIn=1"
     )["inventory"]
     # Positions and indices (drive VC member ordering) are untouched.
     assert [m["entPhysicalParentRelPos"] for m in members] == [1, 2, 3]
@@ -88,7 +88,7 @@ def test_serials_pseudonymized_and_deterministic():
     a1 = anonymize_recording(rec)
     a2 = anonymize_recording(rec)
 
-    key = f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalClass=chassis&entPhysicalContainedIn=1"
+    key = f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalContainedIn=1"
     serials1 = [m["entPhysicalSerialNum"] for m in _response(a1, key)["inventory"]]
     serials2 = [m["entPhysicalSerialNum"] for m in _response(a2, key)["inventory"]]
 
@@ -104,7 +104,7 @@ def test_cross_reference_serial_preserved():
     rec = load_recording("cisco-stackwise-3member")
     # Sanity: the fixture's device serial equals member #100's serial.
     dev_serial = rec["responses"][f"GET /api/v0/devices/{_STACK_RECORDING_ID}"]["devices"][0]["serial"]
-    key = f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalClass=chassis&entPhysicalContainedIn=1"
+    key = f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalContainedIn=1"
     member_serial = rec["responses"][key]["inventory"][0]["entPhysicalSerialNum"]
     assert dev_serial == member_serial
 
@@ -148,7 +148,7 @@ def test_expected_member_serials_follow_anonymized_inventory():
 
     anon = anonymize_recording(rec)
 
-    key = "GET /api/v0/inventory/1001?entPhysicalClass=chassis&entPhysicalContainedIn=10"
+    key = "GET /api/v0/inventory/1001?entPhysicalContainedIn=10"
     inventory_serials = [row["entPhysicalSerialNum"] for row in _response(anon, key)["inventory"]]
     expected_serials = anon["expected"]["virtual_chassis"]["member_serials"]
     assert expected_serials == inventory_serials
@@ -193,7 +193,7 @@ def test_inventory_model_name_is_pseudonymized():
     anon = anonymize_recording(rec)
 
     members = _response(
-        anon, f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalClass=chassis&entPhysicalContainedIn=1"
+        anon, f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalContainedIn=1"
     )["inventory"]
     model_names = [m.get("entPhysicalModelName") for m in members if m.get("entPhysicalModelName")]
     assert model_names
@@ -981,7 +981,7 @@ def test_find_pii_flags_nonempty_value_under_secret_looking_key():
 def test_salt_changes_pseudonyms():
     """Different salts produce different pseudonyms for the same input."""
     rec = load_recording("cisco-stackwise-3member")
-    key = f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalClass=chassis&entPhysicalContainedIn=1"
+    key = f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalContainedIn=1"
     s_a = _response(anonymize_recording(rec, salt="alpha"), key)["inventory"][0]["entPhysicalSerialNum"]
     s_b = _response(anonymize_recording(rec, salt="beta"), key)["inventory"][0]["entPhysicalSerialNum"]
     assert s_a != s_b

@@ -52,7 +52,7 @@ class _StackBoundary:
 
     def get_inventory_filtered(self, _device_id, **kwargs):
         if kwargs.get("ent_physical_contained_in") == 0:
-            return True, [{"entPhysicalClass": "stack", "entPhysicalIndex": 1}]
+            return True, [{"entPhysicalClass": "stack", "entPhysicalIndex": 1, "entPhysicalContainedIn": 0}]
         return True, list(self.members)
 
 
