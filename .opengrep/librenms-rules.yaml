@@ -1125,7 +1125,8 @@ rules:
               - pattern: $CONTAINER.setdefault("librenms_id", ...)
               - pattern: '"librenms_id" in $CONTAINER'
               - pattern: '"librenms_id" not in $CONTAINER'
-              # An update that can set the key; the container rule reports one on the container itself.
+              # An update that can set the key, or a change to the whole container; the container
+              # rule reports one on the container itself.
               - patterns:
                   - pattern-either:
                       - pattern: '$CONTAINER.update({..., "librenms_id": $VALUE, ...}, ...)'
@@ -1135,8 +1136,13 @@ rules:
                       - patterns:
                           - pattern: $CONTAINER.update($VALUE, ...)
                           - pattern-not: '$CONTAINER.update({...}, ...)'
-                  - pattern-not: $OBJ.custom_field_data.update(...)
-                  - pattern-not: $OBJ.cf.update(...)
+                      - pattern: $CONTAINER.clear()
+                      - pattern: $CONTAINER.popitem()
+                      - pattern: $CONTAINER |= $VALUE
+                  - pattern-not: $OBJ.custom_field_data.$METHOD(...)
+                  - pattern-not: $OBJ.cf.$METHOD(...)
+                  - pattern-not: $OBJ.custom_field_data |= $VALUE
+                  - pattern-not: $OBJ.cf |= $VALUE
           - focus-metavariable: $CONTAINER
   - id: no-stored-mapping-access-container
     languages: [python]
