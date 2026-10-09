@@ -139,6 +139,32 @@ class TestSerialEvidence:
         assert target.pk == second.pk
         assert source == "serial"
 
+    def test_a_default_serial_is_no_serial_evidence(self):
+        """LibreNMS reports "default" for no serial, so a member stored with it claims nothing."""
+        first, second = _vc_members(["100014", "default"])
+        item = {"entPhysicalIndex": 7, "entPhysicalSerialNum": "default", "entPhysicalParentRelPos": 1}
+
+        target, source = _attribution(second, [first, second], {**item, "entPhysicalContainedIn": 0})
+
+        assert target.pk == first.pk
+        assert source == "position"
+
+    @pytest.mark.parametrize("stored", [("100015", "S/N 100015"), ("S/N 100015", "100015")])
+    def test_two_members_with_one_serial_key_are_no_serial_evidence(self, stored):
+        """Both members normalize to one key, so the serial names neither and the position decides."""
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        first, second = _vc_members(list(stored))
+        item = {"entPhysicalIndex": 8, "entPhysicalSerialNum": "100015", "entPhysicalParentRelPos": 1}
+
+        target, source = _attribution(second, [first, second], {**item, "entPhysicalContainedIn": 0})
+
+        assert target.pk == first.pk
+        assert source == "position"
+
 
 class TestUnrecognizedShape:
     """An inventory that is no recognized stack keeps the position and name heuristic from 1."""

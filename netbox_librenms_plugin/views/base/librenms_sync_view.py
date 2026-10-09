@@ -14,6 +14,7 @@ from netbox_librenms_plugin.import_utils.virtual_chassis import (
     _generate_vc_member_name,
     chassis_serial_key,
     extract_vc_members,
+    members_by_serial_key,
 )
 from netbox_librenms_plugin.server_mappings import get_librenms_sync_device, mapped_device_servers, read_mapping
 from netbox_librenms_plugin.server_selection import (
@@ -820,13 +821,15 @@ class BaseLibreNMSSyncView(
         # The ENTITY-MIB serial carries the vendor's decoration ("S/N BCFB9793" on Juniper) while
         # the stored member serial does not, so compare and display the serial key.
         serial_key = chassis_serial_key(obj)
+        # A serial key that two members share assigns neither.
+        members_by_key = members_by_serial_key(vc_members, serial_key)
 
         result = []
         for component in extract_vc_members(inventory):
             serial = serial_key(component["serial"])
             if not serial:
                 continue
-            assigned_member = next((member for member in vc_members if serial_key(member.serial) == serial), None)
+            assigned_member = members_by_key.get(serial)
 
             result.append(
                 {

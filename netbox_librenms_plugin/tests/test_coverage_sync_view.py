@@ -472,6 +472,27 @@ class TestVirtualChassisInventory:
         assert "12348" not in form
         assert "12351" not in form
 
+    @pytest.mark.parametrize("stored", [("VC-DUP", "S/N VC-DUP"), ("S/N VC-DUP", "VC-DUP")])
+    def test_a_serial_that_two_members_share_assigns_neither(self, librenms_server, stored):
+        """Two members normalize to one serial key, so the modal names no assigned member."""
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        _vc, members = make_virtual_chassis_members("inventory-dup-key", count=2)
+        for member, serial in zip(members, stored, strict=True):
+            member.serial = serial
+            member.save()
+        inventory = _stack_inventory({"entPhysicalSerialNum": "VC-DUP"}, {"entPhysicalSerialNum": "VC-OTHER"})
+        _register_device(librenms_server, 6648, members[0].name, inventory=inventory)
+        view = _device_view()
+        view.librenms_id = 6648
+
+        result = view._get_vc_inventory_serials(members[0])
+
+        assert [(item["serial"], item["assigned_member"]) for item in result] == [("VC-DUP", None), ("VC-OTHER", None)]
+
     def test_real_inventory_links_chassis_serials_to_members(self, librenms_server):
         _vc, members = make_virtual_chassis_members("inventory-members", count=2)
         members[0].serial = "VC-SERIAL-A"
