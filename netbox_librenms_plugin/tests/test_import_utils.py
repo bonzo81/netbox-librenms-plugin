@@ -1036,6 +1036,28 @@ class TestNameMatchesWithNamingPreferences:
         if not existing_name_matches:
             assert result["suggested_name"] == expected_name
 
+    def test_virtual_chassis_member_at_position_zero_keeps_its_member_name(self):
+        """Junos numbers its first member 0, so that member's VC name must also match."""
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+
+        _virtual_chassis, members = make_virtual_chassis_members("naming-zero", count=2)
+        existing = members[0]
+        existing.vc_position = 0
+        existing.name = _generate_vc_member_name("stack-zero", 0, serial="VC-NAMING-ZERO")
+        existing.serial = "VC-NAMING-ZERO"
+        seed_stored_mapping(existing, {"default": {"id": 45}})
+        existing.save()
+
+        result = validate_device_for_import(
+            {"device_id": 45, "hostname": "stack-zero", "sysName": "stack-zero", "serial": existing.serial},
+            include_vc_detection=False,
+        )
+
+        assert result["name_matches"] is True
+        assert result["name_sync_available"] is False
+
     @pytest.mark.parametrize(
         ("use_sysname", "hostname", "sysname", "expected_source"),
         [
@@ -1351,7 +1373,7 @@ class TestVCPositionHandling:
         [
             ("switch-01", [1, 2], ["switch-01-M1", "switch-01-M2"]),
             ("router", [3], ["router-M3"]),
-            ("sw", [0, -1], ["sw-M1", "sw-M2"]),
+            ("sw", [0, -1], ["sw-M0", "sw-M2"]),
         ],
     )
     def test_update_vc_member_suggested_names_uses_real_settings(
@@ -1380,7 +1402,7 @@ class TestVCPositionHandling:
 
         assert [member["suggested_name"] for member in result["members"]] == expected_names
         assert [member["position"] for member in result["members"]] == [
-            position if position > 0 else index for index, position in enumerate(positions, start=1)
+            position if position >= 0 else index for index, position in enumerate(positions, start=1)
         ]
 
 
@@ -1456,8 +1478,8 @@ class TestCloneVirtualChassisDataAdditional:
         result = _clone_virtual_chassis_data(data)
         assert result["detection_error"] == "Some error"
 
-    def test_member_with_zero_position_replaced_by_one_based(self):
-        """A member with position=0 is replaced by idx+1 (1-based)."""
+    def test_member_with_zero_position_is_kept(self):
+        """Position 0 is a real member number (Junos counts from 0), so it is kept."""
         from netbox_librenms_plugin.import_utils.virtual_chassis import _clone_virtual_chassis_data
 
         data = {
@@ -1466,8 +1488,8 @@ class TestCloneVirtualChassisDataAdditional:
             "members": [{"serial": "S0", "position": 0}, {"serial": "S2", "position": 2}],
         }
         result = _clone_virtual_chassis_data(data)
-        assert result["members"][0]["position"] == 1  # 0 → idx+1 = 1
-        assert result["members"][1]["position"] == 2  # kept as-is
+        assert result["members"][0]["position"] == 0
+        assert result["members"][1]["position"] == 2
 
     def test_member_count_falls_back_to_len_when_zero(self):
         """member_count=0 in source is replaced by len(members)."""

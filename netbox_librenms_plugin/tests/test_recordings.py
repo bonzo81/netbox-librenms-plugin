@@ -609,6 +609,10 @@ def _assert_virtual_chassis(api, device_id, expected):
     assert result["member_count"] == expected["member_count"]
     if "member_serials" in expected:
         assert [m["serial"] for m in result["members"]] == expected["member_serials"]
+    if "member_positions" in expected:
+        assert [m["position"] for m in result["members"]] == expected["member_positions"]
+    if "master_position" in expected:
+        assert [m["position"] for m in result["members"] if m["is_master"]] == [expected["master_position"]]
 
 
 def _assert_port_relationships(api, device_id, recording, expected):

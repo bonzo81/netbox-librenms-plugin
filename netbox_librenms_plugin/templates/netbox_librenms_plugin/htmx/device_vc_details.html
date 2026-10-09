@@ -67,7 +67,7 @@
               <li class="py-3 {% if not forloop.last %}border-bottom{% endif %}">
                 <div class="d-flex flex-wrap align-items-center gap-2">
                   <span class="text-muted me-2">
-                    {% if member.position %}
+                    {% if member.position is not None %}
                       Pos {{ member.position }}
                     {% else %}
                       Pos —
