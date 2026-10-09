@@ -68,6 +68,40 @@ def test_an_imported_stack_puts_each_member_at_its_reported_number(live_librenms
         assert get_virtual_chassis_member(chassis.master, f"ge-{position}/0/0") == member
 
 
+def test_a_missing_member_position_numbers_the_whole_stack_in_row_order(live_librenms):
+    """FPC 0 reports no slot and FPC 1 reports slot 1: detection, import and module sync all use 1 and 2."""
+    import copy
+
+    from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
+    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView, _inventory_item_key
+
+    recording = copy.deepcopy(load_recording("juniper-ex4400-vc-2member"))
+    for key, value in recording["responses"].items():
+        if "/inventory/" in key:
+            for row in unwrap_response(value)[1]["inventory"]:
+                if row["entPhysicalIndex"] == 120:
+                    row["entPhysicalParentRelPos"] = None
+    inventory = unwrap_response(recording["responses"]["GET /api/v0/inventory/1002/all"])[1]["inventory"]
+    fpc_serials = {row["entPhysicalIndex"]: row["entPhysicalSerialNum"] for row in inventory}
+
+    chassis = _import_recording(live_librenms, recording, "missing-slot")
+    detected = detect_virtual_chassis_from_inventory(live_librenms.api, recording["device_id"])
+
+    assert [(m["index"], m["position"]) for m in detected["members"]] == [(120, 1), (121, 2)]
+    members = {member.vc_position: member for member in chassis.members.all()}
+    assert {position: member.serial for position, member in members.items()} == {
+        1: fpc_serials[120],
+        2: fpc_serials[121],
+    }
+    index_map = {row["entPhysicalIndex"]: row for row in inventory}
+    _default, contexts = BaseModuleTableView._build_inventory_ignore_contexts(
+        chassis.master, inventory, index_map, list(members.values()), lambda _manufacturer: []
+    )
+    psu = index_map[4]
+    assert psu["entPhysicalDescr"].startswith("FPC 1 ")
+    assert contexts[_inventory_item_key(psu)]["selected_device"] == members[2]
+
+
 class TestOneBasedStackKeepsPortZeroLocal:
     """On a stack numbered 1, 2, 3 a port named ``...0/0`` is the viewed member's own port."""
 
