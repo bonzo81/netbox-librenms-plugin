@@ -666,18 +666,28 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             serial = cls._normalize_serial(current.get("entPhysicalSerialNum"))
             if current is not item and serial and serial in member_by_serial:
                 return member_by_serial[serial], "ancestor-serial"
-            index = current.get("entPhysicalIndex")
-            if index in member_rows.positions:
-                member = cls._vc_member_at_position(vc_members, member_rows.positions[index])
+            if current.get("entPhysicalIndex") in member_rows.positions:
+                member = cls._member_row_owner(current, vc_members, member_by_serial, member_rows)
                 if member is None:
                     break
                 return member, "position" if current is item else "parent-context"
-            # A Junos PSU or fan tray under the root names its member as "FPC <n> ...".
-            named = cls._vc_member_at_position(vc_members, member_rows.position_named_by(current))
-            if named is not None:
-                return named, "junos-member" if current is item else "parent-context"
+            # A Junos PSU or fan tray under the root names its FPC as "FPC <n> ..." and follows it.
+            fpc = index_map.get(member_rows.fpc_named_by(current))
+            if fpc is not None:
+                member = cls._member_row_owner(fpc, vc_members, member_by_serial, member_rows)
+                if member is None:
+                    break
+                return member, "junos-member" if current is item else "parent-context"
             current = index_map.get(current.get("entPhysicalContainedIn"))
         return obj, "default"
+
+    @classmethod
+    def _member_row_owner(cls, row, vc_members, member_by_serial, member_rows):
+        """Return the member that a member row resolves to: its serial first, then its detected position."""
+        serial = cls._normalize_serial(row.get("entPhysicalSerialNum"))
+        if serial and serial in member_by_serial:
+            return member_by_serial[serial]
+        return cls._vc_member_at_position(vc_members, member_rows.positions.get(row.get("entPhysicalIndex")))
 
     @classmethod
     def _infer_vc_member_without_stack(cls, obj, item, index_map, vc_members, member_by_serial, inherited_member):
