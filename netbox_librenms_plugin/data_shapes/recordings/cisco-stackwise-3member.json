@@ -93,7 +93,13 @@
         "SN-58cf46",
         "SN-dbd32d",
         "SN-a47104"
-      ]
+      ],
+      "member_positions": [
+        1,
+        2,
+        3
+      ],
+      "master_position": 1
     },
     "lag_members": {},
     "sub_interfaces": {}

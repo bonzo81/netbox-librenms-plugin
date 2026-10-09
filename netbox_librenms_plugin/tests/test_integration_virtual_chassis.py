@@ -130,8 +130,8 @@ class TestDetectVCCiscoStack:
         member_pairs = [(m["serial"], m["position"]) for m in result["members"]]
         assert member_pairs == [("SN-1", 1), ("SN-2", 2), ("SN-3", 3)]
 
-    def test_position_zero_falls_back_to_idx_plus_one(self, librenms_server):
-        """position=0 in entPhysicalParentRelPos → fallback to idx+1 (never 0)."""
+    def test_a_shared_position_falls_back_to_idx_plus_one(self, librenms_server):
+        """Two members that report the same position fall back to idx+1."""
         from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
 
         api = _make_api(librenms_server.url)
@@ -140,8 +140,8 @@ class TestDetectVCCiscoStack:
         librenms_server.device_info_response(device_id=device_id, hostname="sw-stack-3")
         root_items = [_stack_root(index=1)]
         member_items = [
-            _chassis(100, "SN-X", position=0),  # 0 → fallback to idx+1=1
-            _chassis(200, "SN-Y", position=0),  # 0 → fallback to idx+1=2
+            _chassis(100, "SN-X", position=0),
+            _chassis(200, "SN-Y", position=0),
         ]
         librenms_server.vc_inventory_callable(device_id, root_items, {1: member_items})
 
@@ -150,7 +150,7 @@ class TestDetectVCCiscoStack:
         assert result is not None
         positions = [m["position"] for m in result["members"]]
         # Both had position=0, so they fall back to idx+1: positions [1, 2]
-        assert all(p >= 1 for p in positions)
+        assert positions == [1, 2]
         # Verify each fallback position is uniquely paired with its serial
         member_pairs = [(m["serial"], m["position"]) for m in result["members"]]
         assert member_pairs == [("SN-X", 1), ("SN-Y", 2)]
@@ -244,7 +244,7 @@ class TestDetectVCJuniperStyle:
             }
         ]
         member_items = [
-            _chassis(100, "JN-SN-1", position=0),  # Juniper uses position=0,1 (1-based after fallback)
+            _chassis(100, "JN-SN-1", position=0),  # the reported member numbers are kept
             _chassis(200, "JN-SN-2", position=1),
         ]
         librenms_server.vc_inventory_callable(device_id, root_items, {10: member_items})

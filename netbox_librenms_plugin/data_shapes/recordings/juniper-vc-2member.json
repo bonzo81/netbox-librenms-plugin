@@ -74,7 +74,12 @@
       "member_serials": [
         "SN-7854cc",
         "SN-44bb4d"
-      ]
+      ],
+      "member_positions": [
+        0,
+        1
+      ],
+      "master_position": 0
     }
   }
 }

@@ -317,7 +317,13 @@ def cache_remaining_ttl(cache, key):
         return None
 
 
-_VC_MEMBER_INTERFACE_PATTERN = re.compile(r"^(?P<prefix>[A-Za-z][A-Za-z0-9]*)(?P<member>\d+)(?P<suffix>[/:].+)$")
+# The optional "-" admits Junos names such as xe-1/2/0, like get_virtual_chassis_member does.
+_VC_MEMBER_INTERFACE_PATTERN = re.compile(r"^(?P<prefix>[A-Za-z][A-Za-z0-9]*-?)(?P<member>\d+)(?P<suffix>[/:].+)$")
+
+
+def is_vc_position(value) -> bool:
+    """Return whether *value* is a Virtual Chassis position: an int, not a bool, 0 or more."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def convert_speed_to_kbps(speed_bps: int | None) -> int | None:
@@ -1223,7 +1229,7 @@ def get_vc_member_positions(device: Device) -> set[int]:
     positions = set()
 
     own_position = getattr(device, "vc_position", None)
-    if isinstance(own_position, int) and own_position > 0:
+    if is_vc_position(own_position):
         positions.add(own_position)
 
     vc = getattr(device, "virtual_chassis", None)
@@ -1246,7 +1252,7 @@ def get_vc_member_positions(device: Device) -> set[int]:
             parsed = int(raw_position)
         except (TypeError, ValueError):
             continue
-        if parsed > 0:
+        if is_vc_position(parsed):
             positions.add(parsed)
 
     return positions
@@ -1256,7 +1262,7 @@ def rewrite_interface_name_for_vc_member(
     interface_name: str, vc_position: int, member_positions: set[int] | None = None
 ) -> str | None:
     """Rewrite a template/interface name to the selected VC member position when appropriate."""
-    if not interface_name or not isinstance(vc_position, int) or vc_position < 1:
+    if not interface_name or not is_vc_position(vc_position):
         return None
     match = _VC_MEMBER_INTERFACE_PATTERN.match(interface_name)
     if not match:
@@ -1288,7 +1294,7 @@ def _instantiate_module_template_interface_specs(device: Device, module) -> list
     vc_position = getattr(device, "vc_position", None)
     vc_id = getattr(device, "virtual_chassis_id", None)
     member_positions = None
-    if isinstance(vc_position, int) and vc_position > 0 and isinstance(vc_id, int):
+    if is_vc_position(vc_position) and isinstance(vc_id, int):
         member_positions = get_vc_member_positions(device)
 
     template_specs = []
@@ -1480,9 +1486,9 @@ def detect_vc_normalization_noop(device: Device, module) -> Optional[dict]:
     vc_position = getattr(device, "vc_position", None)
     vc_id = getattr(device, "virtual_chassis_id", None)
     # bool is a subclass of int; reject explicitly so True/False can't masquerade.
-    if isinstance(vc_position, bool) or isinstance(vc_id, bool):
+    if isinstance(vc_id, bool):
         return None
-    if not (isinstance(vc_position, int) and vc_position > 0 and isinstance(vc_id, int)):
+    if not (is_vc_position(vc_position) and isinstance(vc_id, int)):
         return None
 
     template_manager = getattr(getattr(module, "module_type", None), "interfacetemplates", None)

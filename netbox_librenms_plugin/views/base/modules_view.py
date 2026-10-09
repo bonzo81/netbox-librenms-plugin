@@ -31,6 +31,7 @@ from netbox_librenms_plugin.utils import (
     get_module_template_interface_specs,
     is_valid_ports_payload,
     load_module_type_bay_types,
+    is_vc_position,
     module_bay_fits,
     module_bay_type_fit,
     module_inventory_binding_token,
@@ -395,7 +396,7 @@ def _select_module_interface_by_coordinates(device, module_interfaces, item):
             score = 4
             if len(coords) >= 2 and len(item_coords) >= 2 and coords[-2] == item_coords[-2]:
                 score += 2
-            if isinstance(vc_position, int) and vc_position > 0 and coords[0] == vc_position:
+            if is_vc_position(vc_position) and coords[0] == vc_position:
                 score += 1
             if score > best_score:
                 best_score = score
@@ -596,12 +597,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
     @staticmethod
     def _vc_member_at_position(vc_members, position):
-        """Return the VC member at a normalized positive position, or None."""
+        """Return the VC member at a normalized position, or None."""
         try:
             position = int(position)
         except (TypeError, ValueError):
             return None
-        if position <= 0:
+        if not is_vc_position(position):
             return None
         return next((member for member in vc_members if getattr(member, "vc_position", None) == position), None)
 

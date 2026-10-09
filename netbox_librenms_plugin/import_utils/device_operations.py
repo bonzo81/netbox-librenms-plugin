@@ -26,6 +26,7 @@ from ..utils import (
     find_matching_location,
     find_matching_platform,
     find_matching_site,
+    is_vc_position,
     match_librenms_hardware_to_device_type,
     normalize_serial,
     parse_location_for_import,
@@ -844,7 +845,7 @@ def validate_device_for_import(  # noqa: C901
                     result["librenms_id_needs_migration"] = True
 
                 # Check if name matches resolved name (VC-aware: compare against VC member name)
-                if hostname and existing_device.virtual_chassis and existing_device.vc_position:
+                if hostname and existing_device.virtual_chassis and is_vc_position(existing_device.vc_position):
                     incoming_serial = normalize_serial(libre_device.get("serial"))
                     if incoming_serial == "-":
                         incoming_serial = ""
