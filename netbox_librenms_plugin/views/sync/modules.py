@@ -41,6 +41,7 @@ from netbox_librenms_plugin.utils import (
     get_module_types_indexed,
     get_vc_member_positions,
     load_module_type_bay_types,
+    is_vc_position,
     module_inventory_binding_matches,
     module_inventory_binding_token,
     module_inventory_row_digest,
@@ -628,7 +629,7 @@ def _normalize_module_interface_names_for_vc_member(
 
     vc_position = getattr(device, "vc_position", None)
     vc_id = getattr(device, "virtual_chassis_id", None)
-    if not isinstance(vc_position, int) or vc_position < 1 or not isinstance(vc_id, int):
+    if not is_vc_position(vc_position) or not isinstance(vc_id, int):
         return result
     member_positions = _get_vc_member_positions(device)
 

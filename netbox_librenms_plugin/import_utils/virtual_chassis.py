@@ -11,6 +11,7 @@ from ..librenms_api import LibreNMSAPI
 from ..utils import (
     exception_text_for,
     find_devices_by_serial,
+    is_vc_position,
     normalize_inventory_serial,
     normalize_stack_serial,
     preload_normalization_rules,
@@ -38,12 +39,8 @@ def _clone_virtual_chassis_data(data: dict | None) -> dict:
     members = []
     for idx, member in enumerate(data.get("members", [])):
         member_copy = member.copy()
-        raw_position = member_copy.get("position", idx + 1)
-        try:
-            pos = int(raw_position)
-            member_copy["position"] = pos if pos > 0 else idx + 1
-        except (TypeError, ValueError):
-            member_copy["position"] = idx + 1  # 1-based fallback; position 0 is invalid
+        position = _safe_pos(member_copy.get("position"))
+        member_copy["position"] = position if is_vc_position(position) else idx + 1
         members.append(member_copy)
 
     member_count = data.get("member_count") or len(members)
@@ -243,24 +240,8 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
         if len(chassis_items) <= 1:
             return None
 
-        # Step 5: Extract member info
-        # First pass: collect raw entPhysicalParentRelPos values to detect 0-based
-        # indexing.  Some vendors use 0-based positions (0,1,2,3,4) instead of the
-        # RFC 2737 standard 1-based (1,2,3,4,5).  If any raw position is 0, shift
-        # all valid positions up by 1 so the resulting set is always 1-based.
-        # Exception: if *every* position is 0 the data is invalid (all members
-        # would collide on the same slot) — skip the shift and fall through to
-        # the per-member idx+1 fallback below.
-        raw_positions = []
-        for chassis in chassis_items:
-            raw = chassis.get("entPhysicalParentRelPos")
-            try:
-                raw_positions.append(int(raw))
-            except (TypeError, ValueError):
-                raw_positions.append(None)
-
-        valid_positions = [p for p in raw_positions if p is not None]
-        zero_based = bool(valid_positions) and min(valid_positions) == 0 and max(valid_positions) > 0
+        # Step 5: Extract member info. The position is the member number the device reports.
+        positions = _member_positions([chassis.get("entPhysicalParentRelPos") for chassis in chassis_items])
 
         # Identify the master member by matching the LibreNMS device serial
         # against the ENTITY-MIB serials.  The device-level serial reported by
@@ -272,16 +253,7 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
         # Load naming pattern once to avoid a DB query per member.
         vc_name_pattern = _load_vc_member_name_pattern() if master_name else None
         members = []
-        for idx, chassis in enumerate(chassis_items):
-            raw_pos = raw_positions[idx]
-            if raw_pos is not None:
-                position = raw_pos + 1 if zero_based else raw_pos
-                # Guard against negative or zero after shift
-                if position <= 0:
-                    position = idx + 1
-            else:
-                position = idx + 1
-
+        for chassis, position in zip(chassis_items, positions, strict=True):
             serial = chassis.get("entPhysicalSerialNum", "")
             is_master = bool(device_serial and normalize_stack_serial(serial) == device_serial)
 
@@ -295,8 +267,6 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
                 "is_master": is_master,
             }
 
-            # Generate suggested name if we have master name.
-            # position is already 1-based, so pass it directly (no +1).
             if master_name:
                 member_data["suggested_name"] = _generate_vc_member_name(
                     master_name, position, serial=normalize_stack_serial(serial), pattern=vc_name_pattern
@@ -308,12 +278,6 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
 
         # Sort by position
         members.sort(key=lambda m: m["position"])
-
-        if zero_based:
-            logger.debug(
-                f"VC detection: corrected 0-based entPhysicalParentRelPos for device {device_id} "
-                f"(raw min={min(valid_positions)})"
-            )
 
         master_member = next((m for m in members if m["is_master"]), None)
         if master_member:
@@ -419,14 +383,8 @@ def update_vc_member_suggested_names(vc_data: dict, master_name: str) -> dict:
     # Load naming pattern once to avoid a DB query per member
     vc_pattern = _load_vc_member_name_pattern()
     for idx, member in enumerate(vc_data.get("members", [])):
-        # Positions are stored as 1-based (from entPhysicalParentRelPos or idx+1 fallback).
-        # Use them directly for name generation; only replace 0/negative with 1-based fallback.
-        raw_position = member.get("position", idx + 1)
-        try:
-            position = int(raw_position)
-            if position <= 0:
-                position = idx + 1
-        except (TypeError, ValueError):
+        position = _safe_pos(member.get("position"))
+        if not is_vc_position(position):
             position = idx + 1
         member["position"] = position
         member["suggested_name"] = _generate_vc_member_name(
@@ -438,10 +396,21 @@ def update_vc_member_suggested_names(vc_data: dict, master_name: str) -> dict:
 
 def _safe_pos(value) -> int | None:
     """Return int position or None if not parseable."""
+    if isinstance(value, bool):
+        return None
     try:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _member_positions(raw_positions: list) -> list[int]:
+    """Return the reported member positions; a missing, negative or shared one becomes the row order from 1."""
+    parsed = [_safe_pos(raw) for raw in raw_positions]
+    return [
+        position if is_vc_position(position) and parsed.count(position) == 1 else idx + 1
+        for idx, position in enumerate(parsed)
+    ]
 
 
 def _sync_module_bay_counter(device: Device) -> None:
@@ -507,13 +476,13 @@ def create_virtual_chassis_with_members(  # noqa: C901
     _master_member = next((m for m in members_info if m.get("is_master")), None)
     if _master_member:
         _found_pos = _safe_pos(_master_member.get("position"))
-        if _found_pos and _found_pos >= 1:
+        if is_vc_position(_found_pos):
             _master_pos = _found_pos
     elif _master_serial:
         for _m in members_info:
             if _member_serial(_m.get("serial")) == _master_serial:
                 _found_pos = _safe_pos(_m.get("position"))
-                if _found_pos and _found_pos >= 1:
+                if is_vc_position(_found_pos):
                     _master_pos = _found_pos
                 break
 
@@ -522,7 +491,7 @@ def create_virtual_chassis_with_members(  # noqa: C901
             master_device.snapshot()
             # Load naming pattern once to avoid a DB query per member
             vc_pattern = _load_vc_member_name_pattern()
-            # Rename master device to include position 1 pattern
+            # Rename the master device with its own position
             master_device_new_name = _generate_vc_member_name(
                 original_master_name, _master_pos, serial=_master_serial, pattern=vc_pattern
             )
@@ -596,8 +565,7 @@ def create_virtual_chassis_with_members(  # noqa: C901
                     continue
 
                 # Prefer the discovered SNMP position; fall back to sequential counter.
-                # member_pos was normalized via _safe_pos() above; 0 is not a valid vc_position.
-                discovered_pos = member_pos if (member_pos is not None and member_pos >= 1) else None
+                discovered_pos = member_pos if is_vc_position(member_pos) else None
                 # If discovered_pos is already taken by another member, treat as absent.
                 if discovered_pos is not None and discovered_pos in used_positions:
                     discovered_pos = None

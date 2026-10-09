@@ -595,6 +595,36 @@ class TestBulkImportConfirmView:
 
         assert "Unable to display virtual chassis members: Inventory read failed" in html
 
+    def test_confirm_template_displays_member_position_zero(self):
+        """Junos numbers its first member 0; the confirm page must show that position."""
+        from django.template.loader import render_to_string
+
+        html = render_to_string(
+            "netbox_librenms_plugin/htmx/bulk_import_confirm.html",
+            {
+                "devices": [
+                    {
+                        "device_id": 9902,
+                        "device_name": "zero-based-stack",
+                        "validation": {
+                            "virtual_chassis": {
+                                "is_stack": True,
+                                "member_count": 2,
+                                "members": [
+                                    {"position": 0, "serial": "SN-0", "suggested_name": "zero-based-stack-M0"},
+                                    {"position": 1, "serial": "SN-1", "suggested_name": "zero-based-stack-M1"},
+                                ],
+                            }
+                        },
+                    }
+                ],
+                "server_key": "default",
+            },
+        )
+
+        assert "Pos 0" in html
+        assert "Pos 1" in html
+
 
 @pytest.mark.django_db
 class TestBulkImportConfirmViewIntegration:
@@ -2127,6 +2157,37 @@ class TestDeviceVCDetailsView:
         assert b"2-member" in result.content
         assert b"stack-master-M1" in result.content
         assert b"stack-master-M2" in result.content
+
+    def test_zero_based_stack_renders_member_zero(self, settings, librenms_server):
+        server_key = "vc-details-zero"
+        device_id = 43
+        view = self._view(settings, librenms_server, server_key)
+        librenms_server.device_info_response(device_id=device_id, hostname="zero-master", serial="ZERO-0")
+        librenms_server.vc_inventory_callable(
+            device_id,
+            [{"entPhysicalClass": "stack", "entPhysicalIndex": 100, "entPhysicalContainedIn": 0}],
+            {
+                100: [
+                    {
+                        "entPhysicalClass": "chassis",
+                        "entPhysicalIndex": index,
+                        "entPhysicalParentRelPos": position,
+                        "entPhysicalSerialNum": f"ZERO-{position}",
+                        "entPhysicalContainedIn": 100,
+                    }
+                    for index, position in ((200, 0), (201, 1))
+                ]
+            },
+        )
+        request = make_view_request("get", {"server_key": server_key})
+
+        result = get_view(view, request, device_id=device_id)
+
+        assert result.status_code == 200
+        html = " ".join(result.content.decode().split())
+        assert "Pos 0" in html
+        assert "zero-master-M0" in html
+        assert "zero-master-M1" in html
 
 
 class TestBulkImportDevicesViewSyncExecution:
