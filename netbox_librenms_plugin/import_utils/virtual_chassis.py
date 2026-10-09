@@ -208,44 +208,6 @@ def _member_entries(rows: list, *, model_field: str, master_serial: str) -> list
     return members
 
 
-def junos_vc_member_number(row: dict, rows_by_index: dict) -> int | None:
-    """
-    Return the Junos Virtual Chassis member that an inventory row belongs to, or None.
-
-    Only rows below a Junos Virtual Chassis root have a member. An FPC container directly under
-    the root is its own member (its parent-relative position, as in :func:`extract_vc_members`),
-    a row whose description starts with "FPC <n> " names member n, and any other row takes the
-    member of its nearest such ancestor. A Routing Engine number is not a member id, so a
-    Routing Engine row has no member here.
-
-    Args:
-        row: One inventory row.
-        rows_by_index: Inventory rows keyed by their raw ``entPhysicalIndex`` value.
-
-    """
-    chain = [row]
-    seen = {id(row)}
-    while _as_int(chain[-1].get("entPhysicalContainedIn")):
-        parent = rows_by_index.get(chain[-1].get("entPhysicalContainedIn"))
-        if not isinstance(parent, dict) or id(parent) in seen:
-            return None
-        chain.append(parent)
-        seen.add(id(parent))
-    root = chain[-1]
-    if not _is_junos_vc_root(root):
-        return None
-    root_index = _as_int(root.get("entPhysicalIndex"))
-    for item in chain[:-1]:
-        descr = item.get("entPhysicalDescr")
-        named = JUNOS_FPC_MEMBER_DESCR_RE.match(descr) if isinstance(descr, str) else None
-        if named:
-            return int(named.group("member"))
-        if _is_junos_fpc(item) and _as_int(item.get("entPhysicalContainedIn")) == root_index:
-            position = _as_int(item.get("entPhysicalParentRelPos"))
-            return position if is_vc_position(position) else None
-    return None
-
-
 def extract_vc_members(rows: list, device_serial=None) -> list[dict]:
     """
     Return the Virtual Chassis members that ENTITY-MIB inventory rows describe.
@@ -269,32 +231,28 @@ def extract_vc_members(rows: list, device_serial=None) -> list[dict]:
         list[dict]: The members in position order, or [] when the rows describe no stack.
 
     """
-    return _extract(rows, device_serial)[1]
+    return _extract(rows, device_serial)[2]
 
 
 def _extract(rows, device_serial) -> tuple:
-    """Return the stack root's raw index and the members for :func:`extract_vc_members`; (None, []) for no stack."""
+    """Return the stack root, its member rows and the members for :func:`extract_vc_members`; (None, [], []) for no stack."""
     rows = [row for row in rows if isinstance(row, dict)]
     roots = [row for row in rows if _as_int(row.get("entPhysicalContainedIn")) == 0]
     parent_index = select_vc_parent_index(roots)
     if parent_index is None:
-        return None, []
+        return None, [], []
     root = next(row for row in roots if _as_int(row.get("entPhysicalIndex")) == parent_index)
     children = [row for row in rows if _as_int(row.get("entPhysicalContainedIn")) == parent_index]
 
     chassis = [row for row in children if row.get("entPhysicalClass") == "chassis"]
     if len(chassis) >= 2:
         master_serial = normalize_stack_serial(device_serial)
-        return root.get("entPhysicalIndex"), _member_entries(
-            chassis, model_field="entPhysicalModelName", master_serial=master_serial
-        )
+        return root, chassis, _member_entries(chassis, model_field="entPhysicalModelName", master_serial=master_serial)
     fpcs = _junos_fpc_rows(root, children)
     if fpcs:
         master_serial = normalize_stack_serial(root.get("entPhysicalSerialNum"))
-        return root.get("entPhysicalIndex"), _member_entries(
-            fpcs, model_field="entPhysicalName", master_serial=master_serial
-        )
-    return None, []
+        return root, fpcs, _member_entries(fpcs, model_field="entPhysicalName", master_serial=master_serial)
+    return None, [], []
 
 
 class VCMemberRows(NamedTuple):
@@ -302,6 +260,22 @@ class VCMemberRows(NamedTuple):
 
     root_index: object
     positions: dict
+    # Junos only: {FPC slot: member position} for slots that exactly one FPC reports.
+    fpc_slots: dict
+
+    def position_named_by(self, row: dict) -> int | None:
+        """
+        Return the member position that a Junos "FPC <n> ..." row names, or None.
+
+        Only a row directly under the Junos root that is no member row (a PSU or fan tray) names
+        its member this way. Slot n maps to the FPC that reports slot n, and the result is that
+        FPC's detected position. A slot that no FPC or more than one FPC reports names nothing.
+        """
+        if row.get("entPhysicalContainedIn") != self.root_index or row.get("entPhysicalIndex") in self.positions:
+            return None
+        descr = row.get("entPhysicalDescr")
+        named = JUNOS_FPC_MEMBER_DESCR_RE.match(descr) if isinstance(descr, str) else None
+        return self.fpc_slots.get(int(named.group("member"))) if named else None
 
 
 def vc_member_rows(rows) -> VCMemberRows:
@@ -316,11 +290,25 @@ def vc_member_rows(rows) -> VCMemberRows:
         rows: Inventory rows that hold the roots and at least their direct children.
 
     Returns:
-        VCMemberRows: The stack root's raw ``entPhysicalIndex`` and ``{entPhysicalIndex: member position}``.
+        VCMemberRows: The stack root's raw ``entPhysicalIndex``, ``{entPhysicalIndex: member position}``
+            and, for a Junos stack, the unambiguous FPC slots.
 
     """
-    root_index, members = _extract(rows, None)
-    return VCMemberRows(root_index, {member["index"]: member["position"] for member in members})
+    root, member_rows, members = _extract(rows, None)
+    if root is None:
+        return VCMemberRows(None, {}, {})
+    fpc_slots = {}
+    if all(_is_junos_fpc(row) for row in member_rows):
+        slots = [_as_int(row.get("entPhysicalParentRelPos")) for row in member_rows]
+        position_by_index = {member["index"]: member["position"] for member in members}
+        fpc_slots = {
+            slot: position_by_index[row.get("entPhysicalIndex")]
+            for row, slot in zip(member_rows, slots, strict=True)
+            if is_vc_position(slot) and slots.count(slot) == 1
+        }
+    return VCMemberRows(
+        root.get("entPhysicalIndex"), {member["index"]: member["position"] for member in members}, fpc_slots
+    )
 
 
 def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> dict | None:

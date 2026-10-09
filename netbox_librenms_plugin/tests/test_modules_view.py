@@ -7105,6 +7105,48 @@ def test_junos_vc_member_attribution_skips_routing_engine_numbers():
 
 
 @pytest.mark.django_db
+def test_a_junos_row_inherits_the_nearer_serial_over_its_fpc():
+    """A module below FPC 0 that carries member 1's serial takes its serial-less child to member 1."""
+    master, member = _junos_vc_members("junos-nearer-serial")
+    inventory = [
+        *_junos_vc_inventory(),
+        _row(1201, "module", 120, position=0, entPhysicalSerialNum="12350", entPhysicalModelName="MOVED"),
+        _row(1202, "powerSupply", 1201, entPhysicalModelName="PSU"),
+    ]
+
+    owner = _owners(master, [master, member], inventory)
+
+    assert owner[1201] == member
+    assert owner[1202] == member
+
+
+@pytest.mark.django_db
+def test_junos_fpcs_sharing_a_slot_follow_the_detected_positions():
+    """Two FPCs that both report slot 1 get positions 1 and 2 from detection; module sync must agree."""
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+
+    _chassis, (first, second) = make_virtual_chassis_members("junos-shared-slot", count=2)
+    for device in (first, second):
+        device.serial = ""
+        device.save(update_fields=["serial"])
+    fpc = {"entPhysicalDescr": "FPC: EX4400-24X @ 1/*/*", "entPhysicalName": "EX4400-24X-S"}
+    inventory = [
+        _row(1, "chassis", 0, entPhysicalDescr="Juniper Virtual Chassis Switch", entPhysicalSerialNum="S-A"),
+        _row(120, "container", 1, position=1, entPhysicalSerialNum="S-A", **fpc),
+        _row(121, "container", 1, position=1, entPhysicalSerialNum="S-B", **fpc),
+        _row(1210, "module", 121, position=2, entPhysicalModelName="PIC"),
+        # "FPC 1" names a slot that two FPCs share, so it names no member.
+        _row(4, "powerSupply", 1, position=2, entPhysicalDescr="FPC 1 Power Supply 0", entPhysicalModelName="PSU"),
+    ]
+
+    owner = _owners(second, [first, second], inventory)
+
+    assert owner[120] == first
+    assert (owner[121], owner[1210]) == (second, second)
+    assert owner[4] == second
+
+
+@pytest.mark.django_db
 def test_vc_chassis_can_resolve_below_an_unattributed_stack_root():
     """A generic stack root must not suppress a chassis member position."""
     page, member, _member_manufacturer = _make_mixed_manufacturer_chassis("stack-root-position")
