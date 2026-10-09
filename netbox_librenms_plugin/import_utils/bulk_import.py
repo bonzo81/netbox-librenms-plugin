@@ -46,9 +46,11 @@ from .filters import _safe_disabled, get_librenms_devices_for_import
 from .permissions import check_user_permissions, require_permissions
 from .virtual_chassis import (
     VC_MASTER_UNKNOWN_WARNING,
+    VirtualChassisMasterUnknownError,
     create_virtual_chassis_with_members,
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
+    identify_vc_master,
     prefetch_vc_data_for_devices,
 )
 from netbox_librenms_plugin.server_mappings import (
@@ -360,6 +362,14 @@ def classify_bulk_precheck(collisions, unresolved, device_ids, vm_imports) -> Bu
     )
 
 
+def _import_manufacturer(device_type_id):
+    """Return the Manufacturer of the DeviceType a row imports as, or None when it is not resolved."""
+    from dcim.models import DeviceType
+
+    device_type = DeviceType.objects.filter(pk=device_type_id).select_related("manufacturer").first()
+    return device_type.manufacturer if device_type else None
+
+
 def stack_key(vc_data, device_id) -> str:
     """Return the key of one physical stack: its member serials, or the device when none is usable."""
     member_serials = sorted(
@@ -529,19 +539,6 @@ def bulk_import_devices_shared(  # noqa: C901
                 else:
                     logger.error(error_msg)
                 continue
-            # A stack whose master is unknown imports standalone, so it needs no chassis permission.
-            creates_vc = vc_data.get("is_stack", False) and bool(vc_data.get("master_identified"))
-            if creates_vc:
-                has_vc_perm, _ = check_user_permissions(user, ["dcim.add_virtualchassis"])
-                if not has_vc_perm:
-                    error_msg = f"Cannot import stack device {device_id}: missing permission dcim.add_virtualchassis"
-                    failed_list.append({"device_id": device_id, "error": error_msg})
-                    if job and job.logger:
-                        job.logger.error(error_msg)
-                    else:
-                        logger.error(error_msg)
-                    continue
-
             # Build manual mappings from validation + any provided overrides
             device_mappings = {}
 
@@ -556,6 +553,27 @@ def bulk_import_devices_shared(  # noqa: C901
             # Override with any manual mappings provided for this device
             if manual_mappings_per_device and device_id in manual_mappings_per_device:
                 device_mappings.update(manual_mappings_per_device[device_id])
+
+            # The master is matched with the serial rules of the DeviceType this row imports as.
+            # A stack whose master is unknown imports standalone, so it needs no chassis permission.
+            creates_vc = vc_data.get("is_stack", False) and (
+                identify_vc_master(
+                    vc_data["members"],
+                    libre_device.get("serial"),
+                    _import_manufacturer(device_mappings.get("device_type_id")),
+                )
+                is not None
+            )
+            if creates_vc:
+                has_vc_perm, _ = check_user_permissions(user, ["dcim.add_virtualchassis"])
+                if not has_vc_perm:
+                    error_msg = f"Cannot import stack device {device_id}: missing permission dcim.add_virtualchassis"
+                    failed_list.append({"device_id": device_id, "error": error_msg})
+                    if job and job.logger:
+                        job.logger.error(error_msg)
+                    else:
+                        logger.error(error_msg)
+                    continue
 
             selected_role_id = device_mappings.pop("device_role_id", None)
             if selected_role_id:
@@ -629,7 +647,10 @@ def bulk_import_devices_shared(  # noqa: C901
                         except Exception as vc_error:
                             # Remove from set on failure so retry is possible
                             processed_vc_domains.discard(vc_domain)
-                            if classify_conflict(vc_error):
+                            if isinstance(vc_error, VirtualChassisMasterUnknownError):
+                                # The stored serial no longer names one member; fail closed like the precheck.
+                                warn_msg = VC_MASTER_UNKNOWN_WARNING.format(device_id=device_id)
+                            elif classify_conflict(vc_error):
                                 # The device committed in its own transaction; only the chassis is missing.
                                 warn_msg = (
                                     f"Imported device {device_id}, but another operation was changing the same "
