@@ -8,6 +8,8 @@ browser never navigates. The device is linked to the stub's ArcOS recording, who
 flat ``port`` rows directly under the chassis.
 """
 
+import re
+
 import pytest
 from playwright.sync_api import expect
 
@@ -58,6 +60,20 @@ def test_refresh_then_install_swaps_in_place(modules_page, netbox_api, seeded_de
     expect(tab.toasts(page)).to_contain_text(f"Installed {module_type} in {NAMES[0]}")
     assert tab.forms_bound(page), "row forms lost their HTMX binding after the swap"
     assert netbox_api.installed_modules(seeded_device["id"]) == {NAMES[0]: (module_type, SERIAL[NAMES[0]])}
+
+
+def test_install_toast_renders_once(modules_page):
+    """The page keeps one toast container, so the install message shows once and is visible."""
+    page = modules_page
+    expect(tab.toasts(page)).to_have_count(1)
+    tab.refresh_modules(page, NAMES[0])
+
+    tab.install_row(page, NAMES[0])
+
+    expect(tab.toasts(page)).to_have_count(1)
+    toast = page.locator(".toast", has_text=re.compile(rf"Installed \S+ in {re.escape(NAMES[0])} "))
+    expect(toast).to_have_count(1)
+    expect(toast).to_be_visible()
 
 
 def test_second_action_in_a_row_also_swaps(modules_page, netbox_api, seeded_device):
