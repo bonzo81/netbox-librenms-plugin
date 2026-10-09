@@ -625,6 +625,34 @@ class TestBulkImportConfirmView:
         assert "Pos 0" in html
         assert "Pos 1" in html
 
+    @pytest.mark.parametrize("master_identified", [True, False])
+    def test_confirm_template_says_a_stack_without_a_master_imports_standalone(self, master_identified):
+        from django.template.loader import render_to_string
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _clone_virtual_chassis_data
+
+        members = [{"position": 1, "serial": "SN-1", "is_master": master_identified}, {"position": 2, "serial": "SN-2"}]
+        html = render_to_string(
+            "netbox_librenms_plugin/htmx/bulk_import_confirm.html",
+            {
+                "devices": [
+                    {
+                        "device_id": 9903,
+                        "device_name": "unknown-master-stack",
+                        "validation": {
+                            "virtual_chassis": _clone_virtual_chassis_data(
+                                {"is_stack": True, "member_count": 2, "members": members}
+                            )
+                        },
+                    }
+                ],
+                "server_key": "default",
+            },
+        )
+
+        notice = "The stack master could not be identified by serial"
+        assert (notice in html) is not master_identified
+
 
 @pytest.mark.django_db
 class TestBulkImportConfirmViewIntegration:
@@ -2188,6 +2216,29 @@ class TestDeviceVCDetailsView:
         assert "Pos 0" in html
         assert "zero-master-M0" in html
         assert "zero-master-M1" in html
+
+    def test_a_stack_without_a_master_says_the_import_creates_no_chassis(self, settings, librenms_server):
+        server_key = "vc-details-no-master"
+        device_id = 44
+        view = self._view(settings, librenms_server, server_key)
+        librenms_server.device_info_response(device_id=device_id, hostname="no-master", serial="ROOT")
+        librenms_server.vc_inventory_callable(
+            device_id,
+            [{"entPhysicalClass": "stack", "entPhysicalIndex": 100}],
+            {
+                100: [
+                    {"entPhysicalClass": "chassis", "entPhysicalIndex": 200, "entPhysicalParentRelPos": 1},
+                    {"entPhysicalClass": "chassis", "entPhysicalIndex": 201, "entPhysicalParentRelPos": 2},
+                ]
+            },
+        )
+        request = make_view_request("get", {"server_key": server_key})
+
+        result = get_view(view, request, device_id=device_id)
+
+        html = " ".join(result.content.decode().split())
+        assert "the stack master could not be identified" in html
+        assert "without a virtual chassis" in html
 
 
 class TestBulkImportDevicesViewSyncExecution:

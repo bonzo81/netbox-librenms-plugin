@@ -8,8 +8,8 @@ recording's ``expected`` block. A new recording with an ``expected`` block
 becomes a passing test with no new code.
 
 The flow is exercised end-to-end (real client, real HTTP, real parsing); only
-the plugin-config lookup and the VC member-name pattern (a DB read) are stubbed,
-so these tests need no database.
+the plugin-config lookup is stubbed. VC detection reads the serial normalization
+rules and the member-name pattern, so the outcome tests use the test database.
 """
 
 from io import StringIO
@@ -715,6 +715,7 @@ def test_assert_port_relationships_tolerates_explicit_null_lag_patterns():
     assert api.sap_patterns == []
 
 
+@pytest.mark.django_db
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
 def test_recording_outcomes(recording, recording_server):
     """Replay a recording and assert its declared outcomes against the real logic."""
@@ -738,6 +739,7 @@ def test_recording_outcomes(recording, recording_server):
         _assert_oob(api, recording, expected["oob"])
 
 
+@pytest.mark.django_db
 def test_serial_outcome_without_patterns_replays_as_empty(recording_server):
     recording = {
         **next(item for item in _RECORDINGS if "serial_ports" in item["expected"]),
