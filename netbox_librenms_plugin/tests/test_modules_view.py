@@ -6442,6 +6442,31 @@ class TestInferVcMemberSerialNormalization:
         assert target.pk == master.pk
         assert source == "default"
 
+    def test_a_name_hint_resolves_member_zero(self):
+        """A 0-based stack names its first member 0, so a "0/..." hint points at that member."""
+        view = _make_view()
+        first, second = self._vc_members(["100006", "100007"])
+        for device in (first, second):
+            device.vc_position -= 1
+            device.save(update_fields=["vc_position"])
+        item = {"entPhysicalIndex": 4, "entPhysicalName": "0/PIC 1", "entPhysicalContainedIn": 0}
+
+        target, source = view._infer_vc_member_for_item(second, item, {}, [first, second])
+
+        assert target.pk == first.pk
+        assert source == "name-hint"
+
+    def test_a_name_hint_for_a_position_no_member_holds_resolves_nothing(self):
+        """On a stack numbered from 1, a "0/0" name is a local port, not member 0."""
+        view = _make_view()
+        first, second = self._vc_members(["100008", "100009"])
+        item = {"entPhysicalIndex": 5, "entPhysicalName": "0/0", "entPhysicalContainedIn": 0}
+
+        target, source = view._infer_vc_member_for_item(second, item, {}, [first, second])
+
+        assert target.pk == second.pk
+        assert source == "default"
+
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("inventory_name", ["Slot 1", "Unmatched Card"])
