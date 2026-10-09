@@ -54,6 +54,8 @@ Some chassis (e.g. Nokia 7750 SR-s) report child components (CPMs, MDAs) without
 
 For Virtual Chassis devices, the Modules tab automatically distributes inventory rows across the correct VC member based on the component's position in the ENTITY-MIB tree. Each row shows the member hostname to make it clear which physical switch a component belongs to.
 
+On a Junos Virtual Chassis, all members hang under one root. A row belongs to the member that its FPC names: a row such as "FPC 1 Power Supply 0" belongs to member 1, and a row below an FPC belongs to that FPC's member. Routing Engine numbers are not member numbers.
+
 ## Screenshot
 
 ![Module Sync Tab](../img/Netbox-librenms-plugin-module-sync-tab.png)

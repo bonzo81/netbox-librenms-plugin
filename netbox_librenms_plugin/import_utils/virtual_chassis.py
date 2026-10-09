@@ -7,7 +7,7 @@ from dcim.models import Device, VirtualChassis
 from django.core.cache import cache
 from django.db import transaction
 
-from ..constants import JUNOS_FPC_DESCR_PREFIX, JUNOS_VC_ROOT_DESCR_MARKER
+from ..constants import JUNOS_FPC_DESCR_PREFIX, JUNOS_FPC_MEMBER_DESCR_RE, JUNOS_VC_ROOT_DESCR_MARKER
 from ..librenms_api import LibreNMSAPI
 from ..utils import (
     exception_text_for,
@@ -153,20 +153,32 @@ def select_vc_parent_index(root_rows: list) -> int | None:
     return None
 
 
+def _is_junos_vc_root(row: dict) -> bool:
+    """Return whether *row* is a chassis root whose description names a Junos Virtual Chassis."""
+    descr = row.get("entPhysicalDescr")
+    return (
+        row.get("entPhysicalClass") == "chassis"
+        and _as_int(row.get("entPhysicalContainedIn")) == 0
+        and isinstance(descr, str)
+        and JUNOS_VC_ROOT_DESCR_MARKER.casefold() in descr.casefold()
+    )
+
+
+def _is_junos_fpc(row: dict) -> bool:
+    """Return whether *row* is a Junos FPC container row."""
+    descr = row.get("entPhysicalDescr")
+    return (
+        row.get("entPhysicalClass") == "container"
+        and isinstance(descr, str)
+        and descr.startswith(JUNOS_FPC_DESCR_PREFIX)
+    )
+
+
 def _junos_fpc_rows(root: dict, children: list) -> list:
     """Return the FPC member rows of a Junos Virtual Chassis root, or [] when any condition fails."""
-    descr = root.get("entPhysicalDescr")
-    if root.get("entPhysicalClass") != "chassis" or not isinstance(descr, str):
+    if not _is_junos_vc_root(root):
         return []
-    if JUNOS_VC_ROOT_DESCR_MARKER.casefold() not in descr.casefold():
-        return []
-    fpcs = [
-        row
-        for row in children
-        if row.get("entPhysicalClass") == "container"
-        and isinstance(row.get("entPhysicalDescr"), str)
-        and row["entPhysicalDescr"].startswith(JUNOS_FPC_DESCR_PREFIX)
-    ]
+    fpcs = [row for row in children if _is_junos_fpc(row)]
     serials = [normalize_stack_serial(row.get("entPhysicalSerialNum")) for row in fpcs]
     root_serial = normalize_stack_serial(root.get("entPhysicalSerialNum"))
     # A false stack creates bogus member devices on import, so every condition must hold.
@@ -194,6 +206,44 @@ def _member_entries(rows: list, *, model_field: str, master_serial: str) -> list
     ]
     members.sort(key=lambda member: member["position"])
     return members
+
+
+def junos_vc_member_number(row: dict, rows_by_index: dict) -> int | None:
+    """
+    Return the Junos Virtual Chassis member that an inventory row belongs to, or None.
+
+    Only rows below a Junos Virtual Chassis root have a member. An FPC container directly under
+    the root is its own member (its parent-relative position, as in :func:`extract_vc_members`),
+    a row whose description starts with "FPC <n> " names member n, and any other row takes the
+    member of its nearest such ancestor. A Routing Engine number is not a member id, so a
+    Routing Engine row has no member here.
+
+    Args:
+        row: One inventory row.
+        rows_by_index: Inventory rows keyed by their raw ``entPhysicalIndex`` value.
+
+    """
+    chain = [row]
+    seen = {id(row)}
+    while _as_int(chain[-1].get("entPhysicalContainedIn")):
+        parent = rows_by_index.get(chain[-1].get("entPhysicalContainedIn"))
+        if not isinstance(parent, dict) or id(parent) in seen:
+            return None
+        chain.append(parent)
+        seen.add(id(parent))
+    root = chain[-1]
+    if not _is_junos_vc_root(root):
+        return None
+    root_index = _as_int(root.get("entPhysicalIndex"))
+    for item in chain[:-1]:
+        descr = item.get("entPhysicalDescr")
+        named = JUNOS_FPC_MEMBER_DESCR_RE.match(descr) if isinstance(descr, str) else None
+        if named:
+            return int(named.group("member"))
+        if _is_junos_fpc(item) and _as_int(item.get("entPhysicalContainedIn")) == root_index:
+            position = _as_int(item.get("entPhysicalParentRelPos"))
+            return position if is_vc_position(position) else None
+    return None
 
 
 def extract_vc_members(rows: list, device_serial=None) -> list[dict]:

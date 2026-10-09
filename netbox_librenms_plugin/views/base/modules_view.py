@@ -14,6 +14,7 @@ from netbox_librenms_plugin.constants import (
     OOB_INVENTORY_SOURCE,
     is_module_model_placeholder,
 )
+from netbox_librenms_plugin.import_utils.virtual_chassis import junos_vc_member_number
 from netbox_librenms_plugin.librenms_ids import (
     coerce_librenms_id,
     normalize_librenms_port_id,
@@ -623,6 +624,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         item_serial = cls._normalize_serial(item.get("entPhysicalSerialNum"))
         if item_serial and item_serial in member_by_serial:
             return member_by_serial[item_serial], "serial"
+
+        # A Junos VC hangs every member's rows under one root whose serial is the master's.
+        junos_member = cls._vc_member_at_position(vc_members, junos_vc_member_number(item, index_map))
+        if junos_member is not None:
+            return junos_member, "junos-member"
 
         # Walk ancestors to find a serial tied to a VC member.
         parent_idx = item.get("entPhysicalContainedIn", 0)
