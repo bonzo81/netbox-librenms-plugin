@@ -327,7 +327,8 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
             logger.warning(f"Could not read root inventory items for device {device_id}")
             return _failed_virtual_chassis_data("LibreNMS root inventory request failed")
 
-        parent_index = select_vc_parent_index(root_items or [])
+        root_items = root_items or []
+        parent_index = select_vc_parent_index(root_items)
         if parent_index is None:
             return None
 
