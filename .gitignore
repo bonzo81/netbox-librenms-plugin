@@ -293,3 +293,8 @@ ca-bundle.crt
 
 # Playwright MCP scratch snapshots (accessibility/page dumps from local UI verification)
 .playwright-mcp/
+
+# End-to-end compose suite: setup.sh output and Playwright traces
+tests/compose_e2e/docker/*.whl
+tests/compose_e2e/docker/host_ca.crt
+test-results/
