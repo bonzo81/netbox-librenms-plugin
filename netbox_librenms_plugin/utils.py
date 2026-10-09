@@ -32,8 +32,7 @@ from netbox_librenms_plugin.constants import (
     OOB_NAME_SUFFIX,
     PORT_ID_SOURCE_COLLISION_REASON,
     REPORTED_NAME_PORT_COLLISION_REASON,
-    is_module_model_placeholder,
-    is_stack_serial_placeholder,
+    is_librenms_placeholder,
     is_supported_interface_name_field,
 )
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_host_address
@@ -3127,7 +3126,7 @@ def normalize_serial(value) -> str:
 def normalize_stack_serial(value) -> str:
     """Return a serial usable as stack identity evidence, preserving numeric zero."""
     serial = normalize_serial(value)
-    return "" if is_stack_serial_placeholder(serial) else serial
+    return "" if is_librenms_placeholder(serial) else serial
 
 
 def find_devices_by_serial(serial: str, limit: int = 2) -> list:
@@ -4438,7 +4437,7 @@ def module_type_lookup_candidates(item):
         value = item.get(key)
         if isinstance(value, str):
             value = value.strip()
-        if not is_module_model_placeholder(value) and value not in candidates:
+        if not is_librenms_placeholder(value) and value not in candidates:
             candidates.append(value)
     return candidates
 
@@ -4487,10 +4486,10 @@ def resolve_module_type(
     # for every SFP the vendor declined to identify. The fallbacks apply only then. A real model
     # that resolves to nothing stays unresolved, because matching it on its own description
     # would be a guess, and a ModuleTypeMapping row is the supported way to teach that name.
-    if is_module_model_placeholder(model_name):
+    if is_librenms_placeholder(model_name):
         candidates = []
         for name in fallback_names:
-            if not is_module_model_placeholder(name) and name not in candidates:
+            if not is_librenms_placeholder(name) and name not in candidates:
                 candidates.append(name)
     else:
         candidates = [model_name]

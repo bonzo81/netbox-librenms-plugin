@@ -10,7 +10,7 @@ from django.utils import timezone
 from tenancy.models import Tenant
 from virtualization.models import Cluster, VirtualMachine
 
-from ..constants import normalize_oob_type
+from ..constants import is_librenms_placeholder, normalize_oob_type
 from ..import_validation_helpers import (
     apply_merge_candidates,
     apply_oob_detection_result,
@@ -250,8 +250,6 @@ def _try_chassis_device_type_match(api, device_id, preloaded_device_type_rules: 
         dict | None: Dict with matched/device_type/match_type keys, or None on failure.
 
     """
-    skip_values = {"", "-", "Unspecified", "BUILTIN", "None"}
-
     try:
         success, inventory = api.get_inventory_filtered(device_id, ent_physical_class="chassis")
         if not success or not inventory:
@@ -260,8 +258,8 @@ def _try_chassis_device_type_match(api, device_id, preloaded_device_type_rules: 
         for item in inventory:
             # Try entPhysicalName first (often the chassis part number like CHAS-BP-MX480-S)
             for field in ("entPhysicalName", "entPhysicalModelName"):
-                value = item.get(field) or ""
-                if value and value not in skip_values:
+                value = item.get(field)
+                if not is_librenms_placeholder(value):
                     chassis_match = match_librenms_hardware_to_device_type(
                         value, preloaded_rules=preloaded_device_type_rules
                     )

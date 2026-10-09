@@ -27,8 +27,7 @@ from netbox_librenms_plugin.constants import (
     LIBRENMS_EMPTY_MESSAGES,
     LIBRENMS_GLOBAL_ROUTING_INSTANCE,
     LIBRENMS_PLACEHOLDER_VALUES,
-    MODULE_MODEL_PLACEHOLDERS,
-    is_stack_serial_placeholder,
+    is_librenms_placeholder,
 )
 from netbox_librenms_plugin.data_shapes.ports import (
     ANON_INTERFACE_NAME_PREFIX,
@@ -106,7 +105,7 @@ HOSTNAME_KEYS = frozenset(
 )
 # Use one model identity across device, inventory, transceiver, and link rows.
 MODEL_KEYS = frozenset({"hardware", "remote_platform", "entPhysicalModelName", "model"})
-_MODEL_PLACEHOLDERS = GENERIC_CONTAINER_MODELS | LIBRENMS_PLACEHOLDER_VALUES | MODULE_MODEL_PLACEHOLDERS
+_MODEL_PLACEHOLDERS = GENERIC_CONTAINER_MODELS | LIBRENMS_PLACEHOLDER_VALUES
 # entPhysicalMfgName is the ENTITY-MIB manufacturer name (e.g. "Cisco Systems Inc."). It names the
 # vendor the os-hash deliberately masks and is read by no sync logic, so it's pseudonymized to a
 # deterministic MFG-<hash> — the field shape (present, non-empty) survives without the vendor.
@@ -756,7 +755,7 @@ def _anon_value(key, value, rules, container=None):  # noqa: C901
         if isinstance(value, bool) or not isinstance(value, (str, int, float)):
             return value
         serial = str(value).strip()
-        return f"SN-{_hash(serial, salt)}" if serial and not is_stack_serial_placeholder(serial) else value
+        return f"SN-{_hash(serial, salt)}" if serial and not is_librenms_placeholder(serial) else value
     if key in MODEL_KEYS:
         if isinstance(value, bool) or not isinstance(value, (str, int, float)):
             return value
