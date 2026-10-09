@@ -581,20 +581,6 @@ def _module_interface_update_message(bind_result, location):
     return f"Updated interface {interface_name} for {location}."
 
 
-def _get_vc_member_positions(device):
-    """Compatibility wrapper for VC member position lookups."""
-    return get_vc_member_positions(device)
-
-
-def _rewrite_interface_name_for_vc_member(interface_name, vc_position, member_positions=None):
-    """Compatibility wrapper for VC-aware interface name rewriting."""
-    return rewrite_interface_name_for_vc_member(
-        interface_name,
-        vc_position,
-        member_positions=member_positions,
-    )
-
-
 def _normalize_module_interface_names_for_vc_member(
     device,
     module,
@@ -631,7 +617,7 @@ def _normalize_module_interface_names_for_vc_member(
     vc_id = getattr(device, "virtual_chassis_id", None)
     if not is_vc_position(vc_position) or not isinstance(vc_id, int):
         return result
-    member_positions = _get_vc_member_positions(device)
+    member_positions = get_vc_member_positions(device)
 
     from dcim.models import Interface
 
@@ -643,7 +629,7 @@ def _normalize_module_interface_names_for_vc_member(
         if interface.pk not in changeable_interface_ids:
             result["skipped"] += 1
             continue
-        desired_name = _rewrite_interface_name_for_vc_member(
+        desired_name = rewrite_interface_name_for_vc_member(
             interface.name,
             vc_position,
             member_positions=member_positions,
