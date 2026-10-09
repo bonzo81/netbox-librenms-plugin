@@ -54,6 +54,8 @@ Some chassis (e.g. Nokia 7750 SR-s) report child components (CPMs, MDAs) without
 
 For Virtual Chassis devices, the Modules tab automatically distributes inventory rows across the correct VC member based on the component's position in the ENTITY-MIB tree. Each row shows the member hostname to make it clear which physical switch a component belongs to.
 
+When the inventory is a stack that import detection recognizes, only a member row (for example a stack chassis or a Junos FPC) names a member by its position. Rows below a member row belong to that member, unless a serial names another member. The stack root and rows directly under it belong to the device whose page is open. For an inventory that is no recognized stack, the plugin reads a position of 1 or more, or a leading number in the name, as the member number.
+
 On a Junos Virtual Chassis, all members hang under one root. A row belongs to the member that its FPC names: a row such as "FPC 1 Power Supply 0" belongs to member 1, and a row below an FPC belongs to that FPC's member. Routing Engine numbers are not member numbers.
 
 ## Screenshot

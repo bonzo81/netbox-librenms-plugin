@@ -14,7 +14,7 @@ from netbox_librenms_plugin.constants import (
     OOB_INVENTORY_SOURCE,
     is_module_model_placeholder,
 )
-from netbox_librenms_plugin.import_utils.virtual_chassis import is_vc_root, junos_vc_member_number
+from netbox_librenms_plugin.import_utils.virtual_chassis import junos_vc_member_number, vc_member_rows
 from netbox_librenms_plugin.librenms_ids import (
     coerce_librenms_id,
     normalize_librenms_port_id,
@@ -607,10 +607,34 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             return None
         return next((member for member in vc_members if getattr(member, "vc_position", None) == position), None)
 
+    @staticmethod
+    def _vc_member_rows(inventory_data):
+        """Return the stack rows of the main inventory; OOB controller rows are no stack members."""
+        return vc_member_rows(item for item in inventory_data if item.get("_source") != OOB_INVENTORY_SOURCE)
+
+    @staticmethod
+    def _vc_member_from_one(vc_members, position):
+        """Return the VC member at a position of 1 or more, or None."""
+        try:
+            position = int(position)
+        except (TypeError, ValueError):
+            return None
+        return BaseModuleTableView._vc_member_at_position(vc_members, position) if position >= 1 else None
+
     @classmethod
-    def _infer_vc_member_for_item(cls, obj, item, index_map, vc_members, inherited_member=None):
+    def _infer_vc_member_for_item(cls, obj, item, index_map, vc_members, *, member_rows, inherited_member=None):
         """
         Infer VC member ownership for an inventory item using LibreNMS ENTITY data.
+
+        Args:
+            obj (Device): The page device, the owner when no evidence names a member.
+            item (dict): The inventory row to attribute.
+            index_map (dict): Inventory rows keyed by raw ``entPhysicalIndex``.
+            vc_members (list): The NetBox Virtual Chassis members.
+            member_rows (VCMemberRows): The stack rows from :func:`vc_member_rows`, computed once
+                for the whole inventory.
+            inherited_member (Device | None): The owner of the row's parent, for a shape that is no
+                recognized stack.
 
         Returns:
             tuple: (Device, source) where source is a short reason string.
@@ -629,11 +653,40 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         if item_serial and item_serial in member_by_serial:
             return member_by_serial[item_serial], "serial"
 
+        if member_rows.positions:
+            return cls._infer_vc_member_in_stack(obj, item, index_map, vc_members, member_by_serial, member_rows)
+        return cls._infer_vc_member_without_stack(obj, item, index_map, vc_members, member_by_serial, inherited_member)
+
+    @classmethod
+    def _infer_vc_member_in_stack(cls, obj, item, index_map, vc_members, member_by_serial, member_rows):
+        """Attribute a row of a recognized stack to the member row it is or sits under."""
         # A Junos VC hangs every member's rows under one root whose serial is the master's.
         junos_member = cls._vc_member_at_position(vc_members, junos_vc_member_number(item, index_map))
         if junos_member is not None:
             return junos_member, "junos-member"
 
+        # Walk up to the stack root, which owns no member: a nearer serial wins over a member row.
+        current = item
+        visited = set()
+        while isinstance(current, dict) and current.get("entPhysicalIndex") != member_rows.root_index:
+            if id(current) in visited:
+                break
+            visited.add(id(current))
+            serial = cls._normalize_serial(current.get("entPhysicalSerialNum"))
+            if current is not item and serial and serial in member_by_serial:
+                return member_by_serial[serial], "ancestor-serial"
+            index = current.get("entPhysicalIndex")
+            if index in member_rows.positions:
+                member = cls._vc_member_at_position(vc_members, member_rows.positions[index])
+                if member is None:
+                    break
+                return member, "position" if current is item else "parent-context"
+            current = index_map.get(current.get("entPhysicalContainedIn"))
+        return obj, "default"
+
+    @classmethod
+    def _infer_vc_member_without_stack(cls, obj, item, index_map, vc_members, member_by_serial, inherited_member):
+        """Attribute a row of an unrecognized shape with the position and name heuristic."""
         # Walk ancestors to find a serial tied to a VC member.
         parent_idx = item.get("entPhysicalContainedIn", 0)
         visited = set()
@@ -645,17 +698,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 return member_by_serial[parent_serial], "ancestor-serial"
             parent_idx = parent.get("entPhysicalContainedIn", 0)
 
-        # The stack root holds the members, so its own position or name is no member number.
-        if is_vc_root(item, index_map.values()):
-            return obj, "default"
-
         # A descendant's parentRelPos is its hardware slot, not its Virtual Chassis position.
         # Inherit the parent context unless this item or an ancestor supplied member serial evidence.
         if inherited_member is not None:
             return inherited_member, "parent-context"
 
-        # Position-based fallback from ENTITY parentRelPos.
-        positioned_member = cls._vc_member_at_position(vc_members, item.get("entPhysicalParentRelPos"))
+        # This shape has no member rows, so any row's position or name hint from 1 names a member.
+        positioned_member = cls._vc_member_from_one(vc_members, item.get("entPhysicalParentRelPos"))
         if positioned_member is not None:
             return positioned_member, "position"
 
@@ -668,10 +717,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         for hint in hints:
             if not hint:
                 continue
-            match = re.match(r"^\D*(\d+)[/:\-].*", hint)
+            match = re.match(r"^\D*([1-9]\d*)[/:\-].*", hint)
             if not match:
                 continue
-            hinted_member = cls._vc_member_at_position(vc_members, match.group(1))
+            hinted_member = cls._vc_member_from_one(vc_members, match.group(1))
             if hinted_member is not None:
                 return hinted_member, "name-hint"
 
@@ -1154,6 +1203,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
     ):
         """Return the page policy and per-item policies for attributed VC members."""
         policy_cache = {}
+        member_rows = cls._vc_member_rows(inventory_data)
 
         def policy_for(device):
             device_id = getattr(device, "pk", None)
@@ -1203,6 +1253,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 item,
                 index_map,
                 vc_members,
+                member_rows=member_rows,
                 inherited_member=inherited_member,
             )
             policy = policy_for(selected_device)
@@ -1427,11 +1478,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         ignore_contexts = ignore_contexts or {}
 
         table_data = []
+        member_rows = None  # read once, only when a row has no attributed context
 
         for item in top_items:
             ignore_context = ignore_contexts.get(_inventory_item_key(item))
             if ignore_context is None:
-                target_device, resolution_source = self._infer_vc_member_for_item(obj, item, index_map, vc_members)
+                if member_rows is None:
+                    member_rows = self._vc_member_rows(index_map.values())
+                target_device, resolution_source = self._infer_vc_member_for_item(
+                    obj, item, index_map, vc_members, member_rows=member_rows
+                )
                 target_ignore_rules = ignore_rules
                 target_device_identity = device_identity
                 target_manufacturer = manufacturer
