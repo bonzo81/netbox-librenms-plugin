@@ -14,7 +14,7 @@ from netbox_librenms_plugin.constants import (
     OOB_INVENTORY_SOURCE,
     is_module_model_placeholder,
 )
-from netbox_librenms_plugin.import_utils.virtual_chassis import junos_vc_member_number, vc_member_rows
+from netbox_librenms_plugin.import_utils.virtual_chassis import vc_member_rows
 from netbox_librenms_plugin.librenms_ids import (
     coerce_librenms_id,
     normalize_librenms_port_id,
@@ -656,11 +656,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
     @classmethod
     def _infer_vc_member_in_stack(cls, obj, item, index_map, vc_members, member_by_serial, member_rows):
         """Attribute a row of a recognized stack to the member row it is or sits under."""
-        # A Junos VC hangs every member's rows under one root whose serial is the master's.
-        junos_member = cls._vc_member_at_position(vc_members, junos_vc_member_number(item, index_map))
-        if junos_member is not None:
-            return junos_member, "junos-member"
-
         # Walk up to the stack root, which owns no member: a nearer serial wins over a member row.
         current = item
         visited = set()
@@ -677,6 +672,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 if member is None:
                     break
                 return member, "position" if current is item else "parent-context"
+            # A Junos PSU or fan tray under the root names its member as "FPC <n> ...".
+            named = cls._vc_member_at_position(vc_members, member_rows.position_named_by(current))
+            if named is not None:
+                return named, "junos-member" if current is item else "parent-context"
             current = index_map.get(current.get("entPhysicalContainedIn"))
         return obj, "default"
 
