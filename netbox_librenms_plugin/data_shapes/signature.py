@@ -26,7 +26,7 @@ from netbox_librenms_plugin.data_shapes.recordings_store import (
     SERIAL_SENSORS_UNAVAILABLE,
     recording_meta,
 )
-from netbox_librenms_plugin.import_utils.virtual_chassis import extract_vc_members, select_vc_parent_index
+from netbox_librenms_plugin.import_utils.virtual_chassis import extract_vc_stack, select_vc_parent_index
 
 # Vendor kinship for the *similarity* signal only — NOT for collapsing distinct OSes into one
 # "covered" verdict. ios / iosxr / nxos share a vendor but their ifName/ifDescr conventions differ,
@@ -140,7 +140,7 @@ def compute_shape_signature(recording):
             fields that anonymization preserves).
 
     Returns:
-        dict: ``{os, virtual_chassis:{present,root_class,member_count,position_base},
+        dict: ``{os, virtual_chassis:{present,root_class,member_count,position_base,member_shape},
             lag:{present,ieee8023ad,name_prefix}, sub_interfaces:{present,styles}, port_stack,
             vlans, transceivers, serial, vrf, oob}``.
 
@@ -154,7 +154,7 @@ def compute_shape_signature(recording):
         if isinstance(devices, list) and devices and isinstance(devices[0], dict):
             os_name = devices[0].get("os")
 
-    # Virtual chassis: root container class + the members VC detection finds under it.
+    # Virtual chassis: root container class + the members and member shape VC detection finds under it.
     root_items = _inventory_items(_body(recording, lambda k: _contained_in_query(k) == "0"))
     root_class = None
     if any(i.get("entPhysicalClass") == "stack" for i in root_items):
@@ -165,12 +165,14 @@ def compute_shape_signature(recording):
     child_items = []
     if parent_index is not None:
         child_items = _inventory_items(_body(recording, lambda k: _contained_in_query(k) == str(parent_index)))
-    members = extract_vc_members([*root_items, *child_items])
+    stack = extract_vc_stack([*root_items, *child_items])
+    members = stack.members
     vc = {
         "present": bool(members),
         "root_class": root_class,
         "member_count": len(members),
         "position_base": min(member["position"] for member in members) if members else None,
+        "member_shape": stack.shape,
     }
 
     # LAG + sub-interface styles from ports. LAG detection mirrors the client's
@@ -290,6 +292,7 @@ def _structural_axes(signature):
         vc.get("root_class"),
         vc.get("member_count"),
         vc.get("position_base"),
+        vc.get("member_shape"),
         lag.get("present", False),
         # The ifType-vs-pattern LAG detection style is a distinct shape: a pattern-only LAG
         # (ieee8023ad False) must not be reported as covered by an 802.3ad-ifType LAG, and vice versa.
@@ -331,6 +334,8 @@ def signature_schema_errors(signature):  # noqa: C901
         position_base = vc.get("position_base")
         if position_base is not None and (not isinstance(position_base, int) or isinstance(position_base, bool)):
             errors.append("virtual_chassis.position_base must be an integer or null")
+        if "member_shape" not in vc or (vc["member_shape"] is not None and not isinstance(vc["member_shape"], str)):
+            errors.append("virtual_chassis.member_shape must be a string or null")
 
     lag = signature.get("lag")
     if not isinstance(lag, dict):
