@@ -14,7 +14,7 @@ from netbox_librenms_plugin.constants import (
     OOB_INVENTORY_SOURCE,
     is_module_model_placeholder,
 )
-from netbox_librenms_plugin.import_utils.virtual_chassis import junos_vc_member_number
+from netbox_librenms_plugin.import_utils.virtual_chassis import is_vc_root, junos_vc_member_number
 from netbox_librenms_plugin.librenms_ids import (
     coerce_librenms_id,
     normalize_librenms_port_id,
@@ -644,6 +644,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             if parent_serial and parent_serial in member_by_serial:
                 return member_by_serial[parent_serial], "ancestor-serial"
             parent_idx = parent.get("entPhysicalContainedIn", 0)
+
+        # The stack root holds the members, so its own position or name is no member number.
+        if is_vc_root(item, index_map.values()):
+            return obj, "default"
 
         # A descendant's parentRelPos is its hardware slot, not its Virtual Chassis position.
         # Inherit the parent context unless this item or an ancestor supplied member serial evidence.
