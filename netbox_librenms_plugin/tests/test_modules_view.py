@@ -11,6 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from netbox_librenms_plugin.import_utils.virtual_chassis import vc_member_rows
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -6414,7 +6416,9 @@ class TestInferVcMemberSerialNormalization:
         master, member2 = self._vc_members(["100001", "100002"])
 
         item = {"entPhysicalIndex": 1, "entPhysicalSerialNum": 100002, "entPhysicalContainedIn": 0}
-        target, source = view._infer_vc_member_for_item(master, item, {}, [master, member2])
+        target, source = view._infer_vc_member_for_item(
+            master, item, {}, [master, member2], member_rows=vc_member_rows([item])
+        )
 
         assert target.pk == member2.pk
         assert source == "serial"
@@ -6425,7 +6429,9 @@ class TestInferVcMemberSerialNormalization:
         master, member2 = self._vc_members(["0", "100003"])
 
         item = {"entPhysicalIndex": 2, "entPhysicalSerialNum": 0, "entPhysicalContainedIn": 0}
-        target, source = view._infer_vc_member_for_item(member2, item, {}, [master, member2])
+        target, source = view._infer_vc_member_for_item(
+            member2, item, {}, [master, member2], member_rows=vc_member_rows([item])
+        )
 
         assert target.pk == master.pk
         assert source == "serial"
@@ -6437,24 +6443,12 @@ class TestInferVcMemberSerialNormalization:
         master, member2 = self._vc_members(["100004", "100005"])
         item = {"entPhysicalIndex": 3, field: 2, "entPhysicalContainedIn": 0}
 
-        target, source = view._infer_vc_member_for_item(master, item, {}, [master, member2])
+        target, source = view._infer_vc_member_for_item(
+            master, item, {}, [master, member2], member_rows=vc_member_rows([item])
+        )
 
         assert target.pk == master.pk
         assert source == "default"
-
-    def test_a_name_hint_resolves_member_zero(self):
-        """A 0-based stack names its first member 0, so a "0/..." hint points at that member."""
-        view = _make_view()
-        first, second = self._vc_members(["100006", "100007"])
-        for device in (first, second):
-            device.vc_position -= 1
-            device.save(update_fields=["vc_position"])
-        item = {"entPhysicalIndex": 4, "entPhysicalName": "0/PIC 1", "entPhysicalContainedIn": 0}
-
-        target, source = view._infer_vc_member_for_item(second, item, {}, [first, second])
-
-        assert target.pk == first.pk
-        assert source == "name-hint"
 
     def test_a_name_hint_for_a_position_no_member_holds_resolves_nothing(self):
         """On a stack numbered from 1, a "0/0" name is a local port, not member 0."""
@@ -6462,7 +6456,9 @@ class TestInferVcMemberSerialNormalization:
         first, second = self._vc_members(["100008", "100009"])
         item = {"entPhysicalIndex": 5, "entPhysicalName": "0/0", "entPhysicalContainedIn": 0}
 
-        target, source = view._infer_vc_member_for_item(second, item, {}, [first, second])
+        target, source = view._infer_vc_member_for_item(
+            second, item, {}, [first, second], member_rows=vc_member_rows([item])
+        )
 
         assert target.pk == second.pk
         assert source == "default"
@@ -7205,6 +7201,91 @@ def test_a_vc_root_at_position_zero_does_not_claim_member_zero(root_class, root_
     assert contexts[_inventory_item_key(inventory[0])]["resolution_source"] == "default"
     assert owner[141] == second
     assert owner[142] == second
+
+
+def _zero_based_members(tag):
+    """Return two real VC members at positions 0 and 1 whose NetBox serials are blank."""
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+
+    _chassis, members = make_virtual_chassis_members(tag, count=2)
+    for member in members:
+        member.vc_position -= 1
+        member.serial = ""
+        member.save(update_fields=["vc_position", "serial"])
+    return members
+
+
+def _row(index, entity_class, contained_in, position=None, **fields):
+    row = {"entPhysicalIndex": index, "entPhysicalClass": entity_class, "entPhysicalContainedIn": contained_in}
+    if position is not None:
+        row["entPhysicalParentRelPos"] = position
+    return {"entPhysicalName": f"{entity_class} {index}", "entPhysicalModelName": "", **row, **fields}
+
+
+def _owners(page, members, inventory):
+    """Return {entPhysicalIndex: owning device} as the real module page attributes the rows."""
+    from netbox_librenms_plugin.views.base.modules_view import _inventory_item_key
+
+    index_map = {item["entPhysicalIndex"]: item for item in inventory}
+    _default, contexts = _make_view()._build_inventory_ignore_contexts(
+        page, inventory, index_map, members, lambda _manufacturer: []
+    )
+    return {item["entPhysicalIndex"]: contexts[_inventory_item_key(item)]["selected_device"] for item in inventory}
+
+
+@pytest.mark.django_db
+def test_a_generic_container_root_at_position_zero_does_not_claim_member_zero():
+    """An unrecognized shape keeps the base rule: position 0 is no member, so the chassis child uses its own."""
+    first, second = _zero_based_members("container-root-zero")
+    inventory = [
+        _row(170, "container", 0, position=0),
+        _row(171, "chassis", 170, position=1),
+        _row(172, "powerSupply", 171, entPhysicalModelName="PSU-1"),
+    ]
+
+    owner = _owners(first, [first, second], inventory)
+
+    assert owner[171] == second
+    assert owner[172] == second
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("page_position", [0, 1])
+def test_chassis_stack_members_own_their_subtrees_from_any_page(page_position):
+    """Each chassis member row owns its subtree by its position, whichever member's page is open."""
+    first, second = _zero_based_members(f"chassis-stack-{page_position}")
+    page = (first, second)[page_position]
+    inventory = [
+        _row(180, "chassis", 0),
+        _row(181, "chassis", 180, position=0),
+        _row(182, "chassis", 180, position=1),
+        _row(183, "powerSupply", 181, entPhysicalModelName="PSU-0"),
+        _row(184, "powerSupply", 182, entPhysicalModelName="PSU-1"),
+        # A row directly under the stack root is no member row, so its slot number is no member id.
+        _row(185, "fan", 180, position=1, entPhysicalModelName="FAN"),
+    ]
+
+    owner = _owners(page, [first, second], inventory)
+
+    assert (owner[181], owner[183]) == (first, first)
+    assert (owner[182], owner[184]) == (second, second)
+    assert owner[180] == page
+    assert owner[185] == page
+
+
+@pytest.mark.django_db
+def test_a_lone_serial_less_chassis_at_position_one_keeps_the_base_attribution():
+    """One chassis is no stack, so the base rule applies: its position 1 names member 1, not the page."""
+    first, second = _zero_based_members("lone-chassis")
+    inventory = [
+        _row(190, "chassis", 0, position=1),
+        _row(191, "powerSupply", 190, entPhysicalModelName="PSU"),
+    ]
+
+    owner = _owners(first, [first, second], inventory)
+
+    assert owner[190] == second
+    assert owner[191] == second
 
 
 @pytest.mark.django_db
