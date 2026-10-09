@@ -277,6 +277,59 @@ def _try_chassis_device_type_match(api, device_id, preloaded_device_type_rules: 
     return None
 
 
+def match_import_device_type(libre_device: dict, api=None, preloaded_device_type_rules: dict | None = None):
+    """
+    Return the DeviceType match for a LibreNMS row: mapping or hardware first, then the chassis model.
+
+    Validation and the Virtual Chassis details dialog both read the matched DeviceType from here.
+
+    Returns:
+        dict | None: ``{matched, device_type, match_type}``, or None when several DeviceTypes match.
+
+    """
+    dt_match = match_librenms_hardware_to_device_type(
+        libre_device.get("hardware", ""), preloaded_rules=preloaded_device_type_rules
+    )
+    # When the hardware string matches nothing, the chassis model is a second lookup source.
+    if dt_match is not None and not dt_match["matched"] and api and libre_device.get("device_id"):
+        chassis_match = _try_chassis_device_type_match(
+            api, libre_device["device_id"], preloaded_device_type_rules=preloaded_device_type_rules
+        )
+        if chassis_match and chassis_match["matched"]:
+            dt_match = chassis_match
+    return dt_match
+
+
+DEVICE_TYPE_OVERRIDE_UNAVAILABLE = "Selected device type is unavailable"
+
+
+class DeviceTypeOverrideError(ValueError):
+    """A manual DeviceType override names no DeviceType."""
+
+
+def effective_import_device_type(matched_device_type, manual_mappings: dict | None = None):
+    """
+    Return the DeviceType an import row creates its device with.
+
+    A manual ``device_type_id`` override wins and must name a DeviceType; otherwise the matched
+    DeviceType from :func:`match_import_device_type` applies. The stack master match, the bulk
+    import precheck and the device write all read this one result.
+
+    Raises:
+        DeviceTypeOverrideError: The override is present but names no DeviceType.
+
+    """
+    if not manual_mappings or "device_type_id" not in manual_mappings:
+        return matched_device_type
+    try:
+        device_type = DeviceType.objects.filter(pk=int(manual_mappings["device_type_id"])).first()
+    except (TypeError, ValueError):
+        device_type = None
+    if device_type is None:
+        raise DeviceTypeOverrideError(DEVICE_TYPE_OVERRIDE_UNAVAILABLE)
+    return device_type
+
+
 def _determine_device_name(
     libre_device: dict,
     use_sysname: bool = True,
@@ -1393,7 +1446,9 @@ def validate_device_for_import(  # noqa: C901
 
             # 3. Validate DeviceType (required)
             hardware = libre_device.get("hardware", "")
-            dt_match = match_librenms_hardware_to_device_type(hardware, preloaded_rules=preloaded_device_type_rules)
+            dt_match = match_import_device_type(
+                libre_device, api, preloaded_device_type_rules=preloaded_device_type_rules
+            )
 
             if dt_match is None:
                 result["device_type"]["found"] = False
@@ -1404,17 +1459,6 @@ def validate_device_for_import(  # noqa: C901
                         f"Multiple device types match hardware '{hardware}' — resolve the ambiguity in NetBox."
                     )
             else:
-                # Chassis inventory fallback: when hardware doesn't match,
-                # try the chassis entPhysicalModelName as an additional lookup source
-                if not dt_match["matched"] and api:
-                    device_id = libre_device.get("device_id")
-                    if device_id:
-                        chassis_match = _try_chassis_device_type_match(
-                            api, device_id, preloaded_device_type_rules=preloaded_device_type_rules
-                        )
-                        if chassis_match and chassis_match["matched"]:
-                            dt_match = chassis_match
-
                 # Update result keys individually to preserve the existing schema (especially "found")
                 result["device_type"]["found"] = dt_match["matched"]
                 result["device_type"]["device_type"] = dt_match.get("device_type")
@@ -1774,9 +1818,12 @@ def import_single_device(  # noqa: C901
         rack = None
         rack_explicitly_selected = False
 
+        try:
+            device_type = effective_import_device_type(device_type, manual_mappings)
+        except DeviceTypeOverrideError as exc:
+            return {"success": False, "device": None, "message": "", "error": str(exc), "synced": {}}
         if manual_mappings:
             site = Site.objects.filter(id=manual_mappings.get("site_id")).first() or site
-            device_type = DeviceType.objects.filter(id=manual_mappings.get("device_type_id")).first() or device_type
             device_role = DeviceRole.objects.filter(id=manual_mappings.get("device_role_id")).first() or device_role
 
             platform_id = manual_mappings.get("platform_id")
