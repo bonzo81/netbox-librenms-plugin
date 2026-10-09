@@ -154,19 +154,19 @@ pytest -c netbox_librenms_plugin/tests/browser/pytest.ini netbox_librenms_plugin
 
 ### End-to-End Suite
 
-The suite in `tests/compose_e2e` drives a real NetBox through its web UI and REST API. The Compose stack in `tests/compose_e2e/docker` runs NetBox with the plugin wheel, an RQ worker, PostgreSQL, Redis, and the LibreNMS stub. The stub serves the recordings of this checkout. The suite needs Docker. It does not need a test database or the devcontainer.
+The suite in `tests/e2e` drives a real NetBox through its web UI and REST API. The Compose stack in `tests/e2e/docker` runs NetBox with the plugin wheel, an RQ worker, PostgreSQL, Redis, and the LibreNMS stub. The stub serves the recordings of this checkout. The suite needs Docker. It does not need a test database or the devcontainer.
 
 ```bash
 uv build --wheel
-NETBOX_CONTAINER_TAG=v4.7 tests/compose_e2e/setup.sh
-uv run --no-project --with-requirements tests/compose_e2e/requirements.txt playwright install chromium
-uv run --no-project --with-requirements tests/compose_e2e/requirements.txt \
-    pytest -c tests/compose_e2e/pytest.ini tests/compose_e2e
-docker compose -f tests/compose_e2e/docker/docker-compose.yml down -v
+NETBOX_CONTAINER_TAG=v4.7 tests/e2e/setup.sh
+uv run --no-project --with-requirements tests/e2e/requirements.txt playwright install chromium
+uv run --no-project --with-requirements tests/e2e/requirements.txt \
+    pytest -c tests/e2e/pytest.ini tests/e2e
+docker compose -f tests/e2e/docker/docker-compose.yml down -v
 ```
 
 - `setup.sh` installs the one wheel in `dist/`, or the wheel path that you give as its argument. `NETBOX_CONTAINER_TAG` is a `netboxcommunity/netbox` image tag.
-- `NETBOX_PORT` sets the host port of NetBox (default 8000). Set it for the test run too. `COMPOSE_PROJECT_NAME` gives the stack its own name. `setup.sh` writes both to `tests/compose_e2e/docker/.env`, so later `docker compose` commands use the same values.
+- `NETBOX_PORT` sets the host port of NetBox (default 8000). Set it for the test run too. `COMPOSE_PROJECT_NAME` gives the stack its own name. `setup.sh` writes both to `tests/e2e/docker/.env`, so later `docker compose` commands use the same values.
 - Behind a TLS-intercepting proxy, `setup.sh` passes the proxy variables to the image build and gives the build the CA bundle in `SSL_CERT_FILE`.
 - A failed test keeps its Playwright trace in `test-results/`. Open it with `playwright show-trace`.
 

@@ -295,6 +295,6 @@ ca-bundle.crt
 .playwright-mcp/
 
 # End-to-end compose suite: setup.sh output and Playwright traces
-tests/compose_e2e/docker/*.whl
-tests/compose_e2e/docker/host_ca.crt
+tests/e2e/docker/*.whl
+tests/e2e/docker/host_ca.crt
 test-results/
