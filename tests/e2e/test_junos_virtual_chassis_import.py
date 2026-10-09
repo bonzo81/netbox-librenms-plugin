@@ -2,27 +2,23 @@
 
 import json
 import re
-from pathlib import Path
 
 import pytest
 from playwright.sync_api import Page, expect
 
-from .conftest import NetBoxAPI
+from .conftest import RECORDINGS_DIR, NetBoxAPI, recorded
 
-RECORDING_PATH = (
-    Path(__file__).parents[2] / "netbox_librenms_plugin/data_shapes/recordings/juniper-ex4400-vc-2member.json"
-)
-RECORDING = json.loads(RECORDING_PATH.read_text())
-DEVICE_ID = RECORDING["device_id"]
-DEVICE = RECORDING["responses"][f"GET /api/v0/devices/{DEVICE_ID}"]["devices"][0]
+RECORDING = "juniper-ex4400-vc-2member"
+DEVICE_ID = 1002
+DEVICE = recorded(RECORDING, f"/api/v0/devices/{DEVICE_ID}")["devices"][0]
 HOSTNAME = DEVICE["hostname"]
-ROOT_ROWS = RECORDING["responses"][f"GET /api/v0/inventory/{DEVICE_ID}?entPhysicalContainedIn=0"]["inventory"]
-(ROOT_SERIAL,) = (row["entPhysicalSerialNum"] for row in ROOT_ROWS)
-EXPECTED = RECORDING["expected"]["virtual_chassis"]
+(ROOT_SERIAL,) = (
+    row["entPhysicalSerialNum"]
+    for row in recorded(RECORDING, f"/api/v0/inventory/{DEVICE_ID}?entPhysicalContainedIn=0")["inventory"]
+)
+EXPECTED = json.loads((RECORDINGS_DIR / f"{RECORDING}.json").read_text())["expected"]["virtual_chassis"]
 # The FPC serials in member order, keyed by the member number that Junos reports.
 SERIAL_BY_POSITION = dict(zip(EXPECTED["member_positions"], EXPECTED["member_serials"], strict=True))
-# The stub reports this location for a recording that has none.
-SITE_NAME = "Lab"
 IMPORT_PATH = "/plugins/librenms_plugin/librenms-import/"
 
 
@@ -35,9 +31,8 @@ def _remove_imported_chassis(api: NetBoxAPI) -> None:
 
 
 @pytest.fixture
-def import_placement(netbox_api: NetBoxAPI) -> dict:
-    """Seed the site, device type and role that the import needs, and remove earlier imports."""
-    netbox_api.get_or_create("dcim/sites", {"name": SITE_NAME}, {"name": SITE_NAME, "slug": "lab"})
+def import_placement(netbox_api: NetBoxAPI, placement: dict) -> dict:
+    """Seed the device type that the import matches, and remove earlier imports."""
     manufacturer = netbox_api.get_or_create(
         "dcim/manufacturers", {"slug": "juniper"}, {"name": "Juniper", "slug": "juniper"}
     )
@@ -46,11 +41,8 @@ def import_placement(netbox_api: NetBoxAPI) -> dict:
         {"model": DEVICE["hardware"]},
         {"manufacturer": manufacturer["id"], "model": DEVICE["hardware"], "slug": DEVICE["hardware"].lower()},
     )
-    role = netbox_api.get_or_create(
-        "dcim/device-roles", {"slug": "e2e-switch"}, {"name": "E2E Switch", "slug": "e2e-switch", "color": "2196f3"}
-    )
     _remove_imported_chassis(netbox_api)
-    yield {"role": role}
+    yield placement
     _remove_imported_chassis(netbox_api)
 
 
