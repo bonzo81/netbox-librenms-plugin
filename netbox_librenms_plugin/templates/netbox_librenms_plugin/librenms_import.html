@@ -29,9 +29,6 @@
 
 {% block content %}
 
-  {# Display Django messages #}
-  {% include 'inc/messages.html' %}
-
   {# LibreNMS Server Information #}
   {% if server_selection_error %}
   <div class="alert alert-danger" id="librenms-import-server-error" role="alert">
