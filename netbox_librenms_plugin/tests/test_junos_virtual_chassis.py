@@ -102,3 +102,17 @@ def test_two_fpcs_that_share_a_serial_are_not_a_stack(recording_server):
     _edit_rows(recording, 121, lambda row: row.update(entPhysicalSerialNum=master_serial))
 
     assert _detect(recording_server, recording) is None
+
+
+def test_anonymization_keeps_a_placeholder_fpc_serial_so_the_shape_stays_rejected(recording_server):
+    """A BUILTIN FPC serial is no member serial; anonymizing it must not turn the shape into a stack."""
+    from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
+    from netbox_librenms_plugin.data_shapes.signature import compute_shape_signature
+
+    recording = copy.deepcopy(load_recording(_RECORDING))
+    _edit_rows(recording, 121, lambda row: row.update(entPhysicalSerialNum="BUILTIN"))
+    anonymized = anonymize_recording(recording)
+
+    assert _detect(recording_server, recording) is None
+    assert _detect(recording_server, anonymized) is None
+    assert compute_shape_signature(anonymized) == compute_shape_signature(recording)
