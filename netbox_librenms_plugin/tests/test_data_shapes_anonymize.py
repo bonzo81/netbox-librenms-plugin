@@ -800,6 +800,38 @@ def test_entphysical_name_and_descr_are_pseudonymized():
     assert item["entPhysicalName"] != item["entPhysicalDescr"]
 
 
+def test_entity_descr_keeps_only_the_junos_virtual_chassis_markers():
+    """VC detection reads these description markers, so they survive while the rest is replaced."""
+    import re
+
+    key = "GET /api/v0/inventory/1/all"
+    rec = _ports()
+    rec["responses"][key] = {
+        "status": "ok",
+        "inventory": [
+            {"entPhysicalIndex": 1, "entPhysicalDescr": "Juniper Virtual Chassis Switch"},
+            {"entPhysicalIndex": 4, "entPhysicalDescr": "FPC 1 Power Supply 0", "entPhysicalName": "FPC 1 PSU"},
+            {"entPhysicalIndex": 121, "entPhysicalDescr": "FPC: EX4400-24X @ 1/*/*", "entPhysicalName": "EX4400-24X-S"},
+            {"entPhysicalIndex": 271, "entPhysicalDescr": "Routing Engine 1"},
+        ],
+    }
+
+    first = anonymize_recording(rec)
+    second = anonymize_recording(first)
+
+    rows = first["responses"][key]["inventory"]
+    token = "entity-[0-9a-f]{6}"
+    assert re.fullmatch(f"{token} Virtual Chassis", rows[0]["entPhysicalDescr"])
+    assert re.fullmatch(f"FPC 1 {token}", rows[1]["entPhysicalDescr"])
+    assert re.fullmatch(f"FPC {token}", rows[2]["entPhysicalDescr"])
+    assert re.fullmatch(token, rows[3]["entPhysicalDescr"])
+    # The markers are read from the description only; names stay fully replaced.
+    assert all(re.fullmatch(token, row["entPhysicalName"]) for row in rows if "entPhysicalName" in row)
+    assert not any(word in str(rows) for word in ("Juniper", "EX4400", "Power Supply", "Routing"))
+    assert second["responses"][key]["inventory"] == rows
+    assert find_pii(first) == []
+
+
 def test_entity_text_preserves_only_supported_terminal_locators():
     """Entity text keeps hierarchy locators but not hostname-like slash labels."""
     rec = _ports()
