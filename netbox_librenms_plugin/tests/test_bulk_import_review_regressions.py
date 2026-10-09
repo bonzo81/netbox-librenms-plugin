@@ -316,8 +316,14 @@ def _importable_row(live_librenms, device_id, tag, *, members=None):
     )
 
     prerequisites = _prerequisites(tag)
+    # A stack's LibreNMS device serial is the master member's serial.
+    serial = members[0]["entPhysicalSerialNum"] if members else ""
     row = _libre_device(
-        device_id, f"{tag}-{device_id}", hardware=prerequisites["hardware"], location=prerequisites["location"]
+        device_id,
+        f"{tag}-{device_id}",
+        hardware=prerequisites["hardware"],
+        serial=serial,
+        location=prerequisites["location"],
     )
     if members is None:
         live_librenms.server.register(f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [row]})
@@ -422,6 +428,48 @@ def test_the_import_answer_names_a_chassis_that_a_lock_conflict_left_uncreated(c
         ]
 
 
+MASTER_UNKNOWN = "Imported device {} without a virtual chassis: the stack master could not be identified by serial."
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("htmx", [False, True], ids=["plain", "htmx"])
+def test_a_stack_whose_master_is_unknown_imports_standalone_and_says_why(client, live_librenms, htmx):
+    """No member carries the device serial, so the import creates no chassis and no member devices."""
+    from dcim.models import Device, VirtualChassis
+
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
+
+    device_id = 96361 if htmx else 96351
+    member_serial = f"SN-UNKNOWN-A-{int(htmx)}"
+    members = [_chassis(100, member_serial, position=1), _chassis(200, "", position=2)]
+    prerequisites, row = _importable_row(live_librenms, device_id, f"stack-unknown-{int(htmx)}", members=members)
+    row["serial"] = "ROOT"
+    live_librenms.server.register(f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [row]})
+    client.force_login(make_superuser(f"stack-unknown-{int(htmx)}-user"))
+    headers = {"HTTP_HX_REQUEST": "true"} if htmx else {}
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_devices"),
+        {
+            "server_key": "default",
+            "select": [str(device_id)],
+            f"role_{device_id}": str(prerequisites["device_role_id"]),
+        },
+        **headers,
+    )
+
+    imported = Device.objects.get(serial="ROOT")
+    assert imported.name == row["hostname"]
+    assert imported.virtual_chassis is None
+    assert not VirtualChassis.objects.filter(domain=f"librenms-default-{device_id}").exists()
+    assert not Device.objects.filter(serial=member_serial).exists()
+    warning = MASTER_UNKNOWN.format(device_id)
+    if htmx:
+        assert warning in response.content.decode()
+    else:
+        assert ("warning", warning) in messages_on(response.wsgi_request)
+
+
 @pytest.mark.django_db
 def test_a_failed_module_bay_count_write_fails_the_chassis_create():
     """The count write is part of the chassis transaction: its error must fail the create, not break it silently."""
@@ -442,7 +490,7 @@ def test_a_failed_module_bay_count_write_fails_the_chassis_create():
     ):
         create_virtual_chassis_with_members(
             master,
-            [{"serial": "MASTER-SERIAL", "position": 1}, {"serial": "MEMBER-SERIAL", "position": 2}],
+            [{"serial": "MASTER-SERIAL", "position": 1, "is_master": True}, {"serial": "MEMBER-SERIAL", "position": 2}],
             {"device_id": 96321},
             server_key="default",
         )

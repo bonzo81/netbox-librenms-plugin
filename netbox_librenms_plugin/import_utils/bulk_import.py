@@ -46,6 +46,7 @@ from .device_operations import (
 from .filters import _safe_disabled, get_librenms_devices_for_import
 from .permissions import check_user_permissions, require_permissions
 from .virtual_chassis import (
+    VC_MASTER_UNKNOWN_WARNING,
     create_virtual_chassis_with_members,
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
@@ -599,7 +600,9 @@ def bulk_import_devices_shared(  # noqa: C901
                 else:
                     logger.error(error_msg)
                 continue
-            if vc_data.get("is_stack", False):
+            # A stack whose master is unknown imports standalone, so it needs no chassis permission.
+            creates_vc = vc_data.get("is_stack", False) and bool(vc_data.get("master_identified"))
+            if creates_vc:
                 has_vc_perm, _ = check_user_permissions(user, ["dcim.add_virtualchassis"])
                 if not has_vc_perm:
                     error_msg = f"Cannot import stack device {device_id}: missing permission dcim.add_virtualchassis"
@@ -663,8 +666,16 @@ def bulk_import_devices_shared(  # noqa: C901
                 if job and job.logger:
                     job.logger.info(f"Imported device {idx} of {total}")
 
+                if vc_data.get("is_stack", False) and not creates_vc:
+                    warn_msg = VC_MASTER_UNKNOWN_WARNING.format(device_id=device_id)
+                    warnings_list.append(warn_msg)
+                    if job and job.logger:
+                        job.logger.warning(warn_msg)
+                    else:
+                        logger.warning(warn_msg)
+
                 # Handle virtual chassis creation for stacks
-                if vc_data.get("is_stack", False):
+                if creates_vc:
                     # One key per physical stack, so VC creation is triggered only once for it.
                     vc_domain = stack_identity(vc_data, device_id).key
 

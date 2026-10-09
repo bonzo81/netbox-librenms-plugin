@@ -72,6 +72,13 @@
           {% endif %}
         </div>
 
+        {% if vc.is_stack and not vc.master_identified %}
+          <div class="alert alert-warning py-2 px-3 mt-3 mb-0 small">
+            <i class="mdi mdi-alert"></i>
+            The stack master could not be identified by serial, so this device is imported without a virtual chassis.
+          </div>
+        {% endif %}
+
         {% if entry.validation.issues %}
           <div class="alert alert-warning py-2 px-3 mt-3 mb-0 small">
             <i class="mdi mdi-alert"></i>

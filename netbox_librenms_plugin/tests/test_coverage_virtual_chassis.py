@@ -11,15 +11,16 @@ class TestCreateVirtualChassisWithMembers:
         from netbox_librenms_plugin.tests.conftest import make_device
 
         master = make_device(f"{tag}-master", serial=master_serial)
+        master_row = {"serial": master_serial, "position": 1, "name": "Master", "is_master": True}
         virtual_chassis = create_virtual_chassis_with_members(
             master,
-            members,
+            [master_row, *members],
             {"device_id": master.pk},
             server_key=server_key,
         )
         return master, virtual_chassis
 
-    def test_duplicate_discovered_position_uses_next_free_slot(self):
+    def test_a_shared_position_numbers_the_stack_in_row_order(self):
         _master, virtual_chassis = self._create(
             "duplicate-position",
             [
@@ -34,7 +35,7 @@ class TestCreateVirtualChassisWithMembers:
             ("MEMBER-3", 3),
         ]
 
-    def test_missing_positions_skip_all_taken_slots(self):
+    def test_a_missing_position_numbers_the_stack_in_row_order(self):
         _master, virtual_chassis = self._create(
             "sequential-position",
             [
@@ -87,7 +88,10 @@ class TestStackMemberSerials:
         master = make_device("serial-boundary-master", serial="MASTER")
         virtual_chassis = create_virtual_chassis_with_members(
             master,
-            [{"serial": value, "position": 2, "name": "Member 2"}],
+            [
+                {"serial": "MASTER", "position": 1, "name": "Master", "is_master": True},
+                {"serial": value, "position": 2, "name": "Member 2"},
+            ],
             {"device_id": master.pk},
             server_key="default",
         )
