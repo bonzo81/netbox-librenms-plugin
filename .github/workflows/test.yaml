@@ -186,21 +186,21 @@ jobs:
         # Playwright downloads its own Chromium, so the Google Chrome source is not needed.
         run: |
           sudo rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
-          uv run --system-certs --no-project --with-requirements tests/compose_e2e/requirements.txt \
+          uv run --system-certs --no-project --with-requirements tests/e2e/requirements.txt \
             playwright install --with-deps chromium
 
       - name: Build the plugin wheel
         run: uv build --system-certs --wheel
 
       - name: Start the end-to-end stack
-        run: tests/compose_e2e/setup.sh
+        run: tests/e2e/setup.sh
         env:
           NETBOX_CONTAINER_TAG: ${{ matrix.netbox }}
 
       - name: Run end-to-end tests
         run: >-
-          uv run --system-certs --no-project --with-requirements tests/compose_e2e/requirements.txt
-          pytest -c tests/compose_e2e/pytest.ini tests/compose_e2e -v
+          uv run --system-certs --no-project --with-requirements tests/e2e/requirements.txt
+          pytest -c tests/e2e/pytest.ini tests/e2e -v
 
       - name: Upload Playwright traces
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -214,4 +214,4 @@ jobs:
       - name: Show Docker logs
         if: ${{ always() }}
         run: docker compose logs
-        working-directory: tests/compose_e2e/docker
+        working-directory: tests/e2e/docker
