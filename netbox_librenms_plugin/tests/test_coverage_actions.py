@@ -2241,6 +2241,50 @@ class TestDeviceVCDetailsView:
         assert "the stack master could not be identified" in html
         assert "without a virtual chassis" in html
 
+    def test_the_chassis_matched_device_types_serial_rule_names_the_master(self, settings, librenms_server):
+        """Unmatched hardware falls back to the chassis model, exactly as the import resolves the DeviceType."""
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        server_key = "vc-details-chassis-rule"
+        device_id = 46
+        device_type = make_device("vc-details-chassis-type").device_type
+        NormalizationRule.objects.create(
+            scope="serial", manufacturer=device_type.manufacturer, match_pattern=r"^PREFIX:(.+)$", replacement=r"\1"
+        )
+        view = self._view(settings, librenms_server, server_key)
+        librenms_server.device_info_response(
+            device_id=device_id, hostname="chassis-master", serial="SN1", hardware="NO-SUCH-HW"
+        )
+        member = {"entPhysicalClass": "chassis", "entPhysicalModelName": device_type.model}
+        librenms_server.vc_inventory_callable(
+            device_id,
+            [{"entPhysicalClass": "stack", "entPhysicalIndex": 100}],
+            {
+                100: [
+                    {
+                        **member,
+                        "entPhysicalIndex": 200,
+                        "entPhysicalParentRelPos": 1,
+                        "entPhysicalSerialNum": "PREFIX:SN1",
+                    },
+                    {
+                        **member,
+                        "entPhysicalIndex": 201,
+                        "entPhysicalParentRelPos": 2,
+                        "entPhysicalSerialNum": "PREFIX:SN2",
+                    },
+                ]
+            },
+        )
+        request = make_view_request("get", {"server_key": server_key})
+
+        result = get_view(view, request, device_id=device_id)
+
+        html = " ".join(result.content.decode().split())
+        assert html.count('<span class="badge bg-success text-white">Master</span>') == 1
+        assert "the stack master could not be identified" not in html
+
     def test_the_matched_device_types_serial_rule_names_the_master(self, settings, librenms_server):
         """The dialog previews the master with the rules of the DeviceType that import will use."""
         from netbox_librenms_plugin.models import NormalizationRule
