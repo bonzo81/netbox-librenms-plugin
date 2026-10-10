@@ -5,6 +5,7 @@ The suite is black-box: it drives the NetBox of the compose stack in docker/ thr
 and its REST API, and never imports the plugin. setup.sh builds and starts the stack.
 """
 
+import importlib.util
 import json
 import os
 import time
@@ -26,13 +27,17 @@ REQUEST_TIMEOUT = 30
 JOB_END_STATES = ("completed", "errored", "failed")
 RECORDINGS_DIR = Path(__file__).parents[2] / "netbox_librenms_plugin/data_shapes/recordings"
 MAPPINGS_API = "plugins/librenms_plugin"
+# The one status framing of a recording, loaded from its file: the plugin package needs NetBox.
+_envelope_spec = importlib.util.spec_from_file_location("recording_envelope", RECORDINGS_DIR.parent / "envelope.py")
+envelope = importlib.util.module_from_spec(_envelope_spec)
+_envelope_spec.loader.exec_module(envelope)
 
 
 def recorded(name: str, route: str) -> dict:
     """Return the body that a recording, which the stub also serves, holds for one GET route."""
-    body = json.loads((RECORDINGS_DIR / f"{name}.json").read_text())["responses"][f"GET {route}"]
-    # A recorded response is either the body or a [status, body] pair.
-    return body[1] if isinstance(body, list) else body
+    stored = json.loads((RECORDINGS_DIR / f"{name}.json").read_text())["responses"][f"GET {route}"]
+    _status, body = envelope.unwrap_response(stored)
+    return body
 
 
 class NetBoxAPI:
