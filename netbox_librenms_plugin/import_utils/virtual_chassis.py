@@ -740,6 +740,7 @@ def create_virtual_chassis_with_members(
         VirtualChassis: The created virtual chassis instance
 
     Raises:
+        ValueError: If *master_member* is not one of the *members_info* entries
         IntegrityError: If duplicate serials/names are detected
         Exception: For other creation errors
 
@@ -755,7 +756,11 @@ def create_virtual_chassis_with_members(
     member_serial = vc_serial_key(getattr(getattr(master_device, "device_type", None), "manufacturer", None))
     # Caller-supplied members can lack positions; the stack rule then numbers them in row order.
     positions = _member_positions([member.get("position") for member in members_info])
-    master_pos = next(pos for member, pos in zip(members_info, positions, strict=True) if member is master_member)
+    master_pos = next(
+        (pos for member, pos in zip(members_info, positions, strict=True) if member is master_member), None
+    )
+    if master_pos is None:
+        raise ValueError("master_member must be one of the members_info entries")
 
     # Save originals for in-memory rollback — transaction.atomic() rolls back DB but
     # not in-memory model fields.
