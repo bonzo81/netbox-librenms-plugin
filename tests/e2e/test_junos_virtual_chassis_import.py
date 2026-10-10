@@ -24,10 +24,12 @@ IMPORT_PATH = "/plugins/librenms_plugin/librenms-import/"
 
 def _remove_imported_chassis(api: NetBoxAPI) -> None:
     """Delete the chassis and the member devices that an earlier import of the recording created."""
+    devices = api.list("dcim/devices", name=HOSTNAME)
     for chassis in api.list("dcim/virtual-chassis", name=HOSTNAME):
+        devices += api.list("dcim/devices", virtual_chassis_id=chassis["id"])
         api.delete(f"dcim/virtual-chassis/{chassis['id']}")
-    for device in api.list("dcim/devices", name__isw=HOSTNAME):
-        api.delete(f"dcim/devices/{device['id']}")
+    for device_id in {device["id"] for device in devices}:
+        api.delete(f"dcim/devices/{device_id}")
 
 
 @pytest.fixture
