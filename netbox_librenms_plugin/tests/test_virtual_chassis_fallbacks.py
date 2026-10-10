@@ -454,6 +454,28 @@ class TestCreateVirtualChassisWithMembers:
         assert Device.objects.filter(virtual_chassis=vc, serial="BCFB9793").count() == 1
         assert Device.objects.filter(virtual_chassis=vc).count() == 2
 
+    def test_a_master_member_that_is_not_one_of_the_members_is_refused(self):
+        """A copy of the master row is not the caller's decision, so creation stops before any write."""
+        from dcim.models import Device, VirtualChassis
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
+        _name_pattern()
+        master = make_device("vc-master-copy", serial="COPY1")
+        members = [
+            {"serial": "COPY1", "position": 1, "name": "Switch 1"},
+            {"serial": "COPY2", "position": 2, "name": "Switch 2"},
+        ]
+
+        with pytest.raises(ValueError, match="master_member must be one of the members_info entries"):
+            create_virtual_chassis_with_members(master, members, {"device_id": 8105}, master_member=dict(members[0]))
+
+        master.refresh_from_db()
+        assert master.name == "vc-master-copy"
+        assert master.virtual_chassis is None
+        assert not VirtualChassis.objects.exists()
+        assert not Device.objects.filter(serial="COPY2").exists()
+
     def test_a_member_serial_already_in_netbox_is_skipped(self, caplog):
         from dcim.models import Device
 
