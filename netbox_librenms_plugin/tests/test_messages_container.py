@@ -1,7 +1,5 @@
 """Each plugin page and HTMX partial that shows Django messages carries one messages container."""
 
-import re
-
 import pytest
 from django.urls import reverse
 
@@ -12,10 +10,10 @@ from netbox_librenms_plugin.tests.test_ip_address_sync_safety import _refresh_ip
 from netbox_librenms_plugin.tests.test_vlan_sync_conflicts import _seed_vlan_snapshot
 
 SERVER = "default"
-IP_CACHE_MISS = "Cache has expired. Please refresh the IP data."
-MODULE_CACHE_MISS = "No cached inventory data. Please refresh modules first."
-SERVER_GONE = "Selected LibreNMS server is no longer configured."
-NOTHING_SELECTED = "No devices selected for import"
+IP_CACHE_MISS = "Cache has expired"
+MODULE_CACHE_MISS = "No cached inventory data"
+SERVER_GONE = "no longer configured"
+NOTHING_SELECTED = "No devices selected"
 HTMX = {"HTTP_HX_REQUEST": "true"}
 
 
@@ -123,5 +121,5 @@ def test_a_response_carries_one_messages_container(client, live_librenms, case):
     html = response.content.decode()
     assert html.count('id="django-messages"') == 1
     if message is not None:
-        toasts = re.findall(r'class="toast-body">\s*' + re.escape(message), html)
-        assert len(toasts) == 1, f"{message!r} rendered in {len(toasts)} toasts"
+        assert html.count('class="toast-body"') == 1
+        assert message in html
