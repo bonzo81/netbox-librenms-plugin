@@ -11,8 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from netbox_librenms_plugin.tests.test_vc_attribution import _junos_vc_inventory, _junos_vc_members
-
+from netbox_librenms_plugin.tests.conftest import junos_vc_inventory, make_junos_vc_members
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -6971,8 +6970,8 @@ def test_junos_vc_rows_on_the_page_belong_to_the_member_they_name(client, settin
     configure_servers(
         settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
     )
-    master, member = _junos_vc_members("junos-modules")
-    payload = trusted_module_inventory_payload(master, _junos_vc_inventory(), librenms_id=9355)
+    master, member = make_junos_vc_members("junos-modules")
+    payload = trusted_module_inventory_payload(master, junos_vc_inventory(), librenms_id=9355)
     cache.set(DeviceModuleTableView().get_cache_key(master, "inventory", server_key="default"), payload, 300)
     cache.set("librenms_device_info_default_9355", (True, {"device_id": 9355, "hostname": master.name}), 300)
     client.force_login(make_superuser("junos-modules-user"))
@@ -7009,14 +7008,14 @@ def test_a_decorated_junos_fpc_serial_is_serial_evidence_on_the_page(client, set
     NormalizationRule.objects.get_or_create(
         scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
     )
-    master, member = _junos_vc_members("junos-decorated")
+    master, member = make_junos_vc_members("junos-decorated")
     # NetBox numbers the members the other way round, so only the serial can name FPC 1's member.
     master.serial, member.serial = "12350", "12345"
     for device in (master, member):
         device.save(update_fields=["serial"])
     inventory = [
         {**row, "entPhysicalSerialNum": f"S/N {row['entPhysicalSerialNum']}"} if row["entPhysicalSerialNum"] else row
-        for row in _junos_vc_inventory()
+        for row in junos_vc_inventory()
     ]
     payload = trusted_module_inventory_payload(master, inventory, librenms_id=9356)
     cache.set(DeviceModuleTableView().get_cache_key(master, "inventory", server_key="default"), payload, 300)
