@@ -1044,3 +1044,17 @@ rules:
               metavariable: $CLASSES
               regex: \b(Base)?Exception\b
       - pattern-regex: (?m)^[ \t]*except[ \t]*\*
+  - id: recorded-response-needs-envelope
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Read a recorded LibreNMS response through data_shapes.envelope.unwrap_response. A bare
+      [status, body] list is the body of a 2xx response, not a status pair, and a second reader
+      of the status framing drifts from the envelope module.
+    metadata:
+      category: correctness
+    paths:
+      exclude: ["**/data_shapes/envelope.py"]
+    pattern-either:
+      - pattern: isinstance($V, list) and len($V) == 2 and isinstance($V[0], int)
+      - pattern: $V[1] if isinstance($V, list) else $V

@@ -54,6 +54,7 @@ unchecked until that review.
 | `no-unittest-assertions` | warning | A test calls a `self` method with a unittest assertion API name. |
 | `xfail-needs-raises` | error | A test marks an expected failure with `pytest.mark.xfail` and does not name the exception with `raises=`, or gives `raises=None`. An alias of the marker is not followed. |
 | `barrier-needs-run-in-threads` | error | A test creates a `threading.Barrier` and then starts threads with `ThreadPoolExecutor` or `Thread`, not with `tests.conftest.run_in_threads`. |
+| `recorded-response-needs-envelope` | error | Code reads a recorded response as a bare `[status, body]` list instead of through `data_shapes.envelope.unwrap_response`. |
 | `no-selected-fuzzy-apis` | warning | Code calls selected approximate-selection APIs. This does not prove exact-only selection. |
 
 ## Scope
@@ -70,7 +71,7 @@ rules include only `netbox_librenms_plugin/tests/`. The remaining rules apply to
 in the scan target.
 
 Opengrep 1.30.0 skips test directories during directory scans. The scan script expands the default
-targets into the package directory and explicit Python test files. Options alone keep these defaults.
+targets into the package directory and explicit Python test files, in the package and in `tests/`. Options alone keep these defaults.
 Pass options before the first `--`. The wrapper passes them to opengrep unchanged.
 Pass explicit targets after `--` to replace the defaults. With no `--`, the defaults apply.
 
@@ -162,6 +163,11 @@ the same file. Its limits:
   of a lambda default.
 - The rule follows a closure or a lambda that the function defines before the handler only when
   the `try` statement is at the top level of the function body.
+
+The recorded-response rule checks the two legacy spellings of the `[status, body]` read: the
+`isinstance(..., list) and len(...) == 2 and isinstance(...[0], int)` test and the
+`x[1] if isinstance(x, list) else x` expression. It does not see tuple unpacking or a `type()`
+check. `data_shapes/envelope.py` is excluded because it owns the format.
 
 ## `--taint-intrafile` is required
 
