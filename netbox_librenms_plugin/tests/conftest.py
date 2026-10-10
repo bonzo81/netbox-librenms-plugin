@@ -487,6 +487,45 @@ def make_virtual_chassis_members(tag, count=2):
     return virtual_chassis, members
 
 
+def junos_vc_inventory():
+    """Return the reporter's EX4400 VC rows plus one synthetic PIC under FPC 1."""
+
+    def row(index, entity_class, descr, *, serial="", position=0, contained_in=1, name="", model=""):
+        return {
+            "entPhysicalIndex": index,
+            "entPhysicalClass": entity_class,
+            "entPhysicalDescr": descr,
+            "entPhysicalName": name,
+            "entPhysicalModelName": model,
+            "entPhysicalSerialNum": serial,
+            "entPhysicalParentRelPos": position,
+            "entPhysicalContainedIn": contained_in,
+        }
+
+    psu = {"name": "JPSU-550-C-DC-AFO", "model": "640-107104"}
+    fpc = {"name": "EX4400-24X-S", "model": "650-151094"}
+    return [
+        row(1, "chassis", "Juniper Virtual Chassis Switch", serial="12345", contained_in=0),
+        row(2, "powerSupply", "FPC 0 Power Supply 0", serial="12346", position=0, **psu),
+        row(4, "powerSupply", "FPC 1 Power Supply 0", serial="12348", position=2, **psu),
+        row(30, "fan", "FPC 1 Fan Tray 0", position=10, name="Fan Module, Airflow Out (AFO)"),
+        row(120, "container", "FPC: EX4400-24X @ 0/*/*", serial="12345", position=0, **fpc),
+        row(121, "container", "FPC: EX4400-24X @ 1/*/*", serial="12350", position=1, **fpc),
+        row(1210, "module", "PIC: 4x10G SFP+ @ 1/2/*", position=2, contained_in=121, name="PIC 2", model="PIC-4X10G"),
+        row(271, "other", "Routing Engine 1", serial="12351", position=1, name="EX4400-24X-S", model="BUILTIN"),
+    ]
+
+
+def make_junos_vc_members(tag):
+    """Return a real two-member VC numbered like Junos: master at 0, member at 1."""
+    _chassis, (master, member) = make_virtual_chassis_members(tag, count=2)
+    for device, position, serial in ((master, 0, "12345"), (member, 1, "12350")):
+        device.vc_position = position
+        device.serial = serial
+        device.save(update_fields=["vc_position", "serial"])
+    return master, member
+
+
 def make_cluster(name):
     """Create a real Cluster on a shared ClusterType."""
     from virtualization.models import Cluster, ClusterType
