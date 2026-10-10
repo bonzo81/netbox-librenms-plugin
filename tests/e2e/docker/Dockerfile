@@ -1,3 +1,5 @@
+# check=skip=InvalidDefaultArgInFrom
+# setup.sh requires the tag and compose passes FROM, so no default can hide a missing tag.
 ARG FROM
 FROM ${FROM}
 
