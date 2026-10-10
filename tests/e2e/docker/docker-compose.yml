@@ -112,13 +112,16 @@ services:
       retries: 30
 
   postgres:
-    image: docker.io/postgres:16-alpine
+    image: docker.io/postgres:18-alpine
+    # PostgreSQL 18 does not start on Docker's 64 MB default /dev/shm.
+    shm_size: 1gb
     environment:
       POSTGRES_DB: netbox
       POSTGRES_PASSWORD: netbox-e2e
       POSTGRES_USER: netbox
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      # The 18 image keeps its data in a versioned directory under /var/lib/postgresql.
+      - postgres-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U netbox"]
       interval: 2s
@@ -126,7 +129,7 @@ services:
       retries: 30
 
   redis:
-    image: docker.io/valkey/valkey:8.0-alpine
+    image: docker.io/valkey/valkey:9-alpine
     healthcheck:
       test: ["CMD", "valkey-cli", "ping"]
       interval: 2s
