@@ -161,11 +161,11 @@ def module_device(netbox_api: NetBoxAPI, placement: dict) -> Iterator[Callable[.
             {"manufacturer": manufacturer["id"], "model": f"E2E-MODULES-{run}", "slug": f"e2e-modules-{run}"},
         )
         for name in device_bays:
-            netbox_api.create("dcim/module-bay-templates", {"device_type": device_type["id"], "name": name})
+            _create("dcim/module-bay-templates", {"device_type": device_type["id"], "name": name})
         for model, bays in module_types.items():
             module_type = _create("dcim/module-types", {"manufacturer": manufacturer["id"], "model": model})
             for name in bays:
-                netbox_api.create("dcim/module-bay-templates", {"module_type": module_type["id"], "name": name})
+                _create("dcim/module-bay-templates", {"module_type": module_type["id"], "name": name})
             # Scoped to the manufacturer, so it wins over a global mapping for the same model.
             _create(
                 f"{MAPPINGS_API}/module-type-mappings",
