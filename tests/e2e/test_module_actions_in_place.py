@@ -83,8 +83,10 @@ def test_dismissed_toast_stays_hidden_after_a_later_swap(modules_page):
     tab.install_row(page, NAMES[0])
     toasts = tab.toasts(page).locator(".toast")
     expect(toasts.first).to_be_visible()
-    for close in toasts.locator("[data-bs-dismiss=toast]").all():
-        close.click()
+    # One DOM pass: a toast that auto-hides leaves the page, so a list of buttons taken first can go stale.
+    page.eval_on_selector_all(
+        "#django-messages .toast [data-bs-dismiss=toast]", "buttons => buttons.forEach(b => b.click())"
+    )
     expect(toasts.filter(visible=True)).to_have_count(0)
 
     page.get_by_role("button", name="Capture data shape").click()
