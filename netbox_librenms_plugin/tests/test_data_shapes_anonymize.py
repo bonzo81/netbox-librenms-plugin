@@ -1024,6 +1024,62 @@ def test_hardware_revision_text_is_pseudonymized(field):
 
 
 @pytest.mark.parametrize("field", ["hardware", "remote_platform", "entPhysicalModelName", "model"])
+@pytest.mark.parametrize("value", [0, 123456, 123456.25])
+def test_numeric_model_fields_share_the_string_token(field, value):
+    recording = _ports({field: value, "entPhysicalModelName": str(value)})
+    if field == "entPhysicalModelName":
+        recording = _ports({field: value, "model": str(value)})
+
+    row = _response(anonymize_recording(recording), "GET /api/v0/devices/1/ports")["ports"][0]
+    token = row["model"] if field == "entPhysicalModelName" else row["entPhysicalModelName"]
+
+    assert row[field] == token
+    assert re.fullmatch(r"MODEL-[0-9a-f]{6}", token)
+
+
+@pytest.mark.parametrize("field", ["entPhysicalModelName", "entPhysicalSerialNum"])
+@pytest.mark.parametrize("value", [0, 123456, 123456.25])
+@pytest.mark.parametrize("numeric_parent", [True, False])
+def test_anonymization_preserves_mixed_numeric_inventory_identity(recording_server, field, value, numeric_parent):
+    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+    parent = {
+        "entPhysicalIndex": 100,
+        "entPhysicalName": "Carrier 1",
+        "entPhysicalClass": "xioModule",
+        "entPhysicalContainedIn": 0,
+        "entPhysicalSerialNum": "EXAMPLE-SERIAL",
+        "entPhysicalModelName": "EXAMPLE-SKU",
+        field: value if numeric_parent else str(value),
+    }
+    child = {
+        **parent,
+        "entPhysicalIndex": 200,
+        "entPhysicalName": "Card 1",
+        "entPhysicalClass": "mdaModule",
+        "entPhysicalContainedIn": 100,
+        field: str(value) if numeric_parent else value,
+    }
+    recording = {
+        "device_id": 1,
+        "responses": {"GET /api/v0/inventory/1": {"status": "ok", "inventory": [parent, child]}},
+    }
+
+    for replay in (recording, anonymize_recording(recording, salt="numeric-inventory")):
+        _server, api = recording_server(replay)
+        ok, inventory = api.get_inventory_filtered(replay["device_id"])
+        assert ok
+        replay_parent, replay_child = inventory
+        index_map = {item["entPhysicalIndex"]: item for item in inventory}
+        assert BaseModuleTableView._find_integrating_ancestor(replay_child, index_map) is replay_parent
+        view = object.__new__(BaseModuleTableView)
+        row = view._build_row(replay_child, index_map, {}, {})
+        assert row["status"] == "Integrated"
+        assert row["integrated_in_index"] == 100
+        assert row["can_install"] is False
+
+
+@pytest.mark.parametrize("field", ["hardware", "remote_platform", "entPhysicalModelName", "model"])
 @pytest.mark.parametrize("value", [None, "", "BuIlTiN", "DeFaUlT", "N/A", "Na", "-", "UnKnOwN", "  N/A  "])
 def test_model_placeholders_pass_through_unchanged(field, value):
     recording = _ports({field: value})

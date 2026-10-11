@@ -727,6 +727,13 @@ def _anon_value(key, value, rules, container=None):  # noqa: C901
             return value
         serial = str(value).strip()
         return f"SN-{_hash(serial, salt)}" if serial and serial != "-" else value
+    if key in MODEL_KEYS:
+        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+            return value
+        model = str(value).strip().lower()
+        if model in _MODEL_PLACEHOLDERS:
+            return value
+        return rules.model_tokens.setdefault(model, f"MODEL-{_hash(model, salt)}")
     if not isinstance(value, str) or not value or value == "-":
         # Pseudonym/scrub rules below operate on real string values; leave empties/sentinels
         # and non-strings (ints, bools, null) untouched so logic-bearing numerics survive.
@@ -743,11 +750,6 @@ def _anon_value(key, value, rules, container=None):  # noqa: C901
         return _anon_route_distinguisher(value, rules)
     if key in HOSTNAME_KEYS:
         return f"device-{_hash(value, salt)}"
-    if key in MODEL_KEYS:
-        model = value.strip().lower()
-        if model in _MODEL_PLACEHOLDERS:
-            return value
-        return rules.model_tokens.setdefault(model, f"MODEL-{_hash(model, salt)}")
     if key in MFG_KEYS:
         return f"MFG-{_hash(value, salt)}"
     if key in ENTITY_TEXT_KEYS:
