@@ -153,6 +153,10 @@ def _start_stub():
     return LibreNMSStubServer(recordings=recordings, api_token=TOKEN).start()
 
 
+def _recording_device_id(name):
+    return load_recording(name)["device_id"]
+
+
 def test_persistent_stub_request_log_keeps_only_recent_requests():
     server = _start_stub()
     try:
@@ -192,26 +196,28 @@ def test_stub_serves_recordings_and_derived_instance_endpoints_over_real_http():
         assert set(device["status"] for device in devices) <= {0, 1}
         assert all(device["location"] == "Lab" for device in devices)
 
-        ok, ports = api.get_ports(1)
+        recording = load_recording("arcos-lag-transceivers")
+        device_id = recording["device_id"]
+        ok, ports = api.get_ports(device_id)
         assert ok is True
-        recorded_ports = load_recording("arcos-lag-transceivers")["responses"]["GET /api/v0/devices/1/ports"]
+        recorded_ports = recording["responses"][f"GET /api/v0/devices/{device_id}/ports"]
         assert [port["port_id"] for port in ports["ports"]] == [port["port_id"] for port in recorded_ports["ports"]]
         assert any(port.get("vlans") for port in ports["ports"])
 
-        ok, addresses = api.get_device_ips(1)
+        ok, addresses = api.get_device_ips(device_id)
         assert ok is True
         assert addresses
-        recorded_device = load_recording("arcos-lag-transceivers")["responses"]["GET /api/v0/devices/1"]["devices"][0]
+        recorded_device = recording["responses"][f"GET /api/v0/devices/{device_id}"]["devices"][0]
         assert addresses[0]["ipv4_address"] == recorded_device["ip"]
         assert addresses[0]["port_id"] is not None
 
-        ok, vlans = api.get_device_vlans(1)
+        ok, vlans = api.get_device_vlans(device_id)
         assert ok is True
         assert {vlan["vlan_vlan"] for vlan in vlans} == {100, 200}
-        assert all(vlan["device_id"] == 1 for vlan in vlans)
+        assert all(vlan["device_id"] == device_id for vlan in vlans)
         assert len({vlan["vlan_id"] for vlan in vlans}) == len(vlans)
 
-        ok, links = api.get_device_links(1)
+        ok, links = api.get_device_links(device_id)
         assert ok is True
         assert links["status"] == "ok"
         assert links["links"]
@@ -302,14 +308,21 @@ def test_stub_supports_librenms_device_filters_and_lookup_aliases():
         ).json()["devices"]
         down = _request(server, "GET", "/api/v0/devices", params={"type": "down"}).json()["devices"]
 
-        assert {device["device_id"] for device in management} == {12, 25}
-        assert {device["device_id"] for device in down} == {1, 32}
+        assert {device["device_id"] for device in management} == {
+            _recording_device_id("avocent-serial-ports"),
+            load_recording("linux-host-oob")["meta"]["oob_id"],
+        }
+        assert {device["device_id"] for device in down} == {
+            _recording_device_id("arcos-lag-transceivers"),
+            _recording_device_id("iosxe-subinterfaces"),
+        }
 
-        target = next(device for device in all_devices if device["device_id"] == 1000)
+        target_id = _recording_device_id("cisco-stackwise-3member")
+        target = next(device for device in all_devices if device["device_id"] == target_id)
         for lookup in (target["device_id"], target["hostname"], target["ip"]):
             response = _request(server, "GET", f"/api/v0/devices/{lookup}")
             assert response.status_code == 200
-            assert response.json()["devices"][0]["device_id"] == 1000
+            assert response.json()["devices"][0]["device_id"] == target_id
     finally:
         server.stop()
 
@@ -318,7 +331,8 @@ def test_stub_patches_a_device_by_hostname_with_a_scalar_field():
     """LibreNMS accepts a scalar field/data pair on any device alias, so the stub must too."""
     server = _start_stub()
     try:
-        target = _request(server, "GET", "/api/v0/devices/1000").json()["devices"][0]
+        device_id = _recording_device_id("cisco-stackwise-3member")
+        target = _request(server, "GET", f"/api/v0/devices/{device_id}").json()["devices"][0]
         response = _request(
             server,
             "PATCH",
@@ -327,7 +341,7 @@ def test_stub_patches_a_device_by_hostname_with_a_scalar_field():
         )
 
         assert response.status_code == 200, response.text
-        updated = _request(server, "GET", "/api/v0/devices/1000").json()["devices"][0]
+        updated = _request(server, "GET", f"/api/v0/devices/{device_id}").json()["devices"][0]
         assert updated["notes"] == "kept online"
     finally:
         server.stop()
@@ -371,11 +385,13 @@ def test_stub_derives_the_oob_controller_device_from_the_recorded_host_pair():
         ok, devices = api.list_devices()
         assert ok is True
         by_id = {device["device_id"]: device for device in devices}
-        assert set(by_id) == {25, 39}
-        assert by_id[25]["serial"] == by_id[39]["serial"]
-        assert by_id[25]["os"] == "idrac"
+        host_id = recording["device_id"]
+        controller_id = recording["meta"]["oob_id"]
+        assert set(by_id) == {controller_id, host_id}
+        assert by_id[controller_id]["serial"] == by_id[host_id]["serial"]
+        assert by_id[controller_id]["os"] == "idrac"
 
-        ok, ports = api.get_ports(25)
+        ok, ports = api.get_ports(controller_id)
         assert ok is True
         assert len(ports["ports"]) == 10
     finally:
@@ -400,7 +416,9 @@ def test_stub_replays_the_scaffolded_virtual_machine_recording():
 
         ok, ports = api.get_ports(recording["device_id"])
         assert ok is True
-        assert {port["ifName"] for port in ports["ports"]} == {"lo", "ens3"}
+        recorded_ports = recording["responses"][f"GET /api/v0/devices/{recording['device_id']}/ports"]["ports"]
+        assert {port["ifName"] for port in ports["ports"]} == {port["ifName"] for port in recorded_ports}
+        assert {port["ifType"] for port in ports["ports"]} == {"softwareLoopback", "ethernetCsmacd"}
     finally:
         server.stop()
 
@@ -456,16 +474,19 @@ def test_stub_supports_filtered_inventory_without_a_recorded_query_variant():
     try:
         api = make_recording_api(server.url, server_key="stub", token=TOKEN)
 
-        ok, inventory = api.get_inventory_filtered(12, ent_physical_class="chassis")
+        ok, inventory = api.get_inventory_filtered(
+            _recording_device_id("avocent-serial-ports"), ent_physical_class="chassis"
+        )
 
         assert ok is True
         assert inventory == []
 
-        ok, unfiltered = api.get_inventory_filtered(1000)
+        device_id = _recording_device_id("cisco-stackwise-3member")
+        ok, unfiltered = api.get_inventory_filtered(device_id)
         assert ok is True
         present_class = unfiltered[0]["entPhysicalClass"]
 
-        ok, matched = api.get_inventory_filtered(1000, ent_physical_class=present_class)
+        ok, matched = api.get_inventory_filtered(device_id, ent_physical_class=present_class)
         assert ok is True
         assert matched
         assert all(item["entPhysicalClass"] == present_class for item in matched)
@@ -560,9 +581,11 @@ def test_stub_device_and_location_writes_are_visible_until_restart():
 
 def test_stub_skips_a_generated_ip_collision_when_adding_devices():
     """A generated-IP collision must not wedge this or every later device creation."""
-    server = _start_stub()
+    recording = _location_recording(1, "Lab")
+    recording["responses"]["GET /api/v0/devices/1"]["devices"][0]["ip"] = "198.51.100.3"
+    server = LibreNMSStubServer(recordings=[recording], api_token=TOKEN).start()
     try:
-        for index in range(58):
+        for index in range(2):
             response = _request(
                 server,
                 "POST",
@@ -571,10 +594,10 @@ def test_stub_skips_a_generated_ip_collision_when_adding_devices():
             )
             assert response.status_code == 200, f"add {index}: {response.text}"
 
-        assert 2057 not in server.devices
-        assert server.devices[2058]["hostname"] == "generated-56.example.test"
-        assert server.devices[2059]["hostname"] == "generated-57.example.test"
-        assert server._next_device_id == 2060
+        assert 2 not in server.devices
+        assert server.devices[3]["hostname"] == "generated-0.example.test"
+        assert server.devices[4]["hostname"] == "generated-1.example.test"
+        assert server._next_device_id == 5
     finally:
         server.stop()
 
@@ -585,7 +608,7 @@ def test_stub_rejects_duplicate_recording_device_ids():
     try:
         LibreNMSStubServer(recordings=[recording, recording], api_token=TOKEN)
     except ValueError as exc:
-        assert "Duplicate recording device_id 1000" in str(exc)
+        assert f"Duplicate recording device_id {recording['device_id']}" in str(exc)
     else:
         raise AssertionError("duplicate device ids must fail closed")
 
@@ -593,21 +616,26 @@ def test_stub_rejects_duplicate_recording_device_ids():
 def test_stub_rejects_alias_collision_without_mutating_the_device():
     server = _start_stub()
     try:
-        first = server.devices[1]
-        second = server.devices[12]
+        first_id = _recording_device_id("arcos-lag-transceivers")
+        second_id = _recording_device_id("avocent-serial-ports")
+        first = server.devices[first_id]
+        second = server.devices[second_id]
         original_hostname = first["hostname"]
 
         response = _request(
             server,
             "PATCH",
-            "/api/v0/devices/1",
+            f"/api/v0/devices/{first_id}",
             json={"field": ["hostname"], "data": [second["hostname"]]},
         )
 
         assert response.status_code == 409
-        assert server.devices[1]["hostname"] == original_hostname
+        assert server.devices[first_id]["hostname"] == original_hostname
         assert _request(server, "GET", f"/api/v0/devices/{original_hostname}").status_code == 200
-        assert _request(server, "GET", f"/api/v0/devices/{second['hostname']}").json()["devices"][0]["device_id"] == 12
+        assert (
+            _request(server, "GET", f"/api/v0/devices/{second['hostname']}").json()["devices"][0]["device_id"]
+            == second_id
+        )
     finally:
         server.stop()
 
@@ -615,19 +643,20 @@ def test_stub_rejects_alias_collision_without_mutating_the_device():
 def test_stub_rejects_device_id_update_without_mutating_the_device():
     server = _start_stub()
     try:
-        original = copy.deepcopy(server.devices[1])
+        device_id = _recording_device_id("arcos-lag-transceivers")
+        original = copy.deepcopy(server.devices[device_id])
 
         response = _request(
             server,
             "PATCH",
-            "/api/v0/devices/1",
+            f"/api/v0/devices/{device_id}",
             json={"field": ["location", "device_id"], "data": ["Changed", 9999]},
         )
 
         assert response.status_code == 422
         assert response.json()["status"] == "error"
-        assert server.devices[1] == original
-        current = _request(server, "GET", "/api/v0/devices/1")
+        assert server.devices[device_id] == original
+        current = _request(server, "GET", f"/api/v0/devices/{device_id}")
         assert current.status_code == 200
         assert current.json()["devices"] == [original]
     finally:
@@ -638,7 +667,7 @@ def test_stub_rejects_derived_sysname_collision_before_creating_device():
     """A caller-derived sysName collision must return 409 without changing stub state."""
     server = _start_stub()
     try:
-        existing = server.devices[1]
+        existing = server.devices[_recording_device_id("arcos-lag-transceivers")]
         hostname = f"{existing['sysName']}.other.example.test"
 
         devices_before = copy.deepcopy(server.devices)
@@ -783,12 +812,13 @@ def test_stub_stops_answering_patch_on_a_hostname_a_rename_superseded():
     """A superseded alias must lose its write route, not just its read route."""
     server = _start_stub()
     try:
-        original = _request(server, "GET", "/api/v0/devices/32").json()["devices"][0]
+        device_id = _recording_device_id("iosxe-subinterfaces")
+        original = _request(server, "GET", f"/api/v0/devices/{device_id}").json()["devices"][0]
         old_hostname = original["hostname"]
         # Only a hostname that is not also the sysName or the IP is superseded by the rename.
         assert old_hostname not in (original["sysName"], original["ip"])
         renamed = f"renamed-{old_hostname}"
-        rename = _request(server, "PATCH", "/api/v0/devices/32", json={"field": "hostname", "data": renamed})
+        rename = _request(server, "PATCH", f"/api/v0/devices/{device_id}", json={"field": "hostname", "data": renamed})
         assert rename.status_code == 200, rename.text
 
         stale_read = _request(server, "GET", f"/api/v0/devices/{old_hostname}")
