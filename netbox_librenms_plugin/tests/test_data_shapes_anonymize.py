@@ -13,6 +13,9 @@ from netbox_librenms_plugin.tests.recordings import load_recording
 _DOC_NETWORKS = tuple(ip_network(n) for n in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24", "2001:db8::/32"))
 
 
+_STACK_RECORDING_ID = load_recording("cisco-stackwise-3member")["device_id"]
+
+
 def _is_doc_address(value):
     return any(ip_address(value.split("/")[0]) in network for network in _DOC_NETWORKS)
 
@@ -66,13 +69,13 @@ def test_logic_bearing_fields_preserved():
     rec = load_recording("cisco-stackwise-3member")
     anon = anonymize_recording(rec)
 
-    root = _response(anon, "GET /api/v0/inventory/1000?entPhysicalContainedIn=0")["inventory"][0]
+    root = _response(anon, f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalContainedIn=0")["inventory"][0]
     assert root["entPhysicalClass"] == "stack"
     assert root["entPhysicalIndex"] == 1
 
-    members = _response(anon, "GET /api/v0/inventory/1000?entPhysicalClass=chassis&entPhysicalContainedIn=1")[
-        "inventory"
-    ]
+    members = _response(
+        anon, f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalClass=chassis&entPhysicalContainedIn=1"
+    )["inventory"]
     # Positions and indices (drive VC member ordering) are untouched.
     assert [m["entPhysicalParentRelPos"] for m in members] == [1, 2, 3]
     assert [m["entPhysicalIndex"] for m in members] == [100, 200, 300]
@@ -85,12 +88,13 @@ def test_serials_pseudonymized_and_deterministic():
     a1 = anonymize_recording(rec)
     a2 = anonymize_recording(rec)
 
-    key = "GET /api/v0/inventory/1000?entPhysicalClass=chassis&entPhysicalContainedIn=1"
+    key = f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalClass=chassis&entPhysicalContainedIn=1"
     serials1 = [m["entPhysicalSerialNum"] for m in _response(a1, key)["inventory"]]
     serials2 = [m["entPhysicalSerialNum"] for m in _response(a2, key)["inventory"]]
 
     assert all(s.startswith("SN-") for s in serials1)
-    assert "SN-a1b2c3" not in serials1  # original gone
+    original_serials = [m["entPhysicalSerialNum"] for m in _response(rec, key)["inventory"]]
+    assert set(serials1).isdisjoint(original_serials)
     assert serials1 == serials2  # deterministic
     assert len(set(serials1)) == 3  # distinct originals stay distinct
 
@@ -99,14 +103,15 @@ def test_cross_reference_serial_preserved():
     """A device serial that equals a stack-member serial must map to the SAME pseudonym."""
     rec = load_recording("cisco-stackwise-3member")
     # Sanity: the fixture's device serial equals member #100's serial.
-    dev_serial = rec["responses"]["GET /api/v0/devices/1000"]["devices"][0]["serial"]
-    key = "GET /api/v0/inventory/1000?entPhysicalClass=chassis&entPhysicalContainedIn=1"
+    dev_serial = rec["responses"][f"GET /api/v0/devices/{_STACK_RECORDING_ID}"]["devices"][0]["serial"]
+    key = f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalClass=chassis&entPhysicalContainedIn=1"
     member_serial = rec["responses"][key]["inventory"][0]["entPhysicalSerialNum"]
-    assert dev_serial == member_serial == "SN-a1b2c3"
+    assert dev_serial == member_serial
 
     anon = anonymize_recording(rec)
-    anon_dev = _response(anon, "GET /api/v0/devices/1000")["devices"][0]["serial"]
+    anon_dev = _response(anon, f"GET /api/v0/devices/{_STACK_RECORDING_ID}")["devices"][0]["serial"]
     anon_member = _response(anon, key)["inventory"][0]["entPhysicalSerialNum"]
+    assert anon_dev != dev_serial
     assert anon_dev == anon_member  # cross-reference intact → master detection still works
 
 
@@ -155,7 +160,7 @@ def test_hostname_and_model_pseudonymized():
     """hostname/sysName → device-<hash>; hardware/model SKU → MODEL-<hash>."""
     rec = load_recording("cisco-stackwise-3member")
     anon = anonymize_recording(rec)
-    dev = _response(anon, "GET /api/v0/devices/1000")["devices"][0]
+    dev = _response(anon, f"GET /api/v0/devices/{_STACK_RECORDING_ID}")["devices"][0]
 
     assert dev["hostname"].startswith("device-")
     assert dev["sysName"].startswith("device-")
@@ -187,9 +192,9 @@ def test_inventory_model_name_is_pseudonymized():
     rec = load_recording("cisco-stackwise-3member")
     anon = anonymize_recording(rec)
 
-    members = _response(anon, "GET /api/v0/inventory/1000?entPhysicalClass=chassis&entPhysicalContainedIn=1")[
-        "inventory"
-    ]
+    members = _response(
+        anon, f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalClass=chassis&entPhysicalContainedIn=1"
+    )["inventory"]
     model_names = [m.get("entPhysicalModelName") for m in members if m.get("entPhysicalModelName")]
     assert model_names
     assert all(re.fullmatch(r"MODEL-[0-9a-f]{6}", name) for name in model_names)
@@ -944,7 +949,7 @@ def test_find_pii_flags_nonempty_value_under_secret_looking_key():
 def test_salt_changes_pseudonyms():
     """Different salts produce different pseudonyms for the same input."""
     rec = load_recording("cisco-stackwise-3member")
-    key = "GET /api/v0/inventory/1000?entPhysicalClass=chassis&entPhysicalContainedIn=1"
+    key = f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalClass=chassis&entPhysicalContainedIn=1"
     s_a = _response(anonymize_recording(rec, salt="alpha"), key)["inventory"][0]["entPhysicalSerialNum"]
     s_b = _response(anonymize_recording(rec, salt="beta"), key)["inventory"][0]["entPhysicalSerialNum"]
     assert s_a != s_b
@@ -967,7 +972,7 @@ def test_anonymized_recording_still_detects_vc(recording_server, db):
     # compare member serials against the anonymized DEVICE endpoint's serial — comparing against
     # members[0] is a tautology (members[0] always equals itself), which would stay green even if
     # anonymization broke the device-serial ↔ member-serial correlation.
-    device_serial = _response(anon, "GET /api/v0/devices/1000")["devices"][0]["serial"]
+    device_serial = _response(anon, f"GET /api/v0/devices/{_STACK_RECORDING_ID}")["devices"][0]["serial"]
     assert any(m["serial"] == device_serial for m in result["members"])
 
 

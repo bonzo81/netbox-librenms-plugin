@@ -24,6 +24,10 @@ pytestmark = pytest.mark.django_db
 _STUB_ROW_FIELDS = {"ip": "addresses", "links": "links", "ports": "ports", "transceivers": "transceivers"}
 
 
+_STACK_RECORDING_ID = load_recording("cisco-stackwise-3member")["device_id"]
+_SINGLE_RECORDING_ID = load_recording("cisco-lag-and-subinterface")["device_id"]
+
+
 class _StubApi:
     """Serve controlled API responses without serial sensor support for capture logic tests."""
 
@@ -416,22 +420,25 @@ def test_capture_roundtrip_preserves_vc_outcome(recording_server):
 
     # os metadata is lifted verbatim from the captured device-info response (the bundled seed's OS
     # is already pseudonymized, and capture does not anonymize — it records what the server returns).
-    assert captured["meta"]["os"] == seed["responses"]["GET /api/v0/devices/1000"]["devices"][0]["os"]
+    assert captured["meta"]["os"] == seed["responses"][f"GET /api/v0/devices/{_STACK_RECORDING_ID}"]["devices"][0]["os"]
     # The capture recorded device info, both inventory variants, ports, and port_stack.
     keys = list(captured["responses"])
-    assert "GET /api/v0/devices/1000" in keys
-    assert any("inventory/1000?entPhysicalContainedIn=0" in k for k in keys)
+    assert f"GET /api/v0/devices/{_STACK_RECORDING_ID}" in keys
+    assert any(f"inventory/{_STACK_RECORDING_ID}?entPhysicalContainedIn=0" in k for k in keys)
     assert any("entPhysicalClass=chassis" in k for k in keys)
     # The seed serves real empty ports and port_stack responses. Both routes are required,
     # so an omitted route would abort capture instead of storing its 404 response.
-    assert captured["responses"]["GET /api/v0/devices/1000/ports"] == {"status": "ok", "ports": []}
-    assert captured["responses"]["GET /api/v0/devices/1000/port_stack"] == {"status": "ok", "mappings": []}
+    assert captured["responses"][f"GET /api/v0/devices/{_STACK_RECORDING_ID}/ports"] == {"status": "ok", "ports": []}
+    assert captured["responses"][f"GET /api/v0/devices/{_STACK_RECORDING_ID}/port_stack"] == {
+        "status": "ok",
+        "mappings": [],
+    }
 
     # Round-trip: replay the CAPTURED recording in a fresh mock and re-run VC detection.
     from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
 
     _server2, api2 = recording_server(captured)
-    result = detect_virtual_chassis_from_inventory(api2, 1000)
+    result = detect_virtual_chassis_from_inventory(api2, _STACK_RECORDING_ID)
 
     assert result is not None
     assert result["member_count"] == 3
@@ -446,8 +453,8 @@ def test_capture_roundtrip_preserves_port_relationships(recording_server):
     captured = capture_device_recording(api, seed["device_id"], name="captured-lag")
 
     _server2, api2 = recording_server(captured)
-    ok_ports, ports_data = api2.get_ports(1002)
-    ok_stack, port_stack = api2.get_port_stack(1002)
+    ok_ports, ports_data = api2.get_ports(_SINGLE_RECORDING_ID)
+    ok_stack, port_stack = api2.get_port_stack(_SINGLE_RECORDING_ID)
     assert ok_ports and ok_stack
 
     relationships = api2.resolve_port_relationships(ports_data["ports"], port_stack, lag_patterns={})
@@ -462,10 +469,10 @@ def test_capture_records_verbatim_port_body(recording_server):
     seed = _with_empty_inventory_source(load_recording("cisco-lag-and-subinterface"))
     _server, api = recording_server(seed)
 
-    captured = capture_device_recording(api, 1002)
+    captured = capture_device_recording(api, _SINGLE_RECORDING_ID)
 
-    captured_ports = captured["responses"]["GET /api/v0/devices/1002/ports"]
-    assert captured_ports == seed["responses"]["GET /api/v0/devices/1002/ports"]
+    captured_ports = captured["responses"][f"GET /api/v0/devices/{_SINGLE_RECORDING_ID}/ports"]
+    assert captured_ports == seed["responses"][f"GET /api/v0/devices/{_SINGLE_RECORDING_ID}/ports"]
 
 
 def test_capture_mirrors_inventory_all_fallback_when_server_ignores_filters(recording_server):
@@ -542,10 +549,10 @@ def test_capture_rejects_transceivers_when_request_has_transport_error(recording
     def refuse_request(**_request):
         raise ConnectionResetError("simulated connection reset")
 
-    server.register("/api/v0/devices/1000/transceivers", refuse_request, method="GET")
+    server.register(f"/api/v0/devices/{_STACK_RECORDING_ID}/transceivers", refuse_request, method="GET")
 
     with pytest.raises(RuntimeError, match="transceivers.*no HTTP response"):
-        capture_device_recording(api, 1000)
+        capture_device_recording(api, _STACK_RECORDING_ID)
 
 
 def test_capture_rejects_transceiver_server_error():

@@ -242,7 +242,7 @@
         "present": false,
         "styles": []
       },
-      "port_stack": false,
+      "port_stack": true,
       "vlans": false,
       "transceivers": false,
       "serial": false,

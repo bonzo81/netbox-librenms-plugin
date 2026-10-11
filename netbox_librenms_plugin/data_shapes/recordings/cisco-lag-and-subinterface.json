@@ -7,95 +7,95 @@
     "vendor": "cisco",
     "topology": "single"
   },
-  "device_id": 1002,
+  "device_id": 1182008591,
   "lag_patterns": {
     "os-901310": "^Po\\d+$"
   },
   "responses": {
-    "GET /api/v0/devices/1002": {
+    "GET /api/v0/devices/1182008591": {
       "status": "ok",
       "devices": [
         {
-          "device_id": 1002,
-          "hostname": "router-cisco-1",
-          "sysName": "router-cisco-1-sys",
-          "hardware": "MODEL-c972d0",
+          "device_id": 1182008591,
+          "hostname": "device-def780",
+          "sysName": "device-bc9a1c",
+          "hardware": "MODEL-ff9458",
           "os": "os-901310",
-          "serial": "SN-ee33ff",
-          "ip": "192.0.2.12",
-          "version": "fw-9d812d"
+          "serial": "SN-19435b",
+          "ip": "203.0.113.124",
+          "version": "fw-45ae3b"
         }
       ]
     },
-    "GET /api/v0/devices/1002/ports": {
+    "GET /api/v0/devices/1182008591/ports": {
       "status": "ok",
       "ports": [
         {
-          "port_id": 301,
+          "port_id": 360662649,
           "ifName": "Port-channel1",
           "ifDescr": "Port-channel1",
           "ifType": "ieee8023adLag",
           "ifSpeed": 2000000000,
           "ifAdminStatus": "up",
           "ifAlias": "",
-          "ifPhysAddress": "02:00:00:00:03:01",
+          "ifPhysAddress": "02:00:00:76:cd:be",
           "ifMtu": 1500
         },
         {
-          "port_id": 302,
+          "port_id": 1464895601,
           "ifName": "GigabitEthernet0/0/1",
           "ifDescr": "GigabitEthernet0/0/1",
           "ifType": "ethernetCsmacd",
           "ifSpeed": 1000000000,
           "ifAdminStatus": "up",
-          "ifAlias": "lag-member",
-          "ifPhysAddress": "02:00:00:00:03:02",
+          "ifAlias": "",
+          "ifPhysAddress": "02:00:00:4e:9e:ed",
           "ifMtu": 1500
         },
         {
-          "port_id": 304,
+          "port_id": 126828133,
           "ifName": "GigabitEthernet0/0/2",
           "ifDescr": "GigabitEthernet0/0/2",
           "ifType": "ethernetCsmacd",
           "ifSpeed": 1000000000,
           "ifAdminStatus": "up",
           "ifAlias": "",
-          "ifPhysAddress": "02:00:00:00:03:04",
+          "ifPhysAddress": "02:00:00:f2:2d:29",
           "ifMtu": 1500
         },
         {
-          "port_id": 305,
+          "port_id": 101844568,
           "ifName": "GigabitEthernet0/0/2.200",
           "ifDescr": "GigabitEthernet0/0/2.200",
           "ifType": "l2vlan",
           "ifSpeed": 1000000000,
           "ifAdminStatus": "up",
-          "ifAlias": "vlan200",
-          "ifPhysAddress": "02:00:00:00:03:04",
+          "ifAlias": "",
+          "ifPhysAddress": "02:00:00:f2:2d:29",
           "ifMtu": 1500
         }
       ]
     },
-    "GET /api/v0/devices/1002/port_stack": {
+    "GET /api/v0/devices/1182008591/port_stack": {
       "status": "ok",
       "mappings": [
         {
-          "high_port_id": 302,
-          "low_port_id": 301
+          "high_port_id": 1464895601,
+          "low_port_id": 360662649
         },
         {
-          "high_port_id": 304,
-          "low_port_id": 305
+          "high_port_id": 126828133,
+          "low_port_id": 101844568
         }
       ]
     }
   },
   "expected": {
     "lag_members": {
-      "302": "301"
+      "1464895601": "360662649"
     },
     "sub_interfaces": {
-      "305": "304"
+      "101844568": "126828133"
     }
   }
 }

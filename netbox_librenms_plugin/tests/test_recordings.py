@@ -285,8 +285,9 @@ def test_get_ports_real_fetch_and_parse_via_recording(recording_server):
     """Real-HTTP de-mock demo: get_ports() fetches and parses a real captured recording through the live LibreNMSAPI client (real `requests` → MockLibreNMSServer → real parse), so a regression in the request build or response parsing is caught — unlike test_librenms_api.py::test_get_ports_all, which mocks requests.get and feeds canned JSON straight back."""
     from netbox_librenms_plugin.tests.recordings import load_recording
 
-    _server, api = recording_server(load_recording("cisco-lag-and-subinterface"))
-    success, data = api.get_ports(device_id=1002)
+    recording = load_recording("cisco-lag-and-subinterface")
+    _server, api = recording_server(recording)
+    success, data = api.get_ports(device_id=recording["device_id"])
 
     assert success is True
     ports = data.get("ports")
@@ -711,7 +712,7 @@ def test_arcos_recording_preserves_breakout_port_names():
     from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
 
     recording = load_recording("arcos-lag-transceivers")
-    ports = unwrap_response(recording["responses"]["GET /api/v0/devices/1/ports"])[1]["ports"]
+    ports = unwrap_response(recording["responses"][f"GET /api/v0/devices/{recording['device_id']}/ports"])[1]["ports"]
     import re
 
     assert any(re.fullmatch(r"swp[0-9]+s[0-9]+", port.get("ifName", "")) for port in ports)
