@@ -242,9 +242,7 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
             raise RuntimeError(f"Capture failed for VRFs: {device_vrfs}")
         responses["GET /api/v0/routing/vrf"] = {"status": "ok", "vrfs": device_vrfs}
 
-    # 7. Transceivers (optics shape). Per-device route — safe to record verbatim; anonymization
-    #    pseudonymizes the transceiver serial and preserves the optics shape plus the `model` SKU
-    #    (the module-matching key for ModuleType resolution).
+    # 7. Transceivers. Anonymization masks serials and models and keeps the optics shape.
     # A 404 is a definitive answer from a LibreNMS version without this endpoint. Transport errors,
     # server errors, and non-JSON success bodies are not evidence that the device has no optics.
     record(

@@ -20,6 +20,10 @@ LIBRENMS_PORTS_COLUMNS = (
 DEFAULT_INTERFACE_NAME_FIELD = "ifName"
 INTERFACE_NAME_FIELDS = frozenset({DEFAULT_INTERFACE_NAME_FIELD, "ifDescr"})
 
+# Keep model and serial placeholders consistent during inventory merging and anonymization.
+GENERIC_CONTAINER_MODELS = frozenset({"", "builtin", "default", "n/a"})
+LIBRENMS_PLACEHOLDER_VALUES = frozenset({"", "n/a", "na", "default", "-", "unknown"})
+
 
 def is_supported_interface_name_field(value):
     """

@@ -6,7 +6,12 @@ from django.core.cache import cache
 from django.utils import timezone
 from django.views import View
 
-from netbox_librenms_plugin.constants import MAIN_INVENTORY_SOURCE, OOB_INVENTORY_SOURCE
+from netbox_librenms_plugin.constants import (
+    GENERIC_CONTAINER_MODELS as _GENERIC_CONTAINER_MODELS,
+    LIBRENMS_PLACEHOLDER_VALUES as _PLACEHOLDER_VALUES,
+    MAIN_INVENTORY_SOURCE,
+    OOB_INVENTORY_SOURCE,
+)
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     coerce_librenms_id,
@@ -46,14 +51,6 @@ INVENTORY_CLASSES = {
     "fabricModule",
     "xioModule",
 }
-
-# Model name values that indicate a generic/empty container (not real hardware)
-_GENERIC_CONTAINER_MODELS = {"", "builtin", "default", "n/a"}
-
-# Lowercase placeholder values that LibreNMS returns for absent model/serial fields.
-# Used during transceiver backfill to decide whether existing ENTITY-MIB data should
-# be replaced by richer transceiver API data.
-_PLACEHOLDER_VALUES = {"", "n/a", "na", "default", "-", "unknown"}
 
 # Transceiver entry types that are containers, not real modules.
 _SKIP_TRANSCEIVER_TYPES = {"Port Container", "Port", ""}

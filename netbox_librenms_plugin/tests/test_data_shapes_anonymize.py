@@ -182,8 +182,8 @@ def test_features_field_pseudonymized_like_version():
     assert "Ubuntu" not in feat
 
 
-def test_inventory_model_name_preserved_as_module_match_key():
-    """The entPhysicalModelName ModuleType match key is preserved verbatim, even though device hardware is pseudonymized."""
+def test_inventory_model_name_is_pseudonymized():
+    """Inventory model names use the same token format as device hardware."""
     rec = load_recording("cisco-stackwise-3member")
     anon = anonymize_recording(rec)
 
@@ -191,9 +191,45 @@ def test_inventory_model_name_preserved_as_module_match_key():
         "inventory"
     ]
     model_names = [m.get("entPhysicalModelName") for m in members if m.get("entPhysicalModelName")]
-    # The real chassis SKUs survive so a recording can match a provisioned NetBox ModuleType.
-    assert "WS-C3750X-48P" in model_names
-    assert not any(str(name).startswith("MODEL-") for name in model_names)
+    assert model_names
+    assert all(re.fullmatch(r"MODEL-[0-9a-f]{6}", name) for name in model_names)
+
+
+def test_model_skus_share_one_token_across_fields_and_case_variants():
+    recording = {
+        "device_id": 1,
+        "responses": {
+            "GET /api/v0/devices/1": {"devices": [{"hardware": "  SKU-48P  "}]},
+            "GET /api/v0/inventory/1/all": {"inventory": [{"entPhysicalModelName": "sku-48p"}]},
+            "GET /api/v0/devices/1/transceivers": {"transceivers": [{"model": "Sku-48P"}]},
+            "GET /api/v0/devices/1/links": {"links": [{"remote_platform": "SKU-48P"}]},
+        },
+    }
+
+    anonymized = anonymize_recording(recording, salt="model-identity")
+    token = _response(anonymized, "GET /api/v0/devices/1")["devices"][0]["hardware"]
+
+    assert re.fullmatch(r"MODEL-[0-9a-f]{6}", token)
+    assert _response(anonymized, "GET /api/v0/inventory/1/all")["inventory"][0]["entPhysicalModelName"] == token
+    assert _response(anonymized, "GET /api/v0/devices/1/transceivers")["transceivers"][0]["model"] == token
+    assert _response(anonymized, "GET /api/v0/devices/1/links")["links"][0]["remote_platform"] == token
+    assert anonymized == anonymize_recording(recording, salt="model-identity")
+    assert (
+        token
+        != _response(anonymize_recording(recording, salt="other-models"), "GET /api/v0/devices/1")["devices"][0][
+            "hardware"
+        ]
+    )
+
+
+def test_distinct_model_skus_get_distinct_tokens():
+    recording = _ports({"entPhysicalModelName": "SKU-48P"}, {"model": "SKU-24T"})
+
+    rows = _response(anonymize_recording(recording), "GET /api/v0/devices/1/ports")["ports"]
+    tokens = [rows[0]["entPhysicalModelName"], rows[1]["model"]]
+
+    assert all(re.fullmatch(r"MODEL-[0-9a-f]{6}", token) for token in tokens)
+    assert len(set(tokens)) == 2
 
 
 def test_ip_mac_geo_location_freetext_scrubbed():
@@ -939,6 +975,24 @@ def test_anonymized_recording_still_detects_vc(recording_server, db):
 
 import pytest  # noqa: E402
 
+
+@pytest.mark.parametrize("field", ["hardware", "remote_platform", "entPhysicalModelName", "model"])
+@pytest.mark.parametrize("value", [None, "", "BuIlTiN", "DeFaUlT", "N/A", "Na", "-", "UnKnOwN", "  N/A  "])
+def test_model_placeholders_pass_through_unchanged(field, value):
+    recording = _ports({field: value})
+
+    anonymized = anonymize_recording(recording)
+
+    assert _response(anonymized, "GET /api/v0/devices/1/ports")["ports"][0][field] == value
+
+
+@pytest.mark.parametrize("field", ["hardware", "remote_platform", "entPhysicalModelName", "model"])
+def test_model_fields_are_exempt_from_address_and_hostname_scans(field):
+    recording = _ports({field: "3.9.0.4 optic.example"})
+
+    assert find_pii(recording) == []
+
+
 _PORT_PATTERNS = [
     "ge-0/0/0.100",
     "xe-4/2/2",
@@ -1279,8 +1333,8 @@ def test_anonymization_preserves_a_custom_base_subinterface_relationship(recordi
     assert "tenantlink" not in str(anonymized)
 
 
-def test_transceiver_serial_pseudonymized_model_and_optics_preserved():
-    """A transceiver's serial is pseudonymized; the optics shape AND the model SKU (ModuleType match key) survive."""
+def test_transceiver_serial_and_model_pseudonymized_optics_preserved():
+    """Transceiver serials and models use tokens, and optics keep their shape."""
     rec = {
         "schema_version": 1,
         "name": "optics",
@@ -1306,8 +1360,7 @@ def test_transceiver_serial_pseudonymized_model_and_optics_preserved():
     t = _response(anonymize_recording(rec), "GET /api/v0/devices/1/transceivers")["transceivers"][0]
     # Serial is a per-unit identifier (not a match key) → pseudonymized.
     assert t["serial"].startswith("SN-") and "X42AU0D" not in t["serial"]
-    # Model SKU is the ModuleType-matching key (public part number) → preserved verbatim.
-    assert t["model"] == "3HE10550AARA01"
+    assert re.fullmatch(r"MODEL-[0-9a-f]{6}", t["model"])
     # Logic-bearing optics shape (what an outcome test asserts) is untouched.
     assert isinstance(t["port_id"], int) and t["port_id"] != 519
     assert t["type"] == "CFP2/QSFP28"

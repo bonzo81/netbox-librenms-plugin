@@ -20,6 +20,7 @@ from unittest.mock import patch
 
 import pytest
 
+from netbox_librenms_plugin.constants import GENERIC_CONTAINER_MODELS, LIBRENMS_PLACEHOLDER_VALUES
 from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
 from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
 from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns, compile_sap_patterns
@@ -354,6 +355,7 @@ def test_bundled_recording_has_anonymized_vendor_metadata(recording):
 
     mfg_re = re.compile(r"^MFG-[0-9a-f]{6}$")
     model_re = re.compile(r"^MODEL-[0-9a-f]{6}$")
+    model_placeholders = GENERIC_CONTAINER_MODELS | LIBRENMS_PLACEHOLDER_VALUES
     leaked = []
 
     def _walk(obj):
@@ -363,10 +365,9 @@ def test_bundled_recording_has_anonymized_vendor_metadata(recording):
                     leaked.append((k, v))
                 if k in ("entPhysicalMfgName", "vendor") and isinstance(v, str) and v and not mfg_re.match(v):
                     leaked.append((k, v))
-                if k == "hardware" and isinstance(v, str) and v and not model_re.match(v):
-                    leaked.append((k, v))
-                if k == "entPhysicalModelName" and isinstance(v, str) and v.startswith("MODEL-"):
-                    leaked.append((k, v))
+                if k in ("hardware", "remote_platform", "entPhysicalModelName", "model") and isinstance(v, str):
+                    if v.strip().lower() not in model_placeholders and not model_re.fullmatch(v):
+                        leaked.append((k, v))
                 # The OUI is the IEEE manufacturer prefix; a registered one names the vendor even
                 # when the vendor field is null. Masked values are < 2**24 like real ones, so this
                 # cannot check the value itself: it checks the ones known to have shipped raw.
@@ -675,6 +676,34 @@ def test_serial_outcome_without_patterns_replays_as_empty(recording_server):
     recording.pop("serial_type_patterns", None)
 
     test_recording_outcomes(recording, recording_server)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("mapping", [False, True], ids=["module-type", "module-type-mapping"])
+def test_anonymized_inventory_resolves_a_token_keyed_module_type(recording_server, mapping):
+    from netbox_librenms_plugin.models import ModuleTypeMapping
+    from netbox_librenms_plugin.tests.conftest import make_module_type
+    from netbox_librenms_plugin.utils import get_module_types_indexed, resolve_module_type
+
+    recording = next(item for item in _RECORDINGS if item["name"] == "cisco-stackwise-3member")
+    recording = json.loads(json.dumps(recording))
+    device_id = recording["device_id"]
+    member_route = next(route for route in recording["responses"] if "entPhysicalClass=chassis" in route)
+    model = recording["responses"][member_route]["inventory"][0]["entPhysicalModelName"]
+    recording["responses"][f"GET /api/v0/devices/{device_id}"]["devices"][0]["hardware"] = model
+    anonymized = anonymize_recording(recording, salt="module-matching")
+    token = anonymized["responses"][f"GET /api/v0/devices/{anonymized['device_id']}"]["devices"][0]["hardware"]
+    module_type = make_module_type("Recorded module" if mapping else token)
+    if mapping:
+        ModuleTypeMapping.objects.create(librenms_model=token, netbox_module_type=module_type)
+    _server, api = recording_server(anonymized)
+
+    success, inventory = api.get_inventory_filtered(
+        anonymized["device_id"], ent_physical_class="chassis", ent_physical_contained_in=1
+    )
+
+    assert success and inventory
+    assert resolve_module_type(inventory[0]["entPhysicalModelName"], get_module_types_indexed()) == module_type
 
 
 def test_arcos_recording_preserves_breakout_port_names():

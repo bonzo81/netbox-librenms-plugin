@@ -1,27 +1,17 @@
 """
-Field-aware, deterministic anonymization of LibreNMS data-shape recordings.
+Apply deterministic anonymization to LibreNMS data-shape recordings.
 
-The goal is to make a captured recording safe to share publicly while keeping every field the
-sync logic actually reads intact, so the anonymized recording still drives the same outcome
-tests. Three strategies, by field:
+Preserve structural interface, ENTITY-MIB, VLAN, and transceiver optics fields.
+Map all model SKUs to MODEL tokens with one map per recording. Strip whitespace
+and normalize case for model identity. Keep model placeholders unchanged.
+Serials, hostnames, ENTITY-MIB display text, versions, and database IDs use
+stable tokens within each recording, so equal values and references still join.
+OS tokens remain stable across recordings for novelty comparisons.
+Vendor OIDs use the example-enterprise arc.
 
-* **Preserve verbatim** the logic-bearing fields (ifName/ifType, ENTITY-MIB
-  class/index/position, VLANs, transceiver optics) and the public module-matching SKUs
-  (entPhysicalModelName, transceiver model — keyed to NetBox ModuleType for module install).
-  Anonymizing these would destroy the LAG/sub-interface/VC detection and module-matching the
-  recordings exist to test.
-* **Pseudonymize deterministically** identifiers (serials, hostnames, ENTITY-MIB display text, the
-  device chassis SKU, firmware/software versions, database IDs): equal values share one synthetic
-  value within a recording, so cross-references still match after anonymization. The OS string is
-  pseudonymized too, but *unsalted* (see :func:`pseudonymize_os`) so the same OS yields one stable token across all
-  recordings. The novelty matcher needs that to compare platforms. Vendor-naming SNMP OIDs
-  (sysObjectID, sensor_oid, entPhysicalVendorType) are remapped under the example-enterprise arc so
-  they keep their shape without naming the vendor the OS hash hides.
-* **Scrub** PII to safe placeholders (IPs → RFC 5737/3849 documentation ranges, MACs → a
-  synthetic ``02:00:00`` block, lat/lng → null, location → ``"Lab"``, free-text → "").
-
-:func:`find_pii` is a regex safety-net: it sweeps the anonymized result for any IP/MAC/email the
-field rules missed, so a human (or the mgmt command) can catch leaks before publishing.
+Replace IPs with documentation addresses and MACs with synthetic addresses.
+Clear private free text and credentials. Remove coordinates.
+Use find_pii to check the result for residual identifying data.
 """
 
 import hashlib
@@ -29,6 +19,7 @@ import ipaddress
 import re
 from typing import NamedTuple
 
+from netbox_librenms_plugin.constants import GENERIC_CONTAINER_MODELS, LIBRENMS_PLACEHOLDER_VALUES
 from netbox_librenms_plugin.data_shapes.ports import (
     ANON_INTERFACE_NAME_RE,
     ANON_INTERFACE_NAME_PREFIX,
@@ -37,9 +28,7 @@ from netbox_librenms_plugin.data_shapes.ports import (
 )
 from netbox_librenms_plugin.data_shapes.recordings_store import recording_meta
 
-# Logic-bearing fields the sync/detection/relationship code reads — never altered.
-# NOTE: ifName/ifDescr are NOT here — they carry real infra (custom names, "** host **"
-# annotations) so they get pattern-aware anonymization via INTERFACE_NAME_KEYS instead.
+# Preserve structural fields. Model SKUs use shared tokens.
 PRESERVE_KEYS = frozenset(
     {
         "ifType",
@@ -61,12 +50,6 @@ PRESERVE_KEYS = frozenset(
         "entPhysicalIndex",
         "entPhysicalContainedIn",
         "entPhysicalParentRelPos",
-        # The module-matching key: ModuleTypeMapping resolves entPhysicalModelName (and the
-        # transceiver `model`, merged into it) to a NetBox ModuleType to drive module install.
-        # It's a public vendor catalog SKU (not PII), so it's preserved verbatim — pseudonymizing
-        # it would foreclose recording-driven module-install outcome tests. (Device `hardware`,
-        # the chassis SKU, is NOT a match key and stays pseudonymized via MODEL_KEYS.)
-        "entPhysicalModelName",
         # NOTE: `os` is NOT preserved — it's pseudonymized to a stable os-<hash> (see
         # pseudonymize_os) so a recording never advertises the exact platform.
         "status",
@@ -83,9 +66,6 @@ PRESERVE_KEYS = frozenset(
         "channels",
         "connector",
         "wavelength",
-        # transceiver SKU — merged into entPhysicalModelName for ModuleType matching (see above),
-        # a public part number, preserved so module-install outcomes can be tested from recordings.
-        "model",
     }
 )
 # Interface-name fields: pattern-aware (see _anon_interface_name). The logic-bearing port-name
@@ -99,11 +79,7 @@ INTERFACE_NAME_KEYS = frozenset({"ifName", "ifDescr", "remote_port"})
 SERIAL_LABEL_KEYS = frozenset({"sensor_descr"})
 # BGP ASN — identifying, not read by the sync logic. Mapped to a deterministic private ASN.
 BGP_KEYS = frozenset({"bgpLocalAs", "bgpLocalas", "bgp_local_as"})
-# The VRF name is the NetBox match key, so the instinct is to preserve it the way
-# entPhysicalModelName is. It is the wrong instinct: a model name is a public vendor catalogue
-# SKU, a VRF name is customer or tenant data, and these recordings are meant to be publishable.
-# Deterministic pseudonymization keeps the join intact and loses no testable outcome, because a
-# test builds its NetBox VRF from the fixture anyway. See _anon_vrf_name for the one exception.
+# Stable VRF tokens preserve joins. Keep the global-instance literal.
 VRF_NAME_KEYS = frozenset({"vrf_name"})
 # The SNMP table index of the VRF row. On Nokia it is a plain ordinal ("1"), but the ENTITY form
 # other platforms report is the name length followed by its ASCII codes — 8.77.103.109.116.45.118
@@ -116,21 +92,16 @@ ROUTE_DISTINGUISHER_KEYS = frozenset({"mplsVpnVrfRouteDistinguisher"})
 SERIAL_KEYS = frozenset({"serial", "entPhysicalSerialNum"})
 # `display` is the LibreNMS device display name — operators often set it to a real FQDN.
 HOSTNAME_KEYS = frozenset({"hostname", "sysName", "remote_hostname", "display"})
-# Device chassis SKU (e.g. "WS-C3560X-24T-S"). Pseudonymized: it's not a module-matching key, so
-# blanking it loses no testable outcome. (entPhysicalModelName / transceiver `model` ARE matching
-# keys and are preserved via PRESERVE_KEYS instead.)
-# ``remote_platform`` is the neighbour's chassis SKU on a link row: same kind of value, and it
-# names the vendor the os-hash masks.
-MODEL_KEYS = frozenset({"hardware", "remote_platform"})
+# Use one model identity across device, inventory, transceiver, and link rows.
+MODEL_KEYS = frozenset({"hardware", "remote_platform", "entPhysicalModelName", "model"})
+_MODEL_PLACEHOLDERS = GENERIC_CONTAINER_MODELS | LIBRENMS_PLACEHOLDER_VALUES
 # entPhysicalMfgName is the ENTITY-MIB manufacturer name (e.g. "Cisco Systems Inc."). It names the
 # vendor the os-hash deliberately masks and is read by no sync logic, so it's pseudonymized to a
 # deterministic MFG-<hash> — the field shape (present, non-empty) survives without the vendor.
 # "vendor" is the transceiver vendor LibreNMS reports on /transceivers. Same shape and same
 # reasoning: it names the vendor the os-hash masks, and no sync logic reads it.
 MFG_KEYS = frozenset({"entPhysicalMfgName", "vendor"})
-# ENTITY-MIB names and descriptions are operator-visible display text. They can contain internal
-# hostnames or labels. The structural class, index, containment, position and public model SKU live
-# in separate preserved fields, so replace this free text while keeping equal values correlated.
+# Replace private ENTITY display text. Structural fields and model tokens keep joins.
 ENTITY_TEXT_KEYS = frozenset({"entPhysicalName", "entPhysicalDescr"})
 # The transceiver OUI is the IEEE-registered manufacturer prefix as an integer: 36965 is 0x009065,
 # Finisar. Where "vendor" is null it is the only vendor identifier on the row, so masking the name
@@ -265,25 +236,22 @@ _EMAIL_RE = re.compile(r"\b[\w.+-]{1,64}@[\w-]+(?:\.[\w-]+)*\b")
 _FQDN_RE = re.compile(r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}\b")
 # find_pii: keys whose values are identifiers (firmware/model/version) that can look like a
 # dotted IP (e.g. version "3.9.0.4") but are NOT addresses — exempt them from IP/FQDN flagging.
-_IP_EXEMPT_KEYS = frozenset(
-    {
-        "version",
-        "hardware",
-        "features",
-        "model",
-        "entPhysicalModelName",
-        # entPhysicalDescr is NOT exempt: it's broad free-text preserved verbatim (logic-bearing),
-        # so the residual-PII scan is its only safety net — exempting it from the IP/FQDN checks
-        # would let a chassis/module description carrying a hostname or address pass unnoticed. The
-        # version/model-like fields below stay exempt to suppress dotted-version false positives.
-        "entPhysicalFirmwareRev",
-        "entPhysicalHardwareRev",
-        "entPhysicalSoftwareRev",
-        "entPhysicalVendorType",
-        "entPhysicalMfgName",
-        "sysObjectID",
-        "icon",  # static asset path, e.g. "images/os/nokia.svg" (looks like an FQDN, isn't)
-    }
+_IP_EXEMPT_KEYS = (
+    frozenset(
+        {
+            "version",
+            "features",
+            # ENTITY display text stays subject to the address and hostname scan.
+            "entPhysicalFirmwareRev",
+            "entPhysicalHardwareRev",
+            "entPhysicalSoftwareRev",
+            "entPhysicalVendorType",
+            "entPhysicalMfgName",
+            "sysObjectID",
+            "icon",  # static asset path, e.g. "images/os/nokia.svg" (looks like an FQDN, isn't)
+        }
+    )
+    | MODEL_KEYS
 )
 
 # Known interface-name prefixes (junos / cisco ios-xe-xr / nokia / cumulus-arcos / linux). A name
@@ -764,7 +732,10 @@ def _anon_value(key, value, rules, container=None):  # noqa: C901
     if key in HOSTNAME_KEYS:
         return f"device-{_hash(value, salt)}"
     if key in MODEL_KEYS:
-        return f"MODEL-{_hash(value, salt)}"
+        model = value.strip().lower()
+        if model in _MODEL_PLACEHOLDERS:
+            return value
+        return rules.model_tokens.setdefault(model, f"MODEL-{_hash(model, salt)}")
     if key in MFG_KEYS:
         return f"MFG-{_hash(value, salt)}"
     if key in ENTITY_TEXT_KEYS:
@@ -795,6 +766,7 @@ class _Rules(NamedTuple):
 
     salt: str = ""
     database_ids: _DatabaseIDs | None = None
+    model_tokens: dict | None = None
     # Compiled LAG name patterns captured WITH the recording (see _anon_interface_name).
     lag_patterns: tuple = ()
     # Compiled "this is the default port label" matchers built from the recording's
@@ -886,6 +858,7 @@ def anonymize_recording(recording, *, salt=""):
     rules = _Rules(
         salt=salt,
         database_ids=database_ids,
+        model_tokens={},
         lag_patterns=tuple(compile_lag_patterns(recording)),
         serial_default_labels=_compile_serial_default_labels(recording),
         doc_ips={},

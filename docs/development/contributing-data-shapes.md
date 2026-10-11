@@ -37,12 +37,14 @@ test-useful while losing identifying detail:
 
 - **Preserved verbatim:** the logic-bearing fields the tests read: `ifType`, `ifIndex`,
   `entPhysicalClass` / `entPhysicalIndex` / `entPhysicalContainedIn` /
-  `entPhysicalParentRelPos`, VLANs, transceiver optics, and public module SKUs in
-  `entPhysicalModelName` and transceiver `model` fields.
-- **Pseudonymized deterministically:** serials, hostnames, the device `hardware` chassis SKU,
+  `entPhysicalParentRelPos`, VLANs, and transceiver optics.
+- **Pseudonymized deterministically:** serials, hostnames, all model SKUs,
   and the `os` become `SN-…` / `device-…` / `MODEL-…` / `os-…` tokens. The mapping is stable,
   so cross-references (a device serial that equals a stack member's serial, which identifies
-  the master) still match. `ifName` gets *pattern-aware* anonymization: structured interface names (slots,
+  the master) still match. `hardware`, `remote_platform`, `entPhysicalModelName`, and
+  transceiver `model` share one model map per recording. Whitespace and case variants
+  yield one token. Generic and absent-model placeholders stay unchanged. Tests can
+  key ModuleType and ModuleTypeMapping rows to these tokens. `ifName` gets *pattern-aware* anonymization: structured interface names (slots,
   sub-units, channels) keep their shape while custom/free-form names become `iface-…` tokens.
 - **Database IDs:** device, port, sensor, inventory, VRF, and other database IDs map to
   distinct synthetic integers. One mapping covers response bodies, recorded URLs, metadata,
@@ -52,7 +54,7 @@ test-useful while losing identifying detail:
   Bare row `id` fields use their containing table, so a nested location ID still matches
   `location_id`. Capture fails if a bare ID has no recognized table context.
   SNMP indexes, containment indexes, member positions, and VLAN numbers keep their values.
-  Existing bundled recordings do not need to be regenerated.
+  Bundled recordings use the same ID remapping rules.
 - **Scrubbed:** IPs → documentation ranges, MACs → a synthetic `02:00:00` block, lat/lng →
   null, location → `Lab`, free-text (`ifAlias`, `sysContact`, `sysDescr`, …) → empty.
 
@@ -64,8 +66,8 @@ modal surfaces its findings; **review them before submitting.**
 Schema version 1 treats `entPhysicalName` and `entPhysicalDescr` as private display text. It
 replaces the text with a deterministic `entity-...` token. It preserves only a bounded terminal
 slash locator, such as `1/1` or `2/x1`, when the module hierarchy reader needs that locator. This
-keeps synthetic transceivers nested without publishing the surrounding label. Public catalog
-values stay in the separate `entPhysicalModelName` field.
+keeps synthetic transceivers nested without publishing the surrounding label. Model tokens
+stay in the separate `entPhysicalModelName` field.
 
 Schema version 1 does not capture operator-specific inventory-ignore rules or module-bay mappings.
 It therefore does not promise to replay arbitrary name-based rules. A future schema that declares
