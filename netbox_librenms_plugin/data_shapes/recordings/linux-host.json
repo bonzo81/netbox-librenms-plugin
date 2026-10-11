@@ -2758,11 +2758,6 @@
     "GET /api/v0/devices/1215330439/transceivers": {
       "status": "ok",
       "transceivers": []
-    },
-    "GET /api/v0/inventory/32/all": {
-      "status": "ok",
-      "inventory": [],
-      "count": 0
     }
   },
   "expected": {

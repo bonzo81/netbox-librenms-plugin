@@ -384,11 +384,6 @@
           "vlans": []
         }
       ]
-    },
-    "GET /api/v0/inventory/39/all": {
-      "status": "ok",
-      "inventory": [],
-      "count": 0
     }
   },
   "expected": {

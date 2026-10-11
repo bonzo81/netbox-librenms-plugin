@@ -12,6 +12,48 @@ import pytest
 PLACEHOLDERS = ["unspecified", "unknown", "n/a", "builtin", "UNSPECIFIED", "Builtin"]
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize("placeholder", ["none", "unspecified", " NONE ", "Unspecified"])
+def test_anonymized_placeholder_inventory_keeps_description_matching(recording_server, placeholder):
+    from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
+    from netbox_librenms_plugin.utils import module_type_lookup_candidates, resolve_module_type
+
+    module_type = _module_type("entity-abc123")
+    recording = {
+        "device_id": 1,
+        "responses": {
+            "GET /api/v0/inventory/1/all": {
+                "status": "ok",
+                "inventory": [{"entPhysicalModelName": placeholder, "entPhysicalDescr": "entity-abc123"}],
+            }
+        },
+    }
+    for replay in (recording, anonymize_recording(recording)):
+        _server, api = recording_server(replay)
+        ok, inventory = api.get_device_inventory(replay["device_id"])
+        assert ok, inventory
+        item = inventory[0]
+        assert (
+            resolve_module_type(
+                item["entPhysicalModelName"], _index(), fallback_names=module_type_lookup_candidates(item)
+            )
+            == module_type
+        )
+
+
+@pytest.mark.parametrize("name", ["linux-host", "linux-host-oob", "linux-virtual-machine"])
+def test_recorded_empty_inventory_uses_the_current_device_id(recording_server, name):
+    from netbox_librenms_plugin.tests.recordings import load_recording
+
+    recording = load_recording(name)
+    _server, api = recording_server(recording)
+    assert api.get_device_inventory(recording["device_id"]) == (True, [])
+    full_inventory_routes = [
+        route for route in recording["responses"] if "/inventory/" in route and route.endswith("/all")
+    ]
+    assert full_inventory_routes == [f"GET /api/v0/inventory/{recording['device_id']}/all"]
+
+
 def _module_type(model, manufacturer_name="Placeholder Vendor"):
     from dcim.models import Manufacturer, ModuleType
 

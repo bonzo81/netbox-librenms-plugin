@@ -24,6 +24,7 @@ from netbox_librenms_plugin.constants import (
     LIBRENMS_EMPTY_MESSAGES,
     LIBRENMS_GLOBAL_ROUTING_INSTANCE,
     LIBRENMS_PLACEHOLDER_VALUES,
+    MODULE_MODEL_PLACEHOLDERS,
 )
 from netbox_librenms_plugin.data_shapes.ports import (
     ANON_INTERFACE_NAME_PREFIX,
@@ -101,7 +102,7 @@ HOSTNAME_KEYS = frozenset(
 )
 # Use one model identity across device, inventory, transceiver, and link rows.
 MODEL_KEYS = frozenset({"hardware", "remote_platform", "entPhysicalModelName", "model"})
-_MODEL_PLACEHOLDERS = GENERIC_CONTAINER_MODELS | LIBRENMS_PLACEHOLDER_VALUES
+_MODEL_PLACEHOLDERS = GENERIC_CONTAINER_MODELS | LIBRENMS_PLACEHOLDER_VALUES | MODULE_MODEL_PLACEHOLDERS
 # entPhysicalMfgName is the ENTITY-MIB manufacturer name (e.g. "Cisco Systems Inc."). It names the
 # vendor the os-hash deliberately masks and is read by no sync logic, so it's pseudonymized to a
 # deterministic MFG-<hash> — the field shape (present, non-empty) survives without the vendor.
