@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "name": "juniper-vc-2member",
-  "description": "Juniper EX Virtual Chassis, 2 members under a chassis-class root, 0-based positions.",
+  "description": "Synthetic generic stack shape, not a device capture: 2 chassis-class members under a chassis-class root, 0-based positions.",
   "meta": {
     "os": "os-990f10",
     "vendor": "juniper",

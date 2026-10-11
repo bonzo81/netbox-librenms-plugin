@@ -451,8 +451,9 @@ def test_capture_roundtrip_preserves_a_junos_fpc_virtual_chassis(recording_serve
 
     seed = load_recording("juniper-ex4400-vc-2member")
     # The capture holds inventory only; capture also requires the port routes.
-    seed["responses"]["GET /api/v0/devices/1002/ports"] = {"status": "ok", "ports": []}
-    seed["responses"]["GET /api/v0/devices/1002/port_stack"] = {"status": "ok", "mappings": []}
+    device_id = seed["device_id"]
+    seed["responses"][f"GET /api/v0/devices/{device_id}/ports"] = {"status": "ok", "ports": []}
+    seed["responses"][f"GET /api/v0/devices/{device_id}/port_stack"] = {"status": "ok", "mappings": []}
     _server, api = recording_server(seed)
 
     captured = capture_device_recording(api, seed["device_id"], name="captured-junos")
