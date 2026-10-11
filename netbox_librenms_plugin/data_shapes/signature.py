@@ -20,7 +20,11 @@ from netbox_librenms_plugin.data_shapes.ports import (
     port_is_lag,
     port_names,
 )
-from netbox_librenms_plugin.data_shapes.recordings_store import recording_meta
+from netbox_librenms_plugin.data_shapes.recordings_store import (
+    SERIAL_SENSORS_META_KEY,
+    SERIAL_SENSORS_UNAVAILABLE,
+    recording_meta,
+)
 
 # Vendor kinship for the *similarity* signal only — NOT for collapsing distinct OSes into one
 # "covered" verdict. ios / iosxr / nxos share a vendor but their ifName/ifDescr conventions differ,
@@ -212,6 +216,8 @@ def compute_shape_signature(recording):
     has_serial = (
         isinstance(serial_body, dict) and isinstance(serial_body.get("sensors"), list) and bool(serial_body["sensors"])
     )
+    if meta.get(SERIAL_SENSORS_META_KEY) == SERIAL_SENSORS_UNAVAILABLE:
+        has_serial = None  # the sensor table failed: unknown, not absent
 
     # VRF presence. Capture records /routing/vrf only for a device whose ports carry a VRF id, and
     # stores a body holding just that device's rows, so a non-empty list is the authoritative
@@ -336,9 +342,12 @@ def signature_schema_errors(signature):  # noqa: C901
         if not isinstance(styles, list) or any(not isinstance(style, str) for style in styles):
             errors.append("sub_interfaces.styles must be a list of strings")
 
-    for name in ("port_stack", "vlans", "transceivers", "serial", "vrf", "oob"):
+    for name in ("port_stack", "vlans", "transceivers", "vrf", "oob"):
         if not isinstance(signature.get(name), bool):
             errors.append(f"{name} must be a boolean")
+    serial = signature.get("serial")
+    if "serial" not in signature or (serial is not None and not isinstance(serial, bool)):
+        errors.append("serial must be a boolean or null")
     return errors
 
 
@@ -366,11 +375,30 @@ def classify_novelty(signature, manifest):
         signature (dict): Output of :func:`compute_shape_signature` (raw or anonymized OS both work).
         manifest (list[dict]): ``[{name, signature}]`` entries (see :func:`build_manifest`).
 
+    A signature whose ``serial`` axis is unknown (``None``) is classified once per possible value.
+    When the two verdicts differ, the result is ``undetermined``.
+
     Returns:
-        dict: ``{"verdict": "likely-covered" | "similar" | "new", "closest": <name|None>,
-            "why": <str>}``.
+        dict: ``{"verdict": "likely-covered" | "similar" | "new" | "undetermined",
+            "closest": <name|None>, "why": <str>}``.
 
     """
+    if signature.get("serial") is None:
+        with_serial, without_serial = (
+            _classify_known_novelty({**signature, "serial": value}, manifest) for value in (True, False)
+        )
+        if with_serial["verdict"] == without_serial["verdict"]:
+            return without_serial
+        return {
+            "verdict": "undetermined",
+            "closest": None,
+            "why": "LibreNMS did not return its sensor table, and the serial-port shape decides the verdict",
+        }
+    return _classify_known_novelty(signature, manifest)
+
+
+def _classify_known_novelty(signature, manifest):
+    """Classify a signature whose every axis is known (see :func:`classify_novelty`)."""
     target_shape = _structural_axes(signature)
     target_os = pseudonymize_os(signature.get("os"))
     target_family = _os_family(signature.get("os"))

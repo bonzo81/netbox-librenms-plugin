@@ -31,6 +31,9 @@ SUPPORTED_EXPECTED_OUTCOMES = frozenset(
         "oob",
     }
 )
+# meta[SERIAL_SENSORS_META_KEY] marks a capture whose sensor table failed: serial ports are unknown.
+SERIAL_SENSORS_META_KEY = "serial_sensors"
+SERIAL_SENSORS_UNAVAILABLE = "unavailable"
 
 
 def recording_meta(recording):

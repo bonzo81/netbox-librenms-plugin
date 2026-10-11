@@ -433,6 +433,9 @@ def test_capture_view_warns_when_the_sensor_table_fails(recording_server):
     assert 'id="capture-serial-sensors-unavailable"' in html
     assert "/api/v0/resources/sensors" in html
     assert "&quot;serial_sensors&quot;: &quot;unavailable&quot;" in html
+    # The bundled stackwise shape matches on every other axis, so only the unknown serial axis decides.
+    assert "Likely already covered" not in html
+    assert "Novelty undetermined" in html
 
 
 @pytest.mark.django_db

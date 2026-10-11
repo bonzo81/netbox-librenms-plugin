@@ -12,12 +12,9 @@ can replay. See ``data_shapes/recordings/`` and issue #95.
 from netbox_librenms_plugin.constants import LIBRENMS_PORTS_COLUMNS
 from netbox_librenms_plugin.data_shapes.envelope import MAX_HTTP_STATUS, MIN_HTTP_STATUS, wrap_response
 from netbox_librenms_plugin.data_shapes.ports import port_has_vrf
+from netbox_librenms_plugin.data_shapes.recordings_store import SERIAL_SENSORS_META_KEY, SERIAL_SENSORS_UNAVAILABLE
 
 SCHEMA_VERSION = 1
-
-# meta[SERIAL_SENSORS_META_KEY] marks a capture whose sensor table failed: serial ports are unknown.
-SERIAL_SENSORS_META_KEY = "serial_sensors"
-SERIAL_SENSORS_UNAVAILABLE = "unavailable"
 
 
 def _select_parent_index(root_items):

@@ -73,7 +73,7 @@ def test_signature_vrf_axis_ignores_a_failed_response():
 
 
 def test_novelty_separates_a_vrf_shape_from_an_otherwise_identical_one():
-    """vrf must be a structural axis, or a VRF capture reads as covered by a non-VRF sibling."""
+    """VRF must be a structural axis, or a VRF capture reads as covered by a non-VRF sibling."""
     with_vrf = _vrf_signature_recording([{"vrf_id": 7, "vrf_name": "vrf-abc", "device_id": 5}])
     without_vrf = _vrf_signature_recording([])
     manifest = build_manifest([{**without_vrf, "name": "plain"}])
@@ -519,6 +519,59 @@ def test_serial_and_non_serial_host_are_distinct_novelty_buckets():
     assert classify_novelty(serial_sig, build_manifest([base]))["verdict"] == "new"
     # ...and symmetrically.
     assert classify_novelty(plain_sig, build_manifest([serial]))["verdict"] == "new"
+
+
+def _plain_linux_host(**meta):
+    return {
+        "schema_version": 1,
+        "name": "x",
+        "device_id": 1,
+        "meta": {"os": "linux", **meta},
+        "responses": {
+            "GET /api/v0/devices/1": {"status": "ok", "devices": [{"device_id": 1, "os": "linux"}]},
+            "GET /api/v0/devices/1/ports": {"status": "ok", "ports": [{"port_id": 1, "ifName": "eth0"}]},
+        },
+    }
+
+
+def test_unavailable_serial_sensors_make_the_serial_axis_unknown():
+    """A capture whose sensor table failed fingerprints its serial axis as unknown, not as absent."""
+    sig = compute_shape_signature(_plain_linux_host(serial_sensors="unavailable"))
+
+    assert sig["serial"] is None
+    assert signature_schema_errors(sig) == []
+
+
+def test_novelty_is_undetermined_when_only_the_unknown_serial_axis_decides():
+    """A shape covered except for the unknown serial axis must not be reported as covered."""
+    sig = compute_shape_signature(_plain_linux_host(serial_sensors="unavailable"))
+
+    novelty = classify_novelty(sig, build_manifest([_plain_linux_host()]))
+
+    assert novelty["verdict"] == "undetermined"
+    assert novelty["closest"] is None
+
+
+def test_novelty_stays_new_when_no_serial_value_would_match():
+    """An unknown serial axis does not hide a shape that is new either way."""
+    sig = compute_shape_signature(_plain_linux_host(serial_sensors="unavailable"))
+    other_os = _plain_linux_host()
+    other_os["meta"]["os"] = "timos"
+
+    assert classify_novelty(sig, build_manifest([other_os]))["verdict"] == "new"
+
+
+def test_novelty_is_covered_when_both_serial_values_are_covered():
+    """An unknown serial axis does not matter when the shape is covered with and without serial ports."""
+    sig = compute_shape_signature(_plain_linux_host(serial_sensors="unavailable"))
+    serial_host = _plain_linux_host()
+    serial_host["responses"]["GET /api/v0/resources/sensors"] = {
+        "sensors": [{"sensor_id": 5, "sensor_type": "acsSerialPortTable", "sensor_descr": "ttyS1"}]
+    }
+
+    novelty = classify_novelty(sig, build_manifest([serial_host, _plain_linux_host()]))
+
+    assert novelty["verdict"] == "likely-covered"
 
 
 def test_classify_novelty_distinguishes_lag_detection_style():
