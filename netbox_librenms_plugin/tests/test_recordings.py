@@ -40,6 +40,28 @@ def test_recordings_present():
 
 
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
+def test_bundled_response_labels_and_revisions_are_anonymized(recording):
+    import re
+
+    def check(obj):
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if isinstance(value, str) and value and value != "-":
+                    if key in {"display_template", "display_name", "label"}:
+                        assert re.fullmatch(r"device-[0-9a-f]{6}", value), key
+                    if key in {"entPhysicalHardwareRev", "revision"}:
+                        assert re.fullmatch(r"fw-[0-9a-f]{6}", value), key
+                    if key in {"group", "message"}:
+                        pytest.fail(f"Private response text in {key}")
+                check(value)
+        elif isinstance(obj, list):
+            for value in obj:
+                check(value)
+
+    check(recording.get("responses", {}))
+
+
+@pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
 def test_bundled_inventory_display_text_is_anonymized(recording):
     import re
 
