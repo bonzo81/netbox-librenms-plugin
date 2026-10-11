@@ -7,15 +7,17 @@
 
 {% block content %}
     <div class="alert alert-info">
-        <h4>Carrier Auto-Install Rules</h4>
-        <p>Suggest a holder/carrier ModuleType to install when LibreNMS reports orphan
-           child modules (e.g. CPM cards, mezzanines, MDAs) that have no matching NetBox
-           bay because their parent carrier was never installed in NetBox.</p>
-        <p>Each rule is matched against the device's manufacturer / device-type and the
-           orphan child's <code>entPhysicalClass</code> + <code>entPhysicalName</code>.
-           When the chassis has at least one empty bay matching <em>NetBox Bay Name Pattern</em>,
-           an <strong>Install Carrier</strong> button appears on the module sync page.</p>
-        <p>Suggest-only — no automatic installation. The user clicks to apply.</p>
+        <div>
+            <h4>Carrier Auto-Install Rules</h4>
+            <p>Suggest a holder/carrier ModuleType to install when LibreNMS reports orphan
+               child modules (e.g. CPM cards, mezzanines, MDAs) that have no matching NetBox
+               bay because their parent carrier was never installed in NetBox.</p>
+            <p>Each rule is matched against the device's manufacturer / device-type and the
+               orphan child's <code>entPhysicalClass</code> + <code>entPhysicalName</code>.
+               When the chassis has at least one empty bay matching <em>NetBox Bay Name Pattern</em>,
+               an <strong>Install Carrier</strong> button appears on the module sync page.</p>
+            <p>Suggest-only — no automatic installation. The user clicks to apply.</p>
+        </div>
     </div>
     {{ block.super }}
 {% endblock %}

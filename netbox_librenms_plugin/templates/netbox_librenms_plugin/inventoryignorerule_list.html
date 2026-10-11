@@ -7,32 +7,34 @@
 
 {% block content %}
     <div class="alert alert-info">
-        <h4>Inventory Ignore Rules</h4>
-        <p>Configurable rules to skip ENTITY-MIB entries during module sync.
-           Some vendors (e.g. Cisco IOS-XR) report EEPROM/IDPROM chips as child
-           entities with the same model name and serial as their parent hardware.
-           These phantom entries would appear as duplicate modules in the sync UI.</p>
-        <p>Each rule matches an entity using one of the following strategies:</p>
-        <ul>
-            <li><strong>ends_with / starts_with / contains / regex</strong> — matches the entity <em>name</em> string.</li>
-            <li><strong>serial_matches_device</strong> — matches when the entity's serial number is identical to
-                the parent device's serial. Useful for suppressing EEPROM/IDPROM phantom entries that share the
-                device serial.</li>
-            <li><strong>model_matches_device_type</strong>: matches a chassis-level entity (directly below the
-                chassis or behind slot containers only) whose model name is
-                identical to the device type's model or part number. Use it with the Transparent action for the
-                built-in units of a fixed platform, such as Cisco IOS XE <code>module 0</code>,
-                <code>module R0</code> and <code>module F0</code>.</li>
-        </ul>
-        <p>When <strong>Require Serial Match</strong>
-           is enabled (for name-based rules), the entry is only skipped if its serial number also matches the
-           parent entity — providing a safety net against accidentally hiding
-           legitimate modules.</p>
-        <p>Example — Cisco IOS-XR IDPROM entries:<br>
-           Match type: <code>ends_with</code>, Pattern: <code>IDPROM</code>,
-           Require serial match: <strong>Yes</strong><br>
-           Skips entries like <code>Optics0/0/0/0-IDPROM</code>,
-           <code>0/FT0-FT IDPROM</code>, <code>Rack 0-Chassis IDPROM</code>.</p>
+        <div>
+            <h4>Inventory Ignore Rules</h4>
+            <p>Configurable rules to skip ENTITY-MIB entries during module sync.
+               Some vendors (e.g. Cisco IOS-XR) report EEPROM/IDPROM chips as child
+               entities with the same model name and serial as their parent hardware.
+               These phantom entries would appear as duplicate modules in the sync UI.</p>
+            <p>Each rule matches an entity using one of the following strategies:</p>
+            <ul>
+                <li><strong>ends_with / starts_with / contains / regex</strong> — matches the entity <em>name</em> string.</li>
+                <li><strong>serial_matches_device</strong> — matches when the entity's serial number is identical to
+                    the parent device's serial. Useful for suppressing EEPROM/IDPROM phantom entries that share the
+                    device serial.</li>
+                <li><strong>model_matches_device_type</strong>: matches a chassis-level entity (directly below the
+                    chassis or behind slot containers only) whose model name is
+                    identical to the device type's model or part number. Use it with the Transparent action for the
+                    built-in units of a fixed platform, such as Cisco IOS XE <code>module 0</code>,
+                    <code>module R0</code> and <code>module F0</code>.</li>
+            </ul>
+            <p>When <strong>Require Serial Match</strong>
+               is enabled (for name-based rules), the entry is only skipped if its serial number also matches the
+               parent entity — providing a safety net against accidentally hiding
+               legitimate modules.</p>
+            <p>Example — Cisco IOS-XR IDPROM entries:<br>
+               Match type: <code>ends_with</code>, Pattern: <code>IDPROM</code>,
+               Require serial match: <strong>Yes</strong><br>
+               Skips entries like <code>Optics0/0/0/0-IDPROM</code>,
+               <code>0/FT0-FT IDPROM</code>, <code>Rack 0-Chassis IDPROM</code>.</p>
+        </div>
     </div>
     {{ block.super }}
 {% endblock %}
