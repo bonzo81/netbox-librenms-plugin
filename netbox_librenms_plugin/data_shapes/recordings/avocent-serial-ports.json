@@ -183,7 +183,7 @@
       "__http_status__": 404,
       "body": {
         "status": "error",
-        "message": ""
+        "message": "Links do not exist"
       }
     },
     "GET /api/v0/devices/1887072275/transceivers": {
