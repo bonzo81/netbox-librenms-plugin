@@ -73,9 +73,7 @@ def test_logic_bearing_fields_preserved():
     assert root["entPhysicalClass"] == "stack"
     assert root["entPhysicalIndex"] == 1
 
-    members = _response(
-        anon, f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalContainedIn=1"
-    )["inventory"]
+    members = _response(anon, f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalContainedIn=1")["inventory"]
     # Positions and indices (drive VC member ordering) are untouched.
     assert [m["entPhysicalParentRelPos"] for m in members] == [1, 2, 3]
     assert [m["entPhysicalIndex"] for m in members] == [100, 200, 300]
@@ -192,9 +190,7 @@ def test_inventory_model_name_is_pseudonymized():
     rec = load_recording("cisco-stackwise-3member")
     anon = anonymize_recording(rec)
 
-    members = _response(
-        anon, f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalContainedIn=1"
-    )["inventory"]
+    members = _response(anon, f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalContainedIn=1")["inventory"]
     model_names = [m.get("entPhysicalModelName") for m in members if m.get("entPhysicalModelName")]
     assert model_names
     assert all(re.fullmatch(r"MODEL-[0-9a-f]{6}", name) for name in model_names)
