@@ -418,6 +418,37 @@ def test_capture_view_errors_on_mid_capture_transport_failure(recording_server):
 
 
 @pytest.mark.django_db
+def test_capture_view_warns_when_the_sensor_table_fails(recording_server):
+    """A 500 from the instance-wide sensor table still renders the recording, with a serial-sensor warning."""
+    server, api = recording_server(load_recording("cisco-stackwise-3member"))
+    server.register("/api/v0/resources/sensors", {"message": "Server Error"}, status=500, method="GET")
+    device = make_device("cap-dev-sensors-500", librenms_cf={"test": {"id": 1000}})
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    assert "Capture failed" not in html
+    assert "Anonymized recording" in html
+    assert 'id="capture-serial-sensors-unavailable"' in html
+    assert "/api/v0/resources/sensors" in html
+    assert "&quot;serial_sensors&quot;: &quot;unavailable&quot;" in html
+
+
+@pytest.mark.django_db
+def test_capture_view_has_no_sensor_warning_when_the_table_answers(recording_server):
+    """A working sensor table shows no serial-sensor warning."""
+    server, api = recording_server(load_recording("cisco-stackwise-3member"))
+    device = make_device("cap-dev-sensors-ok", librenms_cf={"test": {"id": 1000}})
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    html = response.content.decode()
+    assert "Anonymized recording" in html
+    assert "capture-serial-sensors-unavailable" not in html
+
+
+@pytest.mark.django_db
 def test_capture_view_reports_an_unanonymizable_recording(recording_server, monkeypatch):
     """Anonymization refuses a device with more addresses than the documentation ranges hold; an unhandled raise would 500 and htmx would drop it silently."""
     server, api = recording_server(load_recording("cisco-stackwise-3member"))

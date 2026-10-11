@@ -262,6 +262,31 @@ def test_capture_skips_sensors_route_when_device_has_none(recording_server):
     captured = capture_device_recording(api, 2000)
 
     assert "GET /api/v0/resources/sensors" not in captured["responses"]
+    assert "serial_sensors" not in captured["meta"]
+
+
+@pytest.mark.parametrize("status", [500, 503])
+def test_capture_marks_serial_sensors_unavailable_when_the_sensor_table_fails(recording_server, status):
+    """A failing instance-wide sensor table leaves the capture complete and marks serial sensors as unknown."""
+    server, api = recording_server(_transceiver_serial_seed())
+    server.register("/api/v0/resources/sensors", {"message": "Server Error"}, status=status, method="GET")
+
+    captured = capture_device_recording(api, 2000, meta={"serial_sensors": "spoofed"})
+
+    assert captured["meta"]["serial_sensors"] == "unavailable"
+    assert "GET /api/v0/resources/sensors" not in captured["responses"]
+    assert "serial_type_patterns" not in captured
+    assert "GET /api/v0/devices/2000/transceivers" in captured["responses"]
+
+
+def test_capture_drops_a_caller_supplied_serial_sensor_marker(recording_server):
+    """Only the capture itself may mark serial sensors as unavailable."""
+    _server, api = recording_server(_transceiver_serial_seed())
+
+    captured = capture_device_recording(api, 2000, meta={"serial_sensors": "unavailable"})
+
+    assert "serial_sensors" not in captured["meta"]
+    assert {s["sensor_id"] for s in captured["responses"]["GET /api/v0/resources/sensors"]["sensors"]} == {1, 2}
 
 
 def _vrf_seed(*, ports, vrfs, ip_addresses=None, links=None):
@@ -664,17 +689,19 @@ def test_capture_fails_when_configured_oob_controller_ports_fail():
         capture_device_recording(api, 1000, oob_id=2000)
 
 
-def test_capture_fails_when_serial_sensor_fetch_fails():
-    """A failed sensor fetch must not become a successful no-serial capture."""
+def test_capture_marks_a_failed_serial_sensor_fetch_as_unknown_not_none():
+    """A failed sensor fetch must not become a no-serial capture: the recording says the sensors are unknown."""
 
     class SerialFailureApi(_StubApi):
         def get_serial_port_sensors(self, device_id):
-            return False, "HTTP 503"
+            return False, "Error connecting to LibreNMS: connection reset"
 
     api = SerialFailureApi({k: (200, v) for k, v in _all_ok_routes().items()})
 
-    with pytest.raises(RuntimeError, match="serial-port sensors"):
-        capture_device_recording(api, 1000)
+    captured = capture_device_recording(api, 1000)
+
+    assert captured["meta"]["serial_sensors"] == "unavailable"
+    assert not any(key.endswith("/resources/sensors") for key in captured["responses"])
 
 
 def test_capture_fails_when_successful_route_has_no_json_body():

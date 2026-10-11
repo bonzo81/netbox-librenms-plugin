@@ -1999,7 +1999,8 @@ class LibreNMSAPI:
 
         * ``/api/v0/resources/sensors`` takes no parameters (it is documented as
           "Input: None") — it always returns every sensor on the instance.
-        * ``/api/v0/devices/{id}/sensors`` is known to 500 on some servers.
+        * ``/api/v0/devices/{id}/sensors`` is not a LibreNMS route: it falls through to the
+          ``{hostname}/{type}`` graph route and answers 500.
         * ``/api/v0/devices/{id}/health/state`` (the per-device path) returns only
           ``sensor_id`` + ``desc`` — it omits ``sensor_index``, which we need to derive
           the physical port number. Recovering it would require an N+1 fan-out

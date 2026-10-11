@@ -19,6 +19,8 @@ parametrizes over them, so **a new JSON with an `expected` block is a new passin
    - a **novelty verdict** (is this shape likely new, or already covered?),
    - the **anonymized recording JSON** (Copy / Download),
    - a **residual-PII warning** if the safety-net found anything to review,
+   - a **serial-port warning** if LibreNMS did not return its instance-wide sensor table. The
+     capture still completes, and the recording carries `"serial_sensors": "unavailable"` in `meta`,
    - an **Open prefilled issue** link.
 4. **Review the JSON.** Then open the issue and paste the JSON into the *Anonymized recording*
    field of the data-shape issue form. Above 60,000 JSON characters, use **Download** and attach

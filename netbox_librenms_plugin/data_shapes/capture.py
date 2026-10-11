@@ -15,6 +15,10 @@ from netbox_librenms_plugin.data_shapes.ports import port_has_vrf
 
 SCHEMA_VERSION = 1
 
+# meta[SERIAL_SENSORS_META_KEY] marks a capture whose sensor table failed: serial ports are unknown.
+SERIAL_SENSORS_META_KEY = "serial_sensors"
+SERIAL_SENSORS_UNAVAILABLE = "unavailable"
+
 
 def _select_parent_index(root_items):
     """
@@ -261,13 +265,15 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
     #    only when the device actually has serial sensors (most don't), so the instance-wide route is
     #    never added to unrelated recordings.
     serial_sensors_present = False
+    serial_sensors_unavailable = False
     if hasattr(api, "get_serial_port_sensors"):
         # No cache to bypass: get_serial_port_sensors fetches the instance-wide table on every
         # call, so a capture always records the CURRENT LibreNMS shape.
         ss_ok, device_serial_sensors = api.get_serial_port_sensors(device_id)
+        # The instance-wide table can fail on a large or broken instance; record "unknown", never "none".
         if not ss_ok:
-            raise RuntimeError(f"Capture failed for serial-port sensors: {device_serial_sensors}")
-        if ss_ok and device_serial_sensors:
+            serial_sensors_unavailable = True
+        elif device_serial_sensors:
             responses["GET /api/v0/resources/sensors"] = {"status": "ok", "sensors": device_serial_sensors}
             serial_sensors_present = True
 
@@ -278,8 +284,10 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
     # signature/novelty behavior). Drop any caller-supplied oob_id: it's the authoritative OOB
     # signal (signature reads meta["oob_id"]), so it must be set ONLY below when controller ports
     # are actually recorded — never spoofed in by a caller without an OOB capture.
-    meta_out = {k: v for k, v in (meta or {}).items() if k != "oob_id"}
+    meta_out = {k: v for k, v in (meta or {}).items() if k not in ("oob_id", SERIAL_SENSORS_META_KEY)}
     meta_out["os"] = device_os
+    if serial_sensors_unavailable:
+        meta_out[SERIAL_SENSORS_META_KEY] = SERIAL_SENSORS_UNAVAILABLE
     # Skip a (misconfigured) OOB controller whose LibreNMS id equals the host's own id: its ports
     # route devices/<oob_id>/ports is the SAME key as the host's, so recording it would overwrite the
     # host's ports — and a device is not its own out-of-band controller. Compare COERCED ids: the

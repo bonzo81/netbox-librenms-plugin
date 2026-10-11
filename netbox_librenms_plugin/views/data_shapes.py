@@ -17,7 +17,11 @@ from django.views import View
 
 from netbox_librenms_plugin.data_shapes import recordings_store
 from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording, find_pii
-from netbox_librenms_plugin.data_shapes.capture import capture_device_recording
+from netbox_librenms_plugin.data_shapes.capture import (
+    SERIAL_SENSORS_META_KEY,
+    SERIAL_SENSORS_UNAVAILABLE,
+    capture_device_recording,
+)
 from netbox_librenms_plugin.data_shapes.compress import compress_recording
 from netbox_librenms_plugin.data_shapes.signature import classify_novelty, compute_shape_signature
 from netbox_librenms_plugin.utils import coerce_librenms_id, get_librenms_oob, get_librenms_sync_device
@@ -111,6 +115,8 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
                 "signature": signature,
                 "recording_json": recording_json,
                 "residual_pii": residual_pii,
+                "serial_sensors_unavailable": recordings_store.recording_meta(anonymized).get(SERIAL_SENSORS_META_KEY)
+                == SERIAL_SENSORS_UNAVAILABLE,
                 # The download filename must use the ANONYMIZED recording name (os-<hash>-shape-<hash>),
                 # never the real device name — the contributor attaches this file to the public issue,
                 # so its name must not leak the hostname the JSON scrubbed (mirrors the issue title).
