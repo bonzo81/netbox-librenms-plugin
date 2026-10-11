@@ -981,6 +981,48 @@ def test_anonymized_recording_still_detects_vc(recording_server, db):
 import pytest  # noqa: E402
 
 
+@pytest.mark.parametrize("field", ["display_template", "display_name", "label"])
+def test_device_labels_share_the_hostname_pseudonym(field):
+    recording = {
+        "device_id": 1,
+        "responses": {
+            "GET /api/v0/devices/1": {
+                "devices": [{"hostname": "example-device", "display": "example-device", field: "example-device"}]
+            }
+        },
+    }
+
+    anonymized = anonymize_recording(recording, salt="device-label")
+    device = _response(anonymized, "GET /api/v0/devices/1")["devices"][0]
+
+    assert re.fullmatch(r"device-[0-9a-f]{6}", device[field])
+    assert device[field] == device["hostname"] == device["display"]
+    assert "example-device" not in str(anonymized)
+    assert find_pii(anonymized) == []
+
+
+@pytest.mark.parametrize("field", ["group", "message"])
+def test_response_free_text_is_scrubbed(field):
+    recording = _ports({field: "example-device"})
+
+    anonymized = anonymize_recording(recording)
+
+    assert _response(anonymized, "GET /api/v0/devices/1/ports")["ports"][0][field] == ""
+    assert find_pii(anonymized) == []
+
+
+@pytest.mark.parametrize("field", ["entPhysicalHardwareRev", "revision"])
+def test_hardware_revision_text_is_pseudonymized(field):
+    recording = _ports({field: "EXAMPLE-SKU-REV-1"})
+
+    anonymized = anonymize_recording(recording)
+    revision = _response(anonymized, "GET /api/v0/devices/1/ports")["ports"][0][field]
+
+    assert re.fullmatch(r"fw-[0-9a-f]{6}", revision)
+    assert "EXAMPLE-SKU-REV-1" not in str(anonymized)
+    assert find_pii(anonymized) == []
+
+
 @pytest.mark.parametrize("field", ["hardware", "remote_platform", "entPhysicalModelName", "model"])
 @pytest.mark.parametrize("value", [None, "", "BuIlTiN", "DeFaUlT", "N/A", "Na", "-", "UnKnOwN", "  N/A  "])
 def test_model_placeholders_pass_through_unchanged(field, value):

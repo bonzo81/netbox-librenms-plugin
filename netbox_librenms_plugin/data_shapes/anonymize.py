@@ -90,8 +90,10 @@ VRF_INDEX_KEYS = frozenset({"vrf_oid"})
 # nothing, and find_pii trips on the IP form, so it is remapped with its shape kept.
 ROUTE_DISTINGUISHER_KEYS = frozenset({"mplsVpnVrfRouteDistinguisher"})
 SERIAL_KEYS = frozenset({"serial", "entPhysicalSerialNum"})
-# `display` is the LibreNMS device display name — operators often set it to a real FQDN.
-HOSTNAME_KEYS = frozenset({"hostname", "sysName", "remote_hostname", "display"})
+# Use one hostname token for device names and operator display labels.
+HOSTNAME_KEYS = frozenset(
+    {"hostname", "sysName", "remote_hostname", "display", "display_template", "display_name", "label"}
+)
 # Use one model identity across device, inventory, transceiver, and link rows.
 MODEL_KEYS = frozenset({"hardware", "remote_platform", "entPhysicalModelName", "model"})
 _MODEL_PLACEHOLDERS = GENERIC_CONTAINER_MODELS | LIBRENMS_PLACEHOLDER_VALUES
@@ -109,10 +111,18 @@ ENTITY_TEXT_KEYS = frozenset({"entPhysicalName", "entPhysicalDescr"})
 # integer type and the row-to-row cardinality the recording exists to preserve. Read by no sync
 # logic. 0 means "no OUI" in LibreNMS and is left alone so it stays distinguishable from a mask.
 OUI_KEYS = frozenset({"oui"})
-# Firmware / software version strings. Identifying (pin an exact build → deployment fingerprint /
-# CVE surface) and read by no sync logic, so pseudonymized to a deterministic fw-<hash>. (Device
-# chassis HARDWARE revision is left alone — it's not a firmware version.)
-VERSION_KEYS = frozenset({"version", "features", "entPhysicalFirmwareRev", "entPhysicalSoftwareRev", "remote_version"})
+# Version and revision text can identify the vendor or build.
+VERSION_KEYS = frozenset(
+    {
+        "version",
+        "features",
+        "entPhysicalFirmwareRev",
+        "entPhysicalHardwareRev",
+        "entPhysicalSoftwareRev",
+        "remote_version",
+        "revision",
+    }
+)
 # ``ipv4_address`` / ``ipv6_address`` / ``ipv6_compressed`` are the /devices/{id}/ip row forms
 # parse_librenms_ip_entry accepts. They are real routable addresses, so they map to the
 # documentation ranges like every other address.
@@ -142,6 +152,8 @@ FREETEXT_KEYS = frozenset(
         "sysDescr",
         "purpose",
         "notes",
+        "group",
+        "message",
         "entPhysicalAssetID",
         "entPhysicalAlias",
         # ENTITY-MIB manufacture date (e.g. "2021-03-15,12:00:00.0") — an identifying build date read

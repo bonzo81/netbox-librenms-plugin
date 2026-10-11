@@ -57,6 +57,8 @@ test-useful while losing identifying detail:
   Bundled recordings use the same ID remapping rules.
 - **Scrubbed:** IPs → documentation ranges, MACs → a synthetic `02:00:00` block, lat/lng →
   null, location → `Lab`, free-text (`ifAlias`, `sysContact`, `sysDescr`, …) → empty.
+  Device display labels, including `display_template`, use the hostname token rule.
+  Hardware revisions use version tokens. Sensor groups and response messages are cleared.
 
 `find_pii()` is a regex safety-net that flags any IP/MAC/email the field rules missed. The capture
 modal surfaces its findings; **review them before submitting.**
