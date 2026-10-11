@@ -6,11 +6,11 @@ import re
 import pytest
 from playwright.sync_api import Page, expect
 
-from .conftest import RECORDINGS_DIR, NetBoxAPI, recorded
+from .conftest import RECORDINGS_DIR, NetBoxAPI, recorded, recording_device_id
 
 RECORDING = "juniper-ex4400-vc-2member"
 RECORDING_DATA = json.loads((RECORDINGS_DIR / f"{RECORDING}.json").read_text())
-DEVICE_ID = RECORDING_DATA["device_id"]
+DEVICE_ID = recording_device_id(RECORDING)
 DEVICE = recorded(RECORDING, f"/api/v0/devices/{DEVICE_ID}")["devices"][0]
 HOSTNAME = DEVICE["hostname"]
 (ROOT_SERIAL,) = (
