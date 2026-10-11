@@ -19,7 +19,11 @@ import ipaddress
 import re
 from typing import NamedTuple
 
-from netbox_librenms_plugin.constants import GENERIC_CONTAINER_MODELS, LIBRENMS_PLACEHOLDER_VALUES
+from netbox_librenms_plugin.constants import (
+    GENERIC_CONTAINER_MODELS,
+    LIBRENMS_EMPTY_MESSAGES,
+    LIBRENMS_PLACEHOLDER_VALUES,
+)
 from netbox_librenms_plugin.data_shapes.ports import (
     ANON_INTERFACE_NAME_RE,
     ANON_INTERFACE_NAME_PREFIX,
@@ -153,7 +157,6 @@ FREETEXT_KEYS = frozenset(
         "purpose",
         "notes",
         "group",
-        "message",
         "entPhysicalAssetID",
         "entPhysicalAlias",
         # ENTITY-MIB manufacture date (e.g. "2021-03-15,12:00:00.0") — an identifying build date read
@@ -734,6 +737,13 @@ def _anon_value(key, value, rules, container=None):  # noqa: C901
         if model in _MODEL_PLACEHOLDERS:
             return value
         return rules.model_tokens.setdefault(model, f"MODEL-{_hash(model, salt)}")
+    if key == "message" and isinstance(value, str):
+        normalized = value.casefold()
+        for phrase in LIBRENMS_EMPTY_MESSAGES:
+            if phrase in normalized:
+                # Keep the fixed phrase and remove any surrounding device identity.
+                return value if normalized == phrase else phrase
+        return ""
     if not isinstance(value, str) or not value or value == "-":
         # Pseudonym/scrub rules below operate on real string values; leave empties/sentinels
         # and non-strings (ints, bools, null) untouched so logic-bearing numerics survive.

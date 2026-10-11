@@ -1011,6 +1011,36 @@ def test_response_free_text_is_scrubbed(field):
     assert find_pii(anonymized) == []
 
 
+@pytest.mark.parametrize(
+    "route,method,message",
+    [
+        ("devices/1/links", "get_device_links", "Device does not have any links"),
+        ("devices/1/links", "get_device_links", "Links do not exist"),
+        ("devices/1/ip", "get_device_ips", "Device does not have any ip addresses"),
+        ("routing/vrf", "get_device_vrfs", "VRFs do not exist"),
+        ("resources/sensors", "get_serial_port_sensors", "Sensors do not exist"),
+    ],
+)
+@pytest.mark.parametrize("include_device_name", [False, True])
+def test_anonymization_preserves_empty_response_replay(recording_server, route, method, message, include_device_name):
+    from netbox_librenms_plugin.data_shapes.envelope import wrap_response
+
+    if include_device_name:
+        message = f"device.example.invalid: {message.upper()}"
+    recording = {
+        "device_id": 1,
+        "responses": {f"GET /api/v0/{route}": wrap_response(404, {"status": "error", "message": message})},
+    }
+    for replay in (recording, anonymize_recording(recording)):
+        _server, api = recording_server(replay)
+        kwargs = {"sensor_types": {"serial": "Port {N}"}} if method == "get_serial_port_sensors" else {}
+        success, result = getattr(api, method)(replay["device_id"], **kwargs)
+        assert success, result
+        assert (result["links"] if method == "get_device_links" else result) == []
+    assert "device.example.invalid" not in str(replay)
+    assert find_pii(replay) == []
+
+
 @pytest.mark.parametrize("field", ["entPhysicalHardwareRev", "revision"])
 def test_hardware_revision_text_is_pseudonymized(field):
     recording = _ports({field: "EXAMPLE-SKU-REV-1"})

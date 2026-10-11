@@ -10,7 +10,13 @@ from django.core.exceptions import ObjectDoesNotExist
 from django.db import transaction
 from netbox.plugins import get_plugin_config
 
-from netbox_librenms_plugin.constants import LIBRENMS_PORTS_COLUMNS
+from netbox_librenms_plugin.constants import (
+    LIBRENMS_NO_IPS_MESSAGE,
+    LIBRENMS_NO_LINKS_MESSAGES,
+    LIBRENMS_NO_SENSORS_MESSAGE,
+    LIBRENMS_NO_VRFS_MESSAGE,
+    LIBRENMS_PORTS_COLUMNS,
+)
 
 # HTTP request timeout constants (in seconds)
 DEFAULT_API_TIMEOUT = 10
@@ -1474,8 +1480,7 @@ class LibreNMSAPI:
                     error_data = {}
                 message = error_data.get("message") if isinstance(error_data, dict) else None
                 normalized_message = message.casefold() if isinstance(message, str) else ""
-                no_links_messages = ("does not have any links", "links do not exist")
-                if any(text in normalized_message for text in no_links_messages):
+                if any(text in normalized_message for text in LIBRENMS_NO_LINKS_MESSAGES):
                     return True, {"status": "ok", "links": []}
                 return False, message if isinstance(message, str) and message else str(e)
             return False, str(e)
@@ -1516,7 +1521,7 @@ class LibreNMSAPI:
                 except ValueError:
                     error_data = None
                 message = error_data.get("message") if isinstance(error_data, dict) else None
-                if isinstance(message, str) and "does not have any ip addresses" in message.lower():
+                if isinstance(message, str) and LIBRENMS_NO_IPS_MESSAGE in message.lower():
                     return True, []
                 return False, message or str(e)
             return False, str(e)
@@ -1580,7 +1585,7 @@ class LibreNMSAPI:
         except (TypeError, ValueError):
             payload = None
         message = payload.get("message") if isinstance(payload, dict) else None
-        if isinstance(message, str) and "vrfs do not exist" in message.lower():
+        if isinstance(message, str) and LIBRENMS_NO_VRFS_MESSAGE in message.lower():
             return True, []
         return False, message or str(error)
 
@@ -2092,7 +2097,7 @@ class LibreNMSAPI:
         except (TypeError, ValueError):
             payload = None
         message = payload.get("message") if isinstance(payload, dict) else None
-        if isinstance(message, str) and "sensors do not exist" in message.lower():
+        if isinstance(message, str) and LIBRENMS_NO_SENSORS_MESSAGE in message.lower():
             return True, []
         return False, "Sensors resource endpoint not found"
 

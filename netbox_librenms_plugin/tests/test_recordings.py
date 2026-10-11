@@ -20,7 +20,11 @@ from unittest.mock import patch
 
 import pytest
 
-from netbox_librenms_plugin.constants import GENERIC_CONTAINER_MODELS, LIBRENMS_PLACEHOLDER_VALUES
+from netbox_librenms_plugin.constants import (
+    GENERIC_CONTAINER_MODELS,
+    LIBRENMS_EMPTY_MESSAGES,
+    LIBRENMS_PLACEHOLDER_VALUES,
+)
 from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
 from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
 from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns, compile_sap_patterns
@@ -40,6 +44,33 @@ def test_recordings_present():
 
 
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
+def test_bundled_empty_responses_replay_as_success(recording_server, recording):
+    _server, api = recording_server(recording)
+    readers = {
+        f"GET /api/v0/devices/{recording['device_id']}/links": (api.get_device_links, "links"),
+        f"GET /api/v0/devices/{recording['device_id']}/ip": (api.get_device_ips, "addresses"),
+        "GET /api/v0/routing/vrf": (api.get_device_vrfs, "vrfs"),
+        f"GET /api/v0/inventory/{recording['device_id']}/all": (api.get_device_inventory, "inventory"),
+    }
+    for route, (reader, field) in readers.items():
+        if route not in recording["responses"]:
+            continue
+        status, body = unwrap_response(recording["responses"][route])
+        if status == 404 or (status == 200 and body.get(field) == []):
+            success, result = reader(recording["device_id"])
+            assert success, (route, result)
+            assert (result["links"] if field == "links" else result) == []
+    route = "GET /api/v0/resources/sensors"
+    if route in recording["responses"]:
+        status, body = unwrap_response(recording["responses"][route])
+        if status == 404 or (status == 200 and body.get("sensors") == []):
+            assert api.get_serial_port_sensors(recording["device_id"], sensor_types={"serial": "Port {N}"}) == (
+                True,
+                [],
+            )
+
+
+@pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
 def test_bundled_response_labels_and_revisions_are_anonymized(recording):
     import re
 
@@ -51,7 +82,9 @@ def test_bundled_response_labels_and_revisions_are_anonymized(recording):
                         assert re.fullmatch(r"device-[0-9a-f]{6}", value), key
                     if key in {"entPhysicalHardwareRev", "revision"}:
                         assert re.fullmatch(r"fw-[0-9a-f]{6}", value), key
-                    if key in {"group", "message"}:
+                    if key == "message":
+                        assert value.casefold() in LIBRENMS_EMPTY_MESSAGES
+                    if key == "group":
                         pytest.fail(f"Private response text in {key}")
                 check(value)
         elif isinstance(obj, list):

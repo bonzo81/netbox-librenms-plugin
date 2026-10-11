@@ -24,6 +24,18 @@ INTERFACE_NAME_FIELDS = frozenset({DEFAULT_INTERFACE_NAME_FIELD, "ifDescr"})
 GENERIC_CONTAINER_MODELS = frozenset({"", "builtin", "default", "n/a"})
 LIBRENMS_PLACEHOLDER_VALUES = frozenset({"", "n/a", "na", "default", "-", "unknown"})
 
+# Fixed response phrases distinguish empty resources from failed requests.
+LIBRENMS_NO_LINKS_MESSAGES = ("does not have any links", "links do not exist")
+LIBRENMS_NO_IPS_MESSAGE = "does not have any ip addresses"
+LIBRENMS_NO_VRFS_MESSAGE = "vrfs do not exist"
+LIBRENMS_NO_SENSORS_MESSAGE = "sensors do not exist"
+LIBRENMS_EMPTY_MESSAGES = (
+    *LIBRENMS_NO_LINKS_MESSAGES,
+    LIBRENMS_NO_IPS_MESSAGE,
+    LIBRENMS_NO_VRFS_MESSAGE,
+    LIBRENMS_NO_SENSORS_MESSAGE,
+)
+
 
 def is_supported_interface_name_field(value):
     """
