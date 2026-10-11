@@ -144,6 +144,50 @@ class TestInterfacesTabIpamScoping:
         assert context["hidden_ipam_permissions"] == [], "precondition: the permission-name check must pass"
         assert context["vlan_scope_incomplete"] is True
 
+    @pytest.mark.parametrize("superuser", [False, True])
+    def test_unscoped_vlan_groups_are_read_once_per_render(self, settings, superuser):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        server_key = configure_default_librenms_server(settings)
+        device = make_device("iface-tab-query-scope")
+        group, _vlan = _site_group_with_vlan(device, "iface-tab-query")
+        user = _reader("iface-tab-query-user")
+        user.is_superuser = superuser
+        user.save()
+
+        with CaptureQueriesContext(connection) as queries:
+            context = self._context(user, device, server_key)
+
+        global_group_reads = [
+            query["sql"]
+            for query in queries
+            if 'FROM "ipam_vlangroup"' in query["sql"] and '"scope_type_id" IS NULL' in query["sql"]
+        ]
+        assert len(global_group_reads) == 1, global_group_reads
+        assert context["hidden_ipam_permissions"] == ([] if superuser else [VLAN_GROUP_PERM, VLAN_PERM])
+        assert list(context["vlan_groups"]) == ([group] if superuser else [])
+
+    def test_superuser_render_skips_vlan_scope_count_queries(self, settings):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        server_key = configure_default_librenms_server(settings)
+        device = make_device("iface-tab-superuser-scope")
+        _site_group_with_vlan(device, "iface-tab-superuser")
+        user = _reader("iface-tab-superuser")
+        user.is_superuser = True
+        user.save()
+
+        with CaptureQueriesContext(connection) as queries:
+            context = self._context(user, device, server_key)
+
+        vlan_counts = [
+            query["sql"] for query in queries if 'FROM "ipam_vlan"' in query["sql"] and "COUNT(" in query["sql"]
+        ]
+        assert vlan_counts == []
+        assert context["vlan_scope_incomplete"] is False
+
 
 def _table_html(table):
     """Render every cell of a bound table so a leaked group name is visible to an assertion."""
@@ -165,6 +209,38 @@ class TestVlanTabIpamScoping:
 
         request = make_request("get", user=user)
         return make_view(DeviceVLANTableView, request), request
+
+    @pytest.mark.parametrize("superuser", [False, True])
+    @pytest.mark.parametrize("error", [False, True], ids=["table", "error-fragment"])
+    def test_scope_notices_reuse_group_reads_and_skip_superuser_counts(self, settings, superuser, error):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        server_key = configure_default_librenms_server(settings)
+        device = make_device("vlan-tab-query-scope")
+        _site_group_with_vlan(device, "vlan-tab-query")
+        user = _reader("vlan-tab-query-user")
+        user.is_superuser = superuser
+        user.save()
+        view, request = self._view(user)
+
+        with CaptureQueriesContext(connection) as queries:
+            context = (
+                view._get_error_context(device, "Unavailable", server_key)
+                if error
+                else view.get_vlan_context(request, device, server_key)
+            )
+
+        global_group_reads = [
+            query["sql"]
+            for query in queries
+            if 'FROM "ipam_vlangroup"' in query["sql"] and '"scope_type_id" IS NULL' in query["sql"]
+        ]
+        assert len(global_group_reads) == 1, global_group_reads
+        assert context["hidden_ipam_permissions"] == ([] if superuser else [VLAN_GROUP_PERM, VLAN_PERM])
+        if superuser:
+            assert context["vlan_scope_incomplete"] is False
+            assert not any('FROM "ipam_vlan"' in query["sql"] and "COUNT(" in query["sql"] for query in queries)
 
     def test_a_user_without_ipam_view_rights_gets_no_vlan_groups(self, settings):
         """get_vlan_context serialises the group id and name into the table, so scope it."""

@@ -200,6 +200,11 @@ class BaseVLANTableView(
                 # requested key instead of serving a removed server's VLANs as live data
                 # (mirrors the interfaces/modules/cables tabs' unresolved guards).
                 vlan_groups = self.get_vlan_groups_for_device(obj, user=vlan_scope_user)
+                unscoped_groups = (
+                    vlan_groups
+                    if vlan_scope_user is None or vlan_scope_user.is_superuser
+                    else self.get_vlan_groups_for_device(obj)
+                )
                 return {
                     "object": obj,
                     "vlan_table": None,
@@ -207,11 +212,14 @@ class BaseVLANTableView(
                     "last_fetched": None,
                     "cache_expiry": None,
                     "server_key": server_key,
-                    "hidden_ipam_permissions": self.hidden_vlan_permissions([obj], vlan_scope_user),
+                    "hidden_ipam_permissions": self.hidden_vlan_permissions(
+                        [obj], vlan_scope_user, unscoped_groups=unscoped_groups
+                    ),
                     "vlan_scope_incomplete": self.vlan_scope_is_incomplete(
                         [obj],
                         vlan_scope_user,
                         scoped_groups=vlan_groups,
+                        unscoped_groups=unscoped_groups,
                     ),
                 }
             # No buildable client → no valid server scope: degrade to None (empty table) instead of
@@ -239,6 +247,11 @@ class BaseVLANTableView(
 
         # Get available VLAN groups for this device
         vlan_groups = self.get_vlan_groups_for_device(obj, user=vlan_scope_user)
+        unscoped_groups = (
+            vlan_groups
+            if vlan_scope_user is None or vlan_scope_user.is_superuser
+            else self.get_vlan_groups_for_device(obj)
+        )
 
         # Build lookup maps for VLAN matching
         lookup_maps = self._build_vlan_lookup_maps(vlan_groups, user=vlan_scope_user)
@@ -264,11 +277,14 @@ class BaseVLANTableView(
             "last_fetched": last_fetched,
             "cache_expiry": cache_expiry,
             "server_key": server_key,
-            "hidden_ipam_permissions": self.hidden_vlan_permissions([obj], vlan_scope_user),
+            "hidden_ipam_permissions": self.hidden_vlan_permissions(
+                [obj], vlan_scope_user, unscoped_groups=unscoped_groups
+            ),
             "vlan_scope_incomplete": self.vlan_scope_is_incomplete(
                 [obj],
                 vlan_scope_user,
                 scoped_groups=vlan_groups,
+                unscoped_groups=unscoped_groups,
             ),
         }
 
@@ -297,17 +313,25 @@ class BaseVLANTableView(
         # path takes no request, so read the one bound on the view.
         vlan_scope_user = self.vlan_scope_user()
         vlan_groups = self.get_vlan_groups_for_device(obj, user=vlan_scope_user)
+        unscoped_groups = (
+            vlan_groups
+            if vlan_scope_user is None or vlan_scope_user.is_superuser
+            else self.get_vlan_groups_for_device(obj)
+        )
         return {
             "object": obj,
             "error_message": error_message,
             "vlan_table": None,
             "vlan_groups": vlan_groups,
             "server_key": resolved,
-            "hidden_ipam_permissions": self.hidden_vlan_permissions([obj], vlan_scope_user),
+            "hidden_ipam_permissions": self.hidden_vlan_permissions(
+                [obj], vlan_scope_user, unscoped_groups=unscoped_groups
+            ),
             "vlan_scope_incomplete": self.vlan_scope_is_incomplete(
                 [obj],
                 vlan_scope_user,
                 scoped_groups=vlan_groups,
+                unscoped_groups=unscoped_groups,
             ),
         }
 

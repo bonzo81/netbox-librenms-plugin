@@ -653,11 +653,19 @@ class BaseInterfaceTableView(
         vlan_scope_user = self.vlan_scope_user(request)
         vlan_groups = self.get_vlan_groups_for_devices(vlan_scope_devices, user=vlan_scope_user)
         lookup_maps = self._build_vlan_lookup_maps(vlan_groups, user=vlan_scope_user)
-        hidden_ipam_permissions = self.hidden_vlan_permissions(vlan_scope_devices, vlan_scope_user)
+        unscoped_groups = (
+            vlan_groups
+            if vlan_scope_user is None or vlan_scope_user.is_superuser
+            else self.get_vlan_groups_for_devices(vlan_scope_devices)
+        )
+        hidden_ipam_permissions = self.hidden_vlan_permissions(
+            vlan_scope_devices, vlan_scope_user, unscoped_groups=unscoped_groups
+        )
         vlan_scope_incomplete = self.vlan_scope_is_incomplete(
             vlan_scope_devices,
             vlan_scope_user,
             scoped_groups=vlan_groups,
+            unscoped_groups=unscoped_groups,
         )
         vlan_groups_by_device = {
             device.pk: self.filter_vlan_groups_for_device(vlan_groups, device) for device in vlan_scope_devices

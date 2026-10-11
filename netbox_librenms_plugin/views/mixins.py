@@ -1095,7 +1095,7 @@ class VlanAssignmentMixin:
             request = getattr(self, "request", None)
         return getattr(request, "user", None)
 
-    def hidden_vlan_permissions(self, devices, user):
+    def hidden_vlan_permissions(self, devices, user, *, unscoped_groups=None):
         """
         Return the IPAM view permissions whose absence hides VLAN data for *devices*.
 
@@ -1107,6 +1107,7 @@ class VlanAssignmentMixin:
         Args:
             devices: The devices whose VLAN scope the caller reads.
             user: The requesting user, or None when no request is bound.
+            unscoped_groups: The groups already resolved without a user, if available.
 
         Returns:
             list[str]: The missing permission names, group before VLAN, or an empty list.
@@ -1125,7 +1126,7 @@ class VlanAssignmentMixin:
 
         # Unscoped on purpose: the question is what the caller's grant hides, so the comparison
         # needs the full scope.
-        groups = self.get_vlan_groups_for_devices(devices)
+        groups = unscoped_groups if unscoped_groups is not None else self.get_vlan_groups_for_devices(devices)
         hidden = []
         if group_permission in missing and groups:
             hidden.append(group_permission)
@@ -1160,7 +1161,7 @@ class VlanAssignmentMixin:
         """
         from ipam.models import VLAN
 
-        if user is None:
+        if user is None or user.is_superuser:
             return False
         if unscoped_groups is None:
             unscoped_groups = self.get_vlan_groups_for_devices(devices)
