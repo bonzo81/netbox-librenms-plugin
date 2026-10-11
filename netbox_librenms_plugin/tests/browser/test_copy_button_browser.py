@@ -119,6 +119,45 @@ def test_capture_preview_has_a_styled_vertical_scrollbar(page):
     assert thumb != "rgba(0, 0, 0, 0)"
 
 
+# NetBox 4.7 netbox.css: a standard scrollbar-color disables every ::-webkit-scrollbar rule (Chrome 121+, Firefox).
+NETBOX_SCROLLBAR_CSS = """
+    :root { --tblr-light: #f9fafb; --tblr-body-color: #374151; }
+    * { scrollbar-color: color-mix(in srgb, var(--tblr-scrollbar-color, var(--tblr-body-color)) 20%, transparent) transparent; }
+    pre { --tblr-scrollbar-color: var(--tblr-light); }
+    .alert { display: flex; }
+"""
+
+
+def _render_capture_modal(page, **context):
+    from django.template import Context, Engine
+
+    template_path = Path(__file__).parents[2] / "templates/netbox_librenms_plugin/htmx/capture_data_shape.html"
+    template = Engine().from_string(template_path.read_text(encoding="utf-8"))
+    context.setdefault("recording_json", "\n".join(str(i) for i in range(200)))
+    page.set_content(f"<style>{NETBOX_SCROLLBAR_CSS}</style>" + template.render(Context(context, use_l10n=False)))
+
+
+def test_capture_preview_scrollbar_stays_visible_under_netbox_css(page):
+    """NetBox's near-white scrollbar-color on <pre> must not hide the preview's vertical scrollbar."""
+    _render_capture_modal(page)
+
+    scrollbar_color = page.locator("#capture-json").evaluate("node => getComputedStyle(node).scrollbarColor")
+    assert scrollbar_color == "rgb(107, 114, 128) rgb(229, 231, 235)"
+
+
+def test_capture_alerts_keep_inline_markup_in_one_text_block(page):
+    """Under Tabler's flex .alert, the text and its <code>/<ul> must stay in one block beside the icon."""
+    _render_capture_modal(
+        page,
+        serial_sensors_unavailable=True,
+        residual_pii=[{"kind": "ipv4", "value": "10.7.8.9", "path": "responses.x"}],
+    )
+
+    for selector in ("#capture-serial-sensors-unavailable", ".alert-danger"):
+        alert = page.locator(selector)
+        assert alert.evaluate("node => Array.from(node.children).map(c => c.tagName)") == ["I", "DIV"]
+
+
 def test_capture_suggests_download_with_room_for_other_issue_fields(page):
     from django.template import Context, Engine
 

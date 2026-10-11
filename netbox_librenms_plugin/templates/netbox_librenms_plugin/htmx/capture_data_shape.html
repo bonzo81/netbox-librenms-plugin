@@ -18,11 +18,13 @@
 
     {% if residual_pii %}
     <div class="alert alert-danger py-2 mt-2 mb-0">
-      <i class="mdi mdi-shield-alert"></i>
-      {{ residual_pii|length }} possible PII value{{ residual_pii|length|pluralize }} remain after anonymization &mdash; review before submitting:
-      <ul class="mb-0 small">
-        {% for p in residual_pii %}<li>{{ p.kind }} <code>{{ p.value }}</code> at <code>{{ p.path }}</code></li>{% endfor %}
-      </ul>
+      <i class="mdi mdi-shield-alert me-2"></i>
+      <div>
+        {{ residual_pii|length }} possible PII value{{ residual_pii|length|pluralize }} remain after anonymization &mdash; review before submitting:
+        <ul class="mb-0 small">
+          {% for p in residual_pii %}<li>{{ p.kind }} <code>{{ p.value }}</code> at <code>{{ p.path }}</code></li>{% endfor %}
+        </ul>
+      </div>
     </div>
     {% else %}
     <div class="text-success small mt-2"><i class="mdi mdi-shield-check"></i> No residual IP / MAC / email detected after anonymization.</div>
@@ -30,9 +32,11 @@
 
     {% if serial_sensors_unavailable %}
     <div id="capture-serial-sensors-unavailable" class="alert alert-warning py-2 mt-2 mb-0 small">
-      <i class="mdi mdi-alert"></i>
-      LibreNMS did not return its sensor table (<code>/api/v0/resources/sensors</code>), so this recording has no serial-port data.
-      The rest of the capture is complete. Check the LibreNMS log for the cause.
+      <i class="mdi mdi-alert me-2"></i>
+      <div>
+        LibreNMS did not return its sensor table (<code>/api/v0/resources/sensors</code>), so this recording has no serial-port data.
+        The rest of the capture is complete. Check the LibreNMS log for the cause.
+      </div>
     </div>
     {% endif %}
 
@@ -40,9 +44,11 @@
     <pre id="capture-json" class="border rounded p-2 small mb-2" data-filename="{{ anonymized_name|default:'data-shape'|slugify }}.json"
          style="max-height:300px;overflow-y:scroll;overflow-x:auto;scrollbar-gutter:stable">{{ recording_json }}</pre>
     <style>
+      {% comment %}NetBox sets a near-white scrollbar-color on <pre>, and that disables the ::-webkit-scrollbar rules.{% endcomment %}
+      #capture-json { scrollbar-color: var(--tblr-secondary, #6b7280) var(--tblr-secondary-bg, #e5e7eb); }
       #capture-json::-webkit-scrollbar { width: 12px; height: 12px; }
-      #capture-json::-webkit-scrollbar-track { background: var(--bs-secondary-bg, #e9ecef); }
-      #capture-json::-webkit-scrollbar-thumb { background: var(--bs-secondary-color, #6c757d); border-radius: 6px; }
+      #capture-json::-webkit-scrollbar-track { background: var(--tblr-secondary-bg, #e5e7eb); }
+      #capture-json::-webkit-scrollbar-thumb { background: var(--tblr-secondary, #6b7280); border-radius: 6px; }
     </style>
     {% if recording_json|length > 60000 %}
     <div id="capture-large-recording" class="alert alert-info py-2 small">
