@@ -766,7 +766,7 @@ def test_anonymized_inventory_resolves_a_token_keyed_module_type(recording_serve
     recording = next(item for item in _RECORDINGS if item["name"] == "cisco-stackwise-3member")
     recording = json.loads(json.dumps(recording))
     device_id = recording["device_id"]
-    member_route = next(route for route in recording["responses"] if "entPhysicalClass=chassis" in route)
+    member_route = next(route for route in recording["responses"] if "entPhysicalContainedIn=1" in route)
     model = recording["responses"][member_route]["inventory"][0]["entPhysicalModelName"]
     recording["responses"][f"GET /api/v0/devices/{device_id}"]["devices"][0]["hardware"] = model
     anonymized = anonymize_recording(recording, salt="module-matching")
@@ -776,9 +776,7 @@ def test_anonymized_inventory_resolves_a_token_keyed_module_type(recording_serve
         ModuleTypeMapping.objects.create(librenms_model=token, netbox_module_type=module_type)
     _server, api = recording_server(anonymized)
 
-    success, inventory = api.get_inventory_filtered(
-        anonymized["device_id"], ent_physical_class="chassis", ent_physical_contained_in=1
-    )
+    success, inventory = api.get_inventory_filtered(anonymized["device_id"], ent_physical_contained_in=1)
 
     assert success and inventory
     assert resolve_module_type(inventory[0]["entPhysicalModelName"], get_module_types_indexed()) == module_type
