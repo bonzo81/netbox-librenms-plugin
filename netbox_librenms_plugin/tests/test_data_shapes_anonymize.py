@@ -819,7 +819,7 @@ def test_entity_descr_keeps_only_the_junos_virtual_chassis_markers():
     first = anonymize_recording(rec)
     second = anonymize_recording(first)
 
-    rows = first["responses"][key]["inventory"]
+    rows = _response(first, key)["inventory"]
     token = "entity-[0-9a-f]{6}"
     assert re.fullmatch(f"{token} Virtual Chassis", rows[0]["entPhysicalDescr"])
     assert re.fullmatch(f"FPC 1 {token}", rows[1]["entPhysicalDescr"])
@@ -828,7 +828,7 @@ def test_entity_descr_keeps_only_the_junos_virtual_chassis_markers():
     # The markers are read from the description only; names stay fully replaced.
     assert all(re.fullmatch(token, row["entPhysicalName"]) for row in rows if "entPhysicalName" in row)
     assert not any(word in str(rows) for word in ("Juniper", "EX4400", "Power Supply", "Routing"))
-    assert second["responses"][key]["inventory"] == rows
+    assert _response(second, key)["inventory"] == rows
     assert find_pii(first) == []
 
 
