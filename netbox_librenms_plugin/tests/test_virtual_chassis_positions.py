@@ -81,7 +81,8 @@ def test_a_missing_member_position_numbers_the_whole_stack_in_row_order(live_lib
             for row in unwrap_response(value)[1]["inventory"]:
                 if row["entPhysicalIndex"] == 120:
                     row["entPhysicalParentRelPos"] = None
-    inventory = unwrap_response(recording["responses"]["GET /api/v0/inventory/1002/all"])[1]["inventory"]
+    device_id = recording["device_id"]
+    inventory = unwrap_response(recording["responses"][f"GET /api/v0/inventory/{device_id}/all"])[1]["inventory"]
     fpc_serials = {row["entPhysicalIndex"]: row["entPhysicalSerialNum"] for row in inventory}
 
     chassis = _import_recording(live_librenms, recording, "missing-slot")

@@ -16,7 +16,7 @@ from netbox_librenms_plugin.tests.recordings import load_recording
 pytestmark = pytest.mark.django_db
 
 _RECORDING = "juniper-ex4400-vc-2member"
-_DEVICE_ID = 1002
+_DEVICE_ID = load_recording(_RECORDING)["device_id"]
 _ROOT_KEY = f"GET /api/v0/inventory/{_DEVICE_ID}?entPhysicalContainedIn=0"
 _CHILDREN_KEY = f"GET /api/v0/inventory/{_DEVICE_ID}?entPhysicalContainedIn=1"
 _ALL_KEY = f"GET /api/v0/inventory/{_DEVICE_ID}/all"
@@ -42,15 +42,23 @@ def _detect(recording_server, recording):
     from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
 
     _server, api = recording_server(recording)
-    return detect_virtual_chassis_from_inventory(api, _DEVICE_ID)
+    return detect_virtual_chassis_from_inventory(api, recording["device_id"])
 
 
-def test_fpc_members_carry_their_member_number_serial_and_model(recording_server):
+@pytest.mark.parametrize("anonymized", [False, True])
+def test_fpc_members_carry_their_member_number_serial_and_model(recording_server, anonymized):
     from netbox_librenms_plugin.import_utils.virtual_chassis import identify_vc_master, vc_serial_key
 
     recording = load_recording(_RECORDING)
+    if anonymized:
+        from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
+
+        recording = anonymize_recording(recording)
+    device_id = recording["device_id"]
     fpcs = {
-        row["entPhysicalIndex"]: row for row in _rows(recording, _CHILDREN_KEY) if row["entPhysicalIndex"] in (120, 121)
+        row["entPhysicalIndex"]: row
+        for row in _rows(recording, f"GET /api/v0/inventory/{device_id}?entPhysicalContainedIn=1")
+        if row["entPhysicalIndex"] in (120, 121)
     }
 
     result = _detect(recording_server, recording)
@@ -63,7 +71,7 @@ def test_fpc_members_carry_their_member_number_serial_and_model(recording_server
         fpcs[121]["entPhysicalSerialNum"],
     ]
     # The LibreNMS device serial is the root serial, which FPC 0 carries.
-    device = unwrap_response(recording["responses"][f"GET /api/v0/devices/{_DEVICE_ID}"])[1]["devices"][0]
+    device = unwrap_response(recording["responses"][f"GET /api/v0/devices/{device_id}"])[1]["devices"][0]
     assert identify_vc_master(result["members"], device["serial"], vc_serial_key()) is result["members"][0]
     # Junos reports the member model as the FPC name; the model-name field holds a part number.
     assert [member["model"] for member in result["members"]] == [

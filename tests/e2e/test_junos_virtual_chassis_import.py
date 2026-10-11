@@ -9,14 +9,15 @@ from playwright.sync_api import Page, expect
 from .conftest import RECORDINGS_DIR, NetBoxAPI, recorded
 
 RECORDING = "juniper-ex4400-vc-2member"
-DEVICE_ID = 1002
+RECORDING_DATA = json.loads((RECORDINGS_DIR / f"{RECORDING}.json").read_text())
+DEVICE_ID = RECORDING_DATA["device_id"]
 DEVICE = recorded(RECORDING, f"/api/v0/devices/{DEVICE_ID}")["devices"][0]
 HOSTNAME = DEVICE["hostname"]
 (ROOT_SERIAL,) = (
     row["entPhysicalSerialNum"]
     for row in recorded(RECORDING, f"/api/v0/inventory/{DEVICE_ID}?entPhysicalContainedIn=0")["inventory"]
 )
-EXPECTED = json.loads((RECORDINGS_DIR / f"{RECORDING}.json").read_text())["expected"]["virtual_chassis"]
+EXPECTED = RECORDING_DATA["expected"]["virtual_chassis"]
 # The FPC serials in member order, keyed by the member number that Junos reports.
 SERIAL_BY_POSITION = dict(zip(EXPECTED["member_positions"], EXPECTED["member_serials"], strict=True))
 IMPORT_PATH = "/plugins/librenms_plugin/librenms-import/"
