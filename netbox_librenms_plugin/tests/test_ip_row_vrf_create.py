@@ -13,12 +13,31 @@ from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, ma
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms, make_view
 
 SERVER_KEY = "test"
-RD_VRF = ("vrf-df874a", "203.0.113.82:61434")
-NO_RD_VRF = "vrf-0ed884"
-# The three iosxe-subinterfaces addresses on vrf-df874a, then the one on vrf-0ed884, then an untagged one.
-RD_ROWS = ("192.0.2.27/29", "192.0.2.234/29", "203.0.113.46/30")
-NO_RD_ROW = "192.0.2.159/24"
-UNTAGGED_ROW = "192.0.2.5/32"
+_RECORDING = load_recording("iosxe-subinterfaces")
+_DEVICE_ID = _RECORDING["device_id"]
+_PORTS = _RECORDING["responses"][f"GET /api/v0/devices/{_DEVICE_ID}/ports"]["ports"]
+_PORTS_BY_ID = {port["port_id"]: port for port in _PORTS}
+_VRFS = _RECORDING["responses"]["GET /api/v0/routing/vrf"]["vrfs"]
+_RD_SOURCE = next(vrf for vrf in _VRFS if vrf["mplsVpnVrfRouteDistinguisher"])
+_NAME_SOURCE = next(vrf for vrf in _VRFS if not vrf["mplsVpnVrfRouteDistinguisher"])
+_ADDRESSES = _RECORDING["responses"][f"GET /api/v0/devices/{_DEVICE_ID}/ip"]["addresses"]
+RD_VRF = (_RD_SOURCE["vrf_name"], _RD_SOURCE["mplsVpnVrfRouteDistinguisher"])
+NO_RD_VRF = _NAME_SOURCE["vrf_name"]
+RD_ROWS = tuple(
+    f"{row['ipv4_address']}/{row['ipv4_prefixlen']}"
+    for row in _ADDRESSES
+    if _PORTS_BY_ID[row["port_id"]]["ifVrf"] == _RD_SOURCE["vrf_id"]
+)
+NO_RD_ROW = next(
+    f"{row['ipv4_address']}/{row['ipv4_prefixlen']}"
+    for row in _ADDRESSES
+    if _PORTS_BY_ID[row["port_id"]]["ifVrf"] == _NAME_SOURCE["vrf_id"]
+)
+UNTAGGED_ROW = next(
+    f"{row['ipv4_address']}/{row['ipv4_prefixlen']}"
+    for row in _ADDRESSES
+    if _PORTS_BY_ID[row["port_id"]]["ifName"] == "Lo10"
+)
 
 pytestmark = pytest.mark.django_db
 
