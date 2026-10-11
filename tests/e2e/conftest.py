@@ -33,6 +33,11 @@ envelope = importlib.util.module_from_spec(_envelope_spec)
 _envelope_spec.loader.exec_module(envelope)
 
 
+def recording_device_id(name: str) -> int:
+    """Return the LibreNMS device id under which the stub serves a recording."""
+    return json.loads((RECORDINGS_DIR / f"{name}.json").read_text())["device_id"]
+
+
 def recorded(name: str, route: str) -> dict:
     """Return the body that a recording, which the stub also serves, holds for one GET route."""
     stored = json.loads((RECORDINGS_DIR / f"{name}.json").read_text())["responses"][f"GET {route}"]

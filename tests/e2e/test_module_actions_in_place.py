@@ -14,12 +14,13 @@ import pytest
 from playwright.sync_api import expect
 
 from . import module_tab as tab
-from .conftest import recorded
+from .conftest import recorded, recording_device_id
 
-LIBRENMS_ID = 1
+RECORDING = "arcos-lag-transceivers"
+LIBRENMS_ID = recording_device_id(RECORDING)
 OPTICS = [
     item
-    for item in recorded("arcos-lag-transceivers", f"/api/v0/inventory/{LIBRENMS_ID}/all")["inventory"]
+    for item in recorded(RECORDING, f"/api/v0/inventory/{LIBRENMS_ID}/all")["inventory"]
     if item["entPhysicalClass"] == "port"
 ]
 # The bay matcher pairs an inventory item with the bay of the same name.
