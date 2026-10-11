@@ -1,16 +1,18 @@
 """Guard: a Tabler ``.alert`` holds an optional icon plus ONE content block."""
 
-import re
 from html.parser import HTMLParser
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
+import re2
 
 TEMPLATES_DIR = Path(__file__).parents[1] / "templates"
 VOID_TAGS = {"br", "img", "input", "hr", "meta", "link", "source", "wbr"}
 # Alerts that choose their own layout keep it: d-flex rows of badges, or block/column alerts.
 OWN_LAYOUT_CLASSES = {"d-flex", "d-block", "flex-column"}
-TEMPLATE_TAGS_ONLY = re.compile(r"^(\s|\{%.*?%\}|\{#.*?#\})*$", re.S)
+TEMPLATE_TAGS_ONLY = re2.compile(r"(?s)^(\s|\{%.*?%\}|\{#.*?#\})*$")
 
 
 class _AlertScanner(HTMLParser):
@@ -101,3 +103,20 @@ def test_every_template_alert_holds_one_content_block():
         for line, items in _offenders(path.read_text(encoding="utf-8"))
     ]
     assert offenders == []
+
+
+@pytest.mark.parametrize("token", ["{% if flag %}", "{# comment #}"])
+def test_the_guard_handles_repeated_template_tags_before_visible_text(token):
+    """Repeated tags must not stall the scanner when visible text follows them."""
+    probe = """
+import runpy
+import sys
+scan = runpy.run_path(sys.argv[1])["_offenders"]
+source = '<div class="alert">' + sys.argv[2] * 128 + 'Text<div>Body</div></div>'
+assert scan(source) == [(1, ["text", "div"])]
+"""
+    subprocess.run(
+        [sys.executable, "-c", probe, str(Path(__file__)), token],
+        check=True,
+        timeout=5,
+    )
