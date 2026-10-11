@@ -10,10 +10,11 @@ import pytest
 from playwright.sync_api import expect
 
 from . import module_tab as tab
-from .conftest import recorded
+from .conftest import recorded, recording_device_id
 
-LIBRENMS_ID = 5
-INVENTORY = recorded("nokia-timos-transceivers", f"/api/v0/inventory/{LIBRENMS_ID}/all")["inventory"]
+RECORDING = "nokia-timos-transceivers"
+LIBRENMS_ID = recording_device_id(RECORDING)
+INVENTORY = recorded(RECORDING, f"/api/v0/inventory/{LIBRENMS_ID}/all")["inventory"]
 CARD = next(item for item in INVENTORY if item["entPhysicalClass"] == "ioModule" and item["entPhysicalModelName"])
 MDA = next(
     item

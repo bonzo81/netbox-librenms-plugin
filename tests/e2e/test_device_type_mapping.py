@@ -11,10 +11,11 @@ from uuid import uuid4
 import pytest
 from playwright.sync_api import expect
 
-from .conftest import MAPPINGS_API, NetBoxAPI, recorded
+from .conftest import MAPPINGS_API, NetBoxAPI, recorded, recording_device_id
 
-DEVICE_ID = 45
-DEVICE = recorded("iosxe-subinterfaces", f"/api/v0/devices/{DEVICE_ID}")["devices"][0]
+RECORDING = "iosxe-subinterfaces"
+DEVICE_ID = recording_device_id(RECORDING)
+DEVICE = recorded(RECORDING, f"/api/v0/devices/{DEVICE_ID}")["devices"][0]
 IMPORT_PATH = "/plugins/librenms_plugin/librenms-import/"
 
 
