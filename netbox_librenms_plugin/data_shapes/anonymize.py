@@ -5,15 +5,15 @@ The goal is to make a captured recording safe to share publicly while keeping ev
 sync logic actually reads intact, so the anonymized recording still drives the same outcome
 tests. Three strategies, by field:
 
-* **Preserve verbatim** the logic-bearing fields (ifName/ifType/port ids, ENTITY-MIB
+* **Preserve verbatim** the logic-bearing fields (ifName/ifType, ENTITY-MIB
   class/index/position, VLANs, transceiver optics) and the public module-matching SKUs
   (entPhysicalModelName, transceiver model — keyed to NetBox ModuleType for module install).
   Anonymizing these would destroy the LAG/sub-interface/VC detection and module-matching the
   recordings exist to test.
 * **Pseudonymize deterministically** identifiers (serials, hostnames, ENTITY-MIB display text, the
-  device chassis SKU, firmware/software versions): the same input always maps to the same fake, so
-  cross-references still match after anonymization. The OS string is pseudonymized too, but
-  *unsalted* (see :func:`pseudonymize_os`) so the same OS yields one stable token across all
+  device chassis SKU, firmware/software versions, database IDs): equal values share one synthetic
+  value within a recording, so cross-references still match after anonymization. The OS string is
+  pseudonymized too, but *unsalted* (see :func:`pseudonymize_os`) so the same OS yields one stable token across all
   recordings. The novelty matcher needs that to compare platforms. Vendor-naming SNMP OIDs
   (sysObjectID, sensor_oid, entPhysicalVendorType) are remapped under the example-enterprise arc so
   they keep their shape without naming the vendor the OS hash hides.
@@ -50,25 +50,13 @@ PRESERVE_KEYS = frozenset(
         "ifOperStatus",
         "ifVlan",
         "ifTrunk",
-        # The per-port VRF id and the VRF row it joins to. Ints, no PII; the join is what makes a
-        # VRF fixture usable, while the VRF's NAME is customer data and is pseudonymized below.
-        "ifVrf",
-        "vrf_id",
         # Address prefix lengths: parse_librenms_ip_entry reads them alongside the address, so a
         # scrubbed one makes the row unparseable.
         "prefix_length",
         "ipv4_prefixlen",
         "ipv6_prefixlen",
-        "port_id",
-        "local_port_id",
-        "remote_port_id",
-        # Link-row device ids and the discovery protocol. The protocol distinguishes the same
-        # neighbour reported over both CDP and LLDP, which is a shape the cables tab must handle.
-        "local_device_id",
-        "remote_device_id",
+        # Keep the protocol to distinguish the same neighbour reported by CDP and LLDP.
         "protocol",
-        "high_port_id",
-        "low_port_id",
         "entPhysicalClass",
         "entPhysicalIndex",
         "entPhysicalContainedIn",
@@ -81,16 +69,12 @@ PRESERVE_KEYS = frozenset(
         "entPhysicalModelName",
         # NOTE: `os` is NOT preserved — it's pseudonymized to a stable os-<hash> (see
         # pseudonymize_os) so a recording never advertises the exact platform.
-        "device_id",
         "status",
         # serial-port sensor logic-bearing fields (Avocent console servers). parse_port_number
-        # reads the trailing int from sensor_index; sensor_type gates the AVOCENT filter; sensor_id
-        # forms the synthetic local_port_id. None carry PII (sensor_descr does — see below).
-        "sensor_id",
+        # reads the trailing int from sensor_index; sensor_type gates the AVOCENT filter.
         "sensor_index",
         "sensor_type",
         "vlan",
-        "vlan_id",
         "vlan_vlan",
         "untagged",
         "tagged",
@@ -617,9 +601,137 @@ def _looks_like_ip(value):
     return True
 
 
-def _anon_value(key, value, rules):  # noqa: C901
+# Aliases that refer to the same database table must share one mapping.
+_ID_NAMESPACES = {
+    "device_id": "device",
+    "local_device_id": "device",
+    "remote_device_id": "device",
+    "oob_id": "device",
+    "port_id": "port",
+    "local_port_id": "port",
+    "remote_port_id": "port",
+    "high_port_id": "port",
+    "low_port_id": "port",
+    "ifVrf": "vrf",
+    "vrf_id": "vrf",
+    "poller_group": "poller_group",
+}
+# A bare row ID needs its containing table to share the foreign-key mapping.
+_ID_CONTAINER_NAMESPACES = {
+    "devices": "device",
+    "ports": "port",
+    "inventory": "entPhysical",
+    "sensors": "sensor",
+    "vrfs": "vrf",
+    "location": "location",
+    "links": "link",
+    "mappings": "port_stack",
+    "transceivers": "transceiver",
+}
+_DEVICE_ROUTE_RE = re.compile(r"(/api/v0/(?:devices|inventory)/)([0-9]+)(?=/|\?|$)")
+
+
+def _id_namespace(key, container=None):
+    """Resolve ID fields and bare row IDs to their database table."""
+    if container == "devices" and key in ("parent_id", "dependency_parent_id"):
+        return "device"
+    if key == "id":
+        try:
+            return _ID_CONTAINER_NAMESPACES[container]
+        except KeyError:
+            raise ValueError("Database ID has no recognized table context.") from None
+    return _ID_NAMESPACES.get(key, key[:-3] if key.endswith("_id") else None)
+
+
+def _database_id_references(key, value, container):
+    """Read each device dependency ID from LibreNMS's comma-separated field."""
+    if container == "devices" and key == "dependency_parent_id" and isinstance(value, str):
+        return value.split(",")
+    return (value,)
+
+
+def _database_id(value):
+    """Normalize numeric IDs and leave absent or nonpositive sentinels unchanged."""
+    if value is None or value in ("", "-"):
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError("Database IDs must be integers or numeric strings.")
+    if isinstance(value, str) and not re.fullmatch(r"-?[0-9]+", value):
+        raise ValueError("Database IDs must be integers or numeric strings.")
+    number = int(value)
+    return number if number > 0 else None
+
+
+class _DatabaseIDs:
+    """Allocate distinct salted IDs within each table for one recording."""
+
+    def __init__(self, recording, salt):
+        self.salt = salt
+        self.mapping = {}
+        self.used = set()
+        # Exclude source IDs from every allocation, including IDs in metadata and routes.
+        self.originals = set()
+        self._collect(recording)
+        for route in recording.get("responses", {}):
+            match = _DEVICE_ROUTE_RE.search(route)
+            if match:
+                self.originals.add(int(match[2]))
+        expected = recording.get("expected")
+        if isinstance(expected, dict):
+            for name in ("lag_members", "sub_interfaces"):
+                relationships = expected.get(name)
+                if isinstance(relationships, dict):
+                    for child, parent in relationships.items():
+                        for value in (child, parent):
+                            if (number := _database_id(value)) is not None:
+                                self.originals.add(number)
+
+    def _collect(self, obj, container=None):
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if _id_namespace(key, container) is not None:
+                    for reference in _database_id_references(key, value, container):
+                        if (number := _database_id(reference)) is not None:
+                            self.originals.add(number)
+                else:
+                    self._collect(value, key)
+        elif isinstance(obj, list):
+            for value in obj:
+                self._collect(value, container)
+
+    def remap(self, namespace, value):
+        """Keep the JSON type while matching numeric strings to integer references."""
+        number = _database_id(value)
+        if number is None:
+            return value
+        identity = (namespace, number)
+        if identity not in self.mapping:
+            attempt = 0
+            while True:
+                digest = hashlib.sha256(f"{self.salt}:database-id:{namespace}:{number}:{attempt}".encode()).digest()
+                candidate = int.from_bytes(digest[:4]) % 2147483647 + 1
+                if candidate not in self.originals and candidate not in self.used:
+                    break
+                attempt += 1
+            self.mapping[identity] = candidate
+            self.used.add(candidate)
+        mapped = self.mapping[identity]
+        return str(mapped) if isinstance(value, str) else mapped
+
+    def route(self, route):
+        """Rewrite device IDs in recorded endpoint paths and keep query parameters intact."""
+        return _DEVICE_ROUTE_RE.sub(lambda match: match[1] + self.remap("device", match[2]), route)
+
+
+def _anon_value(key, value, rules, container=None):  # noqa: C901
     """Apply the field rule for a single scalar (non-container) value keyed by *key*."""
     salt = rules.salt
+    if (namespace := _id_namespace(key, container)) is not None:
+        mapped = [
+            rules.database_ids.remap(namespace, reference)
+            for reference in _database_id_references(key, value, container)
+        ]
+        return ",".join(mapped) if isinstance(value, str) else mapped[0]
     if key in PRESERVE_KEYS:
         return value
     if key in GEO_KEYS:
@@ -682,6 +794,7 @@ class _Rules(NamedTuple):
     """The per-recording anonymization context threaded through the walk."""
 
     salt: str = ""
+    database_ids: _DatabaseIDs | None = None
     # Compiled LAG name patterns captured WITH the recording (see _anon_interface_name).
     lag_patterns: tuple = ()
     # Compiled "this is the default port label" matchers built from the recording's
@@ -733,14 +846,15 @@ def _compile_serial_default_labels(recording):
     return tuple(compiled)
 
 
-def _walk(obj, rules):
+def _walk(obj, rules, container=None):
     """Recursively anonymize a parsed JSON body (dict/list/scalar)."""
     if isinstance(obj, dict):
         return {
-            k: (_walk(v, rules) if isinstance(v, (dict, list)) else _anon_value(k, v, rules)) for k, v in obj.items()
+            k: (_walk(v, rules, k) if isinstance(v, (dict, list)) else _anon_value(k, v, rules, container))
+            for k, v in obj.items()
         }
     if isinstance(obj, list):
-        return [_walk(item, rules) for item in obj]
+        return [_walk(item, rules, container) for item in obj]
     return obj
 
 
@@ -751,8 +865,10 @@ def anonymize_recording(recording, *, salt=""):
     The top-level ``name``/``description`` are auto-populated by the capture view from the NetBox
     device name (e.g. ``"core-rtr01-shape"``), so they are regenerated to a neutral,
     hostname-free token here — this is the single boundary every caller (UI submission, mgmt
-    command) passes through. ``meta`` is kept (os/topology, not PII). Pass a stable *salt* to make
-    pseudonyms reproducible across runs (and unique per contributor if desired).
+    command) passes through. Database IDs are remapped in bodies, endpoint paths, metadata,
+    and expected port relationships. Structural SNMP indexes and absence sentinels stay unchanged.
+    Pass a fresh *salt* for each capture to prevent ID correlation between recordings.
+    A stable salt makes pseudonyms reproducible for tests.
 
     Args:
         recording (dict): A recording as produced by :func:`.capture.capture_device_recording`.
@@ -763,18 +879,30 @@ def anonymize_recording(recording, *, salt=""):
 
     """
     out = dict(recording)
+    database_ids = _DatabaseIDs(recording, salt)
+    out["device_id"] = database_ids.remap("device", recording["device_id"])
     # The recording's own LAG / serial-label patterns decide which names are logic-bearing, so they
     # are compiled once here and threaded through the walk.
     rules = _Rules(
         salt=salt,
+        database_ids=database_ids,
         lag_patterns=tuple(compile_lag_patterns(recording)),
         serial_default_labels=_compile_serial_default_labels(recording),
         doc_ips={},
     )
-    out["responses"] = {key: _walk(body, rules) for key, body in recording.get("responses", {}).items()}
+    out["responses"] = {
+        database_ids.route(key): _walk(body, rules) for key, body in recording.get("responses", {}).items()
+    }
     expected = recording.get("expected")
     if isinstance(expected, dict):
         out["expected"] = dict(expected)
+        for name in ("lag_members", "sub_interfaces"):
+            relationships = expected.get(name)
+            if isinstance(relationships, dict):
+                out["expected"][name] = {
+                    database_ids.remap("port", child): database_ids.remap("port", parent)
+                    for child, parent in relationships.items()
+                }
         virtual_chassis = expected.get("virtual_chassis")
         if isinstance(virtual_chassis, dict) and isinstance(virtual_chassis.get("member_serials"), list):
             out["expected"]["virtual_chassis"] = {
@@ -786,6 +914,8 @@ def anonymize_recording(recording, *, salt=""):
     # Pseudonymize meta.os too (it's outside `responses`, so _walk doesn't reach it) and key the
     # neutral name off the pseudonymized token, so neither the metadata nor the name leaks the OS.
     meta = dict(recording_meta(recording))
+    if "oob_id" in meta:
+        meta["oob_id"] = database_ids.remap("device", meta["oob_id"])
     if meta.get("os"):
         meta["os"] = pseudonymize_os(meta["os"])
     out["meta"] = meta

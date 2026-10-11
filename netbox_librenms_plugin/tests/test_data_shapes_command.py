@@ -256,7 +256,8 @@ def test_recording_pipeline_treats_unencodable_port_names_as_non_matches(tmp_pat
 
     recording = anonymize_recording(load_recording("cisco-stackwise-3member"))
     recording["lag_patterns"] = {"example": r"^Po\d+$"}
-    ports = recording["responses"]["GET /api/v0/devices/1000/ports"]["ports"]
+    ports_key = f"GET /api/v0/devices/{recording['device_id']}/ports"
+    ports = recording["responses"][ports_key]["ports"]
     ports.append({"port_id": 1, "ifName": "Ethernet1", "ifDescr": "Ethernet1", "ifType": "ethernetCsmacd"})
     ports[0][field] = "Po" + chr(surrogate)
     path = tmp_path / "unencodable-name.json"
@@ -265,7 +266,7 @@ def test_recording_pipeline_treats_unencodable_port_names_as_non_matches(tmp_pat
         assert "schema-valid and PII-clean" in _run(validate=str(path))
     else:
         compressed = compress_recording(json.loads(path.read_text(encoding="utf-8")))
-        assert compressed["responses"]["GET /api/v0/devices/1000/ports"]["ports"]
+        assert compressed["responses"][ports_key]["ports"]
     patterns = compile_lag_patterns(recording)
     assert not name_matches_lag_pattern(ports[0][field], patterns)
     assert name_matches_lag_pattern("Po12", patterns)

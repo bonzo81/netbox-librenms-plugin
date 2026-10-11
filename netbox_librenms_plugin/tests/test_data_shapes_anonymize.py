@@ -1,6 +1,7 @@
 """Tests for data-shape anonymization: PII scrubbed, logic fields preserved, deterministic, replayable."""
 
 from ipaddress import ip_address, ip_network
+import re
 
 from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording, find_pii, pseudonymize_os
 from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
@@ -23,6 +24,12 @@ def _ports(*port_dicts):
         "device_id": 1,
         "responses": {"GET /api/v0/devices/1/ports": {"status": "ok", "ports": list(port_dicts)}},
     }
+
+
+def _response(recording, route):
+    """Read a host response through the recording's current device ID."""
+    route = re.sub(r"(/(?:devices|inventory)/)[0-9]+", rf"\g<1>{recording['device_id']}", route)
+    return recording["responses"][route]
 
 
 def test_anonymization_normalizes_unstructured_meta():
@@ -50,20 +57,20 @@ def test_snmp_engine_identifier_is_scrubbed_and_rejected_before_anonymization():
     anonymized = anonymize_recording(recording)
 
     assert any(finding["path"].endswith("snmpEngineID") for finding in findings)
-    assert anonymized["responses"][path]["ports"][0]["snmpEngineID"] == ""
+    assert _response(anonymized, path)["ports"][0]["snmpEngineID"] == ""
     assert find_pii(anonymized) == []
 
 
 def test_logic_bearing_fields_preserved():
-    """ifName/ifType/port ids and ENTITY-MIB class/index/position must survive verbatim."""
+    """Interface names/types and ENTITY-MIB class/index/position survive verbatim."""
     rec = load_recording("cisco-stackwise-3member")
     anon = anonymize_recording(rec)
 
-    root = anon["responses"]["GET /api/v0/inventory/1000?entPhysicalContainedIn=0"]["inventory"][0]
+    root = _response(anon, "GET /api/v0/inventory/1000?entPhysicalContainedIn=0")["inventory"][0]
     assert root["entPhysicalClass"] == "stack"
     assert root["entPhysicalIndex"] == 1
 
-    members = anon["responses"]["GET /api/v0/inventory/1000?entPhysicalClass=chassis&entPhysicalContainedIn=1"][
+    members = _response(anon, "GET /api/v0/inventory/1000?entPhysicalClass=chassis&entPhysicalContainedIn=1")[
         "inventory"
     ]
     # Positions and indices (drive VC member ordering) are untouched.
@@ -79,8 +86,8 @@ def test_serials_pseudonymized_and_deterministic():
     a2 = anonymize_recording(rec)
 
     key = "GET /api/v0/inventory/1000?entPhysicalClass=chassis&entPhysicalContainedIn=1"
-    serials1 = [m["entPhysicalSerialNum"] for m in a1["responses"][key]["inventory"]]
-    serials2 = [m["entPhysicalSerialNum"] for m in a2["responses"][key]["inventory"]]
+    serials1 = [m["entPhysicalSerialNum"] for m in _response(a1, key)["inventory"]]
+    serials2 = [m["entPhysicalSerialNum"] for m in _response(a2, key)["inventory"]]
 
     assert all(s.startswith("SN-") for s in serials1)
     assert "SN-a1b2c3" not in serials1  # original gone
@@ -98,8 +105,8 @@ def test_cross_reference_serial_preserved():
     assert dev_serial == member_serial == "SN-a1b2c3"
 
     anon = anonymize_recording(rec)
-    anon_dev = anon["responses"]["GET /api/v0/devices/1000"]["devices"][0]["serial"]
-    anon_member = anon["responses"][key]["inventory"][0]["entPhysicalSerialNum"]
+    anon_dev = _response(anon, "GET /api/v0/devices/1000")["devices"][0]["serial"]
+    anon_member = _response(anon, key)["inventory"][0]["entPhysicalSerialNum"]
     assert anon_dev == anon_member  # cross-reference intact → master detection still works
 
 
@@ -118,9 +125,9 @@ def test_numeric_serials_are_masked_and_share_string_identity():
 
     anon = anonymize_recording(recording)
 
-    device_serial = anon["responses"]["GET /api/v0/devices/1"]["devices"][0]["serial"]
-    inventory_serial = anon["responses"]["GET /api/v0/inventory/1/all"]["inventory"][0]["entPhysicalSerialNum"]
-    transceiver_serial = anon["responses"]["GET /api/v0/devices/1/transceivers"]["transceivers"][0]["serial"]
+    device_serial = _response(anon, "GET /api/v0/devices/1")["devices"][0]["serial"]
+    inventory_serial = _response(anon, "GET /api/v0/inventory/1/all")["inventory"][0]["entPhysicalSerialNum"]
+    transceiver_serial = _response(anon, "GET /api/v0/devices/1/transceivers")["transceivers"][0]["serial"]
     expected_serials = anon["expected"]["virtual_chassis"]["member_serials"]
     assert device_serial == inventory_serial == expected_serials[0] == expected_serials[1]
     assert transceiver_serial == expected_serials[2] == expected_serials[3]
@@ -137,7 +144,7 @@ def test_expected_member_serials_follow_anonymized_inventory():
     anon = anonymize_recording(rec)
 
     key = "GET /api/v0/inventory/1001?entPhysicalClass=chassis&entPhysicalContainedIn=10"
-    inventory_serials = [row["entPhysicalSerialNum"] for row in anon["responses"][key]["inventory"]]
+    inventory_serials = [row["entPhysicalSerialNum"] for row in _response(anon, key)["inventory"]]
     expected_serials = anon["expected"]["virtual_chassis"]["member_serials"]
     assert expected_serials == inventory_serials
     assert expected_serials != original
@@ -148,7 +155,7 @@ def test_hostname_and_model_pseudonymized():
     """hostname/sysName → device-<hash>; hardware/model SKU → MODEL-<hash>."""
     rec = load_recording("cisco-stackwise-3member")
     anon = anonymize_recording(rec)
-    dev = anon["responses"]["GET /api/v0/devices/1000"]["devices"][0]
+    dev = _response(anon, "GET /api/v0/devices/1000")["devices"][0]
 
     assert dev["hostname"].startswith("device-")
     assert dev["sysName"].startswith("device-")
@@ -170,7 +177,7 @@ def test_features_field_pseudonymized_like_version():
         },
     }
     anon = anonymize_recording(rec)
-    feat = anon["responses"]["GET /api/v0/devices/1"]["devices"][0]["features"]
+    feat = _response(anon, "GET /api/v0/devices/1")["devices"][0]["features"]
     assert feat.startswith("fw-")
     assert "Ubuntu" not in feat
 
@@ -180,7 +187,7 @@ def test_inventory_model_name_preserved_as_module_match_key():
     rec = load_recording("cisco-stackwise-3member")
     anon = anonymize_recording(rec)
 
-    members = anon["responses"]["GET /api/v0/inventory/1000?entPhysicalClass=chassis&entPhysicalContainedIn=1"][
+    members = _response(anon, "GET /api/v0/inventory/1000?entPhysicalClass=chassis&entPhysicalContainedIn=1")[
         "inventory"
     ]
     model_names = [m.get("entPhysicalModelName") for m in members if m.get("entPhysicalModelName")]
@@ -206,12 +213,12 @@ def test_ip_mac_geo_location_freetext_scrubbed():
     }
     anon = anonymize_recording(rec)
 
-    dev = anon["responses"]["GET /api/v0/devices/1"]["devices"][0]
+    dev = _response(anon, "GET /api/v0/devices/1")["devices"][0]
     assert _is_doc_address(dev["ip"]) and dev["ip"] != "10.1.2.3"
     assert dev["lat"] is None and dev["lng"] is None
     assert dev["location"] == "Lab"
 
-    port = anon["responses"]["GET /api/v0/devices/1/ports"]["ports"][0]
+    port = _response(anon, "GET /api/v0/devices/1/ports")["ports"][0]
     assert port["ifPhysAddress"].startswith("02:00:00:")
     assert port["ifAlias"] == ""
     # Logic fields on the same row preserved.
@@ -224,7 +231,7 @@ def test_ipv4_with_prefix_keeps_prefix_length():
     rec = _ports()
     rec["responses"]["GET /api/v0/devices/1"] = {"status": "ok", "devices": [{"device_id": 1, "ip": "10.9.9.9/24"}]}
     anon = anonymize_recording(rec)
-    ip = anon["responses"]["GET /api/v0/devices/1"]["devices"][0]["ip"]
+    ip = _response(anon, "GET /api/v0/devices/1")["devices"][0]["ip"]
     assert _is_doc_address(ip) and ip.endswith("/24")
 
 
@@ -297,15 +304,16 @@ def _vrf_recording():
     }
 
 
-def test_vrf_join_keys_preserved_and_name_pseudonymized():
+def test_vrf_join_keys_remapped_and_name_pseudonymized():
     """ifVrf/vrf_id join the IP row to its VRF; the NAME is customer data and must not survive."""
     anon = anonymize_recording(_vrf_recording())
 
-    port = anon["responses"]["GET /api/v0/devices/5/ports"]["ports"][0]
-    assert port["ifVrf"] == 7
+    port = _response(anon, "GET /api/v0/devices/5/ports")["ports"][0]
 
-    vrfs = anon["responses"]["GET /api/v0/routing/vrf"]["vrfs"]
-    assert [row["vrf_id"] for row in vrfs] == [7, 5]
+    vrfs = _response(anon, "GET /api/v0/routing/vrf")["vrfs"]
+    assert port["ifVrf"] == vrfs[0]["vrf_id"]
+    assert len({row["vrf_id"] for row in vrfs}) == 2
+    assert {row["vrf_id"] for row in vrfs}.isdisjoint({7, 5})
     assert vrfs[0]["vrf_name"] != "Mgmt-vrf"
     assert vrfs[0]["vrf_name"]
 
@@ -314,7 +322,7 @@ def test_nokia_base_vrf_name_preserved_verbatim():
     """ "Base is the global instance, not a VRF" is a logic rule a fixture has to express."""
     anon = anonymize_recording(_vrf_recording())
 
-    vrfs = anon["responses"]["GET /api/v0/routing/vrf"]["vrfs"]
+    vrfs = _response(anon, "GET /api/v0/routing/vrf")["vrfs"]
     assert vrfs[1]["vrf_name"] == "Base"
 
 
@@ -322,7 +330,7 @@ def test_vrf_oid_does_not_leak_the_vrf_name():
     """The SNMP index encodes the name in ASCII: 8.77.103.109… decodes to "Mgmt-vrf"."""
     anon = anonymize_recording(_vrf_recording())
 
-    vrf_oid = anon["responses"]["GET /api/v0/routing/vrf"]["vrfs"][0]["vrf_oid"]
+    vrf_oid = _response(anon, "GET /api/v0/routing/vrf")["vrfs"][0]["vrf_oid"]
     decoded = "".join(chr(int(part)) for part in vrf_oid.split(".")[1:] if part.isdigit())
     assert "Mgmt-vrf" not in decoded
 
@@ -331,7 +339,7 @@ def test_route_distinguisher_remapped_and_description_scrubbed():
     """The RD carries an ASN or an IP; the description is free text read by nothing."""
     anon = anonymize_recording(_vrf_recording())
 
-    vrfs = anon["responses"]["GET /api/v0/routing/vrf"]["vrfs"]
+    vrfs = _response(anon, "GET /api/v0/routing/vrf")["vrfs"]
     assert vrfs[0]["mplsVpnVrfRouteDistinguisher"] != "64513:42"
     assert ":" in vrfs[0]["mplsVpnVrfRouteDistinguisher"]
     assert vrfs[1]["mplsVpnVrfRouteDistinguisher"] is None
@@ -341,18 +349,18 @@ def test_route_distinguisher_remapped_and_description_scrubbed():
 def test_vrf_local_asn_pseudonymized_like_every_other_asn():
     anon = anonymize_recording(_vrf_recording())
 
-    assert anon["responses"]["GET /api/v0/routing/vrf"]["vrfs"][0]["bgpLocalAs"] != 64512
+    assert _response(anon, "GET /api/v0/routing/vrf")["vrfs"][0]["bgpLocalAs"] != 64512
 
 
 def test_ip_rows_are_documentation_addresses_with_their_prefix_kept():
     """ipv4_address is the real routable address; ipv4_prefixlen is what the reader parses."""
     anon = anonymize_recording(_vrf_recording())
 
-    row = anon["responses"]["GET /api/v0/devices/5/ip"]["addresses"][0]
+    row = _response(anon, "GET /api/v0/devices/5/ip")["addresses"][0]
     assert row["ipv4_address"] != "192.0.2.34"
     assert _is_doc_address(row["ipv4_address"])
     assert row["ipv4_prefixlen"] == 31
-    assert row["port_id"] == 485
+    assert row["port_id"] == _response(anon, "GET /api/v0/devices/5/ports")["ports"][0]["port_id"]
     assert row["context_name"] == ""
 
 
@@ -360,11 +368,11 @@ def test_link_rows_keep_their_join_keys_and_lose_the_neighbour_identity():
     """The cables tab keys on the port ids and the protocol; the rest names a real neighbour."""
     anon = anonymize_recording(_vrf_recording())
 
-    link = anon["responses"]["GET /api/v0/devices/5/links"]["links"][0]
-    assert link["local_port_id"] == 485
-    assert link["remote_port_id"] == 6917
-    assert link["local_device_id"] == 5
-    assert link["remote_device_id"] == 1
+    link = _response(anon, "GET /api/v0/devices/5/links")["links"][0]
+    assert link["local_port_id"] == _response(anon, "GET /api/v0/devices/5/ports")["ports"][0]["port_id"]
+    assert link["remote_port_id"] != 6917
+    assert link["local_device_id"] == anon["device_id"]
+    assert link["remote_device_id"] != 1
     assert link["protocol"] == "lldp"
     assert link["remote_hostname"] != "edge.example.test"
     assert link["remote_platform"] != "x86-64-ufispace-s9610-36d-r0"
@@ -396,7 +404,7 @@ def test_documentation_addresses_are_unique_within_a_recording():
 
     anon = anonymize_recording(recording)
 
-    mapped = [row["ipv4_address"] for row in anon["responses"]["GET /api/v0/devices/1/ip"]["addresses"]]
+    mapped = [row["ipv4_address"] for row in _response(anon, "GET /api/v0/devices/1/ip")["addresses"]]
     assert len(set(mapped)) == len(addresses)
 
 
@@ -422,7 +430,7 @@ def test_the_same_address_still_maps_to_one_pseudonym():
         },
     }
 
-    rows = anonymize_recording(recording)["responses"]["GET /api/v0/devices/1/ip"]["addresses"]
+    rows = _response(anonymize_recording(recording), "GET /api/v0/devices/1/ip")["addresses"]
 
     assert rows[0]["ipv4_address"] == rows[1]["ipv4_address"]
     assert rows[2]["ipv4_address"] != rows[0]["ipv4_address"]
@@ -445,7 +453,7 @@ def test_equivalent_ipv6_spellings_share_one_pseudonym():
         },
     }
 
-    rows = anonymize_recording(recording)["responses"]["GET /api/v0/devices/1/ip"]["addresses"]
+    rows = _response(anonymize_recording(recording), "GET /api/v0/devices/1/ip")["addresses"]
 
     assert rows[0]["ipv6_address"] == rows[1]["ipv6_compressed"]
     assert rows[0]["ipv6_address"] == rows[2]["ip_address"]
@@ -463,7 +471,7 @@ def test_documentation_addresses_do_not_use_the_stubs_oob_block():
 
     anon = anonymize_recording(recording)
 
-    mapped = [row["ipv4_address"] for row in anon["responses"]["GET /api/v0/devices/1/ip"]["addresses"]]
+    mapped = [row["ipv4_address"] for row in _response(anon, "GET /api/v0/devices/1/ip")["addresses"]]
     assert not any(address.startswith("198.51.100.") for address in mapped)
 
 
@@ -675,8 +683,8 @@ def test_vendor_oids_pseudonymized_under_example_enterprise():
         ],
     }
     anon = anonymize_recording(rec)
-    dev = anon["responses"]["GET /api/v0/devices/1"]["devices"][0]
-    sensor = anon["responses"]["GET /api/v0/resources/sensors"]["sensors"][0]
+    dev = _response(anon, "GET /api/v0/devices/1")["devices"][0]
+    sensor = _response(anon, "GET /api/v0/resources/sensors")["sensors"][0]
 
     # The example-enterprise arc (32473) replaces the real vendor numbers (6527, 9, 10418).
     assert dev["sysObjectID"].startswith(".1.3.6.1.4.1.32473.") and "6527" not in dev["sysObjectID"]
@@ -685,8 +693,7 @@ def test_vendor_oids_pseudonymized_under_example_enterprise():
     assert sensor["sensor_oid"].startswith(".1.3.6.1.4.1.32473.") and "10418" not in sensor["sensor_oid"]
     # Deterministic, and find_pii stays clean (the pseudonym is a well-formed OID).
     assert (
-        anonymize_recording(rec)["responses"]["GET /api/v0/devices/1"]["devices"][0]["sysObjectID"]
-        == dev["sysObjectID"]
+        _response(anonymize_recording(rec), "GET /api/v0/devices/1")["devices"][0]["sysObjectID"] == dev["sysObjectID"]
     )
     assert find_pii(anon) == []
 
@@ -702,7 +709,7 @@ def test_asset_id_and_alias_scrubbed():
             "entPhysicalAlias": "rackA3-U12-core-rtr",
         }
     )
-    port = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1/ports"]["ports"][0]
+    port = _response(anonymize_recording(rec), "GET /api/v0/devices/1/ports")["ports"][0]
     assert port["entPhysicalAssetID"] == ""
     assert port["entPhysicalAlias"] == ""
 
@@ -729,14 +736,12 @@ def test_entphysical_mfg_name_and_date_anonymized():
         ],
     }
     key = "GET /api/v0/inventory/1?entPhysicalContainedIn=0"
-    item = anonymize_recording(rec)["responses"][key]["inventory"][0]
+    item = _response(anonymize_recording(rec), key)["inventory"][0]
     assert item["entPhysicalMfgName"] != "Cisco Systems Inc."  # vendor name no longer verbatim
     assert item["entPhysicalMfgName"].startswith("MFG-")
     assert item["entPhysicalMfgDate"] == ""  # identifying mfg date scrubbed
     # Deterministic, and the safety net stays clean (the pseudonym carries no PII).
-    assert (
-        anonymize_recording(rec)["responses"][key]["inventory"][0]["entPhysicalMfgName"] == item["entPhysicalMfgName"]
-    )
+    assert _response(anonymize_recording(rec), key)["inventory"][0]["entPhysicalMfgName"] == item["entPhysicalMfgName"]
     assert find_pii(anonymize_recording(rec)) == []
 
 
@@ -748,7 +753,7 @@ def test_entphysical_name_and_descr_are_pseudonymized():
         "inventory": [{"entPhysicalIndex": 1, "entPhysicalName": "FPC 1", "entPhysicalDescr": "10GBASE-LR SFP+"}],
     }
     key = "GET /api/v0/inventory/1?entPhysicalContainedIn=0"
-    item = anonymize_recording(rec)["responses"][key]["inventory"][0]
+    item = _response(anonymize_recording(rec), key)["inventory"][0]
     assert item["entPhysicalName"].startswith("entity-")
     assert item["entPhysicalDescr"].startswith("entity-")
     assert item["entPhysicalName"] != item["entPhysicalDescr"]
@@ -768,7 +773,7 @@ def test_entity_text_preserves_only_supported_terminal_locators():
     }
 
     key = "GET /api/v0/inventory/1/all"
-    names = [item["entPhysicalName"] for item in anonymize_recording(rec)["responses"][key]["inventory"]]
+    names = [item["entPhysicalName"] for item in _response(anonymize_recording(rec), key)["inventory"]]
 
     assert names[0].startswith("entity-") and names[0].endswith(" 1/1")
     assert names[1].startswith("entity-") and names[1].endswith(" 2/x1")
@@ -801,8 +806,8 @@ def test_entity_locator_anonymization_preserves_transceiver_nesting_and_is_idemp
 
     first = anonymize_recording(rec)
     second = anonymize_recording(first)
-    anonymized_inventory = first["responses"]["GET /api/v0/inventory/1/all"]["inventory"]
-    second_inventory = second["responses"]["GET /api/v0/inventory/1/all"]["inventory"]
+    anonymized_inventory = _response(first, "GET /api/v0/inventory/1/all")["inventory"]
+    second_inventory = _response(second, "GET /api/v0/inventory/1/all")["inventory"]
     assert [item["entPhysicalName"] for item in second_inventory] == [
         item["entPhysicalName"] for item in anonymized_inventory
     ]
@@ -827,7 +832,7 @@ def test_entity_names_are_pseudonymized_with_cross_field_correlation():
         ],
     }
 
-    item = anonymize_recording(rec, salt="test-salt")["responses"]["GET /api/v0/inventory/1?entPhysicalContainedIn=0"][
+    item = _response(anonymize_recording(rec, salt="test-salt"), "GET /api/v0/inventory/1?entPhysicalContainedIn=0")[
         "inventory"
     ][0]
 
@@ -846,7 +851,7 @@ def test_entphysical_descr_removes_an_embedded_address():
         ],
     }
     anon = anonymize_recording(rec)
-    item = anon["responses"]["GET /api/v0/inventory/1?entPhysicalContainedIn=0"]["inventory"][0]
+    item = _response(anon, "GET /api/v0/inventory/1?entPhysicalContainedIn=0")["inventory"][0]
     assert item["entPhysicalDescr"].startswith("entity-")
     assert not any(f["kind"] == "ipv4" and f["value"] == "10.7.8.9" for f in find_pii(anon))
 
@@ -869,7 +874,7 @@ def test_snmp_credentials_scrubbed():
             }
         ],
     }
-    dev = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1"]["devices"][0]
+    dev = _response(anonymize_recording(rec), "GET /api/v0/devices/1")["devices"][0]
     for field in ("community", "authname", "authpass", "cryptopass", "authalgo", "cryptoalgo", "snmpver"):
         assert dev[field] == "", f"{field} must be scrubbed"
 
@@ -881,7 +886,7 @@ def test_display_name_pseudonymized():
         "status": "ok",
         "devices": [{"device_id": 1, "display": "core-sw-01.nyc.corp.example.com"}],
     }
-    dev = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1"]["devices"][0]
+    dev = _response(anonymize_recording(rec), "GET /api/v0/devices/1")["devices"][0]
     assert dev["display"].startswith("device-")
     assert "example.com" not in dev["display"]
 
@@ -904,8 +909,8 @@ def test_salt_changes_pseudonyms():
     """Different salts produce different pseudonyms for the same input."""
     rec = load_recording("cisco-stackwise-3member")
     key = "GET /api/v0/inventory/1000?entPhysicalClass=chassis&entPhysicalContainedIn=1"
-    s_a = anonymize_recording(rec, salt="alpha")["responses"][key]["inventory"][0]["entPhysicalSerialNum"]
-    s_b = anonymize_recording(rec, salt="beta")["responses"][key]["inventory"][0]["entPhysicalSerialNum"]
+    s_a = _response(anonymize_recording(rec, salt="alpha"), key)["inventory"][0]["entPhysicalSerialNum"]
+    s_b = _response(anonymize_recording(rec, salt="beta"), key)["inventory"][0]["entPhysicalSerialNum"]
     assert s_a != s_b
 
 
@@ -917,7 +922,7 @@ def test_anonymized_recording_still_detects_vc(recording_server, db):
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"vc_member_name_pattern": "-M{position}"})
     anon = anonymize_recording(load_recording("cisco-stackwise-3member"))
     _server, api = recording_server(anon)
-    result = detect_virtual_chassis_from_inventory(api, 1000)
+    result = detect_virtual_chassis_from_inventory(api, anon["device_id"])
 
     assert result is not None
     assert result["member_count"] == 3
@@ -926,7 +931,7 @@ def test_anonymized_recording_still_detects_vc(recording_server, db):
     # compare member serials against the anonymized DEVICE endpoint's serial — comparing against
     # members[0] is a tautology (members[0] always equals itself), which would stay green even if
     # anonymization broke the device-serial ↔ member-serial correlation.
-    device_serial = anon["responses"]["GET /api/v0/devices/1000"]["devices"][0]["serial"]
+    device_serial = _response(anon, "GET /api/v0/devices/1000")["devices"][0]["serial"]
     assert any(m["serial"] == device_serial for m in result["members"])
 
 
@@ -987,7 +992,7 @@ _PORT_PATTERNS = [
 def test_port_pattern_ifname_preserved_verbatim(name):
     """A real port-name (slot notation or known vendor prefix) survives anonymization unchanged."""
     rec = _ports({"port_id": 1, "ifName": name, "ifType": "ethernetCsmacd"})
-    port = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1/ports"]["ports"][0]
+    port = _response(anonymize_recording(rec), "GET /api/v0/devices/1/ports")["ports"][0]
     assert port["ifName"] == name
 
 
@@ -1002,7 +1007,7 @@ def test_linux_tunnel_sibling_ports_stay_distinct():
         {"port_id": 1, "ifName": "ip6tnl0", "ifType": "tunnel"},
         {"port_id": 2, "ifName": "ip6tnl1", "ifType": "tunnel"},
     )
-    ports = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1/ports"]["ports"]
+    ports = _response(anonymize_recording(rec), "GET /api/v0/devices/1/ports")["ports"]
     assert ports[0]["ifName"] == "ip6tnl0"
     assert ports[1]["ifName"] == "ip6tnl1"
     assert ports[0]["ifName"] != ports[1]["ifName"]
@@ -1014,7 +1019,7 @@ def test_linux_predictable_sibling_ports_stay_distinct():
         {"port_id": 1, "ifName": "eno17395np0", "ifType": "ethernetCsmacd"},
         {"port_id": 2, "ifName": "eno17395np1", "ifType": "ethernetCsmacd"},
     )
-    ports = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1/ports"]["ports"]
+    ports = _response(anonymize_recording(rec), "GET /api/v0/devices/1/ports")["ports"]
     assert ports[0]["ifName"] == "eno17395np0"
     assert ports[1]["ifName"] == "eno17395np1"
     assert ports[0]["ifName"] != ports[1]["ifName"]
@@ -1036,11 +1041,11 @@ def test_linux_predictable_sibling_ports_stay_distinct():
 def test_custom_ifname_pseudonymized(custom):
     """A custom (non-port-pattern) ifName is replaced by a stable iface-<hash> pseudonym, leaking nothing."""
     rec = _ports({"port_id": 1, "ifName": custom, "ifType": "ethernetCsmacd"})
-    out = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1/ports"]["ports"][0]["ifName"]
+    out = _response(anonymize_recording(rec), "GET /api/v0/devices/1/ports")["ports"][0]["ifName"]
     assert out.startswith("iface-")
     assert custom not in out
     # Deterministic.
-    assert out == anonymize_recording(rec)["responses"]["GET /api/v0/devices/1/ports"]["ports"][0]["ifName"]
+    assert out == _response(anonymize_recording(rec), "GET /api/v0/devices/1/ports")["ports"][0]["ifName"]
 
 
 @pytest.mark.parametrize(
@@ -1055,7 +1060,7 @@ def test_custom_ifname_pseudonymized(custom):
 def test_port_token_underscore_annotation_is_dropped(raw, token):
     """A port token with an underscore-joined annotation keeps only the token — the trailing annotation (which can carry customer/tenant/host names) must not survive verbatim."""
     rec = _ports({"port_id": 1, "ifName": raw, "ifType": "ethernetCsmacd"})
-    out = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1/ports"]["ports"][0]["ifName"]
+    out = _response(anonymize_recording(rec), "GET /api/v0/devices/1/ports")["ports"][0]["ifName"]
     assert out == token
     assert raw.split("_", 1)[1] not in out  # the annotation tail is gone
 
@@ -1071,7 +1076,7 @@ def test_ifdescr_keeps_port_token_drops_freetext_annotation():
         },
         {"port_id": 2, "ifName": "AORTA-CUST-9", "ifType": "other", "ifDescr": "AORTA-CUST-9, customer Microsoft"},
     )
-    ports = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1/ports"]["ports"]
+    ports = _response(anonymize_recording(rec), "GET /api/v0/devices/1/ports")["ports"]
     assert ports[0]["ifDescr"] == "lag2"  # token kept, annotation dropped
     assert ports[1]["ifDescr"].startswith("iface-")  # no port token → pseudonym
     blob = str(ports)
@@ -1087,7 +1092,7 @@ def test_bgp_local_as_anonymized_to_private_asn():
         "device_id": 1,
         "responses": {"GET /api/v0/devices/1": {"devices": [{"device_id": 1, "bgpLocalAs": 6730}]}},
     }
-    dev = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1"]["devices"][0]
+    dev = _response(anonymize_recording(rec), "GET /api/v0/devices/1")["devices"][0]
     assert dev["bgpLocalAs"] != 6730
     assert 64512 <= dev["bgpLocalAs"] <= 65534
 
@@ -1118,8 +1123,8 @@ def test_version_pseudonymized_to_fw_hash():
     }
     a1 = anonymize_recording(rec)
     a2 = anonymize_recording(rec)
-    dev1 = a1["responses"]["GET /api/v0/devices/1"]["devices"][0]
-    dev2 = a2["responses"]["GET /api/v0/devices/1"]["devices"][0]
+    dev1 = _response(a1, "GET /api/v0/devices/1")["devices"][0]
+    dev2 = _response(a2, "GET /api/v0/devices/1")["devices"][0]
 
     assert dev1["version"].startswith("fw-")
     assert "21.2R3" not in dev1["version"]
@@ -1161,7 +1166,7 @@ def test_os_pseudonymized_to_stable_unsalted_token():
     rec["responses"]["GET /api/v0/devices/1"] = {"status": "ok", "devices": [{"device_id": 1, "os": "weirdos9000"}]}
     anon = anonymize_recording(rec)
 
-    body_os = anon["responses"]["GET /api/v0/devices/1"]["devices"][0]["os"]
+    body_os = _response(anon, "GET /api/v0/devices/1")["devices"][0]["os"]
     assert body_os == pseudonymize_os("weirdos9000")
     assert "weirdos9000" not in body_os
     # meta.os (outside `responses`) is pseudonymized too, and the neutral name keys off it.
@@ -1173,7 +1178,7 @@ def test_os_pseudonymized_to_stable_unsalted_token():
     # Common OSes are hashed the same way (treated equal) — junos doesn't pass through verbatim.
     common = _ports()
     common["responses"]["GET /api/v0/devices/1"] = {"status": "ok", "devices": [{"device_id": 1, "os": "junos"}]}
-    out = anonymize_recording(common)["responses"]["GET /api/v0/devices/1"]["devices"][0]["os"]
+    out = _response(anonymize_recording(common), "GET /api/v0/devices/1")["devices"][0]["os"]
     assert out == pseudonymize_os("junos") and out != "junos"
 
 
@@ -1205,7 +1210,7 @@ def test_find_pii_flags_residual_fqdn_but_not_icon_or_version():
     assert ("fqdn", "rtr.dc1.example.net") in kinds
     assert not any(f["value"] == "3.9.0.4" for f in findings)  # version pseudonymized to fw-<hash>
     # The icon names the OS/vendor, so it's genericized (and not flagged).
-    assert anon["responses"]["GET /api/v0/devices/1"]["devices"][0]["icon"] == "images/os/generic.svg"
+    assert _response(anon, "GET /api/v0/devices/1")["devices"][0]["icon"] == "images/os/generic.svg"
     assert not any(f["value"] == "nokia.svg" for f in findings)
 
 
@@ -1233,8 +1238,16 @@ def test_anonymization_preserves_port_relationships(recording_server, recording_
         )
 
     raw_lag, raw_sub = _resolve(rec)
-    anon_lag, anon_sub = _resolve(anonymize_recording(rec))
-    assert raw_lag == anon_lag and raw_sub == anon_sub
+    anonymized = anonymize_recording(rec)
+    anon_lag, anon_sub = _resolve(anonymized)
+    raw_ports = rec["responses"][f"GET /api/v0/devices/{rec['device_id']}/ports"]["ports"]
+    anon_ports = anonymized["responses"][f"GET /api/v0/devices/{anonymized['device_id']}/ports"]["ports"]
+    original_ids = {str(port["port_id"]): index for index, port in enumerate(raw_ports)}
+    anonymous_ids = {str(port["port_id"]): index for index, port in enumerate(anon_ports)}
+    for before, after in ((raw_lag, anon_lag), (raw_sub, anon_sub)):
+        assert {(original_ids[child], original_ids[parent]) for child, parent in before.items()} == {
+            (anonymous_ids[child], anonymous_ids[parent]) for child, parent in after.items()
+        }
     # Non-vacuous: the recording really exercises the sub-interface relationship (the Junos fixture's
     # jsrv/irb digit-less base <-> .unit pairing is exactly what the anonymizer must keep intact).
     assert raw_sub
@@ -1257,9 +1270,11 @@ def test_anonymization_preserves_a_custom_base_subinterface_relationship(recordi
         return api.resolve_port_relationships(ports["ports"], stack, lag_patterns={})["sub_interfaces"]
 
     anonymized = anonymize_recording(rec)
-    names = [port["ifName"] for port in anonymized["responses"]["GET /api/v0/devices/1/ports"]["ports"]]
+    names = [port["ifName"] for port in _response(anonymized, "GET /api/v0/devices/1/ports")["ports"]]
 
-    assert resolve(rec) == resolve(anonymized) == {2: 1}
+    assert resolve(rec) == {2: 1}
+    ports = _response(anonymized, "GET /api/v0/devices/1/ports")["ports"]
+    assert resolve(anonymized) == {ports[1]["port_id"]: ports[0]["port_id"]}
     assert names[0].startswith("iface-") and names[1] == f"{names[0]}.100"
     assert "tenantlink" not in str(anonymized)
 
@@ -1288,13 +1303,13 @@ def test_transceiver_serial_pseudonymized_model_and_optics_preserved():
             }
         },
     }
-    t = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1/transceivers"]["transceivers"][0]
+    t = _response(anonymize_recording(rec), "GET /api/v0/devices/1/transceivers")["transceivers"][0]
     # Serial is a per-unit identifier (not a match key) → pseudonymized.
     assert t["serial"].startswith("SN-") and "X42AU0D" not in t["serial"]
     # Model SKU is the ModuleType-matching key (public part number) → preserved verbatim.
     assert t["model"] == "3HE10550AARA01"
     # Logic-bearing optics shape (what an outcome test asserts) is untouched.
-    assert t["port_id"] == 519
+    assert isinstance(t["port_id"], int) and t["port_id"] != 519
     assert t["type"] == "CFP2/QSFP28"
     assert t["channels"] == 4
     assert t["connector"] == "LC"
@@ -1330,7 +1345,7 @@ def test_serial_sensor_label_anonymized_preserving_is_configured():
         "responses": {"GET /api/v0/resources/sensors": {"status": "ok", "sensors": sensors}},
     }
     anon = anonymize_recording(rec)
-    asens = anon["responses"]["GET /api/v0/resources/sensors"]["sensors"]
+    asens = _response(anon, "GET /api/v0/resources/sensors")["sensors"]
 
     # Default port label kept verbatim (no PII); customised hostname label pseudonymized.
     assert asens[0]["sensor_descr"] == "ttyS7 Status"
@@ -1342,7 +1357,7 @@ def test_serial_sensor_label_anonymized_preserving_is_configured():
 
     # The is_configured OUTCOME resolves identically before and after anonymization.
     raw_flags = [r["is_configured"] for r in map_sensors_to_serial_links(sensors, device_id=1)]
-    anon_flags = [r["is_configured"] for r in map_sensors_to_serial_links(asens, device_id=1)]
+    anon_flags = [r["is_configured"] for r in map_sensors_to_serial_links(asens, device_id=anon["device_id"])]
     assert raw_flags == anon_flags == [False, True]  # default ttyS7 vs custom label — both states exercised
     # find_pii is clean — incl. no false-positive on the dotted SNMP sensor_oid.
     assert find_pii(anon) == []
@@ -1369,7 +1384,7 @@ def test_serial_sensor_short_hostname_label_is_pseudonymized():
             }
         },
     }
-    descr = anonymize_recording(rec)["responses"]["GET /api/v0/resources/sensors"]["sensors"][0]["sensor_descr"]
+    descr = _response(anonymize_recording(rec), "GET /api/v0/resources/sensors")["sensors"][0]["sensor_descr"]
     assert descr.startswith("device-")
     assert "core1" not in descr
 
@@ -1393,7 +1408,7 @@ def test_lag_name_matched_by_the_recordings_own_pattern_survives():
 
     anon = anonymize_recording(rec)
 
-    assert anon["responses"]["GET /api/v0/devices/1/ports"]["ports"][0]["ifName"] == "agg7"
+    assert _response(anon, "GET /api/v0/devices/1/ports")["ports"][0]["ifName"] == "agg7"
 
 
 def test_lag_pattern_cannot_preserve_free_text():
@@ -1401,7 +1416,7 @@ def test_lag_pattern_cannot_preserve_free_text():
     rec = _ports({"port_id": 1, "ifName": "to_core-rtr Customer A", "ifType": "propVirtual"})
     rec["lag_patterns"] = {"myos": "^.+$"}
 
-    name = anonymize_recording(rec)["responses"]["GET /api/v0/devices/1/ports"]["ports"][0]["ifName"]
+    name = _response(anonymize_recording(rec), "GET /api/v0/devices/1/ports")["ports"][0]["ifName"]
 
     assert name.startswith("iface-")
     assert "core-rtr" not in name
@@ -1422,14 +1437,14 @@ def test_serial_default_label_from_the_recordings_own_patterns_is_preserved(temp
     )
 
     anon = anonymize_recording(rec)
-    sensors = anon["responses"]["GET /api/v0/resources/sensors"]["sensors"]
+    sensors = _response(anon, "GET /api/v0/resources/sensors")["sensors"]
 
     assert sensors[0]["sensor_descr"] == label
     # The outcome the label feeds resolves identically before and after anonymization.
     types = {"ciscoAsyncLine": template}
     raw_sensors = rec["responses"]["GET /api/v0/resources/sensors"]["sensors"]
     raw = map_sensors_to_serial_links(raw_sensors, device_id=1, sensor_types=types)
-    anonymized = map_sensors_to_serial_links(sensors, device_id=1, sensor_types=types)
+    anonymized = map_sensors_to_serial_links(sensors, device_id=anon["device_id"], sensor_types=types)
     assert [r["is_configured"] for r in raw] == [r["is_configured"] for r in anonymized] == [False]
 
 
@@ -1446,7 +1461,7 @@ def test_serial_custom_label_still_pseudonymized_under_a_captured_pattern():
         serial_type_patterns={"ciscoAsyncLine": "Line {N}"},
     )
 
-    descr = anonymize_recording(rec)["responses"]["GET /api/v0/resources/sensors"]["sensors"][0]["sensor_descr"]
+    descr = _response(anonymize_recording(rec), "GET /api/v0/resources/sensors")["sensors"][0]["sensor_descr"]
 
     assert descr.startswith("device-")
     assert "core-rtr01" not in descr
@@ -1461,7 +1476,7 @@ def test_transceiver_vendor_is_pseudonymized():
         "transceivers": [{"port_id": 1, "vendor": "Finisar", "oui": 36965, "model": "FTLX8574D3BCL"}],
     }
 
-    item = anonymize_recording(rec)["responses"][key]["transceivers"][0]
+    item = _response(anonymize_recording(rec), key)["transceivers"][0]
 
     assert item["vendor"] != "Finisar"
     assert item["vendor"].startswith("MFG-")
@@ -1485,7 +1500,7 @@ def test_transceiver_oui_is_masked():
         ],
     }
 
-    rows = anonymize_recording(rec)["responses"][key]["transceivers"]
+    rows = _response(anonymize_recording(rec), key)["transceivers"]
 
     assert rows[0]["oui"] != 36965
     assert isinstance(rows[0]["oui"], int), "the recorded shape must keep its integer type"
@@ -1504,7 +1519,7 @@ def test_breakout_names_remain_distinct_after_anonymization():
 
     anonymized = anonymize_recording(recording)
 
-    ports = anonymized["responses"]["GET /api/v0/devices/1/ports"]["ports"]
+    ports = _response(anonymized, "GET /api/v0/devices/1/ports")["ports"]
     assert [(port["ifName"], port["ifDescr"]) for port in ports] == [("swp1s0", "swp1s0"), ("swp1s1", "swp1s1")]
 
 
@@ -1517,8 +1532,8 @@ def test_dotted_address_names_are_pseudonymized_as_a_whole(name):
 
     anonymized = anonymize_recording(recording)
 
-    port = anonymized["responses"]["GET /api/v0/devices/1/ports"]["ports"][0]
-    remote = anonymized["responses"]["GET /api/v0/devices/1/links"]["links"][0]["remote_port"]
+    port = _response(anonymized, "GET /api/v0/devices/1/ports")["ports"][0]
+    remote = _response(anonymized, "GET /api/v0/devices/1/links")["links"][0]["remote_port"]
     assert re.fullmatch(r"iface-[0-9a-f]{6}", port["ifName"])
     assert port["ifName"] == port["ifDescr"] == remote
 
@@ -1529,7 +1544,293 @@ def test_anonymization_accepts_a_hostname_device_target():
 
     anonymized = anonymize_recording(recording)
 
-    target = anonymized["responses"]["GET /api/v0/devices/1"]["devices"][0]["overwrite_ip"]
+    target = _response(anonymized, "GET /api/v0/devices/1")["devices"][0]["overwrite_ip"]
     assert target != "target.example.invalid"
     assert _is_doc_address(target)
     assert find_pii(anonymized) == []
+
+
+def test_database_ids_are_remapped_consistently_across_recording_references():
+    from copy import deepcopy
+
+    recording = {
+        "schema_version": 1,
+        "name": "id-references",
+        "device_id": 41,
+        "meta": {"oob_id": 42},
+        "responses": {
+            "GET /api/v0/devices/41": {"devices": [{"device_id": "41", "location_id": 91}]},
+            "GET /api/v0/devices/41/ports": {
+                "ports": [
+                    {"port_id": 71, "device_id": 41, "ifVrf": "81", "ifIndex": 71, "ifVlan": 81},
+                    {"port_id": "72", "device_id": 41, "ifVrf": 0},
+                ]
+            },
+            "GET /api/v0/devices/41/port_stack": {
+                "mappings": [
+                    {"high_port_id": "71", "low_port_id": 72},
+                ]
+            },
+            "GET /api/v0/devices/41/ip": {
+                "addresses": [
+                    {"ipv4_address_id": 101, "ipv4_network_id": 102, "port_id": "71"},
+                ]
+            },
+            "GET /api/v0/devices/41/links": {
+                "links": [
+                    {
+                        "link_id": 103,
+                        "local_device_id": 41,
+                        "remote_device_id": "42",
+                        "local_port_id": 71,
+                        "remote_port_id": "73",
+                    },
+                    {"local_device_id": 41, "remote_device_id": 0, "local_port_id": 72, "remote_port_id": None},
+                ]
+            },
+            "GET /api/v0/devices/41/transceivers": {"transceivers": [{"port_id": 71}]},
+            "GET /api/v0/devices/42/ports": {"ports": [{"port_id": 73, "device_id": 42}]},
+            "GET /api/v0/inventory/41?entPhysicalContainedIn=71": {
+                "inventory": [
+                    {
+                        "entPhysical_id": 104,
+                        "device_id": 41,
+                        "entPhysicalIndex": 72,
+                        "entPhysicalContainedIn": 71,
+                        "entPhysicalParentRelPos": 1,
+                    },
+                ]
+            },
+            "GET /api/v0/routing/vrf": {"vrfs": [{"vrf_id": 81, "device_id": 41}]},
+            "GET /api/v0/resources/sensors": {
+                "sensors": [
+                    {"sensor_id": 105, "device_id": 41, "sensor_index": "1.2"},
+                ]
+            },
+        },
+        "expected": {"lag_members": {"72": "71"}, "sub_interfaces": {"72": 71}},
+    }
+    original = deepcopy(recording)
+
+    anonymized = anonymize_recording(recording, salt="capture-one")
+
+    device_id = anonymized["device_id"]
+    oob_id = anonymized["meta"]["oob_id"]
+    assert device_id != 41 and oob_id != 42 and device_id != oob_id
+    responses = anonymized["responses"]
+    assert f"GET /api/v0/devices/{device_id}" in responses
+    device = responses[f"GET /api/v0/devices/{device_id}"]["devices"][0]
+    assert device["device_id"] == str(device_id)
+    assert device["location_id"] != 91
+    ports = responses[f"GET /api/v0/devices/{device_id}/ports"]["ports"]
+    first, second = ports
+    assert first["port_id"] != 71 and second["port_id"] != "72"
+    assert str(first["port_id"]) != second["port_id"]
+    assert first["device_id"] == second["device_id"] == device_id
+    stack = responses[f"GET /api/v0/devices/{device_id}/port_stack"]["mappings"][0]
+    assert stack["high_port_id"] == str(first["port_id"])
+    assert stack["low_port_id"] == int(second["port_id"])
+    address = responses[f"GET /api/v0/devices/{device_id}/ip"]["addresses"][0]
+    assert address["port_id"] == str(first["port_id"])
+    assert address["ipv4_address_id"] != 101 and address["ipv4_network_id"] != 102
+    link, unresolved = responses[f"GET /api/v0/devices/{device_id}/links"]["links"]
+    oob_port = responses[f"GET /api/v0/devices/{oob_id}/ports"]["ports"][0]
+    assert link["local_device_id"] == device_id
+    assert link["remote_device_id"] == str(oob_id)
+    assert link["local_port_id"] == first["port_id"]
+    assert link["remote_port_id"] == str(oob_port["port_id"])
+    assert link["link_id"] != 103
+    assert unresolved["remote_device_id"] == 0 and unresolved["remote_port_id"] is None
+    assert responses[f"GET /api/v0/devices/{device_id}/transceivers"]["transceivers"][0]["port_id"] == first["port_id"]
+    inventory = responses[f"GET /api/v0/inventory/{device_id}?entPhysicalContainedIn=71"]["inventory"][0]
+    assert inventory["entPhysical_id"] != 104
+    assert inventory["entPhysicalIndex"] == 72 and inventory["entPhysicalContainedIn"] == 71
+    assert inventory["entPhysicalParentRelPos"] == 1
+    assert first["ifIndex"] == 71 and first["ifVlan"] == 81 and second["ifVrf"] == 0
+    assert first["ifVrf"] == str(responses["GET /api/v0/routing/vrf"]["vrfs"][0]["vrf_id"])
+    sensor = responses["GET /api/v0/resources/sensors"]["sensors"][0]
+    assert sensor["sensor_id"] != 105 and sensor["device_id"] == device_id and sensor["sensor_index"] == "1.2"
+    assert anonymized["expected"]["lag_members"] == {second["port_id"]: str(first["port_id"])}
+    assert anonymized["expected"]["sub_interfaces"] == {second["port_id"]: first["port_id"]}
+    assert recording == original
+    assert anonymize_recording(recording, salt="capture-one") == anonymized
+    other = anonymize_recording(recording, salt="capture-two")
+    assert other["device_id"] != device_id
+    assert other["meta"]["oob_id"] != oob_id
+
+
+def test_database_id_namespaces_keep_overlapping_table_ids_distinct():
+    recording = _ports(
+        {
+            "device_id": 1,
+            "port_id": 1,
+            "local_port_id": "1",
+            "ifVrf": "1",
+            "vrf_id": 1,
+            "sensor_id": 1,
+            "entPhysical_id": 1,
+            "location_id": 1,
+            "vlan_id": 1,
+            "port_vlan_id": 1,
+            "ifVlan": 1,
+            "vlan": 1,
+            "vlan_vlan": 1,
+        }
+    )
+
+    anonymized = anonymize_recording(recording, salt="table-ids")
+    port = _response(anonymized, "GET /api/v0/devices/1/ports")["ports"][0]
+
+    identifiers = [
+        port[key]
+        for key in (
+            "device_id",
+            "port_id",
+            "vrf_id",
+            "sensor_id",
+            "entPhysical_id",
+            "location_id",
+            "vlan_id",
+            "port_vlan_id",
+        )
+    ]
+    assert len(set(identifiers)) == len(identifiers)
+    assert all(isinstance(value, int) and 1 < value <= 2147483647 for value in identifiers)
+    assert port["device_id"] == anonymized["device_id"]
+    assert port["local_port_id"] == str(port["port_id"])
+    assert port["ifVrf"] == str(port["vrf_id"])
+    assert port["ifVlan"] == port["vlan"] == port["vlan_vlan"] == 1
+
+
+@pytest.mark.parametrize("field", ["port_id", "poller_group"])
+@pytest.mark.parametrize("value", [None, 0, "0", -1, "-1", "", "-"])
+def test_database_id_absence_sentinels_survive_anonymization(field, value):
+    anonymized = anonymize_recording(_ports({field: value}), salt="absent-id")
+
+    assert _response(anonymized, "GET /api/v0/devices/1/ports")["ports"][0][field] == value
+
+
+@pytest.mark.parametrize("value", [True, False, 1.5, "invalid", {}, []])
+def test_anonymization_rejects_invalid_database_ids(value):
+    with pytest.raises(ValueError, match="Database IDs"):
+        anonymize_recording(_ports({"port_id": value}), salt="invalid-id")
+
+
+def test_bare_database_ids_share_their_containing_table_mapping():
+    recording = _ports({"port_id": 71})
+    recording["responses"].update(
+        {
+            "GET /api/v0/devices/1": {
+                "devices": [
+                    {"device_id": 1, "location_id": 91, "location": {"id": "91", "location": "Lab"}},
+                ]
+            },
+            "GET /api/v0/devices/1/port_stack": {
+                "mappings": [
+                    {"id": 92, "port_stack_id": "92", "high_port_id": 71, "low_port_id": 0},
+                ]
+            },
+            "GET /api/v0/devices/1/links": {"links": [{"id": 92, "link_id": "92", "local_port_id": 71}]},
+            "GET /api/v0/devices/1/transceivers": {"transceivers": [{"id": 92, "transceiver_id": "92", "port_id": 71}]},
+        }
+    )
+
+    first = anonymize_recording(recording, salt="bare-ids-one")
+    second = anonymize_recording(recording, salt="bare-ids-two")
+
+    device = _response(first, "GET /api/v0/devices/1")["devices"][0]
+    assert device["location"]["id"] != "91"
+    assert device["location"]["id"] == str(device["location_id"])
+    assert device["location"]["id"] != _response(second, "GET /api/v0/devices/1")["devices"][0]["location"]["id"]
+    identifiers = []
+    for route, collection, field in (
+        ("port_stack", "mappings", "port_stack_id"),
+        ("links", "links", "link_id"),
+        ("transceivers", "transceivers", "transceiver_id"),
+    ):
+        row = _response(first, f"GET /api/v0/devices/1/{route}")[collection][0]
+        other = _response(second, f"GET /api/v0/devices/1/{route}")[collection][0]
+        assert isinstance(row["id"], int) and row["id"] != 92
+        assert str(row["id"]) == row[field]
+        assert row["id"] != other["id"]
+        identifiers.append(row["id"])
+    assert len(set(identifiers)) == 3
+    assert recording["responses"]["GET /api/v0/devices/1"]["devices"][0]["location"]["id"] == "91"
+
+
+def test_anonymization_rejects_a_bare_id_without_a_known_table():
+    recording = _ports({"port_id": 1, "unknown_table": {"id": 91}})
+
+    with pytest.raises(ValueError, match="Database ID has no recognized table context"):
+        anonymize_recording(recording)
+
+
+@pytest.mark.parametrize("value", [7, "7"])
+def test_poller_group_database_id_changes_between_recordings(value):
+    recording = _ports({"port_id": 71})
+    recording["responses"]["GET /api/v0/devices/1"] = {
+        "devices": [{"device_id": 1, "poller_group": value, "poller_group_id": 7}]
+    }
+
+    first = anonymize_recording(recording, salt="poller-group-one")
+    second = anonymize_recording(recording, salt="poller-group-two")
+    device = _response(first, "GET /api/v0/devices/1")["devices"][0]
+    other = _response(second, "GET /api/v0/devices/1")["devices"][0]
+
+    assert device["poller_group"] != value
+    assert type(device["poller_group"]) is type(value)
+    assert str(device["poller_group"]) == str(device["poller_group_id"])
+    assert device["poller_group"] != other["poller_group"]
+    assert recording["responses"]["GET /api/v0/devices/1"]["devices"][0]["poller_group"] == value
+
+
+def test_device_parent_id_matches_the_referenced_device():
+    recording = _ports({"port_id": 71})
+    recording["responses"].update(
+        {
+            "GET /api/v0/devices/1": {"devices": [{"device_id": 1, "parent_id": "42"}]},
+            "GET /api/v0/devices/42": {"devices": [{"device_id": 42, "parent_id": 0}]},
+            "GET /api/v0/devices/1/links": {"links": [{"remote_device_id": 42}]},
+        }
+    )
+
+    anonymized = anonymize_recording(recording, salt="device-parent")
+    device = _response(anonymized, "GET /api/v0/devices/1")["devices"][0]
+    parent_id = _response(anonymized, "GET /api/v0/devices/1/links")["links"][0]["remote_device_id"]
+
+    assert device["parent_id"] == str(parent_id)
+    assert parent_id != 42
+    assert anonymized["responses"][f"GET /api/v0/devices/{parent_id}"]["devices"][0] == {
+        "device_id": parent_id,
+        "parent_id": 0,
+    }
+    assert recording["responses"]["GET /api/v0/devices/1"]["devices"][0]["parent_id"] == "42"
+
+
+@pytest.mark.parametrize("references", ["42", "42,43"])
+def test_device_dependency_ids_match_device_references(references):
+    recording = _ports({"port_id": 71})
+    recording["responses"].update(
+        {
+            "GET /api/v0/devices/1": {"devices": [{"device_id": 1, "dependency_parent_id": references}]},
+            "GET /api/v0/devices/1/links": {
+                "links": [{"remote_device_id": int(value)} for value in references.split(",")]
+            },
+        }
+    )
+
+    anonymized = anonymize_recording(recording, salt="device-dependencies")
+    device = _response(anonymized, "GET /api/v0/devices/1")["devices"][0]
+    links = _response(anonymized, "GET /api/v0/devices/1/links")["links"]
+
+    assert device["dependency_parent_id"] == ",".join(str(link["remote_device_id"]) for link in links)
+    assert device["dependency_parent_id"] != references
+
+
+@pytest.mark.parametrize("value", [None, "", 0, "0"])
+def test_device_dependency_absence_survives_anonymization(value):
+    recording = _ports({"port_id": 71})
+    recording["responses"]["GET /api/v0/devices/1"] = {"devices": [{"device_id": 1, "dependency_parent_id": value}]}
+
+    anonymized = anonymize_recording(recording, salt="absent-dependency")
+    assert _response(anonymized, "GET /api/v0/devices/1")["devices"][0]["dependency_parent_id"] == value

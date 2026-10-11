@@ -20,6 +20,7 @@ from unittest.mock import patch
 
 import pytest
 
+from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
 from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
 from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns, compile_sap_patterns
 
@@ -685,3 +686,29 @@ def test_arcos_recording_preserves_breakout_port_names():
     import re
 
     assert any(re.fullmatch(r"swp[0-9]+s[0-9]+", port.get("ifName", "")) for port in ports)
+
+
+@pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
+def test_anonymized_recording_replays_declared_outcomes(recording, recording_server):
+    """ID remapping preserves replay outcomes without changing the bundled source."""
+    anonymized = anonymize_recording(recording, salt="recording-replay")
+
+    assert anonymized["device_id"] != recording["device_id"]
+    test_recording_outcomes(anonymized, recording_server)
+
+    def bare_ids(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if key == "id":
+                    yield child
+                else:
+                    yield from bare_ids(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from bare_ids(child)
+
+    original_ids = list(bare_ids(list(recording["responses"].values())))
+    anonymous_ids = list(bare_ids(list(anonymized["responses"].values())))
+    assert len(original_ids) == len(anonymous_ids)
+    assert set(original_ids).isdisjoint(anonymous_ids)
+    assert [type(value) for value in original_ids] == [type(value) for value in anonymous_ids]

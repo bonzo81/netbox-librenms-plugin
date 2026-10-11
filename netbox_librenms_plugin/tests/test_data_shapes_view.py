@@ -1,5 +1,8 @@
 """Render tests for the CaptureDataShapeView modal (capture → anonymize → novelty → issue link)."""
 
+from html import unescape
+import json
+import re
 from unittest.mock import patch
 
 from netbox_librenms_plugin.librenms_api import get_plugin_config as _real_get_plugin_config
@@ -46,6 +49,13 @@ def test_capture_button_reads_server_key_from_url_in_shipped_template():
     # which would silently capture against the default server) — mirroring the interface-sync controls.
     assert "librenms_server_info.server_key" in block
     assert "get('server_key') || ''" not in block
+
+
+def _captured_recording(response):
+    """Read the JSON offered for download from the rendered capture modal."""
+    match = re.search(r'<pre id="capture-json"[^>]*>(.*?)</pre>', response.content.decode(), re.DOTALL)
+    assert match, "capture JSON is missing from the modal"
+    return json.loads(unescape(match[1]))
 
 
 def _superuser_request(query=""):
@@ -232,7 +242,10 @@ def test_capture_view_includes_oob_controller_ports(recording_server):
     html = response.content.decode()
     # The recording records meta.oob_id and the controller's own /ports route (quotes are HTML-escaped).
     assert "oob_id" in html
-    assert "2500/ports" in html
+    anonymized = _captured_recording(response)
+    oob_id = anonymized["meta"]["oob_id"]
+    assert oob_id != 2500
+    assert len(anonymized["responses"][f"GET /api/v0/devices/{oob_id}/ports"]["ports"]) == 2
 
 
 @pytest.mark.django_db
@@ -580,11 +593,27 @@ def test_capture_view_salts_every_capture_freshly(recording_server):
     """The contributor publishes this file, so the pseudonyms must not be a plain hash of low-entropy values: a fresh per-capture salt makes two captures of the SAME device produce different pseudonyms (dictionary-hashing a candidate hostname no longer confirms it)."""
     import re
 
-    server, api = recording_server(load_recording("cisco-stackwise-3member"))
+    source = load_recording("cisco-stackwise-3member")
+    source["responses"]["GET /api/v0/devices/1000"]["devices"][0]["poller_group"] = 7
+    server, api = recording_server(source)
     device = make_device("cap-dev-salt", librenms_cf={"test": {"id": 1000}})
 
-    first = _run_capture(_view_with_api(api), server, device).content.decode()
-    second = _run_capture(_view_with_api(api), server, device).content.decode()
+    first_response = _run_capture(_view_with_api(api), server, device)
+    second_response = _run_capture(_view_with_api(api), server, device)
+    first = first_response.content.decode()
+    second = second_response.content.decode()
+    first_recording = _captured_recording(first_response)
+    second_recording = _captured_recording(second_response)
+    assert first_recording["device_id"] != second_recording["device_id"]
+    first_device = first_recording["responses"][f"GET /api/v0/devices/{first_recording['device_id']}"]["devices"][0]
+    second_device = second_recording["responses"][f"GET /api/v0/devices/{second_recording['device_id']}"]["devices"][0]
+    assert first_device["poller_group"] != 7
+    assert first_device["poller_group"] != second_device["poller_group"]
+    for recording in (first_recording, second_recording):
+        device_id = recording["device_id"]
+        assert device_id != 1000
+        assert f"GET /api/v0/devices/{device_id}/ports" in recording["responses"]
+        assert "GET /api/v0/devices/1000/ports" not in recording["responses"]
 
     first_pseudonyms = set(re.findall(r"SN-[0-9a-f]{6}", first))
     second_pseudonyms = set(re.findall(r"SN-[0-9a-f]{6}", second))
@@ -664,6 +693,6 @@ def test_capture_anonymizes_unencodable_port_names(client, settings, recording_s
     assert response.status_code == 200
     assert b"Anonymized recording" in response.content
     anonymized = json.loads(response.context["recording_json"])
-    ports = anonymized["responses"]["GET /api/v0/devices/1000/ports"]["ports"]
+    ports = anonymized["responses"][f"GET /api/v0/devices/{anonymized['device_id']}/ports"]["ports"]
     assert any(port[field].startswith("iface-") for port in ports)
     json.dumps(anonymized, ensure_ascii=False).encode("utf-8")
