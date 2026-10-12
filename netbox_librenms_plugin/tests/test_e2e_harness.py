@@ -4,6 +4,8 @@ import os
 import re
 from pathlib import Path
 
+import pytest
+
 E2E_DIR = Path(__file__).resolve().parents[2] / "tests" / "e2e"
 
 
@@ -15,6 +17,46 @@ def _e2e_conftest():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _e2e_module(name, monkeypatch):
+    """Import an opt-in ``tests/e2e`` module as part of a package that pytest does not collect."""
+    import importlib
+    import importlib.util
+    import sys
+
+    monkeypatch.setenv("E2E_TESTS_ENABLED", "1")
+    package = "e2e_suite_under_test"
+    spec = importlib.util.spec_from_file_location(
+        package, E2E_DIR / "__init__.py", submodule_search_locations=[str(E2E_DIR)]
+    )
+    monkeypatch.setitem(sys.modules, package, importlib.util.module_from_spec(spec))
+    spec.loader.exec_module(sys.modules[package])
+    for module_name in (f"{package}.conftest", f"{package}.{name}"):
+        monkeypatch.delitem(sys.modules, module_name, raising=False)
+    module = importlib.import_module(f"{package}.{name}")
+    monkeypatch.setitem(sys.modules, f"{package}.{name}", module)
+    return module
+
+
+@pytest.mark.django_db
+def test_module_actions_setup_leaves_nothing_when_a_later_step_fails(monkeypatch):
+    """The fixture runs no teardown when setup fails, so setup must roll back what it created."""
+    pytest.importorskip("playwright.sync_api")
+    from dcim.models import Device, DeviceType, Manufacturer, Site
+
+    module = _e2e_module("test_module_actions_in_place", monkeypatch)
+
+    def refuse_save(*args, **kwargs):
+        raise RuntimeError("injected failure at the device save")
+
+    monkeypatch.setattr(Device, "save", refuse_save)
+    with pytest.raises(RuntimeError, match="injected failure"):
+        exec(module.SETUP_CODE, {})
+
+    assert not Manufacturer.objects.filter(slug=module.MANUFACTURER_SLUG).exists()
+    assert not DeviceType.objects.filter(model=module.DEVICE_TYPE_MODEL).exists()
+    assert not Site.objects.filter(slug=module.SITE_SLUG).exists()
 
 
 def test_netbox_shell_runs_the_docker_on_the_inherited_path(tmp_path, monkeypatch):

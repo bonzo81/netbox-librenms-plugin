@@ -80,54 +80,58 @@ from dcim.models import (
     Site,
 )
 
+from django.db import transaction
+
 from netbox_librenms_plugin.models import ModuleTypeMapping
 from netbox_librenms_plugin.utils import set_librenms_device_id
 
 created = {{}}
 
-manufacturer, was_created = Manufacturer.objects.get_or_create(
-    slug="{MANUFACTURER_SLUG}", defaults={{"name": "E2E Modules Manufacturer {RUN_ID}"}}
-)
-created["manufacturer"] = [manufacturer.pk, was_created]
-
-device_type, was_created = DeviceType.objects.get_or_create(
-    manufacturer=manufacturer, model="{DEVICE_TYPE_MODEL}", defaults={{"slug": "e2e-modules-dt-{RUN_ID}"}}
-)
-created["device_type"] = [device_type.pk, was_created]
-for bay_name in {BAY_NAMES!r}:
-    ModuleBayTemplate.objects.get_or_create(device_type=device_type, name=bay_name)
-
-created["module_types"] = []
-created["module_type_mappings"] = []
-for model in {LIBRENMS_MODELS!r}:
-    module_type, was_created = ModuleType.objects.get_or_create(manufacturer=manufacturer, model=model)
-    created["module_types"].append([module_type.pk, was_created])
-    # Scope the mapping to this manufacturer so it beats any global mapping the
-    # instance already has for the same LibreNMS model name.
-    mapping, was_created = ModuleTypeMapping.objects.get_or_create(
-        librenms_model=model,
-        manufacturer=manufacturer,
-        defaults={{"netbox_module_type": module_type}},
+# The fixture runs no teardown when setup fails, so roll back every object setup created.
+with transaction.atomic():
+    manufacturer, was_created = Manufacturer.objects.get_or_create(
+        slug="{MANUFACTURER_SLUG}", defaults={{"name": "E2E Modules Manufacturer {RUN_ID}"}}
     )
-    created["module_type_mappings"].append([mapping.pk, was_created])
+    created["manufacturer"] = [manufacturer.pk, was_created]
 
-site, was_created = Site.objects.get_or_create(slug="{SITE_SLUG}", defaults={{"name": "E2E Modules Site {RUN_ID}"}})
-created["site"] = [site.pk, was_created]
+    device_type, was_created = DeviceType.objects.get_or_create(
+        manufacturer=manufacturer, model="{DEVICE_TYPE_MODEL}", defaults={{"slug": "e2e-modules-dt-{RUN_ID}"}}
+    )
+    created["device_type"] = [device_type.pk, was_created]
+    for bay_name in {BAY_NAMES!r}:
+        ModuleBayTemplate.objects.get_or_create(device_type=device_type, name=bay_name)
 
-role, was_created = DeviceRole.objects.get_or_create(slug="{ROLE_SLUG}", defaults={{"name": "E2E Modules Role {RUN_ID}"}})
-created["role"] = [role.pk, was_created]
+    created["module_types"] = []
+    created["module_type_mappings"] = []
+    for model in {LIBRENMS_MODELS!r}:
+        module_type, was_created = ModuleType.objects.get_or_create(manufacturer=manufacturer, model=model)
+        created["module_types"].append([module_type.pk, was_created])
+        # Scope the mapping to this manufacturer so it beats any global mapping the
+        # instance already has for the same LibreNMS model name.
+        mapping, was_created = ModuleTypeMapping.objects.get_or_create(
+            librenms_model=model,
+            manufacturer=manufacturer,
+            defaults={{"netbox_module_type": module_type}},
+        )
+        created["module_type_mappings"].append([mapping.pk, was_created])
 
-device = Device.objects.create(
-    name="{DEVICE_NAME}",
-    device_type=device_type,
-    role=role,
-    site=site,
-    status="active",
-)
-created["device"] = [device.pk, True]
+    site, was_created = Site.objects.get_or_create(slug="{SITE_SLUG}", defaults={{"name": "E2E Modules Site {RUN_ID}"}})
+    created["site"] = [site.pk, was_created]
 
-set_librenms_device_id(device, {STUB_DEVICE_ID}, "{SERVER_KEY}")
-device.save()
+    role, was_created = DeviceRole.objects.get_or_create(slug="{ROLE_SLUG}", defaults={{"name": "E2E Modules Role {RUN_ID}"}})
+    created["role"] = [role.pk, was_created]
+
+    device = Device.objects.create(
+        name="{DEVICE_NAME}",
+        device_type=device_type,
+        role=role,
+        site=site,
+        status="active",
+    )
+    created["device"] = [device.pk, True]
+
+    set_librenms_device_id(device, {STUB_DEVICE_ID}, "{SERVER_KEY}")
+    device.save()
 print("E2E_SETUP " + json.dumps(created))
 """
 
