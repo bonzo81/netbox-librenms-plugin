@@ -478,7 +478,9 @@ def test_a_detected_flush_restores_the_custom_field_with_the_seeded_rows():
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("field,value", [("enabled", False), ("description", "Changed seed description")])
+@pytest.mark.parametrize(
+    "field,value", [("enabled", False), ("description", "Changed seed description"), ("pattern", "CHANGED")]
+)
 def test_changed_ignore_rule_defaults_trigger_seed_restoration(field, value):
     """The probe must detect changes to every declared ignore-rule default."""
     import importlib

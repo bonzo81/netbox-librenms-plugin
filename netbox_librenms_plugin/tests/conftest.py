@@ -300,9 +300,6 @@ def _seeds_are_intact():
     )
     if not juniper_ids.issubset(scoped_ids):
         return False
-    for model, signature in _seeded_ignore_rule_signatures():
-        if not model.objects.filter(**signature).exists():
-            return False
     migration = importlib.import_module("netbox_librenms_plugin.migrations.0010_inventory_and_mapping_models")
     for defaults in migration.INITIAL_INVENTORY_IGNORE_RULES:
         if not InventoryIgnoreRule.objects.filter(**defaults).exists():
