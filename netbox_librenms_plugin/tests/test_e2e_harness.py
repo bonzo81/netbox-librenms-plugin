@@ -72,6 +72,23 @@ def test_netbox_shell_runs_the_docker_on_the_inherited_path(tmp_path, monkeypatc
     assert _e2e_conftest().netbox_shell("print('probe')") == "harness-marker"
 
 
+def test_netbox_shell_failure_reports_the_shell_stdout(tmp_path, monkeypatch):
+    """A failed shell command can print its useful output on stdout, so the error must carry it."""
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    docker = binaries / "docker"
+    docker.write_text("#!/bin/sh\necho stdout-detail\necho stderr-detail >&2\nexit 1\n")
+    docker.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{binaries}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("NETBOX_CONTAINER", "netbox-e2e-harness-probe")
+
+    with pytest.raises(RuntimeError) as failure:
+        _e2e_conftest().netbox_shell("print('probe')")
+
+    assert "stdout-detail" in str(failure.value)
+    assert "stderr-detail" in str(failure.value)
+
+
 def test_e2e_run_instructions_carry_no_developer_home_path():
     """Every contributor must be able to run the documented command."""
     sources = sorted(E2E_DIR.glob("*.py"))

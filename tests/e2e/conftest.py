@@ -85,9 +85,12 @@ def netbox_shell(code):
         for line in result.stdout.strip().split("\n")
         if not line.startswith("🧬") and "objects imported automatically" not in line
     ]
+    output = "\n".join(lines).strip()
     if result.returncode != 0:
-        raise RuntimeError(f"netbox shell command failed (rc={result.returncode}): {result.stderr}")
-    return "\n".join(lines).strip()
+        raise RuntimeError(
+            f"netbox shell command failed (rc={result.returncode}):\nstdout: {output}\nstderr: {result.stderr}"
+        )
+    return output
 
 
 def browser_launch_options():
