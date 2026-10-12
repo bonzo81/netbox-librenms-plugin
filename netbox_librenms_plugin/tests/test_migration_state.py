@@ -255,3 +255,42 @@ def test_migration_0018_librenms_settings_field_help_text_matches_model():
         )
         model_help = LibreNMSSettings._meta.get_field(field_name).help_text
         assert add_op.field.help_text == model_help, f"{field_name}: migration help_text drifted from the model"
+
+
+def test_plugin_cross_app_migration_dependencies_resolve():
+    """Report every missing dependency without validating unrelated installed apps."""
+    from django.db.migrations.loader import MigrationLoader
+
+    loader = MigrationLoader(None, load=False, replace_migrations=False)
+    loader.load_disk()
+    migrations = loader.disk_migrations
+    plugin_migrations = {key: value for key, value in migrations.items() if key[0] == "netbox_librenms_plugin"}
+    assert plugin_migrations, "No plugin migrations were loaded"
+
+    missing = []
+    for key, migration in sorted(plugin_migrations.items()):
+        for dependency in migration.dependencies:
+            if dependency[0] == key[0] or dependency[1].startswith("__") or dependency in migrations:
+                continue
+            pending = list(migration.dependencies)
+            ancestors = set()
+            while pending:
+                ancestor = pending.pop()
+                if ancestor in ancestors or ancestor not in migrations:
+                    continue
+                ancestors.add(ancestor)
+                pending.extend(migrations[ancestor].dependencies)
+            available = sorted(name for app, name in ancestors if app == dependency[0])
+            newest = available[-1] if available else "none"
+            kind = "initial" if migration.initial else "non-initial"
+            missing.append(
+                f"{key[1]}.py ({kind}) -> {dependency[0]}.{dependency[1]}; "
+                f"newest available ancestor in {dependency[0]}: {newest}"
+            )
+
+    assert not missing, (
+        "Missing cross-app migration dependencies:\n"
+        + "\n".join(missing)
+        + "\nDrop a redundant edge only if ancestry guarantees ordering. Otherwise use a live dependency, "
+        "or __first__ when an initial migration needs app ordering."
+    )

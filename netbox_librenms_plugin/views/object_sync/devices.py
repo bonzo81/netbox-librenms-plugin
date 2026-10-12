@@ -8,7 +8,7 @@ from django.views import View
 from ipam.models import VLAN, VLANGroup
 from utilities.views import ViewTab, register_model_view
 
-from netbox_librenms_plugin.constants import PERM_VIEW_PLUGIN, is_supported_interface_name_field
+from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE, PERM_VIEW_PLUGIN, is_supported_interface_name_field
 from netbox_librenms_plugin.interface_relationships import (
     build_candidate_relationship_context,
     build_relationship_maps,
@@ -252,7 +252,8 @@ class SingleInterfaceVerifyView(
                 (
                     p
                     for p in ports
-                    if normalize_librenms_port_id(p.get("port_id")) == posted_port_id and p.get("_source") != "oob"
+                    if normalize_librenms_port_id(p.get("port_id")) == posted_port_id
+                    and p.get("_source") != OOB_INVENTORY_SOURCE
                 ),
                 None,
             )

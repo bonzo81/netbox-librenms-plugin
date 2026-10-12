@@ -1,0 +1,2771 @@
+{
+  "schema_version": 1,
+  "name": "linux-host",
+  "description": "Linux host: plain interface shape, no virtual chassis and no OOB controller.",
+  "meta": {
+    "os": "os-9bf16a",
+    "compressed_ports": {
+      "from": 19,
+      "to": 12
+    }
+  },
+  "device_id": 1215330439,
+  "lag_patterns": {
+    "os-9bf16a": "^bond\\d+$"
+  },
+  "sap_patterns": {},
+  "responses": {
+    "GET /api/v0/devices/1215330439": {
+      "status": "ok",
+      "devices": [
+        {
+          "device_id": 1215330439,
+          "inserted": "2026-05-02T15:03:27.000000Z",
+          "hostname": "device-7dca8d",
+          "sysName": "device-f9dff4",
+          "display": "device-7dca8d",
+          "display_template": null,
+          "ip": "192.0.2.91",
+          "overwrite_ip": null,
+          "community": "",
+          "authlevel": "",
+          "authname": "",
+          "authpass": "",
+          "authalgo": "",
+          "cryptopass": "",
+          "cryptoalgo": "",
+          "snmpver": "",
+          "port": 161,
+          "transport": "udp",
+          "timeout": null,
+          "retries": null,
+          "snmp_disable": false,
+          "bgpLocalAs": null,
+          "sysObjectID": ".1.3.6.1.4.1.32473.7976054",
+          "snmpEngineID": "",
+          "sysDescr": "",
+          "sysContact": "",
+          "version": null,
+          "hardware": "MODEL-73eacb",
+          "features": "fw-09a057",
+          "location_id": 860557774,
+          "os": "os-9bf16a",
+          "status": true,
+          "status_reason": "",
+          "ignore": false,
+          "disabled": false,
+          "uptime": 19709344,
+          "agent_uptime": 0,
+          "last_polled": "2026-10-11T17:45:44.000000Z",
+          "last_poll_attempted": null,
+          "last_polled_timetaken": 15.302760839462,
+          "last_discovered_timetaken": 30.717992067337,
+          "last_discovered": "2026-10-11T12:00:50.000000Z",
+          "last_ping": "2026-10-11T17:45:30.000000Z",
+          "last_ping_timetaken": 0.603,
+          "purpose": null,
+          "type": "server",
+          "serial": "SN-70c147",
+          "icon": "images/os/generic.svg",
+          "poller_group": 0,
+          "override_sysLocation": false,
+          "notes": null,
+          "port_association_mode": 1,
+          "max_depth": 0,
+          "disable_notify": false,
+          "ignore_status": false,
+          "mtu_status": true,
+          "location": {
+            "id": 860557774,
+            "location": "Lab",
+            "lat": null,
+            "lng": null,
+            "timestamp": "2026-09-20T09:11:05.000000Z",
+            "fixed_coordinates": false
+          },
+          "lat": null,
+          "lng": null
+        }
+      ],
+      "count": 1
+    },
+    "GET /api/v0/inventory/1215330439?entPhysicalContainedIn=0": {
+      "status": "ok",
+      "inventory": [],
+      "count": 0
+    },
+    "GET /api/v0/inventory/1215330439/all": {
+      "status": "ok",
+      "inventory": [],
+      "count": 0
+    },
+    "GET /api/v0/devices/1215330439/ports": {
+      "status": "ok",
+      "ports": [
+        {
+          "port_id": 99552590,
+          "ifName": "iface-9657a7",
+          "ifType": "softwareLoopback",
+          "ifSpeed": 10000000,
+          "ifAdminStatus": "up",
+          "ifDescr": "iface-9657a7",
+          "ifAlias": "",
+          "ifPhysAddress": null,
+          "ifMtu": 65536,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "ifVrf": 0,
+          "vlans": []
+        },
+        {
+          "port_id": 433567595,
+          "ifName": "eth0",
+          "ifType": "ethernetCsmacd",
+          "ifSpeed": 1000000000,
+          "ifAdminStatus": "up",
+          "ifDescr": "eth0",
+          "ifAlias": "",
+          "ifPhysAddress": "02:00:00:13:8d:09",
+          "ifMtu": 1500,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "ifVrf": 0,
+          "vlans": []
+        },
+        {
+          "port_id": 364885255,
+          "ifName": "eth1",
+          "ifType": "ethernetCsmacd",
+          "ifSpeed": 0,
+          "ifAdminStatus": "up",
+          "ifDescr": "eth1",
+          "ifAlias": "",
+          "ifPhysAddress": "02:00:00:9d:db:ad",
+          "ifMtu": 1500,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "ifVrf": 0,
+          "vlans": []
+        },
+        {
+          "port_id": 405001686,
+          "ifName": "eth2",
+          "ifType": "ethernetCsmacd",
+          "ifSpeed": 10000000000,
+          "ifAdminStatus": "up",
+          "ifDescr": "eth2",
+          "ifAlias": "",
+          "ifPhysAddress": "02:00:00:da:a2:49",
+          "ifMtu": 1500,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "ifVrf": 0,
+          "vlans": []
+        },
+        {
+          "port_id": 538442593,
+          "ifName": "eth3",
+          "ifType": "ethernetCsmacd",
+          "ifSpeed": 0,
+          "ifAdminStatus": "up",
+          "ifDescr": "eth3",
+          "ifAlias": "",
+          "ifPhysAddress": "02:00:00:c9:e8:40",
+          "ifMtu": 1500,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "ifVrf": 0,
+          "vlans": []
+        },
+        {
+          "port_id": 122417325,
+          "ifName": "iface-da9dda",
+          "ifType": "ethernetCsmacd",
+          "ifSpeed": 10000000000,
+          "ifAdminStatus": "up",
+          "ifDescr": "iface-da9dda",
+          "ifAlias": "",
+          "ifPhysAddress": "02:00:00:13:8d:09",
+          "ifMtu": 1500,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "ifVrf": 0,
+          "vlans": []
+        },
+        {
+          "port_id": 945947276,
+          "ifName": "iface-86fb98",
+          "ifType": "ethernetCsmacd",
+          "ifSpeed": 0,
+          "ifAdminStatus": "up",
+          "ifDescr": "iface-86fb98",
+          "ifAlias": "",
+          "ifPhysAddress": "02:00:00:14:ac:79",
+          "ifMtu": 1500,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "ifVrf": 0,
+          "vlans": []
+        },
+        {
+          "port_id": 2006788709,
+          "ifName": "iface-b0385f",
+          "ifType": "ethernetCsmacd",
+          "ifSpeed": 10000000000,
+          "ifAdminStatus": "up",
+          "ifDescr": "iface-b0385f",
+          "ifAlias": "",
+          "ifPhysAddress": "02:00:00:f9:51:4c",
+          "ifMtu": 1500,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "ifVrf": 0,
+          "vlans": []
+        },
+        {
+          "port_id": 1660355691,
+          "ifName": "iface-50dab5",
+          "ifType": "ethernetCsmacd",
+          "ifSpeed": 0,
+          "ifAdminStatus": "up",
+          "ifDescr": "iface-50dab5",
+          "ifAlias": "",
+          "ifPhysAddress": "02:00:00:de:e3:29",
+          "ifMtu": 1500,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "ifVrf": 0,
+          "vlans": []
+        },
+        {
+          "port_id": 1421010649,
+          "ifName": "iface-78af45",
+          "ifType": "ethernetCsmacd",
+          "ifSpeed": 0,
+          "ifAdminStatus": "up",
+          "ifDescr": "iface-78af45",
+          "ifAlias": "",
+          "ifPhysAddress": "02:00:00:12:9f:ae",
+          "ifMtu": 1500,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "ifVrf": 0,
+          "vlans": []
+        },
+        {
+          "port_id": 1932981489,
+          "ifName": "iface-5114ba",
+          "ifType": "ethernetCsmacd",
+          "ifSpeed": 0,
+          "ifAdminStatus": "up",
+          "ifDescr": "iface-5114ba",
+          "ifAlias": "",
+          "ifPhysAddress": "02:00:00:f9:e1:48",
+          "ifMtu": 1500,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "ifVrf": 0,
+          "vlans": []
+        },
+        {
+          "port_id": 1135590770,
+          "ifName": "iface-3e2d45",
+          "ifType": "other",
+          "ifSpeed": 0,
+          "ifAdminStatus": "up",
+          "ifDescr": "iface-3e2d45",
+          "ifAlias": "",
+          "ifPhysAddress": null,
+          "ifMtu": 9500,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "ifVrf": 0,
+          "vlans": []
+        }
+      ]
+    },
+    "GET /api/v0/devices/1215330439/port_stack": {
+      "status": "ok",
+      "mappings": [
+        {
+          "id": 2051722828,
+          "device_id": 1215330439,
+          "high_ifIndex": 2,
+          "high_port_id": 433567595,
+          "low_ifIndex": 6,
+          "low_port_id": 122417325,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 70881184,
+          "device_id": 1215330439,
+          "high_ifIndex": 3,
+          "high_port_id": 364885255,
+          "low_ifIndex": 7,
+          "low_port_id": 945947276,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1524734498,
+          "device_id": 1215330439,
+          "high_ifIndex": 4,
+          "high_port_id": 405001686,
+          "low_ifIndex": 8,
+          "low_port_id": 2006788709,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 242939236,
+          "device_id": 1215330439,
+          "high_ifIndex": 5,
+          "high_port_id": 538442593,
+          "low_ifIndex": 9,
+          "low_port_id": 1660355691,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 997169887,
+          "device_id": 1215330439,
+          "high_ifIndex": 16,
+          "high_port_id": 1421010649,
+          "low_ifIndex": 17,
+          "low_port_id": 1932981489,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 998606096,
+          "device_id": 1215330439,
+          "high_ifIndex": 139,
+          "high_port_id": null,
+          "low_ifIndex": 115,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 23072899,
+          "device_id": 1215330439,
+          "high_ifIndex": 199,
+          "high_port_id": null,
+          "low_ifIndex": 195,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 572662635,
+          "device_id": 1215330439,
+          "high_ifIndex": 200,
+          "high_port_id": null,
+          "low_ifIndex": 196,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 492351598,
+          "device_id": 1215330439,
+          "high_ifIndex": 363,
+          "high_port_id": null,
+          "low_ifIndex": 115,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1563736351,
+          "device_id": 1215330439,
+          "high_ifIndex": 364,
+          "high_port_id": null,
+          "low_ifIndex": 195,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1057748368,
+          "device_id": 1215330439,
+          "high_ifIndex": 365,
+          "high_port_id": null,
+          "low_ifIndex": 116,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 747899183,
+          "device_id": 1215330439,
+          "high_ifIndex": 378,
+          "high_port_id": null,
+          "low_ifIndex": 373,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 345494308,
+          "device_id": 1215330439,
+          "high_ifIndex": 379,
+          "high_port_id": null,
+          "low_ifIndex": 374,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 911757378,
+          "device_id": 1215330439,
+          "high_ifIndex": 380,
+          "high_port_id": null,
+          "low_ifIndex": 196,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1612902592,
+          "device_id": 1215330439,
+          "high_ifIndex": 381,
+          "high_port_id": null,
+          "low_ifIndex": 375,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1860917271,
+          "device_id": 1215330439,
+          "high_ifIndex": 382,
+          "high_port_id": null,
+          "low_ifIndex": 376,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 371123793,
+          "device_id": 1215330439,
+          "high_ifIndex": 392,
+          "high_port_id": null,
+          "low_ifIndex": 385,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1616954303,
+          "device_id": 1215330439,
+          "high_ifIndex": 393,
+          "high_port_id": null,
+          "low_ifIndex": 387,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1346385111,
+          "device_id": 1215330439,
+          "high_ifIndex": 394,
+          "high_port_id": null,
+          "low_ifIndex": 375,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 337277594,
+          "device_id": 1215330439,
+          "high_ifIndex": 405,
+          "high_port_id": null,
+          "low_ifIndex": 385,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1083048420,
+          "device_id": 1215330439,
+          "high_ifIndex": 406,
+          "high_port_id": null,
+          "low_ifIndex": 397,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 71584180,
+          "device_id": 1215330439,
+          "high_ifIndex": 407,
+          "high_port_id": null,
+          "low_ifIndex": 398,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 334236303,
+          "device_id": 1215330439,
+          "high_ifIndex": 418,
+          "high_port_id": null,
+          "low_ifIndex": 374,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1010481026,
+          "device_id": 1215330439,
+          "high_ifIndex": 419,
+          "high_port_id": null,
+          "low_ifIndex": 116,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1492042997,
+          "device_id": 1215330439,
+          "high_ifIndex": 420,
+          "high_port_id": null,
+          "low_ifIndex": 398,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 2036775793,
+          "device_id": 1215330439,
+          "high_ifIndex": 421,
+          "high_port_id": null,
+          "low_ifIndex": 414,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1547234393,
+          "device_id": 1215330439,
+          "high_ifIndex": 422,
+          "high_port_id": null,
+          "low_ifIndex": 415,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 600628651,
+          "device_id": 1215330439,
+          "high_ifIndex": 4269,
+          "high_port_id": null,
+          "low_ifIndex": 4262,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1539418915,
+          "device_id": 1215330439,
+          "high_ifIndex": 4274,
+          "high_port_id": null,
+          "low_ifIndex": 4263,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1310453789,
+          "device_id": 1215330439,
+          "high_ifIndex": 4314,
+          "high_port_id": null,
+          "low_ifIndex": 4311,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 313277378,
+          "device_id": 1215330439,
+          "high_ifIndex": 4317,
+          "high_port_id": null,
+          "low_ifIndex": 4312,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 2005329710,
+          "device_id": 1215330439,
+          "high_ifIndex": 4383,
+          "high_port_id": null,
+          "low_ifIndex": 4377,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1442559499,
+          "device_id": 1215330439,
+          "high_ifIndex": 4385,
+          "high_port_id": null,
+          "low_ifIndex": 4368,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 292602528,
+          "device_id": 1215330439,
+          "high_ifIndex": 4396,
+          "high_port_id": null,
+          "low_ifIndex": 4377,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1570838522,
+          "device_id": 1215330439,
+          "high_ifIndex": 4397,
+          "high_port_id": null,
+          "low_ifIndex": 4037,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 980967551,
+          "device_id": 1215330439,
+          "high_ifIndex": 4490,
+          "high_port_id": null,
+          "low_ifIndex": 4485,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1887200231,
+          "device_id": 1215330439,
+          "high_ifIndex": 4491,
+          "high_port_id": null,
+          "low_ifIndex": 4486,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 149346320,
+          "device_id": 1215330439,
+          "high_ifIndex": 4492,
+          "high_port_id": null,
+          "low_ifIndex": 4037,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 354757151,
+          "device_id": 1215330439,
+          "high_ifIndex": 4493,
+          "high_port_id": null,
+          "low_ifIndex": 4263,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1065205726,
+          "device_id": 1215330439,
+          "high_ifIndex": 4496,
+          "high_port_id": null,
+          "low_ifIndex": 4487,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 250387437,
+          "device_id": 1215330439,
+          "high_ifIndex": 4501,
+          "high_port_id": null,
+          "low_ifIndex": 4488,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 351506891,
+          "device_id": 1215330439,
+          "high_ifIndex": 4539,
+          "high_port_id": null,
+          "low_ifIndex": 4486,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 2071302144,
+          "device_id": 1215330439,
+          "high_ifIndex": 4540,
+          "high_port_id": null,
+          "low_ifIndex": 4368,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1780623108,
+          "device_id": 1215330439,
+          "high_ifIndex": 4541,
+          "high_port_id": null,
+          "low_ifIndex": 4312,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 707293861,
+          "device_id": 1215330439,
+          "high_ifIndex": 4542,
+          "high_port_id": null,
+          "low_ifIndex": 4535,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 59293801,
+          "device_id": 1215330439,
+          "high_ifIndex": 4543,
+          "high_port_id": null,
+          "low_ifIndex": 4536,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 483276209,
+          "device_id": 1215330439,
+          "high_ifIndex": 4714,
+          "high_port_id": null,
+          "low_ifIndex": 4485,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1062076392,
+          "device_id": 1215330439,
+          "high_ifIndex": 4718,
+          "high_port_id": null,
+          "low_ifIndex": 4535,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 2052405666,
+          "device_id": 1215330439,
+          "high_ifIndex": 4828,
+          "high_port_id": null,
+          "low_ifIndex": 4487,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1718099336,
+          "device_id": 1215330439,
+          "high_ifIndex": 4829,
+          "high_port_id": null,
+          "low_ifIndex": 4536,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 113303688,
+          "device_id": 1215330439,
+          "high_ifIndex": 5229,
+          "high_port_id": null,
+          "low_ifIndex": 4488,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 355227479,
+          "device_id": 1215330439,
+          "high_ifIndex": 6607,
+          "high_port_id": null,
+          "low_ifIndex": 6605,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 748624309,
+          "device_id": 1215330439,
+          "high_ifIndex": 6610,
+          "high_port_id": null,
+          "low_ifIndex": 6605,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1429889798,
+          "device_id": 1215330439,
+          "high_ifIndex": 6611,
+          "high_port_id": null,
+          "low_ifIndex": 6608,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 944876041,
+          "device_id": 1215330439,
+          "high_ifIndex": 7883,
+          "high_port_id": null,
+          "low_ifIndex": 7880,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 2012012071,
+          "device_id": 1215330439,
+          "high_ifIndex": 7884,
+          "high_port_id": null,
+          "low_ifIndex": 7271,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1128470280,
+          "device_id": 1215330439,
+          "high_ifIndex": 7885,
+          "high_port_id": null,
+          "low_ifIndex": 7881,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 554659626,
+          "device_id": 1215330439,
+          "high_ifIndex": 7886,
+          "high_port_id": null,
+          "low_ifIndex": 7814,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 2031538089,
+          "device_id": 1215330439,
+          "high_ifIndex": 7887,
+          "high_port_id": null,
+          "low_ifIndex": 7879,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 427803971,
+          "device_id": 1215330439,
+          "high_ifIndex": 7888,
+          "high_port_id": null,
+          "low_ifIndex": 7956,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1924902980,
+          "device_id": 1215330439,
+          "high_ifIndex": 7893,
+          "high_port_id": null,
+          "low_ifIndex": 7890,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 478308069,
+          "device_id": 1215330439,
+          "high_ifIndex": 7894,
+          "high_port_id": null,
+          "low_ifIndex": 7891,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 998576445,
+          "device_id": 1215330439,
+          "high_ifIndex": 7898,
+          "high_port_id": null,
+          "low_ifIndex": 7273,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1312579482,
+          "device_id": 1215330439,
+          "high_ifIndex": 7899,
+          "high_port_id": null,
+          "low_ifIndex": 7358,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1119194805,
+          "device_id": 1215330439,
+          "high_ifIndex": 8677,
+          "high_port_id": null,
+          "low_ifIndex": 7472,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 2018584398,
+          "device_id": 1215330439,
+          "high_ifIndex": 8679,
+          "high_port_id": null,
+          "low_ifIndex": 10470,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1778109258,
+          "device_id": 1215330439,
+          "high_ifIndex": 8940,
+          "high_port_id": null,
+          "low_ifIndex": 7943,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1213372019,
+          "device_id": 1215330439,
+          "high_ifIndex": 8941,
+          "high_port_id": null,
+          "low_ifIndex": 10469,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 515985852,
+          "device_id": 1215330439,
+          "high_ifIndex": 8951,
+          "high_port_id": null,
+          "low_ifIndex": 8893,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1719271285,
+          "device_id": 1215330439,
+          "high_ifIndex": 8952,
+          "high_port_id": null,
+          "low_ifIndex": 10483,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1666466037,
+          "device_id": 1215330439,
+          "high_ifIndex": 8956,
+          "high_port_id": null,
+          "low_ifIndex": 10482,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1856369111,
+          "device_id": 1215330439,
+          "high_ifIndex": 8960,
+          "high_port_id": null,
+          "low_ifIndex": 7958,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1737520746,
+          "device_id": 1215330439,
+          "high_ifIndex": 9098,
+          "high_port_id": null,
+          "low_ifIndex": 8287,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1112762915,
+          "device_id": 1215330439,
+          "high_ifIndex": 9101,
+          "high_port_id": null,
+          "low_ifIndex": 7415,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1298647432,
+          "device_id": 1215330439,
+          "high_ifIndex": 9179,
+          "high_port_id": null,
+          "low_ifIndex": 7292,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 2039051105,
+          "device_id": 1215330439,
+          "high_ifIndex": 9180,
+          "high_port_id": null,
+          "low_ifIndex": 7294,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1242750294,
+          "device_id": 1215330439,
+          "high_ifIndex": 9181,
+          "high_port_id": null,
+          "low_ifIndex": 7267,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 2090153421,
+          "device_id": 1215330439,
+          "high_ifIndex": 9182,
+          "high_port_id": null,
+          "low_ifIndex": 7956,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 495568875,
+          "device_id": 1215330439,
+          "high_ifIndex": 9183,
+          "high_port_id": null,
+          "low_ifIndex": 7269,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 91496003,
+          "device_id": 1215330439,
+          "high_ifIndex": 9184,
+          "high_port_id": null,
+          "low_ifIndex": 7290,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 799093447,
+          "device_id": 1215330439,
+          "high_ifIndex": 9185,
+          "high_port_id": null,
+          "low_ifIndex": 9177,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1864678212,
+          "device_id": 1215330439,
+          "high_ifIndex": 9186,
+          "high_port_id": null,
+          "low_ifIndex": 8198,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1277601490,
+          "device_id": 1215330439,
+          "high_ifIndex": 9187,
+          "high_port_id": null,
+          "low_ifIndex": 7273,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 441336843,
+          "device_id": 1215330439,
+          "high_ifIndex": 9188,
+          "high_port_id": null,
+          "low_ifIndex": 7295,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 91157840,
+          "device_id": 1215330439,
+          "high_ifIndex": 9189,
+          "high_port_id": null,
+          "low_ifIndex": 8893,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 514753133,
+          "device_id": 1215330439,
+          "high_ifIndex": 9190,
+          "high_port_id": null,
+          "low_ifIndex": 7472,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 492890497,
+          "device_id": 1215330439,
+          "high_ifIndex": 9191,
+          "high_port_id": null,
+          "low_ifIndex": 10496,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 866867712,
+          "device_id": 1215330439,
+          "high_ifIndex": 9217,
+          "high_port_id": null,
+          "low_ifIndex": 7943,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1332173918,
+          "device_id": 1215330439,
+          "high_ifIndex": 9218,
+          "high_port_id": null,
+          "low_ifIndex": 9215,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1247079389,
+          "device_id": 1215330439,
+          "high_ifIndex": 9221,
+          "high_port_id": null,
+          "low_ifIndex": 7814,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 56219472,
+          "device_id": 1215330439,
+          "high_ifIndex": 9223,
+          "high_port_id": null,
+          "low_ifIndex": 7357,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1230834033,
+          "device_id": 1215330439,
+          "high_ifIndex": 9327,
+          "high_port_id": null,
+          "low_ifIndex": 10498,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1679442811,
+          "device_id": 1215330439,
+          "high_ifIndex": 9331,
+          "high_port_id": null,
+          "low_ifIndex": 7221,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 783792260,
+          "device_id": 1215330439,
+          "high_ifIndex": 9332,
+          "high_port_id": null,
+          "low_ifIndex": 7234,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1855266259,
+          "device_id": 1215330439,
+          "high_ifIndex": 9338,
+          "high_port_id": null,
+          "low_ifIndex": 10497,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 2049877237,
+          "device_id": 1215330439,
+          "high_ifIndex": 9340,
+          "high_port_id": null,
+          "low_ifIndex": 7219,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 166854822,
+          "device_id": 1215330439,
+          "high_ifIndex": 9342,
+          "high_port_id": null,
+          "low_ifIndex": 7233,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1047543339,
+          "device_id": 1215330439,
+          "high_ifIndex": 9428,
+          "high_port_id": null,
+          "low_ifIndex": 7267,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1539477581,
+          "device_id": 1215330439,
+          "high_ifIndex": 9430,
+          "high_port_id": null,
+          "low_ifIndex": 7355,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 2004872475,
+          "device_id": 1215330439,
+          "high_ifIndex": 9437,
+          "high_port_id": null,
+          "low_ifIndex": 7295,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1470962832,
+          "device_id": 1215330439,
+          "high_ifIndex": 9438,
+          "high_port_id": null,
+          "low_ifIndex": 7378,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1050803206,
+          "device_id": 1215330439,
+          "high_ifIndex": 9448,
+          "high_port_id": null,
+          "low_ifIndex": 7352,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 2056202269,
+          "device_id": 1215330439,
+          "high_ifIndex": 9452,
+          "high_port_id": null,
+          "low_ifIndex": 7269,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1740972961,
+          "device_id": 1215330439,
+          "high_ifIndex": 9459,
+          "high_port_id": null,
+          "low_ifIndex": 8198,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 667765142,
+          "device_id": 1215330439,
+          "high_ifIndex": 9460,
+          "high_port_id": null,
+          "low_ifIndex": 8222,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 2049543563,
+          "device_id": 1215330439,
+          "high_ifIndex": 10231,
+          "high_port_id": null,
+          "low_ifIndex": 7379,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1888063543,
+          "device_id": 1215330439,
+          "high_ifIndex": 10232,
+          "high_port_id": null,
+          "low_ifIndex": 7416,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1874846282,
+          "device_id": 1215330439,
+          "high_ifIndex": 10241,
+          "high_port_id": null,
+          "low_ifIndex": 7414,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 751426289,
+          "device_id": 1215330439,
+          "high_ifIndex": 10244,
+          "high_port_id": null,
+          "low_ifIndex": 7381,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1815864421,
+          "device_id": 1215330439,
+          "high_ifIndex": 10274,
+          "high_port_id": null,
+          "low_ifIndex": 10042,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 983264815,
+          "device_id": 1215330439,
+          "high_ifIndex": 10275,
+          "high_port_id": null,
+          "low_ifIndex": 7356,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1686002004,
+          "device_id": 1215330439,
+          "high_ifIndex": 10305,
+          "high_port_id": null,
+          "low_ifIndex": 8768,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 8472807,
+          "device_id": 1215330439,
+          "high_ifIndex": 10306,
+          "high_port_id": null,
+          "low_ifIndex": 10457,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1701018710,
+          "device_id": 1215330439,
+          "high_ifIndex": 10309,
+          "high_port_id": null,
+          "low_ifIndex": 7382,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1051271126,
+          "device_id": 1215330439,
+          "high_ifIndex": 10310,
+          "high_port_id": null,
+          "low_ifIndex": 7417,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1358785039,
+          "device_id": 1215330439,
+          "high_ifIndex": 10338,
+          "high_port_id": null,
+          "low_ifIndex": 7880,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 582012507,
+          "device_id": 1215330439,
+          "high_ifIndex": 10339,
+          "high_port_id": null,
+          "low_ifIndex": 9119,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 530111429,
+          "device_id": 1215330439,
+          "high_ifIndex": 10340,
+          "high_port_id": null,
+          "low_ifIndex": 7958,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 512956012,
+          "device_id": 1215330439,
+          "high_ifIndex": 10367,
+          "high_port_id": null,
+          "low_ifIndex": 7384,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1012346107,
+          "device_id": 1215330439,
+          "high_ifIndex": 10368,
+          "high_port_id": null,
+          "low_ifIndex": 7427,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1328152715,
+          "device_id": 1215330439,
+          "high_ifIndex": 10369,
+          "high_port_id": null,
+          "low_ifIndex": 7414,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1687200817,
+          "device_id": 1215330439,
+          "high_ifIndex": 10370,
+          "high_port_id": null,
+          "low_ifIndex": 7415,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1845945448,
+          "device_id": 1215330439,
+          "high_ifIndex": 10371,
+          "high_port_id": null,
+          "low_ifIndex": 7416,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1033462881,
+          "device_id": 1215330439,
+          "high_ifIndex": 10372,
+          "high_port_id": null,
+          "low_ifIndex": 7417,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 542026669,
+          "device_id": 1215330439,
+          "high_ifIndex": 10399,
+          "high_port_id": null,
+          "low_ifIndex": 7384,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1095821138,
+          "device_id": 1215330439,
+          "high_ifIndex": 10400,
+          "high_port_id": null,
+          "low_ifIndex": 9119,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1490212325,
+          "device_id": 1215330439,
+          "high_ifIndex": 10401,
+          "high_port_id": null,
+          "low_ifIndex": 10042,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 228288869,
+          "device_id": 1215330439,
+          "high_ifIndex": 10402,
+          "high_port_id": null,
+          "low_ifIndex": 7379,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1750815639,
+          "device_id": 1215330439,
+          "high_ifIndex": 10403,
+          "high_port_id": null,
+          "low_ifIndex": 7382,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 549044869,
+          "device_id": 1215330439,
+          "high_ifIndex": 10404,
+          "high_port_id": null,
+          "low_ifIndex": 7381,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 100157315,
+          "device_id": 1215330439,
+          "high_ifIndex": 10405,
+          "high_port_id": null,
+          "low_ifIndex": 10397,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 622772480,
+          "device_id": 1215330439,
+          "high_ifIndex": 10443,
+          "high_port_id": null,
+          "low_ifIndex": 7352,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1776325715,
+          "device_id": 1215330439,
+          "high_ifIndex": 10444,
+          "high_port_id": null,
+          "low_ifIndex": 7294,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1608338094,
+          "device_id": 1215330439,
+          "high_ifIndex": 10445,
+          "high_port_id": null,
+          "low_ifIndex": 10439,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1117116187,
+          "device_id": 1215330439,
+          "high_ifIndex": 10446,
+          "high_port_id": null,
+          "low_ifIndex": 10397,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1832940927,
+          "device_id": 1215330439,
+          "high_ifIndex": 10447,
+          "high_port_id": null,
+          "low_ifIndex": 7355,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 296039278,
+          "device_id": 1215330439,
+          "high_ifIndex": 10448,
+          "high_port_id": null,
+          "low_ifIndex": 7879,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 501509441,
+          "device_id": 1215330439,
+          "high_ifIndex": 10449,
+          "high_port_id": null,
+          "low_ifIndex": 7357,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 510896334,
+          "device_id": 1215330439,
+          "high_ifIndex": 10450,
+          "high_port_id": null,
+          "low_ifIndex": 7358,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 447412905,
+          "device_id": 1215330439,
+          "high_ifIndex": 10451,
+          "high_port_id": null,
+          "low_ifIndex": 7378,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1915028521,
+          "device_id": 1215330439,
+          "high_ifIndex": 10452,
+          "high_port_id": null,
+          "low_ifIndex": 8222,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1315465444,
+          "device_id": 1215330439,
+          "high_ifIndex": 10453,
+          "high_port_id": null,
+          "low_ifIndex": 10440,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1058240497,
+          "device_id": 1215330439,
+          "high_ifIndex": 10454,
+          "high_port_id": null,
+          "low_ifIndex": 10441,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1450770187,
+          "device_id": 1215330439,
+          "high_ifIndex": 10459,
+          "high_port_id": null,
+          "low_ifIndex": 8287,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1380745862,
+          "device_id": 1215330439,
+          "high_ifIndex": 10460,
+          "high_port_id": null,
+          "low_ifIndex": 10457,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1194978056,
+          "device_id": 1215330439,
+          "high_ifIndex": 10462,
+          "high_port_id": null,
+          "low_ifIndex": 7356,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 2004465246,
+          "device_id": 1215330439,
+          "high_ifIndex": 10473,
+          "high_port_id": null,
+          "low_ifIndex": 10469,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 2123606066,
+          "device_id": 1215330439,
+          "high_ifIndex": 10474,
+          "high_port_id": null,
+          "low_ifIndex": 10470,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 2015083163,
+          "device_id": 1215330439,
+          "high_ifIndex": 10500,
+          "high_port_id": null,
+          "low_ifIndex": 6712,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 411224121,
+          "device_id": 1215330439,
+          "high_ifIndex": 10501,
+          "high_port_id": null,
+          "low_ifIndex": 10496,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 971547967,
+          "device_id": 1215330439,
+          "high_ifIndex": 10502,
+          "high_port_id": null,
+          "low_ifIndex": 10497,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1897479589,
+          "device_id": 1215330439,
+          "high_ifIndex": 10503,
+          "high_port_id": null,
+          "low_ifIndex": 10495,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 987105146,
+          "device_id": 1215330439,
+          "high_ifIndex": 10504,
+          "high_port_id": null,
+          "low_ifIndex": 10498,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1840738959,
+          "device_id": 1215330439,
+          "high_ifIndex": 10505,
+          "high_port_id": null,
+          "low_ifIndex": 15125,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 289414336,
+          "device_id": 1215330439,
+          "high_ifIndex": 10548,
+          "high_port_id": null,
+          "low_ifIndex": 7217,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 114384881,
+          "device_id": 1215330439,
+          "high_ifIndex": 10549,
+          "high_port_id": null,
+          "low_ifIndex": 7427,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 717408743,
+          "device_id": 1215330439,
+          "high_ifIndex": 10550,
+          "high_port_id": null,
+          "low_ifIndex": 7219,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 319871826,
+          "device_id": 1215330439,
+          "high_ifIndex": 10551,
+          "high_port_id": null,
+          "low_ifIndex": 7220,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 599007302,
+          "device_id": 1215330439,
+          "high_ifIndex": 10552,
+          "high_port_id": null,
+          "low_ifIndex": 7221,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 815713068,
+          "device_id": 1215330439,
+          "high_ifIndex": 10553,
+          "high_port_id": null,
+          "low_ifIndex": 7290,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 971086647,
+          "device_id": 1215330439,
+          "high_ifIndex": 10554,
+          "high_port_id": null,
+          "low_ifIndex": 6712,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 428306790,
+          "device_id": 1215330439,
+          "high_ifIndex": 11454,
+          "high_port_id": null,
+          "low_ifIndex": 11452,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1485100249,
+          "device_id": 1215330439,
+          "high_ifIndex": 11464,
+          "high_port_id": null,
+          "low_ifIndex": 11452,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1857036340,
+          "device_id": 1215330439,
+          "high_ifIndex": 12340,
+          "high_port_id": null,
+          "low_ifIndex": 12338,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 531912343,
+          "device_id": 1215330439,
+          "high_ifIndex": 12345,
+          "high_port_id": null,
+          "low_ifIndex": 12338,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 20141248,
+          "device_id": 1215330439,
+          "high_ifIndex": 12346,
+          "high_port_id": null,
+          "low_ifIndex": 12341,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 254466831,
+          "device_id": 1215330439,
+          "high_ifIndex": 12347,
+          "high_port_id": null,
+          "low_ifIndex": 12342,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1950614247,
+          "device_id": 1215330439,
+          "high_ifIndex": 12348,
+          "high_port_id": null,
+          "low_ifIndex": 12343,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 143794524,
+          "device_id": 1215330439,
+          "high_ifIndex": 13456,
+          "high_port_id": null,
+          "low_ifIndex": 13454,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 400746668,
+          "device_id": 1215330439,
+          "high_ifIndex": 13466,
+          "high_port_id": null,
+          "low_ifIndex": 13454,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1284733299,
+          "device_id": 1215330439,
+          "high_ifIndex": 13551,
+          "high_port_id": null,
+          "low_ifIndex": 13548,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 209085131,
+          "device_id": 1215330439,
+          "high_ifIndex": 13552,
+          "high_port_id": null,
+          "low_ifIndex": 13548,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1510258800,
+          "device_id": 1215330439,
+          "high_ifIndex": 13553,
+          "high_port_id": null,
+          "low_ifIndex": 13549,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1434395767,
+          "device_id": 1215330439,
+          "high_ifIndex": 13554,
+          "high_port_id": null,
+          "low_ifIndex": 13550,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1227817848,
+          "device_id": 1215330439,
+          "high_ifIndex": 13555,
+          "high_port_id": null,
+          "low_ifIndex": 14626,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 269442581,
+          "device_id": 1215330439,
+          "high_ifIndex": 13601,
+          "high_port_id": null,
+          "low_ifIndex": 13548,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1401565592,
+          "device_id": 1215330439,
+          "high_ifIndex": 13602,
+          "high_port_id": null,
+          "low_ifIndex": 13536,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1379905974,
+          "device_id": 1215330439,
+          "high_ifIndex": 13604,
+          "high_port_id": null,
+          "low_ifIndex": 13549,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1641010340,
+          "device_id": 1215330439,
+          "high_ifIndex": 13605,
+          "high_port_id": null,
+          "low_ifIndex": 14626,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1063384475,
+          "device_id": 1215330439,
+          "high_ifIndex": 13606,
+          "high_port_id": null,
+          "low_ifIndex": 13596,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1453368470,
+          "device_id": 1215330439,
+          "high_ifIndex": 13607,
+          "high_port_id": null,
+          "low_ifIndex": 13597,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1425403796,
+          "device_id": 1215330439,
+          "high_ifIndex": 13608,
+          "high_port_id": null,
+          "low_ifIndex": 13598,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 889736226,
+          "device_id": 1215330439,
+          "high_ifIndex": 13609,
+          "high_port_id": null,
+          "low_ifIndex": 13599,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1643137648,
+          "device_id": 1215330439,
+          "high_ifIndex": 13610,
+          "high_port_id": null,
+          "low_ifIndex": 13600,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 430808851,
+          "device_id": 1215330439,
+          "high_ifIndex": 13611,
+          "high_port_id": null,
+          "low_ifIndex": 14625,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1187183073,
+          "device_id": 1215330439,
+          "high_ifIndex": 13616,
+          "high_port_id": null,
+          "low_ifIndex": 13548,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1600082742,
+          "device_id": 1215330439,
+          "high_ifIndex": 13617,
+          "high_port_id": null,
+          "low_ifIndex": 13537,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 438337086,
+          "device_id": 1215330439,
+          "high_ifIndex": 13619,
+          "high_port_id": null,
+          "low_ifIndex": 13550,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 619806068,
+          "device_id": 1215330439,
+          "high_ifIndex": 13621,
+          "high_port_id": null,
+          "low_ifIndex": 13612,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1855539024,
+          "device_id": 1215330439,
+          "high_ifIndex": 13622,
+          "high_port_id": null,
+          "low_ifIndex": 13613,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 820319771,
+          "device_id": 1215330439,
+          "high_ifIndex": 13623,
+          "high_port_id": null,
+          "low_ifIndex": 13614,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1695223228,
+          "device_id": 1215330439,
+          "high_ifIndex": 13624,
+          "high_port_id": null,
+          "low_ifIndex": 13599,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 462001963,
+          "device_id": 1215330439,
+          "high_ifIndex": 13625,
+          "high_port_id": null,
+          "low_ifIndex": 13615,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1118353352,
+          "device_id": 1215330439,
+          "high_ifIndex": 13629,
+          "high_port_id": null,
+          "low_ifIndex": 13548,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1251892476,
+          "device_id": 1215330439,
+          "high_ifIndex": 13630,
+          "high_port_id": null,
+          "low_ifIndex": 13596,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1635112964,
+          "device_id": 1215330439,
+          "high_ifIndex": 13631,
+          "high_port_id": null,
+          "low_ifIndex": 13612,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 979090310,
+          "device_id": 1215330439,
+          "high_ifIndex": 13632,
+          "high_port_id": null,
+          "low_ifIndex": 13627,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 2022656056,
+          "device_id": 1215330439,
+          "high_ifIndex": 13633,
+          "high_port_id": null,
+          "low_ifIndex": 13628,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 614633561,
+          "device_id": 1215330439,
+          "high_ifIndex": 13652,
+          "high_port_id": null,
+          "low_ifIndex": 13548,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 839574836,
+          "device_id": 1215330439,
+          "high_ifIndex": 13653,
+          "high_port_id": null,
+          "low_ifIndex": 13598,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 441639830,
+          "device_id": 1215330439,
+          "high_ifIndex": 13654,
+          "high_port_id": null,
+          "low_ifIndex": 13614,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 357878754,
+          "device_id": 1215330439,
+          "high_ifIndex": 13655,
+          "high_port_id": null,
+          "low_ifIndex": 15062,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 307084502,
+          "device_id": 1215330439,
+          "high_ifIndex": 13663,
+          "high_port_id": null,
+          "low_ifIndex": 13548,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1853744694,
+          "device_id": 1215330439,
+          "high_ifIndex": 13664,
+          "high_port_id": null,
+          "low_ifIndex": 13600,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 836406064,
+          "device_id": 1215330439,
+          "high_ifIndex": 13665,
+          "high_port_id": null,
+          "low_ifIndex": 13615,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1693542472,
+          "device_id": 1215330439,
+          "high_ifIndex": 13666,
+          "high_port_id": null,
+          "low_ifIndex": 15062,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1633907497,
+          "device_id": 1215330439,
+          "high_ifIndex": 13674,
+          "high_port_id": null,
+          "low_ifIndex": 13548,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1627651278,
+          "device_id": 1215330439,
+          "high_ifIndex": 13675,
+          "high_port_id": null,
+          "low_ifIndex": 13628,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1780444104,
+          "device_id": 1215330439,
+          "high_ifIndex": 13676,
+          "high_port_id": null,
+          "low_ifIndex": 13640,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 534590344,
+          "device_id": 1215330439,
+          "high_ifIndex": 13695,
+          "high_port_id": null,
+          "low_ifIndex": 13548,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1568265419,
+          "device_id": 1215330439,
+          "high_ifIndex": 13696,
+          "high_port_id": null,
+          "low_ifIndex": 13535,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1611154714,
+          "device_id": 1215330439,
+          "high_ifIndex": 13697,
+          "high_port_id": null,
+          "low_ifIndex": 13536,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1716626508,
+          "device_id": 1215330439,
+          "high_ifIndex": 13698,
+          "high_port_id": null,
+          "low_ifIndex": 13537,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 612591232,
+          "device_id": 1215330439,
+          "high_ifIndex": 14552,
+          "high_port_id": null,
+          "low_ifIndex": 13548,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 2011491417,
+          "device_id": 1215330439,
+          "high_ifIndex": 14554,
+          "high_port_id": null,
+          "low_ifIndex": 13535,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1144629958,
+          "device_id": 1215330439,
+          "high_ifIndex": 14558,
+          "high_port_id": null,
+          "low_ifIndex": 14548,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 152334829,
+          "device_id": 1215330439,
+          "high_ifIndex": 14621,
+          "high_port_id": null,
+          "low_ifIndex": 14620,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 622412774,
+          "device_id": 1215330439,
+          "high_ifIndex": 14622,
+          "high_port_id": null,
+          "low_ifIndex": 6,
+          "low_port_id": 122417325,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1943408269,
+          "device_id": 1215330439,
+          "high_ifIndex": 14780,
+          "high_port_id": null,
+          "low_ifIndex": 6,
+          "low_port_id": 122417325,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1960547681,
+          "device_id": 1215330439,
+          "high_ifIndex": 14781,
+          "high_port_id": null,
+          "low_ifIndex": 13548,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 286304335,
+          "device_id": 1215330439,
+          "high_ifIndex": 15047,
+          "high_port_id": null,
+          "low_ifIndex": 13548,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 331856744,
+          "device_id": 1215330439,
+          "high_ifIndex": 15049,
+          "high_port_id": null,
+          "low_ifIndex": 14626,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 506304410,
+          "device_id": 1215330439,
+          "high_ifIndex": 15050,
+          "high_port_id": null,
+          "low_ifIndex": 14548,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 2028783427,
+          "device_id": 1215330439,
+          "high_ifIndex": 15086,
+          "high_port_id": null,
+          "low_ifIndex": 13548,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 387697300,
+          "device_id": 1215330439,
+          "high_ifIndex": 15087,
+          "high_port_id": null,
+          "low_ifIndex": 13597,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1110573942,
+          "device_id": 1215330439,
+          "high_ifIndex": 15088,
+          "high_port_id": null,
+          "low_ifIndex": 13613,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1002687348,
+          "device_id": 1215330439,
+          "high_ifIndex": 15089,
+          "high_port_id": null,
+          "low_ifIndex": 13627,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1967419772,
+          "device_id": 1215330439,
+          "high_ifIndex": 15090,
+          "high_port_id": null,
+          "low_ifIndex": 13640,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 856920956,
+          "device_id": 1215330439,
+          "high_ifIndex": 15158,
+          "high_port_id": null,
+          "low_ifIndex": 7220,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 496113728,
+          "device_id": 1215330439,
+          "high_ifIndex": 15159,
+          "high_port_id": null,
+          "low_ifIndex": 7217,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 650133203,
+          "device_id": 1215330439,
+          "high_ifIndex": 15160,
+          "high_port_id": null,
+          "low_ifIndex": 8768,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 2140837215,
+          "device_id": 1215330439,
+          "high_ifIndex": 15161,
+          "high_port_id": null,
+          "low_ifIndex": 10495,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1845773162,
+          "device_id": 1215330439,
+          "high_ifIndex": 15179,
+          "high_port_id": null,
+          "low_ifIndex": 7217,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 795486714,
+          "device_id": 1215330439,
+          "high_ifIndex": 15181,
+          "high_port_id": null,
+          "low_ifIndex": 10635,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 229539065,
+          "device_id": 1215330439,
+          "high_ifIndex": 15184,
+          "high_port_id": null,
+          "low_ifIndex": 10635,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1835650185,
+          "device_id": 1215330439,
+          "high_ifIndex": 15186,
+          "high_port_id": null,
+          "low_ifIndex": 7292,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 916723387,
+          "device_id": 1215330439,
+          "high_ifIndex": 15225,
+          "high_port_id": null,
+          "low_ifIndex": 10482,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 2124420486,
+          "device_id": 1215330439,
+          "high_ifIndex": 15226,
+          "high_port_id": null,
+          "low_ifIndex": 10483,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1750156321,
+          "device_id": 1215330439,
+          "high_ifIndex": 15227,
+          "high_port_id": null,
+          "low_ifIndex": 15223,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 811408497,
+          "device_id": 1215330439,
+          "high_ifIndex": 15234,
+          "high_port_id": null,
+          "low_ifIndex": 15223,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 617162626,
+          "device_id": 1215330439,
+          "high_ifIndex": 15236,
+          "high_port_id": null,
+          "low_ifIndex": 7881,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1036195045,
+          "device_id": 1215330439,
+          "high_ifIndex": 15248,
+          "high_port_id": null,
+          "low_ifIndex": 15246,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1319985210,
+          "device_id": 1215330439,
+          "high_ifIndex": 15250,
+          "high_port_id": null,
+          "low_ifIndex": 15246,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1372081587,
+          "device_id": 1215330439,
+          "high_ifIndex": 15260,
+          "high_port_id": null,
+          "low_ifIndex": 15246,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 259088296,
+          "device_id": 1215330439,
+          "high_ifIndex": 15270,
+          "high_port_id": null,
+          "low_ifIndex": 15246,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 704260993,
+          "device_id": 1215330439,
+          "high_ifIndex": 15280,
+          "high_port_id": null,
+          "low_ifIndex": 15246,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1142496666,
+          "device_id": 1215330439,
+          "high_ifIndex": 15290,
+          "high_port_id": null,
+          "low_ifIndex": 15246,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1967817889,
+          "device_id": 1215330439,
+          "high_ifIndex": 15311,
+          "high_port_id": null,
+          "low_ifIndex": 9177,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 3238050,
+          "device_id": 1215330439,
+          "high_ifIndex": 15335,
+          "high_port_id": null,
+          "low_ifIndex": 10439,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 266053830,
+          "device_id": 1215330439,
+          "high_ifIndex": 15543,
+          "high_port_id": null,
+          "low_ifIndex": 15393,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 467742181,
+          "device_id": 1215330439,
+          "high_ifIndex": 15545,
+          "high_port_id": null,
+          "low_ifIndex": 15411,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 690382018,
+          "device_id": 1215330439,
+          "high_ifIndex": 15548,
+          "high_port_id": null,
+          "low_ifIndex": 15412,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 847788201,
+          "device_id": 1215330439,
+          "high_ifIndex": 15551,
+          "high_port_id": null,
+          "low_ifIndex": 15393,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1109937173,
+          "device_id": 1215330439,
+          "high_ifIndex": 15552,
+          "high_port_id": null,
+          "low_ifIndex": 15597,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 835621933,
+          "device_id": 1215330439,
+          "high_ifIndex": 15553,
+          "high_port_id": null,
+          "low_ifIndex": 15613,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 253667479,
+          "device_id": 1215330439,
+          "high_ifIndex": 15554,
+          "high_port_id": null,
+          "low_ifIndex": 15411,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1177577582,
+          "device_id": 1215330439,
+          "high_ifIndex": 15555,
+          "high_port_id": null,
+          "low_ifIndex": 15627,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1784083150,
+          "device_id": 1215330439,
+          "high_ifIndex": 15556,
+          "high_port_id": null,
+          "low_ifIndex": 15413,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1471019811,
+          "device_id": 1215330439,
+          "high_ifIndex": 15560,
+          "high_port_id": null,
+          "low_ifIndex": 15598,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 570561860,
+          "device_id": 1215330439,
+          "high_ifIndex": 15562,
+          "high_port_id": null,
+          "low_ifIndex": 15612,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 2083657267,
+          "device_id": 1215330439,
+          "high_ifIndex": 15564,
+          "high_port_id": null,
+          "low_ifIndex": 15627,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1619019582,
+          "device_id": 1215330439,
+          "high_ifIndex": 15600,
+          "high_port_id": null,
+          "low_ifIndex": 15412,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 24463386,
+          "device_id": 1215330439,
+          "high_ifIndex": 15601,
+          "high_port_id": null,
+          "low_ifIndex": 15413,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 703457868,
+          "device_id": 1215330439,
+          "high_ifIndex": 15602,
+          "high_port_id": null,
+          "low_ifIndex": 15597,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1911276094,
+          "device_id": 1215330439,
+          "high_ifIndex": 15603,
+          "high_port_id": null,
+          "low_ifIndex": 15598,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 699054123,
+          "device_id": 1215330439,
+          "high_ifIndex": 15615,
+          "high_port_id": null,
+          "low_ifIndex": 15612,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1525371197,
+          "device_id": 1215330439,
+          "high_ifIndex": 15616,
+          "high_port_id": null,
+          "low_ifIndex": 15613,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 521723343,
+          "device_id": 1215330439,
+          "high_ifIndex": 15684,
+          "high_port_id": null,
+          "low_ifIndex": 4311,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        },
+        {
+          "id": 1853124309,
+          "device_id": 1215330439,
+          "high_ifIndex": 15717,
+          "high_port_id": null,
+          "low_ifIndex": 4262,
+          "low_port_id": null,
+          "ifStackStatus": "active"
+        }
+      ]
+    },
+    "GET /api/v0/devices/1215330439/ip": {
+      "status": "ok",
+      "addresses": [
+        {
+          "ipv4_address_id": 815958493,
+          "ipv4_address": "203.0.113.186",
+          "ipv4_prefixlen": 8,
+          "ipv4_network_id": 459103959,
+          "port_id": 99552590,
+          "context_name": ""
+        },
+        {
+          "ipv4_address_id": 1893525892,
+          "ipv4_address": "192.0.2.91",
+          "ipv4_prefixlen": 24,
+          "ipv4_network_id": 1034405599,
+          "port_id": 122417325,
+          "context_name": ""
+        },
+        {
+          "ipv4_address_id": 236397334,
+          "ipv4_address": "192.0.2.171",
+          "ipv4_prefixlen": 24,
+          "ipv4_network_id": 399146527,
+          "port_id": 1932981489,
+          "context_name": ""
+        },
+        {
+          "ipv4_address_id": 2036535104,
+          "ipv4_address": "203.0.113.99",
+          "ipv4_prefixlen": 24,
+          "ipv4_network_id": 1619135942,
+          "port_id": 1135590770,
+          "context_name": ""
+        }
+      ],
+      "count": 4
+    },
+    "GET /api/v0/devices/1215330439/links": {
+      "__http_status__": 404,
+      "body": {
+        "status": "error",
+        "message": "Links do not exist"
+      }
+    },
+    "GET /api/v0/devices/1215330439/transceivers": {
+      "status": "ok",
+      "transceivers": []
+    }
+  },
+  "expected": {
+    "virtual_chassis": null,
+    "lag_members": {},
+    "sub_interfaces": {},
+    "transceivers": {
+      "count": 0
+    }
+  }
+}

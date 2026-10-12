@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "name": "cisco-stackwise-3member",
+  "description": "Cisco StackWise, 3 chassis members under a stack-class root, 1-based positions.",
+  "meta": {
+    "os": "os-901310",
+    "vendor": "cisco",
+    "topology": "stackwise"
+  },
+  "device_id": 384090667,
+  "lag_patterns": {
+    "os-901310": "^Po\\d+$"
+  },
+  "responses": {
+    "GET /api/v0/devices/384090667": {
+      "status": "ok",
+      "devices": [
+        {
+          "device_id": 384090667,
+          "hostname": "device-bc55bc",
+          "sysName": "device-7f2578",
+          "hardware": "MODEL-f93a92",
+          "os": "os-901310",
+          "serial": "SN-58cf46",
+          "ip": "192.0.2.126",
+          "version": "fw-4d0da6"
+        }
+      ]
+    },
+    "GET /api/v0/inventory/384090667?entPhysicalContainedIn=0": {
+      "status": "ok",
+      "inventory": [
+        {
+          "entPhysicalIndex": 1,
+          "entPhysicalClass": "stack",
+          "entPhysicalName": "entity-a33df5 0/0",
+          "entPhysicalDescr": "entity-a457e9",
+          "entPhysicalSerialNum": "",
+          "entPhysicalModelName": "",
+          "entPhysicalContainedIn": 0
+        }
+      ]
+    },
+    "GET /api/v0/inventory/384090667?entPhysicalClass=chassis&entPhysicalContainedIn=1": {
+      "status": "ok",
+      "inventory": [
+        {
+          "entPhysicalIndex": 100,
+          "entPhysicalClass": "chassis",
+          "entPhysicalSerialNum": "SN-58cf46",
+          "entPhysicalModelName": "MODEL-f93a92",
+          "entPhysicalName": "entity-0beaae",
+          "entPhysicalDescr": "entity-bf3b65",
+          "entPhysicalParentRelPos": 1,
+          "entPhysicalContainedIn": 1
+        },
+        {
+          "entPhysicalIndex": 200,
+          "entPhysicalClass": "chassis",
+          "entPhysicalSerialNum": "SN-dbd32d",
+          "entPhysicalModelName": "MODEL-f93a92",
+          "entPhysicalName": "entity-7fc92a",
+          "entPhysicalDescr": "entity-bf3b65",
+          "entPhysicalParentRelPos": 2,
+          "entPhysicalContainedIn": 1
+        },
+        {
+          "entPhysicalIndex": 300,
+          "entPhysicalClass": "chassis",
+          "entPhysicalSerialNum": "SN-a47104",
+          "entPhysicalModelName": "MODEL-fbbcbf",
+          "entPhysicalName": "entity-a2f6ed",
+          "entPhysicalDescr": "entity-6ebd1d",
+          "entPhysicalParentRelPos": 3,
+          "entPhysicalContainedIn": 1
+        }
+      ]
+    },
+    "GET /api/v0/devices/384090667/ports": {
+      "status": "ok",
+      "ports": []
+    },
+    "GET /api/v0/devices/384090667/port_stack": {
+      "status": "ok",
+      "mappings": []
+    }
+  },
+  "expected": {
+    "virtual_chassis": {
+      "is_stack": true,
+      "member_count": 3,
+      "member_serials": [
+        "SN-58cf46",
+        "SN-dbd32d",
+        "SN-a47104"
+      ]
+    },
+    "lag_members": {},
+    "sub_interfaces": {}
+  }
+}

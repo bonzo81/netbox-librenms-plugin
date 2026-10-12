@@ -356,7 +356,7 @@ class TestSingleCableVerifyMisconfiguredDefault:
         cfg = {
             "netbox_librenms_plugin": {
                 "servers": {
-                    "prod": {"librenms_url": "http://prod.example", "api_token": "tok"},
+                    "prod": {"librenms_url": "https://prod.example", "api_token": "tok"},
                     "default": {},
                 }
             }

@@ -16,6 +16,8 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
+
 
 class _RawResponse:
     """One response body that the test server must not JSON-encode."""
@@ -56,7 +58,8 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
         request = {
             "method": method,
             "path": path,
-            "query": parse_qs(query),
+            # Preserve blank values so live requests normalize the same way as recordings.
+            "query": parse_qs(query, keep_blank_values=True),
             "headers": dict(self.headers),
             "body": body,
         }
@@ -104,18 +107,7 @@ class _LibreNMSHandler(BaseHTTPRequestHandler):
 
 
 class MockLibreNMSServer:
-    """
-    Context-manager wrapper around a simple HTTP mock server.
-
-    Attributes:
-        url (str): Base URL for the mock server (e.g. "http://127.0.0.1:PORT").
-        routes (dict): Mapping of URL path → (status_code, body_dict) or callable.
-            Callable routes receive keyword arguments: method, path, query, headers, body
-            and must return (status_code, body_dict).
-            Routes can also be keyed as "METHOD /path" for method-specific matching,
-            or "/path?query" for query-specific matching.
-        requests (list): Every received request as a method/path/query/headers/body dict.
-    """
+    """Wrap a simple HTTP mock server with route registration and context management."""
 
     def __init__(self):
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), _LibreNMSHandler)
@@ -133,13 +125,7 @@ class MockLibreNMSServer:
         self.url = f"http://127.0.0.1:{port}"
 
     def register(self, path: str, body, status: int = 200, method: str | None = None):
-        """
-        Register a mock response for a URL path.
-
-        If *method* is given the route is stored as ``"METHOD /path"`` and only
-        matches requests using that HTTP verb.  Omit *method* (or pass ``None``)
-        to match any verb on that path.
-        """
+        """Register a path response, optionally restricted to one HTTP method."""
         key = f"{method} {path}" if method else path
         if callable(body):
             self._server.routes[key] = body
@@ -253,16 +239,35 @@ class MockLibreNMSServer:
             method="GET",
         )
 
+    def load_recording(self, recording: dict):
+        """Register recording responses with order-independent exact query matching for variants."""
+        by_route: dict[tuple[str, str], list] = {}
+        for key, value in recording.get("responses", {}).items():
+            method, sep, rest = key.partition(" ")
+            if not sep:  # No verb prefix → default to GET on the whole key.
+                method, rest = "GET", key
+            path, _, query = rest.partition("?")
+            # Keep the FULL value set per key (sorted) so a repeated param like ?a=1&a=2 is a
+            # distinct shape from ?a=1 — collapsing to v[0] would let them false-match.
+            qdict = {k: tuple(sorted(v)) for k, v in parse_qs(query, keep_blank_values=True).items()} if query else {}
+            status, body = unwrap_response(value)
+            by_route.setdefault((method, path), []).append((qdict, status, body))
+
+        for (method, path), variants in by_route.items():
+            # A single queryless variant is registered as a bare path on purpose: capture.py keys
+            # response-irrelevant endpoints (e.g. /ports) with key_params=None precisely so "the
+            # loader serves it for any query the production readers send" (capture.py comment) —
+            # get_ports() sends columns=…&with=vlans that the recording deliberately doesn't store.
+            # A strict exact-match here would 404 that legitimate replay. Multiple variants of one
+            # path ARE query-keyed, so those route through the exact-match selector.
+            if len(variants) == 1 and not variants[0][0]:
+                qdict, status, body = variants[0]
+                self.register(path, body, status=status, method=method)
+            else:
+                self.register(path, _recording_variant_handler(path, variants), method=method)
+
     def vc_inventory_callable(self, device_id: int, root_items: list, children_by_parent_index: dict):
-        """
-        Register a callable route for VC detection two-call pattern.
-
-        detect_virtual_chassis_from_inventory() calls get_inventory_filtered() twice:
-          1. entPhysicalContainedIn=0 → root items
-          2. entPhysicalClass=chassis&entPhysicalContainedIn=<parent_index> → member chassis items
-
-        children_by_parent_index: dict mapping parent index (int) → list of chassis items
-        """
+        """Register VC inventory responses for root and chassis-filtered child queries."""
         root = root_items
         children = children_by_parent_index
 
@@ -290,6 +295,22 @@ class MockLibreNMSServer:
 
         self.register(f"/api/v0/inventory/{device_id}", _handler, method="GET")
         self.register(f"/api/v0/inventory/{device_id}/all", _handler, method="GET")
+
+
+def _recording_variant_handler(path: str, variants: list):
+    """Build a route handler that returns only an exact recorded query variant."""
+
+    def _handler(method, path, query, headers, body):
+        incoming = {k: tuple(sorted(v if isinstance(v, list) else [v])) for k, v in (query or {}).items()}
+        # Require EXACT query equality: a subset/contains match would let a request carrying extra
+        # unexpected params still replay a cached response, so a request-shape regression would
+        # false-pass instead of failing closed (404).
+        for qdict, status, resp_body in variants:
+            if incoming == qdict:
+                return status, resp_body
+        return 404, {"status": "error", "message": f"No recorded variant for {path}?{incoming}"}
+
+    return _handler
 
 
 @contextmanager

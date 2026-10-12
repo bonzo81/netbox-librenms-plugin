@@ -134,6 +134,7 @@ def _device_sync_redirect(request, pk, server_key):
 
     Returns:
         HttpResponseRedirect: The redirect to the device sync tab.
+
     """
     url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
     return redirect_with_server_key(request, url, server_key)
@@ -157,7 +158,7 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         # so a multi-server user acting on a non-default tab isn't routed through the globally
         # selected server (returning the wrong device's id, or none). Mirrors
         # ConvertLegacyLibreNMSIdView.
-        server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return _device_sync_redirect(request, pk, server_key)
@@ -176,7 +177,7 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         self.librenms_id, lookup_error = self.resolve_librenms_id(librenms_lookup_device)
 
         if lookup_error is not None:
-            messages.error(request, lookup_error.message)
+            messages.error(request, self.scoped_lookup_message(lookup_error))
             return _device_sync_redirect(request, pk, server_key)
 
         if not self.librenms_id:
@@ -255,7 +256,7 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
         # so a multi-server user acting on a non-default tab isn't routed through the globally
         # selected server (returning the wrong device's id, or none). Mirrors
         # ConvertLegacyLibreNMSIdView.
-        server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return _device_sync_redirect(request, pk, server_key)
@@ -263,7 +264,7 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
         self.librenms_id, lookup_error = self.resolve_librenms_id(device)
 
         if lookup_error is not None:
-            messages.error(request, lookup_error.message)
+            messages.error(request, self.scoped_lookup_message(lookup_error))
             return _device_sync_redirect(request, pk, server_key)
 
         if not self.librenms_id:
@@ -322,7 +323,7 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         # so a multi-server user acting on a non-default tab isn't routed through the globally
         # selected server (returning the wrong device's id, or none). Mirrors
         # ConvertLegacyLibreNMSIdView.
-        server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return _device_sync_redirect(request, pk, server_key)
@@ -330,7 +331,7 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         self.librenms_id, lookup_error = self.resolve_librenms_id(device)
 
         if lookup_error is not None:
-            messages.error(request, lookup_error.message)
+            messages.error(request, self.scoped_lookup_message(lookup_error))
             return _device_sync_redirect(request, pk, server_key)
 
         if not self.librenms_id:
@@ -403,7 +404,7 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
         # so a multi-server user acting on a non-default tab isn't routed through the globally
         # selected server (returning the wrong device's id, or none). Mirrors
         # ConvertLegacyLibreNMSIdView.
-        server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return _device_sync_redirect(request, pk, server_key)
@@ -411,7 +412,7 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
         self.librenms_id, lookup_error = self.resolve_librenms_id(device)
 
         if lookup_error is not None:
-            messages.error(request, lookup_error.message)
+            messages.error(request, self.scoped_lookup_message(lookup_error))
             return _device_sync_redirect(request, pk, server_key)
 
         if not self.librenms_id:
@@ -536,7 +537,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         # stay unset — this view makes no live lookup that would lazily build it). A blank/unknown
         # key leaves self._librenms_api unchanged; _sync_redirect still has request.POST as its
         # primary source, so a bad key can't refuse the platform create (which needs no LibreNMS).
-        self.rebind_api_for_server(request.POST.get("server_key"))
+        self.rebind_api_for_posted_server(request.POST)
 
         manufacturer_id = (request.POST.get("manufacturer") or "").strip()
 
@@ -774,6 +775,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         Returns:
             HttpResponseRedirect: A redirect to the sync tab, with the validated
                 ``server_key`` query param when one matches a configured server.
+
         """
         url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
         requested = (request.POST.get("server_key") or "").strip() or (fallback_server_key or "").strip()
@@ -1112,7 +1114,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         # (find_by_librenms_id) and written (migrate_legacy_librenms_id) under the same server
         # namespace the user is acting on — otherwise a multi-server page could check server A
         # while redirecting back to server B and write the mapping under the wrong key.
-        server_key = self.rebind_api_for_server(request.POST.get("server_key"))
+        server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return self._sync_url(object_type, pk)

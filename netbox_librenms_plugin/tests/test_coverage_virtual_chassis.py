@@ -15,12 +15,18 @@ def _make_master_device(serial="MASTER001"):
     master.rack = None
     master.location = None
     master.device_type = MagicMock()
+    # A MagicMock fabricates this, and the serial normalization would then filter the rule
+    # queryset by a mock. A real device without a manufacturer carries None.
+    master.device_type.manufacturer = None
     master.role = MagicMock()
     master.site = MagicMock()
     master.platform = MagicMock()
     return master
 
 
+# The serial normalization these tests exercise reads its rule chain from NormalizationRule, so the
+# creation path needs a database even where the models around it are patched.
+@pytest.mark.django_db
 class TestCreateVirtualChassisWithMembersPositionConflict:
     """Tests specifically for lines 431 and 435 - position conflict resolution."""
 
@@ -215,6 +221,7 @@ class TestCreateVirtualChassisWithMembersPositionConflict:
         assert create_calls[0].kwargs.get("serial") == "SN999"
 
 
+@pytest.mark.django_db
 class TestCreateVirtualChassisServerKeyDomain:
     """Tests for server_key parameter in create_virtual_chassis_with_members domain."""
 
@@ -382,22 +389,23 @@ class TestGenerateVcMemberName:
         assert self._call("switch01", 2, pattern="-M{position}") == "switch01-M2"
 
 
-class TestNormSerial:
-    """_norm_serial(): only None/blank/'-' means missing — a JSON-number serial 0 is real."""
+@pytest.mark.django_db
+class TestStackMemberSerials:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [(0, "0"), (123456, "123456"), (None, ""), ("-", ""), ("  SN-1  ", "SN-1")],
+    )
+    def test_member_creation_normalizes_serials(self, value, expected):
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-    def test_zero_serial_is_preserved(self):
-        from netbox_librenms_plugin.import_utils.virtual_chassis import _norm_serial
+        master = make_device("serial-boundary-master", serial="MASTER")
+        virtual_chassis = create_virtual_chassis_with_members(
+            master,
+            [{"serial": value, "position": 2, "name": "Member 2"}],
+            {"device_id": master.pk},
+            server_key="default",
+        )
 
-        assert _norm_serial(0) == "0"
-
-    def test_numeric_serial_is_coerced(self):
-        from netbox_librenms_plugin.import_utils.virtual_chassis import _norm_serial
-
-        assert _norm_serial(123456) == "123456"
-
-    def test_none_dash_and_padding(self):
-        from netbox_librenms_plugin.import_utils.virtual_chassis import _norm_serial
-
-        assert _norm_serial(None) == ""
-        assert _norm_serial("-") == ""
-        assert _norm_serial("  SN-1  ") == "SN-1"
+        assert virtual_chassis.members.count() == 2
+        assert virtual_chassis.members.get(vc_position=2).serial == expected

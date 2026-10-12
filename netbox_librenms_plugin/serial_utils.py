@@ -26,6 +26,7 @@ Sorting: rows are returned ordered by sensor_index_int (port number).
 import logging
 import re
 
+from netbox_librenms_plugin.constants import SERIAL_INVENTORY_SOURCE
 from netbox_librenms_plugin.utils import coerce_librenms_id
 
 logger = logging.getLogger(__name__)
@@ -221,7 +222,7 @@ def map_sensors_to_serial_links(
                 # customised name — guard with bool(label) so malformed rows aren't marked
                 # configured just because "" != the default port name.
                 "is_configured": bool(label) and label != local_port,
-                "_source": "serial",
+                "_source": SERIAL_INVENTORY_SOURCE,
                 "sensor_id": sensor_id,
                 "sensor_index_int": port_num,
             }

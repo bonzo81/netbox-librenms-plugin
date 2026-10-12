@@ -810,7 +810,10 @@ class TestNormalCableLinkQueryBound:
             view.request = request
             with CaptureQueriesContext(connection) as captured:
                 view.enrich_links_data(
-                    selected_links, local_device, server_key=configured_server_key(), sync_device=local_device
+                    selected_links,
+                    local_device,
+                    server_key=configured_server_key(),
+                    sync_device=local_device,
                 )
             return len(captured)
 
@@ -972,7 +975,7 @@ class TestSerialFetchSkippedWithoutHostId:
             response.url = url
             return response
 
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=not_found):
+        with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=not_found):
             result = view.get_links_data(obj)
 
         assert result is None
@@ -1045,7 +1048,7 @@ class TestSerialSyncSurvivesHostLinks404:
         console_port = cps[0]
 
         client.force_login(make_superuser())
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=self._routed_get()):
+        with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=self._routed_get()):
             refreshed = client.post(
                 reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[acs.pk]),
                 {"server_key": server_key},
@@ -1148,7 +1151,7 @@ class TestSerialSyncSurvivesHostLinks404:
 
         # A privileged refresh reads the sensors and caches the serial row.
         client.force_login(make_superuser())
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=routed_get):
+        with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=routed_get):
             client.post(
                 reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[local.pk]),
                 {"server_key": server_key},
@@ -1163,7 +1166,7 @@ class TestSerialSyncSurvivesHostLinks404:
                 [("view", Device), ("view", Interface), ("view", ConsolePort), ("view", Cable)],
             )
         )
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=routed_get):
+        with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=routed_get):
             client.post(
                 reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[local.pk]),
                 {"server_key": server_key},
@@ -1260,7 +1263,7 @@ class TestSerialSyncSurvivesHostLinks404:
             return response
 
         client.force_login(make_superuser())
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=routed_get):
+        with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=routed_get):
             refreshed = client.post(
                 reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[local.pk]),
                 {"server_key": server_key},
@@ -1275,7 +1278,7 @@ class TestSerialSyncSurvivesHostLinks404:
         assert cached["incomplete_sources"] == ["serial"]
         row_id = cached["links"][0]["row_id"]
 
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=routed_get):
+        with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=routed_get):
             cached_render = client.get(
                 reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local.pk]),
                 {"tab": "cables", "server_key": server_key},
@@ -1354,7 +1357,7 @@ class TestSerialSyncSurvivesHostLinks404:
             return response
 
         client.force_login(make_superuser())
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=routed_get):
+        with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=routed_get):
             refreshed = client.post(
                 reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[local.pk]),
                 {"server_key": server_key},
@@ -1698,14 +1701,14 @@ class TestSerialCableReadScope:
         refresh_url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[device.pk])
 
         client.force_login(make_superuser())
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=external_get):
+        with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=external_get):
             admin_html = client.post(refresh_url, {"server_key": server_key}, HTTP_HX_REQUEST="true").content.decode()
 
         granted = self._user("serial-unmodelled-port-user", device)
         self._grant(granted, "serial-unmodelled-port-csp", ConsoleServerPort, ["view"])
         self._grant(granted, "serial-unmodelled-port-devices", Device, ["view"])
         client.force_login(granted)
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=external_get):
+        with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=external_get):
             granted_html = client.post(refresh_url, {"server_key": server_key}, HTTP_HX_REQUEST="true").content.decode()
 
         # ttyS9 has no ConsoleServerPort in NetBox at all.
@@ -1761,7 +1764,7 @@ class TestSerialCableReadScope:
         assert csp.name not in html
         assert reverse("dcim:consoleserverport", args=[csp.pk]) not in html
 
-        with patch("netbox_librenms_plugin.librenms_api.requests.get") as http_get:
+        with patch("netbox_librenms_plugin.librenms_api._session.get") as http_get:
             refreshed = client.post(
                 reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[visible.pk]),
                 {"server_key": server_key},
@@ -1837,7 +1840,7 @@ class TestSerialCableReadScope:
                 response._content = b'{"status":"ok"}'
             return response
 
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=external_get):
+        with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=external_get):
             response = client.post(
                 reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[device.pk]),
                 {"server_key": server_key},
@@ -1886,7 +1889,7 @@ class TestSerialCableReadScope:
                 raise AssertionError(f"unexpected LibreNMS request: {url}")
             return response
 
-        with patch("netbox_librenms_plugin.librenms_api.requests.get", side_effect=external_get):
+        with patch("netbox_librenms_plugin.librenms_api._session.get", side_effect=external_get):
             response = client.post(
                 reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[device.pk]),
                 {"server_key": server_key},

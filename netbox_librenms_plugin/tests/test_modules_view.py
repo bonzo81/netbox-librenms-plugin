@@ -95,7 +95,7 @@ class TestInventoryClassIncludeRule:
     """
 
     def _inventory(self):
-        """A chassis with the two Routing Engines under it, as LibreNMS reports them."""
+        """Return a chassis with the two Routing Engines that LibreNMS reports."""
         return [
             {
                 "entPhysicalIndex": 1,
@@ -5950,3 +5950,423 @@ def test_included_numeric_inventory_class_renders_on_the_sync_page(client, setti
         assert rows[0]["module_bay_id"] == device.modulebays.get(name="Slot 1").pk
     else:
         assert rows[0]["status"] == "No Bay"
+
+
+@pytest.mark.django_db
+def test_vc_inventory_ignore_rules_follow_each_attributed_member(client, settings):
+    """VC rows must use the attributed member's manufacturer rules and device serial."""
+    from dcim.models import Manufacturer, VirtualChassis
+    from django.core.cache import cache
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_superuser
+    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    configure_servers(
+        settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
+    )
+    page_manufacturer = Manufacturer.objects.create(name="VC Page Vendor", slug="vc-page-vendor")
+    member_manufacturer = Manufacturer.objects.create(name="VC Member Vendor", slug="vc-member-vendor")
+    page = make_device_with_module_bays(
+        "vc-ignore-page",
+        ["Slot 1"],
+        manufacturer=page_manufacturer,
+        serial="PAGE-SERIAL",
+    )
+    member = make_device_with_module_bays(
+        "vc-ignore-member",
+        ["Slot 1"],
+        manufacturer=member_manufacturer,
+        serial="MEMBER-SERIAL",
+    )
+    virtual_chassis = VirtualChassis.objects.create(name="vc-ignore-rules", master=page)
+    for position, device in ((1, page), (2, member)):
+        device.virtual_chassis = virtual_chassis
+        device.vc_position = position
+        device.save(update_fields=["virtual_chassis", "vc_position"])
+
+    InventoryIgnoreRule.objects.filter(match_type=InventoryIgnoreRule.MATCH_SERIAL_DEVICE).delete()
+    InventoryIgnoreRule.objects.create(
+        name="Page-only rule",
+        match_type=InventoryIgnoreRule.MATCH_ENDS_WITH,
+        pattern="Page policy item",
+        action=InventoryIgnoreRule.ACTION_SKIP,
+        require_serial_match_parent=False,
+        manufacturer=page_manufacturer,
+    )
+    InventoryIgnoreRule.objects.create(
+        name="Member-only rule",
+        match_type=InventoryIgnoreRule.MATCH_ENDS_WITH,
+        pattern="Member policy item",
+        action=InventoryIgnoreRule.ACTION_SKIP,
+        require_serial_match_parent=False,
+        manufacturer=member_manufacturer,
+    )
+    InventoryIgnoreRule.objects.create(
+        name="Member serial rule",
+        match_type=InventoryIgnoreRule.MATCH_SERIAL_DEVICE,
+        pattern="",
+        action=InventoryIgnoreRule.ACTION_SKIP,
+        require_serial_match_parent=False,
+        manufacturer=member_manufacturer,
+    )
+    inventory = [
+        {
+            "entPhysicalIndex": 91,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Member policy item",
+            "entPhysicalModelName": "MEMBER-POLICY-MODEL",
+            "entPhysicalParentRelPos": 2,
+            "entPhysicalContainedIn": 0,
+        },
+        {
+            "entPhysicalIndex": 92,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Page policy item",
+            "entPhysicalModelName": "PAGE-POLICY-MODEL",
+            "entPhysicalParentRelPos": 2,
+            "entPhysicalContainedIn": 0,
+        },
+        {
+            "entPhysicalIndex": 93,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Member serial item",
+            "entPhysicalModelName": "MEMBER-SERIAL-MODEL",
+            "entPhysicalSerialNum": member.serial,
+            "entPhysicalContainedIn": 0,
+        },
+        {
+            "entPhysicalIndex": 94,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "OOB Member policy item",
+            "entPhysicalModelName": "OOB-MODEL",
+            "entPhysicalParentRelPos": 2,
+            "entPhysicalContainedIn": 0,
+            "_source": "oob",
+        },
+    ]
+    payload = trusted_module_inventory_payload(page, inventory, librenms_id=9302)
+    cache.set(DeviceModuleTableView().get_cache_key(page, "inventory", server_key="default"), payload, 300)
+    cache.set("librenms_device_info_default_9302", (True, {"device_id": 9302, "hostname": page.name}), 300)
+    client.force_login(make_superuser("vc-ignore-rules-user"))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[page.pk]),
+        {"tab": "modules", "server_key": "default"},
+    )
+
+    assert response.status_code == 200
+    rows = list(response.context["module_sync"]["table"].data)
+    assert {row["name"] for row in rows} == {"OOB Member policy item", "Page policy item"}
+    assert next(row for row in rows if row["name"] == "OOB Member policy item")["status"] == "OOB"
+    assert next(row for row in rows if row["name"] == "Page policy item")["selected_device_id"] == member.pk
+
+
+def _make_mixed_manufacturer_chassis(tag):
+    """Return a two-member chassis whose members use different manufacturers."""
+    from dcim.models import Manufacturer, VirtualChassis
+
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+
+    page_manufacturer = Manufacturer.objects.create(name=f"{tag} Page Vendor", slug=f"{tag}-page-vendor")
+    member_manufacturer = Manufacturer.objects.create(name=f"{tag} Member Vendor", slug=f"{tag}-member-vendor")
+    page = make_device_with_module_bays(
+        f"{tag}-page",
+        ["Page Bay"],
+        manufacturer=page_manufacturer,
+        serial=f"{tag.upper()}-PAGE",
+    )
+    member = make_device_with_module_bays(
+        f"{tag}-member",
+        ["Carrier Bay"],
+        manufacturer=member_manufacturer,
+        serial=f"{tag.upper()}-MEMBER",
+    )
+    virtual_chassis = VirtualChassis.objects.create(name=f"{tag}-chassis", master=page)
+    for position, device in ((1, page), (2, member)):
+        device.virtual_chassis = virtual_chassis
+        device.vc_position = position
+        device.save(update_fields=["virtual_chassis", "vc_position"])
+    return page, member, member_manufacturer
+
+
+@pytest.mark.django_db
+def test_vc_carrier_rules_follow_the_attributed_members_manufacturer():
+    """A member row must use carrier rules selected for that member's manufacturer."""
+    from dcim.models import ModuleType
+
+    from netbox_librenms_plugin.models import CarrierAutoInstallRule
+
+    page, member, member_manufacturer = _make_mixed_manufacturer_chassis("carrier-context")
+    carrier_type = ModuleType.objects.create(manufacturer=member_manufacturer, model="Member Carrier")
+    CarrierAutoInstallRule.objects.create(
+        manufacturer=member_manufacturer,
+        device_type_pattern=member.device_type.model,
+        librenms_child_class="powerSupply",
+        librenms_child_name_pattern="Member Orphan",
+        netbox_bay_name_pattern="Carrier Bay",
+        carrier_module_type=carrier_type,
+    )
+    inventory = [
+        {
+            "entPhysicalIndex": 101,
+            "entPhysicalClass": "powerSupply",
+            "entPhysicalName": "Member Orphan",
+            "entPhysicalModelName": "UNMAPPED-CHILD",
+            "entPhysicalParentRelPos": 2,
+            "entPhysicalContainedIn": 0,
+        }
+    ]
+
+    rows = _run_build_context_real(_make_view(), inventory, page)
+
+    assert rows[0]["selected_device_id"] == member.pk
+    assert rows[0]["carrier_install_options"][0]["module_type_id"] == carrier_type.pk
+
+
+@pytest.mark.django_db
+def test_rule_admission_does_not_change_the_cached_inventory_digest():
+    """Presentation markers must not change the digest used to bind a cached inventory row."""
+    from netbox_librenms_plugin.utils import module_inventory_row_digest
+
+    from netbox_librenms_plugin.tests.conftest import make_device
+
+    device = make_device("module-digest-admission")
+    inventory = [
+        {
+            "entPhysicalIndex": 102,
+            "entPhysicalClass": "other",
+            "entPhysicalName": "Rule admitted module",
+            "entPhysicalModelName": "RULE-MODEL",
+            "entPhysicalContainedIn": 0,
+        }
+    ]
+    cached_digest = module_inventory_row_digest(inventory[0])
+
+    rows = _run_build_context_real(_make_view(), inventory, device)
+
+    assert rows[0]["inventory_digest"] == cached_digest
+
+
+@pytest.mark.django_db
+def test_a_rule_admitted_row_keeps_its_attributed_member_context():
+    """A presentation copy must not drop the member the item's parent attributed it to."""
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+    page, member, _member_manufacturer = _make_mixed_manufacturer_chassis("admitted-context")
+    InventoryIgnoreRule.objects.create(
+        name="Admit sensors reported as other",
+        match_type=InventoryIgnoreRule.MATCH_CLASS_IS,
+        pattern="other",
+        action=InventoryIgnoreRule.ACTION_INCLUDE,
+        require_serial_match_parent=False,
+    )
+    inventory = [
+        {
+            "entPhysicalIndex": 140,
+            "entPhysicalClass": "stack",
+            "entPhysicalName": "Switch stack",
+            "entPhysicalContainedIn": 0,
+        },
+        {
+            "entPhysicalIndex": 141,
+            "entPhysicalClass": "chassis",
+            "entPhysicalName": "Chassis 2",
+            "entPhysicalParentRelPos": 2,
+            "entPhysicalContainedIn": 140,
+        },
+        # No serial and no position of its own: only the parent chassis ties it to the member.
+        {
+            "entPhysicalIndex": 142,
+            "entPhysicalClass": "other",
+            "entPhysicalName": "Member sensor",
+            "entPhysicalModelName": "MEMBER-SENSOR",
+            "entPhysicalDescr": "Member sensor 0",
+            "entPhysicalContainedIn": 141,
+        },
+    ]
+
+    rows = _run_build_context_real(_make_view(), inventory, page)
+
+    admitted = next(row for row in rows if row["ent_physical_index"] == 142)
+    assert admitted["selected_device_id"] == member.pk
+    assert admitted["member_resolution_source"] == "parent-context"
+
+
+@pytest.mark.django_db
+def test_vc_descendants_use_their_own_member_context():
+    """A descendant attributed by serial must use that member's rule and device context."""
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+    page, member, member_manufacturer = _make_mixed_manufacturer_chassis("descendant-context")
+    InventoryIgnoreRule.objects.filter(match_type=InventoryIgnoreRule.MATCH_SERIAL_DEVICE).delete()
+    InventoryIgnoreRule.objects.create(
+        name="Skip member descendant",
+        match_type=InventoryIgnoreRule.MATCH_ENDS_WITH,
+        pattern="Hidden member child",
+        action=InventoryIgnoreRule.ACTION_SKIP,
+        require_serial_match_parent=False,
+        manufacturer=member_manufacturer,
+    )
+    inventory = [
+        {
+            "entPhysicalIndex": 110,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Page parent",
+            "entPhysicalModelName": "PAGE-PARENT",
+            "entPhysicalSerialNum": page.serial,
+            "entPhysicalContainedIn": 0,
+        },
+        {
+            "entPhysicalIndex": 111,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Hidden member child",
+            "entPhysicalModelName": "HIDDEN-CHILD",
+            "entPhysicalSerialNum": member.serial,
+            "entPhysicalContainedIn": 110,
+        },
+        {
+            "entPhysicalIndex": 112,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Visible member child",
+            "entPhysicalModelName": "VISIBLE-CHILD",
+            "entPhysicalSerialNum": member.serial,
+            "entPhysicalContainedIn": 110,
+        },
+    ]
+
+    rows = _run_build_context_real(_make_view(), inventory, page)
+
+    assert {row["name"] for row in rows} == {"Page parent", "Visible member child"}
+    visible_child = next(row for row in rows if row["name"] == "Visible member child")
+    assert visible_child["selected_device_id"] == member.pk
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("parent_class", ["module", "fan", "chassis", "container"])
+def test_vc_default_hardware_parent_keeps_child_on_page_device(client, settings, parent_class):
+    """A local child slot must not change its hardware parent's default member."""
+    from django.core.cache import cache
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    configure_servers(
+        settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
+    )
+    page, _member, _manufacturer = _make_mixed_manufacturer_chassis("default-parent")
+    inventory = [
+        {
+            "entPhysicalIndex": 120,
+            "entPhysicalClass": parent_class,
+            "entPhysicalName": "Fan tray",
+            "entPhysicalModelName": "FAN-TRAY",
+            "entPhysicalContainedIn": 0,
+        },
+        {
+            "entPhysicalIndex": 121,
+            "entPhysicalClass": "fan",
+            "entPhysicalName": "Fan 2",
+            "entPhysicalModelName": "FAN",
+            "entPhysicalParentRelPos": 2,
+            "entPhysicalContainedIn": 120,
+        },
+    ]
+    payload = trusted_module_inventory_payload(page, inventory, librenms_id=9302)
+    cache.set(DeviceModuleTableView().get_cache_key(page, "inventory", server_key="default"), payload, 300)
+    cache.set("librenms_device_info_default_9302", (True, {"device_id": 9302, "hostname": page.name}), 300)
+    client.force_login(make_superuser("default-parent-user"))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[page.pk]),
+        {"tab": "modules", "server_key": "default"},
+    )
+
+    assert response.status_code == 200
+    rows = list(response.context["module_sync"]["table"].data)
+    child = next(row for row in rows if row["ent_physical_index"] == 121)
+    assert child["selected_device_id"] == page.pk
+    assert child["member_resolution_source"] == "parent-context"
+
+
+@pytest.mark.django_db
+def test_vc_descendant_local_position_does_not_override_parent_member():
+    """A hardware-local child position must inherit its parent's VC member."""
+    page, member, _member_manufacturer = _make_mixed_manufacturer_chassis("descendant-position")
+    inventory = [
+        {
+            "entPhysicalIndex": 120,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "1/FPC0",
+            "entPhysicalContainedIn": 0,
+        },
+        {
+            "entPhysicalIndex": 121,
+            "entPhysicalClass": "fan",
+            "entPhysicalName": "Fan 2",
+            "entPhysicalParentRelPos": 2,
+            "entPhysicalContainedIn": 120,
+        },
+    ]
+    from netbox_librenms_plugin.views.base.modules_view import _inventory_item_key
+
+    view = _make_view()
+    index_map = {item["entPhysicalIndex"]: item for item in inventory}
+
+    _default, contexts = view._build_inventory_ignore_contexts(
+        page,
+        inventory,
+        index_map,
+        [page, member],
+        lambda _manufacturer: [],
+    )
+
+    assert contexts[_inventory_item_key(inventory[0])]["selected_device"].pk == page.pk
+    assert contexts[_inventory_item_key(inventory[1])]["selected_device"].pk == page.pk
+
+
+@pytest.mark.django_db
+def test_vc_chassis_can_resolve_below_an_unattributed_stack_root():
+    """A generic stack root must not suppress a chassis member position."""
+    page, member, _member_manufacturer = _make_mixed_manufacturer_chassis("stack-root-position")
+    inventory = [
+        {
+            "entPhysicalIndex": 130,
+            "entPhysicalClass": "stack",
+            "entPhysicalName": "Switch stack",
+            "entPhysicalContainedIn": 0,
+        },
+        {
+            "entPhysicalIndex": 131,
+            "entPhysicalClass": "chassis",
+            "entPhysicalName": "Chassis 2",
+            "entPhysicalParentRelPos": 2,
+            "entPhysicalContainedIn": 130,
+        },
+        {
+            "entPhysicalIndex": 132,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "2/FPC0",
+            "entPhysicalContainedIn": 131,
+        },
+    ]
+    from netbox_librenms_plugin.views.base.modules_view import _inventory_item_key
+
+    view = _make_view()
+    index_map = {item["entPhysicalIndex"]: item for item in inventory}
+
+    _default, contexts = view._build_inventory_ignore_contexts(
+        page,
+        inventory,
+        index_map,
+        [page, member],
+        lambda _manufacturer: [],
+    )
+
+    assert contexts[_inventory_item_key(inventory[0])]["resolution_source"] == "default"
+    assert contexts[_inventory_item_key(inventory[1])]["selected_device"].pk == member.pk
+    assert contexts[_inventory_item_key(inventory[2])]["selected_device"].pk == member.pk

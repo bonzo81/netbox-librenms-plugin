@@ -5,6 +5,8 @@ from time import sleep
 
 import pytest
 
+from netbox_librenms_plugin.constants import LIBRENMS_PORTS_COLUMNS
+
 
 def configure_servers(settings, servers):
     """Replace the plugin's configured servers, leaving the rest of PLUGINS_CONFIG intact."""
@@ -190,28 +192,37 @@ class TestTestConnectionErrors:
         assert "timeout" in result["message"].lower()
 
     def test_unexpected_request_error_is_reported(self, settings):
-        """A malformed server URL reaches the generic request setup error handler."""
-        api = api_for(settings, "invalid-url")
+        """A malformed server URL fails before a client can send credentials."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-        result = api.test_connection()
-
-        assert result["error"] is True
-        assert "unexpected error" in result["message"].lower()
+        configure_servers(settings, {"default": {"librenms_url": "invalid-url", "api_token": "test-token"}})
+        with pytest.raises(ValueError, match="HTTP or HTTPS"):
+            LibreNMSAPI(server_key="default")
 
 
 @pytest.mark.django_db
 class TestGetAvailableServersLegacy:
     """get_available_servers on the pre-multi-server config shape."""
 
-    def test_legacy_config_no_servers(self, settings):
+    @pytest.mark.parametrize("scheme", ["http", "https"])
+    def test_legacy_config_no_servers(self, settings, scheme):
         """With no servers mapping, a complete legacy pair is offered under the default key."""
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 
-        configure_legacy(settings, "https://legacy.example.com")
+        legacy_url = f"{scheme}://legacy.example.com"
+        configure_legacy(settings, legacy_url)
 
         result = LibreNMSAPI.get_available_servers()
 
-        assert result == {"default": "Default Server (https://legacy.example.com)"}
+        assert result == {"default": f"Default Server ({legacy_url})"}
+
+    def test_malformed_legacy_url_returns_no_server(self, settings):
+        """Legacy mode does not offer a URL that the API client cannot bind."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        configure_legacy(settings, "not-a-valid-url")
+
+        assert LibreNMSAPI.get_available_servers() == {}
 
     @pytest.mark.parametrize(
         ("url", "token"),
@@ -289,12 +300,7 @@ READ_ENDPOINTS = [
         lambda api: api.get_ports(1),
         {"status": "ok", "ports": [{"port_id": 7, "ifName": "Gi0/1"}]},
         {"status": "ok", "ports": [{"port_id": 7, "ifName": "Gi0/1"}]},
-        {
-            "columns": [
-                "port_id,ifName,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu,ifVlan,ifTrunk"
-            ],
-            "with": ["vlans"],
-        },
+        {"columns": [LIBRENMS_PORTS_COLUMNS], "with": ["vlans"]},
         {
             404: ("Device not found in LibreNMS",),
             500: ("HTTP error:", "500"),

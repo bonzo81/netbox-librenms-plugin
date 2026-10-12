@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "name": "linux-virtual-machine",
+  "description": "Synthetic minimal Linux virtual machine for development replay and VM import UI testing.",
+  "meta": {
+    "os": "os-9bf16a",
+    "synthetic": true
+  },
+  "device_id": 1158583490,
+  "lag_patterns": {},
+  "responses": {
+    "GET /api/v0/devices/1158583490": {
+      "status": "ok",
+      "devices": [
+        {
+          "device_id": 1158583490,
+          "hostname": "device-86b336",
+          "sysName": "device-5963fb",
+          "display": "device-86b336",
+          "ip": "203.0.113.69",
+          "hardware": "MODEL-8f5b02",
+          "version": "fw-1d838b",
+          "features": "fw-ee06be",
+          "location_id": 53084107,
+          "location": "Lab",
+          "os": "os-9bf16a",
+          "status": true,
+          "status_reason": "",
+          "ignore": false,
+          "disabled": false,
+          "type": "server",
+          "serial": "SN-a1c8fc",
+          "icon": "images/os/generic.svg",
+          "poller_group": 0
+        }
+      ],
+      "count": 1
+    },
+    "GET /api/v0/inventory/1158583490?entPhysicalContainedIn=0": {
+      "status": "ok",
+      "inventory": [],
+      "count": 0
+    },
+    "GET /api/v0/devices/1158583490/ports": {
+      "status": "ok",
+      "ports": [
+        {
+          "port_id": 670458496,
+          "ifName": "iface-509b17",
+          "ifType": "softwareLoopback",
+          "ifSpeed": 10000000,
+          "ifAdminStatus": "up",
+          "ifDescr": "iface-509b17",
+          "ifAlias": "",
+          "ifPhysAddress": null,
+          "ifMtu": 65536,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "vlans": []
+        },
+        {
+          "port_id": 1940106751,
+          "ifName": "ens3",
+          "ifType": "ethernetCsmacd",
+          "ifSpeed": 10000000000,
+          "ifAdminStatus": "up",
+          "ifDescr": "ens3",
+          "ifAlias": "",
+          "ifPhysAddress": "02:00:00:ec:06:10",
+          "ifMtu": 1500,
+          "ifVlan": null,
+          "ifTrunk": null,
+          "vlans": []
+        }
+      ]
+    },
+    "GET /api/v0/devices/1158583490/port_stack": {
+      "status": "ok",
+      "mappings": []
+    },
+    "GET /api/v0/devices/1158583490/transceivers": {
+      "status": "ok",
+      "transceivers": []
+    }
+  },
+  "expected": {
+    "virtual_chassis": null,
+    "lag_members": {},
+    "sub_interfaces": {},
+    "transceivers": {
+      "count": 0
+    }
+  }
+}

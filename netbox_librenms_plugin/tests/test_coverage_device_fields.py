@@ -173,6 +173,20 @@ class TestUpdateDeviceNameView:
         assert device.name == "name-stale-server"
         assert any("no longer configured" in text for text in _messages(response, "error"))
 
+    def test_repeated_server_keys_fail_closed(self, logged_in_client, librenms_server):
+        """Two different configured keys in one POST are ambiguous, so no server may be chosen."""
+        device = _linked_device("name-repeated-server", 6505)
+        librenms_server.device_info_response(device_id=6505, hostname="renamed-by-ambiguous-post")
+
+        response = logged_in_client.post(
+            _url("update_device_name", device.pk),
+            {"server_key": [SERVER_KEY, SECONDARY_KEY]},
+        )
+
+        device.refresh_from_db()
+        assert device.name == "name-repeated-server"
+        assert any("no longer configured" in text for text in _messages(response, "error"))
+
 
 @pytest.mark.django_db
 class TestUpdateDeviceSerialView:

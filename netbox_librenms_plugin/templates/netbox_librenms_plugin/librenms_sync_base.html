@@ -153,6 +153,17 @@
         <span><i class="mdi mdi-server-network text-primary me-1"></i><strong>LibreNMS Connections</strong></span>
         <div class="d-flex gap-2 align-items-center">
             {% include "netbox_librenms_plugin/inc/_server_selector.html" %}
+            {% if not server_selection_blocked and object|meta:"model_name" == "device" %}
+            {# Capture an anonymized LibreNMS data shape for community-contributed outcome tests (issue #95). #}
+            {# server_key is read from the page URL at request time (js hx-vals); when the URL omits it, fall back to the active page server (librenms_server_info.server_key) like the interface-sync controls, NOT to '' — an empty fallback would silently capture against the default server. #}
+            <button type="button" class="btn btn-sm btn-outline-secondary"
+                hx-get="{% url 'plugins:netbox_librenms_plugin:capture_data_shape' device_id=object.pk %}"
+                hx-vals="js:{server_key: new URLSearchParams(window.location.search).get('server_key') || '{{ librenms_server_info.server_key|default:''|escapejs }}'}"
+                hx-target="#htmx-modal-content" hx-swap="innerHTML"
+                title="Capture an anonymized LibreNMS data shape to contribute as a test">
+                <i class="mdi mdi-camera-outline"></i> Capture data shape
+            </button>
+            {% endif %}
             {% if librenms_server_info and not librenms_server_info.is_legacy %}
             <a href="{% url 'plugins:netbox_librenms_plugin:settings' %}" class="btn btn-sm btn-outline-secondary">
                 <i class="mdi mdi-cog"></i> Configure Servers

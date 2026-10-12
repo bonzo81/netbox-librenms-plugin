@@ -8,14 +8,13 @@ from django.core.cache import cache
 from django.db import transaction
 
 from ..librenms_api import LibreNMSAPI
-from ..utils import normalize_serial
+from ..utils import find_devices_by_serial, normalize_inventory_serial, normalize_serial, preload_normalization_rules
 
 logger = logging.getLogger(__name__)
 
 
 def empty_virtual_chassis_data() -> dict:
     """Public helper for callers that need a blank VC payload."""
-
     return {
         "is_stack": False,
         "member_count": 0,
@@ -26,7 +25,6 @@ def empty_virtual_chassis_data() -> dict:
 
 def _clone_virtual_chassis_data(data: dict | None) -> dict:
     """Return a defensive copy of cached VC data to avoid shared references."""
-
     if not data:
         return empty_virtual_chassis_data()
 
@@ -61,7 +59,6 @@ def _vc_cache_key(api: LibreNMSAPI, device_id: int | str) -> str:
 
 def get_virtual_chassis_data(api: LibreNMSAPI, device_id: int | str, *, force_refresh: bool = False) -> dict:
     """Fetch (and cache) virtual chassis data for a LibreNMS device."""
-
     if not api or device_id is None:
         return empty_virtual_chassis_data()
 
@@ -108,6 +105,7 @@ def prefetch_vc_data_for_devices(api: LibreNMSAPI, device_ids: List[int], *, for
         >>> # Before rendering import table
         >>> prefetch_vc_data_for_devices(api, [123, 124, 125])
         >>> # Now all validate_device_for_import() calls hit cache instantly
+
     """
     if not api or not device_ids:
         return
@@ -129,9 +127,10 @@ def prefetch_vc_data_for_devices(api: LibreNMSAPI, device_ids: List[int], *, for
     logger.debug(f"VC cache warming complete for {len(device_ids)} devices")
 
 
-def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> dict | None:
+def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> dict | None:  # noqa: C901
     """
-    Detect if device is a stack/Virtual Chassis by analyzing ENTITY-MIB inventory.
+    Detect a stack or Virtual Chassis from ENTITY-MIB inventory.
+
     Vendor-agnostic using standard hierarchical structure.
 
     Args:
@@ -162,6 +161,7 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
         2. Find parent index (entPhysicalClass='stack' or 'chassis')
         3. Get children chassis at that parent's index
         4. If multiple chassis found -> Stack detected
+
     """
     try:
         # Get the master device info to use for naming
@@ -339,6 +339,7 @@ def _generate_vc_member_name(master_name: str, position: int, serial: str = None
         pattern=" ({position})" -> "switch01 (2)"
         pattern="-SW{position}" -> "switch01-SW2"
         pattern=" [{serial}]" -> "switch01 [ABC123]"
+
     """
     if pattern is None:
         pattern = _load_vc_member_name_pattern()
@@ -372,6 +373,7 @@ def update_vc_member_suggested_names(vc_data: dict, master_name: str) -> dict:
 
     Returns:
         Updated vc_data dict with corrected suggested_name for each member
+
     """
     if not vc_data or not vc_data.get("is_stack"):
         return vc_data
@@ -425,7 +427,7 @@ def _sync_module_bay_counter(device: Device) -> None:
         )
 
 
-def create_virtual_chassis_with_members(
+def create_virtual_chassis_with_members(  # noqa: C901
     master_device: Device, members_info: list, libre_device: dict, server_key: str | None = None
 ) -> VirtualChassis:
     """
@@ -438,6 +440,7 @@ def create_virtual_chassis_with_members(
         master_device: The imported device (becomes VC master)
         members_info: List of member dicts from VC detection
         libre_device: Original LibreNMS device data
+        server_key: LibreNMS server key stored with the created members.
 
     Returns:
         VirtualChassis: The created virtual chassis instance
@@ -452,8 +455,8 @@ def create_virtual_chassis_with_members(
             {'serial': 'ABC123', 'position': 0, 'model': 'C9300-48U', 'name': 'Switch 1'},
             {'serial': 'ABC124', 'position': 1, 'model': 'C9300-48U', 'name': 'Switch 2'}
         ]
-    """
 
+    """
     # Save originals for in-memory rollback — transaction.atomic() rolls back DB but
     # not in-memory model fields.
     original_master_name = master_device.name
@@ -462,15 +465,28 @@ def create_virtual_chassis_with_members(
 
     # Find master's actual VC position from members_info.
     # Priority: is_master flag (set during detection) → serial match → default 1.
+    # The ENTITY-MIB serial carries the vendor's decoration ("S/N BCFB9793" on Juniper) while the
+    # stored device serial does not. Resolve the rule chain once here, before the first comparison,
+    # so master matching, the member loop and the member-count check all read the same value.
+    member_manufacturer = getattr(getattr(master_device, "device_type", None), "manufacturer", None)
+    serial_rules = preload_normalization_rules("serial", manufacturer=member_manufacturer)
+
+    def _member_serial(value):
+        """Return a member's serial normalized the way the stored device serial was written."""
+        return _norm_serial(
+            normalize_inventory_serial(value, manufacturer=member_manufacturer, preloaded_rules=serial_rules)
+        )
+
+    _master_serial = _norm_serial(master_device.serial)
     _master_pos = 1
     _master_member = next((m for m in members_info if m.get("is_master")), None)
     if _master_member:
         _found_pos = _safe_pos(_master_member.get("position"))
         if _found_pos and _found_pos >= 1:
             _master_pos = _found_pos
-    elif _norm_serial(master_device.serial):
+    elif _master_serial:
         for _m in members_info:
-            if _norm_serial(_m.get("serial")) == _norm_serial(master_device.serial):
+            if _member_serial(_m.get("serial")) == _master_serial:
                 _found_pos = _safe_pos(_m.get("position"))
                 if _found_pos and _found_pos >= 1:
                     _master_pos = _found_pos
@@ -482,7 +498,7 @@ def create_virtual_chassis_with_members(
             vc_pattern = _load_vc_member_name_pattern()
             # Rename master device to include position 1 pattern
             master_device_new_name = _generate_vc_member_name(
-                original_master_name, _master_pos, serial=_norm_serial(master_device.serial), pattern=vc_pattern
+                original_master_name, _master_pos, serial=_master_serial, pattern=vc_pattern
             )
 
             # Check if renamed master conflicts with existing device
@@ -524,7 +540,7 @@ def create_virtual_chassis_with_members(
                 # Normalize serial and position up front so all skip-checks and
                 # downstream logic use consistent values (strips whitespace and
                 # treats the sentinel "-" as "no serial").
-                serial = _norm_serial(member.get("serial"))
+                serial = _member_serial(member.get("serial"))
                 member_pos = _safe_pos(member.get("position"))
 
                 # Skip the master member — identified by is_master flag, serial match,
@@ -532,7 +548,7 @@ def create_virtual_chassis_with_members(
                 if member.get("is_master"):
                     continue
                 # Skip if this is the master's serial (only when both serials are non-empty)
-                if serial and serial == _norm_serial(master_device.serial):
+                if serial and serial == _master_serial:
                     continue
                 # Skip blank-serial entries that represent the master slot by position
                 if (
@@ -549,7 +565,7 @@ def create_virtual_chassis_with_members(
                 )
 
                 # Check for duplicate serial
-                if serial and Device.objects.filter(serial=serial).exists():
+                if serial and find_devices_by_serial(serial, limit=1):
                     logger.warning(f"Device with serial '{serial}' already exists, skipping VC member creation")
                     continue
 
@@ -594,23 +610,21 @@ def create_virtual_chassis_with_members(
                 )
                 members_created += 1
 
-            # Validate member count — exclude master-slot entries with blank serials
-            expected_members = len(
-                [
-                    m
-                    for m in members_info
-                    if not (
-                        _norm_serial(m.get("serial"))
-                        and _norm_serial(m.get("serial")) == _norm_serial(master_device.serial)
-                    )
-                    and not (
-                        not _norm_serial(m.get("serial"))
-                        and m.get("position") is not None
-                        and master_device.vc_position is not None
-                        and _safe_pos(m["position"]) == master_device.vc_position
-                    )
-                ]
-            )
+            # Validate the member count after excluding entries that identify the master.
+            def is_expected_member(member):
+                if member.get("is_master"):
+                    return False
+                serial = _member_serial(member.get("serial"))
+                if serial and serial == _master_serial:
+                    return False
+                return not (
+                    not serial
+                    and member.get("position") is not None
+                    and master_device.vc_position is not None
+                    and _safe_pos(member["position"]) == master_device.vc_position
+                )
+
+            expected_members = sum(is_expected_member(member) for member in members_info)
             if members_created < expected_members:
                 logger.warning(
                     f"Created {members_created} members but expected {expected_members}. "

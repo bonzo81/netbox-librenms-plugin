@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "name": "juniper-vc-2member",
+  "description": "Juniper EX Virtual Chassis, 2 members under a chassis-class root, 0-based positions.",
+  "meta": {
+    "os": "os-990f10",
+    "vendor": "juniper",
+    "topology": "virtual-chassis"
+  },
+  "device_id": 674660074,
+  "lag_patterns": {
+    "os-990f10": "^ae\\d+$"
+  },
+  "responses": {
+    "GET /api/v0/devices/674660074": {
+      "status": "ok",
+      "devices": [
+        {
+          "device_id": 674660074,
+          "hostname": "device-eef1bb",
+          "sysName": "device-15c026",
+          "hardware": "MODEL-f8bea9",
+          "os": "os-990f10",
+          "serial": "SN-7854cc",
+          "ip": "192.0.2.81",
+          "version": "fw-2b28dc"
+        }
+      ]
+    },
+    "GET /api/v0/inventory/674660074?entPhysicalContainedIn=0": {
+      "status": "ok",
+      "inventory": [
+        {
+          "entPhysicalIndex": 10,
+          "entPhysicalClass": "chassis",
+          "entPhysicalName": "entity-275655",
+          "entPhysicalDescr": "entity-74648f",
+          "entPhysicalSerialNum": "",
+          "entPhysicalModelName": "",
+          "entPhysicalContainedIn": 0
+        }
+      ]
+    },
+    "GET /api/v0/inventory/674660074?entPhysicalClass=chassis&entPhysicalContainedIn=10": {
+      "status": "ok",
+      "inventory": [
+        {
+          "entPhysicalIndex": 100,
+          "entPhysicalClass": "chassis",
+          "entPhysicalSerialNum": "SN-7854cc",
+          "entPhysicalModelName": "MODEL-f8bea9",
+          "entPhysicalName": "entity-6c5d81",
+          "entPhysicalDescr": "entity-d40007",
+          "entPhysicalParentRelPos": 0,
+          "entPhysicalContainedIn": 10
+        },
+        {
+          "entPhysicalIndex": 200,
+          "entPhysicalClass": "chassis",
+          "entPhysicalSerialNum": "SN-44bb4d",
+          "entPhysicalModelName": "MODEL-f8bea9",
+          "entPhysicalName": "entity-dea8b1",
+          "entPhysicalDescr": "entity-d40007",
+          "entPhysicalParentRelPos": 1,
+          "entPhysicalContainedIn": 10
+        }
+      ]
+    }
+  },
+  "expected": {
+    "virtual_chassis": {
+      "is_stack": true,
+      "member_count": 2,
+      "member_serials": [
+        "SN-7854cc",
+        "SN-44bb4d"
+      ]
+    }
+  }
+}

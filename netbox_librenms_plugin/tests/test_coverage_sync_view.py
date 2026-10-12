@@ -419,6 +419,101 @@ class TestVirtualChassisInventory:
         assert result[0]["model"] == "Member model A"
         assert result[1]["assigned_member"] is None
 
+    def test_a_vendor_marker_does_not_hide_the_assigned_member(self, librenms_server):
+        """
+        Juniper reports the chassis serial as "S/N BCFB9793"; NetBox stores it without.
+
+        Compared raw the two never match, so an already-assigned member is offered for
+        assignment again and the modal shows the decorated serial.
+        """
+        _vc, members = make_virtual_chassis_members("inventory-marker", count=1)
+        members[0].serial = "BCFB9793"
+        members[0].save()
+        inventory = [
+            {
+                "entPhysicalClass": "chassis",
+                "entPhysicalDescr": "Routing Engine chassis",
+                "entPhysicalSerialNum": "S/N BCFB9793",
+                "entPhysicalModelName": "MX304",
+            }
+        ]
+        _register_device(librenms_server, 6644, members[0].name, inventory=inventory)
+        view = _device_view()
+        view.librenms_id = 6644
+
+        result = view._get_vc_inventory_serials(members[0])
+
+        assert len(result) == 1
+        assert result[0]["serial"] == "BCFB9793"
+        assert result[0]["assigned_member"] == members[0]
+
+    @pytest.mark.parametrize("has_master", [True, False])
+    def test_member_inventory_uses_the_master_serial_rules(self, librenms_server, has_master):
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        vc, members = make_virtual_chassis_members("inventory-vendor", count=2)
+        master, member = members
+        other = Manufacturer.objects.create(name="Other inventory vendor", slug="other-inventory-vendor")
+        member.device_type = DeviceType.objects.create(manufacturer=other, model="Other member", slug="other-member")
+        member.serial = "MEMBER-SERIAL"
+        member.save()
+        if has_master:
+            vc.master = master
+            vc.save()
+        NormalizationRule.objects.create(
+            scope="serial",
+            manufacturer=master.device_type.manufacturer if has_master else other,
+            match_pattern=r"^VENDOR:(.+)$",
+            replacement=r"\1",
+        )
+        _register_device(
+            librenms_server,
+            6646,
+            master.name,
+            inventory=[{"entPhysicalClass": "chassis", "entPhysicalSerialNum": "VENDOR:MEMBER-SERIAL"}],
+        )
+        view = _device_view()
+        view.librenms_id = 6646
+
+        result = view._get_vc_inventory_serials(member)
+
+        assert result[0]["serial"] == member.serial
+        assert result[0]["assigned_member"] == member
+
+    def test_the_serial_rules_load_once_for_the_whole_chassis_loop(self, librenms_server):
+        """normalize_inventory_serial re-queries NormalizationRule per call unless rules are preloaded.
+
+        create_virtual_chassis_with_members() already preloads once before its own member loop;
+        this loop must not pay a query per chassis component.
+        """
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        _vc, members = make_virtual_chassis_members("inventory-preload", count=1)
+        inventory = [
+            {
+                "entPhysicalClass": "chassis",
+                "entPhysicalDescr": f"Member {index}",
+                "entPhysicalSerialNum": f"VC-PRELOAD-{index}",
+                "entPhysicalModelName": "Member model",
+            }
+            for index in range(5)
+        ]
+        _register_device(librenms_server, 6645, members[0].name, inventory=inventory)
+        view = _device_view()
+        view.librenms_id = 6645
+
+        with CaptureQueriesContext(connection) as captured:
+            result = view._get_vc_inventory_serials(members[0])
+
+        assert len(result) == 5
+        rule_queries = [q for q in captured.captured_queries if "normalizationrule" in q["sql"].lower()]
+        # One preload reads the scoped and unscoped rows; per-call lookups would scale with the
+        # five components instead.
+        assert 0 < len(rule_queries) <= 2, f"expected one preload for the loop, saw {len(rule_queries)} queries"
+
     def test_failed_inventory_lookup_returns_an_empty_list(self, librenms_server):
         _vc, members = make_virtual_chassis_members("inventory-failure", count=1)
         librenms_server.register("/api/v0/inventory/6642/all", {"status": "error"}, status=404)

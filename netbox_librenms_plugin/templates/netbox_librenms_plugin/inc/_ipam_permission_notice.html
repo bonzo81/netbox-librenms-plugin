@@ -1,0 +1,18 @@
+{% comment %}
+Names the IPAM view permissions the caller is missing. The VLAN reads are scoped with
+restrict(user, "view"), which returns nothing without the grant, so the tab would otherwise
+show empty VLAN columns with no reason. Include it with hidden_ipam_permissions=<list> and
+vlan_scope_incomplete=<bool>, which covers a CONSTRAINED grant: it satisfies the permission-name
+check while still hiding rows, so the list above is empty and nothing would be said.
+{% endcomment %}
+{% if hidden_ipam_permissions %}
+<div class="alert alert-warning d-flex align-items-center noprint" role="alert">
+    <i class="mdi mdi-alert me-2"></i>
+    <div>Some VLAN data is hidden because your account is missing {{ hidden_ipam_permissions|join:", " }}. VLANs you cannot view are not matched and are not synced.</div>
+</div>
+{% elif vlan_scope_incomplete %}
+<div class="alert alert-warning d-flex align-items-center noprint" role="alert">
+    <i class="mdi mdi-alert me-2"></i>
+    <div>Some VLAN data is hidden because your account cannot view every VLAN in scope for this device. VLANs you cannot view are not matched and are not synced.</div>
+</div>
+{% endif %}

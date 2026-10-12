@@ -14,6 +14,7 @@ from django.shortcuts import redirect
 from django.urls import reverse
 from django.views import View
 
+from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE, SERIAL_INVENTORY_SOURCE
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
@@ -676,7 +677,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         # resolve to a host interface (shared name), and creating a cable from OOB-controller
         # LLDP data would attach it to the wrong device. Mirrors the OOB guards in interface
         # sync (interfaces.py) and module sync (modules.py).
-        if link_data.get("_source") == "oob":
+        if link_data.get("_source") == OOB_INVENTORY_SOURCE:
             return None, {"status": "skipped", "interface": display_name}
         # A source named in incomplete_sources contributed no fresh rows to this snapshot, so a
         # row still carrying it was carried over from an earlier refresh (see the permission-skip
@@ -787,7 +788,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
         """
         display_name = link_data.get("local_port") or interface.get("row_id", "")
-        if link_data.get("_source") == "serial":
+        if link_data.get("_source") == SERIAL_INVENTORY_SOURCE:
             csp_id = link_data.get("netbox_local_interface_id")
             cp_id = link_data.get("netbox_remote_interface_id")
             if not csp_id:

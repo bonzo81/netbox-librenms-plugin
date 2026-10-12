@@ -865,7 +865,16 @@ class InventoryIgnoreRuleForm(NetBoxModelForm):
         """Meta options for InventoryIgnoreRuleForm."""
 
         model = InventoryIgnoreRule
-        fields = ["name", "match_type", "pattern", "action", "require_serial_match_parent", "enabled", "description"]
+        fields = [
+            "name",
+            "match_type",
+            "pattern",
+            "action",
+            "require_serial_match_parent",
+            "manufacturer",
+            "enabled",
+            "description",
+        ]
 
 
 class InventoryIgnoreRuleImportForm(NetBoxModelImportForm):
@@ -879,17 +888,37 @@ class InventoryIgnoreRuleImportForm(NetBoxModelImportForm):
         choices=InventoryIgnoreRule.ACTION_CHOICES,
         help_text="Action: skip (remove from table) or transparent (hide row, promote children)",
     )
+    manufacturer = CSVModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        to_field_name="name",
+        required=False,
+        help_text="Optional manufacturer name (must already exist in NetBox)",
+    )
 
     class Meta:
         """Meta options for InventoryIgnoreRuleImportForm."""
 
         model = InventoryIgnoreRule
-        fields = ["name", "match_type", "pattern", "action", "require_serial_match_parent", "enabled", "description"]
+        fields = [
+            "name",
+            "match_type",
+            "pattern",
+            "action",
+            "require_serial_match_parent",
+            "manufacturer",
+            "enabled",
+            "description",
+        ]
 
 
 class InventoryIgnoreRuleFilterForm(NetBoxModelFilterSetForm):
     """Form for filtering inventory ignore rules."""
 
+    manufacturer_id = DynamicModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        required=False,
+        label="Manufacturer",
+    )
     match_type = forms.ChoiceField(
         required=False,
         choices=[("", "---------")] + InventoryIgnoreRule.MATCH_TYPE_CHOICES,

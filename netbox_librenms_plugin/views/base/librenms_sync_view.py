@@ -32,6 +32,7 @@ from netbox_librenms_plugin.utils import (
     get_user_pref,
     is_legacy_librenms_id,
     match_librenms_hardware_to_device_type,
+    normalize_inventory_serial,
     resolve_naming_preferences,
     save_user_pref,
 )
@@ -469,6 +470,7 @@ class BaseLibreNMSSyncView(
             dict: ``{migrated_to_marker, migrated_to_winner}`` — the marker dict
                 ``{device_id, server_key, at}`` (or None), and the winner
                 :class:`Device` (or None if deleted since the marker was written).
+
         """
         from netbox_librenms_plugin.utils import build_migrated_context
 
@@ -502,6 +504,7 @@ class BaseLibreNMSSyncView(
 
         Returns:
             list[dict] or None: The server mappings, or None when no mapping information is available.
+
         """
         plugins_cfg = getattr(django_settings, "PLUGINS_CONFIG", {}).get("netbox_librenms_plugin", {})
         mappings = build_server_mappings(obj, active_server_key, plugin_config=plugins_cfg)
@@ -689,6 +692,7 @@ class BaseLibreNMSSyncView(
         Args:
             request (HttpRequest): The current request.
             obj (Device or VirtualMachine): The NetBox object to synchronize.
+
         """
         return None
 
@@ -701,6 +705,7 @@ class BaseLibreNMSSyncView(
         Args:
             request (HttpRequest): The current request.
             obj (Device or VirtualMachine): The NetBox object to synchronize.
+
         """
         return None
 
@@ -713,6 +718,7 @@ class BaseLibreNMSSyncView(
         Args:
             request (HttpRequest): The current request.
             obj (Device or VirtualMachine): The NetBox object to synchronize.
+
         """
         return None
 
@@ -725,6 +731,7 @@ class BaseLibreNMSSyncView(
         Args:
             request (HttpRequest): The current request.
             obj (Device or VirtualMachine): The NetBox object to synchronize.
+
         """
         return None
 
@@ -737,6 +744,7 @@ class BaseLibreNMSSyncView(
         Args:
             request (HttpRequest): The current request.
             obj (Device or VirtualMachine): The NetBox object to synchronize.
+
         """
         return None
 
@@ -756,6 +764,7 @@ class BaseLibreNMSSyncView(
         Returns:
             str or None: The stripped name, or None if it equals the original
                 (i.e. no suffix was found).
+
         """
         try:
             from netbox_librenms_plugin.models import LibreNMSSettings
@@ -796,6 +805,7 @@ class BaseLibreNMSSyncView(
                     'assigned_member': Device object or None (if serial matches existing assignment)
                 }
             ]
+
         """
         success, inventory = self.librenms_api.get_device_inventory(self.librenms_id)
         if not success:
@@ -807,9 +817,20 @@ class BaseLibreNMSSyncView(
         # Get all VC members
         vc_members = obj.virtual_chassis.members.all()
 
+        # The ENTITY-MIB serial carries the vendor's decoration ("S/N BCFB9793" on Juniper) while
+        # the stored member serial does not, so compare and display the normalized value.
+        master = obj.virtual_chassis.master or obj
+        manufacturer = getattr(getattr(master, "device_type", None), "manufacturer", None)
+        # One lazy cache for the whole loop: apply_normalization_rules fills it on the first
+        # component that needs normalizing and reuses it for the rest, so a stack costs one read
+        # instead of one per component and an inventory with no serials costs none.
+        serial_rules: dict = {}
+
         result = []
         for component in chassis_components:
-            serial = component.get("entPhysicalSerialNum", "-")
+            serial = normalize_inventory_serial(
+                component.get("entPhysicalSerialNum"), manufacturer=manufacturer, preloaded_rules=serial_rules
+            )
             if not serial or serial == "-":
                 continue
 
@@ -851,6 +872,7 @@ class BaseLibreNMSSyncView(
                 'platform_name': str (OS name for platform matching),
                 'matching_platform': Platform object or None
             }
+
         """
         librenms_os = librenms_info["librenms_device_details"].get("librenms_device_os", "-")
         librenms_version = librenms_info["librenms_device_details"].get("librenms_device_version", "-")

@@ -114,6 +114,7 @@ class InventoryIgnoreRuleSerializer(NetBoxModelSerializer):
             "pattern",
             "action",
             "require_serial_match_parent",
+            "manufacturer",
             "enabled",
             "description",
         ]

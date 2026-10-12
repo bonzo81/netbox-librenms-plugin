@@ -35,6 +35,17 @@ from netbox_librenms_plugin.tests.test_serial_cables_view import _make_view
 SERVER_KEY = configured_server_key()
 
 
+def test_picker_viewability_uses_the_shared_serial_source_constant():
+    """The picker must follow the inventory-source constant used by every producer."""
+    import inspect
+
+    from netbox_librenms_plugin.views.base.cables_view import CableRemotePickerView
+
+    source = inspect.getsource(CableRemotePickerView._row_is_viewable)
+    assert "source != SERIAL_INVENTORY_SOURCE" in source
+    assert 'source != "serial"' not in source
+
+
 class CountingLocMemCache(LocMemCache):
     """Real local-memory cache backend with visible read volume for request tests."""
 
@@ -421,7 +432,7 @@ class TestRemotePickerEndpoint:
         client = self._client("unknown-row")
         _acs, _csp, _link, url = self._seed_serial("unknown-row")
 
-        with patch("netbox_librenms_plugin.librenms_api.requests.get") as external_get:
+        with patch("netbox_librenms_plugin.librenms_api._session.get") as external_get:
             response = client.get(url, {"row_id": "missing", "server_key": SERVER_KEY})
 
         assert response.status_code == 404
@@ -2321,7 +2332,7 @@ class TestManualRepointOfExistingCable:
         clear_test_cache(cache)  # the snapshot expired between render and pick
 
         with patch(
-            "netbox_librenms_plugin.librenms_api.requests.get",
+            "netbox_librenms_plugin.librenms_api._session.get",
             side_effect=_serial_refetch_get(link),
         ) as external_get:
             resp = client.post(
@@ -2371,7 +2382,7 @@ class TestManualRepointOfExistingCable:
         clear_test_cache(cache)
 
         with patch(
-            "netbox_librenms_plugin.librenms_api.requests.get",
+            "netbox_librenms_plugin.librenms_api._session.get",
             side_effect=_serial_refetch_get(link),
         ) as external_get:
             resp = client.get(picker_url, {"row_id": link["local_port_id"], "server_key": SERVER_KEY})
