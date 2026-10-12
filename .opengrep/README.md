@@ -193,8 +193,10 @@ the same file. Its limits:
 
 The recorded-response rule checks the two legacy spellings of the `[status, body]` read: the
 `isinstance(..., list) and len(...) == 2 and isinstance(...[0], int)` test and the
-`x[1] if isinstance(x, list) else x` expression. It does not see tuple unpacking or a `type()`
-check. `data_shapes/envelope.py` is excluded because it owns the format.
+`x[1] if isinstance(x, list) else x` expression. The rule reports the expression only when `x` is
+assigned from, or is the loop variable over, an expression that contains `"responses"`, because
+the expression alone is ordinary list selection. It does not see tuple unpacking, a `type()`
+check, or a value passed in from another function. `data_shapes/envelope.py` is excluded because it owns the format.
 
 The `no-stored-mapping-access` rules check the key as the literal `"librenms_id"`, also through a
 local or module string constant. A key built at run time is outside the check. Their limits:
