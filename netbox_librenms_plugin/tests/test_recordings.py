@@ -474,15 +474,18 @@ def test_bundled_recording_transceivers_reference_present_ports(recording):
     assert not dangling, f"{recording.get('name')}: transceivers reference ports missing from /ports: {dangling}"
 
 
-def test_make_recording_api_delegates_non_servers_config_to_real():
+def test_make_recording_api_delegates_non_servers_config_to_real(settings):
     """The recording API override must preserve every non-server plugin setting."""
-    from django.conf import settings
+    from copy import deepcopy
 
     import netbox_librenms_plugin.librenms_api as api_mod
     from netbox_librenms_plugin.tests.conftest import make_recording_api
 
-    # Read the expected non-server value outside the temporary settings override.
-    expected_other = api_mod.get_plugin_config("netbox_librenms_plugin", "cache_timeout", 300)
+    # A plugin-level value unlike the 300 default, so only a real fallback can produce it.
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config.setdefault("netbox_librenms_plugin", {})["cache_timeout"] = 123
+    settings.PLUGINS_CONFIG = plugin_config
+    expected_other = 123
 
     original_config = settings.PLUGINS_CONFIG
     api = make_recording_api("http://127.0.0.1:9", server_key="test")

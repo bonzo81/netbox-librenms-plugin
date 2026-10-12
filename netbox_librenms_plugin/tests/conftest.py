@@ -727,7 +727,6 @@ def make_recording_api(url, *, server_key="test", token="test-token"):
         server_key: {
             "librenms_url": url,
             "api_token": token,
-            "cache_timeout": 0,
             "verify_ssl": False,
         }
     }
