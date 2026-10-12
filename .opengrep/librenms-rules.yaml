@@ -1073,7 +1073,16 @@ rules:
       exclude: ["**/data_shapes/envelope.py"]
     pattern-either:
       - pattern: isinstance($V, list) and len($V) == 2 and isinstance($V[0], int)
-      - pattern: $V[1] if isinstance($V, list) else $V
+      # The ternary alone is ordinary list selection; report it only for a value read from "responses".
+      - patterns:
+          - pattern: $V[1] if isinstance($V, list) else $V
+          - pattern-either:
+              - pattern-inside: |
+                  $V = <... "responses" ...>
+                  ...
+              - pattern-inside: |
+                  for $K, $V in <... "responses" ...>:
+                    ...
   - id: no-stored-mapping-access
     languages: [python]
     severity: ERROR
