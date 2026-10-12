@@ -41,6 +41,9 @@ class _AlertScanner(HTMLParser):
                 items.append(("text", data, []))
 
     def handle_endtag(self, tag):
+        # A void tag (<br/>, </br>) has no open element, so it must not close the enclosing alert.
+        if not any(entry["tag"] == tag for entry in self.stack):
+            return
         while self.stack:
             entry = self.stack.pop()
             if entry["alert"]:
@@ -73,6 +76,8 @@ def _offenders(source):
         '<div class="alert"><i class="mdi mdi-alert"></i> Run <code>x</code> first.</div>',
         '<div class="alert"><h4>Title</h4><p>Body.</p></div>',
         '<div class="alert"><strong>Note:</strong> text</div>',
+        '<div class="alert"><br/>Text<div>Body</div></div>',
+        '<div class="alert"></br>Text<div>Body</div></div>',
     ],
 )
 def test_the_guard_flags_an_alert_with_several_flex_items(source):
