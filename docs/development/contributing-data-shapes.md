@@ -140,4 +140,6 @@ text, including when it ends in a newline.
 
 Use at most 100 patterns per map and 200 characters per pattern. Each compiled
 program has a 1 MiB RE2 memory budget. Malformed Unicode patterns are excluded.
-A name with malformed Unicode (for example, a lone surrogate) never matches a pattern.
+For a name with malformed Unicode (for example, a lone surrogate),
+`name_matches_lag_pattern()` returns `False`. A direct `search()` on a compiled pattern raises
+`UnicodeEncodeError` for that name, so match names through the helper.
