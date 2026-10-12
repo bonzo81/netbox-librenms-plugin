@@ -1620,8 +1620,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         the transceiver API provides SFP model, serial, and type info.
 
         Strategy:
-        - For transceivers matching existing inventory items by entity_physical_index:
-          supplement entPhysicalModelName if empty
+        - For transceivers matching existing inventory items: supplement
+          entPhysicalModelName if empty. An item matches by entity_physical_index when its
+          ifIndex agrees with the transceiver port's ifIndex, else by that ifIndex alone.
         - For transceivers NOT in inventory: create synthetic inventory items
           so they appear in the modules table
 
@@ -1654,6 +1655,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             idx: item for item in inventory_data if (idx := _coerce_idx(item.get("entPhysicalIndex"))) is not None
         }
         inv_serials = {s for item in inventory_data if (s := _clean_librenms_value(item.get("entPhysicalSerialNum")))}
+        inv_by_ifindex = {}
+        for item in inventory_data:
+            if (if_index := _coerce_idx(item.get("ifIndex"))) is not None:
+                inv_by_ifindex[if_index] = None if if_index in inv_by_ifindex else item
 
         # Build port_id → interface label lookup for better synthetic item naming
         port_name_map = self._build_port_name_map(transceivers, ports_data=ports_data)
@@ -1673,6 +1678,18 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             port_meta = port_name_map.get(port_id, {}) if port_id else {}
             ifname = (port_meta.get("ifName") or "").strip() or None
             ifdescr = (port_meta.get("ifDescr") or "").strip() or None
+            port_ifindex = _coerce_idx(port_meta.get("ifIndex"))
+
+            # Junos reports the port's ifIndex as entity_physical_index, which can name an unrelated entity.
+            existing = inv_by_index.get(ent_idx)
+            if port_ifindex is not None and (
+                existing is None or _coerce_idx(existing.get("ifIndex")) not in {None, port_ifindex}
+            ):
+                by_ifindex = inv_by_ifindex.get(port_ifindex)
+                if by_ifindex is None and existing is not None:
+                    # A synthetic row would duplicate the unrelated entity's index.
+                    continue
+                existing = by_ifindex
 
             model = _clean_librenms_value(txr.get("model"))
             serial = _clean_librenms_value(txr.get("serial"))
@@ -1685,9 +1702,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             # Use transceiver type as model fallback (e.g., "CFP2/QSFP28")
             display_model = model or (txr_type if txr_type not in _SKIP_TRANSCEIVER_TYPES else "")
 
-            if ent_idx in inv_by_index:
+            if existing is not None:
                 # Supplement existing inventory item if model/serial is missing or a placeholder
-                existing = inv_by_index[ent_idx]
                 existing_model = _clean_librenms_value(existing.get("entPhysicalModelName"))
                 if (not existing_model or existing_model.lower() == "builtin") and display_model:
                     existing["entPhysicalModelName"] = display_model
@@ -1917,6 +1933,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             port_map[port_id] = {
                 "ifName": ifname,
                 "ifDescr": ifdescr,
+                "ifIndex": port.get("ifIndex"),
             }
         return port_map
 

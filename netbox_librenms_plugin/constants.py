@@ -9,9 +9,10 @@ LIBRENMS_VLAN_STATE_ACTIVE = 1
 
 # Columns every /devices/{id}/ports read requests. The live reader and the data-shape capture
 # share this one string, so a captured ports payload can never carry fewer fields than the sync
-# logic reads. ifVrf is the per-port VRF id the IP tab joins against /routing/vrf.
+# logic reads. ifVrf is the per-port VRF id the IP tab joins against /routing/vrf. ifIndex links a
+# transceiver to its ENTITY-MIB row.
 LIBRENMS_PORTS_COLUMNS = (
-    "port_id,ifName,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu,ifVlan,ifTrunk,ifVrf"
+    "port_id,ifName,ifIndex,ifType,ifSpeed,ifAdminStatus,ifDescr,ifAlias,ifPhysAddress,ifMtu,ifVlan,ifTrunk,ifVrf"
 )
 
 # LibreNMS port fields the plugin can display as the interface name. The preference resolver,

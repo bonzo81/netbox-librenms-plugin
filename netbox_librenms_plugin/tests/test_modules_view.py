@@ -889,6 +889,56 @@ class TestMergeTransceiverDataPortIdentity:
         assert item["entPhysicalModelName"] == "SFP-10G-SR"
         assert item["_librenms_port_id"] == 7
 
+    def test_shared_entity_ifindex_links_the_transceiver_to_neither_entity(self, settings, librenms_server):
+        """Two entities with the port's ifIndex leave the transceiver as its own synthetic row."""
+        view = _real_api_view(settings, librenms_server, librenms_id=104)
+        librenms_server.register(
+            "/api/v0/devices/104/transceivers",
+            {
+                "status": "ok",
+                "transceivers": [{"entity_physical_index": 50, "model": "SFP-10G-SR", "serial": "TX-50", "port_id": 8}],
+            },
+            method="GET",
+        )
+        librenms_server.register(
+            "/api/v0/devices/104/ports",
+            {"status": "ok", "ports": [{"port_id": 8, "ifName": "Eth8", "ifIndex": 50}]},
+            method="GET",
+        )
+        inventory_seed = [
+            {"entPhysicalIndex": index, "entPhysicalName": f"Port {index}", "entPhysicalClass": "port", "ifIndex": 50}
+            for index in (10, 11)
+        ]
+
+        inventory, error = view._merge_transceiver_data(deepcopy(inventory_seed))
+
+        assert error is None
+        assert inventory[:2] == inventory_seed
+        assert [(item["entPhysicalIndex"], item["_librenms_port_id"]) for item in inventory[2:]] == [(50, 8)]
+
+    def test_entity_index_of_an_unrelated_entity_adds_no_row(self, settings, librenms_server):
+        """A transceiver whose entity index names another port's entity adds no row with that index."""
+        view = _real_api_view(settings, librenms_server, librenms_id=105)
+        librenms_server.register(
+            "/api/v0/devices/105/transceivers",
+            {
+                "status": "ok",
+                "transceivers": [{"entity_physical_index": 640, "model": "SFP-10G-SR", "serial": "NEW", "port_id": 9}],
+            },
+            method="GET",
+        )
+        librenms_server.register(
+            "/api/v0/devices/105/ports",
+            {"status": "ok", "ports": [{"port_id": 9, "ifName": "xe-0/0/3:2", "ifIndex": 640}]},
+            method="GET",
+        )
+        inventory_seed = [{"entPhysicalIndex": 640, "entPhysicalName": "Optic 0/5/0", "ifIndex": 600}]
+
+        inventory, error = view._merge_transceiver_data(deepcopy(inventory_seed))
+
+        assert error is None
+        assert inventory == inventory_seed
+
     def test_enrich_inventory_port_identity_backfills_port_rows_from_ports_api(self, settings, librenms_server):
         view = _real_api_view(settings, librenms_server, librenms_id=102)
         librenms_server.register(
@@ -1115,6 +1165,44 @@ class TestPostInventoryRefresh:
         assert transceiver_item["_librenms_port_id"] == 42
         assert transceiver_item["_librenms_ifname"] == "Gi0/2"
         assert message_texts(request, "success") == ["Inventory data refreshed successfully."]
+
+    def test_post_links_junos_optics_to_their_own_ports(self, librenms_server, server_keys):
+        """Junos reports a transceiver's ifIndex as its entity index; xe-0/0/3:2 has ifIndex 640, which is also the 0/5/0 optic's entity index."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        recording = load_recording("junos-subinterfaces")
+        librenms_id = recording["device_id"]
+        responses = recording["responses"]
+        librenms_server.load_recording(recording)
+        server_key, _ = server_keys
+        device = _mapped_device("module-refresh-junos-optics", server_key, librenms_id=librenms_id)
+        port_by_ifindex = {
+            port["ifIndex"]: port for port in responses[f"GET /api/v0/devices/{librenms_id}/ports"]["ports"]
+        }
+        entities = responses[f"GET /api/v0/inventory/{librenms_id}/all"]["inventory"]
+        optics = [entity for entity in entities if entity["entPhysicalIndex"] in (640, 642)]
+        assert [(entity["ifIndex"], port_by_ifindex[entity["entPhysicalIndex"]]["ifName"]) for entity in optics] == [
+            (600, "xe-0/0/3:2"),
+            (591, "xe-0/0/3:3"),
+        ]
+
+        view = DeviceModuleTableView()
+        response = post(view, make_request("post", {"server_key": server_key}), pk=device.pk)
+
+        assert response.status_code == 200
+        inventory = cache.get(view.get_cache_key(device, "inventory", server_key=server_key))["inventory"]
+        indexes = [item["entPhysicalIndex"] for item in inventory]
+        assert len(indexes) == len(set(indexes))
+        by_index = {item["entPhysicalIndex"]: item for item in inventory}
+        for entity in optics:
+            port = port_by_ifindex[entity["ifIndex"]]
+            item = by_index[entity["entPhysicalIndex"]]
+            assert item["entPhysicalName"] == entity["entPhysicalName"]
+            assert (item["_librenms_port_id"], item["_librenms_ifname"]) == (port["port_id"], port["ifName"])
 
     def test_post_treats_non_list_inventory_as_fetch_failure(self, librenms_server, server_keys):
         """get_device_inventory is an external boundary. A non-list inventory body is a fetch failure."""
