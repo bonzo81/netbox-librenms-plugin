@@ -1,4 +1,5 @@
-"""The modules/interfaces tab renders must degrade (not 500) when the client is unbuildable.
+"""
+The modules/interfaces tab renders must degrade (not 500) when the client is unbuildable.
 
 The lazy ``librenms_api`` property raises KeyError/ValueError when the LibreNMS server
 config is missing or misconfigured. The cables and IP tabs resolve their render-path
@@ -6,10 +7,11 @@ server key through ``_render_server_key`` (None fallback); these tests pin the s
 degrade on the modules and interfaces tabs, which resolved through the raising property.
 """
 
-from unittest.mock import patch
+from copy import deepcopy
 
 import pytest
-from django.test import RequestFactory
+
+from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 
 def _make_device(name):
@@ -24,15 +26,41 @@ def _make_device(name):
 
 def _patch_unbuildable_config():
     """No servers dict and no legacy url/token: LibreNMSAPI() raises ValueError."""
-    return patch(
-        "netbox_librenms_plugin.librenms_api.get_plugin_config",
-        side_effect=lambda app, key, default=None: default,
-    )
+    from django.conf import settings
+    from django.test import override_settings
+
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"] = {"servers": {}, "librenms_url": "", "api_token": ""}
+    return override_settings(PLUGINS_CONFIG=plugin_config)
+
+
+@pytest.fixture
+def librenms_server(monkeypatch):
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    with librenms_mock_server() as server:
+        yield server
+
+
+def _api_for(server):
+    from django.conf import settings
+    from django.test import override_settings
+
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = {
+        "alpha": {"librenms_url": server.url, "api_token": "test-token"}
+    }
+    with override_settings(PLUGINS_CONFIG=plugin_config):
+        return LibreNMSAPI(server_key="alpha")
 
 
 @pytest.mark.django_db
 class TestModulesTabDegradesOnUnbuildableClient:
     def test_get_context_data_returns_empty_panel_not_500(self):
+        from django.test import RequestFactory
+
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         device = _make_device("degrade-mod-dev")
@@ -51,6 +79,8 @@ class TestModulesTabDegradesOnUnbuildableClient:
 @pytest.mark.django_db
 class TestInterfacesTabDegradesOnUnbuildableClient:
     def test_get_context_data_renders_with_none_key_not_500(self):
+        from django.test import RequestFactory
+
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         device = _make_device("degrade-if-dev")
@@ -69,9 +99,10 @@ class TestInterfacesTabDegradesOnUnbuildableClient:
 class TestCablesPortsCacheShapeGuard:
     """get_ports_data must treat a truthy but malformed ports cache entry as a miss."""
 
-    def test_corrupt_ports_cache_falls_through_to_live_fetch(self):
+    def test_corrupt_ports_cache_falls_through_to_live_fetch(self, librenms_server):
+        from django.test import RequestFactory
+
         from django.core.cache import cache as real_cache
-        from unittest.mock import MagicMock
 
         from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
@@ -79,9 +110,8 @@ class TestCablesPortsCacheShapeGuard:
         view = DeviceCableTableView()
         view.request = RequestFactory().get("/")
         view.librenms_id = 4242
-        # The live-fetch boundary: a real call would hit LibreNMS over HTTP.
-        view._librenms_api = MagicMock(server_key="alpha")
-        view._librenms_api.get_ports.return_value = (True, {"ports": [{"port_id": 1, "ifName": "eth0"}]})
+        view._librenms_api = _api_for(librenms_server)
+        librenms_server.ports_response(device_id=4242, ports=[{"port_id": 1, "ifName": "eth0"}])
 
         cache_key = view.get_cache_key(device, "ports", "alpha")
         real_cache.set(cache_key, ["corrupt", "legacy", "shape"], timeout=60)
@@ -99,7 +129,8 @@ class TestCablesPortsCacheShapeGuard:
 
 @pytest.mark.django_db
 class TestVlanTabDegradesOnUnbuildableClient:
-    """The VLAN tab must resolve its render-path server key through _render_server_key too.
+    """
+    The VLAN tab must resolve its render-path server key through _render_server_key too.
 
     get_vlan_context read the key via getattr(self.librenms_api, "server_key", None); the lazy
     librenms_api property raises ValueError (not AttributeError) on an unbuildable config, so getattr
@@ -107,6 +138,8 @@ class TestVlanTabDegradesOnUnbuildableClient:
     """
 
     def test_get_vlan_context_returns_none_key_not_500(self):
+        from django.test import RequestFactory
+
         from netbox_librenms_plugin.views.object_sync.devices import DeviceVLANTableView
 
         device = _make_device("degrade-vlan-dev")
