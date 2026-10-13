@@ -344,5 +344,33 @@
       "vrf": true,
       "oob": false
     }
+  },
+  {
+    "name": "nxos-fixed-linecard",
+    "signature": {
+      "os": "os-dbc9fb",
+      "virtual_chassis": {
+        "present": false,
+        "root_class": "stack",
+        "member_count": 0,
+        "position_base": null,
+        "member_shape": null
+      },
+      "lag": {
+        "present": true,
+        "ieee8023ad": true,
+        "name_prefix": "custom"
+      },
+      "sub_interfaces": {
+        "present": false,
+        "styles": []
+      },
+      "port_stack": true,
+      "vlans": true,
+      "transceivers": true,
+      "serial": false,
+      "vrf": false,
+      "oob": false
+    }
   }
 ]
