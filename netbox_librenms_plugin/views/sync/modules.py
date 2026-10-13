@@ -30,13 +30,16 @@ from netbox_librenms_plugin.utils import (
     get_module_template_interface_names,
     get_module_types_indexed,
     get_vc_member_positions,
+    load_module_type_bay_types,
     module_inventory_binding_matches,
     module_inventory_binding_token,
     module_inventory_row_digest,
     module_inventory_snapshot_digest,
+    module_type_bay_type_ids,
     netbox_relocates_module_subtree,
     normalize_inventory_serial,
     normalize_serial,
+    prefetch_module_bay_types,
     rewrite_interface_name_for_vc_member,
     set_librenms_device_id,
     validation_error_detail,
@@ -1217,6 +1220,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         from netbox_librenms_plugin.utils import preload_normalization_rules
 
         norm_rules_bay = preload_normalization_rules("module_bay")
+        type_bay_types = load_module_type_bay_types()
         for context in manufacturer_contexts.values():
             context["serial_rules"] = preload_normalization_rules("serial", context["manufacturer"])
 
@@ -1246,6 +1250,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         manufacturer_id=mfr_id,
                         norm_rules_bay=norm_rules_bay,
                         norm_rules_serial=policy["serial_rules"],
+                        type_bay_types=type_bay_types,
                         module_bays=module_bays,
                         allowed_module_type_ids=allowed_module_type_ids,
                         changeable_components=changeable_components,
@@ -1454,6 +1459,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         norm_rules_bay=None,
         norm_rules_serial=None,
         holder_of=None,
+        type_bay_types=None,
     ):
         """
         Try to install a single inventory item.
@@ -1477,6 +1483,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             norm_rules_bay (dict | None): The optional module bay normalization rules.
             norm_rules_serial (dict | None): The optional serial normalization rules.
             holder_of (dict | None): Mutable module ancestry reused during a bulk install.
+            type_bay_types (dict | None): Preloaded module bay types per module type, for a bulk install.
 
         Returns:
             dict: The install status and its result details.
@@ -1519,7 +1526,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             return {"status": "skipped", "name": name, "reason": "no matching type"}
 
         # Re-fetch module bays (parent install creates new child bays)
-        bays = module_bays.filter(device=device).select_related("installed_module__module_type")
+        bays = prefetch_module_bay_types(
+            module_bays.filter(device=device).select_related("installed_module__module_type")
+        )
 
         # Use preloaded mappings if provided, otherwise load from DB
         if exact_mappings is None or regex_mappings is None:
@@ -1537,6 +1546,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             manufacturer_id,
             norm_rules_bay,
             holder_of=holder_of,
+            accepted_bay_types=module_type_bay_type_ids(matched_type, type_bay_types),
         )
         if not matched_bay:
             return {"status": "skipped", "name": name, "reason": "no matching bay"}
@@ -1623,6 +1633,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         norm_rules_bay,
         *,
         holder_of=None,
+        accepted_bay_types=frozenset(),
     ):
         """
         Return the module bay to install *item* into, or None when nothing matches.
@@ -1647,6 +1658,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             manufacturer_id (int | None): The device manufacturer ID.
             norm_rules_bay (dict | None): The module bay normalization rules.
             holder_of (dict | None): Preloaded module ancestry for a bulk install.
+            accepted_bay_types (frozenset): The module bay types the module type fits.
 
         Returns:
             ModuleBay | None: The bay to install into.
@@ -1662,6 +1674,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 regex_mappings,
                 manufacturer_id=manufacturer_id,
                 norm_rules_bay=norm_rules_bay,
+                accepted_bay_types=accepted_bay_types,
             )
 
         # Trace the item's LibreNMS parent hierarchy to an installed module, if any.
@@ -1980,6 +1993,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         regex_mappings,
         manufacturer_id=None,
         norm_rules_bay=None,
+        accepted_bay_types=frozenset(),
     ):
         """Match an inventory item to a module bay (same logic as BaseModuleTableView)."""
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
@@ -2017,18 +2031,12 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             if bay:
                 return bay
 
-        # Fallback: exact match on candidate names against bay dict, with FPC-scope check
-        for name in candidate_names:
-            if name in module_bays:
-                maps = module_bays.maps if hasattr(module_bays, "maps") else [module_bays]
-                for scope_map in maps:
-                    if name in scope_map:
-                        bay = scope_map[name]
-                        if BaseModuleTableView._fpc_slot_matches(name, bay):
-                            return bay
+        bay = BaseModuleTableView._match_bay_by_name(candidate_names, module_bays, accepted_bay_types)
+        if bay:
+            return bay
 
         # Positional fallback for items inside converters
-        return BaseModuleTableView._match_bay_by_position(item, index_map, module_bays)
+        return BaseModuleTableView._match_bay_by_position(item, index_map, module_bays, accepted_bay_types)
 
 
 class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -2141,6 +2149,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
         norm_rules_bay = preload_normalization_rules("module_bay")
         norm_rules_serial = preload_normalization_rules("serial", page_device.device_type.manufacturer)
+        type_bay_types = load_module_type_bay_types()
         if page_device.virtual_chassis_id is not None:
             members = (
                 self.restricted_queryset(Device)
@@ -2205,6 +2214,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         manufacturer_id=mfr_id,
                         norm_rules_bay=norm_rules_bay,
                         norm_rules_serial=norm_rules_serial,
+                        type_bay_types=type_bay_types,
                         module_bays=module_bays,
                         allowed_module_type_ids=allowed_module_type_ids,
                         changeable_components=changeable_components,

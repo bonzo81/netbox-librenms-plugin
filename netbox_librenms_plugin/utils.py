@@ -3829,6 +3829,64 @@ def netbox_allows_standalone_vm_host():
     return version is not None and version >= _STANDALONE_VM_HOST_VERSION
 
 
+def netbox_constrains_module_bay_types():
+    """Return True when NetBox only installs a module into a bay whose module bay types fit (NetBox 4.7)."""
+    from dcim.models import ModuleBay
+
+    return any(field.name == "module_bay_types" for field in ModuleBay._meta.get_fields())
+
+
+def load_module_type_bay_types():
+    """Return the module bay types of every module type in one query, keyed by module type pk."""
+    if not netbox_constrains_module_bay_types():
+        return {}
+    from dcim.models import ModuleType
+
+    pairs = {}
+    for type_pk, bay_type_pk in ModuleType.module_bay_types.through.objects.values_list(
+        "moduletype_id", "modulebaytype_id"
+    ):
+        pairs.setdefault(type_pk, set()).add(bay_type_pk)
+    return {type_pk: frozenset(bay_type_pks) for type_pk, bay_type_pks in pairs.items()}
+
+
+def module_type_bay_type_ids(module_type, preloaded=None):
+    """Return the module bay types *module_type* installs into; an empty set fits any bay.
+
+    *preloaded* is the result of ``load_module_type_bay_types``; without it, this reads one query.
+    """
+    if module_type is None or not netbox_constrains_module_bay_types():
+        return frozenset()
+    if preloaded is not None:
+        return preloaded.get(module_type.pk, frozenset())
+    return frozenset(module_type.module_bay_types.values_list("pk", flat=True))
+
+
+def prefetch_module_bay_types(bays):
+    """Prefetch each bay's module bay types where NetBox has them, so a fit check adds no query per bay."""
+    return bays.prefetch_related("module_bay_types") if netbox_constrains_module_bay_types() else bays
+
+
+def module_bay_type_fit(bay, accepted_bay_type_ids):
+    """
+    Return whether a bay and a module type fit by their module bay types.
+
+    True when they share a type, False when NetBox refuses the install (both typed, no type shared),
+    and None when either side is untyped.
+    """
+    if not accepted_bay_type_ids:
+        return None
+    bay_type_ids = {bay_type.pk for bay_type in bay.module_bay_types.all()}
+    if not bay_type_ids:
+        return None
+    return not bay_type_ids.isdisjoint(accepted_bay_type_ids)
+
+
+def module_bay_fits(bay, accepted_bay_type_ids):
+    """Apply NetBox's install rule: a typed bay refuses a typed module only when no type is shared."""
+    return module_bay_type_fit(bay, accepted_bay_type_ids) is not False
+
+
 def netbox_relocates_module_subtree():
     """
     Return True when the running NetBox moves a module's whole subtree with it.

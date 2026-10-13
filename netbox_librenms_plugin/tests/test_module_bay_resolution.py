@@ -1,5 +1,7 @@
 """Real-ORM tests for the bulk installer's parent, bay, and mapping resolution."""
 
+import re
+
 import pytest
 
 from netbox_librenms_plugin.tests.conftest import (
@@ -7,10 +9,16 @@ from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_device_with_module_bays,
     make_module_bay,
+    make_module_bay_type,
     make_module_type,
 )
+from netbox_librenms_plugin.utils import netbox_constrains_module_bay_types
 
 pytestmark = pytest.mark.django_db
+
+requires_module_bay_types = pytest.mark.skipif(
+    not netbox_constrains_module_bay_types(), reason="NetBox constrains module bays by type from 4.7"
+)
 
 
 def test_contributed_mappings_load_under_an_ascii_default(monkeypatch):
@@ -625,6 +633,105 @@ class TestInstallSingleResolutionPaths:
 
         assert result["status"] == "installed", result
         assert Module.objects.get(device=device, module_type=module_type).module_bay.name == "1/c2"
+
+    @staticmethod
+    def _optic_in_first_cage(module_type):
+        rows = [
+            _item(1, "CARRIER-4X", "subslot 0/1"),
+            _item(10, "", "", parent=1, phys_class="container", entPhysicalParentRelPos=0),
+            _item(30, module_type.model, "transceiver 0", parent=10),
+        ]
+        return {row["entPhysicalIndex"]: row for row in rows}
+
+    def test_the_position_fallback_never_installs_an_optic_into_a_power_supply_bay(self):
+        from dcim.models import Module
+
+        device = make_device("install-fit-psu-name")
+        make_module_bay(device, "Power Supply Module 1", position="1")
+        module_type = make_module_type("INSTALL-FIT-OPTIC")
+        index_map = self._optic_in_first_cage(module_type)
+
+        result = self._install(device, index_map[30], index_map, module_types=[module_type])
+
+        assert result == {"status": "skipped", "name": "transceiver 0", "reason": "no matching bay"}
+        assert not Module.objects.filter(device=device).exists()
+
+    @requires_module_bay_types
+    def test_the_install_skips_a_bay_whose_bay_types_refuse_the_module(self):
+        from dcim.models import Module
+
+        device = make_device("install-fit-type-refused")
+        make_module_bay(device, "Module 1", position="1", bay_types=("psu",))
+        module_type = make_module_type("INSTALL-FIT-TYPED-OPTIC")
+        module_type.module_bay_types.set([make_module_bay_type("sfp-plus")])
+        index_map = self._optic_in_first_cage(module_type)
+
+        result = self._install(device, index_map[30], index_map, module_types=[module_type])
+
+        assert result == {"status": "skipped", "name": "transceiver 0", "reason": "no matching bay"}
+        assert not Module.objects.filter(device=device).exists()
+
+    @requires_module_bay_types
+    def test_the_install_picks_the_fitting_bay_among_bays_at_one_position(self):
+        from dcim.models import Module
+
+        device = make_device("install-fit-type-picks")
+        make_module_bay(device, "Module 1", position="1", bay_types=("psu",))
+        make_module_bay(device, "Optic 1", position="1", bay_types=("sfp-plus",))
+        module_type = make_module_type("INSTALL-FIT-PICKED-OPTIC")
+        module_type.module_bay_types.set([make_module_bay_type("sfp-plus")])
+        index_map = self._optic_in_first_cage(module_type)
+
+        result = self._install(device, index_map[30], index_map, module_types=[module_type])
+
+        assert result["status"] == "installed", result
+        assert Module.objects.get(device=device).module_bay.name == "Optic 1"
+
+    @requires_module_bay_types
+    def test_a_refused_interface_label_bay_does_not_hide_a_fitting_one(self):
+        """Te1/1/2 names port 2: a refused "SFP 2" must leave "Port 2" to be tried."""
+        from dcim.models import Module
+
+        device = make_device("install-fit-label")
+        make_module_bay(device, "SFP 2", bay_types=("psu",))
+        make_module_bay(device, "Port 2", bay_types=("sfp-plus",))
+        module_type = make_module_type("INSTALL-FIT-LABEL-OPTIC")
+        module_type.module_bay_types.set([make_module_bay_type("sfp-plus")])
+        rows = [
+            _item(1, "CARRIER-4X", "subslot 1/1"),
+            _item(10, "", "", parent=1, phys_class="container", entPhysicalParentRelPos=0),
+            _item(30, module_type.model, "Te1/1/2", parent=10, phys_class="port"),
+        ]
+        index_map = {row["entPhysicalIndex"]: row for row in rows}
+
+        result = self._install(device, index_map[30], index_map, module_types=[module_type])
+
+        assert result["status"] == "installed", result
+        assert Module.objects.get(device=device).module_bay.name == "Port 2"
+
+    @requires_module_bay_types
+    def test_a_preloaded_bay_type_map_adds_no_query_per_install(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.utils import load_module_type_bay_types
+
+        device = make_device("install-fit-preloaded")
+        make_module_bay(device, "Optic 1", position="1", bay_types=("sfp-plus",))
+        module_type = make_module_type("INSTALL-FIT-PRELOADED-OPTIC")
+        module_type.module_bay_types.set([make_module_bay_type("sfp-plus")])
+        index_map = self._optic_in_first_cage(module_type)
+        type_bay_types = load_module_type_bay_types()
+
+        with CaptureQueriesContext(connection) as queries:
+            result = self._install(
+                device, index_map[30], index_map, module_types=[module_type], type_bay_types=type_bay_types
+            )
+
+        assert result["status"] == "installed", result
+        # NetBox's own install validation reads full bay type rows; only a per-type id read is the plugin's.
+        per_type_read = re.compile(r'SELECT "dcim_modulebaytype"\."id"(?: AS "pk")? FROM')
+        assert not [q for q in queries.captured_queries if per_type_read.match(q["sql"])]
 
     def test_omitted_mappings_are_loaded_from_the_database(self):
         device = make_device_with_module_bays("install-loads-mappings", ["PS1"])

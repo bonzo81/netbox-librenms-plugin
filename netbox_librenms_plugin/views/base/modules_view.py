@@ -22,11 +22,16 @@ from netbox_librenms_plugin.utils import (
     get_librenms_sync_device,
     get_module_template_interface_names,
     is_valid_ports_payload,
+    load_module_type_bay_types,
+    module_bay_fits,
+    module_bay_type_fit,
     module_inventory_binding_token,
     module_inventory_row_digest,
     module_inventory_snapshot_digest,
+    module_type_bay_type_ids,
     normalize_librenms_port_id,
     normalize_serial,
+    prefetch_module_bay_types,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -58,6 +63,23 @@ _SKIP_TRANSCEIVER_TYPES = {"Port Container", "Port", ""}
 
 # Physical classes filtered out when counting hardware siblings under a parent bay.
 _NON_HARDWARE_CLASSES = {"sensor", "backplane", "stack"}
+
+# Bay name prefixes per hardware class: "<prefix><slot>" names the bay for that slot.
+_CLASS_BAY_PREFIXES = {
+    "fan": ("Fan Tray ", "Fan ", "FT ", "FT"),
+    "powersupply": ("Power Supply ", "PSU ", "PSU", "PS", "PEM ", "PM ", "PM"),
+}
+
+
+def _reserved_bay_class(bay_name):
+    """Return the hardware class a bay name reserves the bay for, or None."""
+    name = (bay_name or "").strip().casefold()
+    for cls, prefixes in _CLASS_BAY_PREFIXES.items():
+        for prefix in map(str.casefold, prefixes):
+            # A prefix with no trailing space reserves a name only when a number follows ("PS1", not "Port 1").
+            if name.startswith(prefix) and (prefix.endswith(" ") or name[len(prefix) : len(prefix) + 1].isdigit()):
+                return cls
+    return None
 
 
 def _normalize_librenms_text(value) -> str:
@@ -2059,11 +2081,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         return None
 
     @staticmethod
-    def _match_bay_by_interface_label(item, module_bays):
+    def _match_bay_by_interface_label(item, module_bays, accepted_bay_types):
         """Infer bay names from interface labels when positional matching is unavailable."""
         for port_index in BaseModuleTableView._extract_interface_port_indices(item):
             for pattern in [f"SFP {port_index}", f"Port {port_index}", f"Bay {port_index}", f"Slot {port_index}"]:
-                if pattern in module_bays:
+                if pattern in module_bays and module_bay_fits(module_bays[pattern], accepted_bay_types):
                     return module_bays[pattern]
         return None
 
@@ -2239,12 +2261,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         )
         device_bays = {}
         module_scoped_bays = {}
-        for bay in bays:
+        for bay in prefetch_module_bay_types(bays):
             if bay.module_id:
                 module_scoped_bays.setdefault(bay.module_id, {})[bay.name] = bay
             else:
                 device_bays[bay.name] = bay
         return device_bays, module_scoped_bays
+
+    def _accepted_bay_types(self, module_type):
+        """Return the module bay types *module_type* fits, from one load per render."""
+        type_bay_types = getattr(self, "_type_bay_types", None)
+        if type_bay_types is None:
+            type_bay_types = self._type_bay_types = load_module_type_bay_types()
+        return module_type_bay_type_ids(module_type, type_bay_types)
 
     def _get_module_types(self):
         """Get all module types indexed by model/part_number, with ModuleTypeMapping applied."""
@@ -2430,17 +2459,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 normalized_extras.append(normalized)
         return candidate_names + normalized_extras
 
-    def _match_module_bay(self, item, index_map, module_bays):
+    def _match_module_bay(self, item, index_map, module_bays, accepted_bay_types=frozenset()):
         """
         Try to match an inventory item to a NetBox ModuleBay.
 
         Checks ModuleBayMapping table first (exact then regex), then falls back
-        to exact parent name match, then positional matching.
+        to exact parent name match, then positional matching. The two fallbacks
+        guess, so they skip a bay whose module bay types refuse the module.
 
         Args:
             item (dict): The inventory item to match.
             index_map (dict): Inventory items keyed by physical index.
             module_bays (dict): Available NetBox module bays keyed by name.
+            accepted_bay_types (frozenset): The module bay types the matched module type fits.
 
         Returns:
             ModuleBay | None: The matched module bay, or None if no bay matches.
@@ -2483,22 +2514,42 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             if bay:
                 return bay
 
-        # Fallback: exact match on candidate names against bay dict, with FPC-scope check
-        for name in all_candidates:
-            if name in module_bays:
-                maps = module_bays.maps if hasattr(module_bays, "maps") else [module_bays]
-                for scope_map in maps:
-                    if name in scope_map:
-                        bay = scope_map[name]
-                        if BaseModuleTableView._fpc_slot_matches(name, bay):
-                            return bay
-
-        # Positional fallback: determine slot number from container sibling order
-        # Handles SFPs inside converters where containers are unnamed
-        bay = self._match_bay_by_position(item, index_map, module_bays)
+        bay = BaseModuleTableView._match_bay_by_name(all_candidates, module_bays, accepted_bay_types)
         if bay:
             return bay
 
+        # Positional fallback: determine slot number from container sibling order
+        # Handles SFPs inside converters where containers are unnamed
+        bay = self._match_bay_by_position(item, index_map, module_bays, accepted_bay_types)
+        if bay:
+            return bay
+
+        return None
+
+    @staticmethod
+    def _match_bay_by_name(candidate_names, module_bays, accepted_bay_types):
+        """
+        Return the first bay named like a candidate that passes the FPC-scope check and fits the module.
+
+        Args:
+            candidate_names (list[str]): Candidate bay names in matching order.
+            module_bays (dict): Available NetBox module bays keyed by name.
+            accepted_bay_types (frozenset): The module bay types the matched module type fits.
+
+        Returns:
+            ModuleBay | None: The name-matched module bay, or None if no bay matches.
+
+        """
+        maps = module_bays.maps if hasattr(module_bays, "maps") else [module_bays]
+        for name in candidate_names:
+            for scope_map in maps:
+                bay = scope_map.get(name)
+                if (
+                    bay is not None
+                    and BaseModuleTableView._fpc_slot_matches(name, bay)
+                    and module_bay_fits(bay, accepted_bay_types)
+                ):
+                    return bay
         return None
 
     @staticmethod
@@ -2662,7 +2713,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         return None
 
     @staticmethod
-    def _match_bay_by_position(item, index_map, module_bays):  # noqa: C901
+    def _match_bay_by_position(item, index_map, module_bays, accepted_bay_types=frozenset()):
         """
         Match bay by item's positional order among container siblings.
 
@@ -2674,6 +2725,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             item (dict): The inventory item to match.
             index_map (dict): Inventory items keyed by physical index.
             module_bays (dict): Available NetBox module bays keyed by name.
+            accepted_bay_types (frozenset): The module bay types the matched module type fits.
 
         Returns:
             ModuleBay | None: The position-matched module bay, or None if no bay matches.
@@ -2741,42 +2793,32 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # (e.g. no "Fan Tray N" / "PSU N" defined on the device type), we
         # surface "No Bay" and let the user fix the model rather than guess.
         phys_class = _normalize_librenms_text(item.get("entPhysicalClass")).lower()
-        if phys_class == "fan":
-            patterns = [f"Fan Tray {slot_num}", f"Fan {slot_num}", f"FT {slot_num}", f"FT{slot_num}"]
-        elif phys_class == "powersupply":
-            patterns = [
-                f"Power Supply {slot_num}",
-                f"PSU {slot_num}",
-                f"PSU{slot_num}",
-                f"PS{slot_num}",
-                f"PEM {slot_num}",
-                f"PM {slot_num}",
-                f"PM{slot_num}",
-            ]
+        if phys_class in _CLASS_BAY_PREFIXES:
+            patterns = [f"{prefix}{slot_num}" for prefix in _CLASS_BAY_PREFIXES[phys_class]]
         elif phys_class in {"module", "port", "iomodule", "cpmmodule", "mdamodule", "fabricmodule", "xiomodule"}:
             patterns = [f"SFP {slot_num}", f"Slot {slot_num}", f"Bay {slot_num}", f"Port {slot_num}"]
         else:
             return None
 
         for pattern in patterns:
-            if pattern in module_bays:
+            if pattern in module_bays and module_bay_fits(module_bays[pattern], accepted_bay_types):
                 return module_bays[pattern]
 
-        bay = BaseModuleTableView._match_bay_by_position_value(module_bays, slot_num)
+        bay = BaseModuleTableView._match_bay_by_position_value(module_bays, slot_num, phys_class, accepted_bay_types)
         if bay:
             return bay
 
         # Final fallback for interface-like children: infer bay index from
         # labels such as Te1/1/1 or TenGigabitEthernet1/1/1.
         if phys_class == "port":
-            bay = BaseModuleTableView._match_bay_by_interface_label(item, module_bays)
+            bay = BaseModuleTableView._match_bay_by_interface_label(item, module_bays, accepted_bay_types)
             if bay:
                 return bay
 
         return None
 
     @staticmethod
-    def _match_bay_by_position_value(module_bays, slot_num):
+    def _match_bay_by_position_value(module_bays, slot_num, phys_class, accepted_bay_types):
         """Match a bay by its NetBox ``position`` field when the name is inconsistent."""
         if not isinstance(slot_num, int) or slot_num < 1:
             return None
@@ -2796,7 +2838,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 seen.add(marker)
 
                 position = str(getattr(bay, "position", "") or "").strip().upper()
-                if position in expected_positions:
+                if position not in expected_positions:
+                    continue
+                type_fit = module_bay_type_fit(bay, accepted_bay_types)
+                # Shared bay types decide. Without them, a bay named for another hardware class only shares the number.
+                if type_fit or (type_fit is None and _reserved_bay_class(bay.name) in (None, phys_class)):
                     matches.append(bay)
 
         if len(matches) == 1:
@@ -2949,9 +2995,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 "_source": item.get("_source", MAIN_INVENTORY_SOURCE),
             }
 
-        # Match to NetBox module bay
-        matched_bay = self._match_module_bay(item, index_map, module_bays)
-
         # Match to NetBox module type (direct lookup, normalization fallback, then Generic fallback).
         # Type mappings are manufacturer-scoped, so a virtual-chassis row resolves against the
         # member it targets rather than the page device.
@@ -2966,6 +3009,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             generic_fallback=generic_module_types,
             fallback_names=module_type_lookup_candidates(item),
         )
+
+        # The type comes first because a guessed bay must fit it.
+        matched_bay = self._match_module_bay(item, index_map, module_bays, self._accepted_bay_types(matched_type))
 
         # Determine status; override to "Name Conflict" when the matched module
         # type uses {module} in interface templates and has sibling bays (which

@@ -622,11 +622,22 @@ def make_module_type(model, *, manufacturer=None):
     return ModuleType.objects.create(manufacturer=manufacturer, model=model)
 
 
-def make_module_bay(device, name):
-    """Create a real ModuleBay on *device*."""
+def make_module_bay(device, name, *, position="", bay_types=()):
+    """Create a real ModuleBay on *device*, typed by the *bay_types* slugs (NetBox 4.7)."""
     from dcim.models import ModuleBay
 
-    return ModuleBay.objects.create(device=device, name=name)
+    bay = ModuleBay.objects.create(device=device, name=name, position=position)
+    if bay_types:
+        bay.module_bay_types.set([make_module_bay_type(slug) for slug in bay_types])
+    return bay
+
+
+def make_module_bay_type(slug):
+    """get_or_create a real ModuleBayType (NetBox 4.7)."""
+    from dcim.models import ModuleBayType
+
+    bay_type, _ = ModuleBayType.objects.get_or_create(slug=slug, defaults={"name": slug})
+    return bay_type
 
 
 def make_module_type_with_bays(model, *, manufacturer=None, bay_names=()):
