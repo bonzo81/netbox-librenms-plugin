@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
 from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
 from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view, message_texts
@@ -296,7 +297,7 @@ class TestTrustedPayloadMatchesTheDeviceMapping:
 
         payload = trusted_module_inventory_payload(device, [{"index": 1}], librenms_id=9)
 
-        assert payload == {"inventory": [{"index": 1}], "librenms_id": 9, "oob_librenms_id": None}
+        assert payload == module_inventory_cache_payload([{"index": 1}], 9, None)
 
     def test_a_written_mapping_refreshes_the_cached_custom_field_value(self):
         """The helper must verify a write against current custom field data."""
@@ -308,4 +309,4 @@ class TestTrustedPayloadMatchesTheDeviceMapping:
 
         payload = trusted_module_inventory_payload(device, [{"index": 1}], librenms_id=9)
 
-        assert payload == {"inventory": [{"index": 1}], "librenms_id": 9, "oob_librenms_id": None}
+        assert payload == module_inventory_cache_payload([{"index": 1}], 9, None)

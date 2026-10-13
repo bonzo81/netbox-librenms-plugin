@@ -23,6 +23,7 @@ from netbox_librenms_plugin.sync_cache import (
     SyncTabState,
     apply_request_cache_transition,
     claim_sync_subjects,
+    module_inventory_cache_payload,
     schedule_request_cache_mutation,
     sync_cache_browser_contract,
     sync_subject_key,
@@ -348,6 +349,30 @@ def test_cable_cache_fragment_does_not_rewrite_the_snapshot(client, settings, pr
 
 
 @pytest.mark.django_db
+def test_module_cache_status_reads_the_inventory_snapshot_like_the_tab(client, settings):
+    """A snapshot from an older inventory writer is one the Modules tab rejects, so status must not call it ready."""
+    _configure_servers(settings)
+    device = make_device("cache-status-module-version", librenms_cf={"primary": {"id": 6406}})
+    key = _cache_key("inventory", device, "primary")
+    cache.set(key, {"inventory": [], "librenms_id": 6406, "oob_librenms_id": None}, timeout=300)
+    client.force_login(make_superuser("cache-status-module-version-user"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_status",
+        kwargs={"object_type": "device", "pk": device.pk},
+    )
+
+    stale = client.get(url, {"server_key": "primary"})
+    cache.set(key, module_inventory_cache_payload([], 6406, None), timeout=300)
+    current = client.get(url, {"server_key": "primary"})
+
+    assert stale.status_code == current.status_code == 200
+    stale_modules = stale.json()["tabs"]["modules"]
+    current_modules = current.json()["tabs"]["modules"]
+    assert (stale_modules["state"], stale_modules["snapshot_available"]) == ("missing", False)
+    assert (current_modules["state"], current_modules["snapshot_available"]) == ("ready", True)
+
+
+@pytest.mark.django_db
 def test_module_cache_fragment_does_not_discover_a_missing_host_id(client, settings, primary_librenms):
     """An OOB-mapped module fragment must not discover a missing host identity."""
     _configure_servers(settings)
@@ -357,7 +382,7 @@ def test_module_cache_fragment_does_not_discover_a_missing_host_id(client, setti
     )
     cache.set(
         _cache_key("inventory", device, "primary"),
-        {"inventory": [], "librenms_id": 9999, "oob_librenms_id": 6405},
+        module_inventory_cache_payload([], 9999, 6405),
         timeout=300,
     )
     client.force_login(make_superuser("cache-only-module-user"))
@@ -1201,10 +1226,9 @@ def test_unchanged_module_serial_preserves_other_snapshots(client, settings, dja
         module_type=module_type,
         serial="UNCHANGED-SERIAL",
     )
-    inventory_payload = {
-        "librenms_id": 641,
-        "inventory": [{"entPhysicalIndex": 8102, "entPhysicalSerialNum": module.serial}],
-    }
+    inventory_payload = module_inventory_cache_payload(
+        [{"entPhysicalIndex": 8102, "entPhysicalSerialNum": module.serial}], 641, None
+    )
     _seed_snapshot("inventory", device, "primary", inventory_payload)
     _seed_snapshot("ports", device, "primary")
     client.force_login(make_superuser("cache-module-unchanged-user"))
@@ -1252,10 +1276,9 @@ def test_module_mutation_without_posted_server_uses_active_namespace(
         model="Cache Scoped Module",
     )
     module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, serial="OLD")
-    inventory_payload = {
-        "librenms_id": 642,
-        "inventory": [{"entPhysicalIndex": 8103, "entPhysicalSerialNum": "NEW"}],
-    }
+    inventory_payload = module_inventory_cache_payload(
+        [{"entPhysicalIndex": 8103, "entPhysicalSerialNum": "NEW"}], 642, None
+    )
     _seed_snapshot(
         "inventory",
         device,

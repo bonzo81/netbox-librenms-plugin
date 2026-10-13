@@ -29,6 +29,56 @@ _ACKNOWLEDGED_REVISIONS_SESSION_KEY = "librenms_sync_cache_acknowledged_revision
 _MAX_ACKNOWLEDGED_REVISIONS = 200
 
 
+# Increase when cached inventory rows change meaning; a reader treats any other payload as a miss.
+MODULE_INVENTORY_CACHE_VERSION = 2
+
+
+def module_inventory_cache_payload(inventory, librenms_id, oob_librenms_id) -> dict:
+    """
+    Return the cached module inventory payload, stamped with the current schema version.
+
+    Args:
+        inventory (list[dict]): The merged inventory rows.
+        librenms_id (int): The LibreNMS device ID the rows came from.
+        oob_librenms_id (int | None): The linked OOB controller ID, or None.
+
+    Returns:
+        dict: The payload to cache.
+
+    """
+    return {
+        "version": MODULE_INVENTORY_CACHE_VERSION,
+        "inventory": inventory,
+        "librenms_id": librenms_id,
+        "oob_librenms_id": oob_librenms_id,
+    }
+
+
+def cached_module_inventory(payload):
+    """
+    Return the inventory rows of a cached payload, or None when the payload is unusable.
+
+    A refreshed device with an empty LibreNMS inventory caches ``[]``, which is data and not a
+    miss, so callers must test ``is None``.
+
+    Args:
+        payload (object): The cached value.
+
+    Returns:
+        list[dict] | None: The rows, or None for an older schema version or a malformed payload.
+
+    """
+    if not isinstance(payload, dict):
+        return None
+    version = payload.get("version")
+    if type(version) is not int or version != MODULE_INVENTORY_CACHE_VERSION:
+        return None
+    inventory = payload.get("inventory")
+    if not isinstance(inventory, list) or any(not isinstance(item, dict) for item in inventory):
+        return None
+    return inventory
+
+
 class SyncTab(StrEnum):
     """The cache-backed tabs on a LibreNMS object sync page."""
 
@@ -660,12 +710,19 @@ class SyncCacheConsistency:
                 )
                 transition.revisions[(server_key, tab)] = record["revision"]
 
+    def _snapshot_readable(self, tab, server_key):
+        """Return whether the tab's snapshot exists in a form its reader accepts."""
+        key = self.snapshot_key(tab, server_key)
+        if tab == SyncTab.MODULES:
+            return cached_module_inventory(cache.get(key)) is not None
+        return cache.has_key(key)
+
     def status(self, server_key, *, actor_id=None):
         """Inspect tab state and actual payload keys without contacting LibreNMS."""
         result = {}
         for tab in self.applicable_tabs():
             record = cache.get(self.state_key(tab, server_key))
-            snapshot_exists = cache.has_key(self.snapshot_key(tab, server_key))
+            snapshot_exists = self._snapshot_readable(tab, server_key)
             if not isinstance(record, dict):
                 record = {}
             timestamp = record.get("timestamp")
