@@ -53,7 +53,14 @@ from netbox_librenms_plugin.utils import (
 from netbox_librenms_plugin.utils import (
     coerce_positive_int as _coerce_positive_int,
 )
-from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView, _PLACEHOLDER_VALUES, _inventory_item_key
+from netbox_librenms_plugin.views.base.modules_view import (
+    NO_DEVICE_IDENTITY,
+    BaseModuleTableView,
+    DeviceIdentity,
+    _PLACEHOLDER_VALUES,
+    _check_ignore_rules,
+    _inventory_item_key,
+)
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -1243,7 +1250,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             parent_index,
             cached_data,
             default_context["ignore_rules"],
-            default_context["device_serial"],
+            default_context["device_identity"],
             index_map,
             ignore_contexts=ignore_contexts,
         )
@@ -1370,7 +1377,14 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         return manufacturer_contexts
 
     def _collect_branch(
-        self, parent_index, inventory_data, ignore_rules=None, device_serial="", index_map=None, *, ignore_contexts=None
+        self,
+        parent_index,
+        inventory_data,
+        ignore_rules=None,
+        device_identity=NO_DEVICE_IDENTITY,
+        index_map=None,
+        *,
+        ignore_contexts=None,
     ):
         """
         Collect all items in a branch depth-first, parent first.
@@ -1383,7 +1397,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             parent_index (int): The inventory index at the branch root.
             inventory_data (list[dict]): The LibreNMS inventory items.
             ignore_rules (list[dict] | None): The optional inventory ignore rules.
-            device_serial (str): The device serial used to evaluate ignore rules.
+            device_identity (DeviceIdentity): The device identity used to evaluate ignore rules.
             index_map (dict | None): The inventory items keyed by index.
             ignore_contexts (dict | None): The owner and ignore policy for each inventory item.
 
@@ -1394,14 +1408,12 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         items = []
         parent = next((i for i in inventory_data if i.get("entPhysicalIndex") == parent_index), None)
         if parent:
-            item_rules, item_serial = BaseModuleTableView._ignore_policy_for_item(
-                parent, ignore_contexts, ignore_rules, device_serial
+            item_rules, item_identity = BaseModuleTableView._ignore_policy_for_item(
+                parent, ignore_contexts, ignore_rules, device_identity
             )
             if item_rules:
-                from netbox_librenms_plugin.views.base.modules_view import _check_ignore_rules
-
                 ancestor = index_map.get(parent.get("entPhysicalContainedIn")) if index_map else None
-                action = _check_ignore_rules(parent, ancestor, item_rules, index_map, item_serial)
+                action = _check_ignore_rules(parent, ancestor, item_rules, index_map, item_identity)
                 if action == "skip":
                     return []
                 if action == "transparent":
@@ -1411,7 +1423,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         items,
                         visited={parent_index},
                         ignore_rules=ignore_rules,
-                        device_serial=device_serial,
+                        device_identity=device_identity,
                         index_map=index_map,
                         ignore_contexts=ignore_contexts,
                     )
@@ -1425,7 +1437,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 items,
                 visited={parent_index},
                 ignore_rules=ignore_rules,
-                device_serial=device_serial,
+                device_identity=device_identity,
                 index_map=index_map,
                 ignore_contexts=ignore_contexts,
             )
@@ -1438,7 +1450,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         items,
         visited=None,
         ignore_rules=None,
-        device_serial="",
+        device_identity=NO_DEVICE_IDENTITY,
         index_map=None,
         *,
         ignore_contexts=None,
@@ -1456,7 +1468,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             items (list[dict]): The output list that receives installable children.
             visited (set[int] | None): The inventory indexes already visited.
             ignore_rules (list[dict] | None): The optional inventory ignore rules.
-            device_serial (str): The device serial used to evaluate ignore rules.
+            device_identity (DeviceIdentity): The device identity used to evaluate ignore rules.
             index_map (dict | None): The inventory items keyed by index.
             ignore_contexts (dict | None): The owner and ignore policy for each inventory item.
 
@@ -1471,14 +1483,12 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             if child_idx in visited:
                 continue
             visited.add(child_idx)
-            item_rules, item_serial = BaseModuleTableView._ignore_policy_for_item(
-                child, ignore_contexts, ignore_rules, device_serial
+            item_rules, item_identity = BaseModuleTableView._ignore_policy_for_item(
+                child, ignore_contexts, ignore_rules, device_identity
             )
             if item_rules:
-                from netbox_librenms_plugin.views.base.modules_view import _check_ignore_rules
-
                 parent_item = index_map.get(child.get("entPhysicalContainedIn")) if index_map else None
-                action = _check_ignore_rules(child, parent_item, item_rules, index_map, item_serial)
+                action = _check_ignore_rules(child, parent_item, item_rules, index_map, item_identity)
                 if action == "skip":
                     continue
                 if action == "transparent":
@@ -1489,7 +1499,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         items,
                         visited,
                         ignore_rules,
-                        device_serial,
+                        device_identity,
                         index_map,
                         ignore_contexts=ignore_contexts,
                     )
@@ -1504,7 +1514,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 items,
                 visited,
                 ignore_rules,
-                device_serial,
+                device_identity,
                 index_map,
                 ignore_contexts=ignore_contexts,
             )
@@ -2185,7 +2195,6 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         # resolve them per target and cache by manufacturer rather than loading the page device's
         # set once for every row.
         from netbox_librenms_plugin.utils import get_enabled_ignore_rules
-        from netbox_librenms_plugin.views.base.modules_view import _check_ignore_rules
 
         ignore_rules_by_manufacturer = {}
 
@@ -2252,13 +2261,12 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 for item, target_device, ignore_rules in resolved_items:
                     target_device.serial = current_serials[target_device.pk]
                     if ignore_rules:
-                        target_serial = (getattr(target_device, "serial", None) or "").strip()
                         rule_action = _check_ignore_rules(
                             item,
                             index_map.get(item.get("entPhysicalContainedIn")),
                             ignore_rules,
                             index_map,
-                            target_serial,
+                            DeviceIdentity.of(target_device),
                         )
                         if rule_action in {"skip", "transparent"}:
                             skipped.append(f"{item.get('entPhysicalName', '?')}: matched ignore rule")
