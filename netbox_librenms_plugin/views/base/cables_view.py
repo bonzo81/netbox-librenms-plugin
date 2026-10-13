@@ -1781,15 +1781,14 @@ class BaseCableTableView(
             near, far = far, near
         if near != interface:
             return None
-        peer_device = getattr(far, "device", None)
-        if peer_device is None:
+        peer_device_id = getattr(far, "device_id", None)
+        if peer_device_id is None:
             return None
-        # One management switch is the peer of many ports, so memoise per request rather than
-        # asking once per row.
+        # One management switch is the peer of many ports: read its device once per request, by id.
         memo = self.__dict__.setdefault("_peer_device_visibility", {})
-        if peer_device.pk not in memo:
-            memo[peer_device.pk] = self._object_is_viewable(peer_device)
-        return peer_device if memo[peer_device.pk] else None
+        if peer_device_id not in memo:
+            memo[peer_device_id] = self._viewable_queryset(Device).filter(pk=peer_device_id).first()
+        return memo[peer_device_id]
 
     def check_serial_cable_status(self, link, csp=None, remote_context=None):
         """
@@ -2698,10 +2697,11 @@ class BaseCableTableView(
         Return the NetBox device that owns the row's advertised remote port, or None.
 
         This is the neighbour the row names, or its chassis member for a VC, resolved the way the
-        remote end is. A manual pick does not change it.
+        remote end is. A manual pick does not change it. An owner the request may not view is None.
         """
         if normal_context is not None:
-            return normal_context["remote_owner_by_link"].get(id(link))
+            owner = normal_context["remote_owner_by_link"].get(id(link))
+            return owner if owner is not None and owner.pk in normal_context["visible_owner_ids"] else None
         device, found, _error = self.get_device_by_id_or_name(
             link.get("remote_device_id"),
             link.get("remote_device"),
@@ -2712,7 +2712,8 @@ class BaseCableTableView(
             return None
         if device.virtual_chassis_id is None:
             return device
-        return get_virtual_chassis_member(device, link.get("remote_port"), return_device_on_failure=False)
+        member = get_virtual_chassis_member(device, link.get("remote_port"), return_device_on_failure=False)
+        return member if member is not None and self._object_is_viewable(member) else None
 
     def get_table(self, data, obj):
         """Return the cable table for *data*; concrete subclasses choose the table class."""

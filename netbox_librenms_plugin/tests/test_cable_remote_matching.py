@@ -2033,6 +2033,42 @@ def test_an_unmodelled_neighbour_keeps_the_local_cable_report(client, hostname, 
     assert not formatted["can_create_cable"]
 
 
+@pytest.mark.django_db
+def test_one_sided_rows_to_one_peer_read_its_device_once():
+    """A management switch is the peer of many one-sided rows; its device must not load per row."""
+    import re
+
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    from netbox_librenms_plugin.tests.conftest import cable_together
+
+    server_key = configured_server_key()
+    device_reads = re.compile(r'FROM "dcim_device"')
+
+    def device_queries(port_count):
+        local_device = make_device(f"one-peer-local-{port_count}")
+        peer_device = make_device(f"one-peer-switch-{port_count}")
+        rows = []
+        for index in range(port_count):
+            local = make_interface(local_device, f"eth{index}")
+            cable_together(local, make_interface(peer_device, f"ge-0/0/{index}"))
+            rows.append(
+                _row(
+                    local_port=local.name,
+                    local_port_id=100 + index,
+                    link_id=index + 1,
+                    remote_device="",
+                    remote_device_id=None,
+                )
+            )
+        with CaptureQueriesContext(connection) as captured:
+            enriched = _make_view().enrich_links_data(rows, local_device, server_key=server_key)
+        assert [row["cable_status"] for row in enriched] == [f"Cabled to {peer_device.name}"] * port_count
+        return sum(1 for query in captured.captured_queries if device_reads.search(query["sql"]))
+
+    assert device_queries(5) == device_queries(2)
+
+
 @transactional_db_with_all_apps()
 def test_remote_creation_locks_both_devices_before_inserting_an_interface(librenms_server, settings):
     from django.db import DatabaseError, connection, connections
@@ -2138,6 +2174,41 @@ def test_remote_create_uses_the_resolved_chassis_member(librenms_server, setting
     else:
         created = Interface.objects.get(device=member, name="Gi0/1")
         assert created.cable_id == local_interface.cable_id is not None
+
+
+@pytest.mark.django_db
+def test_remote_create_is_not_offered_for_a_chassis_member_out_of_view(librenms_server, settings):
+    """The endpoint refuses an owner the request may not view, so the table must not offer it."""
+    from dcim.models import Cable, Device, Interface, VirtualChassis
+    from django.urls import reverse
+    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+    key, local, _local_interface, advertised, _ = TestCheckAndCreateTheRemoteEnd()._scenario(
+        "create-hidden-member", librenms_server, settings
+    )
+    chassis = VirtualChassis.objects.create(name="create-hidden-chassis")
+    advertised.virtual_chassis, advertised.vc_position = chassis, 1
+    advertised.save()
+    member = make_device("create-hidden-member-two")
+    member.virtual_chassis, member.vc_position = chassis, 2
+    member.save()
+    row = _row(remote_device=advertised.name, remote_device_id=9, remote_port="Gi2/0/1", remote_port_key=500)
+    row_id = _seed_cable_row(local, row, key)
+    user = make_user_with_perms(
+        "create-hidden-member",
+        [("view", Interface), ("change", Interface), ("add", Interface), ("add", Cable), ("change", Cable)],
+    )
+    user = grant(user, "view", Device, constraints={"pk__in": [local.pk, advertised.pk]})
+
+    view = _make_view()
+    view.request.user = user
+    enriched = view.enrich_links_data([dict(row)], local, server_key=key)[0]
+    assert enriched.get("remote_port_owner_id") is None
+    assert not enriched.get("remote_create_url")
+
+    formatted = _verify(_logged_in(user), local, row_id, key)
+    create_path = reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[local.pk])
+    assert create_path not in json.dumps(formatted)
 
 
 @pytest.mark.django_db
