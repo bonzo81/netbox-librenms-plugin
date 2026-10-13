@@ -104,6 +104,57 @@ def _seeded_model_rows():
     yield SerialSensorTypePattern, "sensor_type", "port_name_pattern", serial.INITIAL_SERIAL_SENSOR_TYPES
 
 
+def _seeded_ignore_rule_signatures():
+    """
+    Yield ``(model, signature)`` for each rule migration 0010 seeds.
+
+    The signature is the migration's own reverse-match field set, so a row restored here is the
+    same row its ``_delete_default_inventory_ignore_rules`` would remove. ``test_migration_state``
+    pins these against the migration so the two cannot drift.
+    """
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+    yield (
+        InventoryIgnoreRule,
+        {
+            "name": "Cisco IOS-XR IDPROM entries",
+            "match_type": "ends_with",
+            "pattern": "IDPROM",
+            "action": "skip",
+            "require_serial_match_parent": True,
+        },
+    )
+    yield (
+        InventoryIgnoreRule,
+        {
+            "name": "Embedded RP / fixed-chassis system board",
+            "match_type": "serial_matches_device",
+            "pattern": "",
+            "action": "transparent",
+            "require_serial_match_parent": False,
+        },
+    )
+
+
+def restore_inventory_ignore_rules():
+    """
+    Re-apply migration 0010's seeded rules by running the migration's own insert.
+
+    Reusing the migration code (rather than restating the field values) keeps the restored rows
+    byte-identical to a fresh migrate, descriptions included. The reverse runs first so repeated
+    restores stay idempotent against the unique-signature rows it creates.
+    """
+    import importlib
+    from types import SimpleNamespace
+
+    from django.apps import apps as global_apps
+
+    migration = importlib.import_module("netbox_librenms_plugin.migrations.0010_inventory_and_mapping_models")
+    schema_editor = SimpleNamespace(connection=SimpleNamespace(alias="default"))
+    migration._delete_default_inventory_ignore_rules(global_apps, schema_editor)
+    migration._insert_default_inventory_ignore_rules(global_apps, schema_editor)
+
+
 def _seeded_sap_rows():
     """
     Yield ``(model, lookup_field, value_field, rows)`` for the seed that UPDATES existing rows.
@@ -132,10 +183,8 @@ def _seeded_rule_rows():
 
     from netbox_librenms_plugin.models import InventoryIgnoreRule, NormalizationRule, PortStackLagPattern
 
-    inventory = importlib.import_module("netbox_librenms_plugin.migrations.0010_inventory_and_mapping_models")
-    for rule in inventory.INITIAL_INVENTORY_IGNORE_RULES:
-        yield InventoryIgnoreRule, {"name": rule["name"]}, rule
-
+    # Migration 0010's rules are restored by :func:`restore_inventory_ignore_rules`, which reuses
+    # the migration's own insert, so they are deliberately not repeated here.
     rules = importlib.import_module("netbox_librenms_plugin.migrations.0017_inventory_class_include_rule")
     yield InventoryIgnoreRule, {"name": rules.DEFAULT_RULE["name"]}, rules.DEFAULT_RULE
     yield (
@@ -196,8 +245,13 @@ def seed_migration_rows():
         else:
             model.objects.update_or_create(**lookup, defaults=defaults)
 
-    # The declared rows carry no manufacturer, so a restored include rule would come back
-    # vendor-agnostic while a fresh migrate scopes it. Re-run the migration's own scoping.
+    # Migration 0010's two InventoryIgnoreRules are seeded the same way, and the modules sync
+    # reads them out of the box: without this a transactional flush leaves every later test in
+    # the worker running with no ignore rules at all.
+    restore_inventory_ignore_rules()
+
+    # Scope last, once every rule row is back: the declared rows carry no manufacturer, so a
+    # restored include rule would stay vendor-agnostic while a fresh migrate scopes it.
     restore_inventory_rule_scoping()
 
 
@@ -224,6 +278,8 @@ def _seeds_are_intact():
     from extras.models import CustomField
     from virtualization.models import VirtualMachine, VMInterface
 
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+
     # Both seeds, or a corrupted sap_name_pattern reports the state as intact and
     # restore_seeded_state(force=False) skips the repair it needs.
     for model, lookup_field, value_field, rows in chain(_seeded_model_rows(), _seeded_sap_rows()):
@@ -244,6 +300,10 @@ def _seeds_are_intact():
     )
     if not juniper_ids.issubset(scoped_ids):
         return False
+    migration = importlib.import_module("netbox_librenms_plugin.migrations.0010_inventory_and_mapping_models")
+    for defaults in migration.INITIAL_INVENTORY_IGNORE_RULES:
+        if not InventoryIgnoreRule.objects.filter(**defaults).exists():
+            return False
 
     custom_field = CustomField.objects.filter(name="librenms_id", type="json").first()
     if custom_field is None:
@@ -505,6 +565,26 @@ def configure_no_librenms_servers(settings):
     settings.PLUGINS_CONFIG = plugin_config
 
 
+def bind_librenms_server(settings, server, *, server_key):
+    """Point the plugin at a loopback LibreNMS and return a client bound to *server_key*."""
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+    configure_librenms_servers(settings, {server_key: {"librenms_url": server.url, "api_token": "test-token"}})
+    return LibreNMSAPI(server_key=server_key)
+
+
+def map_device_to_librenms(device, librenms_id=None, *, server_key, oob=None):
+    """Persist the device's LibreNMS mapping, optionally with an OOB controller sub-entry."""
+    entry = {}
+    if librenms_id is not None:
+        entry["id"] = librenms_id
+    if oob is not None:
+        entry["oob"] = oob
+    device.custom_field_data["librenms_id"] = {server_key: entry}
+    device.save(update_fields=["custom_field_data"])
+    return device
+
+
 @pytest.fixture
 def librenms_server(monkeypatch):
     """A real loopback HTTP LibreNMS whose responses the test registers."""
@@ -644,7 +724,6 @@ def make_recording_api(url, *, server_key="test", token="test-token"):
         server_key: {
             "librenms_url": url,
             "api_token": token,
-            "cache_timeout": 0,
             "verify_ssl": False,
         }
     }
@@ -687,6 +766,70 @@ def recording_server(monkeypatch):
 # =============================================================================
 # Configuration Fixtures
 # =============================================================================
+
+
+@pytest.fixture
+def configure_librenms(settings):
+    """Configure the real NetBox plugin-settings boundary for one test."""
+
+    def _configure(
+        servers,
+        *,
+        librenms_url=None,
+        api_token=None,
+        cache_timeout=300,
+        verify_ssl=True,
+    ):
+        plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+        librenms_config = dict(plugin_config.get("netbox_librenms_plugin", {}))
+        librenms_config.update(
+            {
+                "servers": servers,
+                "librenms_url": librenms_url,
+                "api_token": api_token,
+                "cache_timeout": cache_timeout,
+                "verify_ssl": verify_ssl,
+            }
+        )
+        plugin_config["netbox_librenms_plugin"] = librenms_config
+        settings.PLUGINS_CONFIG = plugin_config
+
+    _configure(
+        {
+            "default": {
+                "librenms_url": "https://librenms.example.com",
+                "api_token": "test-token",
+                "cache_timeout": 300,
+                "verify_ssl": True,
+            }
+        }
+    )
+    return _configure
+
+
+@pytest.fixture
+def live_librenms(configure_librenms, monkeypatch):
+    """Run a controllable loopback LibreNMS and return its real API client."""
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    from netbox_librenms_plugin.tests.mock_librenms_server import MockLibreNMSServer
+
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    server = MockLibreNMSServer().start()
+    configure_librenms(
+        {
+            "default": {
+                "librenms_url": server.url,
+                "api_token": "test-token",
+                "cache_timeout": 0,
+                "verify_ssl": False,
+            }
+        }
+    )
+    try:
+        yield SimpleNamespace(server=server, api=LibreNMSAPI(server_key="default"))
+    finally:
+        server.stop()
 
 
 @pytest.fixture

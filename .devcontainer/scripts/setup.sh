@@ -60,7 +60,7 @@ if [ -n "$HTTP_PROXY" ] || [ -n "$HTTPS_PROXY" ]; then
   CA_BUNDLE_SRC="$PLUGIN_WS_DIR_EARLY/ca-bundle.crt"
   if [ -f "$CA_BUNDLE_SRC" ]; then
     echo "🔐 Installing custom CA certificate into system trust store..."
-    cert_count=$(grep -c '-----BEGIN CERTIFICATE-----' "$CA_BUNDLE_SRC" 2>/dev/null || true)
+    cert_count=$(grep -c -- '-----BEGIN CERTIFICATE-----' "$CA_BUNDLE_SRC" 2>/dev/null || true)
     if [ "${cert_count:-0}" -eq 0 ]; then
       echo "  ⚠️  ca-bundle.crt does not contain any PEM certificate blocks; skipping CA install."
     else

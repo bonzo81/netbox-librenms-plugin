@@ -470,7 +470,7 @@ def interface_name_fallback_matches_port(interface, port_id, server_key) -> bool
 
 
 def get_interface_port_identity_sets(ports, interface_name_field) -> tuple[set[int], set[int]]:
-    """Return host IDs that are unique and the subset with a unique selected display name."""
+    """Return unique host and OOB port IDs and the subset with a unique display name across all rows."""
     if not is_list_of_dicts(ports):
         return set(), set()
 
@@ -478,8 +478,8 @@ def get_interface_port_identity_sets(ports, interface_name_field) -> tuple[set[i
     port_names = {}
     name_counts = {}
     for port in ports:
-        if port.get("_source") == OOB_INVENTORY_SOURCE:
-            continue
+        # OOB rows count here too: they sync onto this device, and port_id being a LibreNMS
+        # global primary key means an OOB id can never collide with a host id.
         port_id = normalize_librenms_port_id(port.get("port_id"))
         interface_name = port.get(interface_name_field)
         if port_id is None:
@@ -487,6 +487,7 @@ def get_interface_port_identity_sets(ports, interface_name_field) -> tuple[set[i
         port_id_counts[port_id] = port_id_counts.get(port_id, 0) + 1
         port_names[port_id] = interface_name
         if isinstance(interface_name, str) and interface_name.strip():
+            # Host and OOB rows share the target NetBox device's interface namespace.
             name_counts[interface_name] = name_counts.get(interface_name, 0) + 1
 
     unique_port_ids = {port_id for port_id, count in port_id_counts.items() if count == 1}

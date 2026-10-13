@@ -1,10 +1,26 @@
 """
-Coverage tests for netbox_librenms_plugin/tables/vlans.py
+Coverage tests for netbox_librenms_plugin/tables/vlans.py.
 
 Tests cover all render methods and the configure() method of LibreNMSVLANTable.
 """
 
-from unittest.mock import MagicMock, patch
+import pytest
+from django.contrib.auth.models import AnonymousUser
+from django.test import RequestFactory
+
+from netbox_librenms_plugin.tests.conftest import make_device
+
+
+pytestmark = pytest.mark.django_db
+
+
+def _group(tag, name, scope=None):
+    from ipam.models import VLANGroup
+
+    group = VLANGroup(name=name, slug=f"{name.lower().replace(' ', '-')}-{tag}")
+    group.scope = scope
+    group.save()
+    return group
 
 
 def _make_table(data=None, vlan_groups=None):
@@ -31,9 +47,9 @@ class TestLibreNMSVLANTableInit:
         assert table.vlan_groups == []
 
     def test_vlan_groups_stored_when_provided(self):
-        mock_group = MagicMock()
-        table = _make_table(vlan_groups=[mock_group])
-        assert table.vlan_groups == [mock_group]
+        group = _group(1, "Stored Group")
+        table = _make_table(vlan_groups=[group])
+        assert table.vlan_groups == [group]
 
     def test_none_vlan_groups_normalised_to_empty_list(self):
         table = _make_table(vlan_groups=None)
@@ -147,12 +163,8 @@ class TestRenderName:
 class TestRenderVlanGroupSelection:
     """Tests for LibreNMSVLANTable.render_vlan_group_selection()."""
 
-    def _make_group(self, pk, name, scope=None):
-        group = MagicMock()
-        group.pk = pk
-        group.name = name
-        group.scope = scope
-        return group
+    def _make_group(self, tag, name, scope=None):
+        return _group(tag, name, scope)
 
     def test_select_element_rendered(self):
         table = _make_table(vlan_groups=[self._make_group(1, "Site VLANs")])
@@ -172,26 +184,26 @@ class TestRenderVlanGroupSelection:
 
     def test_existing_netbox_vlan_group_preselected(self):
         """Priority 1: existing NetBox VLAN group is pre-selected."""
-        group = self._make_group(pk=7, name="Existing Group")
+        group = self._make_group(tag=7, name="Existing Group")
         table = _make_table(vlan_groups=[group])
         record = {
             "vlan_id": 20,
             "name": "EXISTING",
             "exists_in_netbox": True,
-            "netbox_vlan_group_id": 7,
+            "netbox_vlan_group_id": group.pk,
         }
         html = str(table.render_vlan_group_selection(None, record))
         assert "selected" in html
 
     def test_auto_selected_group_preselected(self):
         """Priority 2: auto_selected_group_id is pre-selected when exists_in_netbox is False."""
-        group = self._make_group(pk=3, name="Auto Group")
+        group = self._make_group(tag=3, name="Auto Group")
         table = _make_table(vlan_groups=[group])
         record = {
             "vlan_id": 30,
             "name": "AUTO",
             "exists_in_netbox": False,
-            "auto_selected_group_id": 3,
+            "auto_selected_group_id": group.pk,
         }
         html = str(table.render_vlan_group_selection(None, record))
         assert "selected" in html
@@ -241,15 +253,16 @@ class TestRenderVlanGroupSelection:
 
     def test_scope_info_appended_when_scope_present(self):
         """If group.scope is truthy, scope string is included in option."""
-        group = self._make_group(pk=11, name="Rack VLANs", scope="rack1")
+        device = make_device("vlan-table-scoped-group")
+        group = self._make_group(tag=11, name="Rack VLANs", scope=device.site)
         table = _make_table(vlan_groups=[group])
         record = {"vlan_id": 80, "name": "RACK", "exists_in_netbox": False}
         html = str(table.render_vlan_group_selection(None, record))
-        assert "rack1" in html
+        assert device.site.name in html
 
     def test_no_scope_info_when_scope_is_falsy(self):
         """If group.scope is falsy, no extra parenthetical appears."""
-        group = self._make_group(pk=12, name="Global VLANs", scope=None)
+        group = self._make_group(tag=12, name="Global VLANs", scope=None)
         table = _make_table(vlan_groups=[group])
         record = {"vlan_id": 90, "name": "GLOBAL", "exists_in_netbox": False}
         html = str(table.render_vlan_group_selection(None, record))
@@ -315,53 +328,16 @@ class TestRenderState:
 class TestLibreNMSVLANTableConfigure:
     """Tests for LibreNMSVLANTable.configure()."""
 
-    def test_configure_calls_request_config(self):
-        from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
-
-        table = LibreNMSVLANTable(data=[])
-        mock_request = MagicMock()
-
-        with patch("netbox_librenms_plugin.tables.vlans.tables.RequestConfig") as mock_rc_cls:
-            with patch("netbox_librenms_plugin.tables.vlans.get_table_paginate_count", return_value=50):
-                mock_rc_instance = MagicMock()
-                mock_rc_cls.return_value = mock_rc_instance
-                table.configure(mock_request)
-
-        mock_rc_cls.assert_called_once()
-        mock_rc_instance.configure.assert_called_once_with(table)
-
-    def test_configure_passes_enhanced_paginator(self):
+    def test_configure_paginates_with_enhanced_paginator(self):
         from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
         from utilities.paginator import EnhancedPaginator
 
-        table = LibreNMSVLANTable(data=[])
-        mock_request = MagicMock()
+        rows = [{"vlan_id": vlan_id, "name": f"VLAN {vlan_id}", "exists_in_netbox": False} for vlan_id in range(1, 61)]
+        table = LibreNMSVLANTable(data=rows)
+        request = RequestFactory().get("/", {"vlans_page": "2", "vlans_per_page": "25"})
+        request.user = AnonymousUser()
 
-        captured_paginate = {}
+        table.configure(request)
 
-        def capture_rc(request, paginate):
-            captured_paginate.update(paginate)
-            rc = MagicMock()
-            rc.configure = MagicMock()
-            return rc
-
-        with patch("netbox_librenms_plugin.tables.vlans.tables.RequestConfig", side_effect=capture_rc):
-            with patch("netbox_librenms_plugin.tables.vlans.get_table_paginate_count", return_value=25):
-                table.configure(mock_request)
-
-        assert captured_paginate.get("paginator_class") is EnhancedPaginator
-        assert captured_paginate.get("per_page") == 25
-
-    def test_configure_uses_table_prefix_for_paginate_count(self):
-        from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
-
-        table = LibreNMSVLANTable(data=[])
-        mock_request = MagicMock()
-
-        with patch("netbox_librenms_plugin.tables.vlans.tables.RequestConfig") as mock_rc_cls:
-            mock_rc_cls.return_value.configure = MagicMock()
-            with patch("netbox_librenms_plugin.tables.vlans.get_table_paginate_count") as mock_paginate:
-                mock_paginate.return_value = 10
-                table.configure(mock_request)
-
-        mock_paginate.assert_called_once_with(mock_request, "vlans_")
+        assert isinstance(table.paginator, EnhancedPaginator)
+        assert table.page.number == 2

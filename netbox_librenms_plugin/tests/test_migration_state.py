@@ -294,3 +294,72 @@ def test_plugin_cross_app_migration_dependencies_resolve():
         + "\nDrop a redundant edge only if ancestry guarantees ordering. Otherwise use a live dependency, "
         "or __first__ when an initial migration needs app ordering."
     )
+
+
+@pytest.mark.django_db
+def test_conftest_restores_exactly_the_rules_migration_0010_seeds():
+    """
+    The seed-restore signatures in conftest must match what the migration's own insert produces.
+
+    conftest re-runs the migration's insert to repair a transactional flush, but its intactness
+    check compares signatures it declares itself. Pin the two against each other so a change to
+    the migration's seeded rules cannot silently leave the restore reporting "intact".
+    """
+    from types import SimpleNamespace
+
+    from django.apps import apps as global_apps
+
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+    from netbox_librenms_plugin.tests.conftest import _seeded_ignore_rule_signatures
+
+    mod = importlib.import_module("netbox_librenms_plugin.migrations.0010_inventory_and_mapping_models")
+    schema_editor = SimpleNamespace(connection=SimpleNamespace(alias="default"))
+    signature_fields = ("name", "match_type", "pattern", "action", "require_serial_match_parent")
+
+    InventoryIgnoreRule.objects.all().delete()
+    mod._insert_default_inventory_ignore_rules(global_apps, schema_editor)
+
+    produced = set(InventoryIgnoreRule.objects.values_list(*signature_fields))
+    declared = {
+        tuple(signature[field] for field in signature_fields) for _model, signature in _seeded_ignore_rule_signatures()
+    }
+
+    assert produced == declared
+
+
+def _seeded_ignore_rule_count():
+    """Count the ignore rules the restore declares, across every migration that seeds one."""
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+    from netbox_librenms_plugin.tests.conftest import _seeded_ignore_rule_signatures, _seeded_rule_rows
+
+    declarative = sum(1 for model, _lookup, _defaults in _seeded_rule_rows() if model is InventoryIgnoreRule)
+    return len(list(_seeded_ignore_rule_signatures())) + declarative
+
+
+@pytest.mark.django_db
+def test_the_seeded_ignore_rules_survive_a_seed_restore():
+    """restore_seeded_state() must put every migration's seeded ignore rules back after a flush."""
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+    from netbox_librenms_plugin.tests.conftest import restore_seeded_state
+
+    expected = _seeded_ignore_rule_count()
+    InventoryIgnoreRule.objects.all().delete()
+
+    assert restore_seeded_state(force=False) is True
+    assert InventoryIgnoreRule.objects.count() == expected
+    # A second pass must not duplicate them.
+    restore_seeded_state(force=True)
+    assert InventoryIgnoreRule.objects.count() == expected
+
+
+@pytest.mark.django_db
+def test_the_seeded_ignore_rules_are_present_before_a_test_body_runs():
+    """
+    Every test starts with the seeded rules, including one that follows a flush.
+
+    A ``transaction=True`` test truncates the tables, so without the restore this passes or fails
+    purely on xdist scheduling: the modules sync reads these rules on every render.
+    """
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+    assert InventoryIgnoreRule.objects.count() == _seeded_ignore_rule_count()

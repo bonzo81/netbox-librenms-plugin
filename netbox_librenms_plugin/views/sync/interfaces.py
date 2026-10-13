@@ -84,6 +84,10 @@ class _BulkRelationshipContext:
     excluded_columns: set
 
 
+class _HostInterfaceNameConflict(Exception):
+    """An OOB row cannot claim a host interface by its name."""
+
+
 class SyncInterfacesView(
     LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, VlanAssignmentMixin, CacheMixin, View
 ):
@@ -910,12 +914,22 @@ class SyncInterfacesView(
                 self._prepare_vlan_lookup_maps(vlan_scope_devices)
             try:
                 for port in ports_data:
-                    # OOB-controller rows are merged into the host's interface list only for context
-                    # (shared-LOM detection) and are never routed to a real target device by
-                    # sync_interface(). They must not sync onto the host — and skipping them prevents
-                    # a main/OOB interface-name collision (both "eth0") from double-processing one
-                    # selection and overwriting the host interface with the OOB row's port_id/attrs.
-                    if port.get("_source") == OOB_INVENTORY_SOURCE:
+                    # An OOB controller is a second device in LibreNMS but the SAME device in
+                    # NetBox, so its ports are modelled as interfaces here. port_id is a LibreNMS
+                    # global primary key, so an OOB row can never resolve onto a host row's
+                    # interface by id; a name clash is caught by _resolve_device_interface and
+                    # recorded as a skipped conflict rather than overwriting the host interface.
+                    # A shared LOM is the exception: one physical port reported on both sides, so
+                    # syncing both rows would model it twice.
+                    if (
+                        port.get("_source") == OOB_INVENTORY_SOURCE
+                        and port.get("_dedup_conflict")
+                        and normalize_librenms_port_id(port.get("port_id")) in selected_port_ids
+                    ):
+                        self._record_skipped_conflict(
+                            port.get(interface_name_field),
+                            "shared LOM already synced from the host side",
+                        )
                         continue
                     port_id = normalize_librenms_port_id(port.get("port_id"))
 
@@ -934,7 +948,7 @@ class SyncInterfacesView(
         auto_selected_port_ids = getattr(self, "_auto_selected_port_ids", set())
         owners = {}
         for port in ports_data:
-            if port.get("_source") == OOB_INVENTORY_SOURCE:
+            if port.get("_source") == OOB_INVENTORY_SOURCE and port.get("_dedup_conflict"):
                 continue
             port_id = normalize_librenms_port_id(port.get("port_id"))
             if (
@@ -1098,7 +1112,17 @@ class SyncInterfacesView(
                 # caller's grant, do not silently sync the row onto the page device.
                 self._record_skipped_conflict(interface_name, "selected target unavailable")
                 return
-            interface = self._resolve_device_interface(target_device, interface_name, lookup_port_id, server_key)
+            try:
+                interface = self._resolve_device_interface(
+                    target_device,
+                    interface_name,
+                    lookup_port_id,
+                    server_key,
+                    oob=librenms_interface.get("_source") == OOB_INVENTORY_SOURCE,
+                )
+            except _HostInterfaceNameConflict:
+                self._record_skipped_conflict(interface_name, "host interface already uses this name")
+                return
         elif isinstance(obj, VirtualMachine):
             server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
             interface = self._resolve_vm_interface(obj, interface_name, lookup_port_id, server_key)
@@ -1150,7 +1174,7 @@ class SyncInterfacesView(
         if skipped is not None:
             skipped.append(f"{interface_name or '(unnamed)'} ({reason})")
 
-    def _resolve_device_interface(self, target_device, interface_name, port_id, server_key):
+    def _resolve_device_interface(self, target_device, interface_name, port_id, server_key, *, oob=False):
         """Resolve a device interface using port_id first, then safe name fallback."""
         changeable = self.restricted_queryset(Interface, "change")
         if port_id:
@@ -1166,6 +1190,8 @@ class SyncInterfacesView(
                     return None
                 if by_id.device_id == target_device.id:
                     return by_id
+                if oob:
+                    return None
                 # The port_id resolves to an interface on a DIFFERENT device (a stale or
                 # duplicate stored port_id, e.g. after a device replacement). The LibreNMS row
                 # still describes THIS device's interface, and the rendered table binds it to the
@@ -1184,6 +1210,11 @@ class SyncInterfacesView(
                     )
                 return None
         interface, created = Interface.objects.get_or_create(device=target_device, name=interface_name)
+        if oob and not created:
+            # The controller row has no claim on an existing host interface by name.
+            if not self.restricted_queryset(Interface).filter(pk=interface.pk).exists():
+                return None
+            raise _HostInterfaceNameConflict
         if not created and port_id and not interface_name_fallback_matches_port(interface, port_id, server_key):
             return None
         if created:

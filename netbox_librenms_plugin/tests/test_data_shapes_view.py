@@ -1,15 +1,14 @@
 """Render tests for the CaptureDataShapeView modal (capture → anonymize → novelty → issue link)."""
 
+from copy import deepcopy
 from html import unescape
 import json
 import re
-from unittest.mock import patch
-
-from netbox_librenms_plugin.librenms_api import get_plugin_config as _real_get_plugin_config
 
 import pytest
+from django.conf import settings
 from django.contrib.auth import get_user_model
-from django.test import RequestFactory
+from django.test import RequestFactory, override_settings
 
 from netbox_librenms_plugin.tests.conftest import make_device
 from netbox_librenms_plugin.tests.recordings import load_recording
@@ -76,17 +75,19 @@ def _view_with_api(api):
     return view
 
 
-def _run_capture(view, server, device, *, query="?server_key=test"):
-    """Run capture through real API rebind, ID lookup, and device sync with only config patched."""
+def _override_servers(server):
+    """Configure the recording server through the real plugin-settings boundary."""
     servers_config = {
         "test": {"librenms_url": server.url, "api_token": "test-token", "cache_timeout": 0, "verify_ssl": False}
     }
-    with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_cfg:
-        # Patch ONLY the "servers" lookup and accept a defaulted 3-arg call, so a path that reads
-        # another setting (cache_timeout, verify_ssl) sees the real value instead of None.
-        mock_cfg.side_effect = lambda plugin, key, *args, **kwargs: (
-            servers_config if key == "servers" else _real_get_plugin_config(plugin, key, *args, **kwargs)
-        )
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = servers_config
+    return override_settings(PLUGINS_CONFIG=plugin_config)
+
+
+def _run_capture(view, server, device, *, query="?server_key=test"):
+    """Run capture through real API rebind, ID lookup, and device sync."""
+    with _override_servers(server):
         return view.get(_superuser_request(query), device_id=device.pk)
 
 
@@ -494,17 +495,19 @@ def test_capture_view_reports_an_unanonymizable_recording(recording_server, monk
 
 
 @pytest.mark.django_db
-def test_capture_view_reports_an_unavailable_novelty_manifest(recording_server):
+def test_capture_view_reports_an_unavailable_novelty_manifest(recording_server, monkeypatch):
     """A broken packaged manifest must render an error instead of a false novelty verdict."""
     server, api = recording_server(load_recording("cisco-stackwise-3member"))
     device = make_device("cap-dev-manifest", librenms_cf={"test": {"id": _STACK_RECORDING_ID}})
     view = _view_with_api(api)
 
-    with patch(
-        "netbox_librenms_plugin.views.data_shapes.recordings_store.load_manifest",
-        side_effect=RuntimeError("Data-shape manifest is unavailable."),
-    ):
-        response = _run_capture(view, server, device)
+    from netbox_librenms_plugin.views import data_shapes
+
+    def fail_manifest():
+        raise RuntimeError("Data-shape manifest is unavailable.")
+
+    monkeypatch.setattr(data_shapes.recordings_store, "load_manifest", fail_manifest)
+    response = _run_capture(view, server, device)
 
     assert response.status_code == 200
     html = response.content.decode()
@@ -541,22 +544,14 @@ def test_capture_view_denies_device_outside_users_object_scope(recording_server)
     request.user = user
     view = _view_with_api(api)
 
-    servers_config = {
-        "test": {"librenms_url": server.url, "api_token": "test-token", "cache_timeout": 0, "verify_ssl": False}
-    }
-    with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_cfg:
-        # Patch ONLY the "servers" lookup and accept a defaulted 3-arg call, so a path that reads
-        # another setting (cache_timeout, verify_ssl) sees the real value instead of None.
-        mock_cfg.side_effect = lambda plugin, key, *args, **kwargs: (
-            servers_config if key == "servers" else _real_get_plugin_config(plugin, key, *args, **kwargs)
-        )
+    with _override_servers(server):
         # Out-of-scope id must 404 (fail-closed), never render the device's captured shape.
         with pytest.raises(Http404):
             view.get(request, device_id=target.pk)
 
 
 @pytest.mark.django_db
-def test_capture_view_denies_a_hidden_virtual_chassis_sync_owner(recording_server):
+def test_capture_view_denies_a_hidden_virtual_chassis_sync_owner(recording_server, configure_librenms):
     """A visible VC member must not expose capture data owned by a hidden member."""
     from core.models import ObjectType
     from dcim.models import Device
@@ -583,16 +578,19 @@ def test_capture_view_denies_a_hidden_virtual_chassis_sync_owner(recording_serve
     user = get_user_model().objects.get(pk=user.pk)
     request = RequestFactory().get("/?server_key=test")
     request.user = user
-    servers_config = {
-        "test": {"librenms_url": server.url, "api_token": "test-token", "cache_timeout": 0, "verify_ssl": False}
-    }
+    configure_librenms(
+        {
+            "test": {
+                "librenms_url": server.url,
+                "api_token": "test-token",
+                "cache_timeout": 0,
+                "verify_ssl": False,
+            }
+        }
+    )
 
-    with patch("netbox_librenms_plugin.librenms_api.get_plugin_config") as mock_cfg:
-        mock_cfg.side_effect = lambda plugin, key, *args, **kwargs: (
-            servers_config if key == "servers" else _real_get_plugin_config(plugin, key, *args, **kwargs)
-        )
-        with pytest.raises(Http404):
-            _view_with_api(api).get(request, device_id=visible.pk)
+    with pytest.raises(Http404):
+        _view_with_api(api).get(request, device_id=visible.pk)
 
 
 @pytest.mark.django_db
