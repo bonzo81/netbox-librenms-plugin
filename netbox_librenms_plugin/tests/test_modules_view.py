@@ -595,7 +595,12 @@ class TestFpcSlotMatchesOnSlashedPositions:
         )
 
         resolved = BaseModuleTableView._lookup_regex_bay_mapping(
-            "QSFP56-DD @ 0/0/0", "port", {bay.name: bay}, [mapping], manufacturer_id=manufacturer.pk
+            "QSFP56-DD @ 0/0/0",
+            "port",
+            {bay.name: bay},
+            [mapping],
+            manufacturer_id=manufacturer.pk,
+            accepted_bay_types=frozenset(),
         )
 
         assert resolved == bay
