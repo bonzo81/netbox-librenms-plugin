@@ -75,28 +75,26 @@
     will not be filtered.
 
 # ─── Fixed-chassis embedded RP (action=transparent) ──────────────────────────
-# Fixed-form routers (e.g. Cisco 8201-SYS, 8101-32FH, Juniper PTX10001-36MR)
-# report their built-in RP/system-board as an ENTITY-MIB module whose serial
-# number equals the chassis/device serial. The RP is NOT a removable FRU —
-# it IS the device itself. Marking it "transparent" hides the RP row but lets
-# its ENTITY-MIB children (transceivers, fans, PSUs) fall through to device-
-# level bay matching.
+# Some fixed-form routers report their built-in RP or system board as an
+# ENTITY-MIB module directly below the chassis entity, with the serial number
+# of the chassis and of the NetBox device. The board is NOT a removable FRU:
+# it IS the device itself. Marking it "transparent" hides its row but lets its
+# ENTITY-MIB children (transceivers, fans, PSUs) fall through to device-level
+# bay matching.
 #
-# Detection signal: entPhysicalSerialNum == NetBox Device.serial
+# Detection signal: entPhysicalSerialNum == NetBox Device.serial, and the item
+# has no parent or its direct parent is the chassis entity.
 #
-# Hierarchy for Cisco 8201-SYS (device serial = FOC2418NHRK):
-#   Rack 0-Control Card Slot 0  (container)
-#   └── 0/RP0/CPU0  (serial FOC2418NHRK) ← TRANSPARENT (= device serial)
-#       └── Optics Controller containers
-#           └── 0/RP0/CPU0-QSFP bay N
-#               └── Optics0/0/0/N  (transceiver) ← becomes device-level bay match
+# Hierarchy (device serial = the chassis serial):
+#   Chassis
+#   └── system board  (serial = device serial) ← TRANSPARENT
+#       └── transceiver  ← becomes device-level bay match
 #
-# The 8201-SYS device type should have device-level bays for:
-#   Optics0/0/0/0–23  (400GE QSFP-DD)
-#   HundredGigE0/0/0/24–35  (100GE QSFP28)
-#   0/FT0–4  (fans)
-#   0/PM0–1  (PSUs)
-# NO bay for 0/RP0/CPU0 — the RP is the device, not a pluggable module.
+# The rule takes only a direct child of the chassis: on a modular chassis a
+# line card in a slot can share the device serial, and that card is a real
+# FRU. A built-in board in a slot container, such as 0/RP0/CPU0 of a Cisco
+# 8201-SYS, is therefore not matched here. The "Fixed-platform built-in units"
+# rule below covers it.
 
 - name: "Embedded RP / fixed-chassis system board"
   match_type: serial_matches_device
@@ -129,6 +127,20 @@
 #   Chassis  (model N9K-C93180YC-FX)
 #   +-- LinecardSlot-1  (container)
 #       +-- Module-1  (model N9K-C93180YC-FX)   <- TRANSPARENT
+#
+# Cisco 8201-SYS puts its built-in RP board in a slot container in the same way:
+#   Rack 0-Control Card Slot 0  (container)
+#   +-- 0/RP0/CPU0                              <- TRANSPARENT
+#       +-- Optics Controller containers
+#           +-- 0/RP0/CPU0-QSFP bay N
+#               +-- Optics0/0/0/N  (transceiver) <- becomes device-level bay match
+#
+# The 8201-SYS device type should have device-level bays for:
+#   Optics0/0/0/0-23  (400GE QSFP-DD)
+#   HundredGigE0/0/0/24-35  (100GE QSFP28)
+#   0/FT0-4  (fans)
+#   0/PM0-1  (PSUs)
+# NO bay for 0/RP0/CPU0: the RP is the device, not a pluggable module.
 
 - name: "Fixed-platform built-in units"
   match_type: model_matches_device_type
