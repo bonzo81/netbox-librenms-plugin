@@ -113,19 +113,180 @@ def queued_request(user):
     return copy_safe_request(request)
 
 
-def module_row_binding(target_device, action, row, *, action_target=None, server_key="default"):
-    """Sign the cached module row that a rendered action form would submit."""
-    from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
+def cached_module_snapshot(device, server_key="default"):
+    """Return the module inventory snapshot cached for *device*'s Modules page."""
+    from django.core.cache import cache
 
-    ent_index = row.get("entPhysicalIndex")
-    return module_inventory_binding_token(
-        target_device.pk,
-        server_key,
-        action,
-        action_target or {},
-        ent_index,
-        module_inventory_row_digest(row),
+    from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+    from netbox_librenms_plugin.sync_cache import cached_module_inventory
+    from netbox_librenms_plugin.views.mixins import CacheMixin
+
+    sync_device = get_librenms_sync_device(device, server_key=server_key) or device
+    return cached_module_inventory(cache.get(CacheMixin().get_cache_key(sync_device, "inventory", server_key)))
+
+
+def module_grant(
+    page_device,
+    action,
+    *,
+    target_device=None,
+    ent_index=None,
+    action_target=None,
+    rows=None,
+    server_key="default",
+    inventory=None,
+    render_mode="attributed",
+):
+    """
+    Sign a module grant with the production signer for the current snapshot and policy of *page_device*.
+
+    Only a unit test that drives a writer without rendering the table may use it; a behavioural test
+    takes its grant from the rendered table.
+    """
+    from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+    from netbox_librenms_plugin.module_grants import module_inventory_snapshot_digest, sign_module_grant
+
+    snapshot = cached_module_snapshot(page_device, server_key) if inventory is None else inventory
+    return sign_module_grant(
+        page_device_id=page_device.pk,
+        device_id=(target_device or page_device).pk,
+        server_key=server_key,
+        action=action,
+        ent_index=ent_index,
+        action_target=action_target,
+        rows=rows,
+        inventory_digest=module_inventory_snapshot_digest(snapshot),
+        policy_fingerprint=load_inventory_policy(page_device.pk).fingerprint,
+        render_mode=render_mode,
     )
+
+
+def collector_grant(page_device, action, inventory, *, parent_index=None, server_key="default"):
+    """
+    Return the grant the real Modules table signs over *inventory*: the selected install manifest or a branch.
+
+    The table is built by the production collector for a superuser, so the grant names exactly the rows
+    and targets that the rendered page would carry.
+    """
+    from types import SimpleNamespace
+
+    from netbox_librenms_plugin.module_grants import ACTION_INSTALL_BRANCH, ACTION_INSTALL_SELECTED
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    request = make_request("get", {"server_key": server_key}, path="/modules/")
+    view = make_view(DeviceModuleTableView, request, librenms_api=SimpleNamespace(server_key=server_key))
+    context = view._build_context(request, page_device, inventory, server_key=server_key)
+    if action == ACTION_INSTALL_SELECTED:
+        return context["install_selected_inventory_binding"]
+    assert action == ACTION_INSTALL_BRANCH, action
+    table = context["table"]
+    row = next(row for row in table.data if row["ent_physical_index"] == parent_index and row["depth"] == 0)
+    return table.grant(
+        ACTION_INSTALL_BRANCH, row, action_target={"parent_index": parent_index}, rows=row["branch_rows"]
+    )
+
+
+def module_row_binding(
+    target_device, action, row, *, action_target=None, server_key="default", page_device=None, inventory=None
+):
+    """Sign the action a rendered form submits for inventory *row* of the snapshot *inventory* (default: cached)."""
+    return module_grant(
+        page_device or target_device,
+        action,
+        target_device=target_device,
+        ent_index=row.get("entPhysicalIndex"),
+        action_target=action_target,
+        server_key=server_key,
+        inventory=inventory,
+    )
+
+
+def render_module_tab(device, *, user=None, server_key="default"):
+    """Render the Modules tab fragment from its cached snapshot, as a module action re-renders it; return the HTML."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    request = make_request(
+        "get",
+        {"tab": "modules", "server_key": server_key},
+        user=user,
+        path=reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": device.pk}),
+    )
+    view = DeviceModuleTableView()
+    view.setup(request, pk=device.pk)
+    view.cache_only = True
+    context = view.get_context_data(request, device, server_key=server_key)
+    return view.render_sync_partial(request, device, context["server_key"], {"module_sync": context}).content.decode()
+
+
+class _ModuleTabParser:
+    """Collect the forms, the hx-get controls and the member selects of a rendered Modules tab."""
+
+    def __init__(self, html):
+        from html.parser import HTMLParser
+
+        self.forms, self.links, self.selects = [], [], []
+        self.manifest = None
+        self.table_attrs = {}
+        parser = HTMLParser(convert_charrefs=True)
+        current = []
+
+        def start(tag, attrs):
+            attrs = dict(attrs)
+            if tag == "form":
+                current.append({"action": attrs.get("action", ""), "fields": {}})
+                self.forms.append(current[-1])
+            elif tag == "table" and attrs.get("id") == "librenms-module-table":
+                self.table_attrs = attrs
+            elif tag == "input" and attrs.get("name"):
+                if current:
+                    current[-1]["fields"][attrs["name"]] = attrs.get("value", "")
+                if attrs.get("type") == "hidden" and attrs["name"].startswith("selection_grant_"):
+                    self.links.append({"selection_grant": attrs["name"], "value": attrs.get("value", "")})
+            elif tag == "select" and attrs.get("data-module") is not None:
+                self.selects.append(attrs)
+            if attrs.get("hx-get"):
+                self.links.append({"hx-get": attrs["hx-get"], "action": attrs.get("data-action", "")})
+
+        def end(tag):
+            if tag == "form" and current:
+                current.pop()
+
+        parser.handle_starttag = start
+        parser.handle_startendtag = start
+        parser.handle_endtag = end
+        parser.feed(html)
+
+
+def module_tab_forms(html):
+    """Return the parsed forms, hx-get controls, member selects and table attributes of a rendered Modules tab."""
+    return _ModuleTabParser(html)
+
+
+def rendered_module_form(html, path_part, ent_index=None):
+    """Return ``(action URL, fields)`` of the one rendered form whose URL holds *path_part* for *ent_index*."""
+    matches = [
+        form
+        for form in module_tab_forms(html).forms
+        if path_part in form["action"]
+        and (
+            ent_index is None or str(ent_index) in (form["fields"].get("ent_index"), form["fields"].get("parent_index"))
+        )
+    ]
+    assert len(matches) == 1, f"expected one {path_part} form for {ent_index}, found {len(matches)}"
+    return matches[0]["action"], dict(matches[0]["fields"])
+
+
+def rendered_preview_url(html, ent_index):
+    """Return the mismatch preview URL the rendered Replace button of row *ent_index* opens."""
+    from urllib.parse import parse_qs, urlsplit
+
+    for link in module_tab_forms(html).links:
+        url = link.get("hx-get", "")
+        if "module-mismatch-preview" in url and parse_qs(urlsplit(url).query).get("ent_index") == [str(ent_index)]:
+            return url
+    raise AssertionError(f"row {ent_index} renders no Replace button")
 
 
 def _message_level(name):
