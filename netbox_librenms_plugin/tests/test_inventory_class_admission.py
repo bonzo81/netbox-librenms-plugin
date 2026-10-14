@@ -15,9 +15,7 @@ from netbox_librenms_plugin.tests.test_modules_view import (
 
 pytestmark = pytest.mark.django_db
 
-# Rows the Modules tab rendered for each bundled recording before admission moved from a code
-# constant to rules: [entPhysicalIndex, depth, name, class]. A recording that cannot render the
-# tab (no inventory route) is not listed.
+# Rows [entPhysicalIndex, depth, name, class] per recording, rendered by the class constant before the rules.
 _ROWS_BEFORE_RULES = json.loads(Path(__file__).with_name("module_rows_by_recording.json").read_text(encoding="utf-8"))
 
 SCB_RULE_NAME = "Juniper MX switch control boards"
