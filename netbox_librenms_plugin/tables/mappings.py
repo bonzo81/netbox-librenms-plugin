@@ -204,6 +204,15 @@ class NormalizationRuleTable(NetBoxTable):
         attrs = {"class": "table table-hover table-headings table-striped"}
 
 
+def _yes_no(value):
+    """Return the coloured Yes/No label of a stored boolean."""
+    return (
+        mark_safe('<span class="text-success">Yes</span>')
+        if value
+        else mark_safe('<span class="text-danger">No</span>')
+    )
+
+
 class InventoryIgnoreRuleTable(NetBoxTable):
     """Table for displaying InventoryIgnoreRule data."""
 
@@ -212,6 +221,10 @@ class InventoryIgnoreRuleTable(NetBoxTable):
     action = tables.Column(verbose_name="Action")
     pattern = tables.Column(verbose_name="Pattern", empty_values=())
     require_serial_match_parent = tables.BooleanColumn(verbose_name="Require Serial Match")
+    name_pattern = tables.Column(verbose_name="Name Pattern", empty_values=())
+    description_pattern = tables.Column(verbose_name="Description Pattern", empty_values=())
+    model_pattern = tables.Column(verbose_name="Model Pattern", empty_values=())
+    prefer_description = tables.BooleanColumn(verbose_name="Prefer Description")
     manufacturer = tables.Column(verbose_name="Manufacturer", linkify=True)
     enabled = tables.BooleanColumn(verbose_name="Enabled")
     description = tables.Column(verbose_name="Description", linkify=False)
@@ -229,13 +242,32 @@ class InventoryIgnoreRuleTable(NetBoxTable):
 
     def render_require_serial_match_parent(self, value, record):
         """Show the actual stored boolean; dash for rules where the flag has no effect."""
-        if not record.uses_pattern:
+        if not record.uses_pattern or record.action == record.ACTION_INCLUDE:
             return mark_safe('<span class="text-muted">—</span>')
-        return (
-            mark_safe('<span class="text-success">Yes</span>')
-            if value
-            else mark_safe('<span class="text-danger">No</span>')
-        )
+        return _yes_no(value)
+
+    @staticmethod
+    def _render_filter(value):
+        # A blank filter admits any value, and only an include rule stores one.
+        return format_html("<code>{}</code>", value) if value else mark_safe('<span class="text-muted">—</span>')
+
+    def render_name_pattern(self, value, record):
+        """Show the stored regex as typed; dash when the rule has none."""
+        return self._render_filter(value)
+
+    def render_description_pattern(self, value, record):
+        """Show the stored regex as typed; dash when the rule has none."""
+        return self._render_filter(value)
+
+    def render_model_pattern(self, value, record):
+        """Show the stored regex as typed; dash when the rule has none."""
+        return self._render_filter(value)
+
+    def render_prefer_description(self, value, record):
+        """Show the stored boolean on include rules; dash where the flag has no effect."""
+        if record.action != record.ACTION_INCLUDE:
+            return mark_safe('<span class="text-muted">—</span>')
+        return _yes_no(value)
 
     class Meta:
         """Meta options for InventoryIgnoreRuleTable."""
@@ -249,6 +281,10 @@ class InventoryIgnoreRuleTable(NetBoxTable):
             "action",
             "pattern",
             "require_serial_match_parent",
+            "name_pattern",
+            "description_pattern",
+            "model_pattern",
+            "prefer_description",
             "manufacturer",
             "enabled",
             "description",
@@ -262,6 +298,10 @@ class InventoryIgnoreRuleTable(NetBoxTable):
             "action",
             "pattern",
             "require_serial_match_parent",
+            "name_pattern",
+            "description_pattern",
+            "model_pattern",
+            "prefer_description",
             "manufacturer",
             "enabled",
             "actions",

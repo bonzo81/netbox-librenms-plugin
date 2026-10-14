@@ -497,15 +497,18 @@ _INTERFACE_RULE_FIELDS = [
 ]
 
 
-class _VerbatimNamePatternMixin:
-    """Keep ``name_pattern`` as typed: whitespace is part of a regex."""
+class _VerbatimPatternMixin:
+    """Keep each regex field in ``verbatim_fields`` as typed: whitespace is part of a regex."""
+
+    verbatim_fields = ("name_pattern",)
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["name_pattern"].strip = False
+        for field in self.verbatim_fields:
+            self.fields[field].strip = False
 
 
-class InterfaceTypeMappingForm(_VerbatimNamePatternMixin, NetBoxModelForm):
+class InterfaceTypeMappingForm(_VerbatimPatternMixin, NetBoxModelForm):
     """Create and edit interface rules: set a NetBox type for matching LibreNMS ports, or ignore them."""
 
     platform = DynamicModelChoiceField(
@@ -519,7 +522,7 @@ class InterfaceTypeMappingForm(_VerbatimNamePatternMixin, NetBoxModelForm):
         fields = _INTERFACE_RULE_FIELDS
 
 
-class InterfaceTypeMappingImportForm(_VerbatimNamePatternMixin, NetBoxModelImportForm):
+class InterfaceTypeMappingImportForm(_VerbatimPatternMixin, NetBoxModelImportForm):
     """Import interface rules from CSV, JSON, or YAML."""
 
     action = CSVChoiceField(
@@ -928,27 +931,36 @@ class NormalizationRuleFilterForm(NetBoxModelFilterSetForm):
     model = NormalizationRule
 
 
-class InventoryIgnoreRuleForm(NetBoxModelForm):
+_INVENTORY_RULE_FIELDS = [
+    "name",
+    "match_type",
+    "pattern",
+    "action",
+    "require_serial_match_parent",
+    *InventoryIgnoreRule.INCLUDE_FILTER_SOURCES,
+    "prefer_description",
+    "manufacturer",
+    "enabled",
+    "description",
+]
+
+
+class InventoryIgnoreRuleForm(_VerbatimPatternMixin, NetBoxModelForm):
     """Form for creating and editing inventory ignore rules."""
+
+    verbatim_fields = tuple(InventoryIgnoreRule.INCLUDE_FILTER_SOURCES)
 
     class Meta:
         """Meta options for InventoryIgnoreRuleForm."""
 
         model = InventoryIgnoreRule
-        fields = [
-            "name",
-            "match_type",
-            "pattern",
-            "action",
-            "require_serial_match_parent",
-            "manufacturer",
-            "enabled",
-            "description",
-        ]
+        fields = _INVENTORY_RULE_FIELDS
 
 
-class InventoryIgnoreRuleImportForm(NetBoxModelImportForm):
+class InventoryIgnoreRuleImportForm(_VerbatimPatternMixin, NetBoxModelImportForm):
     """Form for bulk importing inventory ignore rules."""
+
+    verbatim_fields = tuple(InventoryIgnoreRule.INCLUDE_FILTER_SOURCES)
 
     match_type = CSVChoiceField(
         choices=InventoryIgnoreRule.MATCH_TYPE_CHOICES,
@@ -956,7 +968,8 @@ class InventoryIgnoreRuleImportForm(NetBoxModelImportForm):
     )
     action = CSVChoiceField(
         choices=InventoryIgnoreRule.ACTION_CHOICES,
-        help_text="Action: skip (remove from table) or transparent (hide row, promote children)",
+        help_text="Action: skip (remove from table), transparent (hide row, promote children) "
+        "or include (admit rows of a class)",
     )
     manufacturer = CSVModelChoiceField(
         queryset=Manufacturer.objects.all(),
@@ -969,16 +982,7 @@ class InventoryIgnoreRuleImportForm(NetBoxModelImportForm):
         """Meta options for InventoryIgnoreRuleImportForm."""
 
         model = InventoryIgnoreRule
-        fields = [
-            "name",
-            "match_type",
-            "pattern",
-            "action",
-            "require_serial_match_parent",
-            "manufacturer",
-            "enabled",
-            "description",
-        ]
+        fields = _INVENTORY_RULE_FIELDS
 
 
 class InventoryIgnoreRuleFilterForm(NetBoxModelFilterSetForm):
@@ -1004,6 +1008,16 @@ class InventoryIgnoreRuleFilterForm(NetBoxModelFilterSetForm):
         widget=forms.Select(choices=[("", "---------"), ("true", "Yes"), ("false", "No")]),
         label="Enabled",
     )
+    prefer_description = forms.NullBooleanField(
+        required=False,
+        widget=forms.Select(choices=[("", "---------"), ("true", "Yes"), ("false", "No")]),
+        label="Prefer description",
+    )
+    name_pattern = forms.CharField(required=False, label="Name pattern", help_text="Partial match on the stored text")
+    description_pattern = forms.CharField(
+        required=False, label="Description pattern", help_text="Partial match on the stored text"
+    )
+    model_pattern = forms.CharField(required=False, label="Model pattern", help_text="Partial match on the stored text")
 
     model = InventoryIgnoreRule
 

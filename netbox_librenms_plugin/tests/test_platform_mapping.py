@@ -267,15 +267,14 @@ class TestToYamlOnAllMappingModels:
 
         from netbox_librenms_plugin.models import InventoryIgnoreRule
 
-        rule = InventoryIgnoreRule.__new__(InventoryIgnoreRule)
-        rule.name = "Skip IDPROM"
-        rule.match_type = "ends_with"
-        rule.pattern = "IDPROM"
-        rule.action = "skip"
-        rule.require_serial_match_parent = False
-        rule.manufacturer_id = None
-        rule.enabled = True
-        rule.description = ""
+        # A real unsaved instance: __new__ skips the field defaults that to_yaml() reads.
+        rule = InventoryIgnoreRule(
+            name="Skip IDPROM",
+            match_type="ends_with",
+            pattern="IDPROM",
+            action="skip",
+            require_serial_match_parent=False,
+        )
 
         result = rule.to_yaml()
         assert isinstance(result, str)

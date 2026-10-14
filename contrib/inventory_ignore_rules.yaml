@@ -1,9 +1,12 @@
 # Inventory Ignore Rules — filter ENTITY-MIB items during module sync
 #
-# Two actions are supported:
+# Three actions are supported:
 #   skip        — remove the item from the sync table entirely
 #   transparent — hide the item's row but promote its ENTITY-MIB children to
 #                 device-level bay matching (use for embedded/fixed-chassis modules)
+#   include     — admit the items of one entPhysicalClass (match_type class_is,
+#                 pattern = the class). Migration 0025 seeds one include rule per
+#                 class the sync table used to admit from a fixed list.
 #
 # Match types:
 #   ends_with | starts_with | contains | regex
@@ -13,6 +16,7 @@
 #   model_matches_device_type
 #                         : compare entPhysicalModelName to the NetBox device
 #                           type's model or part number (no pattern needed)
+#   class_is              : compare entPhysicalClass, ignoring case (include only)
 #
 # Import via: LibreNMS Plugin → Settings → Inventory Ignore Rules → Import
 #
@@ -21,6 +25,13 @@
 #       true  — (name-based rules only) only apply if the item's serial matches
 #               any ancestor entity's serial in the ENTITY-MIB tree
 #       false — apply unconditionally on name match alone
+#   name_pattern, description_pattern, model_pattern:
+#       (include rules only) optional Python regexes, searched in entPhysicalName,
+#       entPhysicalDescr and entPhysicalModelName. Case-sensitive and kept as
+#       typed. Every non-blank filter must match. Import them as YAML or JSON:
+#       a CSV import strips the spaces of each cell, so it refuses these columns.
+#   prefer_description:
+#       (include rules only) true names the row by entPhysicalDescr
 #   enabled:     true | false
 #   description: optional notes
 #
@@ -126,3 +137,27 @@
     model equals the device type's model or part number. Marking them
     transparent hides their rows and promotes their children to device-level
     bay matching.
+
+# --- Juniper MX switch control boards (action=include) ---
+# Juniper MX480 and MX960 report each Switch Control Board as class "backplane",
+# named by its SKU and described by its slot. Other Juniper platforms report
+# "backplane" rows that are not separate boards, so the name filter decides:
+#   SCBE2-MX-S | CB 0   <- INCLUDED, row named "CB 0"
+#   JNP10K-RE1 | CB 0   <- not included (MX10008: the Routing Engine board)
+#   JNP304-CHAS | CB 0  <- not included (MX304 chassis)
+# Migration 0025 creates this rule for each Juniper manufacturer. A module bay
+# mapping "^CB (\d+)$" -> "CB\1" (contrib/module_bay_mappings.yaml) places the
+# boards in the bays CB0 and CB1.
+
+- name: "Juniper MX switch control boards"
+  match_type: class_is
+  pattern: "backplane"
+  action: include
+  name_pattern: "^SCB"
+  prefer_description: true
+  require_serial_match_parent: false
+  manufacturer: "Juniper"
+  enabled: true
+  description: >
+    Juniper MX480 and MX960 report each Switch Control Board as class
+    'backplane', named by its SKU (SCBE2-MX-S) and described by its slot (CB 0).

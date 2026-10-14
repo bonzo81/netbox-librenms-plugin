@@ -24,6 +24,12 @@
                     identical to the device type's model or part number. Use it with the Transparent action for the
                     built-in units of a fixed platform, such as Cisco IOS XE <code>module 0</code>,
                     <code>module R0</code> and <code>module F0</code>.</li>
+                <li><strong>class_is</strong> (Include action only): admits the entities of one
+                    <em>entPhysicalClass</em> to module sync. An entity that no include rule admits gets no row.
+                    Each class the sync used to admit has its own seeded rule (<code>Inventory class: module</code>
+                    and others), so disabling one hides that class. Optional name, description and model regex
+                    filters narrow a class: the seeded <code>Juniper MX switch control boards</code> rule admits
+                    class <code>backplane</code> only when the name starts with <code>SCB</code>.</li>
             </ul>
             <p>When <strong>Require Serial Match</strong>
                is enabled (for name-based rules), the entry is only skipped if its serial number also matches the

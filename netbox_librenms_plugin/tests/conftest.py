@@ -260,6 +260,42 @@ def restore_inventory_rule_scoping():
     migration.scope_include_rule_to_juniper(global_apps, SimpleNamespace(connection=SimpleNamespace(alias="default")))
 
 
+def _class_rules_migration():
+    """Return migration 0025, the one source of the inventory class rules it seeds."""
+    import importlib
+
+    return importlib.import_module("netbox_librenms_plugin.migrations.0025_inventory_class_admission_rules")
+
+
+def default_inventory_include_rules():
+    """Return unsaved include rules for the built-in classes, built from migration 0025's seed data."""
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+    return [InventoryIgnoreRule(**rule) for rule in _class_rules_migration().CLASS_RULES]
+
+
+def seeded_class_rule_rows():
+    """Yield the field values of each rule row migration 0025 seeds, its manufacturer scope included."""
+    from dcim.models import Manufacturer
+
+    migration = _class_rules_migration()
+    yield from migration.CLASS_RULES
+    juniper = Manufacturer.objects.filter(slug__in=migration._SCOPING.JUNIPER_SLUGS).order_by("pk")
+    for manufacturer_id in list(juniper.values_list("pk", flat=True)) or [None]:
+        yield {**migration.SCB_RULE, "manufacturer_id": manufacturer_id}
+
+
+def restore_inventory_class_rules():
+    """Re-apply migration 0025's data step by running the migration's own function."""
+    from types import SimpleNamespace
+
+    from django.apps import apps as global_apps
+
+    _class_rules_migration().seed_inventory_class_rules(
+        global_apps, SimpleNamespace(connection=SimpleNamespace(alias="default"))
+    )
+
+
 def seed_migration_rows():
     """Recreate every row the plugin's data migrations seed, with its declared value."""
     import importlib
@@ -298,6 +334,9 @@ def seed_migration_rows():
     # Scope last, once every rule row is back: the declared rows carry no manufacturer, so a
     # restored include rule would stay vendor-agnostic while a fresh migrate scopes it.
     restore_inventory_rule_scoping()
+
+    # 0025 reads the include rules above: it converts their display flag and skips a class they admit.
+    restore_inventory_class_rules()
 
 
 _transactional_seed_restore_required = False
@@ -344,6 +383,11 @@ def _seeds_are_intact():
         .values_list("manufacturer_id", flat=True)
     )
     if not juniper_ids.issubset(scoped_ids):
+        return False
+    # Migration 0025 names the routing-engine rows by their description through this flag.
+    if migration._seeded_include_rules(global_apps, "default").filter(prefer_description=False).exists():
+        return False
+    if not all(InventoryIgnoreRule.objects.filter(**row).exists() for row in seeded_class_rule_rows()):
         return False
     migration = importlib.import_module("netbox_librenms_plugin.migrations.0010_inventory_and_mapping_models")
     for defaults in migration.INITIAL_INVENTORY_IGNORE_RULES:

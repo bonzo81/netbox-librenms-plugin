@@ -92,6 +92,12 @@ NO_LIBRENMS_SERVER_MESSAGE = (
 # constants.py; only the wording of the refusal belongs to this module.
 OOB_INVENTORY_READ_ONLY_REASON = "OOB controller inventory is read-only"
 
+# Fixed text: the Modules tab names the rule, and the exception detail goes to the log only.
+INVALID_INVENTORY_RULE_MESSAGE = (
+    "An enabled Inventory Ignore Rule stores an invalid filter regex, so nothing was installed. "
+    "Fix or disable the rule that the Modules tab names."
+)
+
 
 def _modules_redirect_response(request, sync_url, server_key=None):
     """
@@ -1259,6 +1265,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             return
 
         # Load ignore rules so the branch respects the same filters shown in the table
+        from netbox_librenms_plugin.models import InventoryRuleFilterError
         from netbox_librenms_plugin.utils import get_enabled_ignore_rules
 
         index_map = {idx: item for item in cached_data if (idx := item.get("entPhysicalIndex")) is not None}
@@ -1267,9 +1274,14 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             if page_device.virtual_chassis_id
             else []
         )
-        default_context, ignore_contexts = BaseModuleTableView._build_inventory_ignore_contexts(
-            page_device, cached_data, vc_members, get_enabled_ignore_rules
-        )
+        try:
+            default_context, ignore_contexts = BaseModuleTableView._build_inventory_ignore_contexts(
+                page_device, cached_data, vc_members, get_enabled_ignore_rules
+            )
+        except InventoryRuleFilterError as exc:
+            logger.error("Branch install on %s refused: %s", page_device, exc)
+            messages.error(request, INVALID_INVENTORY_RULE_MESSAGE)
+            return
         root = index_map.get(parent_index)
         if root is not None and ignore_contexts[_inventory_item_key(root)]["selected_device"].pk != target_device.pk:
             messages.error(request, "Inventory destination changed. Refresh Modules and try again.")
@@ -2147,6 +2159,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         # The rules are manufacturer-scoped and VC members can carry different device types, so
         # resolve them per target and cache by manufacturer rather than loading the page device's
         # set once for every row.
+        from netbox_librenms_plugin.models import InventoryRuleFilterError
         from netbox_librenms_plugin.utils import get_enabled_ignore_rules
 
         ignore_rules_by_manufacturer = {}
@@ -2190,15 +2203,20 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         resolved_items = []
         invalid_selection_seen = False
         devices = self.restricted_queryset(Device)
-        for item in items:
-            ent_index = item.get("entPhysicalIndex")
-            target_device, invalid_selected_device = _resolve_target_device_with_validation(
-                page_device,
-                request.POST.get(f"device_selection_{ent_index}"),
-                devices,
-            )
-            invalid_selection_seen |= invalid_selected_device
-            resolved_items.append((item, target_device, _ignore_rules_for(target_device)))
+        try:
+            for item in items:
+                ent_index = item.get("entPhysicalIndex")
+                target_device, invalid_selected_device = _resolve_target_device_with_validation(
+                    page_device,
+                    request.POST.get(f"device_selection_{ent_index}"),
+                    devices,
+                )
+                invalid_selection_seen |= invalid_selected_device
+                resolved_items.append((item, target_device, _ignore_rules_for(target_device)))
+        except InventoryRuleFilterError as exc:
+            logger.error("Selected install on %s refused: %s", page_device, exc)
+            messages.error(request, INVALID_INVENTORY_RULE_MESSAGE)
+            return _modules_action_response(request, page_device, server_key)
 
         holder_of_by_device = {}
         installed, skipped, failed = [], [], []
@@ -2253,6 +2271,11 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             changeable_interfaces,
                         )
                         bound_any = _record_bind_outcome(bind_result, result, skipped) or bound_any
+        except InventoryRuleFilterError as exc:
+            # The rules are read again under the page lock, so an edit after the first read lands here.
+            logger.error("Selected install on %s refused: %s", page_device, exc)
+            messages.error(request, INVALID_INVENTORY_RULE_MESSAGE)
+            return _modules_action_response(request, page_device, server_key)
         except (AbortRequest, ValidationError, IntegrityError) as e:
             if classify_conflict(e):
                 raise

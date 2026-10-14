@@ -127,11 +127,15 @@ class InventoryIgnoreRuleSerializer(NetBoxModelSerializer):
             "pattern",
             "action",
             "require_serial_match_parent",
+            *InventoryIgnoreRule.INCLUDE_FILTER_SOURCES,
+            "prefer_description",
             "manufacturer",
             "enabled",
             "description",
         ]
         brief_fields = ("id", "url", "display", "name", "description")
+        # Whitespace is part of a regex.
+        extra_kwargs = {field: {"trim_whitespace": False} for field in InventoryIgnoreRule.INCLUDE_FILTER_SOURCES}
 
 
 @extend_schema_serializer(component_name="LibreNMSPlatformMapping")

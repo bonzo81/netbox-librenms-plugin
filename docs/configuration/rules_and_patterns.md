@@ -12,9 +12,9 @@ The available actions are:
 
 - **Skip** removes the matched item from the sync table. Use this for phantom EEPROM or IDPROM entities that duplicate a parent component.
 - **Transparent** hides the matched row and promotes its children to device-level bay matching. Use this for a fixed-chassis system board whose children should match device-level bays.
-- **Include** admits an `entPhysicalClass` that the plugin's built-in class list omits. This action must be paired with the **Class is** match type.
+- **Include** admits the inventory rows of one `entPhysicalClass` to Module Sync. This action must be paired with the **Class is** match type. See [Inventory classes](#inventory-classes).
 
-Name-based rules can use **Ends with**, **Starts with**, **Contains**, or a Python regular expression against `entPhysicalName`. These comparisons are case-insensitive except for regular expressions, whose behavior is controlled by the expression. **Serial matches device** compares `entPhysicalSerialNum` with the NetBox device serial. **Model matches device type** compares `entPhysicalModelName` case-insensitively with the model and the part number of the NetBox device type. **Class is** compares `entPhysicalClass` case-insensitively and is used only with the Include action.
+Name-based rules can use **Ends with**, **Starts with**, **Contains**, or a Python regular expression against `entPhysicalName`. These comparisons are case-insensitive except for regular expressions, whose behavior is controlled by the expression. **Serial matches device** compares `entPhysicalSerialNum` with the NetBox device serial. **Model matches device type** compares `entPhysicalModelName` case-insensitively with the model and the part number of the NetBox device type. **Class is** compares `entPhysicalClass` case-insensitively and is used only with the Include action. An Include rule ignores **Require serial match parent**.
 
 For name-based rules, **Require serial match parent** adds a safety check: the rule applies only when the item's serial also matches an ancestor entity's serial.
 
@@ -41,16 +41,52 @@ Fixed Cisco NX-OS platforms, such as the Nexus 93180YC-FX, report their built-in
   enabled: true
   description: "Hide built-in units that report the chassis PID"
 
-- name: "Additional inventory class"
+- name: "Routing engines reported as class other"
   match_type: class_is
-  pattern: cpmModule
+  pattern: other
   action: include
+  prefer_description: true
   require_serial_match_parent: false
   enabled: true
-  description: "Include CPM inventory rows"
+  description: "Include Juniper Routing Engine rows"
 ```
 
 ![Inventory Ignore Rule List](../img/inventory_ignore_rules/list.png)
+
+### Inventory classes
+
+Module Sync shows an ENTITY-MIB row only when an enabled Include rule admits it. Migration 0025 seeds one editable rule for each class that earlier releases admitted from a fixed list: `module`, `powerSupply`, `fan`, `port`, `container`, `ioModule`, `cpmModule`, `mdaModule`, `fabricModule` and `xioModule`. Each rule is named `Inventory class: <class>`. To hide a class, disable or delete its rule. When no Include rule applies to a device, the Modules tab shows a warning, so an empty table does not look like a device without hardware. Rows from the transceivers API do not need a rule.
+
+The migration keeps the existing Include rules working. A rule for a class outside that list gets **Prefer description**, so its rows keep `entPhysicalDescr` as their name. The migration adds a class rule only when no enabled, unscoped Include rule without filters already admits the class.
+
+An Include rule can narrow its class with three optional filters:
+
+- **Name pattern** is searched in `entPhysicalName`.
+- **Description pattern** is searched in `entPhysicalDescr`.
+- **Model pattern** is searched in `entPhysicalModelName`.
+
+Each filter is a Python regular expression, applied with `re.search`. It is case-sensitive unless the expression enables case-insensitive matching, for example with `(?i)`. The plugin stores the expression as typed and does not trim it, so a CSV import that carries a filter column is refused: import these rules as YAML or JSON. A missing value is compared as an empty string. Within one rule, the class and every non-blank filter must match. Between rules, one matching rule is enough to admit the row.
+
+**Prefer description** names the row by `entPhysicalDescr` instead of `entPhysicalName`. Use it when the name repeats the model, as on Juniper Routing Engines. It applies to the rows at the top level of the table.
+
+Juniper MX480 and MX960 routers report each Switch Control Board as class `backplane`, with the SKU as the name and the slot as the description, for example `SCBE2-MX-S` and `CB 0`. Other Juniper platforms report `backplane` rows that are not separate boards, such as `JNP10008-CHAS` / `Backplane` or `JNP304-CHAS` / `CB 0`, so the class alone admits too much, and the description does not separate them either. Migration 0025 seeds this rule for each Juniper manufacturer, or unscoped when NetBox has none:
+
+```yaml
+- name: "Juniper MX switch control boards"
+  match_type: class_is
+  pattern: backplane
+  action: include
+  name_pattern: "^SCB"
+  prefer_description: true
+  require_serial_match_parent: false
+  enabled: true
+```
+
+The rows are named `CB 0` and `CB 1`. A Module Bay Mapping from `^CB (\d+)$` to `CB\1` for class `backplane` places them in the NetBox module bays `CB0` and `CB1`. `contrib/module_bay_mappings.yaml` carries it.
+
+A stored filter that does not compile stops the Modules tab with an error that names the rule, and the install actions refuse until the rule is fixed or disabled. The rule form and the API reject an invalid expression, so such a filter can only come from a direct database edit.
+
+Migration 0025 cannot be reversed. To go back to an earlier release, restore a database backup taken before the upgrade.
 
 ## Normalization Rules
 

@@ -102,10 +102,10 @@ def _captured_table_view(view):
 @pytest.mark.django_db
 class TestInventoryClassIncludeRule:
     """
-    Admit an entPhysicalClass the built-in allowlist does not carry.
+    Admit an entPhysicalClass through an include rule.
 
-    A Juniper MX304 reports both Routing Engines with entPhysicalClass "other".
-    INVENTORY_CLASSES has no "other", so the modules tab showed neither of them.
+    A Juniper MX304 reports both Routing Engines with entPhysicalClass "other". Without a rule
+    for "other", the modules tab showed neither of them.
     """
 
     def _inventory(self):
@@ -163,16 +163,18 @@ class TestInventoryClassIncludeRule:
     def _include_rule(self, pattern="other"):
         from netbox_librenms_plugin.models import InventoryIgnoreRule
 
+        # Migration 0025 sets prefer_description on every include rule of a class outside the old list.
         return InventoryIgnoreRule.objects.create(
             name="Routing engines reported as other",
             match_type=InventoryIgnoreRule.MATCH_CLASS_IS,
             pattern=pattern,
             action=InventoryIgnoreRule.ACTION_INCLUDE,
             require_serial_match_parent=False,
+            prefer_description=True,
         )
 
     def test_without_a_rule_the_class_is_dropped(self):
-        """The built-in allowlist still governs when no rule says otherwise."""
+        """An item whose class no include rule admits is no row."""
         assert self._collect(self._inventory(), []) == []
 
     def test_an_include_rule_admits_every_item_of_that_class(self):
@@ -184,6 +186,7 @@ class TestInventoryClassIncludeRule:
         """Display annotations must not change the digest used to authorize a later action."""
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.utils import module_inventory_row_digest
+        from netbox_librenms_plugin.views.base.modules_view import _PREFER_DESCRIPTION
 
         inventory = self._inventory()
         expected_digest = module_inventory_row_digest(inventory[1])
@@ -193,7 +196,8 @@ class TestInventoryClassIncludeRule:
         row = next(row for row in rows if row["ent_physical_index"] == 38)
 
         assert row["inventory_digest"] == expected_digest
-        assert "_class_included" not in inventory[1]
+        assert row["name"] == "Routing Engine 0"
+        assert _PREFER_DESCRIPTION not in inventory[1]
 
     def test_a_rule_for_another_class_admits_nothing(self):
         assert self._collect(self._inventory(), [self._include_rule(pattern="sensor")]) == []
@@ -278,7 +282,9 @@ class TestInventoryClassIncludeRule:
             },
         ]
 
-        collected = self._collect(items, [self._include_rule()])
+        from netbox_librenms_plugin.tests.conftest import default_inventory_include_rules
+
+        collected = self._collect(items, [*default_inventory_include_rules(), self._include_rule()])
 
         assert [item["entPhysicalIndex"] for item in collected] == [38]
 

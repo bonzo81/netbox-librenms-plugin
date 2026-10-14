@@ -71,5 +71,5 @@ Before using Module Sync you will typically need to configure one or more [mappi
 - **ModuleTypeMapping** — maps LibreNMS model strings (e.g. `SFP-1G-T`) to NetBox ModuleType objects
 - **ModuleBayMapping** — maps LibreNMS bay names (e.g. `Power Supply 1`) to NetBox bay names (e.g. `PSU1`), with optional regex and manufacturer scoping
 - **NormalizationRule** — strips vendor suffixes from model strings before matching (e.g. `3HE16474AARA01` → `3HE16474AA`)
-- **InventoryIgnoreRule** — skips or makes transparent phantom EEPROM/IDPROM entities that some vendors (Cisco IOS-XR) report, and the built-in units of fixed platforms (Cisco IOS XE)
+- **InventoryIgnoreRule** — admits the inventory classes the tab shows (one seeded rule per class, optionally narrowed by name, description or model), and skips or makes transparent phantom EEPROM/IDPROM entities that some vendors (Cisco IOS-XR) report, and the built-in units of fixed platforms (Cisco IOS XE)
 - **CarrierAutoInstallRule** — suggests installing carrier modules for vendors that omit them from SNMP reporting

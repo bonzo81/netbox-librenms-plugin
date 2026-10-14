@@ -282,10 +282,14 @@ def test_conftest_restores_exactly_the_rules_migration_0010_seeds():
 def _seeded_ignore_rule_count():
     """Count the ignore rules the restore declares, across every migration that seeds one."""
     from netbox_librenms_plugin.models import InventoryIgnoreRule
-    from netbox_librenms_plugin.tests.conftest import _seeded_ignore_rule_signatures, _seeded_rule_rows
+    from netbox_librenms_plugin.tests.conftest import (
+        _seeded_ignore_rule_signatures,
+        _seeded_rule_rows,
+        seeded_class_rule_rows,
+    )
 
     declarative = sum(1 for model, _lookup, _defaults in _seeded_rule_rows() if model is InventoryIgnoreRule)
-    return len(list(_seeded_ignore_rule_signatures())) + declarative
+    return len(list(_seeded_ignore_rule_signatures())) + declarative + len(list(seeded_class_rule_rows()))
 
 
 @pytest.mark.django_db
