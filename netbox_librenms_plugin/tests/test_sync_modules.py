@@ -3781,10 +3781,14 @@ def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(
     assert [str(message) for message in response.wsgi_request._messages] == [GrantRefusal.POLICY.message]
 
 
-def _waiting_advisory_locks(observer):
-    """Return how many backends wait for an advisory lock; *observer* is any other connection."""
+def _backends_blocked_by(observer, holder_pid):
+    """Return how many backends wait for an advisory lock that *holder_pid* holds; *observer* is any other connection."""
     with observer.cursor() as cursor:
-        cursor.execute("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted")
+        cursor.execute(
+            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
+            " AND %s = ANY(pg_blocking_pids(pid))",
+            [holder_pid],
+        )
         return cursor.fetchone()[0]
 
 
@@ -3861,9 +3865,11 @@ def test_a_writer_waiting_for_the_page_lock_refuses_a_change_committed_during_th
                     "SELECT pg_advisory_xact_lock(%s)",
                     [advisory_lock_key(f"netbox-librenms-plugin:module-serial:{page.pk}")],
                 )
+                cursor.execute("SELECT pg_backend_pid()")
+                holder_pid = cursor.fetchone()[0]
             posted = executor.submit(post_while_the_lock_is_held)
             deadline = time.monotonic() + 5
-            while not _waiting_advisory_locks(observer):
+            while not _backends_blocked_by(observer, holder_pid):
                 assert time.monotonic() < deadline, "the writer never waited for the page lock"
                 time.sleep(0.02)
             # The change commits while the writer waits; this connection is in autocommit.
