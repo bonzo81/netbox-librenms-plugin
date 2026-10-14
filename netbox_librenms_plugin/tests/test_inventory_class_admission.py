@@ -420,8 +420,9 @@ class TestInvalidStoredFilter:
             make_user_with_perms,
             make_view,
             message_texts,
-            module_grant,
             post,
+            render_module_tab,
+            rendered_module_form,
         )
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView, InstallSelectedView
         from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
@@ -429,7 +430,13 @@ class TestInvalidStoredFilter:
         device = make_device_with_module_bays(f"broken-filter-{action}", ["Slot 1"])
         seed_mapping(device, "default", own=7)
         make_module_type_with_bays("CARD-1")
-        inventory = [_chassis(), _entity(2, "module", "Slot 1", "Line card", model="CARD-1")]
+        make_module_type_with_bays("CARD-1-OPTIC")
+        # The optic below the card is what makes the table render the card's branch button.
+        inventory = [
+            _chassis(),
+            _entity(2, "module", "Slot 1", "Line card", model="CARD-1"),
+            _entity(3, "module", "Optic", "SFP", model="CARD-1-OPTIC", contained_in=2),
+        ]
         user = make_user_with_perms(
             f"broken-filter-{action}",
             [
@@ -442,19 +449,16 @@ class TestInvalidStoredFilter:
                 ("delete", Interface),
             ],
         )
+        view_class = InstallSelectedView if action == "install_selected" else InstallBranchView
+        seed_inventory(view_class(), device, inventory, librenms_id=7)
+        content = render_module_tab(device, user=user)
         if action == "install_selected":
-            view_class = InstallSelectedView
-            grant = {"rows": [[2, device.pk, True]]}
-            data = {"select": ["2"], "server_key": "default"}
+            _action, data = rendered_module_form(content, "install-selected")
+            data["select"] = ["2"]
         else:
-            view_class = InstallBranchView
-            grant = {"ent_index": 2, "action_target": {"parent_index": 2}, "rows": [[2, device.pk]]}
-            data = {"parent_index": "2", "server_key": "default", "selected_device_id": str(device.pk)}
+            _action, data = rendered_module_form(content, "install-branch", 2)
         request = make_request("post", data, user=user)
         view = make_view(view_class, request, librenms_api=SimpleNamespace(server_key="default"))
-        seed_inventory(view, device, inventory, librenms_id=7)
-        request.POST = request.POST.copy()
-        request.POST["inventory_binding"] = module_grant(device, action, **grant)
         _break_the_scb_filter()
 
         post(view, request, pk=device.pk)

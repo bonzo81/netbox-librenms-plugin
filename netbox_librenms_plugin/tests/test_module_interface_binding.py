@@ -16,7 +16,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post as view_post
-from netbox_librenms_plugin.tests.view_test_helpers import module_grant
+from netbox_librenms_plugin.tests.view_test_helpers import render_module_tab, rendered_module_form
 
 pytestmark = pytest.mark.django_db
 
@@ -149,25 +149,6 @@ class TestInterfacePortBinding:
         assert read_mapping(module.interfaces.get(name="Uplink")).own_id("default") is None
 
 
-def _render_module_tab(device, user):
-    """Render the real module table from its seeded cache."""
-    from django.urls import reverse
-
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-    request = make_request(
-        "get",
-        {"tab": "modules", "server_key": "default"},
-        user=user,
-        path=reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": device.pk}),
-    )
-    view = DeviceModuleTableView()
-    view.setup(request, pk=device.pk)
-    view.cache_only = True
-    context = view.get_context_data(request, device)
-    return context["table"].as_html(request)
-
-
 class TestModuleTableShowsTheWriterChoice:
     """The modules table shows the interface that Update Interface then binds."""
 
@@ -183,26 +164,11 @@ class TestModuleTableShowsTheWriterChoice:
         cache_key = seed_inventory(DeviceModuleTableView(), device, [row], librenms_id=ADOPTION_LIBRENMS_ID)
         return device, module, row, cache_key
 
-    def _post_update(self, device, user, live_librenms, *, content=None, module=None):
-        """POST Update Interface for the seeded row, from the rendered form or signed for *module*."""
-        from netbox_librenms_plugin.tests.view_test_helpers import module_grant, rendered_module_form
+    def _post_update(self, device, user, live_librenms, content):
+        """POST the Update Interface form that *content* renders for the seeded row."""
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
-        if content is not None:
-            _action, fields = rendered_module_form(content, "update-module-interface", ADOPTION_ENT_INDEX)
-        else:
-            # The table offers no update for this row, so the test signs the crafted post itself.
-            fields = {
-                "module_id": str(module.pk),
-                "ent_index": str(ADOPTION_ENT_INDEX),
-                "server_key": "default",
-                "inventory_binding": module_grant(
-                    device,
-                    "update_module_interface",
-                    ent_index=ADOPTION_ENT_INDEX,
-                    action_target={"module_id": module.pk},
-                ),
-            }
+        _action, fields = rendered_module_form(content, "update-module-interface", ADOPTION_ENT_INDEX)
         request = make_request("post", fields, user=user, path="/modules/")
         view = UpdateModuleInterfaceView()
         view._librenms_api = live_librenms.api
@@ -227,8 +193,8 @@ class TestModuleTableShowsTheWriterChoice:
         user = make_superuser()
         shown = module.interfaces.get(name=expected)
         try:
-            content = _render_module_tab(device, user)
-            response, _request = self._post_update(device, user, live_librenms, content=content)
+            content = render_module_tab(device, user=user)
+            response, _request = self._post_update(device, user, live_librenms, content)
         finally:
             cache.delete(cache_key)
 
@@ -247,12 +213,18 @@ class TestModuleTableShowsTheWriterChoice:
         """The item names port Te1/1/5, so a lone interface with another port number is not that port."""
         from django.core.cache import cache
 
+        from dcim.models import Interface
+
         device, module, row, cache_key = self._seed("contra", [lone_name], {"_librenms_ifname": "Te1/1/5"})
         lone = module.interfaces.get(name=lone_name)
         user = make_superuser()
         try:
-            content = _render_module_tab(device, user)
-            _response, request = self._post_update(device, user, live_librenms, module=module)
+            content = render_module_tab(device, user=user)
+            # A later page shows Te1/1/5 and offers the update; the interface is gone again before the click.
+            named = Interface.objects.create(device=device, module=module, name="Te1/1/5", type="other")
+            stale_page = render_module_tab(device, user=user)
+            named.delete()
+            _response, request = self._post_update(device, user, live_librenms, stale_page)
         finally:
             cache.delete(cache_key)
 
@@ -271,8 +243,8 @@ class TestModuleTableShowsTheWriterChoice:
         seed_stored_mapping(uplink, {"default": {"oob": {"id": 8811}}}, save=True)
         user = make_superuser()
         try:
-            content = _render_module_tab(device, user)
-            self._post_update(device, user, live_librenms, content=content)
+            content = render_module_tab(device, user=user)
+            self._post_update(device, user, live_librenms, content)
         finally:
             cache.delete(cache_key)
 
@@ -295,7 +267,7 @@ class TestModuleTableShowsTheWriterChoice:
         uplink = module.interfaces.get(name="Uplink")
         seed_stored_mapping(uplink, stored, save=True)
         try:
-            content = _render_module_tab(device, make_superuser())
+            content = render_module_tab(device, user=make_superuser())
         finally:
             cache.delete(cache_key)
 
@@ -312,7 +284,7 @@ class TestModuleTableShowsTheWriterChoice:
         holder = make_interface(make_device("table-choice-holder"), "Ethernet9")
         seed_mapping(holder, own=8811)
         try:
-            content = _render_module_tab(device, make_superuser())
+            content = render_module_tab(device, user=make_superuser())
         finally:
             cache.delete(cache_key)
 
@@ -330,7 +302,7 @@ class TestModuleTableShowsTheWriterChoice:
         uplink = module.interfaces.get(name="Uplink")
         seed_mapping(uplink, own=8999)
         try:
-            content = _render_module_tab(device, make_superuser())
+            content = render_module_tab(device, user=make_superuser())
         finally:
             cache.delete(cache_key)
 
@@ -356,7 +328,7 @@ class TestModuleTableShowsTheWriterChoice:
             make_module_bay(device, "Slot 2")
             _module_with_interfaces(device, "Slot 2", "TABLE-CHOICE-OTHER", ["Ethernet1/1"])
         try:
-            content = _render_module_tab(device, make_superuser())
+            content = render_module_tab(device, user=make_superuser())
         finally:
             cache.delete(cache_key)
 
@@ -373,7 +345,7 @@ class TestModuleTableShowsTheWriterChoice:
             # A duplicate binding: no writer can store it, so seed the raw state.
             seed_stored_mapping(holder, {"default": 8811}, save=True)
         try:
-            content = _render_module_tab(device, make_superuser())
+            content = render_module_tab(device, user=make_superuser())
         finally:
             cache.delete(cache_key)
 
@@ -393,7 +365,7 @@ class TestModuleTableShowsTheWriterChoice:
         )
         user = grant(user, "change", Interface, constraints={"name": "Management1"})
         try:
-            content = _render_module_tab(device, user)
+            content = render_module_tab(device, user=user)
         finally:
             cache.delete(cache_key)
 
@@ -411,7 +383,7 @@ class TestModuleTableShowsTheWriterChoice:
         user = make_user_with_perms("table-choice-hidden-user", [("view", Device), ("view", Module)])
         user = grant(user, "view", Interface, constraints={"name": "Management1"})
         try:
-            content = _render_module_tab(device, user)
+            content = render_module_tab(device, user=user)
         finally:
             cache.delete(cache_key)
 
@@ -537,23 +509,20 @@ class TestUpdateModuleInterfaceAdoption:
             librenms_id=ADOPTION_LIBRENMS_ID,
         )
 
-    def _post(self, view_class, device, data, live_librenms, module=None):
-        data = data.copy()
-        if module is not None:
-            inventory_item = _adoption_inventory_row(module.module_type.model, module.module_bay.name)
-            data["inventory_binding"] = module_grant(
-                device,
-                "update_module_interface",
-                ent_index=data["ent_index"],
-                action_target={"module_id": module.pk},
-                server_key=data["server_key"],
-                inventory=[inventory_item],
-            )
-        request = make_request("post", data, user=make_superuser(), path="/modules/")
+    def _post(self, view_class, device, live_librenms, module=None, *, user=None, before_post=None):
+        """POST the Update Interface form rendered for the seeded row of *module*; without one, post no module."""
+        user = user or make_superuser()
         view = view_class()
         view._librenms_api = live_librenms.api
+        data = {"server_key": "default"}
         if module is not None:
-            self._seed(view, device, module, inventory_item)
+            self._seed(view, device, module)
+            _action, data = rendered_module_form(
+                render_module_tab(device, user=user), "update-module-interface", ADOPTION_ENT_INDEX
+            )
+        if before_post is not None:
+            before_post()
+        request = make_request("post", data, user=user, path="/modules/")
         return view, request, view_post(view, request, pk=device.pk)
 
     def test_a_missing_module_id_reports_an_error(self, live_librenms):
@@ -561,9 +530,7 @@ class TestUpdateModuleInterfaceAdoption:
 
         device, _module = self._module_with_templates("adopt-bad-id", ["Ethernet1/1"])
 
-        _view, request, response = self._post(
-            UpdateModuleInterfaceView, device, {"server_key": "default"}, live_librenms
-        )
+        _view, request, response = self._post(UpdateModuleInterfaceView, device, live_librenms)
 
         assert response.status_code == 302
         assert "Missing or invalid module ID." in message_texts(request, "error")
@@ -576,13 +543,7 @@ class TestUpdateModuleInterfaceAdoption:
         second = make_interface(device, "Ethernet1/2")
         untouched = make_interface(device, "Management1")
 
-        _view, request, response = self._post(
-            UpdateModuleInterfaceView,
-            device,
-            {"module_id": str(module.pk), "ent_index": str(ADOPTION_ENT_INDEX), "server_key": "default"},
-            live_librenms,
-            module=module,
-        )
+        _view, request, response = self._post(UpdateModuleInterfaceView, device, live_librenms, module)
 
         first.refresh_from_db()
         second.refresh_from_db()
@@ -597,13 +558,11 @@ class TestUpdateModuleInterfaceAdoption:
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
         device, module = self._module_with_templates("adopt-nothing", ["Ethernet1/1"])
+        # The page offers the adoption of Ethernet1/1; the interface is deleted before the click.
+        standalone = make_interface(device, "Ethernet1/1")
 
         _view, request, response = self._post(
-            UpdateModuleInterfaceView,
-            device,
-            {"module_id": str(module.pk), "ent_index": str(ADOPTION_ENT_INDEX), "server_key": "default"},
-            live_librenms,
-            module=module,
+            UpdateModuleInterfaceView, device, live_librenms, module, before_post=standalone.delete
         )
 
         assert response.status_code == 302
@@ -619,29 +578,8 @@ class TestUpdateModuleInterfaceAdoption:
         blocked = make_interface(device, "Ethernet1/1")
         user = make_user_with_perms("adopt-scoped-user", [("view", Device), ("view", Module)])
         user = grant(user, "change", Interface, constraints={"name": "Management1"})
-        inventory_item = _adoption_inventory_row(module.module_type.model, module.module_bay.name)
-        request = make_request(
-            "post",
-            {
-                "module_id": str(module.pk),
-                "ent_index": str(ADOPTION_ENT_INDEX),
-                "server_key": "default",
-                "inventory_binding": module_grant(
-                    device,
-                    "update_module_interface",
-                    ent_index=ADOPTION_ENT_INDEX,
-                    action_target={"module_id": module.pk},
-                    inventory=[inventory_item],
-                ),
-            },
-            user=user,
-            path="/modules/",
-        )
-        view = UpdateModuleInterfaceView()
-        view._librenms_api = live_librenms.api
-        self._seed(view, device, module, inventory_item)
 
-        response = view_post(view, request, pk=device.pk)
+        _view, request, response = self._post(UpdateModuleInterfaceView, device, live_librenms, module, user=user)
 
         blocked.refresh_from_db()
         assert response.status_code == 302

@@ -66,25 +66,9 @@ def _seed(name, *, port_id_on_interface):
 ENT_INDEX = 4077
 
 
-def _post(device, module):
-    """Build the Update Interface post for the cached row; the cache must already hold it."""
-    from netbox_librenms_plugin.tests.view_test_helpers import module_grant
-
-    request = RequestFactory().post(
-        f"/modules/{device.pk}/interface/",
-        data={
-            "module_id": str(module.pk),
-            "server_key": SERVER_KEY,
-            "ent_index": str(ENT_INDEX),
-            "inventory_binding": module_grant(
-                device,
-                "update_module_interface",
-                ent_index=ENT_INDEX,
-                action_target={"module_id": module.pk},
-                server_key=SERVER_KEY,
-            ),
-        },
-    )
+def _post(device, fields):
+    """Build the post of the rendered Update Interface form."""
+    request = RequestFactory().post(f"/modules/{device.pk}/interface/", data=fields)
     request.user = get_user_model().objects.create_superuser(username=f"mib-{device.pk}", email="", password="x")
     request.session = {}
     request._messages = FallbackStorage(request)
@@ -92,20 +76,29 @@ def _post(device, module):
     return request
 
 
-def _drive(device, module, *, port_id, ifname):
-    """Seed the row the clicked button names, then drive the real view over it."""
+def _drive(device, module, iface, *, port_id, ifname, bound_before_post=None):
+    """Seed the row, take the Update Interface form the tab renders for it, then drive the real view over it."""
     from django.core.cache import cache
 
     from netbox_librenms_plugin.tests.view_test_helpers import (
         post as post_view,
     )
     from netbox_librenms_plugin.tests.view_test_helpers import (
+        render_module_tab,
+        rendered_module_form,
         trusted_module_inventory_payload,
     )
     from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
     view = UpdateModuleInterfaceView()
-    inventory_item = {"entPhysicalIndex": ENT_INDEX, "_librenms_port_id": port_id, "_librenms_ifname": ifname}
+    inventory_item = {
+        "entPhysicalIndex": ENT_INDEX,
+        "entPhysicalClass": "module",
+        "entPhysicalName": module.module_bay.name,
+        "entPhysicalModelName": module.module_type.model,
+        "_librenms_port_id": port_id,
+        "_librenms_ifname": ifname,
+    }
     # The view reads the port identity from the cached row for ent_index, never from the post.
     cache_key = view.get_cache_key(device, "inventory", server_key=SERVER_KEY)
     cache.set(
@@ -118,8 +111,13 @@ def _drive(device, module, *, port_id, ifname):
         ),
         timeout=300,
     )
-    request = _post(device, module)
     try:
+        _action, fields = rendered_module_form(render_module_tab(device), "update-module-interface", ENT_INDEX)
+        if bound_before_post is not None:
+            # Another writer binds the port between the render and the click, so the click is a no-op.
+            seed_mapping(iface, SERVER_KEY, own=bound_before_post, save=False)
+            iface.save()
+        request = _post(device, fields)
         post_view(view, request, pk=device.pk)
     finally:
         cache.delete(cache_key)
@@ -130,8 +128,8 @@ def _drive(device, module, *, port_id, ifname):
 class TestUpdateModuleInterfaceBindMessage:
     def test_noop_rebind_shows_no_updated_interface_message(self):
         # Interface already mapped to port_id 500 → posting the same port_id is a no-op.
-        device, module, _iface = _seed("mib-noop", port_id_on_interface=500)
-        messages = _drive(device, module, port_id=500, ifname="Gi0/1")
+        device, module, iface = _seed("mib-noop", port_id_on_interface=None)
+        messages = _drive(device, module, iface, port_id=500, ifname="Gi0/1", bound_before_post=500)
 
         joined = " || ".join(msg for _, msg in messages)
         assert not any("Updated interface" in msg for _, msg in messages), joined
@@ -139,8 +137,8 @@ class TestUpdateModuleInterfaceBindMessage:
     def test_real_rebind_still_announces_updated_interface(self):
         # Positive control: the interface has NO port binding yet, so posting a port_id actually
         # writes it (changed=True) and the confirmation message must appear.
-        device, module, _iface = _seed("mib-real", port_id_on_interface=None)
-        messages = _drive(device, module, port_id=600, ifname="Gi0/1")
+        device, module, iface = _seed("mib-real", port_id_on_interface=None)
+        messages = _drive(device, module, iface, port_id=600, ifname="Gi0/1")
 
         joined = " || ".join(msg for _, msg in messages)
         assert any("Updated interface" in msg for _, msg in messages), joined
