@@ -31,6 +31,7 @@ from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
     cached_module_inventory,
+    module_inventory_oob_matches,
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.transactions import classify_conflict, update_existing_row
@@ -231,7 +232,8 @@ def _get_cached_inventory_for_device(sync_device, server_key, get_cache_key):
 
     Cache entries are namespaced by server key and include ``librenms_id``.
     When both current and cached IDs are valid positive integers, they must
-    match; otherwise cached data is treated as stale. A malformed payload or one
+    match; otherwise cached data is treated as stale. The OOB controller link must
+    match too, the same check the module table makes. A malformed payload or one
     from an older schema version is deleted and read as absent.
 
     Args:
@@ -253,6 +255,8 @@ def _get_cached_inventory_for_device(sync_device, server_key, get_cache_key):
     current_librenms_id = _coerce_positive_int(read_mapping(sync_device).own_id(server_key))
     cached_librenms_id = _coerce_positive_int(cached_payload.get("librenms_id"))
     if current_librenms_id is None or cached_librenms_id is None or current_librenms_id != cached_librenms_id:
+        return None
+    if not module_inventory_oob_matches(cached_payload, sync_device, server_key):
         return None
 
     return inventory

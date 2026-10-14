@@ -29,6 +29,7 @@ from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     cached_module_inventory,
     module_inventory_cache_payload,
+    module_inventory_oob_matches,
     request_actor_id,
 )
 from netbox_librenms_plugin.utils import (
@@ -980,19 +981,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         if current_librenms_id is None or cached_payload.get("librenms_id") != current_librenms_id:
             cache.delete(cache_key)
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
-        # Same for the linked OOB controller: a re-link (or unlink) to a different
-        # controller must drop merged inventory built for the old one. Symmetric on
-        # None so had-OOB→none and none→has-OOB both invalidate.
-        sync_mapping = read_mapping(sync_device)
-        # The snapshot reads a stored "5" and 5 as the same int, which post() also caches.
-        current_oob_id = sync_mapping.oob_id(scoped_server)
-        # A linked-but-corrupt OOB id must not collapse to the no-OOB fingerprint: post()
-        # takes the partial-outcome path (never caches) for this state, so the GET compare
-        # can't quietly serve a prior no-OOB snapshot while an OOB controller is linked.
-        if sync_mapping.has_oob(scoped_server) and current_oob_id is None:
-            cache.delete(cache_key)
-            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
-        if cached_payload.get("oob_librenms_id") != current_oob_id:
+        # Same for the linked OOB controller: merged inventory built for another link is stale.
+        if not module_inventory_oob_matches(cached_payload, sync_device, scoped_server):
             cache.delete(cache_key)
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
         # Pass the resolved server explicitly (like post() does) so _active_server_key keys on it
