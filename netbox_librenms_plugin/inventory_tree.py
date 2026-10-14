@@ -16,7 +16,9 @@ def _pics_by_slot(rows, by_index):
     """Return ``{(fpc, pic): [PIC rows]}`` for the PIC rows held by an FPC container of the same slot."""
     pics = {}
     for row in rows:
-        if row.get("entPhysicalClass") != "module" or (pic := _locator(JUNOS_PIC_LOCATOR_RE, row)) is None:
+        if row.get("entPhysicalIndex") is None or row.get("entPhysicalClass") != "module":
+            continue
+        if (pic := _locator(JUNOS_PIC_LOCATOR_RE, row)) is None:
             continue
         holder = by_index.get(row.get("entPhysicalContainedIn"))
         if holder is None or holder.get("entPhysicalClass") != "container":
@@ -54,7 +56,8 @@ def repair_dangling_parents(inventory):
         inventory (list[dict]): The rows of one source inventory list, changed in place.
 
     """
-    by_index = {row.get("entPhysicalIndex"): row for row in inventory}
+    # A row with no index can not be a parent, so it is not in the lookup.
+    by_index = {row["entPhysicalIndex"]: row for row in inventory if row.get("entPhysicalIndex") is not None}
     pics = _pics_by_slot(inventory, by_index)
     for row in inventory:
         reported = row.get("entPhysicalContainedIn")
