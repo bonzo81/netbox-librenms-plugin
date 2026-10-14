@@ -2869,7 +2869,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         Checks class-scoped mappings first, then falls back to classless mappings.
         Within each scope, prefers manufacturer-matched mappings over global ones
-        and skips mappings scoped to a different manufacturer.
+        and skips mappings scoped to a different manufacturer. A mapping whose bay is absent
+        or refuses the module gives way to the next mapping of the same name.
         Iterates the underlying dict scopes (supports both plain dicts and legacy
         ChainMap instances) so the returned bay is validated via _fpc_slot_matches
         and fits the module.
@@ -2888,24 +2889,18 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         """
         maps = module_bays.maps if hasattr(module_bays, "maps") else [module_bays]
         scoped_mappings = BaseModuleTableView._filter_mappings_by_manufacturer(exact_mappings, manufacturer_id)
-        if phys_class:
-            mapping = next(
-                (m for m in scoped_mappings if m.librenms_name == name and m.librenms_class == phys_class), None
-            )
-            if mapping and mapping.netbox_bay_name in module_bays:
+        # Class-scoped mappings first, then classless; each tier keeps the manufacturer order.
+        for entity_class in (phys_class, "") if phys_class else ("",):
+            for mapping in scoped_mappings:
+                if mapping.librenms_name != name or mapping.librenms_class != entity_class:
+                    continue
                 for scope_map in maps:
-                    if mapping.netbox_bay_name in scope_map:
-                        bay = scope_map[mapping.netbox_bay_name]
-                        if BaseModuleTableView._fpc_slot_matches(name, bay) and module_bay_fits(
-                            bay, accepted_bay_types
-                        ):
-                            return bay
-        mapping = next((m for m in scoped_mappings if m.librenms_name == name and m.librenms_class == ""), None)
-        if mapping and mapping.netbox_bay_name in module_bays:
-            for scope_map in maps:
-                if mapping.netbox_bay_name in scope_map:
-                    bay = scope_map[mapping.netbox_bay_name]
-                    if BaseModuleTableView._fpc_slot_matches(name, bay) and module_bay_fits(bay, accepted_bay_types):
+                    bay = scope_map.get(mapping.netbox_bay_name)
+                    if (
+                        bay is not None
+                        and BaseModuleTableView._fpc_slot_matches(name, bay)
+                        and module_bay_fits(bay, accepted_bay_types)
+                    ):
                         return bay
         return None
 
