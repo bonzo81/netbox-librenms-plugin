@@ -937,7 +937,7 @@ _INVENTORY_RULE_FIELDS = [
     "pattern",
     "action",
     "require_serial_match_parent",
-    *InventoryIgnoreRule.INCLUDE_FILTER_SOURCES,
+    *InventoryIgnoreRule.FILTER_SOURCES,
     "prefer_description",
     "manufacturer",
     "enabled",
@@ -948,7 +948,7 @@ _INVENTORY_RULE_FIELDS = [
 class InventoryIgnoreRuleForm(_VerbatimPatternMixin, NetBoxModelForm):
     """Form for creating and editing inventory ignore rules."""
 
-    verbatim_fields = tuple(InventoryIgnoreRule.INCLUDE_FILTER_SOURCES)
+    verbatim_fields = tuple(InventoryIgnoreRule.FILTER_SOURCES)
 
     class Meta:
         """Meta options for InventoryIgnoreRuleForm."""
@@ -960,7 +960,7 @@ class InventoryIgnoreRuleForm(_VerbatimPatternMixin, NetBoxModelForm):
 class InventoryIgnoreRuleImportForm(_VerbatimPatternMixin, NetBoxModelImportForm):
     """Form for bulk importing inventory ignore rules."""
 
-    verbatim_fields = tuple(InventoryIgnoreRule.INCLUDE_FILTER_SOURCES)
+    verbatim_fields = tuple(InventoryIgnoreRule.FILTER_SOURCES)
 
     match_type = CSVChoiceField(
         choices=InventoryIgnoreRule.MATCH_TYPE_CHOICES,

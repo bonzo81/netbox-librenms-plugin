@@ -691,7 +691,7 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
 
 
 class InventoryRuleFilterError(Exception):
-    """An include rule stores a filter regex that does not compile."""
+    """An inventory rule stores a filter regex that does not compile."""
 
     def __init__(self, rule, field):
         self.rule_pk = rule.pk
@@ -705,10 +705,10 @@ def _raw_text(value):
     return "" if value is None else str(value)
 
 
-def _include_filter_help(source):
+def _filter_help(source):
     return (
-        f"(Include rules only) Optional Python regex, searched in {source} and case-sensitive. "
-        "Leave blank to admit any value."
+        f"Optional Python regex, searched in {source} and case-sensitive. The rule applies only when "
+        "every non-blank filter matches. Leave blank to match any value."
     )
 
 
@@ -719,11 +719,8 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
     Three use-cases are supported, controlled by the ``action`` field:
 
     **Include** (``action='include'``)
-        Admit the items of one ``entPhysicalClass`` to the sync table. Optional
-        regex filters on ``entPhysicalName``, ``entPhysicalDescr`` and
-        ``entPhysicalModelName`` narrow the class; every non-blank filter must
-        match. Migration 0025 seeds one rule per class the table admitted from a
-        code constant before.
+        Admit the items of one ``entPhysicalClass`` to the sync table. Migration
+        0025 seeds one rule per class the table admitted from a code constant before.
 
     **Skip** (``action='skip'``)
         The matched item is removed from the sync table entirely.  Used for
@@ -737,6 +734,10 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
         where the RP/system-board entity is the device itself — it carries the
         same serial number as the NetBox device, so its children (transceivers,
         fans, PSUs) should be matched directly against device-level bays.
+
+    Optional regex filters on ``entPhysicalName``, ``entPhysicalDescr`` and
+    ``entPhysicalModelName`` narrow a rule of every action and match type; every
+    non-blank filter must match.
 
     Match types:
         ``ends_with / starts_with / contains / regex``
@@ -752,7 +753,8 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
             Pair with ``action='transparent'`` for the built-in units of a fixed
             platform (e.g. Cisco C8500L-8S4X), which report the chassis PID.
         ``class_is``
-            Compare ``entPhysicalClass``, ignoring case. Pairs only with ``action='include'``.
+            Compare ``entPhysicalClass``, ignoring case. The include action needs it. A skip or
+            transparent ``class_is`` rule honours ``require_serial_match_parent``.
     """
 
     # --- action ---
@@ -764,8 +766,8 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
         (ACTION_TRANSPARENT, "Transparent (hide row, promote children to device level)"),
         (ACTION_INCLUDE, "Include (admit rows of an entPhysicalClass)"),
     ]
-    # Each include filter field and the inventory field it searches.
-    INCLUDE_FILTER_SOURCES = {
+    # Each filter field and the inventory field it searches.
+    FILTER_SOURCES = {
         "name_pattern": "entPhysicalName",
         "description_pattern": "entPhysicalDescr",
         "model_pattern": "entPhysicalModelName",
@@ -803,7 +805,7 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
         max_length=25,
         choices=MATCH_TYPE_CHOICES,
         default=MATCH_ENDS_WITH,
-        help_text="How to match the inventory item",
+        help_text="How to match the inventory item. The optional filters narrow every match type.",
     )
     pattern = models.CharField(
         max_length=200,
@@ -811,7 +813,7 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
         help_text="Pattern to match against entPhysicalName. "
         "Case-insensitive for ends_with / starts_with / contains; "
         "Python re syntax for regex. "
-        "For class_is, the entPhysicalClass to admit. "
+        "For class_is, the entPhysicalClass to match. "
         "Not used for serial_matches_device or model_matches_device_type.",
     )
     action = models.CharField(
@@ -820,32 +822,32 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
         default=ACTION_SKIP,
         help_text="What to do when this rule matches: skip the item entirely, "
         "hide its row and promote its children to device-level bay matching, "
-        "or admit rows of an entPhysicalClass to the Modules tab.",
+        "or admit rows of an entPhysicalClass to the Modules tab (class_is only).",
     )
     require_serial_match_parent = models.BooleanField(
         default=True,
-        help_text="(Name-based rules only) Only apply this rule if the item's serial "
-        "number matches an ancestor entity's serial number.  Recommended to "
-        "prevent false positives.  Ignored for serial_matches_device, "
-        "model_matches_device_type and class_is rules.",
+        help_text="(Name-based and class_is skip or transparent rules only) Only apply this rule if the "
+        "item's serial number matches an ancestor entity's serial number. Recommended to prevent false "
+        "positives. Clear it for a rule that must match rows without a serial. Ignored for include, "
+        "serial_matches_device and model_matches_device_type rules.",
     )
     name_pattern = models.CharField(
         max_length=200,
         blank=True,
         default="",
-        help_text=_include_filter_help("entPhysicalName"),
+        help_text=_filter_help("entPhysicalName"),
     )
     description_pattern = models.CharField(
         max_length=200,
         blank=True,
         default="",
-        help_text=_include_filter_help("entPhysicalDescr"),
+        help_text=_filter_help("entPhysicalDescr"),
     )
     model_pattern = models.CharField(
         max_length=200,
         blank=True,
         default="",
-        help_text=_include_filter_help("entPhysicalModelName"),
+        help_text=_filter_help("entPhysicalModelName"),
     )
     prefer_description = models.BooleanField(
         default=False,
@@ -872,7 +874,7 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
     )
 
     def clean(self):
-        """Validate pattern/match_type consistency and the include-only filters."""
+        """Validate pattern/match_type consistency, the filters and the include-only display flag."""
         super().clean()
         # Invalidate cached compiled pattern so it's recomputed from the new value
         self.__dict__.pop("_compiled_pattern", None)
@@ -882,25 +884,16 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
             validate_regex_field(pattern_stripped, "pattern")
         if self.uses_pattern and not pattern_stripped:
             raise ValidationError({"pattern": "Pattern is required for name-based match types."})
-        if (self.action == self.ACTION_INCLUDE) != (self.match_type == self.MATCH_CLASS_IS):
+        if self.action == self.ACTION_INCLUDE and self.match_type != self.MATCH_CLASS_IS:
             raise ValidationError(
                 {
-                    "action": "The include action admits an entPhysicalClass, so it pairs only "
-                    "with the class_is match type, and class_is has no other use."
+                    "action": "The include action admits an entPhysicalClass, so it pairs only with the class_is match type."
                 }
             )
-        if self.action != self.ACTION_INCLUDE:
-            refused = {
-                field: "Only an include rule filters the rows it admits."
-                for field in self.INCLUDE_FILTER_SOURCES
-                if getattr(self, field)
-            }
-            if self.prefer_description:
-                refused["prefer_description"] = "Only an include rule names the rows it admits."
-            if refused:
-                raise ValidationError(refused)
+        if self.action != self.ACTION_INCLUDE and self.prefer_description:
+            raise ValidationError({"prefer_description": "Only an include rule names the rows it admits."})
         # A filter is a regex as typed, so it is validated but never trimmed.
-        for field in self.INCLUDE_FILTER_SOURCES:
+        for field in self.FILTER_SOURCES:
             if getattr(self, field):
                 validate_regex_field(getattr(self, field), field)
         # Normalize stored pattern to the stripped form so matches_name() and
@@ -911,6 +904,11 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
     def uses_pattern(self) -> bool:
         """Return True when this rule's match type reads the pattern field."""
         return self.match_type not in self.PATTERNLESS_MATCH_TYPES
+
+    @property
+    def serial_guard_applies(self) -> bool:
+        """Return True when ``require_serial_match_parent`` takes effect: a pattern-based skip or transparent rule."""
+        return self.uses_pattern and self.action != self.ACTION_INCLUDE
 
     @functools.cached_property
     def _compiled_pattern(self):
@@ -923,7 +921,7 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
             return None
 
     def matches_class(self, phys_class: str) -> bool:
-        """Return True when this rule admits *phys_class* (class_is rules only)."""
+        """Return True when this rule's class is *phys_class* (class_is rules only)."""
         if self.match_type != self.MATCH_CLASS_IS or not self.pattern:
             return False
         return self.pattern.strip().casefold() == (phys_class or "").strip().casefold()
@@ -931,16 +929,14 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
     @functools.cached_property
     def compiled_filters(self) -> tuple:
         """
-        Return ``(inventory field, compiled regex)`` for each non-blank filter of an include rule.
+        Return ``(inventory field, compiled regex)`` for each non-blank filter of this rule.
 
         Raises:
             InventoryRuleFilterError: When a stored filter does not compile.
 
         """
-        if self.action != self.ACTION_INCLUDE:
-            return ()
         compiled = []
-        for field, source in self.INCLUDE_FILTER_SOURCES.items():
+        for field, source in self.FILTER_SOURCES.items():
             if not getattr(self, field):
                 continue
             try:
@@ -949,14 +945,19 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
                 raise InventoryRuleFilterError(self, field) from exc
         return tuple(compiled)
 
-    def matches_inventory_item(self, item: dict) -> bool:
-        """Return True when this include rule admits *item*: its class and every non-blank filter match."""
+    def matches_item_class(self, item: dict) -> bool:
+        """Return True when this class_is rule's class is the class of *item*."""
         # LibreNMS sends JSON, so a numeric value arrives as an int; a missing one compares as "".
-        phys_class = normalize_serial(item.get("entPhysicalClass"))
-        if self.action != self.ACTION_INCLUDE or not self.matches_class(phys_class):
-            return False
+        return self.matches_class(normalize_serial(item.get("entPhysicalClass")))
+
+    def matches_filters(self, item: dict) -> bool:
+        """Return True when every non-blank filter of this rule matches *item*, whatever the action."""
         # A filter searches the raw text: spaces are part of a regex, so the value is not stripped.
         return all(regex.search(_raw_text(item.get(source))) for source, regex in self.compiled_filters)
+
+    def matches_inventory_item(self, item: dict) -> bool:
+        """Return True when this include rule admits *item*: its class and every non-blank filter match."""
+        return self.action == self.ACTION_INCLUDE and self.matches_item_class(item) and self.matches_filters(item)
 
     def matches_name(self, name: str) -> bool:
         """Return True if *name* matches this rule's pattern/match_type (name-based rules only)."""
@@ -996,7 +997,7 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
     def __str__(self):
         if not self.uses_pattern:
             return f"{self.name}: {self.get_match_type_display()}"
-        serial_note = " [serial match]" if self.require_serial_match_parent else ""
+        serial_note = " [serial match]" if self.serial_guard_applies and self.require_serial_match_parent else ""
         return f"{self.name}: {self.get_match_type_display()} '{self.pattern}'{serial_note}"
 
     def to_yaml(self):

@@ -101,14 +101,14 @@ def _filter_field(source):
     return models.CharField(
         blank=True,
         default="",
-        help_text=f"(Include rules only) Optional Python regex, searched in {source} and case-sensitive. "
-        "Leave blank to admit any value.",
+        help_text=f"Optional Python regex, searched in {source} and case-sensitive. The rule applies only when "
+        "every non-blank filter matches. Leave blank to match any value.",
         max_length=200,
     )
 
 
 class Migration(migrations.Migration):
-    """Admit inventory classes through include rules, with optional name, description and model filters."""
+    """Admit inventory classes through include rules, and add name, description and model filters to every rule."""
 
     dependencies = [
         ("netbox_librenms_plugin", "0024_inventory_model_matches_device_type_rule"),
@@ -151,8 +151,29 @@ class Migration(migrations.Migration):
                 default="skip",
                 help_text="What to do when this rule matches: skip the item entirely, "
                 "hide its row and promote its children to device-level bay matching, "
-                "or admit rows of an entPhysicalClass to the Modules tab.",
+                "or admit rows of an entPhysicalClass to the Modules tab (class_is only).",
                 max_length=15,
+            ),
+        ),
+        migrations.AlterField(
+            model_name="inventoryignorerule",
+            name="match_type",
+            field=models.CharField(
+                choices=[
+                    ("ends_with", "Ends with (entPhysicalName)"),
+                    ("starts_with", "Starts with (entPhysicalName)"),
+                    ("contains", "Contains (entPhysicalName)"),
+                    ("regex", "Regex (entPhysicalName)"),
+                    ("serial_matches_device", "Serial matches device (entPhysicalSerialNum = Device.serial)"),
+                    (
+                        "model_matches_device_type",
+                        "Model matches device type (entPhysicalModelName = DeviceType model or part number)",
+                    ),
+                    ("class_is", "Class is (entPhysicalClass)"),
+                ],
+                default="ends_with",
+                help_text="How to match the inventory item. The optional filters narrow every match type.",
+                max_length=25,
             ),
         ),
         migrations.AlterField(
@@ -161,7 +182,7 @@ class Migration(migrations.Migration):
             field=models.CharField(
                 blank=True,
                 help_text="Pattern to match against entPhysicalName. Case-insensitive for ends_with / starts_with / "
-                "contains; Python re syntax for regex. For class_is, the entPhysicalClass to admit. Not used for "
+                "contains; Python re syntax for regex. For class_is, the entPhysicalClass to match. Not used for "
                 "serial_matches_device or model_matches_device_type.",
                 max_length=200,
             ),
@@ -171,9 +192,10 @@ class Migration(migrations.Migration):
             name="require_serial_match_parent",
             field=models.BooleanField(
                 default=True,
-                help_text="(Name-based rules only) Only apply this rule if the item's serial number matches an "
-                "ancestor entity's serial number.  Recommended to prevent false positives.  Ignored for "
-                "serial_matches_device, model_matches_device_type and class_is rules.",
+                help_text="(Name-based and class_is skip or transparent rules only) Only apply this rule if the "
+                "item's serial number matches an ancestor entity's serial number. Recommended to prevent false "
+                "positives. Clear it for a rule that must match rows without a serial. Ignored for include, "
+                "serial_matches_device and model_matches_device_type rules.",
             ),
         ),
         # No reverse: the seeded rows and the converted flags cannot be told apart from operator edits.

@@ -4508,7 +4508,7 @@ def get_enabled_ignore_rules(manufacturer=None) -> list:
     global made one vendor's quirk change what every other vendor's sync admits.
 
     Raises:
-        InventoryRuleFilterError: When an include rule stores a filter regex that does not compile.
+        InventoryRuleFilterError: When an enabled rule of any action stores a filter regex that does not compile.
 
     """
     from django.db.models import Q
@@ -4522,7 +4522,7 @@ def get_enabled_ignore_rules(manufacturer=None) -> list:
         rules = rules.filter(manufacturer__isnull=True)
     rules = list(rules.order_by("pk"))
     for rule in rules:
-        # Compile now: a broken include filter must stop the caller, not silently admit nothing.
+        # Compile now: a broken filter must stop the caller, not silently admit or hide nothing.
         _ = rule.compiled_filters
     return rules
 

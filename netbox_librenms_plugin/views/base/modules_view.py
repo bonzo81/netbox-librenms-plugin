@@ -373,6 +373,13 @@ def _check_ignore_rules(
         equals **any ancestor's** serial in the ENTITY-MIB hierarchy (walking
         up from the direct parent).
 
+    **class_is**
+        Matches on ``entPhysicalClass``, ignoring case, with the same serial
+        guard as the name-based types.
+
+    Every type also needs every non-blank filter of the rule to match. Include
+    rules admit rows to the table and never hide one, so they are skipped.
+
         Ancestor walking handles cases like Cisco IOS-XR where an IDPROM entry
         is not a direct child of the module it represents. For example,
         ``0/RP0/CPU0-Base Board IDPROM`` is a child of ``0/RP0/CPU0-Mother Board``
@@ -395,42 +402,44 @@ def _check_ignore_rules(
     name = (item.get("entPhysicalName") or "").strip()
 
     for rule in rules:
-        if not rule.uses_pattern:
-            if _matches_target_device(rule, item, parent_item, index_map, device_identity):
-                return rule.action
+        if rule.action == rule.ACTION_INCLUDE:
             continue
-
-        # --- name-based rules ---
-        if not rule.matches_name(name):
+        if rule.match_type in (rule.MATCH_SERIAL_DEVICE, rule.MATCH_MODEL_DEVICE_TYPE):
+            matched = _matches_target_device(rule, item, parent_item, index_map, device_identity)
+        elif rule.match_type == rule.MATCH_CLASS_IS:
+            matched = rule.matches_item_class(item)
+        else:
+            matched = rule.matches_name(name)
+        if not matched or not rule.matches_filters(item):
             continue
-        if not rule.require_serial_match_parent:
+        if not (rule.serial_guard_applies and rule.require_serial_match_parent):
             return rule.action
-        if parent_item is None:
-            # Can't satisfy serial check without a parent — skip conservatively.
-            continue
-        if not item_serial:
-            continue
-        # Walk up ancestors until a non-empty serial is found.
-        current = parent_item
-        visited: set = set()
-        while current is not None:
-            current_idx = current.get("entPhysicalIndex")
-            if current_idx is not None:
-                if current_idx in visited:
-                    break
-                visited.add(current_idx)
-            ancestor_serial = _clean_librenms_value(current.get("entPhysicalSerialNum"))
-            if ancestor_serial:
-                if ancestor_serial == item_serial:
-                    return rule.action
-                # Non-empty serial that doesn't match — stop looking further up.
-                break
-            if index_map is not None:
-                next_idx = current.get("entPhysicalContainedIn")
-                current = index_map.get(next_idx) if next_idx else None
-            else:
-                break
+        if _serial_matches_an_ancestor(item_serial, parent_item, index_map):
+            return rule.action
     return None
+
+
+def _serial_matches_an_ancestor(item_serial: str, parent_item: dict | None, index_map: dict | None) -> bool:
+    """Return True when the first ancestor that reports a serial reports *item_serial*."""
+    # Without a parent or an own serial the guard can not be satisfied, so the rule does not apply.
+    if parent_item is None or not item_serial:
+        return False
+    current = parent_item
+    visited: set = set()
+    while current is not None:
+        current_idx = current.get("entPhysicalIndex")
+        if current_idx is not None:
+            if current_idx in visited:
+                return False
+            visited.add(current_idx)
+        ancestor_serial = _clean_librenms_value(current.get("entPhysicalSerialNum"))
+        if ancestor_serial:
+            return ancestor_serial == item_serial
+        if index_map is None:
+            return False
+        next_idx = current.get("entPhysicalContainedIn")
+        current = index_map.get(next_idx) if next_idx else None
+    return False
 
 
 def _get_item_port_identity(item):
