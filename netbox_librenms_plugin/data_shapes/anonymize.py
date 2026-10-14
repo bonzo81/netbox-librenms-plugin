@@ -235,7 +235,7 @@ _INTERFACE_IPV4_RE = re.compile(rf"(?<![\d.]){_OCTET}(?:\.{_OCTET}){{3}}(?![\d.]
 # plain colon-separated decimal sequence (e.g. a "12:34:56" timestamp) is NOT matched.
 _H16 = r"[0-9A-Fa-f]{1,4}"
 _IPV6_RE = re.compile(
-    r"(?<![\w:])(?:"  # No start after a word character, so "SOME-MIB::table" is not an address.
+    r"(?<![0-9A-Fa-f:])(?:"
     rf"(?:{_H16}:){{7}}{_H16}"  # 1:2:3:4:5:6:7:8
     rf"|(?:{_H16}:){{1,7}}:"  # 1::            1:2:3:4:5:6:7::
     rf"|(?:{_H16}:){{1,6}}:{_H16}"  # 1::8          1:2:3:4:5:6::8
@@ -247,6 +247,8 @@ _IPV6_RE = re.compile(
     rf"|:(?:(?::{_H16}){{1,7}}|:)"  # ::2:3:4:5:6:7:8  ::
     r")(?![0-9A-Fa-f:])"
 )
+# An SNMP module-qualified name ("OLD-CISCO-TS-MIB::ltsLineTable") is not an address; find_pii blanks only these.
+_MIB_QUALIFIED_NAME_RE = re.compile(r"\b[A-Za-z][\w-]*-MIB::\w+")
 _MAC_RE = re.compile(r"\b(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}\b")
 # Match a full email AND the dotless internal-domain form (``user@host``): internal mail domains and
 # short-hostname contacts (e.g. ``netops@corp``) carry no dot, so requiring one let a real leak slip
@@ -1073,7 +1075,8 @@ def find_pii(recording):
             ):
                 if ip_exempt and kind in ("ipv4", "ipv6", "fqdn"):
                     continue
-                for match in regex.findall(obj):
+                text = _MIB_QUALIFIED_NAME_RE.sub(" ", obj) if kind == "ipv6" else obj
+                for match in regex.findall(text):
                     # IPv6 hex is case-insensitive, so lower-case before the documentation-range
                     # check (e.g. 2001:DB8::1 must still be exempted like 2001:db8::1).
                     if kind in ("ipv4", "ipv6") and _is_documentation_address(match):

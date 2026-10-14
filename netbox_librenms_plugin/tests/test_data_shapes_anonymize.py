@@ -678,7 +678,7 @@ def test_find_pii_ipv6_no_false_positive_on_time_or_doc_range():
 
 
 def test_find_pii_ipv6_ignores_a_mib_qualified_sensor_type():
-    """A "<NAME>-MIB::<table>" sensor type is not an IPv6 address: the "B::" follows a word character."""
+    """A "<NAME>-MIB::<table>" sensor type is not an IPv6 address."""
     rec = _ports()
     rec["responses"]["GET /api/v0/resources/sensors"] = {
         "status": "ok",
@@ -703,10 +703,17 @@ def test_find_pii_ipv6_ignores_a_mib_qualified_sensor_type():
     ],
 )
 def test_find_pii_ipv6_still_flags_a_real_address(text, address):
-    """The word-character boundary keeps real addresses after a space, "=", "(" or at the start."""
+    """Real addresses after a space, "=", "(" or at the start of a value are reported."""
     rec = _ports({"port_id": 1, "ifName": "Gi0/1", "entPhysicalName": text})
 
     assert ("ipv6", address) in {(f["kind"], f["value"]) for f in find_pii(rec)}
+
+
+def test_find_pii_ipv6_flags_an_address_glued_to_a_word():
+    """An address directly after a word and a colon is still reported, so the check stays fail closed."""
+    rec = _ports({"port_id": 1, "ifName": "Gi0/1", "entPhysicalName": "ipv6:2001:4860::1"})
+
+    assert any(f["kind"] == "ipv6" for f in find_pii(rec))
 
 
 def test_find_pii_ipv6_documentation_exemption_has_a_network_boundary():
