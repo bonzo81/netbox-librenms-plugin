@@ -691,13 +691,15 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
 
 
 class InventoryRuleFilterError(Exception):
-    """An inventory rule stores a filter regex that does not compile."""
+    """An inventory ignore rule or a serial normalization rule stores a regex or a replacement that does not work."""
 
     def __init__(self, rule, field):
         self.rule_pk = rule.pk
-        self.rule_name = rule.name
+        self.rule_name = getattr(rule, "name", "") or str(rule)
+        self.rule_kind = rule._meta.verbose_name
+        self.rule_url = rule.get_absolute_url()
         self.field = field
-        super().__init__(f"InventoryIgnoreRule pk={rule.pk} stores an invalid {field} regex")
+        super().__init__(f"{type(rule).__name__} pk={rule.pk} stores an invalid {field}")
 
 
 def _raw_text(value):
