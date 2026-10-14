@@ -380,7 +380,7 @@ class LibreNMSModuleTable(tables.Table):
             )
             else "Installing"
         )
-        badge = self._status_badge_html(value, record)
+        badge = self._status_badge_html(value, record) + self._parent_report_html(record)
         return format_html(
             '<span class="lnms-status-live">{}</span>'
             '<span class="lnms-installing badge bg-primary text-white" role="status" title="{}…">'
@@ -389,6 +389,22 @@ class LibreNMSModuleTable(tables.Table):
             in_flight_label,
             in_flight_label,
         )
+
+    @staticmethod
+    def _parent_report_html(record):
+        """Render the warning for a parent index that is not in the inventory, or the note for a repaired one."""
+        if (dangling := record.get("dangling_parent")) is not None:
+            return format_html(
+                ' <span class="badge bg-warning text-dark" title="{}">'
+                '<i class="mdi mdi-file-tree-outline"></i> Parent Missing</span>',
+                f"LibreNMS reports parent index {dangling}, which is not in the inventory.",
+            )
+        if (reported := record.get("reported_parent")) is not None:
+            return format_html(
+                ' <i class="mdi mdi-information-outline text-muted" title="{}"></i>',
+                f"LibreNMS reports parent index {reported}; the PIC locator in the description sets the parent.",
+            )
+        return mark_safe("")
 
     def _status_badge_html(self, value, record):
         """Render sync status with badge."""

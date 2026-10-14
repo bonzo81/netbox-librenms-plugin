@@ -14,6 +14,7 @@ from netbox_librenms_plugin.constants import (
     is_librenms_placeholder,
 )
 from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory, chassis_serial_key, vc_serial_key
+from netbox_librenms_plugin.inventory_tree import DANGLING_PARENT_KEY, REPORTED_PARENT_KEY, repair_dangling_parents
 from netbox_librenms_plugin.librenms_ids import (
     coerce_librenms_id,
     normalize_librenms_port_id,
@@ -776,6 +777,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 {"module_sync": {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}},
             )
 
+        # Before the transceiver merge: a synthetic row index must not make a missing parent look valid.
+        repair_dangling_parents(inventory_data)
         for item in inventory_data:
             item["_source"] = MAIN_INVENTORY_SOURCE
 
@@ -842,6 +845,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 # Round up to the next 1000-boundary for a clean namespace. Both ranges are
                 # non-negative, so the offset clears every main index.
                 _OOB_OFFSET = ((main_max_idx // 1000) + 1) * 1000
+                repair_dangling_parents(oob_inventory)
                 for item in oob_inventory:
                     item["_source"] = OOB_INVENTORY_SOURCE
                     if (idx := item.get("entPhysicalIndex")) is not None:
@@ -3171,6 +3175,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # Routing Engines "JNP304-RE-S", and the description holds the label that separates them.
         if item.get(_PREFER_DESCRIPTION):
             name = description or name
+        parent_report = {
+            field: item[key]
+            for field, key in (("dangling_parent", DANGLING_PARENT_KEY), ("reported_parent", REPORTED_PARENT_KEY))
+            if key in item
+        }
 
         # OOB-controller modules come from a *separate* device. Comparing them against this
         # host's bays/types/installed modules is meaningless, and the host matching below could
@@ -3201,6 +3210,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 "librenms_ifdescr": item.get("_librenms_ifdescr"),
                 "interface_name_hint": item.get("_librenms_ifname") or item.get("_librenms_ifdescr"),
                 "_source": OOB_INVENTORY_SOURCE,
+                **parent_report,
             }
 
         # Detect "integrated child" SNMP duplicates (e.g. Nokia XIOM with a
@@ -3229,6 +3239,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 "integrated_in_name": ancestor_name,
                 "integrated_in_index": integrating_ancestor.get("entPhysicalIndex"),
                 "_source": item.get("_source", MAIN_INVENTORY_SOURCE),
+                **parent_report,
             }
 
         # Match to NetBox module type (direct lookup, normalization fallback, then Generic fallback).
@@ -3279,6 +3290,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             "librenms_ifdescr": item.get("_librenms_ifdescr"),
             "interface_name_hint": item.get("_librenms_ifname") or item.get("_librenms_ifdescr"),
             "_source": item.get("_source", MAIN_INVENTORY_SOURCE),
+            **parent_report,
         }
         if name_conflict_reason:
             row["name_conflict_reason"] = name_conflict_reason

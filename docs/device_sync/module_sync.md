@@ -30,6 +30,12 @@ Each row in the table shows:
 
 An installed module also shows an **Interface Type** badge when the type of one or more of its interfaces differs from its module template. Hover the badge to see the interface names.
 
+## Missing Parent Rows
+
+Some Juniper MX optics report a parent index that no inventory row has. The description of each optic ends with an `@ fpc/pic/port` locator, for example `@ 1/0/2`. When exactly one PIC row (`PIC: ... @ 1/0/*`) inside the FPC container of the same slot (`FPC: ... @ 1/*/*`) matches, the plugin uses that PIC as the parent. An information icon beside the status names the reported index.
+
+When no single PIC matches, the row keeps the reported parent and shows a **Parent Missing** badge. Hover the badge to see the reported index. The row still gets a bay guess and the install actions, so check the bay before you install it.
+
 ## Taking Action
 
 Only an install action (**Install**, **Install Carrier**) shows its label in the Actions column. Every other action is an icon button: hover it for a tooltip, and a screen reader announces its name.
