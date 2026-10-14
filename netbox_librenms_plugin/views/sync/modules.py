@@ -2279,7 +2279,7 @@ class UpdateModuleInterfaceView(
             # module can also own template interfaces (e.g. breakout children like c2/1) that
             # remain standalone and independently keep the row's "Update Interface" action on
             # (see _count_adoptable_template_interfaces). Adopt those too when the bind found
-            # nothing to do (None) or succeeded (bound) — otherwise an already-bound interface
+            # nothing to do (None) or succeeded (bound). Otherwise an already-bound interface
             # makes the bind a no-op, the adoption is skipped, and the button never clears.
             # A hard conflict/skip is left untouched so we don't mutate past an unresolved issue.
             if bind_result is None or bind_result.get("status") == "bound":
