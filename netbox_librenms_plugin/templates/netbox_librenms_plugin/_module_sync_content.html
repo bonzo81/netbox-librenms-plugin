@@ -10,10 +10,10 @@
 <div class="alert alert-danger" role="alert" id="module-inventory-rule-error">
     <i class="mdi mdi-alert-circle me-2"></i>
     <div>
-        Inventory Ignore Rule
-        <a href="{% url 'plugins:netbox_librenms_plugin:inventoryignorerule_detail' pk=rule_error.rule_pk %}">{{ rule_error.rule_name }}</a>
-        stores an invalid <code>{{ rule_error.field }}</code> regex, so no module rows are shown.
-        Fix or disable the rule, then reload this tab.
+        {{ rule_error.rule_kind|bettertitle }}
+        <a href="{{ rule_error.rule_url }}">{{ rule_error.rule_name }}</a>
+        stores an invalid <code>{{ rule_error.field }}</code>, so no module rows are shown and no module action runs.
+        Fix the rule, then reload this tab.
     </div>
 </div>
 {% endwith %}
@@ -32,6 +32,15 @@
 </div>
 {% endif %}
 {% endwith %}
+{% if module_sync.inventory_index_ambiguous %}
+<div class="alert alert-warning" role="alert" id="module-inventory-index-ambiguous">
+    <i class="mdi mdi-alert me-2"></i>
+    <div>
+        LibreNMS reports one entPhysicalIndex for more than one inventory row, so the table offers no module action.
+        Refresh Modules when LibreNMS reports each index once.
+    </div>
+</div>
+{% endif %}
 {# Migrated donors must not install: drop the whole form (not just the button) so install_selected isn't a live POST target / wired JS handler in migrated mode — matching the other sync-content templates. #}
 {% if has_write_permission and not migrated_to_marker %}
 {# Separate form for Install Selected — uses JS to collect checked rows before submit #}
@@ -42,9 +51,9 @@
     hx-sync="#module-sync-content:drop" hx-disabled-elt="find button">
     {% csrf_token %}
     {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" with server_key=module_sync.server_key %}
-    <input type="hidden" name="inventory_binding" value="{{ module_sync.install_selected_inventory_binding }}">
+    <input type="hidden" name="inventory_binding" value="{{ module_sync.install_selected_inventory_binding|default:'' }}">
     <div class="noprint d-flex align-items-center mt-0 mb-3 sync-tab-primary-toolbar">
-        <button type="submit" class="btn btn-primary" id="install-selected-btn">
+        <button type="submit" class="btn btn-primary" id="install-selected-btn"{% if not module_sync.install_selected_inventory_binding %} disabled{% endif %}>
             <span class="lnms-btn-idle"><i class="mdi mdi-package-down"></i> Install Selected</span>
             <span class="lnms-installing"><span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Installing…</span>
         </button>

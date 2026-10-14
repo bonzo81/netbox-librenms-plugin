@@ -50,7 +50,9 @@ Only an install action (**Install**, **Install Carrier**) shows its label in the
 - **Add Bay Mapping** / **Add Type Mapping** / **Map Existing Bay** / **Add Module Type**: resolve "No Bay" or "No Type" statuses without leaving the page
 - **Add Bay Template**: if the device type is missing a module bay template, this button creates it inline
 
-**Install**, **Install Branch** and **Install Selected** read the Inventory Ignore Rules again when you click them. A Skip rule on the row, or on a row above it, stops the installation of that row and of the rows below it. A Transparent rule on the row stops the installation of that row only: **Install Branch** still installs the hardware below it. A Transparent rule on a row above it does not stop the installation. **Install** then installs nothing and tells you to refresh the table. **Install Selected** skips each row that a rule now hides and installs the other selected rows. If an enabled rule stores a filter that does not compile, the action also installs nothing.
+Each module action is valid only for the state the table was rendered from: the same cached inventory, the same Inventory Ignore Rules and serial Normalization Rules, and the same Virtual Chassis devices (serial, position and device type). When one of these changes, the action changes nothing and tells you to refresh the table. A change to any rule refuses open pages, also when the rule does not touch their rows. When an enabled rule stores a regex or a replacement that does not work, the tab names the rule and shows no table, and no module action runs until you fix the rule. When LibreNMS reports one entPhysicalIndex for two rows, the table offers no module action.
+
+**Install Selected** installs all of the selected rows or none of them. Each row installs on the member that the table shows for it. To install a row on another member, select that member in the row: the plugin checks the row for that member, and the row actions and **Install Selected** wait until the check is complete. **Install Branch** installs the rows that the table shows below the module.
 
 ## Module Interfaces
 
