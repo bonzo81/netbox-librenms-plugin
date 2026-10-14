@@ -224,7 +224,7 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         row_field="transceivers",
     )
 
-    # 8. Serial-port sensors (Avocent console servers). The underlying LibreNMS route,
+    # 8. Serial-port sensors (console servers, router async line modules). The LibreNMS route,
     #    /api/v0/resources/sensors, is INSTANCE-WIDE — it returns every sensor on every device, so
     #    recording it verbatim would embed other devices' data (cross-device PII). Fetch through the
     #    device-filtered accessor and synthesize a sensors body carrying ONLY this device's serial
