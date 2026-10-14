@@ -356,7 +356,7 @@ def test_vrf_join_keys_remapped_and_name_pseudonymized():
 
 
 def test_nokia_base_vrf_name_preserved_verbatim():
-    """ "Base is the global instance, not a VRF" is a logic rule a fixture has to express."""
+    """The rule that "Base" is the global instance and not a VRF is a logic rule a fixture has to express."""
     anon = anonymize_recording(_vrf_recording())
 
     vrfs = _response(anon, "GET /api/v0/routing/vrf")["vrfs"]
@@ -446,7 +446,8 @@ def test_documentation_addresses_are_unique_within_a_recording():
 
 
 def test_the_same_address_still_maps_to_one_pseudonym():
-    """Uniqueness must not break the join: equal inputs stay equal.
+    """
+    Uniqueness must not break the join: equal inputs stay equal.
 
     A real device does repeat an address — one fe80:: link-local sits on hundreds of sub-interfaces
     — so the allocator deduplicates by input, never by output position.
@@ -858,7 +859,7 @@ def test_entity_descr_keeps_only_the_junos_virtual_chassis_markers():
     token = "entity-[0-9a-f]{6}"
     assert re.fullmatch(f"{token} Virtual Chassis", rows[0]["entPhysicalDescr"])
     assert re.fullmatch(f"FPC 1 {token}", rows[1]["entPhysicalDescr"])
-    assert re.fullmatch(f"FPC {token}", rows[2]["entPhysicalDescr"])
+    assert re.fullmatch(rf"FPC: {token} @ 1/\*/\*", rows[2]["entPhysicalDescr"])
     assert re.fullmatch(token, rows[3]["entPhysicalDescr"])
     # The markers are read from the description only; names stay fully replaced.
     assert all(re.fullmatch(token, row["entPhysicalName"]) for row in rows if "entPhysicalName" in row)
@@ -888,6 +889,79 @@ def test_entity_descr_keeps_a_terminal_locator_after_the_junos_markers():
     assert re.fullmatch(f"FPC {token} 2/1", rows[1]["entPhysicalDescr"])
     assert _response(anonymize_recording(first), key)["inventory"] == rows
     assert find_pii(first) == []
+
+
+def _junos_mx_rows():
+    """Return Juniper MX rows: an FPC, a PIC and an optic with the locators, plus free text and a malformed locator."""
+
+    def row(index, entity_class, descr, contained_in, name):
+        return {
+            "entPhysicalIndex": index,
+            "entPhysicalClass": entity_class,
+            "entPhysicalDescr": descr,
+            "entPhysicalName": name,
+            "entPhysicalModelName": f"750-00{index}",
+            "entPhysicalSerialNum": f"CANARY-SERIAL-{index}",
+            "entPhysicalContainedIn": contained_in,
+        }
+
+    return [
+        row(22, "container", "FPC: MPC7E 3D MRATE-12xQSFPP-XGE-XLGE-CGE @ 1/*/*", 1, "MPC7E-MRATE"),
+        row(67, "module", "PIC: MRATE-6xQSFPP-XGE-XLGE-CGE @ 1/0/*", 22, ""),
+        row(889, "port", "QSFP-100GBASE-LR4 @ 1/0/2", 71, "QSFP-100GBASE-LR4"),
+        row(890, "port", "QSFP-100GBASE-LR4 @ 1/0", 71, "QSFP-100GBASE-LR4"),
+        row(891, "port", "core-router-7 uplink @ 1/0/3 spare", 71, "core-router-7"),
+    ]
+
+
+def _anonymized_inventory(rows, salt=""):
+    rec = _ports()
+    rec["responses"]["GET /api/v0/inventory/1/all"] = {"status": "ok", "inventory": rows}
+    anonymized = anonymize_recording(rec, salt=salt)
+    return anonymized, _response(anonymized, "GET /api/v0/inventory/1/all")["inventory"]
+
+
+def test_entity_descr_keeps_the_junos_mx_locators_and_hashes_the_rest():
+    """The dangling-parent repair reads the "@ F/P/N" locators, so they survive and the free text does not."""
+    first, rows = _anonymized_inventory(_junos_mx_rows(), salt="mx-locators")
+    second, again = _anonymized_inventory(rows, salt="mx-locators")
+
+    token = "entity-[0-9a-f]{6}"
+    assert re.fullmatch(rf"FPC: {token} @ 1/\*/\*", rows[0]["entPhysicalDescr"])
+    assert re.fullmatch(rf"PIC: {token} @ 1/0/\*", rows[1]["entPhysicalDescr"])
+    assert re.fullmatch(rf"{token} @ 1/0/2", rows[2]["entPhysicalDescr"])
+    # A malformed locator gets the generic slash rule, and a non-terminal one keeps nothing.
+    assert re.fullmatch(rf"{token} 1/0", rows[3]["entPhysicalDescr"])
+    assert re.fullmatch(token, rows[4]["entPhysicalDescr"])
+    text = str(rows)
+    assert not any(word in text for word in ("MPC7E", "MRATE", "QSFP", "core-router", "uplink", "CANARY-SERIAL"))
+    text_fields = [(row["entPhysicalDescr"], row["entPhysicalName"]) for row in rows]
+    assert [(row["entPhysicalDescr"], row["entPhysicalName"]) for row in again] == text_fields
+    assert find_pii(first) == []
+    assert find_pii(second) == []
+
+
+def test_a_junos_vc_marker_before_a_locator_keeps_its_member_attribution(db):
+    """The locator is parsed first and the VC marker rule then reads the prefix, so "FPC 1 " survives."""
+    from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory, chassis_serial_key
+    from netbox_librenms_plugin.tests.conftest import junos_vc_inventory, make_junos_vc_members
+
+    inventory = junos_vc_inventory()
+    inventory.append({**inventory[2], "entPhysicalIndex": 5, "entPhysicalDescr": "FPC 1 Power Supply 1 @ 1/0/0"})
+    _first, rows = _anonymized_inventory(inventory, salt="vc-locator")
+    _second, again = _anonymized_inventory(rows, salt="vc-locator")
+    # Serials are hashed on purpose; put them back so only the description decides the result.
+    for anonymized, raw in zip(rows, inventory, strict=True):
+        anonymized["entPhysicalSerialNum"] = raw["entPhysicalSerialNum"]
+    master, member = make_junos_vc_members("vc-locator")
+
+    raw_owners = attribute_inventory(inventory, [master, member], chassis_serial_key(master))
+    anonymized_owners = attribute_inventory(rows, [master, member], chassis_serial_key(master))
+
+    assert re.fullmatch(r"FPC 1 entity-[0-9a-f]{6} @ 1/0/0", rows[-1]["entPhysicalDescr"])
+    assert anonymized_owners == raw_owners
+    assert anonymized_owners[-1][0] == member
+    assert [row["entPhysicalDescr"] for row in again] == [row["entPhysicalDescr"] for row in rows]
 
 
 def test_entity_text_preserves_only_supported_terminal_locators():

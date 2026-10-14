@@ -108,6 +108,11 @@ GENERIC_CONTAINER_MODELS = frozenset({"", "builtin", "default", "n/a"})
 JUNOS_VC_ROOT_DESCR_MARKER = "Virtual Chassis"
 JUNOS_FPC_DESCR_PREFIX = "FPC"
 JUNOS_FPC_MEMBER_DESCR_RE = re.compile(r"^FPC (?P<member>\d+) ")
+# Juniper MX descriptions end with an "@ fpc/pic/port" locator, where "*" marks a level the row spans.
+# The dangling-parent repair and the anonymizer read these.
+JUNOS_PORT_LOCATOR_RE = re.compile(r"\A(?P<text>.+?) @ (?P<locator>(?P<fpc>[0-9]+)/(?P<pic>[0-9]+)/[0-9]+)\Z")
+JUNOS_PIC_LOCATOR_RE = re.compile(r"\APIC: (?P<text>.+?) @ (?P<locator>(?P<fpc>[0-9]+)/(?P<pic>[0-9]+)/\*)\Z")
+JUNOS_FPC_LOCATOR_RE = re.compile(r"\AFPC: (?P<text>.+?) @ (?P<locator>(?P<fpc>[0-9]+)/\*/\*)\Z")
 
 
 # OOB management controller detection
