@@ -14,6 +14,12 @@
             <th>Pattern</th>
             <th>Action</th>
             <th>Require Serial Match</th>
+            {% if object.action == "include" %}
+            <th>Name Pattern</th>
+            <th>Description Pattern</th>
+            <th>Model Pattern</th>
+            <th>Prefer Description</th>
+            {% endif %}
             <th>Manufacturer</th>
             <th>Enabled</th>
             <th>Description</th>
@@ -25,7 +31,15 @@
             <td>{{ object.get_match_type_display }}</td>
             <td>{% if not object.uses_pattern %}<span class="text-muted">—</span>{% else %}<code>{{ object.pattern }}</code>{% endif %}</td>
             <td>{{ object.get_action_display }}</td>
+            {% if object.action == "include" %}
+            <td><span class="text-muted">—</span></td>
+            <td>{% if object.name_pattern %}<code>{{ object.name_pattern }}</code>{% else %}<span class="text-muted">—</span>{% endif %}</td>
+            <td>{% if object.description_pattern %}<code>{{ object.description_pattern }}</code>{% else %}<span class="text-muted">—</span>{% endif %}</td>
+            <td>{% if object.model_pattern %}<code>{{ object.model_pattern }}</code>{% else %}<span class="text-muted">—</span>{% endif %}</td>
+            <td>{% if object.prefer_description %}<span class="text-success">Yes</span>{% else %}<span class="text-danger">No</span>{% endif %}</td>
+            {% else %}
             <td>{% if not object.uses_pattern %}<span class="text-muted">—</span>{% elif object.require_serial_match_parent %}<span class="text-success">Yes</span>{% else %}<span class="text-danger">No</span>{% endif %}</td>
+            {% endif %}
             <td>{% if object.manufacturer %}<a href="{{ object.manufacturer.get_absolute_url }}">{{ object.manufacturer }}</a>{% else %}<span class="text-muted">All vendors</span>{% endif %}</td>
             <td>{% if object.enabled %}<span class="text-success">Yes</span>{% else %}<span class="text-danger">No</span>{% endif %}</td>
             <td>{{ object.description|default:"—" }}</td>

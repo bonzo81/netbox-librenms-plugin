@@ -104,7 +104,27 @@ class InterfaceTypeMappingCreateView(LibreNMSGenericWritePermissionMixin, generi
 
 
 @register_model_view(InterfaceTypeMapping, "bulk_import", path="import", detail=False)
-class InterfaceTypeMappingBulkImportView(LibreNMSGenericWritePermissionMixin, generic.BulkImportView):
+class _RefuseCsvRegexColumnsMixin:
+    """Refuse a CSV import that carries a column in ``verbatim_fields``: NetBox's CSV parser strips every cell."""
+
+    verbatim_fields = ("name_pattern",)
+
+    def create_and_update_objects(self, form, request):
+        """Refuse the import before any row is written when a regex column arrives through CSV."""
+        # NetBox sets _csv_headers (normalized, so "name_pattern.x" is "name_pattern") only for CSV input.
+        headers = getattr(form, "_csv_headers", {})
+        columns = [field for field in self.verbatim_fields if field in headers]
+        if columns:
+            raise ValidationError(
+                "CSV import strips spaces at the start and end of each cell, and spaces are part of a regex, "
+                f"so rules with a {', '.join(columns)} column must be imported as YAML or JSON."
+            )
+        return super().create_and_update_objects(form, request)
+
+
+class InterfaceTypeMappingBulkImportView(
+    _RefuseCsvRegexColumnsMixin, LibreNMSGenericWritePermissionMixin, generic.BulkImportView
+):
     """
     Import `InterfaceTypeMapping` objects from CSV, JSON, or YAML.
 
@@ -113,16 +133,6 @@ class InterfaceTypeMappingBulkImportView(LibreNMSGenericWritePermissionMixin, ge
 
     queryset = InterfaceTypeMapping.objects.all()
     model_form = InterfaceTypeMappingImportForm
-
-    def create_and_update_objects(self, form, request):
-        """Refuse a CSV import with a name_pattern column: NetBox's CSV parser strips every cell."""
-        # NetBox sets _csv_headers (normalized, so "name_pattern.x" is "name_pattern") only for CSV input.
-        if "name_pattern" in getattr(form, "_csv_headers", {}):
-            raise ValidationError(
-                "CSV import strips spaces at the start and end of each cell, and spaces are part of a regex, "
-                "so rules with a name_pattern column must be imported as YAML or JSON."
-            )
-        return super().create_and_update_objects(form, request)
 
 
 class InterfaceTypeMappingView(LibreNMSGenericPermissionMixin, generic.ObjectView):
@@ -418,11 +428,14 @@ class InventoryIgnoreRuleCreateView(LibreNMSGenericWritePermissionMixin, generic
 
 
 @register_model_view(InventoryIgnoreRule, "bulk_import", path="import", detail=False)
-class InventoryIgnoreRuleBulkImportView(LibreNMSGenericWritePermissionMixin, generic.BulkImportView):
+class InventoryIgnoreRuleBulkImportView(
+    _RefuseCsvRegexColumnsMixin, LibreNMSGenericWritePermissionMixin, generic.BulkImportView
+):
     """Provides a view for bulk importing InventoryIgnoreRule objects."""
 
     queryset = InventoryIgnoreRule.objects.all()
     model_form = InventoryIgnoreRuleImportForm
+    verbatim_fields = tuple(InventoryIgnoreRule.INCLUDE_FILTER_SOURCES)
 
 
 class InventoryIgnoreRuleView(LibreNMSGenericPermissionMixin, generic.ObjectView):

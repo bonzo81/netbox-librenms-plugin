@@ -4503,9 +4503,13 @@ def get_enabled_ignore_rules(manufacturer=None) -> list:
     Return the enabled InventoryIgnoreRule instances that apply to *manufacturer*.
 
     Scoping follows :func:`apply_normalization_rules`: a manufacturer takes its own rules plus
-    the unscoped ones, and no manufacturer takes only the unscoped ones. A rule that admits an
-    entPhysicalClass the built-in list omits is vendor-specific in practice, so leaving every
-    such rule global made one vendor's quirk change what every other vendor's sync admits.
+    the unscoped ones, and no manufacturer takes only the unscoped ones. A rule that admits a
+    vendor's own inventory class is vendor-specific in practice, so leaving every such rule
+    global made one vendor's quirk change what every other vendor's sync admits.
+
+    Raises:
+        InventoryRuleFilterError: When an include rule stores a filter regex that does not compile.
+
     """
     from django.db.models import Q
 
@@ -4516,7 +4520,11 @@ def get_enabled_ignore_rules(manufacturer=None) -> list:
         rules = rules.filter(Q(manufacturer__isnull=True) | Q(manufacturer=manufacturer))
     else:
         rules = rules.filter(manufacturer__isnull=True)
-    return list(rules.order_by("pk"))
+    rules = list(rules.order_by("pk"))
+    for rule in rules:
+        # Compile now: a broken include filter must stop the caller, not silently admit nothing.
+        _ = rule.compiled_filters
+    return rules
 
 
 def load_bay_mappings() -> tuple:

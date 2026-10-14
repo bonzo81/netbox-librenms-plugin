@@ -58,26 +58,19 @@ from netbox_librenms_plugin.views.mixins import (
 logger = logging.getLogger(__name__)
 
 
-# entPhysicalClass values relevant for module sync
-# Includes vendor-specific classes (Nokia TIMETRA-CHASSIS-MIB uses ioModule, cpmModule, etc.)
-INVENTORY_CLASSES = {
-    "module",
-    "powerSupply",
-    "fan",
-    "port",
-    "container",
-    "ioModule",
-    "cpmModule",
-    "mdaModule",
-    "fabricModule",
-    "xioModule",
-}
+# Card classes that can repeat an ancestor's serial and model as one physical card (Nokia TIMETRA-CHASSIS-MIB).
+_INTEGRATED_MODULE_CLASSES = frozenset(
+    {"module", "port", "ioModule", "cpmModule", "mdaModule", "fabricModule", "xioModule"}
+)
 
 # Transceiver entry types that are containers, not real modules.
 _SKIP_TRANSCEIVER_TYPES = {"Port Container", "Port", ""}
 
-# Physical classes filtered out when counting hardware siblings under a parent bay.
-_NON_HARDWARE_CLASSES = {"sensor", "backplane", "stack"}
+# Physical classes left out when counting hardware siblings under a parent bay.
+_POSITION_UNCOUNTED_CLASSES = {"sensor", "backplane", "stack"}
+
+# Marks a top-level row that an include rule names by entPhysicalDescr.
+_PREFER_DESCRIPTION = "_prefer_description"
 
 # Bay name prefixes per hardware class: "<prefix><slot>" names the bay for that slot.
 _CLASS_BAY_PREFIXES = {
@@ -251,18 +244,22 @@ def _inventory_item_key(item: dict):
     return ("index", index) if index is not None else ("object", id(item))
 
 
-def _class_is_included(item: dict, rules: list) -> bool:
+def _admitting_rules(item: dict, rules: list) -> list:
     """
-    Return True when an include rule admits this item's entPhysicalClass.
+    Return the include rules that admit an inventory item to the Modules table.
 
-    INVENTORY_CLASSES lists the classes the sync table understands. A vendor that reports
-    real hardware under another class (Juniper returns Routing Engines as "other") would
-    otherwise be dropped before any matching runs, so an operator can admit the class with
-    a rule rather than waiting for the built-in list to grow.
+    An include rule admits one entPhysicalClass, optionally narrowed by name, description and
+    model filters. An item that no rule admits is no row of its own and parents no row.
+
+    Args:
+        item (dict): The inventory item.
+        rules (list): The ignore rules of the item's own policy.
+
+    Returns:
+        list: The include rules that admit the item.
+
     """
-    # LibreNMS sends JSON, so a numeric class arrives as an int and matches_class() strips.
-    phys_class = _normalize_librenms_text(item.get("entPhysicalClass"))
-    return any(rule.action == rule.ACTION_INCLUDE and rule.matches_class(phys_class) for rule in rules)
+    return [rule for rule in rules if rule.matches_inventory_item(item)]
 
 
 @dataclass(frozen=True)
@@ -1045,12 +1042,25 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             if getattr(obj, "virtual_chassis", None)
             else []
         )
-        default_ignore_context, item_ignore_contexts = self._build_inventory_ignore_contexts(
-            obj,
-            inventory_data,
-            vc_members,
-            get_enabled_ignore_rules,
-        )
+        from netbox_librenms_plugin.models import InventoryRuleFilterError
+
+        try:
+            default_ignore_context, item_ignore_contexts = self._build_inventory_ignore_contexts(
+                obj,
+                inventory_data,
+                vc_members,
+                get_enabled_ignore_rules,
+            )
+        except InventoryRuleFilterError as exc:
+            # Rows that a broken rule would admit are unknown, so the tab shows no partial table.
+            logger.error("Module table for %s not built: %s", obj, exc)
+            return {
+                "table": None,
+                "object": obj,
+                "cache_expiry": None,
+                "server_key": self._active_server_key,
+                "inventory_rule_error": exc,
+            }
         ignore_rules = default_ignore_context["ignore_rules"]
         device_identity = default_ignore_context["device_identity"]
 
@@ -1127,6 +1137,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             "object": obj,
             "cache_expiry": cache_expiry,
             "server_key": self._active_server_key,
+            # An empty table must not read as a device without hardware.
+            "no_inventory_class_admitted": not any(rule.action == rule.ACTION_INCLUDE for rule in ignore_rules),
             "install_selected_inventory_binding": module_inventory_binding_token(
                 obj.pk,
                 self._active_server_key,
@@ -1204,7 +1216,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         default_rules,
         default_device_identity,
     ):
-        """Return whether an item belongs below a visible inventory-class ancestor."""
+        """Return whether an item belongs below a visible ancestor that an include rule admits."""
         current_idx = item.get("entPhysicalContainedIn", 0)
         visited_ancestors = set()
         while current_idx and current_idx in index_map and current_idx not in visited_ancestors:
@@ -1213,14 +1225,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             if current_idx in transparent_indices:
                 current_idx = ancestor.get("entPhysicalContainedIn", 0)
                 continue
-            anc_class = _normalize_librenms_text(ancestor.get("entPhysicalClass"))
             ancestor_rules, _ancestor_device_identity = BaseModuleTableView._ignore_policy_for_item(
                 ancestor,
                 ignore_contexts,
                 default_rules,
                 default_device_identity,
             )
-            if anc_class in INVENTORY_CLASSES or _class_is_included(ancestor, ancestor_rules):
+            if _admitting_rules(ancestor, ancestor_rules):
                 if _is_holder(ancestor):
                     current_idx = ancestor.get("entPhysicalContainedIn", 0)
                     continue
@@ -1241,8 +1252,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         """
         Collect top-level inventory items for the sync table.
 
-        Includes synthetic transceiver items. Excludes items that have any
-        ancestor with an INVENTORY_CLASSES class (they appear as sub-components).
+        Includes synthetic transceiver items. Excludes items that no include rule admits, and
+        items below a visible admitted ancestor (they appear as sub-components).
 
         Args:
             inventory_data (list): The inventory items to inspect.
@@ -1299,12 +1310,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     continue
                 top_items.append(item)
                 continue
-            phys_class = _normalize_librenms_text(item.get("entPhysicalClass"))
-            admitted_by_rule = False
-            if phys_class not in INVENTORY_CLASSES:
-                if not _class_is_included(item, item_rules):
-                    continue
-                admitted_by_rule = True
+            admitting_rules = _admitting_rules(item, item_rules)
+            if not admitting_rules:
+                continue
             idx = item.get("entPhysicalIndex")
             action = (
                 ignore_cache.get(idx)
@@ -1326,11 +1334,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             # Skip entities that only hold hardware, regardless of class.
             if _is_holder(item):
                 continue
-            # Walk up ancestor chain; skip if any ancestor is an inventory-class item.
-            # Transparent ancestors are treated as holders.
-            # A rule-admitted ancestor reaches the table as a row of its own, so it parents
-            # its children exactly like a built-in class. Ignoring it here lets a standard
-            # child reach top level while _get_sub_components() also renders it below.
+            # Walk up ancestor chain; skip if any admitted ancestor reaches the table as a row.
+            # Transparent ancestors are treated as holders. Ignoring an admitted ancestor here
+            # lets a child reach top level while _get_sub_components() also renders it below.
             if BaseModuleTableView._has_inventory_ancestor(
                 item,
                 index_map,
@@ -1342,8 +1348,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 continue
             # Mark only rows that reach the table at top level. A Cisco converter is class
             # "other" too, but it hangs under a container and keeps its own name.
-            if admitted_by_rule:
-                item = {**item, "_class_included": True}
+            if any(rule.prefer_description for rule in admitting_rules):
+                item = {**item, _PREFER_DESCRIPTION: True}
             top_items.append(item)
         return top_items
 
@@ -3000,7 +3006,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 i
                 for i in index_map.values()
                 if i.get("entPhysicalContainedIn") == parent_with_model_idx
-                and _normalize_librenms_text(i.get("entPhysicalClass")) not in _NON_HARDWARE_CLASSES
+                and _normalize_librenms_text(i.get("entPhysicalClass")) not in _POSITION_UNCOUNTED_CLASSES
             ],
             key=lambda x: (
                 int(x.get("entPhysicalParentRelPos") or 0)
@@ -3161,10 +3167,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         phys_class = _normalize_librenms_text(item.get("entPhysicalClass"))
         name = item.get("entPhysicalName", "") or "-"
         description = _normalize_librenms_text(item.get("entPhysicalDescr"))
-        # A class admitted by rule is hardware the vendor files outside the usual classes, and
-        # it tends to carry the model in entPhysicalName: a Juniper MX304 names both Routing
-        # Engines "JNP304-RE-S". The description holds the label that separates them.
-        if item.get("_class_included"):
+        # An include rule can name its rows by entPhysicalDescr: a Juniper MX304 names both
+        # Routing Engines "JNP304-RE-S", and the description holds the label that separates them.
+        if item.get(_PREFER_DESCRIPTION):
             name = description or name
 
         # OOB-controller modules come from a *separate* device. Comparing them against this
@@ -4077,7 +4082,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         """
         item_class = _normalize_librenms_text(item.get("entPhysicalClass"))
-        if item_class not in INVENTORY_CLASSES or item_class in {"container", "powerSupply", "fan"}:
+        if item_class not in _INTEGRATED_MODULE_CLASSES:
             return None
         item_serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
         if not item_serial:
@@ -4097,7 +4102,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             # Stop at chassis — never dedupe against the chassis itself.
             if anc_class == "chassis":
                 return None
-            if anc_class in INVENTORY_CLASSES and anc_class not in {"container", "powerSupply", "fan"}:
+            if anc_class in _INTEGRATED_MODULE_CLASSES:
                 anc_serial = _clean_librenms_value(ancestor.get("entPhysicalSerialNum"))
                 anc_model = _clean_librenms_value(ancestor.get("entPhysicalModelName")).lower()
                 if anc_serial and anc_serial == item_serial and anc_model and anc_model == item_model:
