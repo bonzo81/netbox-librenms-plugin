@@ -152,3 +152,31 @@ def test_the_installer_skips_the_bay_that_the_table_refuses(librenms_server, ser
 
     assert not Module.objects.filter(device=device).exists()
     assert any("no matching bay" in text for text in message_texts(request)), message_texts(request)
+
+
+@pytest.mark.parametrize("entity_class", ["other", ""], ids=["class-scoped", "classless"])
+def test_an_exact_mapping_that_does_not_fit_gives_way_to_the_next_one(librenms_server, server_key, entity_class):
+    """A Juniper exact mapping to an SCB-only bay is skipped, and the global exact mapping of the same name applies."""
+    from netbox_librenms_plugin.models import ModuleBayMapping
+
+    device = _setup(
+        f"exact-next-{entity_class or 'none'}",
+        _mx_recording(),
+        server_key,
+        librenms_server,
+        re_bay_types=("mx-re",),
+        cb_bay_types=("mx-scb",),
+        regex=False,
+    )
+    ModuleBayMapping.objects.all().delete()
+    make_module_bay(device, "RE0", bay_types=("mx-re",))
+    for manufacturer, bay in ((_juniper(), "CB0"), (None, "RE0")):
+        ModuleBayMapping.objects.create(
+            librenms_name="Routing Engine 0",
+            librenms_class=entity_class,
+            netbox_bay_name=bay,
+            is_regex=False,
+            manufacturer=manufacturer,
+        )
+
+    assert _re_bays(device, server_key)[0] == "RE0"
