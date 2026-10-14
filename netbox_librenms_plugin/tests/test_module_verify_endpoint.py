@@ -13,6 +13,7 @@ import json
 import pytest
 
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms
 
 
 SERVER_KEY = "default"
@@ -80,13 +81,20 @@ def _refresh_modules(client, device):
     )
 
 
-def _verify_module(client, body):
-    """POST a JSON body to the single-module verify endpoint."""
+def _verify_module(client, body, *, page=None, binding=None):
+    """POST a JSON body to the single-module verify endpoint for a row of the Modules page of *page*."""
+    from dcim.models import Device
     from django.urls import reverse
 
+    from netbox_librenms_plugin.tests.view_test_helpers import module_grant
+
+    page = page or Device.objects.get(pk=body["device_id"])
+    if binding is None:
+        # A standalone device's table renders no member select, so a test signs the grant as the table would.
+        binding = module_grant(page, "verify_module", ent_index=body["ent_physical_index"], server_key=SERVER_KEY)
     return client.post(
         reverse("plugins:netbox_librenms_plugin:verify_module"),
-        data=json.dumps(body),
+        data=json.dumps({"page_device_id": page.pk, "verify_binding": binding, **body}),
         content_type="application/json",
     )
 
@@ -221,11 +229,15 @@ class TestSingleModuleVerifyRow:
         _register_inventory(librenms_server, inventory)
         client.force_login(make_superuser("module-verify-vc-user"))
 
-        assert _refresh_modules(client, first).status_code == 200
+        refreshed = _refresh_modules(client, first)
+        assert refreshed.status_code == 200
+        (select,) = module_tab_forms(refreshed.content.decode()).selects
 
         response = _verify_module(
             client,
             {"device_id": selected.pk, "ent_physical_index": 1, "server_key": SERVER_KEY},
+            page=first,
+            binding=select["data-verify-binding"],
         )
 
         assert response.status_code == 200

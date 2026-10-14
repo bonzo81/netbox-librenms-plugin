@@ -16,7 +16,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post as view_post
-from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
+from netbox_librenms_plugin.tests.view_test_helpers import module_grant
 
 pytestmark = pytest.mark.django_db
 
@@ -183,28 +183,27 @@ class TestModuleTableShowsTheWriterChoice:
         cache_key = seed_inventory(DeviceModuleTableView(), device, [row], librenms_id=ADOPTION_LIBRENMS_ID)
         return device, module, row, cache_key
 
-    def _post_update(self, device, module, row, user, live_librenms):
-        """POST Update Interface for the seeded row and return the response and its request."""
+    def _post_update(self, device, user, live_librenms, *, content=None, module=None):
+        """POST Update Interface for the seeded row, from the rendered form or signed for *module*."""
+        from netbox_librenms_plugin.tests.view_test_helpers import module_grant, rendered_module_form
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
-        request = make_request(
-            "post",
-            {
+        if content is not None:
+            _action, fields = rendered_module_form(content, "update-module-interface", ADOPTION_ENT_INDEX)
+        else:
+            # The table offers no update for this row, so the test signs the crafted post itself.
+            fields = {
                 "module_id": str(module.pk),
                 "ent_index": str(ADOPTION_ENT_INDEX),
                 "server_key": "default",
-                "inventory_binding": module_inventory_binding_token(
-                    device.pk,
-                    "default",
+                "inventory_binding": module_grant(
+                    device,
                     "update_module_interface",
-                    {"module_id": module.pk},
-                    ADOPTION_ENT_INDEX,
-                    module_inventory_row_digest(row),
+                    ent_index=ADOPTION_ENT_INDEX,
+                    action_target={"module_id": module.pk},
                 ),
-            },
-            user=user,
-            path="/modules/",
-        )
+            }
+        request = make_request("post", fields, user=user, path="/modules/")
         view = UpdateModuleInterfaceView()
         view._librenms_api = live_librenms.api
         return view_post(view, request, pk=device.pk), request
@@ -229,7 +228,7 @@ class TestModuleTableShowsTheWriterChoice:
         shown = module.interfaces.get(name=expected)
         try:
             content = _render_module_tab(device, user)
-            response, _request = self._post_update(device, module, row, user, live_librenms)
+            response, _request = self._post_update(device, user, live_librenms, content=content)
         finally:
             cache.delete(cache_key)
 
@@ -253,7 +252,7 @@ class TestModuleTableShowsTheWriterChoice:
         user = make_superuser()
         try:
             content = _render_module_tab(device, user)
-            _response, request = self._post_update(device, module, row, user, live_librenms)
+            _response, request = self._post_update(device, user, live_librenms, module=module)
         finally:
             cache.delete(cache_key)
 
@@ -273,7 +272,7 @@ class TestModuleTableShowsTheWriterChoice:
         user = make_superuser()
         try:
             content = _render_module_tab(device, user)
-            self._post_update(device, module, row, user, live_librenms)
+            self._post_update(device, user, live_librenms, content=content)
         finally:
             cache.delete(cache_key)
 
@@ -542,13 +541,13 @@ class TestUpdateModuleInterfaceAdoption:
         data = data.copy()
         if module is not None:
             inventory_item = _adoption_inventory_row(module.module_type.model, module.module_bay.name)
-            data["inventory_binding"] = module_inventory_binding_token(
-                device.pk,
-                data["server_key"],
+            data["inventory_binding"] = module_grant(
+                device,
                 "update_module_interface",
-                {"module_id": module.pk},
-                data["ent_index"],
-                module_inventory_row_digest(inventory_item),
+                ent_index=data["ent_index"],
+                action_target={"module_id": module.pk},
+                server_key=data["server_key"],
+                inventory=[inventory_item],
             )
         request = make_request("post", data, user=make_superuser(), path="/modules/")
         view = view_class()
@@ -627,13 +626,12 @@ class TestUpdateModuleInterfaceAdoption:
                 "module_id": str(module.pk),
                 "ent_index": str(ADOPTION_ENT_INDEX),
                 "server_key": "default",
-                "inventory_binding": module_inventory_binding_token(
-                    device.pk,
-                    "default",
+                "inventory_binding": module_grant(
+                    device,
                     "update_module_interface",
-                    {"module_id": module.pk},
-                    ADOPTION_ENT_INDEX,
-                    module_inventory_row_digest(inventory_item),
+                    ent_index=ADOPTION_ENT_INDEX,
+                    action_target={"module_id": module.pk},
+                    inventory=[inventory_item],
                 ),
             },
             user=user,

@@ -14,17 +14,17 @@ from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 CACHE_MISS_TEXT = "No cached inventory data. Please refresh modules first."
 
 
-def _inventory_binding(device, action, inventory, parent_index=None):
-    """Return a valid full-snapshot binding for one bulk install request."""
-    from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_snapshot_digest
+def _inventory_binding(device, action, inventory, rows, parent_index=None):
+    """Return the grant the table signs for one bulk install over *inventory*, with the production signer."""
+    from netbox_librenms_plugin.tests.view_test_helpers import module_grant
 
-    return module_inventory_binding_token(
-        device.pk,
-        "default",
+    return module_grant(
+        device,
         action,
-        {"parent_index": parent_index} if parent_index is not None else {},
-        parent_index,
-        module_inventory_snapshot_digest(inventory),
+        ent_index=parent_index,
+        action_target={"parent_index": parent_index} if parent_index is not None else {},
+        rows=rows,
+        inventory=inventory,
     )
 
 
@@ -159,7 +159,7 @@ class TestWritersCheckTheOobLinkOfTheSnapshot:
             {
                 "select": ["2"],
                 "server_key": "default",
-                "inventory_binding": _inventory_binding(device, "install_selected", inventory),
+                "inventory_binding": _inventory_binding(device, "install_selected", inventory, [[2, device.pk, True]]),
             },
             user=user,
         )
@@ -203,7 +203,7 @@ class TestEmptyInventoryIsNotACacheMiss:
             {
                 "select": ["100"],
                 "server_key": "default",
-                "inventory_binding": _inventory_binding(device, "install_selected", []),
+                "inventory_binding": _inventory_binding(device, "install_selected", [], []),
             },
             user=user,
         )
@@ -219,7 +219,10 @@ class TestEmptyInventoryIsNotACacheMiss:
         assert CACHE_MISS_TEXT not in texts, (
             f"a valid empty inventory was reported as a cache miss; messages were {texts}"
         )
-        assert "None of the selected indices matched cached inventory." in texts, texts
+        # The table rendered no row, so its manifest offers none.
+        assert any(text.startswith("Nothing was installed: the Modules table does not offer 100") for text in texts), (
+            texts
+        )
 
     def test_absent_snapshot_still_reports_a_cache_miss(self):
         """Positive control: with no cache entry at all the miss message must still fire."""
@@ -275,7 +278,8 @@ class TestEmptyInventoryIsNotACacheMiss:
             {
                 "parent_index": "100",
                 "server_key": "default",
-                "inventory_binding": _inventory_binding(device, "install_branch", [], parent_index=100),
+                "selected_device_id": str(device.pk),
+                "inventory_binding": _inventory_binding(device, "install_branch", [], [], parent_index=100),
             },
             user=user,
         )

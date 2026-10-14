@@ -66,8 +66,9 @@ def _seed(name, *, port_id_on_interface):
 ENT_INDEX = 4077
 
 
-def _post(device, module, inventory_item):
-    from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
+def _post(device, module):
+    """Build the Update Interface post for the cached row; the cache must already hold it."""
+    from netbox_librenms_plugin.tests.view_test_helpers import module_grant
 
     request = RequestFactory().post(
         f"/modules/{device.pk}/interface/",
@@ -75,13 +76,12 @@ def _post(device, module, inventory_item):
             "module_id": str(module.pk),
             "server_key": SERVER_KEY,
             "ent_index": str(ENT_INDEX),
-            "inventory_binding": module_inventory_binding_token(
-                device.pk,
-                SERVER_KEY,
+            "inventory_binding": module_grant(
+                device,
                 "update_module_interface",
-                {"module_id": module.pk},
-                ENT_INDEX,
-                module_inventory_row_digest(inventory_item),
+                ent_index=ENT_INDEX,
+                action_target={"module_id": module.pk},
+                server_key=SERVER_KEY,
             ),
         },
     )
@@ -106,7 +106,6 @@ def _drive(device, module, *, port_id, ifname):
 
     view = UpdateModuleInterfaceView()
     inventory_item = {"entPhysicalIndex": ENT_INDEX, "_librenms_port_id": port_id, "_librenms_ifname": ifname}
-    request = _post(device, module, inventory_item)
     # The view reads the port identity from the cached row for ent_index, never from the post.
     cache_key = view.get_cache_key(device, "inventory", server_key=SERVER_KEY)
     cache.set(
@@ -119,6 +118,7 @@ def _drive(device, module, *, port_id, ifname):
         ),
         timeout=300,
     )
+    request = _post(device, module)
     try:
         post_view(view, request, pk=device.pk)
     finally:
