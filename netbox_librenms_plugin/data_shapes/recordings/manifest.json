@@ -138,7 +138,7 @@
       "port_stack": false,
       "vlans": true,
       "transceivers": true,
-      "serial": false,
+      "serial": true,
       "vrf": false,
       "oob": false
     }
