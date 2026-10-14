@@ -1834,53 +1834,43 @@ class TestInstallRefusesADuplicateSerial:
         return device, module_type, installed, make_module_bay(device, "Slot 2")
 
     @staticmethod
-    def _post_install(device, module_type, empty_bay, serial, user=None):
-        """Drive a real InstallModuleView POST for a cached row carrying `serial`."""
+    def _post_install(device, module_type, installed, empty_bay, serial, user=None):
+        """Post the rendered Install form of a cached row carrying `serial`; the installed serial lands after the render."""
+        from dcim.models import Module
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, module_grant
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            make_request,
+            make_superuser,
+            message_texts,
+            render_module_tab,
+            rendered_module_form,
+        )
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
+        user = user or make_superuser(f"dupserial-{empty_bay.pk}")
         view = InstallModuleView()
         view._librenms_api = MagicMock(server_key="default")
         inventory_item = {
             "entPhysicalIndex": 100,
+            "entPhysicalClass": "module",
+            "entPhysicalName": empty_bay.name,
             "entPhysicalModelName": module_type.model,
             "entPhysicalSerialNum": serial,
         }
-        request = make_request(
-            "post",
-            {
-                "server_key": "default",
-                "ent_index": "100",
-                "serial": serial,
-                "module_bay_id": str(empty_bay.pk),
-                "module_type_id": str(module_type.pk),
-            },
-            user=user or make_superuser(f"dupserial-{empty_bay.pk}"),
-            path="/x/",
-        )
-        view.setup(request)
         cache_key = view.get_cache_key(device, "inventory", server_key="default")
-        cache.set(
-            cache_key,
-            trusted_module_inventory_payload(
-                device,
-                [inventory_item],
-            ),
-        )
-        # The table offers no install for a serial the device holds, so the test signs the action itself.
-        request.POST = request.POST.copy()
-        request.POST["inventory_binding"] = module_grant(
-            device,
-            "install_module",
-            ent_index=100,
-            action_target={"module_bay_id": empty_bay.pk, "module_type_id": module_type.pk},
-        )
+        cache.set(cache_key, trusted_module_inventory_payload(device, [inventory_item]))
+        # The table offers no install for a serial the device holds, so the serial lands after the render.
+        Module.objects.filter(pk=installed.pk).update(serial="")
+        _action, fields = rendered_module_form(render_module_tab(device, user=user), "install-module", 100)
+        Module.objects.filter(pk=installed.pk).update(serial=installed.serial)
+        request = make_request("post", fields, user=user, path="/x/")
+        view.setup(request)
         try:
             view.post(request, pk=device.pk)
         finally:
             cache.delete(cache_key)
+        return message_texts(request)
 
     def test_install_is_refused_when_the_serial_is_already_on_the_device(self):
         """Installing a part NetBox already holds would create a second record of one object."""
@@ -1888,8 +1878,9 @@ class TestInstallRefusesADuplicateSerial:
 
         device, module_type, installed, empty_bay = self._device_with_installed_serial("dupserial", "DUP-SN")
 
-        self._post_install(device, module_type, empty_bay, "DUP-SN")
+        texts = self._post_install(device, module_type, installed, empty_bay, "DUP-SN")
 
+        assert texts == ["Serial 'DUP-SN' is already installed on this device. Nothing was installed."]
         assert Module.objects.filter(device=device).count() == 1, "a second Module was created for one serial"
         assert not Module.objects.filter(module_bay=empty_bay).exists()
         installed.refresh_from_db()
@@ -1899,9 +1890,9 @@ class TestInstallRefusesADuplicateSerial:
         """Positive control: the guard must not block an ordinary first install."""
         from dcim.models import Module
 
-        device, module_type, _installed, empty_bay = self._device_with_installed_serial("dupserial-ok", "FIRST-SN")
+        device, module_type, installed, empty_bay = self._device_with_installed_serial("dupserial-ok", "FIRST-SN")
 
-        self._post_install(device, module_type, empty_bay, "SECOND-SN")
+        self._post_install(device, module_type, installed, empty_bay, "SECOND-SN")
 
         assert Module.objects.filter(module_bay=empty_bay).exists(), "an unrelated serial was refused"
         assert Module.objects.filter(device=device).count() == 2
@@ -1917,7 +1908,7 @@ class TestInstallRefusesADuplicateSerial:
 
         from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
-        device, module_type, _installed, empty_bay = self._device_with_installed_serial("dupserial-addonly", "ADD-SN")
+        device, module_type, installed, empty_bay = self._device_with_installed_serial("dupserial-addonly", "ADD-SN")
 
         user = make_user_with_perms("dupserial-addonly-user", [])
         for i, (model, action) in enumerate(
@@ -1934,8 +1925,9 @@ class TestInstallRefusesADuplicateSerial:
             user = grant(user, action, model, constraints=None, name=f"addonly-{i}")
         assert not user.has_perm("dcim.change_module"), "precondition: this operator cannot change modules"
 
-        self._post_install(device, module_type, empty_bay, "ADD-SN", user=user)
+        texts = self._post_install(device, module_type, installed, empty_bay, "ADD-SN", user=user)
 
+        assert texts == ["Serial 'ADD-SN' is already installed on this device. Nothing was installed."]
         assert Module.objects.filter(device=device).count() == 1, "an add-only operator created a duplicate"
 
     def test_bulk_install_is_refused_when_the_serial_is_already_on_the_device(self):
@@ -1947,57 +1939,56 @@ class TestInstallRefusesADuplicateSerial:
 
         from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, make_view, module_grant
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            make_request,
+            make_superuser,
+            make_view,
+            message_texts,
+            render_module_tab,
+            rendered_module_form,
+        )
         from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
 
         device = make_device("bulkdup", librenms_cf={"default": 77})
         module_type = make_module_type("MT-bulkdup")
-        Module.objects.create(
+        installed = Module.objects.create(
             device=device,
             module_bay=make_module_bay(device, "Slot 1"),
             module_type=module_type,
-            serial="BULK-DUP",
         )
         make_module_bay(device, "Slot 2")
 
         inventory = [
             {
                 "entPhysicalIndex": 200,
+                "entPhysicalClass": "module",
                 "entPhysicalName": "Slot 2",
                 "entPhysicalModelName": module_type.model,
                 "entPhysicalSerialNum": "BULK-DUP",
             }
         ]
-        request = make_request(
-            "post",
-            {"server_key": "default", "select": ["200"]},
-            user=make_superuser("bulkdup-user"),
-            path="/x/",
-        )
+        user = make_superuser("bulkdup-user")
+        key = seed_inventory(InstallSelectedView(), device, inventory, librenms_id=77)
+        _action, fields = rendered_module_form(render_module_tab(device, user=user), "install-selected")
+        # The table offers no install for a serial the device holds, so the serial lands after the render.
+        Module.objects.filter(pk=installed.pk).update(serial="BULK-DUP")
+        request = make_request("post", {**fields, "select": ["200"]}, user=user, path="/x/")
         view = make_view(InstallSelectedView, request, librenms_api=SimpleNamespace(server_key="default"))
-        key = seed_inventory(
-            view,
-            device,
-            inventory,
-            librenms_id=77,
-        )
-        # The table offers no install for a serial the device holds, so the test signs the manifest itself.
-        request.POST = request.POST.copy()
-        request.POST["inventory_binding"] = module_grant(device, "install_selected", rows=[[200, device.pk, True]])
         try:
             view.post(request, pk=device.pk)
         finally:
             cache.delete(key)
 
         assert Module.objects.filter(device=device).count() == 1, "the bulk path created a duplicate serial"
+        assert any("serial already installed on this device" in text for text in message_texts(request))
 
     def test_a_blank_inventory_serial_still_installs(self):
         """Blank and placeholder serials carry no identity, so they must not collide with each other."""
         from dcim.models import Module
 
-        device, module_type, _installed, empty_bay = self._device_with_installed_serial("dupserial-blank", "")
+        device, module_type, installed, empty_bay = self._device_with_installed_serial("dupserial-blank", "")
 
-        self._post_install(device, module_type, empty_bay, "")
+        self._post_install(device, module_type, installed, empty_bay, "")
 
         assert Module.objects.filter(module_bay=empty_bay).exists(), "a blank serial was treated as identity"
 
@@ -2457,9 +2448,10 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
         from netbox_librenms_plugin.tests.view_test_helpers import (
             message_texts,
+            render_module_tab,
+            rendered_module_form,
             trusted_module_inventory_payload,
         )
-        from netbox_librenms_plugin.tests.view_test_helpers import module_grant
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
         page_device = make_device("scope-modserial-page")
@@ -2489,7 +2481,13 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         # rather than naming a server: the configured set differs between environments.
         server_key = view.resolve_posted_server_key_or_none(request.POST)
         assert server_key is not None, "this test needs a resolvable server namespace"
-        inventory_item = {"entPhysicalIndex": 4001, "entPhysicalSerialNum": "HIJACKED"}
+        inventory_item = {
+            "entPhysicalIndex": 4001,
+            "entPhysicalClass": "module",
+            "entPhysicalName": bay.name,
+            "entPhysicalModelName": mtype.model,
+            "entPhysicalSerialNum": "HIJACKED",
+        }
         cache_key = view.get_cache_key(page_device, "inventory", server_key=server_key)
         cache.set(
             cache_key,
@@ -2501,15 +2499,13 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             ),
             timeout=300,
         )
-        post_data = request.POST.copy()
-        post_data["inventory_binding"] = module_grant(
-            page_device,
-            "update_module_serial",
-            ent_index=4001,
-            action_target={"module_id": module.pk},
-            server_key=server_key,
+        # A model-level change grant renders the update for every row; the writer then checks the object.
+        _action, fields = rendered_module_form(
+            render_module_tab(page_device, user=user, server_key=server_key), "update-module-serial", 4001
         )
-        request.POST = post_data
+        assert fields["module_id"] == str(module.pk)
+        request = self._request(user, fields)
+        view.setup(request)
         try:
             view.post(request, pk=page_device.pk)
         finally:
@@ -2596,7 +2592,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
-        from netbox_librenms_plugin.tests.view_test_helpers import message_texts, module_grant
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts, rendered_modal_form
         from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
 
         device = make_device("scope-replace-conflict")
@@ -2608,17 +2604,18 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             module_type=module_type,
             serial="OLD-CONFLICT",
         )
+        # The modal offers no Replace over a hidden conflict, so the conflicting serial lands after the render.
         hidden = Module.objects.create(
             device=other_device,
             module_bay=make_module_bay(other_device, "Secret Slot"),
             module_type=module_type,
-            serial="INCOMING-CONFLICT",
         )
         user = self._user(
             "scope-replace-conflict",
             [
                 (Device, "view", {"pk": device.pk}),
                 (ModuleType, "view", {"pk": module_type.pk}),
+                (Module, "view", {"pk": target.pk}),
                 (Module, "add", None),
                 (Module, "change", {"pk": target.pk}),
                 (Module, "delete", {"pk": target.pk}),
@@ -2634,14 +2631,11 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         view._librenms_api = LibreNMSAPI(server_key=server_key)
         inventory_item = {
             "entPhysicalIndex": 100,
+            "entPhysicalClass": "module",
+            "entPhysicalName": target.module_bay.name,
             "entPhysicalModelName": module_type.model,
-            "entPhysicalSerialNum": hidden.serial,
+            "entPhysicalSerialNum": "INCOMING-CONFLICT",
         }
-        request = self._request(
-            user,
-            {"server_key": server_key, "module_id": str(target.pk), "ent_index": "100"},
-        )
-        view.setup(request)
         cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
         cache.set(
             cache_key,
@@ -2651,10 +2645,10 @@ class TestGatedViewsRefuseOutOfScopeObjects:
                 server_key=server_key,
             ),
         )
-        request.POST = request.POST.copy()
-        request.POST["inventory_binding"] = module_grant(
-            device, "replace_module", ent_index=100, action_target={"module_id": target.pk}, server_key=server_key
-        )
+        _action, fields = rendered_modal_form(device, 100, "replace-module", user=user, server_key=server_key)
+        Module.objects.filter(pk=hidden.pk).update(serial="INCOMING-CONFLICT")
+        request = self._request(user, fields)
+        view.setup(request)
         try:
             view.post(request, pk=device.pk)
         finally:
@@ -2690,11 +2684,15 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             module_type=module_type,
             serial="INCOMING-PREVIEW",
         )
+        # The module grants reach the target only, so the conflict on the hidden device stays out of view.
         user = self._user(
             "scope-preview-conflict",
             [
                 (Device, "view", {"pk": device.pk}),
                 (Module, "view", {"pk": target.pk}),
+                (Module, "add", None),
+                (Module, "change", {"pk": target.pk}),
+                (Module, "delete", {"pk": target.pk}),
             ],
         )
         view = ModuleMismatchPreviewView()
@@ -2716,6 +2714,8 @@ class TestGatedViewsRefuseOutOfScopeObjects:
                 [
                     {
                         "entPhysicalIndex": 100,
+                        "entPhysicalClass": "module",
+                        "entPhysicalName": target.module_bay.name,
                         "entPhysicalModelName": module_type.model,
                         "entPhysicalSerialNum": hidden.serial,
                     }
@@ -2723,12 +2723,12 @@ class TestGatedViewsRefuseOutOfScopeObjects:
                 server_key=server_key,
             ),
         )
-        from netbox_librenms_plugin.tests.view_test_helpers import module_grant
+        from netbox_librenms_plugin.tests.view_test_helpers import rendered_preview_query
 
         request.GET = request.GET.copy()
-        request.GET["inventory_binding"] = module_grant(
-            device, "mismatch_preview", ent_index=100, action_target={"module_id": target.pk}, server_key=server_key
-        )
+        request.GET["inventory_binding"] = rendered_preview_query(device, 100, user=user, server_key=server_key)[
+            "inventory_binding"
+        ]
         try:
             response = view.get(request, pk=device.pk)
         finally:

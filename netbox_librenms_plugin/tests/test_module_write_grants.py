@@ -452,17 +452,27 @@ def _vc_rows(page_serial, member_serial, *, optic_1_serial="SN-O1"):
         }
 
     return [
-        {"entPhysicalIndex": 1, "entPhysicalContainedIn": 0, "entPhysicalClass": "chassis",
-         "entPhysicalName": "Chassis A", "entPhysicalSerialNum": page_serial},
-        {"entPhysicalIndex": 5, "entPhysicalContainedIn": 0, "entPhysicalClass": "chassis",
-         "entPhysicalName": "Chassis B", "entPhysicalSerialNum": member_serial},
+        {
+            "entPhysicalIndex": 1,
+            "entPhysicalContainedIn": 0,
+            "entPhysicalClass": "chassis",
+            "entPhysicalName": "Chassis A",
+            "entPhysicalSerialNum": page_serial,
+        },
+        {
+            "entPhysicalIndex": 5,
+            "entPhysicalContainedIn": 0,
+            "entPhysicalClass": "chassis",
+            "entPhysicalName": "Chassis B",
+            "entPhysicalSerialNum": member_serial,
+        },
         module(CARRIER, 1, "Carrier Slot", "GR-CARRIER", "SN-CARRIER"),
         container(20, CARRIER, "Cage 1"),
         module(OPTIC_1, 20, "Optic 1", "GR-OPTIC", optic_1_serial),
         container(22, CARRIER, "Cage 2"),
         module(OPTIC_2, 22, "Optic 2", "GR-OPTIC", "SN-O2"),
         module(CARD, 1, "Card Slot", "GR-CARD", "SN-CARD"),
-    ]  # fmt: skip
+    ]
 
 
 @pytest.fixture

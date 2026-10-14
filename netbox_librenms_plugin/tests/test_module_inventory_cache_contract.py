@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from netbox_librenms_plugin.module_grants import GrantRefusal
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
 from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
@@ -14,18 +15,11 @@ from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 CACHE_MISS_TEXT = "No cached inventory data. Please refresh modules first."
 
 
-def _inventory_binding(device, action, inventory, rows, parent_index=None):
-    """Return the grant the table signs for one bulk install over *inventory*, with the production signer."""
-    from netbox_librenms_plugin.tests.view_test_helpers import module_grant
+def _rendered_manifest(device, user):
+    """Return the Install Selected form fields that the cached Modules tab renders for *user*."""
+    from netbox_librenms_plugin.tests.view_test_helpers import render_module_tab, rendered_module_form
 
-    return module_grant(
-        device,
-        action,
-        ent_index=parent_index,
-        action_target={"parent_index": parent_index} if parent_index is not None else {},
-        rows=rows,
-        inventory=inventory,
-    )
+    return rendered_module_form(render_module_tab(device, user=user), "install-selected")[1]
 
 
 @pytest.mark.django_db
@@ -154,17 +148,11 @@ class TestWritersCheckTheOobLinkOfTheSnapshot:
                 ("delete", Interface),
             ],
         )
-        request = make_request(
-            "post",
-            {
-                "select": ["2"],
-                "server_key": "default",
-                "inventory_binding": _inventory_binding(device, "install_selected", inventory, [[2, device.pk, True]]),
-            },
-            user=user,
-        )
+        seed_inventory(InstallSelectedView(), device, inventory, librenms_id=7)
+        # The page renders before the OOB link, so its manifest names the snapshot built without it.
+        fields = _rendered_manifest(device, user)
+        request = make_request("post", {**fields, "select": ["2"]}, user=user)
         view = make_view(InstallSelectedView, request, librenms_api=SimpleNamespace(server_key="default"))
-        seed_inventory(view, device, inventory, librenms_id=7)
         self._link(device, "linked")
 
         _post(view, request, pk=device.pk)
@@ -198,17 +186,10 @@ class TestEmptyInventoryIsNotACacheMiss:
                 ("delete", Interface),
             ],
         )
-        request = make_request(
-            "post",
-            {
-                "select": ["100"],
-                "server_key": "default",
-                "inventory_binding": _inventory_binding(device, "install_selected", [], []),
-            },
-            user=user,
-        )
+        key = seed_inventory(InstallSelectedView(), device, [], librenms_id=7)
+        fields = _rendered_manifest(device, user)
+        request = make_request("post", {**fields, "select": ["100"]}, user=user)
         view = make_view(InstallSelectedView, request, librenms_api=SimpleNamespace(server_key="default"))
-        key = seed_inventory(view, device, [], librenms_id=7)
 
         try:
             _post(view, request, pk=device.pk)
@@ -252,7 +233,7 @@ class TestEmptyInventoryIsNotACacheMiss:
 
         assert CACHE_MISS_TEXT in message_texts(request)
 
-    def test_install_branch_reports_an_empty_branch_rather_than_a_missing_snapshot(self):
+    def test_install_branch_reads_an_empty_snapshot_rather_than_a_missing_one(self):
         from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
         from django.core.cache import cache
 
@@ -273,14 +254,10 @@ class TestEmptyInventoryIsNotACacheMiss:
                 ("delete", Interface),
             ],
         )
+        # An empty snapshot renders no branch, so the post has no grant; the writer refuses it as stale, not as missing.
         request = make_request(
             "post",
-            {
-                "parent_index": "100",
-                "server_key": "default",
-                "selected_device_id": str(device.pk),
-                "inventory_binding": _inventory_binding(device, "install_branch", [], [], parent_index=100),
-            },
+            {"parent_index": "100", "server_key": "default", "selected_device_id": str(device.pk)},
             user=user,
         )
         view = make_view(InstallBranchView, request, librenms_api=SimpleNamespace(server_key="default"))
@@ -293,7 +270,7 @@ class TestEmptyInventoryIsNotACacheMiss:
 
         texts = message_texts(request)
         assert CACHE_MISS_TEXT not in texts, texts
-        assert "No installable items found in this branch." in texts, texts
+        assert GrantRefusal.STALE.message in texts, texts
 
 
 @pytest.mark.django_db
