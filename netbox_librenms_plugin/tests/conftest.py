@@ -296,6 +296,34 @@ def restore_inventory_class_rules():
     )
 
 
+def _fixed_platform_rule_migration():
+    """Return migration 0026, the one source of the Cisco fixed-platform rule it seeds."""
+    import importlib
+
+    return importlib.import_module("netbox_librenms_plugin.migrations.0026_seed_cisco_fixed_platform_rule")
+
+
+def seeded_fixed_platform_rule_rows():
+    """Yield the field values of each rule row migration 0026 seeds: one per Cisco manufacturer."""
+    from dcim.models import Manufacturer
+
+    migration = _fixed_platform_rule_migration()
+    cisco = Manufacturer.objects.filter(slug__in=migration.CISCO_SLUGS).order_by("pk")
+    for manufacturer_id in cisco.values_list("pk", flat=True):
+        yield {**migration.FIXED_PLATFORM_RULE, "manufacturer_id": manufacturer_id}
+
+
+def restore_fixed_platform_rules():
+    """Re-apply migration 0026's data step by running the migration's own function."""
+    from types import SimpleNamespace
+
+    from django.apps import apps as global_apps
+
+    _fixed_platform_rule_migration().seed_fixed_platform_rule(
+        global_apps, SimpleNamespace(connection=SimpleNamespace(alias="default"))
+    )
+
+
 def seed_migration_rows():
     """Recreate every row the plugin's data migrations seed, with its declared value."""
     import importlib
@@ -337,6 +365,7 @@ def seed_migration_rows():
 
     # 0025 reads the include rules above: it converts their display flag and skips a class they admit.
     restore_inventory_class_rules()
+    restore_fixed_platform_rules()
 
 
 _transactional_seed_restore_required = False
@@ -388,6 +417,8 @@ def _seeds_are_intact():
     if migration._seeded_include_rules(global_apps, "default").filter(prefer_description=False).exists():
         return False
     if not all(InventoryIgnoreRule.objects.filter(**row).exists() for row in seeded_class_rule_rows()):
+        return False
+    if not all(InventoryIgnoreRule.objects.filter(**row).exists() for row in seeded_fixed_platform_rule_rows()):
         return False
     migration = importlib.import_module("netbox_librenms_plugin.migrations.0010_inventory_and_mapping_models")
     for defaults in migration.INITIAL_INVENTORY_IGNORE_RULES:
