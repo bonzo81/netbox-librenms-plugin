@@ -1,5 +1,6 @@
 import logging
 import re
+from collections import Counter
 from dataclasses import dataclass
 
 from django.contrib import messages
@@ -13,10 +14,19 @@ from netbox_librenms_plugin.constants import (
     OOB_INVENTORY_SOURCE,
     is_librenms_placeholder,
 )
-from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory, chassis_serial_key, vc_serial_key
+from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory, vc_serial_key
+from netbox_librenms_plugin.inventory_policy import load_inventory_policy
 from netbox_librenms_plugin.inventory_tree import DANGLING_PARENT_KEY, REPORTED_PARENT_KEY, repair_dangling_parents
 from netbox_librenms_plugin.librenms_ids import (
     normalize_librenms_port_id,
+)
+from netbox_librenms_plugin.module_grants import (
+    ACTION_INSTALL_SELECTED,
+    RENDER_ATTRIBUTED,
+    RENDER_PINNED,
+    duplicate_inventory_indices,
+    module_inventory_snapshot_digest,
+    sign_module_grant,
 )
 from netbox_librenms_plugin.server_mappings import (
     name_match_may_be_port,
@@ -35,6 +45,7 @@ from netbox_librenms_plugin.sync_cache import (
 )
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
+    coerce_positive_int,
     get_module_template_interface_names,
     get_module_template_interface_specs,
     is_valid_ports_payload,
@@ -42,9 +53,6 @@ from netbox_librenms_plugin.utils import (
     is_vc_position,
     module_bay_fits,
     module_bay_type_fit,
-    module_inventory_binding_token,
-    module_inventory_row_digest,
-    module_inventory_snapshot_digest,
     module_type_bay_type_ids,
     normalize_serial,
     prefetch_module_bay_types,
@@ -705,11 +713,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         ]
 
     @staticmethod
-    def _attribute_to_members(obj, inventory_data, vc_members):
+    def _attribute_to_members(obj, inventory_data, vc_members, policy):
         """Return ``{item key: (Device, source)}`` for the main inventory, with *obj* for an unowned row."""
         rows = [item for item in inventory_data if item.get("_source") != OOB_INVENTORY_SOURCE]
         # Without members every row stays on the page, so the serial rules are not read.
-        owners = attribute_inventory(rows, vc_members, chassis_serial_key(obj) if vc_members else None)
+        owners = attribute_inventory(rows, vc_members, policy.chassis_serial_key() if vc_members else None)
         return {
             _inventory_item_key(item): (member or obj, source)
             for item, (member, source) in zip(rows, owners, strict=True)
@@ -946,12 +954,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             {"module_sync": context},
         )
 
-    def get_context_data(self, request, obj, server_key=None, *, pin_rows_to_object=False):
-        """Get context from cache (used on initial page load and by the module actions' in-place re-render)."""
-        # Scope the cache read + OOB-fingerprint comparison to the active server from the request
-        # (GET query), matching the server post() rebinds to and caches under. Without this the
-        # GET render keys on the lazy default server_key, so a non-default-server tab cache-misses
-        # (empty module table despite a successful refresh) and the OOB-invalidation guard no-ops.
+    def _read_render_inventory(self, request, obj, server_key=None):
+        """
+        Return ``(server key, sync device, cached inventory, None)``, or an empty context as the last item.
+
+        The read is scoped to the active server from the request (GET query), the server post() rebinds
+        to and caches under. A cached snapshot for another LibreNMS device or OOB link is discarded.
+        """
         # The shared helper falls back to the session/default server when the query is blank, so
         # single-server and default-server renders are unchanged.
         scoped_server, unresolved = self.resolve_get_render_server_key(request, server_key)
@@ -959,13 +968,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             # The query named a server that no longer resolves (deleted/misconfigured). Render an
             # empty table scoped to that key instead of silently falling back to the default
             # server's cached inventory and attributing it to the requested server.
-            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
+            return None, None, None, {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
         # No buildable client (missing/misconfigured default and no ?server_key rebind): there is no
         # valid server scope, so degrade to the empty panel with server_key=None — mirrors the
         # sibling tabs' _render_server_key() None fallback (develop hardening) instead of the
         # "default" placeholder resolve_get_render_server_key falls back to.
         if self._render_server_key() is None:
-            return {"table": None, "object": obj, "cache_expiry": None, "server_key": None}
+            return None, None, None, {"table": None, "object": obj, "cache_expiry": None, "server_key": None}
+        empty = {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
         # Scope the VC sync-device resolution to the RESOLVED server explicitly, rather than
         # relying on resolve_get_render_server_key having rebound self.librenms_api as a side
         # effect — otherwise a future ordering/rebind change would silently key VC resolution on
@@ -976,7 +986,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         cached_inventory = cached_module_inventory(cached_payload)
         if cached_inventory is None:
             cache.delete(cache_key)
-            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
+            return None, None, None, empty
         # Validate that the cached inventory was built for the same LibreNMS device.
         # If the object has been remapped to a different device, discard stale inventory.
         # Coerce like post() does: a raw compare both accepts a poisoned bool (True == 1 in
@@ -993,18 +1003,56 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # The linked OOB controller must match too: merged inventory built for another link is stale.
         if not module_inventory_snapshot_matches(cached_payload, sync_device, scoped_server, current_librenms_id):
             cache.delete(cache_key)
-            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
+            return None, None, None, empty
+        return scoped_server, sync_device, cached_inventory, None
+
+    def get_context_data(self, request, obj, server_key=None):
+        """Get context from cache (used on initial page load and by the module actions' in-place re-render)."""
+        scoped_server, sync_device, inventory, empty = self._read_render_inventory(request, obj, server_key)
+        if empty is not None:
+            return empty
         # Pass the resolved server explicitly (like post() does) so _active_server_key keys on it
-        # rather than falling back to self.librenms_api.server_key — the same rebind-side-effect
-        # avoidance the sync_device resolution above documents.
-        return self._build_context(
-            request,
-            obj,
-            cached_inventory,
-            server_key=scoped_server,
-            sync_device=sync_device,
-            pin_rows_to_object=pin_rows_to_object,
-        )
+        # rather than falling back to self.librenms_api.server_key.
+        return self._build_context(request, obj, inventory, server_key=scoped_server, sync_device=sync_device)
+
+    def get_verify_context_data(self, request, page_device, member, server_key=None):
+        """
+        Return the page table and the table pinned to *member*, built from one snapshot and one policy load.
+
+        Returns:
+            tuple: ``(page context, pinned context)``; the pinned context is None when no table could be built.
+
+        """
+        from netbox_librenms_plugin.models import InventoryRuleFilterError
+
+        scoped_server, sync_device, inventory, empty = self._read_render_inventory(request, page_device, server_key)
+        if empty is not None:
+            return empty, None
+        try:
+            policy = load_inventory_policy(page_device.pk)
+        except InventoryRuleFilterError as exc:
+            logger.error("Module table for %s not built: %s", page_device, exc)
+            return {
+                "table": None,
+                "object": page_device,
+                "server_key": scoped_server,
+                "inventory_rule_error": exc,
+            }, None
+        if policy.member(member.pk) is None:
+            return {"table": None, "object": page_device, "server_key": scoped_server}, None
+        contexts = [
+            self._build_context(
+                request,
+                page_device,
+                inventory,
+                server_key=scoped_server,
+                sync_device=sync_device,
+                policy=policy,
+                pin_to=pin_to,
+            )
+            for pin_to in (None, member)
+        ]
+        return contexts[0], contexts[1]
 
     def _build_context(
         self,
@@ -1014,16 +1062,52 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         server_key=None,
         sync_device=None,
         *,
-        pin_rows_to_object=False,
+        policy=None,
+        pin_to=None,
     ):
-        """Build context with matched inventory items and table."""
+        """
+        Build context with matched inventory items and table.
+
+        Args:
+            request: The current request.
+            obj (Device): The device whose Modules page shows the table.
+            inventory_data (list[dict]): The inventory snapshot.
+            server_key (str | None): The LibreNMS server of the snapshot.
+            sync_device (Device | None): The device that owns the cached snapshot.
+            policy (InventoryPolicy | None): The policy inputs of *obj*, loaded here when None.
+            pin_to (Device | None): A member that every row is attributed to, as the verify view renders it.
+
+        Returns:
+            dict: The module sync context.
+
+        """
         self.request = request
         # Scope cache reads + per-row interface binding to the POST-resolved server when
         # provided (fallback: session server). Stored on self so _build_member_contexts
         # (reached via the row builders) uses the same key without threading it through
         # every intermediate signature.
         self._active_server_key = server_key or self.librenms_api.server_key
+        from netbox_librenms_plugin.models import InventoryRuleFilterError
+
+        if policy is None:
+            try:
+                policy = load_inventory_policy(obj.pk)
+            except InventoryRuleFilterError as exc:
+                # Rows that a broken rule would admit are unknown, so the tab shows no partial table.
+                logger.error("Module table for %s not built: %s", obj, exc)
+                return {
+                    "table": None,
+                    "object": obj,
+                    "cache_expiry": None,
+                    "server_key": self._active_server_key,
+                    "inventory_rule_error": exc,
+                }
+        # The collector reads devices from the policy load, so the fingerprint covers what it read.
+        self._inventory_policy = policy
+        owner = policy.page_device if pin_to is None else policy.member(pin_to.pk)
         inventory_snapshot_digest = module_inventory_snapshot_digest(inventory_data)
+        # One index on two rows makes every indexed action ambiguous, so the table issues no grant.
+        index_ambiguous = bool(duplicate_inventory_indices(inventory_data))
         # Build a lookup of all inventory items by index for parent resolution
         # Skip items with missing entPhysicalIndex to avoid KeyError on malformed data.
         index_map = {idx: item for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None}
@@ -1036,43 +1120,20 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 children_by_parent.setdefault(p, []).append(item)
 
         # Preload all ModuleBayMapping rows once to avoid N+1 queries in _match_module_bay.
-        from netbox_librenms_plugin.utils import (
-            get_enabled_ignore_rules,
-            load_bay_mappings,
-            preload_normalization_rules,
-        )
+        from netbox_librenms_plugin.utils import load_bay_mappings, preload_normalization_rules
 
         self._exact_bay_mappings, self._regex_bay_mappings = load_bay_mappings()
 
         # Resolve ignore policy once per attributed VC member. A stacked device can contain
         # inventory for members with different manufacturers and device serials.
-        manufacturer = getattr(getattr(obj, "device_type", None), "manufacturer", None)
-        vc_members = (
-            []
-            if pin_rows_to_object
-            else list(obj.virtual_chassis.members.all())
-            if getattr(obj, "virtual_chassis", None)
-            else []
+        manufacturer = owner.device_type.manufacturer
+        vc_members = [] if pin_to is not None else policy.vc_members
+        default_ignore_context, item_ignore_contexts = self._build_inventory_ignore_contexts(
+            owner,
+            inventory_data,
+            vc_members,
+            policy,
         )
-        from netbox_librenms_plugin.models import InventoryRuleFilterError
-
-        try:
-            default_ignore_context, item_ignore_contexts = self._build_inventory_ignore_contexts(
-                obj,
-                inventory_data,
-                vc_members,
-                get_enabled_ignore_rules,
-            )
-        except InventoryRuleFilterError as exc:
-            # Rows that a broken rule would admit are unknown, so the tab shows no partial table.
-            logger.error("Module table for %s not built: %s", obj, exc)
-            return {
-                "table": None,
-                "object": obj,
-                "cache_expiry": None,
-                "server_key": self._active_server_key,
-                "inventory_rule_error": exc,
-            }
         ignore_rules = default_ignore_context["ignore_rules"]
         device_identity = default_ignore_context["device_identity"]
 
@@ -1080,7 +1141,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # _match_module_bay and resolve_module_type loops.
         self._norm_rules_bay = preload_normalization_rules("module_bay")
         self._norm_rules_type = preload_normalization_rules("module_type", manufacturer=manufacturer)
-        self._norm_rules_serial = preload_normalization_rules("serial", manufacturer=manufacturer)
+        self._norm_rules_serial = policy.serial_rule_sets
         # Pre-compute ignore rule results once to avoid calling _check_ignore_rules
         # twice per item (once in _find_transparent_indices, once in _collect_top_items).
         ignore_cache = {}
@@ -1106,7 +1167,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             ignore_contexts=item_ignore_contexts,
         )
         table_data = self._build_table_rows(
-            obj,
+            owner,
             top_items,
             index_map,
             children_by_parent,
@@ -1117,21 +1178,22 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             vc_members=vc_members,
             ignore_contexts=item_ignore_contexts,
         )
-        for row in table_data:
-            inventory_item = index_map.get(row.get("ent_physical_index"))
-            if inventory_item is not None:
-                row["inventory_digest"] = module_inventory_row_digest(inventory_item)
 
         # Sort top-level groups by status, keeping children after their parent
         table_data = self._group_children_under_parents(table_data)
 
         # Bulk-detect serial conflicts for rows that can be replaced/installed
-        self._detect_serial_conflicts(table_data, index_map, obj=obj)
+        self._detect_serial_conflicts(table_data, index_map, obj=owner)
+        self._mark_grant_rows(table_data, grants_enabled=not index_ambiguous)
 
         table = self.get_table(table_data, obj)
         table.server_key = self._active_server_key
         table.inventory_snapshot_digest = inventory_snapshot_digest
-        table.attrs["data-selection-snapshot"] = inventory_snapshot_digest
+        table.policy_fingerprint = "" if index_ambiguous else policy.fingerprint
+        table.render_mode = RENDER_ATTRIBUTED if pin_to is None else RENDER_PINNED
+        # A selection belongs to one snapshot under one policy; another one names no current grant.
+        table.attrs["data-selection-snapshot"] = f"{inventory_snapshot_digest}:{policy.fingerprint}"
+        table.attrs["data-page-device"] = obj.pk
         table.configure(request)
 
         # Reuse the device the caller (post / get_context_data) already resolved to avoid a second
@@ -1153,14 +1215,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             "devices_without_inventory_class": self._devices_without_inventory_class(
                 obj, ignore_rules, item_ignore_contexts
             ),
-            "install_selected_inventory_binding": module_inventory_binding_token(
-                obj.pk,
-                self._active_server_key,
-                "install_selected",
-                {},
-                None,
-                inventory_snapshot_digest,
-            ),
+            "inventory_index_ambiguous": index_ambiguous,
+            "install_selected_inventory_binding": self._selection_manifest(table, table_data),
         }
 
     @staticmethod
@@ -1176,6 +1232,51 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             for device, rules in policies.values()
             if not any(rule.action == rule.ACTION_INCLUDE for rule in rules)
         ]
+
+    @staticmethod
+    def _mark_grant_rows(table_data, *, grants_enabled):
+        """
+        Mark the rows a selected or branch install may act on, and give each top-level row its branch list.
+
+        A row is selectable when it is main inventory with a positive index that one row alone shows, and it
+        is not Integrated. A branch list holds the top-level row and its sub-rows that are selectable, in
+        table order, each with its write target.
+        """
+        emitted = Counter(coerce_positive_int(row.get("ent_physical_index")) for row in table_data)
+        branch = None
+        for row in table_data:
+            index = coerce_positive_int(row.get("ent_physical_index"))
+            row["selectable"] = bool(
+                grants_enabled
+                and index is not None
+                and emitted[index] == 1
+                and row.get("_source") != OOB_INVENTORY_SOURCE
+                and row.get("status") != "Integrated"
+            )
+            if row.get("depth", 0) == 0:
+                branch = row["branch_rows"] = []
+            if branch is not None and row["selectable"]:
+                branch.append([index, row["selected_device_id"]])
+
+    def _selection_manifest(self, table, table_data):
+        """Return the signed list of every rendered row a selected install may name, or None without grants."""
+        if table.render_mode != RENDER_ATTRIBUTED or not table.grants_enabled or not table.selection_allowed:
+            return None
+        rows = {}
+        for row in table_data:
+            index = coerce_positive_int(row.get("ent_physical_index"))
+            if index is not None:
+                rows.setdefault(index, [index, row["selected_device_id"], row["selectable"]])
+        return sign_module_grant(
+            page_device_id=table.device.pk,
+            device_id=table.device.pk,
+            server_key=table.server_key,
+            action=ACTION_INSTALL_SELECTED,
+            inventory_digest=table.inventory_snapshot_digest,
+            policy_fingerprint=table.policy_fingerprint,
+            render_mode=RENDER_ATTRIBUTED,
+            rows=list(rows.values()),
+        )
 
     @staticmethod
     def _find_transparent_indices(inventory_data, ignore_cache):
@@ -1195,22 +1296,33 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         obj,
         inventory_data,
         vc_members,
-        get_enabled_ignore_rules,
+        policy,
     ):
-        """Return the page policy and per-item policies for attributed VC members."""
+        """
+        Return the page policy and per-item policies for attributed VC members.
+
+        Args:
+            obj (Device): The device an unattributed row belongs to; one of the policy's loaded devices.
+            inventory_data (list[dict]): The inventory snapshot.
+            vc_members (list): The loaded members to attribute rows to, or [] to keep every row on *obj*.
+            policy (InventoryPolicy): The loaded rules and devices.
+
+        Returns:
+            tuple: ``(default context, {item key: context})``.
+
+        """
         policy_cache = {}
-        owners = cls._attribute_to_members(obj, inventory_data, vc_members)
+        owners = cls._attribute_to_members(obj, inventory_data, vc_members, policy)
 
         def policy_for(device):
-            device_id = getattr(device, "pk", None)
-            if device_id not in policy_cache:
-                manufacturer = getattr(getattr(device, "device_type", None), "manufacturer", None)
-                policy_cache[device_id] = {
+            if device.pk not in policy_cache:
+                manufacturer = device.device_type.manufacturer
+                policy_cache[device.pk] = {
                     "manufacturer": manufacturer,
-                    "ignore_rules": get_enabled_ignore_rules(manufacturer),
+                    "ignore_rules": policy.rules_for(manufacturer),
                     "device_identity": DeviceIdentity.of(device),
                 }
-            return policy_cache[device_id]
+            return policy_cache[device.pk]
 
         default_context = policy_for(obj)
         item_contexts = {}
@@ -1446,7 +1558,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             if ignore_context is None:
                 if owners is None:
                     rows = [*index_map.values(), *(row for row in top_items if row.get("entPhysicalIndex") is None)]
-                    owners = self._attribute_to_members(obj, rows, vc_members)
+                    owners = self._attribute_to_members(obj, rows, vc_members, self._inventory_policy)
                 target_device, resolution_source = owners[_inventory_item_key(item)]
                 target_ignore_rules = ignore_rules
                 target_device_identity = device_identity

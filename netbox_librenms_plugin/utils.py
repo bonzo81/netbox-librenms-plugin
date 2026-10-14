@@ -9,7 +9,6 @@ from typing import Optional
 
 import psycopg
 from dcim.models import Device, Interface
-from django.core import signing
 from django.core.exceptions import FieldDoesNotExist, ObjectDoesNotExist, ValidationError
 from django.db import DatabaseError, IntegrityError
 from django.db.models import Count, Max
@@ -49,91 +48,6 @@ from netbox_librenms_plugin.server_mappings import (
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE, classify_conflict, nearest_database_error
 
 logger = logging.getLogger(__name__)
-
-_MODULE_INVENTORY_BINDING_SALT = "netbox_librenms_plugin.module_inventory_binding"
-
-
-def module_inventory_row_digest(inventory_item) -> str:
-    """Return a canonical digest for one cached LibreNMS inventory row."""
-    if not isinstance(inventory_item, dict):
-        raise TypeError("inventory_item must be a dictionary")
-    serialized = json.dumps(inventory_item, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(serialized.encode()).hexdigest()
-
-
-def module_inventory_snapshot_digest(inventory) -> str:
-    """Return a canonical digest for a complete cached LibreNMS inventory snapshot."""
-    if not isinstance(inventory, list) or any(not isinstance(item, dict) for item in inventory):
-        raise TypeError("inventory must be a list of dictionaries")
-    return module_inventory_row_digest({"inventory": inventory})
-
-
-def _module_inventory_binding_payload(
-    device_id,
-    server_key,
-    action,
-    action_target,
-    ent_index,
-    inventory_digest,
-):
-    """Return the canonical fields that bind one rendered action to inventory state."""
-    return {
-        "device_id": coerce_positive_int(device_id),
-        "server_key": server_key,
-        "action": action,
-        "action_target": {key: coerce_positive_int(value) for key, value in sorted(action_target.items())},
-        "ent_index": coerce_positive_int(ent_index),
-        "inventory_digest": inventory_digest,
-    }
-
-
-def module_inventory_binding_token(
-    device_id,
-    server_key,
-    action,
-    action_target,
-    ent_index,
-    inventory_digest,
-) -> str:
-    """Sign one rendered module action and its exact inventory state."""
-    return signing.dumps(
-        _module_inventory_binding_payload(
-            device_id,
-            server_key,
-            action,
-            action_target,
-            ent_index,
-            inventory_digest,
-        ),
-        salt=_MODULE_INVENTORY_BINDING_SALT,
-    )
-
-
-def module_inventory_binding_matches(
-    token,
-    device_id,
-    server_key,
-    action,
-    action_target,
-    ent_index,
-    inventory_digest,
-) -> bool:
-    """Return whether a signed action still matches its target and inventory state."""
-    if not isinstance(token, str) or not token:
-        return False
-    try:
-        payload = signing.loads(token, salt=_MODULE_INVENTORY_BINDING_SALT)
-    except signing.BadSignature:
-        return False
-    return payload == _module_inventory_binding_payload(
-        device_id,
-        server_key,
-        action,
-        action_target,
-        ent_index,
-        inventory_digest,
-    )
-
 
 _CABLE_ROW_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
@@ -4496,35 +4410,6 @@ def slashless_route_aliases(patterns):
             continue
         aliases.append(path(route[:-1], entry.callback, kwargs=entry.default_args))
     return aliases
-
-
-def get_enabled_ignore_rules(manufacturer=None) -> list:
-    """
-    Return the enabled InventoryIgnoreRule instances that apply to *manufacturer*.
-
-    Scoping follows :func:`apply_normalization_rules`: a manufacturer takes its own rules plus
-    the unscoped ones, and no manufacturer takes only the unscoped ones. A rule that admits a
-    vendor's own inventory class is vendor-specific in practice, so leaving every such rule
-    global made one vendor's quirk change what every other vendor's sync admits.
-
-    Raises:
-        InventoryRuleFilterError: When an enabled rule of any action stores a filter regex that does not compile.
-
-    """
-    from django.db.models import Q
-
-    from netbox_librenms_plugin.models import InventoryIgnoreRule
-
-    rules = InventoryIgnoreRule.objects.filter(enabled=True)
-    if manufacturer is not None and getattr(manufacturer, "pk", None) is not None:
-        rules = rules.filter(Q(manufacturer__isnull=True) | Q(manufacturer=manufacturer))
-    else:
-        rules = rules.filter(manufacturer__isnull=True)
-    rules = list(rules.order_by("pk"))
-    for rule in rules:
-        # Compile now: a broken filter must stop the caller, not silently admit or hide nothing.
-        _ = rule.compiled_filters
-    return rules
 
 
 def load_bay_mappings() -> tuple:

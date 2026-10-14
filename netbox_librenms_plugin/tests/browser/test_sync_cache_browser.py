@@ -1844,7 +1844,7 @@ def test_a_retry_after_a_failed_module_install_still_carries_the_off_page_select
           </form>
           <table id="librenms-module-table"><tbody><tr>
             <td><input type="checkbox" name="select" value="201" checked>
-                <select id="device_selection_201"><option value="7" selected>m7</option></select></td>
+                <select id="device_selection_201" name="device_selection_201"><option value="7" selected>m7</option></select></td>
           </tr></tbody></table>
         </div>
         """

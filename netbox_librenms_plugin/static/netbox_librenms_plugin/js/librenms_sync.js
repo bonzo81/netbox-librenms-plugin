@@ -1862,6 +1862,7 @@ function _isSelectionCompanionName(name) {
     return (
         Boolean(name) &&
         (name.startsWith('device_selection_') ||
+            name.startsWith('selection_grant_') ||
             name.startsWith('vlan_group_') ||
             cableSnapshotPrefixes.some((prefix) => name.startsWith(prefix)))
     );
@@ -2423,6 +2424,11 @@ function initializeVCMemberSelect() {
         if (moduleTable) {
             const moduleSelects = moduleTable.querySelectorAll('.vc-member-select');
             moduleSelects.forEach(select => {
+                // The rendered member is the verified one; a failed verify rolls back to it.
+                if (typeof select._lastVerifiedMember === 'undefined' && !select.dataset.moduleSelectInitialized) {
+                    const selectedOption = select.querySelector('option[selected]');
+                    select._lastVerifiedMember = selectedOption ? selectedOption.value : select.value;
+                }
                 if (select.tomselect && !select.dataset.moduleSelectInitialized) {
                     select.dataset.moduleSelectInitialized = 'true';
                     select.tomselect.on('change', function (value) {
@@ -3384,15 +3390,63 @@ document.addEventListener('click', function (event) {
 });
 
 /**
+ * Lock or release a module row's writes while its member verify is in flight.
+ *
+ * The row's action forms and its install grant were signed for the previous member, so a click or
+ * a selected install before the answer would act on the wrong member. Install Selected waits too.
+ *
+ * @param {HTMLTableRowElement} row - The module row.
+ * @param {boolean} pending - True while the verify request is in flight.
+ * @returns {void}
+ */
+function _setModuleRowPending(row, pending) {
+    if (pending) {
+        row.dataset.verifyPending = 'true';
+        row.querySelectorAll('td[data-col="actions"] button:not([disabled]), td[data-col="selection"] input[name="select"]:not([disabled])')
+            .forEach((control) => {
+                control.disabled = true;
+                control.dataset.verifyLocked = '1';
+            });
+    } else {
+        delete row.dataset.verifyPending;
+        row.querySelectorAll('[data-verify-locked]').forEach((control) => {
+            delete control.dataset.verifyLocked;
+            control.disabled = false;
+        });
+    }
+    _syncInstallSelectedLock();
+}
+
+/**
+ * Disable Install Selected while any module row waits for its member verify.
+ *
+ * @returns {void}
+ */
+function _syncInstallSelectedLock() {
+    const button = document.getElementById('install-selected-btn');
+    const table = document.getElementById('librenms-module-table');
+    if (!button) return;
+    const pending = Boolean(table && table.querySelector('tr[data-verify-pending]'));
+    if (pending && !button.disabled) {
+        button.disabled = true;
+        button.dataset.verifyLocked = '1';
+    } else if (!pending && button.dataset.verifyLocked) {
+        delete button.dataset.verifyLocked;
+        button.disabled = false;
+    }
+}
+
+/**
  * Handle VC member selection change for module verification.
- * Fetches recalculated matching status for one module row and updates cells inline.
+ * Fetches the row the table pinned to the new member, with that member's grants, and updates cells inline.
  *
  * @param {HTMLSelectElement} select - VC member dropdown for a module row
  * @param {string} value - Selected NetBox device ID
  */
 function handleModuleChange(select, value) {
-    const row = document.querySelector(`tr[data-ent-index="${select.dataset.rowId}"]`);
+    const row = select.closest('tr') || document.querySelector(`tr[data-ent-index="${select.dataset.rowId}"]`);
     const rowDepth = row?.dataset?.depth || 0;
+    const table = row?.closest('table');
 
     // Abort any in-flight verify for this select so a slower earlier response
     // can't clobber a faster later one when the user changes the dropdown rapidly.
@@ -3405,6 +3459,33 @@ function handleModuleChange(select, value) {
     const csrfToken = getCsrfToken();
     if (!csrfToken) return;  // missing token → abort rather than throw on `.value`
 
+    if (typeof select._lastVerifiedMember === 'undefined') {
+        const selectedOption = select.querySelector('option[selected]');
+        select._lastVerifiedMember = selectedOption ? selectedOption.value : null;
+    }
+    // The install grant names the previous member, so it is withdrawn until the new member is verified.
+    const grantField = row ? Array.from(row.querySelectorAll('input[type="hidden"]')).find(
+        (field) => field.name === 'selection_grant_' + select.dataset.module
+    ) : null;
+    if (grantField && typeof select._lastVerifiedGrant === 'undefined') {
+        select._lastVerifiedGrant = grantField.value;
+    }
+    if (grantField) grantField.value = '';
+    if (row) _setModuleRowPending(row, true);
+
+    const rollbackToLastVerified = () => {
+        if (select._lastVerifiedMember != null) {
+            if (select.tomselect && typeof select.tomselect.setValue === 'function') {
+                select.tomselect.setValue(select._lastVerifiedMember, true);
+            } else {
+                select.value = select._lastVerifiedMember;
+            }
+            if (grantField) grantField.value = select._lastVerifiedGrant || '';
+            _setModuleRowPending(row, false);
+        }
+        if (table) commitSelectionChange(table);
+    };
+
     fetch('/plugins/librenms_plugin/verify-module/', {
         method: 'POST',
         headers: {
@@ -3414,6 +3495,8 @@ function handleModuleChange(select, value) {
         },
         body: JSON.stringify({
             device_id: value,
+            page_device_id: table?.dataset?.pageDevice || null,
+            verify_binding: select.dataset.verifyBinding || null,
             ent_physical_index: select.dataset.module,
             depth: rowDepth,
             server_key: document.querySelector('input[name="server_key"]')?.value || null
@@ -3427,9 +3510,22 @@ function handleModuleChange(select, value) {
             return response.json();
         })
         .then(data => {
-            if (!_isLiveRow(row) || data.status !== 'success' || !data.formatted_row) return;
+            if (!_isLiveRow(row)) return;
+            if (data.status !== 'success' || !data.formatted_row) {
+                console.error('Module verification rejected:', data.message || 'Unknown error');
+                rollbackToLastVerified();
+                return;
+            }
 
             const formattedRow = data.formatted_row;
+            // The member decides whether a selected install may take the row, so the checkbox follows it.
+            const selectionCell = row.querySelector('td[data-col="selection"]');
+            if (selectionCell && typeof formattedRow.selection !== 'undefined') {
+                const wasChecked = Boolean(selectionCell.querySelector('input[name="select"]:checked'));
+                selectionCell.innerHTML = formattedRow.selection;
+                const checkbox = selectionCell.querySelector('input[name="select"]');
+                if (checkbox) checkbox.checked = wasChecked && !checkbox.disabled;
+            }
             const deviceSelCell = row.querySelector('td[data-col="device_selection"]');
             if (deviceSelCell) {
                 deviceSelCell.innerHTML = formattedRow.device_selection || '';
@@ -3456,15 +3552,19 @@ function handleModuleChange(select, value) {
                 }
             }
 
+            // The replaced cells carry the new member's grants, so the row may write again.
+            _setModuleRowPending(row, false);
             // Re-bind listeners because row controls (select/buttons/forms) were replaced.
             initializeVCMemberSelect();
             initializeVCReportButtons();
             // The member select was replaced, so the stored selection takes its value again.
-            commitSelectionChange(row.closest('table'));
+            commitSelectionChange(table);
         })
         .catch(error => {
-            if (error.name === 'AbortError') return;
+            // A superseded request was aborted on purpose: the newer request owns the row lock.
+            if (error.name === 'AbortError' || !_isLiveRow(row)) return;
             console.error('Error verifying module:', error.message);
+            rollbackToLastVerified();
         });
 }
 
@@ -4159,23 +4259,38 @@ function handleInstallSelectedSubmit() {
     const table = document.getElementById('librenms-module-table');
     if (!table) return;
 
-    table.querySelectorAll('input[name="select"]:checked').forEach(cb => {
-        const hidden = document.createElement('input');
-        hidden.type = 'hidden';
-        hidden.name = 'select';
-        hidden.value = cb.value;
-        hidden.dataset.injectedSelect = '1';
-        form.appendChild(hidden);
+    const rows = _checkedModuleRows(table);
+    // An htmx submit takes its off-page rows at htmx:configRequest; only a native submit takes them here.
+    if (!form.hasAttribute('hx-post')) {
+        const records = offPageRecords(table, readStoredSelection(table));
+        Object.keys(records).forEach((rowKey) => {
+            const companions = (records[rowKey] && records[rowKey].inputs) || {};
+            rows.push({value: rowKey, companions: Object.fromEntries(Object.entries(companions).filter(([name]) => _isSelectionCompanionName(name)))});
+        });
+        clearStoredSelection(table);
+    }
+    rows.forEach(({value, companions}) => {
+        [['select', value], ...Object.entries(companions)].forEach(([name, fieldValue]) => {
+            const hidden = document.createElement('input');
+            hidden.type = 'hidden';
+            hidden.name = name;
+            hidden.value = fieldValue;
+            hidden.dataset.injectedSelect = '1';
+            form.appendChild(hidden);
+        });
+    });
+}
 
-        const selectedDevice = table.querySelector(`#device_selection_${cb.value}`);
-        if (selectedDevice) {
-            const hiddenDevice = document.createElement('input');
-            hiddenDevice.type = 'hidden';
-            hiddenDevice.name = `device_selection_${cb.value}`;
-            hiddenDevice.value = selectedDevice.value;
-            hiddenDevice.dataset.injectedSelect = '1';
-            form.appendChild(hiddenDevice);
-        }
+/**
+ * Return the checked module rows with the companion fields each submits: its member and its install grant.
+ *
+ * @param {HTMLElement} table - The module table.
+ * @returns {Array<{value: string, companions: Object<string, string>}>}
+ */
+function _checkedModuleRows(table) {
+    return Array.from(table.querySelectorAll('input[name="select"]:checked')).map((checkbox) => {
+        const row = checkbox.closest('tr');
+        return {value: checkbox.value, companions: row ? _rowCompanionInputs(row) : {}};
     });
 }
 
@@ -4438,16 +4553,13 @@ document.addEventListener('DOMContentLoaded', function () {
         if (event.detail.elt && event.detail.elt.id === 'install-selected-form') {
             const params = event.detail.parameters;
             Array.from(params.keys())
-                .filter((k) => k === 'select' || k.startsWith('device_selection_'))
+                .filter((k) => k === 'select' || _isSelectionCompanionName(k))
                 .forEach((k) => params.delete(k));
             const table = document.getElementById('librenms-module-table');
             if (table) {
-                table.querySelectorAll('input[name="select"]:checked').forEach((cb) => {
-                    params.append('select', cb.value);
-                    const selectedDevice = table.querySelector(`#device_selection_${cb.value}`);
-                    if (selectedDevice) {
-                        params.append(`device_selection_${cb.value}`, selectedDevice.value);
-                    }
+                _checkedModuleRows(table).forEach(({value, companions}) => {
+                    params.append('select', value);
+                    Object.entries(companions).forEach(([name, fieldValue]) => params.append(name, fieldValue));
                 });
                 // Modules the user selected on another page of this table: the rows are gone
                 // from the DOM, so their target device travels with them out of the store.
