@@ -369,6 +369,22 @@ class TestRepairRule:
         assert rows[2]["entPhysicalContainedIn"] == 99
         assert "_reported_parent" not in rows[2]
 
+    @pytest.mark.parametrize("missing", ["absent", "null"])
+    def test_a_pic_with_no_index_is_no_candidate(self, missing):
+        from netbox_librenms_plugin.inventory_tree import repair_dangling_parents
+
+        rows = self._rows()
+        if missing == "absent":
+            del rows[1]["entPhysicalIndex"]
+        else:
+            rows[1]["entPhysicalIndex"] = None
+
+        repair_dangling_parents(rows)
+
+        assert rows[2]["entPhysicalContainedIn"] == 99
+        assert rows[2]["_dangling_parent"] == 99
+        assert "_reported_parent" not in rows[2]
+
     def test_a_repair_that_would_close_a_cycle_is_refused(self):
         """Container 10 sits below port 30, so a parent 20 for port 30 would close 30 -> 20 -> 10 -> 30."""
         from netbox_librenms_plugin.inventory_tree import repair_dangling_parents
