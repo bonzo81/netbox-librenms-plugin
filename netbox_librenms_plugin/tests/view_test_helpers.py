@@ -113,94 +113,6 @@ def queued_request(user):
     return copy_safe_request(request)
 
 
-def cached_module_snapshot(device, server_key="default"):
-    """Return the module inventory snapshot cached for *device*'s Modules page."""
-    from django.core.cache import cache
-
-    from netbox_librenms_plugin.server_selection import get_librenms_sync_device
-    from netbox_librenms_plugin.sync_cache import cached_module_inventory
-    from netbox_librenms_plugin.views.mixins import CacheMixin
-
-    sync_device = get_librenms_sync_device(device, server_key=server_key) or device
-    return cached_module_inventory(cache.get(CacheMixin().get_cache_key(sync_device, "inventory", server_key)))
-
-
-def module_grant(
-    page_device,
-    action,
-    *,
-    target_device=None,
-    ent_index=None,
-    action_target=None,
-    rows=None,
-    server_key="default",
-    inventory=None,
-    render_mode="attributed",
-):
-    """
-    Sign a module grant with the production signer for the current snapshot and policy of *page_device*.
-
-    Only a unit test that drives a writer without rendering the table may use it; a behavioural test
-    takes its grant from the rendered table.
-    """
-    from netbox_librenms_plugin.inventory_policy import load_inventory_policy
-    from netbox_librenms_plugin.module_grants import module_inventory_snapshot_digest, sign_module_grant
-
-    snapshot = cached_module_snapshot(page_device, server_key) if inventory is None else inventory
-    return sign_module_grant(
-        page_device_id=page_device.pk,
-        device_id=(target_device or page_device).pk,
-        server_key=server_key,
-        action=action,
-        ent_index=ent_index,
-        action_target=action_target,
-        rows=rows,
-        inventory_digest=module_inventory_snapshot_digest(snapshot),
-        policy_fingerprint=load_inventory_policy(page_device.pk).fingerprint,
-        render_mode=render_mode,
-    )
-
-
-def collector_grant(page_device, action, inventory, *, parent_index=None, server_key="default"):
-    """
-    Return the grant the real Modules table signs over *inventory*: the selected install manifest or a branch.
-
-    The table is built by the production collector for a superuser, so the grant names exactly the rows
-    and targets that the rendered page would carry.
-    """
-    from types import SimpleNamespace
-
-    from netbox_librenms_plugin.module_grants import ACTION_INSTALL_BRANCH, ACTION_INSTALL_SELECTED
-    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-    request = make_request("get", {"server_key": server_key}, path="/modules/")
-    view = make_view(DeviceModuleTableView, request, librenms_api=SimpleNamespace(server_key=server_key))
-    context = view._build_context(request, page_device, inventory, server_key=server_key)
-    if action == ACTION_INSTALL_SELECTED:
-        return context["install_selected_inventory_binding"]
-    assert action == ACTION_INSTALL_BRANCH, action
-    table = context["table"]
-    row = next(row for row in table.data if row["ent_physical_index"] == parent_index and row["depth"] == 0)
-    return table.grant(
-        ACTION_INSTALL_BRANCH, row, action_target={"parent_index": parent_index}, rows=row["branch_rows"]
-    )
-
-
-def module_row_binding(
-    target_device, action, row, *, action_target=None, server_key="default", page_device=None, inventory=None
-):
-    """Sign the action a rendered form submits for inventory *row* of the snapshot *inventory* (default: cached)."""
-    return module_grant(
-        page_device or target_device,
-        action,
-        target_device=target_device,
-        ent_index=row.get("entPhysicalIndex"),
-        action_target=action_target,
-        server_key=server_key,
-        inventory=inventory,
-    )
-
-
 def render_module_tab(device, *, user=None, server_key="default"):
     """Render the Modules tab fragment from its cached snapshot, as a module action re-renders it; return the HTML."""
     from django.urls import reverse
@@ -287,6 +199,28 @@ def rendered_preview_url(html, ent_index):
         if "module-mismatch-preview" in url and parse_qs(urlsplit(url).query).get("ent_index") == [str(ent_index)]:
             return url
     raise AssertionError(f"row {ent_index} renders no Replace button")
+
+
+def rendered_preview_query(device, ent_index, *, user=None, server_key="default"):
+    """Return the query that the rendered Replace button of row *ent_index* opens the mismatch preview with."""
+    from urllib.parse import parse_qsl, urlsplit
+
+    url = rendered_preview_url(render_module_tab(device, user=user, server_key=server_key), ent_index)
+    return dict(parse_qsl(urlsplit(url).query))
+
+
+def rendered_modal_form(device, ent_index, path_part, *, user=None, server_key="default"):
+    """Return ``(action URL, fields)`` of a form in the modal that the rendered Replace button of row *ent_index* opens."""
+    from types import SimpleNamespace
+
+    from netbox_librenms_plugin.views.sync.modules import ModuleMismatchPreviewView
+
+    query = rendered_preview_query(device, ent_index, user=user, server_key=server_key)
+    request = make_request("get", query, user=user)
+    view = make_view(ModuleMismatchPreviewView, request, librenms_api=SimpleNamespace(server_key=server_key))
+    response = get(view, request, pk=device.pk)
+    assert response.status_code == 200, response.content
+    return rendered_module_form(response.content.decode(), path_part, ent_index)
 
 
 def _message_level(name):

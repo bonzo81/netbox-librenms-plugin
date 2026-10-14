@@ -81,22 +81,29 @@ def _refresh_modules(client, device):
     )
 
 
-def _verify_module(client, body, *, page=None, binding=None):
-    """POST a JSON body to the single-module verify endpoint for a row of the Modules page of *page*."""
-    from dcim.models import Device
+def _verify_module(client, refreshed, page, body):
+    """POST the verify request that the member select of the asked row on the refreshed tab sends."""
     from django.urls import reverse
 
-    from netbox_librenms_plugin.tests.view_test_helpers import module_grant
-
-    page = page or Device.objects.get(pk=body["device_id"])
-    if binding is None:
-        # A standalone device's table renders no member select, so a test signs the grant as the table would.
-        binding = module_grant(page, "verify_module", ent_index=body["ent_physical_index"], server_key=SERVER_KEY)
+    (select,) = [
+        attrs
+        for attrs in module_tab_forms(refreshed.content.decode()).selects
+        if attrs.get("data-module") == str(body["ent_physical_index"])
+    ]
     return client.post(
         reverse("plugins:netbox_librenms_plugin:verify_module"),
-        data=json.dumps({"page_device_id": page.pk, "verify_binding": binding, **body}),
+        data=json.dumps({"page_device_id": page.pk, "verify_binding": select["data-verify-binding"], **body}),
         content_type="application/json",
     )
+
+
+def _in_a_chassis(device):
+    """Enroll *device* in a two-member Virtual Chassis, so its Modules table renders a member select per row."""
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_virtual_chassis
+
+    make_virtual_chassis(f"{device.name}-vc", device, make_device_with_module_bays(f"{device.name}-member", []))
+    device.refresh_from_db()
+    return device
 
 
 @pytest.mark.django_db
@@ -114,10 +121,13 @@ class TestSingleModuleVerifyRow:
         _register_inventory(librenms_server, INVENTORY)
         client.force_login(make_superuser("module-verify-row-user"))
 
-        assert _refresh_modules(client, device).status_code == 200
+        refreshed = _refresh_modules(client, _in_a_chassis(device))
+        assert refreshed.status_code == 200
 
         response = _verify_module(
             client,
+            refreshed,
+            device,
             {"device_id": device.pk, "ent_physical_index": 1, "server_key": SERVER_KEY},
         )
 
@@ -149,10 +159,13 @@ class TestSingleModuleVerifyRow:
         _register_inventory(librenms_server, INVENTORY)
         client.force_login(make_superuser("module-verify-depth-user"))
 
-        assert _refresh_modules(client, device).status_code == 200
+        refreshed = _refresh_modules(client, _in_a_chassis(device))
+        assert refreshed.status_code == 200
 
         response = _verify_module(
             client,
+            refreshed,
+            device,
             {"device_id": device.pk, "ent_physical_index": 1, "depth": 5, "server_key": SERVER_KEY},
         )
 
@@ -197,10 +210,13 @@ class TestSingleModuleVerifyRow:
         _register_inventory(librenms_server, inventory)
         client.force_login(make_superuser("module-verify-carrier-user"))
 
-        assert _refresh_modules(client, device).status_code == 200
+        refreshed = _refresh_modules(client, _in_a_chassis(device))
+        assert refreshed.status_code == 200
 
         response = _verify_module(
             client,
+            refreshed,
+            device,
             {"device_id": device.pk, "ent_physical_index": 3, "server_key": SERVER_KEY},
         )
 
@@ -231,13 +247,12 @@ class TestSingleModuleVerifyRow:
 
         refreshed = _refresh_modules(client, first)
         assert refreshed.status_code == 200
-        (select,) = module_tab_forms(refreshed.content.decode()).selects
 
         response = _verify_module(
             client,
+            refreshed,
+            first,
             {"device_id": selected.pk, "ent_physical_index": 1, "server_key": SERVER_KEY},
-            page=first,
-            binding=select["data-verify-binding"],
         )
 
         assert response.status_code == 200
