@@ -116,6 +116,34 @@
     }
   },
   {
+    "name": "iosxe-c8300",
+    "signature": {
+      "os": "os-48b51d",
+      "virtual_chassis": {
+        "present": false,
+        "root_class": "chassis",
+        "member_count": 0,
+        "position_base": null,
+        "member_shape": null
+      },
+      "lag": {
+        "present": false,
+        "ieee8023ad": false,
+        "name_prefix": null
+      },
+      "sub_interfaces": {
+        "present": false,
+        "styles": []
+      },
+      "port_stack": false,
+      "vlans": true,
+      "transceivers": true,
+      "serial": false,
+      "vrf": false,
+      "oob": false
+    }
+  },
+  {
     "name": "iosxe-subinterfaces",
     "signature": {
       "os": "os-48b51d",
