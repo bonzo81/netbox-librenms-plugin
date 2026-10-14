@@ -202,6 +202,36 @@
     }
   },
   {
+    "name": "junos-mx-dangling",
+    "signature": {
+      "os": "os-990f10",
+      "virtual_chassis": {
+        "present": false,
+        "root_class": "chassis",
+        "member_count": 0,
+        "position_base": null,
+        "member_shape": null
+      },
+      "lag": {
+        "present": true,
+        "ieee8023ad": true,
+        "name_prefix": "ae"
+      },
+      "sub_interfaces": {
+        "present": true,
+        "styles": [
+          "dot-numeric"
+        ]
+      },
+      "port_stack": true,
+      "vlans": true,
+      "transceivers": true,
+      "serial": false,
+      "vrf": true,
+      "oob": false
+    }
+  },
+  {
     "name": "junos-mx-scb",
     "signature": {
       "os": "os-990f10",
