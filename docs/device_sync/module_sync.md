@@ -36,6 +36,8 @@ Some Juniper MX optics report a parent index that no inventory row has. The desc
 
 When no single PIC matches, the row keeps the reported parent and shows a **Parent Missing** badge. Hover the badge to see the reported index. The row still gets a bay guess and the install actions, so check the bay before you install it.
 
+Junos EVO reports each PIC row (`PIC: ... @ 0/0/*`) with its slot number as parent, so when a PIC row is not below an FPC row of its slot and exactly one FPC row of that slot exists, the plugin puts the PIC and its optics below that FPC row, with no badge.
+
 ## Taking Action
 
 Only an install action (**Install**, **Install Carrier**) shows its label in the Actions column. Every other action is an icon button: hover it for a tooltip, and a screen reader announces its name.

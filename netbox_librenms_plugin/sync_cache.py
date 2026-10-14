@@ -30,7 +30,7 @@ _MAX_ACKNOWLEDGED_REVISIONS = 200
 
 
 # Increase when cached inventory rows change meaning; a reader treats any other payload as a miss.
-MODULE_INVENTORY_CACHE_VERSION = 3
+MODULE_INVENTORY_CACHE_VERSION = 4
 
 
 def module_inventory_cache_payload(inventory, librenms_id, oob_librenms_id) -> dict:

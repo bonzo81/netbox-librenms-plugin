@@ -12,6 +12,9 @@ from netbox_librenms_plugin.tests.test_modules_view import _two_server_keys
 pytestmark = pytest.mark.django_db
 
 RECORDING = "junos-mx-dangling"
+# Junos EVO: FPC 119 and PIC 127 both report parent 0; the optics report PIC 127.
+EVO_RECORDING = "junos-evo-ptx10008"
+EVO_FPC, EVO_PIC = 119, 127
 # Optic index: the PIC that its "@ F/P/N" locator names. LibreNMS reports 71, 72, 95 and 96.
 REPAIRED = {889: 67, 892: 67, 984: 68, 985: 68, 986: 68, 987: 68, 3191: 79, 3287: 80}
 REPORTED = {889: 71, 892: 71, 984: 72, 985: 72, 986: 72, 987: 72, 3191: 95, 3287: 96}
@@ -280,7 +283,7 @@ class TestValidTreesDoNotChange:
         sorted(
             recording["name"]
             for recording in iter_recordings()
-            if recording["name"] != RECORDING
+            if recording["name"] not in {RECORDING, EVO_RECORDING}
             and f"GET /api/v0/inventory/{recording['device_id']}/all" in recording["responses"]
         ),
     )
@@ -293,6 +296,17 @@ class TestValidTreesDoNotChange:
         repair_dangling_parents(rows)
 
         assert rows == before
+
+    def test_the_mx_recording_changes_only_its_dangling_optics(self):
+        """Each MX PIC row is already below the FPC row of its slot, so the PIC repair moves none."""
+        from netbox_librenms_plugin.inventory_tree import repair_dangling_parents
+
+        rows = _inventory(_recording(RECORDING))
+        before = deepcopy(rows)
+
+        repair_dangling_parents(rows)
+
+        assert {row["entPhysicalIndex"] for row, old in zip(rows, before, strict=True) if row != old} == set(REPAIRED)
 
     def test_a_port_with_a_valid_parent_is_not_moved(self):
         """The locator names PIC 20, but the reported parent row exists, so it stays."""
@@ -347,13 +361,13 @@ class TestRepairRule:
         "rows_kwargs",
         [
             {"port_class": "module"},
-            {"pic_parent": 0},
+            {"pic_parent": 0, "fpc_descr": "FPC: X @ 2/*/*"},
             {"fpc_descr": "FPC: X @ 2/*/*"},
             {"fpc_descr": "Backplane"},
             {"port_descr": "SFP @ 1/1/2"},
             {"port_descr": "SFP 1/0/2"},
         ],
-        ids=["not-a-port", "pic-not-in-an-fpc", "fpc-of-another-slot", "parent-not-an-fpc", "no-such-pic", "no-at"],
+        ids=["not-a-port", "root-pic-no-fpc", "fpc-of-another-slot", "parent-not-an-fpc", "no-such-pic", "no-at"],
     )
     def test_no_single_candidate_marks_the_row_dangling(self, rows_kwargs):
         from netbox_librenms_plugin.inventory_tree import repair_dangling_parents
@@ -368,6 +382,16 @@ class TestRepairRule:
             assert rows[2]["_dangling_parent"] == 99
         assert rows[2]["entPhysicalContainedIn"] == 99
         assert "_reported_parent" not in rows[2]
+
+    def test_a_port_takes_a_pic_that_the_pic_repair_moved_into_its_fpc(self):
+        from netbox_librenms_plugin.inventory_tree import repair_dangling_parents
+
+        rows = self._rows(pic_parent=0)
+
+        repair_dangling_parents(rows)
+
+        assert (rows[1]["entPhysicalContainedIn"], rows[1]["_reported_parent"]) == (10, 0)
+        assert (rows[2]["entPhysicalContainedIn"], rows[2]["_reported_parent"]) == (20, 99)
 
     @pytest.mark.parametrize("missing", ["absent", "null", "zero"])
     def test_a_pic_with_no_index_is_no_candidate(self, missing):
@@ -486,3 +510,193 @@ class TestOobInventory:
         assert cached[40 + offset]["entPhysicalContainedIn"] == 99 + offset
         assert cached[40 + offset]["_dangling_parent"] == 99
         assert {idx: cached[idx]["entPhysicalContainedIn"] for idx in REPAIRED} == REPAIRED
+
+
+def _evo_rows(recording):
+    return {row["entPhysicalIndex"]: row for row in _inventory(recording)}
+
+
+def _evo_optics(recording):
+    return sorted(idx for idx, row in _evo_rows(recording).items() if row["entPhysicalContainedIn"] == EVO_PIC)
+
+
+def _add_slot_1(recording, pic_parent=1):
+    """Add an FPC, a PIC and an optic in slot 1; return their indices. Parent 1 is the chassis row."""
+    rows = _inventory(recording)
+    optic = _evo_rows(recording)[_evo_optics(recording)[0]]
+    fpc, pic, port = (max(row["entPhysicalIndex"] for row in rows) + n for n in (1, 2, 3))
+    rows += [
+        {**_evo_rows(recording)[EVO_FPC], "entPhysicalIndex": fpc, "entPhysicalDescr": "FPC: entity-f1f1f1 @ 1/*/*"},
+        {
+            **_evo_rows(recording)[EVO_PIC],
+            "entPhysicalIndex": pic,
+            "entPhysicalDescr": "PIC: entity-f1f1f2 @ 1/0/*",
+            "entPhysicalContainedIn": pic_parent,
+        },
+        {
+            **optic,
+            "entPhysicalIndex": port,
+            "entPhysicalDescr": "entity-f1f1f3 @ 1/0/0",
+            "entPhysicalContainedIn": pic,
+            "entPhysicalSerialNum": "SN-SLOT1",
+        },
+    ]
+    return fpc, pic, port
+
+
+def _depth_and_parent(rows):
+    return {index: (depth, parent) for index, depth, parent in _rows_with_parents(rows)}
+
+
+class TestEvoPicRepair:
+    """A1: a Junos EVO PIC row whose ancestry has no FPC row of its slot moves below that FPC row."""
+
+    def test_pic_127_moves_below_fpc_119_and_its_optics_render_below_the_fpc(self, librenms_server, server_key):
+        recording = _recording(EVO_RECORDING)
+        entities = _evo_rows(recording)
+        assert entities[EVO_FPC]["entPhysicalDescr"].startswith("FPC: ")
+        assert entities[EVO_FPC]["entPhysicalDescr"].endswith(" @ 0/*/*")
+        assert entities[EVO_PIC]["entPhysicalDescr"].endswith(" @ 0/0/*")
+        assert entities[EVO_FPC]["entPhysicalContainedIn"] == entities[EVO_PIC]["entPhysicalContainedIn"] == 0
+        optics = _evo_optics(recording)
+        assert len(optics) == 34
+
+        device, content, rows = _render(recording, librenms_server, server_key, "evo")
+
+        cached = _cached_inventory(device, server_key)
+        assert cached[EVO_PIC]["entPhysicalContainedIn"] == EVO_FPC
+        assert cached[EVO_PIC]["_reported_parent"] == 0
+        assert "_dangling_parent" not in cached[EVO_PIC]
+        assert {idx: cached[idx]["entPhysicalContainedIn"] for idx in optics} == dict.fromkeys(optics, EVO_PIC)
+        placed = _depth_and_parent(rows)
+        # PIC 127 has a generic model, so the table hides it and its optics render one level below FPC 119.
+        assert EVO_PIC not in placed
+        assert {idx: placed[idx] for idx in optics} == dict.fromkeys(optics, (placed[EVO_FPC][0] + 1, EVO_FPC))
+        assert "Parent Missing" not in content
+
+    def test_a_fixed_agent_renders_the_same_tree_with_no_report(self, librenms_server, server_key):
+        fixed = _recording(EVO_RECORDING)
+        _evo_rows(fixed)[EVO_PIC]["entPhysicalContainedIn"] = EVO_FPC
+
+        _device, _content, repaired_rows = _render(_recording(EVO_RECORDING), librenms_server, server_key, "evo-as")
+        device, content, fixed_rows = _render(fixed, librenms_server, server_key, "evo-fixed")
+
+        def rendered(rows):
+            fields = [(row["name"], row["item_class"], row["status"], row["module_bay"]) for row in rows]
+            return [[*place, *field] for place, field in zip(_rows_with_parents(rows), fields, strict=True)]
+
+        assert rendered(fixed_rows) == rendered(repaired_rows)
+        cached = _cached_inventory(device, server_key)
+        assert not any("_dangling_parent" in row or "_reported_parent" in row for row in cached.values())
+        assert "LibreNMS reports parent index" not in content
+
+    def test_a_slot_1_pic_that_reports_the_chassis_moves_below_the_slot_1_fpc(self, librenms_server, server_key):
+        recording = _recording(EVO_RECORDING)
+        fpc, pic, port = _add_slot_1(recording)
+
+        device, _content, rows = _render(recording, librenms_server, server_key, "evo-slot1")
+
+        cached = _cached_inventory(device, server_key)
+        assert (cached[pic]["entPhysicalContainedIn"], cached[pic]["_reported_parent"]) == (fpc, 1)
+        assert (cached[EVO_PIC]["entPhysicalContainedIn"], cached[EVO_PIC]["_reported_parent"]) == (EVO_FPC, 0)
+        placed = _depth_and_parent(rows)
+        assert placed[port] == (placed[fpc][0] + 1, fpc)
+
+    def test_a_pic_below_the_fpc_of_another_slot_moves_below_its_own_fpc(self, librenms_server, server_key):
+        recording = _recording(EVO_RECORDING)
+        fpc, _pic, _port = _add_slot_1(recording)
+        _evo_rows(recording)[EVO_PIC]["entPhysicalContainedIn"] = fpc
+
+        device, _content, rows = _render(recording, librenms_server, server_key, "evo-wrong-slot")
+
+        cached = _cached_inventory(device, server_key)
+        assert (cached[EVO_PIC]["entPhysicalContainedIn"], cached[EVO_PIC]["_reported_parent"]) == (EVO_FPC, fpc)
+        placed = _depth_and_parent(rows)
+        assert all(placed[idx][1] == EVO_FPC for idx in _evo_optics(_recording(EVO_RECORDING)))
+
+    def test_a_pic_below_a_mic_of_its_fpc_stays_there(self, librenms_server, server_key):
+        """Chassis -> FPC -> MIC -> PIC -> optic: the PIC reaches its FPC through the MIC, so nothing moves."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        recording = _recording(EVO_RECORDING)
+        rows = _inventory(recording)
+        entities = _evo_rows(recording)
+        mic = max(row["entPhysicalIndex"] for row in rows) + 1
+        entities[EVO_FPC]["entPhysicalContainedIn"] = 1
+        rows.append(
+            {
+                **entities[EVO_FPC],
+                "entPhysicalIndex": mic,
+                "entPhysicalClass": "module",
+                "entPhysicalDescr": "MIC: entity-f1f1f4 @ 0/0/*",
+                "entPhysicalModelName": "MODEL-f1f1f4",
+                "entPhysicalSerialNum": "SN-MIC",
+                "entPhysicalContainedIn": EVO_FPC,
+            }
+        )
+        entities[EVO_PIC]["entPhysicalContainedIn"] = mic
+        optics = _evo_optics(_recording(EVO_RECORDING))
+
+        device, _content, rendered = _render(recording, librenms_server, server_key, "evo-mic")
+
+        cached = _cached_inventory(device, server_key)
+        assert cached[EVO_PIC]["entPhysicalContainedIn"] == mic
+        assert not any("_reported_parent" in row or "_dangling_parent" in row for row in cached.values())
+        placed = _depth_and_parent(rendered)
+        assert placed[mic] == (placed[EVO_FPC][0] + 1, EVO_FPC)
+        assert {idx: placed[idx] for idx in optics} == dict.fromkeys(optics, (placed[mic][0] + 1, mic))
+        snapshot = list(cached.values())
+        branch = InstallBranchView()._collect_branch(mic, snapshot, index_map=cached)
+        assert {item["entPhysicalIndex"] for item in branch} >= set(optics)
+
+
+def _second_slot_0_fpc(rows):
+    rows.append(
+        {**rows[0], "entPhysicalIndex": 9001, "entPhysicalClass": "container", "entPhysicalDescr": "FPC: X @ 0/*/*"}
+    )
+
+
+def _fpc_below_the_pic(rows):
+    next(row for row in rows if row["entPhysicalIndex"] == EVO_FPC)["entPhysicalContainedIn"] = EVO_PIC
+
+
+def _shared_index(index):
+    def edit(rows):
+        rows.append({"entPhysicalIndex": index, "entPhysicalClass": "sensor", "entPhysicalDescr": "X"})
+
+    edit.__name__ = f"shared-{index}"
+    return edit
+
+
+class TestEvoPicNoMove:
+    """A PIC stays where LibreNMS reports it when the FPC row is not unique or the move would close a cycle."""
+
+    @pytest.mark.parametrize(
+        "edit",
+        [_second_slot_0_fpc, _fpc_below_the_pic, _shared_index(EVO_PIC), _shared_index(EVO_FPC)],
+        ids=["two-fpcs-of-slot-0", "cycle", "duplicate-pic-index", "duplicate-fpc-index"],
+    )
+    def test_the_pic_keeps_its_parent(self, edit):
+        from netbox_librenms_plugin.inventory_tree import repair_dangling_parents
+
+        rows = _inventory(_recording(EVO_RECORDING))
+        edit(rows)
+        pic = next(row for row in rows if row["entPhysicalIndex"] == EVO_PIC and row["entPhysicalClass"] == "module")
+        reported = pic["entPhysicalContainedIn"]
+
+        repair_dangling_parents(rows)
+
+        assert pic["entPhysicalContainedIn"] == reported
+        assert "_reported_parent" not in pic
+        assert "_dangling_parent" not in pic
+
+
+class TestCacheVersion:
+    def test_a_version_3_snapshot_is_refused(self):
+        """A version 3 snapshot holds EVO PIC rows that are not below their FPC, so the reader refuses it."""
+        from netbox_librenms_plugin.sync_cache import cached_module_inventory, module_inventory_cache_payload
+
+        current = module_inventory_cache_payload([{"entPhysicalIndex": 1}], 7, None)
+
+        assert cached_module_inventory({**current, "version": 3}) is None
+        assert cached_module_inventory(current) == [{"entPhysicalIndex": 1}]
