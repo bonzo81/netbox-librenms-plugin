@@ -796,6 +796,45 @@ def test_entphysical_name_and_descr_are_pseudonymized():
     assert item["entPhysicalName"] != item["entPhysicalDescr"]
 
 
+def test_a_switch_control_board_name_keeps_only_the_scb_prefix():
+    """An inventory include rule matches ^SCB, so the prefix survives; the SKU after it never does."""
+    key = "GET /api/v0/inventory/1/all"
+    rec = _ports()
+    rec["responses"][key] = {
+        "status": "ok",
+        "inventory": [
+            {
+                "entPhysicalIndex": 114,
+                "entPhysicalClass": "backplane",
+                "entPhysicalName": "SCBE2-MX-S",
+                "entPhysicalDescr": "SCBE2-MX-S",
+                "entPhysicalModelName": "750-062572",
+            },
+            {"entPhysicalIndex": 115, "entPhysicalClass": "backplane", "entPhysicalName": "SCBE-MX-S"},
+            {"entPhysicalIndex": 116, "entPhysicalClass": "backplane", "entPhysicalName": "JNP10K-RE1"},
+            {"entPhysicalIndex": 117, "entPhysicalClass": "backplane", "entPhysicalName": "scbe2-mx-s"},
+        ],
+    }
+
+    first = anonymize_recording(rec, salt="scb")
+    second = anonymize_recording(first, salt="scb")
+
+    rows = _response(first, key)["inventory"]
+    names = [row["entPhysicalName"] for row in rows]
+    assert re.fullmatch(r"SCB entity-[0-9a-f]{6}", names[0])
+    assert re.fullmatch(r"SCB entity-[0-9a-f]{6}", names[1])
+    assert names[0] != names[1]
+    # Only the literal, case-sensitive prefix is kept, and only in the name.
+    assert re.fullmatch(r"entity-[0-9a-f]{6}", names[2])
+    assert re.fullmatch(r"entity-[0-9a-f]{6}", names[3])
+    assert re.fullmatch(r"entity-[0-9a-f]{6}", rows[0]["entPhysicalDescr"])
+    # The model goes through the shared MODEL-<hash> map like every other model field.
+    assert re.fullmatch(r"MODEL-[0-9a-f]{6}", rows[0]["entPhysicalModelName"])
+    assert not any(sku in str(first) for sku in ("SCBE2", "SCBE-", "MX-S", "750-062572", "JNP10K"))
+    assert [row["entPhysicalName"] for row in _response(second, key)["inventory"]] == names
+    assert find_pii(first) == []
+
+
 def test_entity_descr_keeps_only_the_junos_virtual_chassis_markers():
     """VC detection reads these description markers, so they survive while the rest is replaced."""
     import re

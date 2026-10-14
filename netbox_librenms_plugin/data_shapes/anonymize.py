@@ -348,6 +348,9 @@ _ENTITY_LOCATOR = r"\d+(?:/(?:\d+|[xc]\d+))+"
 _ENTITY_LOCATOR_RE = re.compile(rf"^{_ENTITY_LOCATOR}$")
 _ENTITY_LOCATOR_SUFFIX_RE = re.compile(rf"(?<![A-Za-z0-9])(?P<locator>{_ENTITY_LOCATOR})$")
 _ENTITY_TOKEN_RE = re.compile(rf"^entity-[0-9a-f]{{6}}(?: {_ENTITY_LOCATOR})?$")
+# Juniper names a Switch Control Board by its SKU ("SCBE2-MX-S"); an include rule matches the prefix.
+_SCB_NAME_PREFIX = "SCB"
+_SCB_NAME_TOKEN_RE = re.compile(r"^SCB entity-[0-9a-f]{6}$")
 
 
 def pseudonymize_os(os_name):
@@ -551,11 +554,15 @@ def _anon_junos_vc_descr(normalized, rules):
     return None
 
 
-def _anon_entity_text(value, rules, *, keep_vc_markers=False):
+def _anon_entity_text(value, rules, *, keep_vc_markers=False, keep_scb_prefix=False):
     """Replace private ENTITY text while keeping a bounded terminal hierarchy locator."""
     normalized = value.strip()
     if keep_vc_markers and (kept := _anon_junos_vc_descr(normalized, rules)) is not None:
         return kept
+    if keep_scb_prefix and normalized.startswith(_SCB_NAME_PREFIX):
+        if _SCB_NAME_TOKEN_RE.fullmatch(normalized):
+            return normalized
+        return f"{_SCB_NAME_PREFIX} entity-{_hash(normalized, rules.salt)}"
     return _entity_token(normalized, rules)
 
 
@@ -793,7 +800,12 @@ def _anon_value(key, value, rules, container=None):  # noqa: C901
     if key in MFG_KEYS:
         return f"MFG-{_hash(value, salt)}"
     if key in ENTITY_TEXT_KEYS:
-        return _anon_entity_text(value, rules, keep_vc_markers=key == "entPhysicalDescr")
+        return _anon_entity_text(
+            value,
+            rules,
+            keep_vc_markers=key == "entPhysicalDescr",
+            keep_scb_prefix=key == "entPhysicalName",
+        )
     if key in VERSION_KEYS:
         return f"fw-{_hash(value, salt)}"
     if key == "os":
