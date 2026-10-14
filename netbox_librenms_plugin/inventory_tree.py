@@ -1,5 +1,7 @@
 """Repair inventory containment that LibreNMS reports with a missing parent row."""
 
+from collections import Counter
+
 from netbox_librenms_plugin.constants import JUNOS_FPC_LOCATOR_RE, JUNOS_PIC_LOCATOR_RE, JUNOS_PORT_LOCATOR_RE
 
 # Row keys the repair sets; the modules table reads them.
@@ -12,15 +14,16 @@ def _locator(pattern, row):
     return pattern.fullmatch(descr.strip()) if isinstance(descr, str) else None
 
 
-def _pics_by_slot(rows, by_index):
+def _pics_by_slot(rows, by_index, unique):
     """Return ``{(fpc, pic): [PIC rows]}`` for the PIC rows held by an FPC container of the same slot."""
     pics = {}
     for row in rows:
-        if not row.get("entPhysicalIndex") or row.get("entPhysicalClass") != "module":
+        if not unique(row.get("entPhysicalIndex")) or row.get("entPhysicalClass") != "module":
             continue
         if (pic := _locator(JUNOS_PIC_LOCATOR_RE, row)) is None:
             continue
-        holder = by_index.get(row.get("entPhysicalContainedIn"))
+        holder_index = row.get("entPhysicalContainedIn")
+        holder = by_index.get(holder_index) if unique(holder_index) else None
         if holder is None or holder.get("entPhysicalClass") != "container":
             continue
         fpc = _locator(JUNOS_FPC_LOCATOR_RE, holder)
@@ -49,8 +52,8 @@ def repair_dangling_parents(inventory):
     non-zero ``entPhysicalContainedIn`` names no row of the same list, and whose description ends in
     ``@ F/P/N``, moves below the one ``module`` row ``PIC: ... @ F/P/*`` held by a container
     ``FPC: ... @ F/*/*``. The row keeps the reported value in ``_reported_parent``. A row with no
-    single candidate, or whose repair would close a cycle, keeps its parent and gets
-    ``_dangling_parent``.
+    single candidate, whose repair would close a cycle, or whose optic, PIC or FPC index is not a
+    unique positive index, keeps its parent and gets ``_dangling_parent``.
 
     Args:
         inventory (list[dict]): The rows of one source inventory list, changed in place.
@@ -58,10 +61,19 @@ def repair_dangling_parents(inventory):
     """
     # Index 0 is the parent value of a root row, so a row with no index or index 0 is no parent.
     by_index = {row["entPhysicalIndex"]: row for row in inventory if row.get("entPhysicalIndex")}
-    pics = _pics_by_slot(inventory, by_index)
+    counts = Counter(row.get("entPhysicalIndex") for row in inventory)
+
+    def unique(index):
+        # The readers key rows by index, so a shared index can resolve to another row.
+        return bool(index) and counts[index] == 1
+
+    pics = _pics_by_slot(inventory, by_index, unique)
     for row in inventory:
         reported = row.get("entPhysicalContainedIn")
         if row.get("entPhysicalClass") != "port" or not reported or reported in by_index:
+            continue
+        if not unique(row.get("entPhysicalIndex")):
+            row[DANGLING_PARENT_KEY] = reported
             continue
         port = _locator(JUNOS_PORT_LOCATOR_RE, row)
         candidates = pics.get((int(port["fpc"]), int(port["pic"])), []) if port else []
