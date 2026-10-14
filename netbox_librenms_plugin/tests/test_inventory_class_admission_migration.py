@@ -190,9 +190,13 @@ def test_the_migration_cannot_be_reversed():
 
     before = InventoryIgnoreRule.objects.count()
     executor = MigrationExecutor(connection)
+    key = ("netbox_librenms_plugin", "0025_inventory_class_admission_rules")
+    # 0026 can not be reversed either, so a migrate to 0024 stops there: unapply 0025 itself.
+    migration = executor.loader.get_migration(*key)
+    state = executor.loader.project_state(key)
 
-    with pytest.raises(IrreversibleError):
-        executor.migrate([("netbox_librenms_plugin", "0024_inventory_model_matches_device_type_rule")])
+    with connection.schema_editor() as editor, pytest.raises(IrreversibleError, match="0025_inventory_class"):
+        migration.unapply(state, editor)
 
     assert InventoryIgnoreRule.objects.count() == before
     assert InventoryIgnoreRule.objects.filter(name_pattern="^SCB").exists()
