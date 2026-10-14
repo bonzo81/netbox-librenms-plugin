@@ -2699,7 +2699,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         Each method runs over the whole candidate list before the next method starts: exact
         mappings, then regex mappings, then a bay named like a candidate, then the position.
-        The two fallbacks guess, so they skip a bay whose module bay types refuse the module.
+        Every method skips a bay whose module bay types refuse the module, so a mapping result
+        that does not fit gives way to the next mapping.
 
         Args:
             item (dict): The inventory item to match.
@@ -2724,13 +2725,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         )
         for name in candidates:
             bay = BaseModuleTableView._lookup_exact_bay_mapping(
-                name, phys_class, module_bays, exact_mappings, manufacturer_id
+                name, phys_class, module_bays, exact_mappings, manufacturer_id, accepted_bay_types=accepted_bay_types
             )
             if bay:
                 return bay
         for name in candidates:
             bay = BaseModuleTableView._lookup_regex_bay_mapping(
-                name, phys_class, module_bays, regex_mappings, manufacturer_id
+                name, phys_class, module_bays, regex_mappings, manufacturer_id, accepted_bay_types=accepted_bay_types
             )
             if bay:
                 return bay
@@ -2860,7 +2861,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         return scoped + global_
 
     @staticmethod
-    def _lookup_exact_bay_mapping(name, phys_class, module_bays, exact_mappings, manufacturer_id=None):
+    def _lookup_exact_bay_mapping(
+        name, phys_class, module_bays, exact_mappings, manufacturer_id, *, accepted_bay_types
+    ):
         """
         Try exact ModuleBayMapping entries against a candidate name.
 
@@ -2868,7 +2871,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         Within each scope, prefers manufacturer-matched mappings over global ones
         and skips mappings scoped to a different manufacturer.
         Iterates the underlying dict scopes (supports both plain dicts and legacy
-        ChainMap instances) so the returned bay is validated via _fpc_slot_matches.
+        ChainMap instances) so the returned bay is validated via _fpc_slot_matches
+        and fits the module.
 
         Args:
             name (str): The candidate name to match.
@@ -2876,6 +2880,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             module_bays (dict): Available NetBox module bays keyed by name.
             exact_mappings (list): The exact ModuleBayMapping entries to check.
             manufacturer_id (int | None): The selected device manufacturer ID.
+            accepted_bay_types (frozenset): The module bay types the module type fits.
 
         Returns:
             ModuleBay | None: The matched module bay, or None if no mapping resolves.
@@ -2891,19 +2896,23 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 for scope_map in maps:
                     if mapping.netbox_bay_name in scope_map:
                         bay = scope_map[mapping.netbox_bay_name]
-                        if BaseModuleTableView._fpc_slot_matches(name, bay):
+                        if BaseModuleTableView._fpc_slot_matches(name, bay) and module_bay_fits(
+                            bay, accepted_bay_types
+                        ):
                             return bay
         mapping = next((m for m in scoped_mappings if m.librenms_name == name and m.librenms_class == ""), None)
         if mapping and mapping.netbox_bay_name in module_bays:
             for scope_map in maps:
                 if mapping.netbox_bay_name in scope_map:
                     bay = scope_map[mapping.netbox_bay_name]
-                    if BaseModuleTableView._fpc_slot_matches(name, bay):
+                    if BaseModuleTableView._fpc_slot_matches(name, bay) and module_bay_fits(bay, accepted_bay_types):
                         return bay
         return None
 
     @staticmethod
-    def _lookup_regex_bay_mapping(name, phys_class, module_bays, regex_mappings, manufacturer_id=None):
+    def _lookup_regex_bay_mapping(
+        name, phys_class, module_bays, regex_mappings, manufacturer_id, *, accepted_bay_types
+    ):
         """
         Try regex ModuleBayMapping patterns against a name.
 
@@ -2911,7 +2920,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         objects (passed in from the caller to avoid per-item DB queries).
         Manufacturer-scoped mappings (matching the device's manufacturer) take
         precedence over vendor-agnostic ones; mappings scoped to a different
-        manufacturer are skipped.
+        manufacturer are skipped. A resolved bay that does not fit the module gives
+        way to the next mapping.
 
         Args:
             name (str): The candidate name to match.
@@ -2919,6 +2929,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             module_bays (dict): Available NetBox module bays keyed by name.
             regex_mappings (list): The regex ModuleBayMapping entries to check.
             manufacturer_id (int | None): The selected device manufacturer ID.
+            accepted_bay_types (frozenset): The module bay types the module type fits.
 
         Returns:
             ModuleBay | None: The matched module bay, or None if no mapping resolves.
@@ -2949,7 +2960,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 for scope_map in maps:
                     if resolved_bay in scope_map:
                         bay = scope_map[resolved_bay]
-                        if BaseModuleTableView._fpc_slot_matches(name, bay):
+                        if BaseModuleTableView._fpc_slot_matches(name, bay) and module_bay_fits(
+                            bay, accepted_bay_types
+                        ):
                             return bay
         return None
 

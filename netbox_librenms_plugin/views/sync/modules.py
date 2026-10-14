@@ -1983,10 +1983,11 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 if bay.name in names and getattr(bay, "installed_module", None):
                     return bay.installed_module.pk
             for name in names:
+                # The walk resolves no module type for the parent row, so no bay type constrains the bay.
                 bay = BaseModuleTableView._lookup_exact_bay_mapping(
-                    name, parent_class, bays_by_name, exact_mappings, manufacturer_id
+                    name, parent_class, bays_by_name, exact_mappings, manufacturer_id, accepted_bay_types=frozenset()
                 ) or BaseModuleTableView._lookup_regex_bay_mapping(
-                    name, parent_class, bays_by_name, regex_mappings, manufacturer_id
+                    name, parent_class, bays_by_name, regex_mappings, manufacturer_id, accepted_bay_types=frozenset()
                 )
                 if bay is not None:
                     return bay.installed_module.pk
