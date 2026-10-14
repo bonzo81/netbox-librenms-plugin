@@ -278,32 +278,25 @@ def written_state(device):
     }
 
 
-def post_selected(client, device, server_key, indices):
-    from django.urls import reverse
+def post_selected(client, content, indices):
+    """POST the rendered Install Selected form for *indices*."""
+    from netbox_librenms_plugin.tests.view_test_helpers import rendered_module_form
 
-    from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_snapshot_digest
-
-    digest = module_inventory_snapshot_digest(cached_inventory(device, server_key))
-    binding = module_inventory_binding_token(device.pk, server_key, "install_selected", {}, None, digest)
-    return client.post(
-        reverse("plugins:netbox_librenms_plugin:install_selected", kwargs={"pk": device.pk}),
-        {"select": [str(index) for index in indices], "server_key": server_key, "inventory_binding": binding},
-    )
+    action, fields = rendered_module_form(content, "install-selected")
+    return client.post(action, {**fields, "select": [str(index) for index in indices]})
 
 
-def post_branch(client, device, server_key, parent_index):
-    from django.urls import reverse
+def post_branch(client, content, parent_index):
+    """POST the rendered Install Branch form of row *parent_index*."""
+    from netbox_librenms_plugin.tests.view_test_helpers import rendered_module_form
 
-    from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_snapshot_digest
+    return client.post(*rendered_module_form(content, "install-branch", parent_index))
 
-    digest = module_inventory_snapshot_digest(cached_inventory(device, server_key))
-    binding = module_inventory_binding_token(
-        device.pk, server_key, "install_branch", {"parent_index": parent_index}, parent_index, digest
-    )
-    return client.post(
-        reverse("plugins:netbox_librenms_plugin:install_branch", kwargs={"pk": device.pk}),
-        {"parent_index": str(parent_index), "server_key": server_key, "inventory_binding": binding},
-    )
+
+def rendered(device, server_key):
+    """Refresh the Modules tab and return its rendered HTML."""
+    response, _module_sync = refresh(device, server_key)
+    return response.content.decode()
 
 
 def messages_of(response):
@@ -321,28 +314,29 @@ def ui(client):
 
 
 class TestBulkWriters:
-    """AC4: the selected and branch installs read the same rules as the table."""
+    """AC4: the selected and branch installs act on the rows the table rendered under the current rules."""
 
-    def test_a_selected_install_of_the_built_in_module_refuses_it(self, ui, librenms_server, server_key):
-        """The action is rendered before the rule exists, so only the writer's own check can refuse it."""
-        from dcim.models import Module
+    def test_a_selected_install_rendered_before_a_rule_refuses_every_row(self, ui, librenms_server, server_key):
+        """The action is rendered before the rule exists, so its grant names another policy."""
+        from netbox_librenms_plugin.module_grants import GrantRefusal
 
         recording = _recording()
         librenms_server.load_recording(recording)
         device = c8300_device("c8300-selected", recording, server_key)
         contrib_rule(MODEL_RULE)
-        rendered = rows_by_index(device, server_key)
-        assert rendered[FRONT_PANEL]["can_install"] and rendered[REAL_NIM]["can_install"]
+        response, module_sync = refresh(device, server_key)
+        rows = {row["ent_physical_index"]: row for row in module_sync["table"].data}
+        assert rows[FRONT_PANEL]["can_install"] and rows[REAL_NIM]["can_install"]
         contrib_rule(FRONT_PANEL_RULE)
+        before = written_state(device)
 
-        response = post_selected(ui, device, server_key, [FRONT_PANEL, REAL_NIM])
+        response = post_selected(ui, response.content.decode(), [FRONT_PANEL, REAL_NIM])
 
         assert response.status_code == 302
-        installed = set(Module.objects.filter(device=device).values_list("module_bay__name", flat=True))
-        assert installed == {rendered[REAL_NIM]["module_bay"]}
-        assert any("matched ignore rule" in text for text in messages_of(response))
+        assert GrantRefusal.POLICY.message in messages_of(response)
+        assert written_state(device) == before
 
-    def test_a_branch_install_skips_the_built_in_module_and_installs_its_optics(self, ui, librenms_server, server_key):
+    def test_the_hidden_module_has_no_branch_and_its_optics_install_as_rows(self, ui, librenms_server, server_key):
         from dcim.models import Module
 
         recording = _recording()
@@ -351,14 +345,17 @@ class TestBulkWriters:
         device = c8300_device("c8300-branch", recording, server_key)
         contrib_rule(MODEL_RULE)
         contrib_rule(FRONT_PANEL_RULE)
-        rendered = rows_by_index(device, server_key)
+        response, module_sync = refresh(device, server_key)
+        rows = {row["ent_physical_index"]: row for row in module_sync["table"].data}
+        content = response.content.decode()
 
-        response = post_branch(ui, device, server_key, MODULE_0)
+        assert f'name="parent_index" value="{MODULE_0}"' not in content
+        response = post_selected(ui, content, [*OPTICS, REAL_NIM])
 
         assert response.status_code == 302
         installed = dict(Module.objects.filter(device=device).values_list("module_bay__name", "module_type__model"))
         assert installed == {
-            rendered[index]["module_bay"]: entities[index]["entPhysicalModelName"] for index in (*OPTICS, REAL_NIM)
+            rows[index]["module_bay"]: entities[index]["entPhysicalModelName"] for index in (*OPTICS, REAL_NIM)
         }
 
 
@@ -394,22 +391,22 @@ class TestInvalidStoredFilter:
     @pytest.mark.parametrize("writer", ["selected", "branch"])
     @pytest.mark.parametrize("action", ["skip", "transparent"])
     def test_a_bulk_install_refuses_with_no_write(self, ui, librenms_server, server_key, action, writer):
-        from netbox_librenms_plugin.views.sync.modules import INVALID_INVENTORY_RULE_MESSAGE
+        from netbox_librenms_plugin.module_grants import GrantRefusal
 
         recording = _recording()
         librenms_server.load_recording(recording)
         device = c8300_device(f"c8300-broken-{writer}-{action}", recording, server_key)
-        rows_by_index(device, server_key)
+        content = rendered(device, server_key)
         rule = contrib_rule(FRONT_PANEL_RULE, action=action)
         _break_the_rule(rule)
         before = written_state(device)
 
         if writer == "selected":
-            response = post_selected(ui, device, server_key, [REAL_NIM])
+            response = post_selected(ui, content, [REAL_NIM])
         else:
-            response = post_branch(ui, device, server_key, MODULE_0)
+            response = post_branch(ui, content, MODULE_0)
 
-        assert INVALID_INVENTORY_RULE_MESSAGE in messages_of(response)
+        assert GrantRefusal.RULE_ERROR.message in messages_of(response)
         assert written_state(device) == before
 
 
@@ -451,31 +448,11 @@ def rendered_install_form(content, index):
     raise AssertionError(f"row {index} renders no install form")
 
 
-def install_form_for(device, server_key, item, bay_name, target=None):
-    """Sign a single-install form for a cached row the table shows without one, as the table signs it."""
-    from dcim.models import ModuleBay, ModuleType
+def cached_install_form(device, index):
+    """Return the install form the Modules tab renders, from its cached snapshot, for row *index*."""
+    from netbox_librenms_plugin.tests.view_test_helpers import render_module_tab
 
-    from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
-
-    target = target or device
-    bay = ModuleBay.objects.get(device=target, name=bay_name)
-    module_type = ModuleType.objects.get(model=item["entPhysicalModelName"])
-    action_target = {"module_bay_id": bay.pk, "module_type_id": module_type.pk}
-    return {
-        "server_key": server_key,
-        "selected_device_id": str(target.pk),
-        "ent_index": str(item["entPhysicalIndex"]),
-        "module_bay_id": str(bay.pk),
-        "module_type_id": str(module_type.pk),
-        "inventory_binding": module_inventory_binding_token(
-            target.pk,
-            server_key,
-            "install_module",
-            action_target,
-            item["entPhysicalIndex"],
-            module_inventory_row_digest(item),
-        ),
-    }
+    return rendered_install_form(render_module_tab(device), index)
 
 
 def post_single(client, device, form):
@@ -494,7 +471,7 @@ class TestSingleInstall:
 
     @pytest.mark.parametrize("action", ["skip", "transparent"])
     def test_a_rule_enabled_after_render_refuses_the_row(self, ui, librenms_server, server_key, action):
-        from netbox_librenms_plugin.views.sync.modules import IGNORED_INVENTORY_ROW_MESSAGE
+        from netbox_librenms_plugin.module_grants import GrantRefusal
 
         recording = _recording()
         librenms_server.load_recording(recording)
@@ -507,7 +484,7 @@ class TestSingleInstall:
         response = post_single(ui, device, form)
 
         assert response.status_code == 302
-        assert IGNORED_INVENTORY_ROW_MESSAGE in messages_of(response)
+        assert GrantRefusal.POLICY.message in messages_of(response)
         assert written_state(device) == before
 
     @pytest.mark.parametrize("ancestor_action", [None, "skip"])
@@ -516,7 +493,7 @@ class TestSingleInstall:
     ):
         """The rendered optic sits below the hidden front-panel module; a skip there removes the subtree."""
         from netbox_librenms_plugin.models import InventoryIgnoreRule
-        from netbox_librenms_plugin.views.sync.modules import IGNORED_INVENTORY_ROW_MESSAGE
+        from netbox_librenms_plugin.module_grants import GrantRefusal
 
         recording = _recording()
         librenms_server.load_recording(recording)
@@ -538,14 +515,14 @@ class TestSingleInstall:
                 device=device, module_bay_id=int(form["module_bay_id"]), module_type_id=int(form["module_type_id"])
             ).exists()
             return
-        assert IGNORED_INVENTORY_ROW_MESSAGE in messages_of(response)
+        assert GrantRefusal.POLICY.message in messages_of(response)
         assert written_state(device) == before
 
     @pytest.mark.parametrize("action", ["skip", "transparent"])
     def test_a_filter_corrupted_after_render_refuses_with_the_shared_message(
         self, ui, librenms_server, server_key, action
     ):
-        from netbox_librenms_plugin.views.sync.modules import INVALID_INVENTORY_RULE_MESSAGE
+        from netbox_librenms_plugin.module_grants import GrantRefusal
 
         recording = _recording()
         librenms_server.load_recording(recording)
@@ -557,7 +534,7 @@ class TestSingleInstall:
 
         response = post_single(ui, device, form)
 
-        assert INVALID_INVENTORY_RULE_MESSAGE in messages_of(response)
+        assert GrantRefusal.RULE_ERROR.message in messages_of(response)
         assert written_state(device) == before
 
     def test_a_target_serial_changed_after_render_so_the_serial_rule_matches_refuses(
@@ -565,7 +542,7 @@ class TestSingleInstall:
     ):
         """The seeded serial rule makes the route processor transparent once the device carries its serial."""
         from netbox_librenms_plugin.tests.conftest import make_module_bay
-        from netbox_librenms_plugin.views.sync.modules import IGNORED_INVENTORY_ROW_MESSAGE
+        from netbox_librenms_plugin.module_grants import GrantRefusal
 
         recording = _recording()
         entities = _entities(recording)
@@ -583,7 +560,7 @@ class TestSingleInstall:
 
         response = post_single(ui, device, form)
 
-        assert IGNORED_INVENTORY_ROW_MESSAGE in messages_of(response)
+        assert GrantRefusal.POLICY.message in messages_of(response)
         assert written_state(device) == before
 
 
@@ -630,17 +607,18 @@ def vc_pair():
 
 
 class TestSingleInstallOnAVirtualChassisMember:
-    """r4.3: the ancestor policy and the page-device rules apply when the target is another member."""
+    """A rule of the member or of the page device that changes after render refuses the member's row."""
 
     @pytest.mark.parametrize("rule", [None, "member-skip"])
     def test_an_ancestor_skip_rule_of_the_member_refuses_its_optic(self, ui, vc_pair, rule):
         from dcim.models import Module
 
         from netbox_librenms_plugin.models import InventoryIgnoreRule
-        from netbox_librenms_plugin.views.sync.modules import IGNORED_INVENTORY_ROW_MESSAGE
+        from netbox_librenms_plugin.module_grants import GrantRefusal
 
         page, member, rows = vc_pair
-        form = install_form_for(page, "default", rows[30], "Cage 1", target=member)
+        form = cached_install_form(page, 30)
+        assert form["selected_device_id"] == str(member.pk)
         if rule:
             InventoryIgnoreRule.objects.create(
                 name="Member front panel",
@@ -658,20 +636,21 @@ class TestSingleInstallOnAVirtualChassisMember:
         if rule is None:
             assert Module.objects.filter(device=member, module_bay__name="Cage 1").exists()
             return
-        assert IGNORED_INVENTORY_ROW_MESSAGE in messages_of(response)
+        assert GrantRefusal.POLICY.message in messages_of(response)
         assert (written_state(page), written_state(member)) == before
 
     def test_a_corrupt_page_device_rule_refuses_with_valid_target_rules(self, ui, vc_pair):
-        """The target's own rules load; the page device's rules are read under the lock and fail there."""
-        from netbox_librenms_plugin.views.sync.modules import INVALID_INVENTORY_RULE_MESSAGE
+        """The writer loads every rule of the page's policy, so a page-device rule fails a member's row too."""
+        from netbox_librenms_plugin.module_grants import GrantRefusal
 
         page, member, rows = vc_pair
-        form = install_form_for(page, "default", rows[30], "Cage 1", target=member)
+        form = cached_install_form(page, 30)
+        assert form["selected_device_id"] == str(member.pk)
         rule = contrib_rule(FRONT_PANEL_RULE, manufacturer=page.device_type.manufacturer.name)
         _break_the_rule(rule)
         before = (written_state(page), written_state(member))
 
         response = post_single(ui, page, form)
 
-        assert INVALID_INVENTORY_RULE_MESSAGE in messages_of(response)
+        assert GrantRefusal.RULE_ERROR.message in messages_of(response)
         assert (written_state(page), written_state(member)) == before

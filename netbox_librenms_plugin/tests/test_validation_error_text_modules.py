@@ -31,14 +31,11 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     make_request,
     make_user_with_perms,
     message_texts,
+    module_grant,
     module_row_binding,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import post as view_post
-from netbox_librenms_plugin.utils import (
-    module_inventory_binding_token,
-    module_inventory_snapshot_digest,
-    netbox_relocates_module_subtree,
-)
+from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
 
 HIDDEN = "(only a superuser sees the message)"
 
@@ -206,7 +203,9 @@ class TestAModuleActionShowsNetBoxsMessageOnlyToASuperuser:
         module = install_module(device, "Slot 1", f"CARD-{tag}", serial="OLD")
         rows = [_row(11, module.module_type.model, "Slot 1", entPhysicalSerialNum="NEW")]
         settings.CUSTOM_VALIDATORS = {"dcim.module": [_Refuses(f"Conflicts with {hidden.name}.", "serial")]}
-        binding = module_row_binding(device, "update_module_serial", rows[0], action_target={"module_id": module.pk})
+        binding = module_row_binding(
+            device, "update_module_serial", rows[0], action_target={"module_id": module.pk}, inventory=rows
+        )
 
         texts = _drive(
             UpdateModuleSerialView,
@@ -227,7 +226,9 @@ class TestAModuleActionShowsNetBoxsMessageOnlyToASuperuser:
         installed = install_module(device, "Slot 1", f"OLD-{tag}", serial="OLD")
         rows = [{"entPhysicalIndex": 100, "entPhysicalModelName": make_module_type(f"NEW-{tag}").model}]
         settings.CUSTOM_VALIDATORS = {"dcim.module": [_Refuses(f"Conflicts with {hidden.name}.", hidden.name)]}
-        binding = module_row_binding(device, "replace_module", rows[0], action_target={"module_id": installed.pk})
+        binding = module_row_binding(
+            device, "replace_module", rows[0], action_target={"module_id": installed.pk}, inventory=rows
+        )
 
         texts = _drive(
             ReplaceModuleView,
@@ -301,11 +302,15 @@ class TestAModuleActionShowsNetBoxsMessageOnlyToASuperuser:
 
 def _bulk_data(device, view_name, rows):
     """Return the POST of a branch install (parent index 10) or a selected install (row 10)."""
-    digest = module_inventory_snapshot_digest(rows)
     if view_name == "InstallBranchView":
-        binding = module_inventory_binding_token(
-            device.pk, "default", "install_branch", {"parent_index": 10}, 10, digest
+        binding = module_grant(
+            device,
+            "install_branch",
+            ent_index=10,
+            action_target={"parent_index": 10},
+            rows=[[10, device.pk]],
+            inventory=rows,
         )
-        return {"parent_index": "10", "inventory_binding": binding}
-    binding = module_inventory_binding_token(device.pk, "default", "install_selected", {}, None, digest)
+        return {"parent_index": "10", "selected_device_id": str(device.pk), "inventory_binding": binding}
+    binding = module_grant(device, "install_selected", rows=[[10, device.pk, True]], inventory=rows)
     return {"select": ["10"], "inventory_binding": binding}
