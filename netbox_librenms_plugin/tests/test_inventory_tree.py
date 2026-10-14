@@ -369,15 +369,16 @@ class TestRepairRule:
         assert rows[2]["entPhysicalContainedIn"] == 99
         assert "_reported_parent" not in rows[2]
 
-    @pytest.mark.parametrize("missing", ["absent", "null"])
+    @pytest.mark.parametrize("missing", ["absent", "null", "zero"])
     def test_a_pic_with_no_index_is_no_candidate(self, missing):
+        """Index 0 is the parent value of a root row, so a row at index 0 is no parent either."""
         from netbox_librenms_plugin.inventory_tree import repair_dangling_parents
 
         rows = self._rows()
         if missing == "absent":
             del rows[1]["entPhysicalIndex"]
         else:
-            rows[1]["entPhysicalIndex"] = None
+            rows[1]["entPhysicalIndex"] = None if missing == "null" else 0
 
         repair_dangling_parents(rows)
 
