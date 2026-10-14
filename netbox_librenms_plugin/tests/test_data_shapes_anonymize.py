@@ -1,5 +1,6 @@
 """Tests for data-shape anonymization: PII scrubbed, logic fields preserved, deterministic, replayable."""
 
+from copy import deepcopy
 from ipaddress import ip_address, ip_network
 import re
 
@@ -937,6 +938,52 @@ def test_entity_descr_keeps_the_junos_mx_locators_and_hashes_the_rest():
     assert not any(word in text for word in ("MPC7E", "MRATE", "QSFP", "core-router", "uplink", "CANARY-SERIAL"))
     text_fields = [(row["entPhysicalDescr"], row["entPhysicalName"]) for row in rows]
     assert [(row["entPhysicalDescr"], row["entPhysicalName"]) for row in again] == text_fields
+    assert find_pii(first) == []
+    assert find_pii(second) == []
+
+
+# Each raw description and whether the IOS XE front-panel rule pattern finds it.
+_FRONT_PANEL_DESCRS = [
+    "Front Panel 6 ports Gigabitethernet Module",
+    "  Front Panel 3 ports Gigabitethernet Module",
+    "front panel 3 ports",
+    "Front Panelboard rev 2",
+    "Front Panel",
+    "Front Panel uplink card @ 1/0/2",
+    "16 ports Async Serial NIM",
+    "NIM with a Front Panel",
+]
+
+
+def test_entity_descr_keeps_a_leading_front_panel_as_typed_and_hashes_the_rest():
+    """A description rule on "^Front Panel" finds the same rows before and after anonymization."""
+    rows = [
+        {"entPhysicalIndex": index, "entPhysicalName": descr, "entPhysicalDescr": descr}
+        for index, descr in enumerate(_FRONT_PANEL_DESCRS, start=1)
+    ]
+    first, anonymized = _anonymized_inventory(deepcopy(rows), salt="front-panel")
+    second, again = _anonymized_inventory(deepcopy(anonymized), salt="front-panel")
+
+    token = "entity-[0-9a-f]{6}"
+    descrs = [row["entPhysicalDescr"] for row in anonymized]
+    assert re.fullmatch(rf"Front Panel {token}", descrs[0])
+    assert re.fullmatch(rf"  Front Panel {token}", descrs[1])
+    assert re.fullmatch(rf"front panel {token}", descrs[2])
+    assert re.fullmatch(rf"Front Panel{token}", descrs[3])
+    assert descrs[4] == "Front Panel"
+    assert re.fullmatch(rf"Front Panel {token} @ 1/0/2", descrs[5])
+    assert re.fullmatch(token, descrs[6])
+    assert re.fullmatch(token, descrs[7])
+    # Only the description keeps the prefix.
+    assert all(
+        re.fullmatch(rf"{token}(?: 1/0/2)?", row["entPhysicalName"]) for row in anonymized if row["entPhysicalName"]
+    )
+    for pattern in (r"^Front Panel", r"^Front Panel\b", r"(?i)^front panel", r"^\s*Front Panel "):
+        assert [bool(re.search(pattern, descr)) for descr in descrs] == [
+            bool(re.search(pattern, descr)) for descr in _FRONT_PANEL_DESCRS
+        ], pattern
+    assert [row["entPhysicalDescr"] for row in again] == descrs
+    assert "Gigabitethernet" not in str(anonymized)
     assert find_pii(first) == []
     assert find_pii(second) == []
 
