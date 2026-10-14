@@ -3954,6 +3954,92 @@ def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(
     assert [str(message) for message in response.wsgi_request._messages] == [GrantRefusal.POLICY.message]
 
 
+def _waiting_advisory_locks(observer):
+    """Return how many backends wait for an advisory lock; *observer* is any other connection."""
+    with observer.cursor() as cursor:
+        cursor.execute("SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted")
+        return cursor.fetchone()[0]
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("change", ["device-serial", "rule-added"])
+@pytest.mark.parametrize("writer", ["install", "selected", "branch"])
+def test_a_writer_waiting_for_the_page_lock_refuses_a_change_committed_during_the_wait(client, writer, change):
+    """Another session holds the page lock; a change commits while the writer waits, so the writer refuses it."""
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    from dcim.models import Device, Module
+    from django.core.cache import cache
+    from django.db import close_old_connections
+
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+    from netbox_librenms_plugin.module_grants import GrantRefusal
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type, make_superuser
+    from netbox_librenms_plugin.tests.view_test_helpers import render_module_tab, rendered_module_form
+    from netbox_librenms_plugin.utils import advisory_lock_key
+    from netbox_librenms_plugin.views.mixins import CacheMixin
+
+    page = make_device_with_module_bays(f"lock-wait-{writer}-{change}", ["Carrier"], serial="LOCK-WAIT-PAGE")
+    carrier = make_module_type(f"Lock Wait Carrier {writer} {change}", manufacturer=page.device_type.manufacturer)
+    card = make_module_type(f"Lock Wait Card {writer} {change}", manufacturer=page.device_type.manufacturer)
+    rows = [
+        {"entPhysicalIndex": 1, "entPhysicalContainedIn": 0, "entPhysicalClass": "chassis",
+         "entPhysicalSerialNum": page.serial},
+        {"entPhysicalIndex": 2, "entPhysicalContainedIn": 1, "entPhysicalClass": "module",
+         "entPhysicalName": "Carrier", "entPhysicalModelName": carrier.model, "entPhysicalSerialNum": "SN-CARRIER"},
+        {"entPhysicalIndex": 3, "entPhysicalContainedIn": 2, "entPhysicalClass": "module",
+         "entPhysicalName": "Card", "entPhysicalModelName": card.model, "entPhysicalSerialNum": "SN-CARD"},
+    ]  # fmt: skip
+    key = CacheMixin().get_cache_key(page, "inventory", "default")
+    cache.set(key, trusted_module_inventory_payload(page, rows))
+    content = render_module_tab(page)
+    if writer == "install":
+        action, fields = rendered_module_form(content, "install-module", 2)
+    elif writer == "branch":
+        action, fields = rendered_module_form(content, "install-branch", 2)
+    else:
+        action, fields = rendered_module_form(content, "install-selected")
+        fields = {**fields, "select": ["2"]}
+    user = make_superuser(f"lock-wait-{writer}-{change}")
+
+    def post_while_the_lock_is_held():
+        close_old_connections()
+        try:
+            client.force_login(user)
+            return client.post(action, fields)
+        finally:
+            close_old_connections()
+
+    try:
+        with second_connection() as holder, second_connection() as observer, ThreadPoolExecutor(1) as executor:
+            with holder.cursor() as cursor:
+                cursor.execute(
+                    "SELECT pg_advisory_xact_lock(%s)",
+                    [advisory_lock_key(f"netbox-librenms-plugin:module-serial:{page.pk}")],
+                )
+            posted = executor.submit(post_while_the_lock_is_held)
+            deadline = time.monotonic() + 5
+            while not _waiting_advisory_locks(observer):
+                assert time.monotonic() < deadline, "the writer never waited for the page lock"
+                time.sleep(0.02)
+            # The change commits while the writer waits; this connection is in autocommit.
+            if change == "device-serial":
+                Device.objects.filter(pk=page.pk).update(serial="LOCK-WAIT-CHANGED")
+            else:
+                InventoryIgnoreRule.objects.create(
+                    name="Lock wait rule", match_type="contains", pattern="no-such-entity", action="skip"
+                )
+            holder.rollback()
+            response = posted.result(timeout=10)
+    finally:
+        cache.delete(key)
+
+    assert response.status_code == 302
+    assert [str(message) for message in response.wsgi_request._messages] == [GrantRefusal.POLICY.message]
+    assert not Module.objects.filter(device=page).exists()
+
+
 @pytest.mark.parametrize(
     "details, expected",
     [
