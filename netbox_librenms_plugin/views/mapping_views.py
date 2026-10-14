@@ -435,7 +435,7 @@ class InventoryIgnoreRuleBulkImportView(
 
     queryset = InventoryIgnoreRule.objects.all()
     model_form = InventoryIgnoreRuleImportForm
-    verbatim_fields = tuple(InventoryIgnoreRule.INCLUDE_FILTER_SOURCES)
+    verbatim_fields = tuple(InventoryIgnoreRule.FILTER_SOURCES)
 
 
 class InventoryIgnoreRuleView(LibreNMSGenericPermissionMixin, generic.ObjectView):

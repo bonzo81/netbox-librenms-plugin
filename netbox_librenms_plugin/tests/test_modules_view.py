@@ -3437,12 +3437,7 @@ class TestInventoryIgnoreRuleMatchesName:
     def _rule(self, match_type, pattern, require_serial=True):
         from netbox_librenms_plugin.models import InventoryIgnoreRule
 
-        rule = InventoryIgnoreRule.__new__(InventoryIgnoreRule)
-        rule.match_type = match_type
-        rule.pattern = pattern
-        rule.require_serial_match_parent = require_serial
-        rule.enabled = True
-        return rule
+        return InventoryIgnoreRule(match_type=match_type, pattern=pattern, require_serial_match_parent=require_serial)
 
     # --- ends_with ---
 
@@ -3564,7 +3559,8 @@ class TestModelMatchesDeviceTypeRule:
         response = client.get(rule.get_absolute_url())
 
         assert response.status_code == 200
-        assert response.content.decode().count('<td><span class="text-muted">\u2014</span></td>') == 2
+        # The pattern, the serial match flag and the three blank filters.
+        assert response.content.decode().count('<td><span class="text-muted">\u2014</span></td>') == 5
 
 
 class TestCheckIgnoreRules:
@@ -3573,13 +3569,9 @@ class TestCheckIgnoreRules:
     def _rule(self, match_type="ends_with", pattern="IDPROM", require_serial=True, action="skip"):
         from netbox_librenms_plugin.models import InventoryIgnoreRule
 
-        rule = InventoryIgnoreRule.__new__(InventoryIgnoreRule)
-        rule.match_type = match_type
-        rule.pattern = pattern
-        rule.require_serial_match_parent = require_serial
-        rule.action = action
-        rule.enabled = True
-        return rule
+        return InventoryIgnoreRule(
+            match_type=match_type, pattern=pattern, require_serial_match_parent=require_serial, action=action
+        )
 
     def _check(self, item, parent_item, rules, index_map=None, device_serial="", type_models=()):
         from netbox_librenms_plugin.views.base.modules_view import DeviceIdentity, _check_ignore_rules
@@ -4289,13 +4281,9 @@ class TestCollectDescendantsIgnoreRules:
     def _rule(self, match_type="ends_with", pattern="IDPROM", require_serial=True, action="skip"):
         from netbox_librenms_plugin.models import InventoryIgnoreRule
 
-        rule = InventoryIgnoreRule.__new__(InventoryIgnoreRule)
-        rule.match_type = match_type
-        rule.pattern = pattern
-        rule.require_serial_match_parent = require_serial
-        rule.action = action
-        rule.enabled = True
-        return rule
+        return InventoryIgnoreRule(
+            match_type=match_type, pattern=pattern, require_serial_match_parent=require_serial, action=action
+        )
 
     def _build_maps(self, inventory):
         children_by_parent = {}

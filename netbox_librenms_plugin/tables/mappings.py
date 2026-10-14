@@ -242,13 +242,13 @@ class InventoryIgnoreRuleTable(NetBoxTable):
 
     def render_require_serial_match_parent(self, value, record):
         """Show the actual stored boolean; dash for rules where the flag has no effect."""
-        if not record.uses_pattern or record.action == record.ACTION_INCLUDE:
+        if not record.serial_guard_applies:
             return mark_safe('<span class="text-muted">—</span>')
         return _yes_no(value)
 
     @staticmethod
     def _render_filter(value):
-        # A blank filter admits any value, and only an include rule stores one.
+        # A blank filter matches any value.
         return format_html("<code>{}</code>", value) if value else mark_safe('<span class="text-muted">—</span>')
 
     def render_name_pattern(self, value, record):

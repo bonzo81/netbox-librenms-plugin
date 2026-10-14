@@ -16,20 +16,23 @@
 #   model_matches_device_type
 #                         : compare entPhysicalModelName to the NetBox device
 #                           type's model or part number (no pattern needed)
-#   class_is              : compare entPhysicalClass, ignoring case (include only)
+#   class_is              : compare entPhysicalClass, ignoring case (include needs it;
+#                           skip and transparent can use it too)
 #
 # Import via: LibreNMS Plugin → Settings → Inventory Ignore Rules → Import
 #
 # Additional fields:
 #   require_serial_match_parent:
-#       true : (name-based rules only) only apply if the item's serial matches
-#               any ancestor entity's serial in the ENTITY-MIB tree
-#       false: apply unconditionally on name match alone
+#       true : (name-based and class_is skip or transparent rules only) only apply
+#               if the item's serial matches any ancestor entity's serial in the
+#               ENTITY-MIB tree. A row without a serial never passes.
+#       false: apply on the match alone
 #   name_pattern, description_pattern, model_pattern:
-#       (include rules only) optional Python regexes, searched in entPhysicalName,
-#       entPhysicalDescr and entPhysicalModelName. Case-sensitive and kept as
-#       typed. Every non-blank filter must match. Import them as YAML or JSON:
-#       a CSV import strips the spaces of each cell, so it refuses these columns.
+#       optional Python regexes for a rule of every action, searched in
+#       entPhysicalName, entPhysicalDescr and entPhysicalModelName.
+#       Case-sensitive and kept as typed. Every non-blank filter must match.
+#       Import them as YAML or JSON: a CSV import strips the spaces of each
+#       cell, so it refuses these columns.
 #   prefer_description:
 #       (include rules only) true names the row by entPhysicalDescr
 #   enabled:     true | false
@@ -137,6 +140,35 @@
     model equals the device type's model or part number. Marking them
     transparent hides their rows and promotes their children to device-level
     bay matching.
+
+# --- Cisco IOS XE built-in front-panel modules (action=transparent) ---
+# Cisco ISR 4000 and Catalyst 8300 routers report their built-in front-panel
+# ports as a module below the built-in "module 0". It has no serial, and its
+# description starts with "Front Panel". A real NIM or service module reports
+# its own description and serial, so the description filter keeps it:
+#   module 0                                      (built-in NIM controller)
+#   +-- NIM subslot 0/0  "Front Panel 6 ports Gigabitethernet Module"
+#   |   |                                         <- TRANSPARENT
+#   |   +-- transceiver container 4
+#   |       +-- subslot 0/0 transceiver 4         <- promoted
+#   +-- subslot 0/1
+#       +-- NIM subslot 0/1  "16 ports Async Serial NIM" (own serial) <- kept
+# The module has no serial, so the serial-match guard must be off. With the
+# "Fixed-platform built-in units" rule, module 0 is transparent too, and the
+# transceivers match device-level bays.
+
+- name: "Cisco IOS XE built-in front-panel modules"
+  match_type: class_is
+  pattern: "module"
+  action: transparent
+  description_pattern: "^Front Panel"
+  require_serial_match_parent: false
+  manufacturer: "Cisco"
+  enabled: true
+  description: >
+    Cisco ISR 4000 and Catalyst 8300 routers report their built-in front-panel
+    ports as a serial-less module whose description starts with "Front Panel".
+    Marking it transparent hides the row and promotes its transceivers.
 
 # --- Juniper MX switch control boards (action=include) ---
 # Juniper MX480 and MX960 report each Switch Control Board as class "backplane",
