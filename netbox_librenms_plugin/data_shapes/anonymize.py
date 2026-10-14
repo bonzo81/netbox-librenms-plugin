@@ -235,7 +235,7 @@ _INTERFACE_IPV4_RE = re.compile(rf"(?<![\d.]){_OCTET}(?:\.{_OCTET}){{3}}(?![\d.]
 # plain colon-separated decimal sequence (e.g. a "12:34:56" timestamp) is NOT matched.
 _H16 = r"[0-9A-Fa-f]{1,4}"
 _IPV6_RE = re.compile(
-    r"(?<![0-9A-Fa-f:])(?:"
+    r"(?<![\w:])(?:"  # No start after a word character, so "SOME-MIB::table" is not an address.
     rf"(?:{_H16}:){{7}}{_H16}"  # 1:2:3:4:5:6:7:8
     rf"|(?:{_H16}:){{1,7}}:"  # 1::            1:2:3:4:5:6:7::
     rf"|(?:{_H16}:){{1,6}}:{_H16}"  # 1::8          1:2:3:4:5:6::8

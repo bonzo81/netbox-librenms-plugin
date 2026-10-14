@@ -4,6 +4,8 @@ from copy import deepcopy
 from ipaddress import ip_address, ip_network
 import re
 
+import pytest
+
 from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording, find_pii, pseudonymize_os
 from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 from netbox_librenms_plugin.tests.recordings import load_recording
@@ -673,6 +675,38 @@ def test_find_pii_ipv6_no_false_positive_on_time_or_doc_range():
     """A plain colon time (12:34:56) is not IPv6, and the documentation range (2001:db8::) is exempt — neither must be flagged."""
     rec = _ports({"port_id": 1, "ifName": "Gi0/1", "entPhysicalName": "boot 12:34:56 doc 2001:DB8::1"})
     assert not any(f["kind"] == "ipv6" for f in find_pii(rec))
+
+
+def test_find_pii_ipv6_ignores_a_mib_qualified_sensor_type():
+    """A "<NAME>-MIB::<table>" sensor type is not an IPv6 address: the "B::" follows a word character."""
+    rec = _ports()
+    rec["responses"]["GET /api/v0/resources/sensors"] = {
+        "status": "ok",
+        "sensors": [
+            {"sensor_id": 1, "sensor_type": "OLD-CISCO-TS-MIB::tsLineTable"},
+            {"sensor_id": 2, "sensor_type": "CISCO-FAB-MIB::cDead"},
+        ],
+    }
+
+    assert not any(f["kind"] == "ipv6" for f in find_pii(rec))
+
+
+@pytest.mark.parametrize(
+    ("text", "address"),
+    [
+        ("uplink to 2001:4860::1", "2001:4860::1"),
+        ("full 2001:4860:0:0:0:0:0:8888 end", "2001:4860:0:0:0:0:0:8888"),
+        ("::1", "::1"),
+        ("peer=2001:4860::2", "2001:4860::2"),
+        ("next hop (2001:4860::3)", "2001:4860::3"),
+        ("addr 2001:4860:ABCD::FE", "2001:4860:ABCD::FE"),
+    ],
+)
+def test_find_pii_ipv6_still_flags_a_real_address(text, address):
+    """The word-character boundary keeps real addresses after a space, "=", "(" or at the start."""
+    rec = _ports({"port_id": 1, "ifName": "Gi0/1", "entPhysicalName": text})
+
+    assert ("ipv6", address) in {(f["kind"], f["value"]) for f in find_pii(rec)}
 
 
 def test_find_pii_ipv6_documentation_exemption_has_a_network_boundary():
