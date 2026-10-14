@@ -42,7 +42,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change, seed_mapping, seed_stored_mapping
-from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
+from netbox_librenms_plugin.tests.view_test_helpers import module_grant
 from netbox_librenms_plugin.server_mappings import mark_migrated
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
@@ -1313,13 +1313,12 @@ def test_unchanged_module_serial_preserves_other_snapshots(client, settings, dja
                 "server_key": "primary",
                 "module_id": str(module.pk),
                 "ent_index": "8102",
-                "inventory_binding": module_inventory_binding_token(
-                    device.pk,
-                    "primary",
+                "inventory_binding": module_grant(
+                    device,
                     "update_module_serial",
-                    {"module_id": module.pk},
-                    8102,
-                    module_inventory_row_digest(inventory_payload["inventory"][0]),
+                    ent_index=8102,
+                    action_target={"module_id": module.pk},
+                    server_key="primary",
                 ),
             },
         )
@@ -1367,13 +1366,12 @@ def test_module_mutation_without_posted_server_uses_active_namespace(
             {
                 "module_id": str(module.pk),
                 "ent_index": "8103",
-                "inventory_binding": module_inventory_binding_token(
-                    device.pk,
-                    "primary",
+                "inventory_binding": module_grant(
+                    device,
                     "update_module_serial",
-                    {"module_id": module.pk},
-                    8103,
-                    module_inventory_row_digest(inventory_payload["inventory"][0]),
+                    ent_index=8103,
+                    action_target={"module_id": module.pk},
+                    server_key="primary",
                 ),
             },
         )

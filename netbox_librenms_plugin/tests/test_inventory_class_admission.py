@@ -395,13 +395,15 @@ class TestInvalidStoredFilter:
         assert state["state"] == SyncTabState.REFRESH_FAILED.value
 
     def test_the_rule_loader_raises_a_typed_error_naming_rule_and_field(self):
+        from netbox_librenms_plugin.inventory_policy import load_inventory_policy
         from netbox_librenms_plugin.models import InventoryRuleFilterError
-        from netbox_librenms_plugin.utils import get_enabled_ignore_rules
+        from netbox_librenms_plugin.tests.conftest import make_device
 
+        device = make_device("broken-filter-loader")
         rule = _break_the_scb_filter()
 
         with pytest.raises(InventoryRuleFilterError) as excinfo:
-            get_enabled_ignore_rules(None)
+            load_inventory_policy(device.pk)
 
         assert (excinfo.value.rule_pk, excinfo.value.field) == (rule.pk, "name_pattern")
         assert f"pk={rule.pk}" in str(excinfo.value)
@@ -412,19 +414,16 @@ class TestInvalidStoredFilter:
 
         from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
         from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type_with_bays
+        from netbox_librenms_plugin.module_grants import GrantRefusal
         from netbox_librenms_plugin.tests.view_test_helpers import (
             make_request,
             make_user_with_perms,
             make_view,
             message_texts,
+            module_grant,
             post,
         )
-        from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_snapshot_digest
-        from netbox_librenms_plugin.views.sync.modules import (
-            INVALID_INVENTORY_RULE_MESSAGE,
-            InstallBranchView,
-            InstallSelectedView,
-        )
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView, InstallSelectedView
         from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
         device = make_device_with_module_bays(f"broken-filter-{action}", ["Slot 1"])
@@ -443,21 +442,22 @@ class TestInvalidStoredFilter:
                 ("delete", Interface),
             ],
         )
-        digest = module_inventory_snapshot_digest(inventory)
         if action == "install_selected":
             view_class = InstallSelectedView
-            binding = module_inventory_binding_token(device.pk, "default", action, {}, None, digest)
-            data = {"select": ["2"], "server_key": "default", "inventory_binding": binding}
+            grant = {"rows": [[2, device.pk, True]]}
+            data = {"select": ["2"], "server_key": "default"}
         else:
             view_class = InstallBranchView
-            binding = module_inventory_binding_token(device.pk, "default", action, {"parent_index": 2}, 2, digest)
-            data = {"parent_index": "2", "server_key": "default", "inventory_binding": binding}
+            grant = {"ent_index": 2, "action_target": {"parent_index": 2}, "rows": [[2, device.pk]]}
+            data = {"parent_index": "2", "server_key": "default", "selected_device_id": str(device.pk)}
         request = make_request("post", data, user=user)
         view = make_view(view_class, request, librenms_api=SimpleNamespace(server_key="default"))
         seed_inventory(view, device, inventory, librenms_id=7)
+        request.POST = request.POST.copy()
+        request.POST["inventory_binding"] = module_grant(device, action, **grant)
         _break_the_scb_filter()
 
         post(view, request, pk=device.pk)
 
-        assert INVALID_INVENTORY_RULE_MESSAGE in message_texts(request)
+        assert GrantRefusal.RULE_ERROR.message in message_texts(request)
         assert not Module.objects.filter(device=device).exists()

@@ -1,6 +1,7 @@
 """Rendering tests for the real LibreNMS module table."""
 
 import re
+from urllib.parse import parse_qsl
 
 import pytest
 from django.test import RequestFactory
@@ -33,8 +34,16 @@ def _table(device=None, **overrides):
     table = LibreNMSModuleTable([], device=device, server_key="production", **permissions)
     table.csrf_token = "table-csrf-token"
     table.inventory_snapshot_digest = "table-snapshot-digest"
+    table.policy_fingerprint = "table-policy-fingerprint"
     table.return_url = "/plugins/librenms-sync/?tab=modules"
     return table
+
+
+def _grant(binding, action, device):
+    """Read a rendered grant with the production parser."""
+    from netbox_librenms_plugin.module_grants import read_module_grant
+
+    return read_module_grant(binding, action=action, page_device_id=device.pk, server_key="production")
 
 
 def _actions(rendered):
@@ -208,8 +217,6 @@ class TestActionRendering:
         assert _table(device, has_write_permission=False).render_actions(None, {"can_install": True}) == ""
 
     def test_install_and_branch_actions_use_real_reversed_urls(self):
-        from netbox_librenms_plugin.utils import module_inventory_binding_matches
-
         device = make_device("table-install")
         table = _table(device)
         record = {
@@ -219,7 +226,7 @@ class TestActionRendering:
             "serial": "TEST-SERIAL",
             "has_installable_children": True,
             "ent_physical_index": 42,
-            "inventory_digest": "install-row-digest",
+            "branch_rows": [[42, device.pk], [43, device.pk]],
         }
 
         rendered = str(table.render_actions(None, record))
@@ -231,32 +238,23 @@ class TestActionRendering:
         assert "table-csrf-token" in rendered
         assert 'hx-target="#module-sync-content"' in rendered
         assert f"/{device.pk}/" in rendered
-        bindings = [tag["value"] for tag in open_tags(rendered, "input") if tag.get("name") == "inventory_binding"]
-        assert len(bindings) == 2
-        assert any(
-            module_inventory_binding_matches(
-                binding,
-                device.pk,
-                "production",
-                "install_module",
-                {"module_bay_id": 5, "module_type_id": 10},
-                42,
-                "install-row-digest",
-            )
-            for binding in bindings
+        install, branch = [
+            tag["value"] for tag in open_tags(rendered, "input") if tag.get("name") == "inventory_binding"
+        ]
+        install = _grant(install, "install_module", device)
+        branch = _grant(branch, "install_branch", device)
+        assert (install.device_id, install.ent_index, install.action_target) == (
+            device.pk,
+            42,
+            {"module_bay_id": 5, "module_type_id": 10},
         )
-        assert any(
-            module_inventory_binding_matches(
-                binding,
-                device.pk,
-                "production",
-                "install_branch",
-                {"parent_index": 42},
-                42,
+        assert (branch.action_target, branch.rows) == ({"parent_index": 42}, ((42, device.pk), (43, device.pk)))
+        for grant in (install, branch):
+            assert (grant.inventory_digest, grant.policy_fingerprint, grant.render_mode) == (
                 "table-snapshot-digest",
+                "table-policy-fingerprint",
+                "attributed",
             )
-            for binding in bindings
-        )
 
     def test_missing_branch_index_produces_no_branch_action(self):
         device = make_device("table-branch-missing")
@@ -303,8 +301,6 @@ class TestActionRendering:
         assert action not in _actions(rendered)
 
     def test_update_serial_and_interface_actions_carry_real_identifiers(self):
-        from netbox_librenms_plugin.utils import module_inventory_binding_matches
-
         device = make_device("table-update")
         table = _table(device)
         record = {
@@ -315,7 +311,6 @@ class TestActionRendering:
             "librenms_port_id": 56_284,
             "serial": "NEW-SERIAL",
             "name": "Ethernet1",
-            "inventory_digest": "update-row-digest",
         }
 
         rendered = str(table.render_actions(None, record))
@@ -324,32 +319,13 @@ class TestActionRendering:
         assert 'name="module_id" value="42"' in rendered
         # The action reads the serial from the cached row, so the form posts the row index.
         assert 'name="ent_index" value="77"' in rendered
-        bindings = [tag["value"] for tag in open_tags(rendered, "input") if tag.get("name") == "inventory_binding"]
-        assert len(bindings) == 2
-        assert any(
-            module_inventory_binding_matches(
-                binding,
-                device.pk,
-                "production",
-                "update_module_serial",
-                {"module_id": 42},
-                77,
-                "update-row-digest",
-            )
-            for binding in bindings
-        )
-        assert any(
-            module_inventory_binding_matches(
-                binding,
-                device.pk,
-                "production",
-                "update_module_interface",
-                {"module_id": 42},
-                77,
-                "update-row-digest",
-            )
-            for binding in bindings
-        )
+        serial, interface = [
+            tag["value"] for tag in open_tags(rendered, "input") if tag.get("name") == "inventory_binding"
+        ]
+        for binding, action in ((serial, "update_module_serial"), (interface, "update_module_interface")):
+            grant = _grant(binding, action, device)
+            assert (grant.device_id, grant.ent_index, grant.action_target) == (device.pk, 77, {"module_id": 42})
+            assert grant.inventory_digest == "table-snapshot-digest"
         assert "NEW-SERIAL" not in rendered
         assert 'hx-indicator="closest tr"' in rendered
         assert 'hx-disabled-elt="find button"' in rendered
@@ -443,9 +419,19 @@ class TestActionRendering:
         # The preview fragment carries hx- forms, so it must arrive through an HTMX swap: a
         # fetch()+innerHTML load leaves them unbound and they fall back to a full page reload.
         (button,) = [tag for tag in open_tags(rendered, "button") if tag.get("hx-get")]
-        assert button["hx-get"] == (
-            f"{preview_url}?module_id=55&ent_index=200&server_key=production&selected_device_id={device.pk}"
-        )
+        url, query = button["hx-get"].split("?", 1)
+        params = dict(parse_qsl(query))
+        assert url == preview_url
+        binding = params.pop("inventory_binding")
+        assert params == {
+            "module_id": "55",
+            "ent_index": "200",
+            "server_key": "production",
+            "selected_device_id": str(device.pk),
+        }
+        # The preview signs the replace and serial actions only for a row the table rendered.
+        preview = _grant(binding, "mismatch_preview", device)
+        assert (preview.ent_index, preview.action_target) == (200, {"module_id": 55})
         assert button["hx-target"] == "#htmx-modal-content"
         assert button["hx-swap"] == "innerHTML"
         # A newer click supersedes an older in-flight preview, as the AbortController did.
@@ -459,22 +445,19 @@ class TestActionRendering:
             "module_bay_id": 1,
             "module_type_id": 2,
             "ent_physical_index": 32,
-            "inventory_digest": "install-row-digest",
         },
-        "install_branch": {"has_installable_children": True, "ent_physical_index": 5},
+        "install_branch": {"has_installable_children": True, "ent_physical_index": 5, "branch_rows": [[5, 1]]},
         "update_serial": {
             "can_update_serial": True,
             "installed_module_id": 42,
             "ent_physical_index": 77,
             "serial": "S2",
-            "inventory_digest": "serial-row-digest",
         },
         "update_interface": {
             "can_update_interface_binding": True,
             "installed_module_id": 42,
             "ent_physical_index": 77,
             "librenms_port_id": 56284,
-            "inventory_digest": "interface-row-digest",
         },
         "carrier_install": {
             "status": "No Bay",
@@ -509,7 +492,6 @@ class TestActionRendering:
             "installed_module_id": 99,
             "serial": "SERIAL",
             "ent_physical_index": 99,
-            "inventory_digest": "permission-row-digest",
         }
 
         add_only = str(_table(device, can_change_module=False).render_actions(None, record))
@@ -588,7 +570,7 @@ class TestActionRendering:
                     "module_type_id": 10,
                     "has_installable_children": True,
                     "ent_physical_index": 42,
-                    "inventory_digest": "rule-row-digest",
+                    "branch_rows": [[42, 1]],
                 },
             ),
             (
@@ -600,7 +582,6 @@ class TestActionRendering:
                     "can_replace": True,
                     "installed_module_id": 42,
                     "ent_physical_index": 77,
-                    "inventory_digest": "rule-row-digest",
                 },
             ),
             (

@@ -1838,8 +1838,7 @@ class TestInstallRefusesADuplicateSerial:
         """Drive a real InstallModuleView POST for a cached row carrying `serial`."""
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser
-        from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, module_grant
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
         view = InstallModuleView()
@@ -1857,14 +1856,6 @@ class TestInstallRefusesADuplicateSerial:
                 "serial": serial,
                 "module_bay_id": str(empty_bay.pk),
                 "module_type_id": str(module_type.pk),
-                "inventory_binding": module_inventory_binding_token(
-                    device.pk,
-                    "default",
-                    "install_module",
-                    {"module_bay_id": empty_bay.pk, "module_type_id": module_type.pk},
-                    100,
-                    module_inventory_row_digest(inventory_item),
-                ),
             },
             user=user or make_superuser(f"dupserial-{empty_bay.pk}"),
             path="/x/",
@@ -1877,6 +1868,14 @@ class TestInstallRefusesADuplicateSerial:
                 device,
                 [inventory_item],
             ),
+        )
+        # The table offers no install for a serial the device holds, so the test signs the action itself.
+        request.POST = request.POST.copy()
+        request.POST["inventory_binding"] = module_grant(
+            device,
+            "install_module",
+            ent_index=100,
+            action_target={"module_bay_id": empty_bay.pk, "module_type_id": module_type.pk},
         )
         try:
             view.post(request, pk=device.pk)
@@ -1948,8 +1947,7 @@ class TestInstallRefusesADuplicateSerial:
 
         from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, make_view
-        from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_snapshot_digest
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, make_view, module_grant
         from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
 
         device = make_device("bulkdup", librenms_cf={"default": 77})
@@ -1972,18 +1970,7 @@ class TestInstallRefusesADuplicateSerial:
         ]
         request = make_request(
             "post",
-            {
-                "server_key": "default",
-                "select": ["200"],
-                "inventory_binding": module_inventory_binding_token(
-                    device.pk,
-                    "default",
-                    "install_selected",
-                    {},
-                    None,
-                    module_inventory_snapshot_digest(inventory),
-                ),
-            },
+            {"server_key": "default", "select": ["200"]},
             user=make_superuser("bulkdup-user"),
             path="/x/",
         )
@@ -1994,6 +1981,9 @@ class TestInstallRefusesADuplicateSerial:
             inventory,
             librenms_id=77,
         )
+        # The table offers no install for a serial the device holds, so the test signs the manifest itself.
+        request.POST = request.POST.copy()
+        request.POST["inventory_binding"] = module_grant(device, "install_selected", rows=[[200, device.pk, True]])
         try:
             view.post(request, pk=device.pk)
         finally:
@@ -2030,8 +2020,9 @@ class TestIdentityIsNotGatedOnBayMapping:
         from dcim.models import Module
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+        from netbox_librenms_plugin.module_grants import module_inventory_snapshot_digest, read_module_grant
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, make_view
-        from netbox_librenms_plugin.utils import module_inventory_binding_matches, module_inventory_snapshot_digest
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
         device = make_device(prefix, librenms_cf={"default": 91})
@@ -2049,15 +2040,19 @@ class TestIdentityIsNotGatedOnBayMapping:
         view = make_view(DeviceModuleTableView, request, librenms_api=SimpleNamespace(server_key="session-default"))
         context = view._build_context(request, device, inventory, server_key="default")
         assert context["table"].server_key == "default"
-        assert context["table"].attrs["data-selection-snapshot"] == module_inventory_snapshot_digest(inventory)
-        assert module_inventory_binding_matches(
+        digest = module_inventory_snapshot_digest(inventory)
+        fingerprint = load_inventory_policy(device.pk).fingerprint
+        assert context["table"].attrs["data-selection-snapshot"] == f"{digest}:{fingerprint}"
+        manifest = read_module_grant(
             context["install_selected_inventory_binding"],
+            action="install_selected",
+            page_device_id=device.pk,
+            server_key="default",
+        )
+        assert (manifest.device_id, manifest.inventory_digest, manifest.policy_fingerprint) == (
             device.pk,
-            "default",
-            "install_selected",
-            {},
-            None,
-            module_inventory_snapshot_digest(inventory),
+            digest,
+            fingerprint,
         )
         return device, module_type, installed, list(context["table"].data)
 
@@ -2464,7 +2459,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             message_texts,
             trusted_module_inventory_payload,
         )
-        from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
+        from netbox_librenms_plugin.tests.view_test_helpers import module_grant
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
         page_device = make_device("scope-modserial-page")
@@ -2495,16 +2490,6 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         server_key = view.resolve_posted_server_key_or_none(request.POST)
         assert server_key is not None, "this test needs a resolvable server namespace"
         inventory_item = {"entPhysicalIndex": 4001, "entPhysicalSerialNum": "HIJACKED"}
-        post_data = request.POST.copy()
-        post_data["inventory_binding"] = module_inventory_binding_token(
-            page_device.pk,
-            server_key,
-            "update_module_serial",
-            {"module_id": module.pk},
-            4001,
-            module_inventory_row_digest(inventory_item),
-        )
-        request.POST = post_data
         cache_key = view.get_cache_key(page_device, "inventory", server_key=server_key)
         cache.set(
             cache_key,
@@ -2516,6 +2501,15 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             ),
             timeout=300,
         )
+        post_data = request.POST.copy()
+        post_data["inventory_binding"] = module_grant(
+            page_device,
+            "update_module_serial",
+            ent_index=4001,
+            action_target={"module_id": module.pk},
+            server_key=server_key,
+        )
+        request.POST = post_data
         try:
             view.post(request, pk=page_device.pk)
         finally:
@@ -2602,8 +2596,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
-        from netbox_librenms_plugin.tests.view_test_helpers import message_texts
-        from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts, module_grant
         from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
 
         device = make_device("scope-replace-conflict")
@@ -2646,19 +2639,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         }
         request = self._request(
             user,
-            {
-                "server_key": server_key,
-                "module_id": str(target.pk),
-                "ent_index": "100",
-                "inventory_binding": module_inventory_binding_token(
-                    device.pk,
-                    server_key,
-                    "replace_module",
-                    {"module_id": target.pk},
-                    100,
-                    module_inventory_row_digest(inventory_item),
-                ),
-            },
+            {"server_key": server_key, "module_id": str(target.pk), "ent_index": "100"},
         )
         view.setup(request)
         cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
@@ -2669,6 +2650,10 @@ class TestGatedViewsRefuseOutOfScopeObjects:
                 [inventory_item],
                 server_key=server_key,
             ),
+        )
+        request.POST = request.POST.copy()
+        request.POST["inventory_binding"] = module_grant(
+            device, "replace_module", ent_index=100, action_target={"module_id": target.pk}, server_key=server_key
         )
         try:
             view.post(request, pk=device.pk)
@@ -2737,6 +2722,12 @@ class TestGatedViewsRefuseOutOfScopeObjects:
                 ],
                 server_key=server_key,
             ),
+        )
+        from netbox_librenms_plugin.tests.view_test_helpers import module_grant
+
+        request.GET = request.GET.copy()
+        request.GET["inventory_binding"] = module_grant(
+            device, "mismatch_preview", ent_index=100, action_target={"module_id": target.pk}, server_key=server_key
         )
         try:
             response = view.get(request, pk=device.pk)

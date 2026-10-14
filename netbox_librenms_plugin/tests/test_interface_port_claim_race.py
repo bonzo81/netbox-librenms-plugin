@@ -126,16 +126,14 @@ def _module_bind(user_pk, device, module):
     from django.test import Client
     from django.urls import reverse
 
-    from netbox_librenms_plugin.tests.view_test_helpers import messages_on
-    from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
+    from netbox_librenms_plugin.tests.view_test_helpers import messages_on, module_grant
 
-    token = module_inventory_binding_token(
-        device.pk,
-        SERVER_KEY,
+    token = module_grant(
+        device,
         "update_module_interface",
-        {"module_id": module.pk},
-        ENT_INDEX,
-        module_inventory_row_digest(_INVENTORY_ITEM),
+        ent_index=ENT_INDEX,
+        action_target={"module_id": module.pk},
+        server_key=SERVER_KEY,
     )
     client = Client()
     client.force_login(get_user_model().objects.get(pk=user_pk))

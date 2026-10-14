@@ -66,6 +66,21 @@ def _cache_inventory(view, device, inventory):
     return cache_key
 
 
+def _cache_preview(view, device, inventory, request):
+    """Cache *inventory* and add the preview grant the Replace button carries for the requested row."""
+    from netbox_librenms_plugin.tests.view_test_helpers import module_grant
+
+    cache_key = _cache_inventory(view, device, inventory)
+    request.GET = request.GET.copy()
+    request.GET["inventory_binding"] = module_grant(
+        device,
+        "mismatch_preview",
+        ent_index=int(request.GET["ent_index"]),
+        action_target={"module_id": int(request.GET["module_id"])},
+    )
+    return cache_key
+
+
 class TestModuleMismatchPreviewView:
     def _setup(self, tag, *, installed_model="INSTALLED", librenms_model=None, installed_serial="OLD", serial="NEW"):
         from netbox_librenms_plugin.views.sync.modules import ModuleMismatchPreviewView
@@ -98,7 +113,7 @@ class TestModuleMismatchPreviewView:
         device, _installed, request, view, inventory = self._setup(
             "marker", installed_serial="NS123", serial="S/N NS123"
         )
-        cache_key = _cache_inventory(view, device, inventory)
+        cache_key = _cache_preview(view, device, inventory, request)
         try:
             response = view_get(view, request, pk=device.pk)
         finally:
@@ -115,7 +130,7 @@ class TestModuleMismatchPreviewView:
         """OOB-controller inventory is read-only, so the dialog that leads to Replace must refuse it."""
         device, _installed, request, view, inventory = self._setup("oob")
         inventory[0]["_source"] = "oob"
-        cache_key = _cache_inventory(view, device, inventory)
+        cache_key = _cache_preview(view, device, inventory, request)
         try:
             response = view_get(view, request, pk=device.pk)
         finally:
@@ -145,7 +160,7 @@ class TestModuleMismatchPreviewView:
         device, _installed, request, view, inventory = self._setup("cache")
 
         assert view_get(view, request, pk=device.pk).status_code == 400
-        cache_key = _cache_inventory(view, device, inventory)
+        cache_key = _cache_preview(view, device, inventory, request)
         request.GET = request.GET.copy()
         request.GET["ent_index"] = "999"
         try:
@@ -155,7 +170,7 @@ class TestModuleMismatchPreviewView:
 
     def test_exact_real_module_type_renders_the_match_badge(self):
         device, _installed, request, view, inventory = self._setup("matched")
-        cache_key = _cache_inventory(view, device, inventory)
+        cache_key = _cache_preview(view, device, inventory, request)
         try:
             response = view_get(view, request, pk=device.pk)
         finally:
@@ -181,7 +196,7 @@ class TestModuleMismatchPreviewView:
             netbox_module_type=installed.module_type,
             manufacturer=device.device_type.manufacturer,
         )
-        cache_key = _cache_inventory(view, device, inventory)
+        cache_key = _cache_preview(view, device, inventory, request)
         try:
             response = view_get(view, request, pk=device.pk)
         finally:
@@ -206,7 +221,7 @@ class TestModuleMismatchPreviewView:
             netbox_module_type=other_type,
             manufacturer=device.device_type.manufacturer,
         )
-        cache_key = _cache_inventory(view, device, inventory)
+        cache_key = _cache_preview(view, device, inventory, request)
         try:
             response = view_get(view, request, pk=device.pk)
         finally:
@@ -223,7 +238,7 @@ class TestModuleMismatchPreviewView:
         other_type = make_module_type("PREVIEW-CONFLICT-TYPE")
         other_bay = make_module_bay(other_device, "Conflict Bay")
         conflict = _module(other_device, other_bay, other_type, "CONFLICT-SERIAL")
-        cache_key = _cache_inventory(view, device, inventory)
+        cache_key = _cache_preview(view, device, inventory, request)
         try:
             response = view_get(view, request, pk=device.pk)
         finally:
@@ -264,6 +279,7 @@ class TestReplaceModuleView:
                     "replace_module",
                     inventory[0],
                     action_target={"module_id": installed.pk},
+                    inventory=inventory,
                 ),
             },
         )
@@ -333,6 +349,11 @@ class TestReplaceModuleView:
         """A crafted POST naming an OOB row's index deleted the real module and installed the OOB row."""
         Module, device, old_type, _new_type, bay, installed, request, view, inventory = self._setup("oob")
         inventory[0]["_source"] = "oob"
+        # The table signs no action for an OOB row, so the test signs the crafted one for this snapshot.
+        request.POST = request.POST.copy()
+        request.POST["inventory_binding"] = module_row_binding(
+            device, "replace_module", inventory[0], action_target={"module_id": installed.pk}, inventory=inventory
+        )
         cache_key = _cache_inventory(view, device, inventory)
         try:
             view_post(view, request, pk=device.pk)
@@ -375,6 +396,8 @@ class TestReplaceModuleView:
 
     def test_replacement_refuses_an_inventory_index_reused_after_preview(self):
         """A replacement must not use a new row that reused the previewed inventory index."""
+        from netbox_librenms_plugin.module_grants import GrantRefusal
+
         Module, device, old_type, _new_type, bay, installed, request, view, inventory = self._setup("stale")
         replacement_type = make_module_type("REPLACE-REUSED-TYPE")
         replacement_inventory = [
@@ -395,10 +418,7 @@ class TestReplaceModuleView:
         assert installed.module_type == old_type
         assert installed.module_bay == bay
         assert Module.objects.filter(device=device, module_bay=bay).count() == 1
-        assert any(
-            message.startswith("Inventory action is stale or does not match this row.")
-            for message in message_texts(request, "error")
-        )
+        assert GrantRefusal.SNAPSHOT.message in message_texts(request, "error")
 
     def test_replacement_removes_the_single_real_serial_conflict(self):
         Module, device, _old_type, new_type, bay, installed, request, view, inventory = self._setup(
@@ -466,6 +486,7 @@ class TestReplaceModuleView:
                     "replace_module",
                     inventory[0],
                     action_target={"module_id": installed.pk},
+                    inventory=inventory,
                 ),
             },
             user=user,
