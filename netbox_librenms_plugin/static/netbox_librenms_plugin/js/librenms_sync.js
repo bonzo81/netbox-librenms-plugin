@@ -3518,8 +3518,10 @@ function handleModuleChange(select, value, options = {}) {
         const checkbox = options.restored && row ? row.querySelector('td[data-col="selection"] input[name="select"]') : null;
         if (checkbox) checkbox.checked = false;
         if (table) commitSelectionChange(table);
+        // A server refusal can end without a full stop, so the two sentences do not run together.
+        const refusal = reason.trim();
         showErrorToast(
-            reason + (options.restored
+            (/[.!?]$/.test(refusal) ? refusal : refusal + '.') + (options.restored
                 ? ' The saved selection of this row is cleared.'
                 : ' The row keeps its previous member.')
         );
