@@ -700,6 +700,11 @@ class InventoryRuleFilterError(Exception):
         super().__init__(f"InventoryIgnoreRule pk={rule.pk} stores an invalid {field} regex")
 
 
+def _raw_text(value):
+    """Return a LibreNMS value as text: JSON sends a number as an int, and a missing value is ""."""
+    return "" if value is None else str(value)
+
+
 def _include_filter_help(source):
     return (
         f"(Include rules only) Optional Python regex, searched in {source} and case-sensitive. "
@@ -950,7 +955,8 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
         phys_class = normalize_serial(item.get("entPhysicalClass"))
         if self.action != self.ACTION_INCLUDE or not self.matches_class(phys_class):
             return False
-        return all(regex.search(normalize_serial(item.get(source))) for source, regex in self.compiled_filters)
+        # A filter searches the raw text: spaces are part of a regex, so the value is not stripped.
+        return all(regex.search(_raw_text(item.get(source))) for source, regex in self.compiled_filters)
 
     def matches_name(self, name: str) -> bool:
         """Return True if *name* matches this rule's pattern/match_type (name-based rules only)."""

@@ -1,17 +1,17 @@
-# Inventory Ignore Rules — filter ENTITY-MIB items during module sync
+# Inventory Ignore Rules: filter ENTITY-MIB items during module sync
 #
 # Three actions are supported:
-#   skip        — remove the item from the sync table entirely
-#   transparent — hide the item's row but promote its ENTITY-MIB children to
+#   skip       : remove the item from the sync table entirely
+#   transparent: hide the item's row but promote its ENTITY-MIB children to
 #                 device-level bay matching (use for embedded/fixed-chassis modules)
-#   include     — admit the items of one entPhysicalClass (match_type class_is,
+#   include    : admit the items of one entPhysicalClass (match_type class_is,
 #                 pattern = the class). Migration 0025 seeds one include rule per
 #                 class the sync table used to admit from a fixed list.
 #
 # Match types:
 #   ends_with | starts_with | contains | regex
-#                         — compare entPhysicalName
-#   serial_matches_device — compare entPhysicalSerialNum to the NetBox device's
+#                         : compare entPhysicalName
+#   serial_matches_device: compare entPhysicalSerialNum to the NetBox device's
 #                           own serial number (no pattern needed)
 #   model_matches_device_type
 #                         : compare entPhysicalModelName to the NetBox device
@@ -22,9 +22,9 @@
 #
 # Additional fields:
 #   require_serial_match_parent:
-#       true  — (name-based rules only) only apply if the item's serial matches
+#       true : (name-based rules only) only apply if the item's serial matches
 #               any ancestor entity's serial in the ENTITY-MIB tree
-#       false — apply unconditionally on name match alone
+#       false: apply unconditionally on name match alone
 #   name_pattern, description_pattern, model_pattern:
 #       (include rules only) optional Python regexes, searched in entPhysicalName,
 #       entPhysicalDescr and entPhysicalModelName. Case-sensitive and kept as

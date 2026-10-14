@@ -103,7 +103,6 @@ class InterfaceTypeMappingCreateView(LibreNMSGenericWritePermissionMixin, generi
     form = InterfaceTypeMappingForm
 
 
-@register_model_view(InterfaceTypeMapping, "bulk_import", path="import", detail=False)
 class _RefuseCsvRegexColumnsMixin:
     """Refuse a CSV import that carries a column in ``verbatim_fields``: NetBox's CSV parser strips every cell."""
 
@@ -122,6 +121,7 @@ class _RefuseCsvRegexColumnsMixin:
         return super().create_and_update_objects(form, request)
 
 
+@register_model_view(InterfaceTypeMapping, "bulk_import", path="import", detail=False)
 class InterfaceTypeMappingBulkImportView(
     _RefuseCsvRegexColumnsMixin, LibreNMSGenericWritePermissionMixin, generic.BulkImportView
 ):

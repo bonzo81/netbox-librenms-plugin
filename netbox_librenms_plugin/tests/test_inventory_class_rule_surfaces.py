@@ -88,6 +88,16 @@ class TestIncludeFilterMatching:
         assert _rule(name_pattern="^scb").matches_inventory_item(item) is False
         assert _rule(name_pattern="(?i)^scb").matches_inventory_item(item) is True
 
+    @pytest.mark.parametrize("source", ["entPhysicalName", "entPhysicalDescr", "entPhysicalModelName"])
+    def test_a_filter_searches_the_text_with_its_spaces(self, source):
+        field = {"entPhysicalName": "name_pattern", "entPhysicalDescr": "description_pattern"}.get(
+            source, "model_pattern"
+        )
+        item = {"entPhysicalClass": "backplane", source: " SCB "}
+
+        assert _rule(**{field: "^ SCB $"}).matches_inventory_item(item) is True
+        assert _rule(**{field: "^SCB$"}).matches_inventory_item(item) is False
+
     def test_numeric_values_match_as_text(self):
         rule = _rule(pattern="7", model_pattern="^750")
 
