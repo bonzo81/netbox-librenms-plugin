@@ -386,6 +386,36 @@ class TestRepairRule:
         assert rows[2]["_dangling_parent"] == 99
         assert "_reported_parent" not in rows[2]
 
+    @pytest.mark.parametrize("index", [None, 0], ids=["null", "zero"])
+    def test_a_port_with_no_index_keeps_its_parent(self, index):
+        from netbox_librenms_plugin.inventory_tree import repair_dangling_parents
+
+        rows = self._rows()
+        rows[2]["entPhysicalIndex"] = index
+
+        repair_dangling_parents(rows)
+
+        assert rows[2]["entPhysicalContainedIn"] == 99
+        assert rows[2]["_dangling_parent"] == 99
+        assert "_reported_parent" not in rows[2]
+
+    @pytest.mark.parametrize("duplicate", [10, 20, 30], ids=["fpc", "pic", "port"])
+    def test_a_duplicate_index_on_the_repair_path_keeps_the_parent(self, duplicate):
+        """The readers key rows by index, so a shared index can resolve to another row."""
+        from netbox_librenms_plugin.inventory_tree import repair_dangling_parents
+
+        rows = self._rows()
+        port = rows[2]
+        for other in ("first", "last"):
+            shared = {"entPhysicalIndex": duplicate, "entPhysicalClass": "sensor", "entPhysicalDescr": "X"}
+            listed = [shared, *rows] if other == "first" else [*rows, shared]
+
+            repair_dangling_parents(listed)
+
+            assert port["entPhysicalContainedIn"] == 99, other
+            assert port["_dangling_parent"] == 99, other
+            assert "_reported_parent" not in port, other
+
     def test_a_repair_that_would_close_a_cycle_is_refused(self):
         """Container 10 sits below port 30, so a parent 20 for port 30 would close 30 -> 20 -> 10 -> 30."""
         from netbox_librenms_plugin.inventory_tree import repair_dangling_parents
