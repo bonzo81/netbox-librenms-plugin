@@ -17,7 +17,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from netbox_librenms_plugin.librenms_api import configured_cache_timeout
-from netbox_librenms_plugin.server_mappings import mapped_device_servers
+from netbox_librenms_plugin.server_mappings import mapped_device_servers, read_mapping
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.utils import cache_remaining_ttl
 
@@ -77,6 +77,29 @@ def cached_module_inventory(payload):
     if not isinstance(inventory, list) or any(not isinstance(item, dict) for item in inventory):
         return None
     return inventory
+
+
+def module_inventory_oob_matches(payload, sync_device, server_key) -> bool:
+    """
+    Return whether a cached inventory payload was built for the OOB controller the device links now.
+
+    A re-link, a new link and an unlink all change the fingerprint. A linked controller whose stored
+    id is corrupt never matches: the refresh caches no snapshot in that state.
+
+    Args:
+        payload (dict): A payload that :func:`cached_module_inventory` accepts.
+        sync_device (Device): The device that owns the inventory.
+        server_key (str): The LibreNMS server key of the snapshot.
+
+    Returns:
+        bool: True when the snapshot matches the current OOB link.
+
+    """
+    mapping = read_mapping(sync_device)
+    current_oob_id = mapping.oob_id(server_key)
+    if mapping.has_oob(server_key) and current_oob_id is None:
+        return False
+    return payload.get("oob_librenms_id") == current_oob_id
 
 
 class SyncTab(StrEnum):
