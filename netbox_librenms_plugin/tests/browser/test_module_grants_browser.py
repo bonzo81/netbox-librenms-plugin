@@ -188,6 +188,17 @@ def test_a_refused_member_verify_restores_the_member_and_its_grant_and_says_why(
     assert page.locator('[name="selection_grant_30"]').input_value() == "earlier-override"
 
 
+def test_a_refusal_without_a_full_stop_reads_as_its_own_sentence(page):
+    """The verify view answers a dropped snapshot with "No cached inventory data", which has no full stop."""
+    _answers(page, {"status": 404, "json": {"status": "error", "message": "No cached inventory data"}})
+    _load(page, [_row(30)])
+
+    with page.expect_response(VERIFY_ROUTE):
+        _change_member(page, 30, "2")
+
+    expect(_toasts(page)).to_have_text("No cached inventory data. The row keeps its previous member.")
+
+
 @pytest.mark.parametrize("mode", ["htmx", "htmx-absent", "htmx-disabled"])
 def test_a_verified_override_travels_with_its_row_across_pages(page, mode):
     """The form keeps its production hx-post in every mode; without htmx the native submit carries the rows."""
