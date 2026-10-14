@@ -117,7 +117,7 @@ _MODEL_PLACEHOLDERS = GENERIC_CONTAINER_MODELS | LIBRENMS_PLACEHOLDER_VALUES
 # reasoning: it names the vendor the os-hash masks, and no sync logic reads it.
 MFG_KEYS = frozenset({"entPhysicalMfgName", "vendor"})
 # Replace private ENTITY display text. Structural fields and model tokens keep joins.
-# A description keeps only the Junos Virtual Chassis markers that VC detection reads.
+# A description keeps only the Junos Virtual Chassis markers that VC detection reads and a leading "Front Panel".
 ENTITY_TEXT_KEYS = frozenset({"entPhysicalName", "entPhysicalDescr"})
 # The transceiver OUI is the IEEE-registered manufacturer prefix as an integer: 36965 is 0x009065,
 # Finisar. Where "vendor" is null it is the only vendor identifier on the row, so masking the name
@@ -354,6 +354,8 @@ _ENTITY_TOKEN_RE = re.compile(rf"^entity-[0-9a-f]{{6}}(?: {_ENTITY_LOCATOR})?$")
 # Juniper names a Switch Control Board by its SKU ("SCBE2-MX-S"); an include rule matches the prefix.
 _SCB_NAME_PREFIX = "SCB"
 _SCB_NAME_TOKEN_RE = re.compile(r"^SCB entity-[0-9a-f]{6}$")
+# An IOS XE built-in front-panel module is matched by a description rule on this prefix.
+_FRONT_PANEL_DESCR_RE = re.compile(r"^\s*front panel(?P<separator>\s*)", re.IGNORECASE)
 
 
 def pseudonymize_os(os_name):
@@ -571,8 +573,19 @@ def _anon_junos_located_descr(normalized, rules):
     return f"{prefix} @ {located['locator']}"
 
 
+def _anon_front_panel_descr(value, rules):
+    """Keep a leading "Front Panel" of a description as typed and anonymize the rest, or return None."""
+    front = _FRONT_PANEL_DESCR_RE.match(value)
+    if front is None:
+        return None
+    rest = _anon_entity_text(value[front.end() :], rules, keep_descr_markers=True)
+    return f"{front.group(0)}{rest}" if rest else front.group(0).rstrip()
+
+
 def _anon_entity_text(value, rules, *, keep_descr_markers=False, keep_scb_prefix=False):
     """Replace private ENTITY text while keeping a bounded terminal hierarchy locator."""
+    if keep_descr_markers and (kept := _anon_front_panel_descr(value, rules)) is not None:
+        return kept
     normalized = value.strip()
     if keep_descr_markers:
         for keep in (_anon_junos_located_descr, _anon_junos_vc_descr):

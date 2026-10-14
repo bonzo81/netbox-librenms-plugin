@@ -107,6 +107,8 @@ def test_bundled_inventory_display_text_is_anonymized(recording):
     )
     # A Juniper switch control board name keeps the prefix an include rule matches, never the SKU.
     scb_name = re.compile(r"SCB entity-[0-9a-f]{6}")
+    # An IOS XE description keeps the leading "Front Panel" a description rule matches, as typed.
+    front_panel_descr = re.compile(rf"\s*(?i:front panel)\s*(?:{allowed.pattern})?")
     for key, value in recording.get("responses", {}).items():
         body = unwrap_response(value)[1]
         if "/inventory/" not in key or not isinstance(body, dict):
@@ -115,9 +117,10 @@ def test_bundled_inventory_display_text_is_anonymized(recording):
             for field in ("entPhysicalName", "entPhysicalDescr"):
                 if isinstance(item, dict) and item.get(field):
                     value = item[field]
-                    kept = (field == "entPhysicalDescr" and junos_descr.fullmatch(value)) or (
-                        field == "entPhysicalName" and scb_name.fullmatch(value)
-                    )
+                    kept = (
+                        field == "entPhysicalDescr"
+                        and (junos_descr.fullmatch(value) or front_panel_descr.fullmatch(value))
+                    ) or (field == "entPhysicalName" and scb_name.fullmatch(value))
                     assert allowed.fullmatch(value) or kept, (recording["name"], field, value)
 
 
