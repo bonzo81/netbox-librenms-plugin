@@ -730,10 +730,11 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
     **Transparent** (``action='transparent'``)
         The matched item's row is hidden, but its ENTITY-MIB children are
         *promoted* to device-level bay matching instead of being treated as
-        sub-components.  Used for fixed-chassis devices (e.g. Cisco 8201-SYS)
-        where the RP/system-board entity is the device itself — it carries the
-        same serial number as the NetBox device, so its children (transceivers,
-        fans, PSUs) should be matched directly against device-level bays.
+        sub-components.  Used for fixed-chassis devices whose RP or system board
+        is the device itself: a board directly below the chassis that carries the
+        device serial (``serial_matches_device``), or a built-in unit that reports
+        the chassis PID, also in a slot container (``model_matches_device_type``).
+        Its children (transceivers, fans, PSUs) then match device-level bays.
 
     Optional regex filters on ``entPhysicalName``, ``entPhysicalDescr`` and
     ``entPhysicalModelName`` narrow a rule of every action and match type; every
