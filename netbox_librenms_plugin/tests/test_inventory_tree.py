@@ -121,6 +121,26 @@ class TestRepairOnTheRecording:
         assert "LibreNMS reports parent index 71; the PIC locator" in _row_html(content, 889)
         assert "LibreNMS reports parent index" not in _row_html(content, 119)
 
+    def test_a_fixed_agent_renders_the_tree_the_repair_builds_with_no_report(self, librenms_server, server_key):
+        """A Junos agent that reports each PIC parent itself gives the same rows, and no warning or note shows."""
+        fixed = _recording(RECORDING)
+        for row in _inventory(fixed):
+            row["entPhysicalContainedIn"] = REPAIRED.get(row["entPhysicalIndex"], row["entPhysicalContainedIn"])
+
+        _device, _content, repaired_rows = _render(_recording(RECORDING), librenms_server, server_key, "as-reported")
+        device, content, fixed_rows = _render(fixed, librenms_server, server_key, "fixed-agent")
+
+        def rendered(rows):
+            fields = [(row["name"], row["item_class"], row["status"], row["module_bay"]) for row in rows]
+            return [[*place, *field] for place, field in zip(_rows_with_parents(rows), fields, strict=True)]
+
+        assert rendered(fixed_rows) == rendered(repaired_rows)
+        assert _rows_with_parents(fixed_rows) == EXPECTED_ROWS
+        cached = _cached_inventory(device, server_key)
+        assert not any("_dangling_parent" in row or "_reported_parent" in row for row in cached.values())
+        assert "LibreNMS reports parent index" not in content
+        assert "Parent Missing" not in content
+
 
 def _without_pic_67(recording):
     rows = _inventory(recording)
