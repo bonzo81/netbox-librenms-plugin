@@ -97,6 +97,10 @@ INVALID_INVENTORY_RULE_MESSAGE = (
     "An enabled Inventory Ignore Rule stores an invalid filter regex, so nothing was installed. "
     "Fix or disable the rule that the Modules tab names."
 )
+IGNORED_INVENTORY_ROW_MESSAGE = (
+    "An enabled Inventory Ignore Rule now hides this inventory row, so nothing was installed. "
+    "Refresh Modules to see the current table."
+)
 
 
 def _modules_redirect_response(request, sync_url, server_key=None):
@@ -855,25 +859,25 @@ def _resolve_posted_inventory_row(
     action,
     action_target,
 ):
-    """Resolve one posted inventory action to its current cached row."""
+    """Resolve one posted inventory action to its current cached row and the authenticated inventory it is in."""
     ent_index = _coerce_positive_int(request.POST.get("ent_index"))
     if ent_index is None:
         messages.error(request, "Missing or invalid inventory index.")
-        return None, _modules_action_response(request, page_device, server_key)
+        return None, None, _modules_action_response(request, page_device, server_key)
     sync_device = _get_sync_device_for_inventory(target_device, server_key)
     cached_data = _get_cached_inventory_for_device(sync_device, server_key, get_cache_key)
     if cached_data is None:
-        return None, _modules_cache_missing_response(request, page_device, server_key)
+        return None, None, _modules_cache_missing_response(request, page_device, server_key)
     librenms_item = next(
         (item for item in cached_data if _coerce_positive_int(item.get("entPhysicalIndex")) == ent_index),
         None,
     )
     if librenms_item is None:
         messages.error(request, "Inventory item not found in cache.")
-        return None, _modules_action_response(request, page_device, server_key)
+        return None, None, _modules_action_response(request, page_device, server_key)
     if librenms_item.get("_source") == OOB_INVENTORY_SOURCE:
         messages.error(request, OOB_INVENTORY_READ_ONLY_REASON)
-        return None, _modules_action_response(request, page_device, server_key)
+        return None, None, _modules_action_response(request, page_device, server_key)
     if not module_inventory_binding_matches(
         request.POST.get("inventory_binding"),
         target_device.pk,
@@ -887,8 +891,24 @@ def _resolve_posted_inventory_row(
             request,
             "Inventory action is stale or does not match this row. Refresh Modules and try again.",
         )
-        return None, _modules_action_response(request, page_device, server_key)
-    return librenms_item, None
+        return None, None, _modules_action_response(request, page_device, server_key)
+    return librenms_item, cached_data, None
+
+
+def _current_device_serials(devices):
+    """Return the stored serial of each already-resolved device; the page lock must already be held."""
+    from dcim.models import Device
+
+    ids = {device.pk for device in devices}
+    serials = dict(Device.objects.filter(pk__in=ids).values_list("pk", "serial"))
+    if serials.keys() != ids:
+        raise ValidationError("A selected device is no longer available. Refresh Modules and try again.")
+    return serials
+
+
+def _inventory_index_map(inventory):
+    """Return the inventory rows keyed by physical index, as every install writer reads them."""
+    return {idx: item for item in inventory if (idx := item.get("entPhysicalIndex")) is not None}
 
 
 def _should_attempt_bind_for_result(result):
@@ -1060,10 +1080,13 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         # Resolve all inventory metadata from the signed cached row. Carrier installs do not have
         # an inventory row of their own, so they intentionally omit ent_index.
+        from netbox_librenms_plugin.models import InventoryRuleFilterError
+        from netbox_librenms_plugin.utils import get_enabled_ignore_rules
+
         bind_item = None
         serial = ""
         if request.POST.get("ent_index"):
-            bind_item, refusal = _resolve_posted_inventory_row(
+            bind_item, inventory, refusal = _resolve_posted_inventory_row(
                 request,
                 page_device,
                 target_device,
@@ -1075,6 +1098,13 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             if refusal:
                 return refusal
             manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
+            try:
+                ignore_rules = get_enabled_ignore_rules(manufacturer)
+            except InventoryRuleFilterError as exc:
+                logger.error("Single install on %s refused: %s", page_device, exc)
+                messages.error(request, INVALID_INVENTORY_RULE_MESSAGE)
+                return _modules_action_response(request, page_device, server_key)
+            index_map = _inventory_index_map(inventory)
             serial = normalize_inventory_serial(bind_item.get("entPhysicalSerialNum"), manufacturer=manufacturer)
             if is_librenms_placeholder(serial):
                 serial = ""
@@ -1087,6 +1117,15 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         try:
             with transaction.atomic():
                 _lock_page_device_serials(page_device)
+                if bind_item is not None:
+                    # The selected install's check, on the same inputs: rules read before the lock, serials after it.
+                    target_device.serial = _current_device_serials([target_device])[target_device.pk]
+                    ancestor_action = _locked_ancestor_action(
+                        page_device, inventory, index_map, get_enabled_ignore_rules
+                    )
+                    if _selected_row_is_ignored(bind_item, index_map, ignore_rules, target_device, ancestor_action):
+                        messages.error(request, IGNORED_INVENTORY_ROW_MESSAGE)
+                        raise _ModuleInstallRefused
                 # Re-fetch bay under lock to prevent TOCTOU race with concurrent installs.
                 locked_bay = (
                     self.restricted_queryset(ModuleBay)
@@ -1170,6 +1209,10 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             _schedule_module_cache_mutation(request, page_device, server_key)
         except _ModuleInstallRefused:
             pass
+        except InventoryRuleFilterError as exc:
+            # The page and member rules are read under the page lock, so an edit after the first read lands here.
+            logger.error("Single install on %s refused: %s", page_device, exc)
+            messages.error(request, INVALID_INVENTORY_RULE_MESSAGE)
         except _ModuleComponentAdoptionUnavailable as exc:
             messages.error(request, f"A matching {exc.component_label} is not available for module adoption.")
         except (AbortRequest, ValidationError, IntegrityError) as e:
@@ -1268,7 +1311,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         from netbox_librenms_plugin.models import InventoryRuleFilterError
         from netbox_librenms_plugin.utils import get_enabled_ignore_rules
 
-        index_map = {idx: item for item in cached_data if (idx := item.get("entPhysicalIndex")) is not None}
+        index_map = _inventory_index_map(cached_data)
         vc_members = (
             list(page_device.virtual_chassis.members.select_related("device_type__manufacturer"))
             if page_device.virtual_chassis_id
@@ -2148,7 +2191,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             )
             return _modules_action_response(request, page_device, server_key)
 
-        index_map = {idx: item for item in cached_data if (idx := item.get("entPhysicalIndex")) is not None}
+        index_map = _inventory_index_map(cached_data)
         items = [index_map[idx] for idx in selected_list if idx in index_map]
 
         if not items:
@@ -2225,10 +2268,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         try:
             with transaction.atomic():
                 _lock_page_device_serials(page_device)
-                target_ids = {device.pk for _, device, _ in resolved_items}
-                current_serials = dict(Device.objects.filter(pk__in=target_ids).values_list("pk", "serial"))
-                if current_serials.keys() != target_ids:
-                    raise ValidationError("A selected device is no longer available. Refresh Modules and try again.")
+                current_serials = _current_device_serials(device for _, device, _ in resolved_items)
                 ancestor_action = _locked_ancestor_action(page_device, cached_data, index_map, get_enabled_ignore_rules)
                 for item, target_device, ignore_rules in resolved_items:
                     target_device.serial = current_serials[target_device.pk]
@@ -2334,7 +2374,7 @@ class UpdateModuleSerialView(
             messages.error(request, "Missing or invalid module ID.")
             return _modules_action_response(request, page_device, server_key)
 
-        librenms_item, refusal = _resolve_posted_inventory_row(
+        librenms_item, _inventory, refusal = _resolve_posted_inventory_row(
             request,
             page_device,
             target_device,
@@ -2420,7 +2460,7 @@ class UpdateModuleInterfaceView(
         if invalid_selected_device:
             _warn_invalid_selected_device(request)
         changeable_interfaces = self.restricted_queryset(Interface, "change")
-        bind_item, refusal = _resolve_posted_inventory_row(
+        bind_item, _inventory, refusal = _resolve_posted_inventory_row(
             request,
             page_device,
             target_device,
@@ -3033,7 +3073,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             pk__in=self.restricted_queryset(Module, "delete").values("pk"),
         )
 
-        librenms_item, refusal = _resolve_posted_inventory_row(
+        librenms_item, _inventory, refusal = _resolve_posted_inventory_row(
             request,
             page_device,
             target_device,

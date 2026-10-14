@@ -437,3 +437,236 @@ def test_the_contrib_front_panel_rule_imports_as_yaml(ui):
         "^Front Panel",
     )
     assert (rule.require_serial_match_parent, rule.manufacturer.slug, rule.enabled) == (False, "cisco", True)
+
+
+def rendered_install_form(content, index):
+    """Return the hidden fields of the rendered single-install form of row *index*."""
+    import html
+    import re
+
+    for body in re.findall(r"<form method=\"post\"[^>]*>(.*?)</form>", content, re.S):
+        fields = {name: html.unescape(value) for name, value in re.findall(r'name="([^"]+)" value="([^"]*)"', body)}
+        if fields.get("ent_index") == str(index) and "module_bay_id" in fields:
+            return fields
+    raise AssertionError(f"row {index} renders no install form")
+
+
+def install_form_for(device, server_key, item, bay_name, target=None):
+    """Sign a single-install form for a cached row the table shows without one, as the table signs it."""
+    from dcim.models import ModuleBay, ModuleType
+
+    from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
+
+    target = target or device
+    bay = ModuleBay.objects.get(device=target, name=bay_name)
+    module_type = ModuleType.objects.get(model=item["entPhysicalModelName"])
+    action_target = {"module_bay_id": bay.pk, "module_type_id": module_type.pk}
+    return {
+        "server_key": server_key,
+        "selected_device_id": str(target.pk),
+        "ent_index": str(item["entPhysicalIndex"]),
+        "module_bay_id": str(bay.pk),
+        "module_type_id": str(module_type.pk),
+        "inventory_binding": module_inventory_binding_token(
+            target.pk,
+            server_key,
+            "install_module",
+            action_target,
+            item["entPhysicalIndex"],
+            module_inventory_row_digest(item),
+        ),
+    }
+
+
+def post_single(client, device, form):
+    from django.urls import reverse
+
+    return client.post(reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": device.pk}), form)
+
+
+class TestSingleInstall:
+    """AC4 and AC6 for the single-row install: an action rendered before a change is checked again."""
+
+    @staticmethod
+    def _rendered(device, server_key, index):
+        response, _module_sync = refresh(device, server_key)
+        return rendered_install_form(response.content.decode(), index)
+
+    @pytest.mark.parametrize("action", ["skip", "transparent"])
+    def test_a_rule_enabled_after_render_refuses_the_row(self, ui, librenms_server, server_key, action):
+        from netbox_librenms_plugin.views.sync.modules import IGNORED_INVENTORY_ROW_MESSAGE
+
+        recording = _recording()
+        librenms_server.load_recording(recording)
+        device = c8300_device(f"c8300-single-new-rule-{action}", recording, server_key)
+        contrib_rule(MODEL_RULE)
+        form = self._rendered(device, server_key, FRONT_PANEL)
+        contrib_rule(FRONT_PANEL_RULE, action=action)
+        before = written_state(device)
+
+        response = post_single(ui, device, form)
+
+        assert response.status_code == 302
+        assert IGNORED_INVENTORY_ROW_MESSAGE in messages_of(response)
+        assert written_state(device) == before
+
+    @pytest.mark.parametrize("ancestor_action", [None, "skip"])
+    def test_an_ancestor_skip_rule_set_after_render_refuses_its_optic(
+        self, ui, librenms_server, server_key, ancestor_action
+    ):
+        """The rendered optic sits below the hidden front-panel module; a skip there removes the subtree."""
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+        from netbox_librenms_plugin.views.sync.modules import IGNORED_INVENTORY_ROW_MESSAGE
+
+        recording = _recording()
+        librenms_server.load_recording(recording)
+        device = c8300_device(f"c8300-single-ancestor-{ancestor_action}", recording, server_key)
+        rule = contrib_rule(FRONT_PANEL_RULE)
+        form = self._rendered(device, server_key, OPTICS[0])
+        if ancestor_action:
+            InventoryIgnoreRule.objects.filter(pk=rule.pk).update(action=ancestor_action)
+        before = written_state(device)
+
+        response = post_single(ui, device, form)
+
+        if ancestor_action is None:
+            # The positive control: the same rendered action installs while the module stays transparent.
+            assert written_state(device)["modules"] != before["modules"]
+            return
+        assert IGNORED_INVENTORY_ROW_MESSAGE in messages_of(response)
+        assert written_state(device) == before
+
+    @pytest.mark.parametrize("action", ["skip", "transparent"])
+    def test_a_filter_corrupted_after_render_refuses_with_the_shared_message(
+        self, ui, librenms_server, server_key, action
+    ):
+        from netbox_librenms_plugin.views.sync.modules import INVALID_INVENTORY_RULE_MESSAGE
+
+        recording = _recording()
+        librenms_server.load_recording(recording)
+        device = c8300_device(f"c8300-single-corrupt-{action}", recording, server_key)
+        contrib_rule(MODEL_RULE)
+        form = self._rendered(device, server_key, REAL_NIM)
+        _break_the_rule(contrib_rule(FRONT_PANEL_RULE, action=action))
+        before = written_state(device)
+
+        response = post_single(ui, device, form)
+
+        assert INVALID_INVENTORY_RULE_MESSAGE in messages_of(response)
+        assert written_state(device) == before
+
+    def test_a_target_serial_changed_after_render_so_the_serial_rule_matches_refuses(
+        self, ui, librenms_server, server_key
+    ):
+        """The seeded serial rule makes the route processor transparent once the device carries its serial."""
+        from netbox_librenms_plugin.tests.conftest import make_module_bay
+        from netbox_librenms_plugin.views.sync.modules import IGNORED_INVENTORY_ROW_MESSAGE
+
+        recording = _recording()
+        entities = _entities(recording)
+        route_processor = entities[OTHER_BUILT_INS[1]]
+        librenms_server.load_recording(recording)
+        device = c8300_device("c8300-single-serial", recording, server_key)
+        make_module_bay(device, route_processor["entPhysicalName"])
+        from netbox_librenms_plugin.tests.conftest import make_module_type_with_bays
+
+        make_module_type_with_bays(route_processor["entPhysicalModelName"], manufacturer=_cisco())
+        form = self._rendered(device, server_key, route_processor["entPhysicalIndex"])
+        device.serial = route_processor["entPhysicalSerialNum"]
+        device.save()
+        before = written_state(device)
+
+        response = post_single(ui, device, form)
+
+        assert IGNORED_INVENTORY_ROW_MESSAGE in messages_of(response)
+        assert written_state(device) == before
+
+
+def _vc_rows(page, member):
+    """Each member's chassis, a member board with the front-panel description, and an optic in its cage."""
+    return [
+        {"entPhysicalIndex": 1, "entPhysicalContainedIn": 0, "entPhysicalClass": "chassis",
+         "entPhysicalName": "Chassis 1", "entPhysicalSerialNum": page.serial},
+        {"entPhysicalIndex": 5, "entPhysicalContainedIn": 0, "entPhysicalClass": "chassis",
+         "entPhysicalName": "Chassis 2", "entPhysicalSerialNum": member.serial},
+        {"entPhysicalIndex": 10, "entPhysicalContainedIn": 5, "entPhysicalClass": "module",
+         "entPhysicalName": "Member board", "entPhysicalDescr": "Front Panel 4 ports Gigabitethernet Module",
+         "entPhysicalModelName": "MEMBER-BOARD", "entPhysicalSerialNum": "SN-VC-BOARD"},
+        {"entPhysicalIndex": 20, "entPhysicalContainedIn": 10, "entPhysicalClass": "container",
+         "entPhysicalName": "Cage 1", "entPhysicalSerialNum": ""},
+        {"entPhysicalIndex": 30, "entPhysicalContainedIn": 20, "entPhysicalClass": "module",
+         "entPhysicalName": "Optic 1", "entPhysicalDescr": "SFP", "entPhysicalModelName": "VC-OPTIC",
+         "entPhysicalSerialNum": "SN-VC-OPTIC"},
+    ]  # fmt: skip
+
+
+@pytest.fixture
+def vc_pair():
+    """Return a page device and a VC member of another vendor whose board and optic the inventory attributes to it."""
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.tests.conftest import (
+        make_device_with_module_bays,
+        make_module_type_with_bays,
+        make_virtual_chassis,
+    )
+    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+    from netbox_librenms_plugin.views.mixins import CacheMixin
+
+    page = make_device_with_module_bays("vc-filter-page", [], serial="VC-PAGE")
+    member = make_device_with_module_bays("vc-filter-member", ["Cage 1"], manufacturer=_cisco(), serial="VC-MEMBER")
+    make_virtual_chassis("vc-filter", page, member)
+    make_module_type_with_bays("VC-OPTIC", manufacturer=_cisco())
+    rows = _vc_rows(page, member)
+    cache_key = CacheMixin().get_cache_key(page, "inventory", "default")
+    cache.set(cache_key, trusted_module_inventory_payload(page, rows))
+    yield page, member, {row["entPhysicalIndex"]: row for row in rows}
+    cache.delete(cache_key)
+
+
+class TestSingleInstallOnAVirtualChassisMember:
+    """r4.3: the ancestor policy and the page-device rules apply when the target is another member."""
+
+    @pytest.mark.parametrize("rule", [None, "member-skip"])
+    def test_an_ancestor_skip_rule_of_the_member_refuses_its_optic(self, ui, vc_pair, rule):
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+        from netbox_librenms_plugin.views.sync.modules import IGNORED_INVENTORY_ROW_MESSAGE
+
+        page, member, rows = vc_pair
+        form = install_form_for(page, "default", rows[30], "Cage 1", target=member)
+        if rule:
+            InventoryIgnoreRule.objects.create(
+                name="Member front panel",
+                match_type="class_is",
+                pattern="module",
+                action="skip",
+                description_pattern="^Front Panel",
+                require_serial_match_parent=False,
+                manufacturer=member.device_type.manufacturer,
+            )
+        before = (written_state(page), written_state(member))
+
+        response = post_single(ui, page, form)
+
+        if rule is None:
+            assert Module.objects.filter(device=member, module_bay__name="Cage 1").exists()
+            return
+        assert IGNORED_INVENTORY_ROW_MESSAGE in messages_of(response)
+        assert (written_state(page), written_state(member)) == before
+
+    def test_a_corrupt_page_device_rule_refuses_with_valid_target_rules(self, ui, vc_pair):
+        """The target's own rules load; the page device's rules are read under the lock and fail there."""
+        from netbox_librenms_plugin.views.sync.modules import INVALID_INVENTORY_RULE_MESSAGE
+
+        page, member, rows = vc_pair
+        form = install_form_for(page, "default", rows[30], "Cage 1", target=member)
+        rule = contrib_rule(FRONT_PANEL_RULE, manufacturer=page.device_type.manufacturer.name)
+        _break_the_rule(rule)
+        before = (written_state(page), written_state(member))
+
+        response = post_single(ui, page, form)
+
+        assert INVALID_INVENTORY_RULE_MESSAGE in messages_of(response)
+        assert (written_state(page), written_state(member)) == before

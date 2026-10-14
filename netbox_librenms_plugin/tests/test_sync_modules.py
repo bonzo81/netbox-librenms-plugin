@@ -308,7 +308,7 @@ class TestInventoryCacheContract:
         assert _get_cached_inventory_for_device(device, "default", view.get_cache_key) is None
 
     def test_resolve_posted_inventory_row_returns_the_cache_row_for_ent_index(self, live_librenms):
-        """The resolver hands back the cached row itself, so the caller reads its _source marker."""
+        """The resolver hands back the cached row itself and the authenticated inventory it is in."""
         from netbox_librenms_plugin.views.sync.modules import _resolve_posted_inventory_row
 
         device = make_device("resolve-row-hit", librenms_cf={"default": 771})
@@ -331,7 +331,7 @@ class TestInventoryCacheContract:
             }
         )
 
-        row, refusal = _resolve_posted_inventory_row(
+        row, inventory, refusal = _resolve_posted_inventory_row(
             request,
             device,
             device,
@@ -344,6 +344,8 @@ class TestInventoryCacheContract:
         assert refusal is None
         assert row["_librenms_port_id"] == 42
         assert row["_librenms_ifname"] == "Te1/1/1"
+        assert inventory == [item]
+        assert any(entry is row for entry in inventory)
 
     def test_resolve_posted_inventory_row_refuses_a_missing_ent_index(self, live_librenms):
         """Without an index there is no row to read, so the resolver refuses instead of guessing."""
@@ -355,7 +357,7 @@ class TestInventoryCacheContract:
         # The identity the deleted fallback used to read, with no index to resolve it against.
         request = _post_request({"librenms_port_id": "56284", "librenms_ifname": "Te1/1/1", "server_key": "default"})
 
-        row, refusal = _resolve_posted_inventory_row(
+        row, inventory, refusal = _resolve_posted_inventory_row(
             request,
             device,
             device,
@@ -365,7 +367,7 @@ class TestInventoryCacheContract:
             action_target={"module_id": 17},
         )
 
-        assert row is None
+        assert (row, inventory) == (None, None)
         assert refusal is not None
         assert "Missing or invalid inventory index." in message_texts(request, "error")
 
@@ -378,7 +380,7 @@ class TestInventoryCacheContract:
         seed_inventory(view, device, [_inventory_item(77, "CARD", "Te1/1/1")], librenms_id=555)
         request = _post_request({"ent_index": "77", "server_key": "default"})
 
-        row, refusal = _resolve_posted_inventory_row(
+        row, inventory, refusal = _resolve_posted_inventory_row(
             request,
             device,
             device,
@@ -388,7 +390,7 @@ class TestInventoryCacheContract:
             action_target={"module_id": 17},
         )
 
-        assert row is None
+        assert (row, inventory) == (None, None)
         assert refusal is not None
         assert "No cached inventory data. Please refresh modules first." in message_texts(request, "error")
 

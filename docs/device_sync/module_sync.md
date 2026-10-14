@@ -48,6 +48,8 @@ Only an install action (**Install**, **Install Carrier**) shows its label in the
 - **Add Bay Mapping** / **Add Type Mapping** / **Map Existing Bay** / **Add Module Type**: resolve "No Bay" or "No Type" statuses without leaving the page
 - **Add Bay Template**: if the device type is missing a module bay template, this button creates it inline
 
+**Install**, **Install Branch** and **Install Selected** read the Inventory Ignore Rules again when you click them. If a rule now hides the row, or hides a row above it, the action installs nothing and tells you to refresh the table. If an enabled rule stores a filter that does not compile, the action also installs nothing.
+
 ## Module Interfaces
 
 When a module type defines interface templates, installing the module also reconciles the device's interfaces with those templates. The plugin works out the names the module's interfaces should have (instantiating each interface template against the device, and rewriting names for Virtual Chassis members where needed), then adopts any existing standalone interfaces on the device that match those names into the newly installed module. This keeps interfaces that were created by a previous interface sync from being duplicated, and links them to the module that physically provides them.
