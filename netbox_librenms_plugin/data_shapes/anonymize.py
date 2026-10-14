@@ -23,7 +23,10 @@ from typing import NamedTuple
 from netbox_librenms_plugin.constants import (
     GENERIC_CONTAINER_MODELS,
     JUNOS_FPC_DESCR_PREFIX,
+    JUNOS_FPC_LOCATOR_RE,
     JUNOS_FPC_MEMBER_DESCR_RE,
+    JUNOS_PIC_LOCATOR_RE,
+    JUNOS_PORT_LOCATOR_RE,
     JUNOS_VC_ROOT_DESCR_MARKER,
     LIBRENMS_EMPTY_MESSAGES,
     LIBRENMS_GLOBAL_ROUTING_INSTANCE,
@@ -554,11 +557,27 @@ def _anon_junos_vc_descr(normalized, rules):
     return None
 
 
-def _anon_entity_text(value, rules, *, keep_vc_markers=False, keep_scb_prefix=False):
+def _anon_junos_located_descr(normalized, rules):
+    """Keep the "@ fpc/pic/port" locator of a Junos description and its PIC/FPC label or VC markers, or return None."""
+    for pattern, label in ((JUNOS_PIC_LOCATOR_RE, "PIC:"), (JUNOS_FPC_LOCATOR_RE, "FPC:")):
+        if located := pattern.fullmatch(normalized):
+            return f"{label} {_entity_token(located['text'], rules)} @ {located['locator']}"
+    located = JUNOS_PORT_LOCATOR_RE.fullmatch(normalized)
+    if located is None:
+        return None
+    prefix = _anon_junos_vc_descr(located["text"], rules)
+    if prefix is None:
+        prefix = _entity_token(located["text"], rules)
+    return f"{prefix} @ {located['locator']}"
+
+
+def _anon_entity_text(value, rules, *, keep_descr_markers=False, keep_scb_prefix=False):
     """Replace private ENTITY text while keeping a bounded terminal hierarchy locator."""
     normalized = value.strip()
-    if keep_vc_markers and (kept := _anon_junos_vc_descr(normalized, rules)) is not None:
-        return kept
+    if keep_descr_markers:
+        for keep in (_anon_junos_located_descr, _anon_junos_vc_descr):
+            if (kept := keep(normalized, rules)) is not None:
+                return kept
     if keep_scb_prefix and normalized.startswith(_SCB_NAME_PREFIX):
         if _SCB_NAME_TOKEN_RE.fullmatch(normalized):
             return normalized
@@ -803,7 +822,7 @@ def _anon_value(key, value, rules, container=None):  # noqa: C901
         return _anon_entity_text(
             value,
             rules,
-            keep_vc_markers=key == "entPhysicalDescr",
+            keep_descr_markers=key == "entPhysicalDescr",
             keep_scb_prefix=key == "entPhysicalName",
         )
     if key in VERSION_KEYS:

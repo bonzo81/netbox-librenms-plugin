@@ -98,8 +98,13 @@ def test_bundled_inventory_display_text_is_anonymized(recording):
     import re
 
     allowed = re.compile(r"(?:entity-[0-9a-f]{6}(?: \d+(?:/(?:\d+|[xc]\d+))+)?)|(?:\d+(?:/(?:\d+|[xc]\d+))+)")
-    # A description may also keep the Junos Virtual Chassis markers that VC detection reads.
-    junos_descr = re.compile(r"(?:FPC(?: \d+)? entity-[0-9a-f]{6})|(?:entity-[0-9a-f]{6} Virtual Chassis)")
+    # A description may also keep the Junos Virtual Chassis markers that VC detection reads and the
+    # Juniper MX "@ fpc/pic/port" locators that the dangling-parent repair reads.
+    junos_descr = re.compile(
+        r"(?:(?:FPC(?: \d+)? )?entity-[0-9a-f]{6} @ \d+/\d+/\d+)|(?:PIC: entity-[0-9a-f]{6} @ \d+/\d+/\*)"
+        r"|(?:FPC: entity-[0-9a-f]{6} @ \d+/\*/\*)|(?:FPC(?: \d+)? entity-[0-9a-f]{6})"
+        r"|(?:entity-[0-9a-f]{6} Virtual Chassis)"
+    )
     # A Juniper switch control board name keeps the prefix an include rule matches, never the SKU.
     scb_name = re.compile(r"SCB entity-[0-9a-f]{6}")
     for key, value in recording.get("responses", {}).items():
@@ -419,9 +424,10 @@ _LEAKED_OUIS = frozenset({"36965", "713", "21327", "8172124", "9098", "2589"})
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
 def test_bundled_recording_has_anonymized_vendor_metadata(recording):
     """
-    A committed recording must carry the anonymizer's normalized icon (generic.svg) and
-    pseudonymized manufacturer names (MFG-<hash>) — a raw value means the fixture predates an
-    anonymizer rule and re-leaks vendor metadata.
+    A committed recording carries the normalized icon and pseudonymized manufacturer names.
+
+    The icon is generic.svg and each manufacturer name is MFG-<hash>. A raw value means the fixture
+    predates an anonymizer rule and re-leaks vendor metadata.
 
     Only response bodies are checked: ``meta.vendor`` is corpus metadata the anonymizer keeps on
     purpose, exactly like ``meta.os``, so it names the platform rather than leaking a device's.
