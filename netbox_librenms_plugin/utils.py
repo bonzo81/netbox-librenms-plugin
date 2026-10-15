@@ -723,8 +723,11 @@ def cable_is_point_to_point(cable) -> bool:
     """Return whether *cable* has one termination on each end, and a profile (if any) of one connector per end."""
     # A breakout or trunk profile has more connectors and takes more far ends later, so plain sync never takes it.
     if getattr(cable, "profile", ""):
-        profile = cable.profile_class()
-        if profile is None or len(profile.a_connectors) != 1 or len(profile.b_connectors) != 1:
+        # NetBox's profile_class property is None for a stored value that is no known profile.
+        if (profile_class := cable.profile_class) is None:
+            return False
+        profile = profile_class()
+        if len(profile.a_connectors) != 1 or len(profile.b_connectors) != 1:
             return False
     prefetched = getattr(cable, "_prefetched_objects_cache", {}).get("terminations")
     if prefetched is not None:
