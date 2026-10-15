@@ -336,9 +336,7 @@ def test_location_update_reports_a_discovered_id_conflict(client, librenms_serve
 def test_location_update_answers_a_busy_identity_claim(client, librenms_server, settings):
     """An identity claim that another transaction holds gives the try-again redirect and no LibreNMS write."""
     from netbox_librenms_plugin.middleware import TRY_AGAIN_MESSAGE
-    from netbox_librenms_plugin.server_mappings import _DEVICE_CLAIM_IDENTITY
-    from netbox_librenms_plugin.tests.lock_conflict_helpers import second_connection
-    from netbox_librenms_plugin.utils import advisory_lock_key
+    from netbox_librenms_plugin.tests.claim_race_helpers import held_device_claim
 
     server_key = _point_plugin_at(settings, librenms_server.url)
     target = make_device("librenms-busy-claim-target.example.com", librenms_cf={server_key: None})
@@ -348,11 +346,8 @@ def test_location_update_answers_a_busy_identity_claim(client, librenms_server, 
         method="GET",
     )
     client.force_login(make_superuser("librenms-busy-claim-user"))
-    claim = _DEVICE_CLAIM_IDENTITY.format(server=server_key, identity=CONFLICTING_DEVICE_ID)
 
-    with second_connection() as other:
-        with other.cursor() as cursor:
-            cursor.execute("SELECT pg_advisory_xact_lock(%s)", [advisory_lock_key(claim)])
+    with held_device_claim(server_key, CONFLICTING_DEVICE_ID):
         response = client.post(
             reverse("plugins:netbox_librenms_plugin:update_device_location", args=[target.pk]),
             {"server_key": server_key},
