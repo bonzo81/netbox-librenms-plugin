@@ -760,3 +760,113 @@ def test_a_confirmed_overwrite_from_a_far_end_never_removes_the_breakout_cable()
     assert (record["cable_status"], record["can_create_cable"]) == ("Multi-termination Cable Not Supported", False)
     assert setup.b_side(cable) == [(1, setup.far_ends[0])]
     assert Interface.objects.get(pk=other.pk).cable_id is None
+
+
+SINGLE = "single-1c1p"
+
+
+def _plain_pair(tag):
+    """A page device with port eth0, a peer with port Gi0/1, and the page's cable row towards it."""
+    device = make_device(f"single-{tag}")
+    persist_test_server_mapping(device, SERVER_KEY)
+    local = make_interface(device, "eth0")
+    peer = make_device(f"single-{tag}-peer")
+    remote = make_interface(peer, "Gi0/1")
+    row = {"_source": "main", "local_port_id": 100, "local_port": "eth0", "remote_device": peer.name}
+    return device, local, remote, {**row, "remote_port": "Gi0/1", "remote_port_id": 500}
+
+
+def _single_cable(a, b, *, tagged):
+    cable = Cable(a_terminations=[a], b_terminations=[b], profile=SINGLE)
+    cable.save()
+    if tagged:
+        cable.tags.add(librenms_cable_tag())
+    return cable
+
+
+def _sync_plain(client, device, data):
+    response = client.post(reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[device.pk]), data)
+    return [str(message) for message in get_messages(response.wsgi_request)]
+
+
+@pytest.mark.usefixtures("breakout_server")
+class TestASingleProfileCableIsPointToPoint:
+    """A single-* profile has one connector on each side, so the plain path treats it as an unprofiled cable."""
+
+    def _client(self, device, row):
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        cache.set(
+            object.__new__(SyncCablesView).get_cache_key(device, "links", SERVER_KEY),
+            {"links": [row], "snapshot_token": f"single-{device.pk}"},
+            timeout=300,
+        )
+        client = Client()
+        client.force_login(make_superuser())
+        return client
+
+    def _record(self, client, device):
+        rendered = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
+            {"tab": "cables", "server_key": SERVER_KEY},
+        )
+        return next(iter(rendered.context["cable_sync"]["table"].rows)).record
+
+    def test_a_tagged_single_profile_cable_reads_as_found(self):
+        device, local, remote, row = _plain_pair("tagged")
+        _single_cable(local, remote, tagged=True)
+        client = self._client(device, row)
+
+        record = self._record(client, device)
+
+        assert (record["cable_status"], record["can_create_cable"]) == ("Cable Found", False)
+
+    def test_an_untagged_single_profile_cable_is_adopted(self):
+        device, local, remote, row = _plain_pair("untagged")
+        cable = _single_cable(local, remote, tagged=False)
+        client = self._client(device, row)
+
+        record = self._record(client, device)
+        texts = _sync_plain(client, device, _rendered_sync_data(client, device, "100"))
+
+        assert (record["cable_status"], record["can_create_cable"]) == ("Cable Found", True)
+        assert "Tagged existing cable(s) as LibreNMS-managed for: eth0" in texts
+        assert librenms_cable_tag() in Cable.objects.get(pk=cable.pk).tags.all()
+
+    def test_a_confirmed_overwrite_replaces_a_single_profile_cable(self):
+        from netbox_librenms_plugin.tests.test_cable_overwrite import _confirmed_intent
+
+        device, local, remote, row = _plain_pair("overwrite")
+        old = _single_cable(local, make_interface(make_device("single-overwrite-other"), "Gi0/9"), tagged=True)
+        client = self._client(device, row)
+
+        record = self._record(client, device)
+        local.refresh_from_db()
+        data = {
+            **_rendered_sync_data(client, device, "100"),
+            "force": "on",
+            "expected_cable_intent_100": _confirmed_intent(local, remote, old),
+        }
+        texts = _sync_plain(client, device, data)
+
+        local.refresh_from_db()
+        remote.refresh_from_db()
+        assert (record["cable_status"], record["can_create_cable"]) == ("Cable Mismatch", True)
+        assert "Overwrote existing cable for interfaces: eth0" in texts
+        assert not Cable.objects.filter(pk=old.pk).exists()
+        assert local.cable_id is not None and local.cable_id == remote.cable_id
+
+
+def test_a_single_profile_serial_cable_reads_as_found():
+    from netbox_librenms_plugin.tests.conftest import make_serial_device, make_serial_row
+    from netbox_librenms_plugin.tests.test_serial_cables_view import _make_view
+
+    acs, (csp,), _ = make_serial_device("single-serial", csp_names=["ttyS1"])
+    _remote, _, (console,) = make_serial_device("single-serial-r", cp_names=["console"])
+    cable = Cable(a_terminations=[csp], b_terminations=[console], profile=SINGLE)
+    cable.save()
+    cable.tags.add(librenms_cable_tag())
+
+    link = _make_view().enrich_links_data([make_serial_row(csp, "single-serial-r", acs)], acs, server_key=SERVER_KEY)[0]
+
+    assert (link["cable_status"], link["can_create_cable"]) == ("Cable Found", False)
