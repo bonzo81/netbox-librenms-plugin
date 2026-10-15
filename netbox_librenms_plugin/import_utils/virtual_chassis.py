@@ -1,5 +1,6 @@
 """Virtual chassis detection, creation, and management."""
 
+import functools
 import logging
 import re
 from typing import List, NamedTuple
@@ -75,8 +76,14 @@ def _vc_cache_key(api: LibreNMSAPI, device_id: int | str) -> str:
     return f"librenms_vc_detection_{_VC_CACHE_VERSION}_{server_key}_{device_id}"
 
 
-def get_virtual_chassis_data(api: LibreNMSAPI, device_id: int | str, *, force_refresh: bool = False) -> dict:
-    """Fetch (and cache) virtual chassis data for a LibreNMS device."""
+def get_virtual_chassis_data(
+    api: LibreNMSAPI, device_id: int | str, *, force_refresh: bool = False, candidate_keys=None
+) -> dict:
+    """
+    Fetch (and cache) virtual chassis data for a LibreNMS device.
+
+    *candidate_keys* returns :func:`candidate_vc_serial_keys`; a batch passes one memoized callable.
+    """
     if not api or device_id is None:
         return empty_virtual_chassis_data()
 
@@ -88,7 +95,7 @@ def get_virtual_chassis_data(api: LibreNMSAPI, device_id: int | str, *, force_re
         if cached is not None:
             return _clone_virtual_chassis_data(cached)
 
-    detection_data = detect_virtual_chassis_from_inventory(api, device_id)
+    detection_data = detect_virtual_chassis_from_inventory(api, device_id, candidate_keys=candidate_keys)
     if detection_data is None:
         # Cache a confirmed non-stack result so subsequent renders skip repeated reads.
         empty = empty_virtual_chassis_data()
@@ -130,11 +137,13 @@ def prefetch_vc_data_for_devices(api: LibreNMSAPI, device_ids: List[int], *, for
         return
 
     logger.debug(f"Pre-warming VC cache for {len(device_ids)} devices")
+    # Batch-local: a rule change shows in the next batch.
+    candidate_keys = functools.cache(candidate_vc_serial_keys)
 
     for idx, device_id in enumerate(device_ids):
         # This populates the cache if empty, or skips if already cached
         try:
-            get_virtual_chassis_data(api, device_id, force_refresh=force_refresh)
+            get_virtual_chassis_data(api, device_id, force_refresh=force_refresh, candidate_keys=candidate_keys)
         except (BrokenPipeError, ConnectionError, IOError, OSError) as e:
             logger.warning("Connection error during VC prefetch at device %s: %s", idx, e)
             # Stop processing if connection is broken
@@ -555,7 +564,7 @@ def attribute_inventory(rows: list, vc_members: list, serial_key) -> list[tuple]
     return [attribution.resolve(row) for row in rows]
 
 
-def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> dict | None:
+def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int, *, candidate_keys=None) -> dict | None:
     """
     Detect a stack or Virtual Chassis from ENTITY-MIB inventory.
 
@@ -565,6 +574,7 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
     Args:
         api: LibreNMSAPI instance
         device_id: LibreNMS device ID
+        candidate_keys: Returns :func:`candidate_vc_serial_keys`; None calls it directly.
 
     Returns:
         dict | None: ``{is_stack, member_count, members, detection_failed, detection_error}``.
@@ -601,7 +611,8 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
             logger.warning(f"Could not read child inventory for device {device_id}")
             return _failed_virtual_chassis_data("LibreNMS child inventory request failed")
 
-        members = extract_vc_members([*root_items, *(child_items or [])], candidate_vc_serial_keys())
+        serial_keys = (candidate_keys or candidate_vc_serial_keys)()
+        members = extract_vc_members([*root_items, *(child_items or [])], serial_keys)
         if not members:
             return None
 

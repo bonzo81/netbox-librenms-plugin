@@ -228,6 +228,42 @@ class TestPrefetchVcData:
         assert _inventory_paths(librenms_server, 7203)
         assert "Error prefetching VC data for device 7202" in caplog.text
 
+    @pytest.mark.parametrize("entry", ["prefetch", "collision-scan"])
+    def test_a_batch_reads_the_serial_rules_once_and_the_next_batch_reads_them_again(
+        self, settings, librenms_server, entry
+    ):
+        from django.core.cache import cache
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.import_utils import virtual_chassis as vc_module
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        api = _api(settings, librenms_server, f"vc_batch_rules_{entry}")
+        device_ids = [7401, 7402, 7403]
+        for device_id in device_ids:
+            _seed_stack(librenms_server, device_id)
+        rows = {device_id: {"device_id": device_id, "hostname": f"sw-{device_id}"} for device_id in device_ids}
+        table = f'"{NormalizationRule._meta.db_table}"'
+
+        def run_batch():
+            if entry == "prefetch":
+                vc_module.prefetch_vc_data_for_devices(api, device_ids, force_refresh=True)
+                return
+            cache.delete_many([vc_module._vc_cache_key(api, device_id) for device_id in device_ids])
+            detect_collisions_for_device_ids(device_ids, api, libre_devices_cache=dict(rows))
+
+        def rule_reads(call):
+            with CaptureQueriesContext(connection) as queries:
+                call()
+            return [query for query in queries.captured_queries if table in query["sql"]]
+
+        one_key_set = rule_reads(vc_module.candidate_vc_serial_keys)
+        for _batch in range(2):
+            assert len(rule_reads(run_batch)) == len(one_key_set)
+        assert all(vc_module.get_virtual_chassis_data(api, device_id)["is_stack"] for device_id in device_ids)
+
 
 @pytest.mark.django_db
 class TestDetectVirtualChassisFailures:
