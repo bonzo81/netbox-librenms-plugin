@@ -18,8 +18,8 @@ from django.utils.html import escape
 from django.views import View
 
 from netbox_librenms_plugin.breakout_cables import (
+    HIDDEN_REASONS,
     breakout_far_end,
-    channel_write_endpoints,
     decide_breakout_cable,
     decide_channel_far_end,
     holds_a_cable,
@@ -429,7 +429,7 @@ class BaseCableTableView(
         return sync_device
 
     def _apply_termination_change_scope(self, links, preloaded_changeable_ids=None):
-        """Disable cable writes unless every interface the write writes is changeable."""
+        """Disable cable writes unless both resolved terminations are changeable."""
         required_ids = defaultdict(set)
         row_requirements = []
         for link in links:
@@ -444,7 +444,6 @@ class BaseCableTableView(
                     requirements = [
                         (Interface, coerce_librenms_id(link.get("netbox_local_interface_id"))),
                         (Interface, coerce_librenms_id(link.get("netbox_remote_interface_id"))),
-                        *((Interface, pk) for pk in link.get("_extra_write_endpoint_ids", ())),
                     ]
                 for model, object_id in requirements:
                     if object_id is not None:
@@ -734,12 +733,6 @@ class BaseCableTableView(
             if interface_librenms_id is not None:
                 interface_ids_by_device[(interface.device_id, interface_librenms_id)].append(interface)
         cable_ids = {interface.cable_id for interface in catalog_interfaces if interface.cable_id is not None}
-        # A channel row reads the cable on its parent.
-        cable_ids.update(
-            interface.parent.cable_id
-            for interface in catalog_interfaces
-            if interface.parent_id is not None and interface.parent.cable_id is not None
-        )
         return {
             "server_key": server_key,
             "interfaces_by_pk": interfaces_by_pk,
@@ -1678,7 +1671,7 @@ class BaseCableTableView(
                 except Interface.DoesNotExist:
                     link["cable_status"] = "Interface Not Available"
                     return link
-            if self._is_breakout_row(link, local_interface, remote_interface, actionable, normal_context):
+            if self._is_breakout_row(link, local_interface, remote_interface, actionable):
                 return link
             local_cable = local_interface.cable
             remote_cable = remote_interface.cable
@@ -1833,43 +1826,15 @@ class BaseCableTableView(
         peer_device = self._viewable_cable_peer_device(interface, cable)
         link["cable_status"] = f"Cabled to {peer_device.name}" if peer_device is not None else "Cabled in Netbox"
 
-    def _is_breakout_row(self, link, local_interface, remote_interface, actionable, normal_context):
-        """Return whether an end of the row is a channel; the row then shows the breakout decision."""
-        channel = local_interface if is_channel(local_interface) else remote_interface
-        if not is_channel(channel):
+    def _is_breakout_row(self, link, local_interface, remote_interface, actionable):
+        """Return whether an end of the row is a channel; the row then shows the breakout gate's decision."""
+        if is_channel(local_interface):
+            decision = self._breakout_decision(local_interface, remote_interface)
+        elif (decision := decide_channel_far_end(local_interface, remote_interface, self._may)) is None:
             return False
-        parent = channel.parent
-        if parent is not None and not self._object_is_viewable(parent):
-            # The decision reads the parent's name and state, so a hidden parent leaves only a generic reason.
-            link["cable_status"] = "Breakout Not Synced: the parent interface of this channel is not available"
-            return True
-        cable = None if parent is None else parent.cable
-        if not self._breakout_cable_is_viewable(cable, normal_context):
-            link["cable_status"] = "Cable State Not Available"
-            return True
-        if channel is local_interface:
-            decision = decide_breakout_cable(channel, parent, cable, remote_interface, self._provenance_tag())
-            # An extend changes the existing cable, so the row needs change on that cable as the writer does.
-            if decision.action == "extend" and not self._changeable_queryset(Cable).filter(pk=cable.pk).exists():
-                actionable = False
-            link["_extra_write_endpoint_ids"] = [endpoint.pk for endpoint in channel_write_endpoints(channel)]
-        else:
-            decision = decide_channel_far_end(local_interface, remote_interface)
-        self._set_breakout_row_status(link, decision, cable, actionable)
-        return True
-
-    def _breakout_cable_is_viewable(self, cable, normal_context):
-        """Return whether the request may view the cable on a channelized parent; no cable is viewable."""
-        if cable is None:
-            return True
-        if normal_context is not None:
-            return cable.pk in normal_context["visible_cable_ids"]
-        return self._object_is_viewable(cable)
-
-    @staticmethod
-    def _set_breakout_row_status(link, decision, cable, actionable):
-        """Show a breakout decision on its row: matching, refused with the reason, or a write to offer."""
-        if cable is not None:
+        channel = local_interface if is_channel(local_interface) else remote_interface
+        cable = None if channel.parent is None else channel.parent.cable
+        if cable is not None and decision.reason not in HIDDEN_REASONS:
             link["cable_url"] = reverse("dcim:cable", args=[cable.pk])
         if decision.action == "matching":
             link["cable_status"] = "Cable Found"
@@ -1878,6 +1843,16 @@ class BaseCableTableView(
         else:
             link["cable_status"] = "No Cable"
             link["can_create_cable"] = actionable
+        return True
+
+    def _breakout_decision(self, channel, remote):
+        """Return the breakout gate's decision for a channel row of this request."""
+        return decide_breakout_cable(channel, remote, self._provenance_tag(), self._may)
+
+    def _may(self, action, obj):
+        """Return whether the request user may do *action* (``view`` or ``change``) on *obj*."""
+        queryset = self._viewable_queryset if action == "view" else self._changeable_queryset
+        return queryset(type(obj)).filter(pk=obj.pk).exists()
 
     def _viewable_cable_peer_device(self, interface, cable):
         """Return the device at the far end of *cable*, only when the request may view it."""
@@ -2452,6 +2427,12 @@ class BaseCableTableView(
                 return
         except AmbiguousLibreNMSIdError:
             return
+        local = self._viewable_queryset(Interface).filter(pk=link["netbox_local_interface_id"]).first()
+        if is_channel(local):
+            decision = self._breakout_decision(local, None)
+            if decision.action not in ("create", "extend"):
+                link["cable_status"] = f"Breakout Not Synced: {decision.reason}"
+                return
         url = reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[obj.pk])
         query = f"row_id={quote_plus(str(link.get('row_id', '')))}"
         query += f"&expected_local_id={link['netbox_local_interface_id']}"
