@@ -538,7 +538,9 @@ def _constrained_user(name, *, interface_view=None, cable_change=None):
 
     from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
-    user = make_user_with_perms(name, [("view", Device), ("view", Cable), ("add", Cable), ("change", Interface)])
+    user = make_user_with_perms(
+        name, [("view", Device), ("view", Cable), ("add", Cable), ("add", Interface), ("change", Interface)]
+    )
     user = grant(user, "view", Interface, constraints=interface_view)
     return grant(user, "change", Cable, constraints=cable_change)
 
@@ -571,5 +573,93 @@ def test_an_extend_needs_change_on_the_existing_parent_cable():
     record = setup.records()["102"]
     verified = setup.verify(2)
 
-    assert (record["cable_status"], record["can_create_cable"]) == ("No Cable", False)
-    assert verified["can_create_cable"] is False
+    reason = "Breakout Not Synced: you may not change the cable on et-0/0/1"
+    assert (record["cable_status"], record["can_create_cable"]) == (reason, False)
+    # Verify links the status to the cable the user may view.
+    assert (reason in verified["cable_status"], verified["can_create_cable"]) == (True, False)
+
+
+def _missing_far_end(setup, librenms_server, channel_id, librenms_id):
+    """Return the row of *channel_id* towards a peer port that LibreNMS has and NetBox does not."""
+    from netbox_librenms_plugin.tests.conftest import map_device_to_librenms
+
+    port_id = 200 + channel_id
+    name = f"Ethernet{channel_id}0"
+    map_device_to_librenms(setup.peer, librenms_id, server_key=SERVER_KEY)
+    librenms_server.register(
+        f"/api/v0/ports/{port_id}",
+        {
+            "status": "ok",
+            "port": [
+                {
+                    "port_id": port_id,
+                    "device_id": librenms_id,
+                    "deleted": 0,
+                    "ifName": name,
+                    "ifDescr": name,
+                    "ifType": "ethernetCsmacd",
+                    "ifSpeed": 25_000_000_000,
+                }
+            ],
+        },
+    )
+    return {**setup.row(channel_id), "remote_device_id": librenms_id, "remote_port": name, "remote_port_key": port_id}
+
+
+def _post_create_remote(setup, channel_id):
+    """POST the create-remote action of the row of *channel_id* the way its button would."""
+    row_id = str(100 + channel_id)
+    return setup.client.post(
+        reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[setup.device.pk]),
+        {"row_id": row_id, "expected_local_id": setup.channels[channel_id - 1].pk, "server_key": SERVER_KEY},
+    )
+
+
+@pytest.mark.usefixtures("breakout_server")
+def test_a_direct_post_never_names_a_hidden_parent():
+    setup = _Breakout("hidden-parent-post")
+    setup.seed(setup.row(1), setup.row(2))
+    setup.client.force_login(_constrained_user("breakout-hidden-post", interface_view={"channels__isnull": True}))
+
+    texts = setup.sync(2)
+
+    assert any("the parent interface of this channel is not available" in text for text in texts), texts
+    assert not any("on et-0/0/1 " in text for text in texts), texts
+    assert setup.parent_cable() is None
+
+
+@pytest.mark.usefixtures("breakout_server")
+def test_create_remote_is_offered_only_on_the_next_channel(librenms_server):
+    setup = _Breakout("create-far-gap")
+    setup.seed(setup.row(1), _missing_far_end(setup, librenms_server, 3, 9003))
+    setup.sync(1)
+
+    record = setup.records()["103"]
+    verified = setup.verify(3)
+    response = _post_create_remote(setup, 3)
+
+    reason = "Breakout Not Synced: channel ID 2 has no far end on et-0/0/1 yet, so sync channel ID 2 first"
+    assert (record["cable_status"], record.get("remote_create_url")) == (reason, None)
+    assert verified["cable_status"] == reason
+    assert "cable-remote-create" not in verified["actions"] and "remote-create" not in verified["actions"]
+    assert response.status_code == 404
+    assert not Interface.objects.filter(device=setup.peer, name="Ethernet30").exists()
+    assert setup.b_side(setup.parent_cable()) == [(1, setup.far_ends[0])]
+
+
+@pytest.mark.usefixtures("breakout_server")
+def test_create_remote_is_not_offered_under_a_hidden_parent(librenms_server):
+    setup = _Breakout("create-far-hidden")
+    setup.seed(setup.row(1), _missing_far_end(setup, librenms_server, 2, 9004))
+    setup.sync(1)
+    setup.client.force_login(_constrained_user("breakout-create-hidden", interface_view={"channels__isnull": True}))
+
+    record = setup.records()["102"]
+    verified = setup.verify(2)
+    response = _post_create_remote(setup, 2)
+
+    reason = "Breakout Not Synced: the parent interface of this channel is not available"
+    assert (record["cable_status"], record.get("remote_create_url")) == (reason, None)
+    assert verified["cable_status"] == reason
+    assert response.status_code == 404
+    assert not Interface.objects.filter(device=setup.peer, name="Ethernet20").exists()
