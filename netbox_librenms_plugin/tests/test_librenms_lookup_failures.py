@@ -333,6 +333,37 @@ def test_location_update_reports_a_discovered_id_conflict(client, librenms_serve
 
 
 @pytest.mark.django_db
+def test_location_update_answers_a_busy_identity_claim(client, librenms_server, settings):
+    """An identity claim that another transaction holds gives the try-again redirect and no LibreNMS write."""
+    from netbox_librenms_plugin.middleware import TRY_AGAIN_MESSAGE
+    from netbox_librenms_plugin.server_mappings import _DEVICE_CLAIM_IDENTITY
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import second_connection
+    from netbox_librenms_plugin.utils import advisory_lock_key
+
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    target = make_device("librenms-busy-claim-target.example.com", librenms_cf={server_key: None})
+    librenms_server.register(
+        f"/api/v0/devices/{target.name}",
+        {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
+        method="GET",
+    )
+    client.force_login(make_superuser("librenms-busy-claim-user"))
+    claim = _DEVICE_CLAIM_IDENTITY.format(server=server_key, identity=CONFLICTING_DEVICE_ID)
+
+    with second_connection() as other:
+        with other.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_xact_lock(%s)", [advisory_lock_key(claim)])
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:update_device_location", args=[target.pk]),
+            {"server_key": server_key},
+        )
+
+    assert response.status_code == 302
+    assert [str(message) for message in get_messages(response.wsgi_request)] == [TRY_AGAIN_MESSAGE]
+    assert {request["method"] for request in librenms_server.requests} == {"GET"}, librenms_server.requests
+
+
+@pytest.mark.django_db
 def test_device_status_reports_a_discovered_id_conflict(client, librenms_server, settings):
     """A status lookup must identify the conflicting owner instead of only showing unlinked."""
     server_key = _point_plugin_at(settings, librenms_server.url)
