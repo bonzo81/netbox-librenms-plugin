@@ -26,7 +26,6 @@ from netbox_librenms_plugin.sync_cache import (
     TAB_SPECS,
     SyncCacheConsistency,
     SyncTab,
-    SyncTabState,
     sync_cache_browser_contract,
 )
 from netbox_librenms_plugin.utils import (
@@ -307,16 +306,7 @@ class BaseLibreNMSSyncView(
                 active_tab=SyncTab(active_sync_tab),
             )
 
-        active_cache_state = sync_cache_status.get(active_sync_tab) if sync_cache_status else None
-        cache_only_device_info = bool(
-            active_cache_state
-            and active_cache_state["state"] in (SyncTabState.INVALIDATED.value, SyncTabState.REFRESH_FAILED.value)
-        )
-        librenms_info = self.get_librenms_device_info(
-            obj,
-            request,
-            cache_only=cache_only_device_info,
-        )
+        librenms_info = self.get_librenms_device_info(obj, request)
 
         interface_context = self.get_interface_context(request, obj)
         cable_context = self.get_cable_context(request, obj)
@@ -511,7 +501,7 @@ class BaseLibreNMSSyncView(
         mappings = build_server_mappings(obj, active_server_key, plugin_config=plugins_cfg)
         return [asdict(mapping) for mapping in mappings] or None
 
-    def get_librenms_device_info(self, obj, request=None, *, cache_only=False):
+    def get_librenms_device_info(self, obj, request=None):
         """Get the LibreNMS device information for the given object."""
         found_in_librenms = False
         mismatched_device = False
@@ -527,18 +517,14 @@ class BaseLibreNMSSyncView(
             "librenms_device_location": "-",
             "librenms_device_hardware_match": None,
             "vc_inventory_serials": [],
-            "vc_inventory_not_loaded": False,
         }
 
         if self.librenms_id is not None:
-            success, device_info = self.librenms_api.get_device_info(self.librenms_id, cache_only=cache_only)
+            success, device_info = self.librenms_api.get_device_info(self.librenms_id)
             # A lookup that failed for its own reason must not be reported as a missing device.
             from netbox_librenms_plugin.librenms_api import LibreNMSLookupError
 
             lookup_error = device_info if isinstance(device_info, LibreNMSLookupError) else None
-            # One flag for "no usable device info", so every consumer (status text, the add
-            # action, its modal, the tab region) stays in step. The reason travels separately.
-            device_info_unavailable = (cache_only and not success) or lookup_error is not None
             # isinstance(dict) guard: a truthy non-dict payload (string/list) would 500 on the
             # device_info.get(...) calls below; fall back to the default details block instead
             # of trusting success=True alone (issue #100).
@@ -603,14 +589,9 @@ class BaseLibreNMSSyncView(
                     }
                 )
 
-                # For Virtual Chassis, fetch inventory. Inventory has no snapshot, so a
-                # cache-only render must skip it instead of contacting LibreNMS. The skip is
-                # reported separately, or an unloaded inventory renders as an empty one.
+                # For Virtual Chassis, fetch inventory
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                    if cache_only:
-                        librenms_device_details["vc_inventory_not_loaded"] = True
-                    else:
-                        librenms_device_details["vc_inventory_serials"] = self._get_vc_inventory_serials(obj)
+                    librenms_device_details["vc_inventory_serials"] = self._get_vc_inventory_serials(obj)
 
                 # Device was retrieved successfully via librenms_id — trust the ID
                 found_in_librenms = True

@@ -647,8 +647,8 @@ class TestGetDeviceInfoErrors:
         # ...then the import path reads live and LibreNMS denies the device.
         assert api.get_device_info(device_id, use_cache=False) == (False, None)
 
-        # A cache-only read (the partial refresh) must not resurrect the deleted device.
-        assert api.get_device_info(device_id, cache_only=True) == (False, None)
+        # A later cached read must not resurrect the deleted device.
+        assert cache.get(f"librenms_device_info_default_{device_id}") is None
 
     def test_request_exception_reports_the_lookup_failure(self, settings, librenms_server):
         """A transport failure is not an answer about the device, so it is not "not found"."""
