@@ -260,7 +260,7 @@ class TestBreakoutCableWrites:
         ("profile", "tagged", "reason"),
         [
             (PROFILE, False, "does not have the LibreNMS cable tag"),
-            ("", True, "has no breakout-1c4p-4c1p profile"),
+            ("", True, "uses profile none, which this sync does not read"),
         ],
         ids=["untagged", "unprofiled"],
     )
@@ -280,6 +280,27 @@ class TestBreakoutCableWrites:
         assert Cable.objects.get(pk=foreign.pk).profile == profile
         assert setup.b_side(foreign) == [(1 if profile else None, setup.far_ends[0])]
         assert Interface.objects.get(pk=setup.far_ends[1].pk).cable_id is None
+
+    def test_a_cable_with_another_breakout_profile_never_reads_as_matching(self):
+        from netbox_librenms_plugin.utils import cable_far_terminations
+
+        setup = _Breakout("shuffle")
+        # On this profile, channel 3 of A connector 1 maps to B connector 5, not 3.
+        shuffle = Cable(
+            a_terminations=[setup.parent], b_terminations=setup.far_ends[:3], profile="breakout-2c4p-8c1p-shuffle"
+        )
+        shuffle.save()
+        shuffle.tags.add(librenms_cable_tag())
+        setup.seed(setup.row(3))
+
+        record = setup.records()["103"]
+        texts = setup.sync(3)
+
+        reason = "the cable on et-0/0/1 uses profile breakout-2c4p-8c1p-shuffle, which this sync does not read"
+        assert (record["cable_status"], record["can_create_cable"]) == (f"Breakout Not Synced: {reason}", False)
+        assert any(reason in text for text in texts), texts
+        channel = Interface.objects.get(pk=setup.channels[2].pk)
+        assert cable_far_terminations(Cable.objects.get(pk=shuffle.pk), channel) == []
 
     def test_a_far_end_that_is_a_channel_is_refused(self):
         setup = _Breakout("far-channel")
