@@ -1519,8 +1519,9 @@ def get_table_paginate_count(request: HttpRequest, table_prefix: str) -> int:
     """
     Return the page size of one sync tab table, and remember a requested size for that tab.
 
-    The order is: a valid ``<prefix>per_page`` request value (saved when it changes), the size
-    saved for the tab, then NetBox's own page size. Every size is clamped to MAX_PAGE_SIZE.
+    The order is: a valid ``<prefix>per_page`` request value, the size saved for the tab, then
+    NetBox's own page size. A request value is saved when it differs from the size the tab
+    shows without it. Every size is clamped to MAX_PAGE_SIZE.
 
     Args:
         request: HTTP request object
@@ -1534,16 +1535,21 @@ def get_table_paginate_count(request: HttpRequest, table_prefix: str) -> int:
     param_key = f"{table_prefix}per_page"
     param_value = request.POST.get(param_key) if param_key in request.POST else request.GET.get(param_key)
     preference = f"{SYNC_TAB_PAGE_SIZE_PREFERENCE}.{table_prefix.rstrip('_')}"
-    requested = coerce_positive_int(param_value)
-    per_page = requested if requested is not None else coerce_positive_int(get_user_pref(request, preference))
-    if per_page is None:
-        return netbox_get_paginate_count(request)
     max_page_size = get_config().MAX_PAGE_SIZE
-    # MAX_PAGE_SIZE 0/None disables the NetBox ceiling; don't clamp to it (min() with 0
-    # would zero the page size, and with None it TypeErrors).
-    if max_page_size:
-        per_page = min(per_page, max_page_size)
-    if requested is not None and per_page != get_user_pref(request, preference):
+
+    def clamp(per_page):
+        # MAX_PAGE_SIZE 0/None disables the NetBox ceiling; don't clamp to it (min() with 0
+        # would zero the page size, and with None it TypeErrors).
+        return min(per_page, max_page_size) if max_page_size else per_page
+
+    saved = coerce_positive_int(get_user_pref(request, preference))
+    current = clamp(saved) if saved is not None else netbox_get_paginate_count(request)
+    requested = coerce_positive_int(param_value)
+    if requested is None:
+        return current
+    per_page = clamp(requested)
+    # Page links and the sync form carry the rendered size, so only a different size is a choice.
+    if per_page != current:
         save_user_pref(request, preference, per_page)
     return per_page
 

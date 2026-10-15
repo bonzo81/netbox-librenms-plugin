@@ -832,7 +832,10 @@ class TestPaginationHelpers:
 
         from netbox_librenms_plugin.utils import get_table_paginate_count
 
+        from django.contrib.auth.models import AnonymousUser
+
         request = RequestFactory().get("/", {"table1_per_page": "50"})
+        request.user = AnonymousUser()
 
         result = get_table_paginate_count(request, "table1_")
 
@@ -845,8 +848,11 @@ class TestPaginationHelpers:
 
         from netbox_librenms_plugin.utils import get_table_paginate_count
 
+        from django.contrib.auth.models import AnonymousUser
+
         settings.MAX_PAGE_SIZE = disabled_max
         request = RequestFactory().get("/", {"table1_per_page": "500"})
+        request.user = AnonymousUser()
 
         assert get_table_paginate_count(request, "table1_") == 500
 

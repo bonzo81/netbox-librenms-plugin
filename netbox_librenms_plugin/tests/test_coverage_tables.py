@@ -6,6 +6,7 @@ from html import unescape
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory
 from django.urls import reverse
 
@@ -1513,6 +1514,7 @@ class TestInterfaceFormatting:
     def test_configure_uses_the_real_request_and_paginator(self):
         table = _interface_table(data=[_port()])
         request = RequestFactory().get("/", {"interfaces_per_page": "1"})
+        request.user = AnonymousUser()
 
         table.configure(request)
 

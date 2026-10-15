@@ -1,15 +1,17 @@
 """Each sync tab remembers the page size the user picked, per tab, in the user's preferences."""
 
 import re
+from copy import deepcopy
 
 import pytest
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory
 from django.urls import reverse
-from users.models import UserConfig
 
 from netbox_librenms_plugin.tests.conftest import make_device
+from netbox_librenms_plugin.tests.test_interface_sync_htmx_swap import FIRST_PORT, _ports, _post, _sync_data
+from netbox_librenms_plugin.tests.test_interface_sync_htmx_swap import _seed as _seed_ports
 from netbox_librenms_plugin.tests.test_ip_address_sync_safety import _configure_test_server, _serve_librenms_ip_rows
 from netbox_librenms_plugin.tests.test_sync_option_preferences import SERVER_KEY, _seed, _user
 from netbox_librenms_plugin.utils import get_table_paginate_count
@@ -26,6 +28,20 @@ pytestmark = pytest.mark.django_db
 
 def _stored(user, path):
     return get_user_model().objects.get(pk=user.pk).config.get(path)
+
+
+def _set_netbox_page_size(user, size):
+    """Change the user's NetBox page size the way the NetBox preferences form does."""
+    config = get_user_model().objects.get(pk=user.pk).config
+    config.data = deepcopy(config.data)
+    config.set("pagination.per_page", size, commit=True)
+
+
+def _paged_device(name):
+    """Return a device with 30 interface rows, so a page size of 10 renders 3 pages."""
+    device = make_device(name, librenms_cf={SERVER_KEY: {"id": 42}})
+    _seed_ports(device, _ports())
+    return device
 
 
 def _device(name):
@@ -109,6 +125,7 @@ def test_a_page_size_above_the_ceiling_is_clamped_before_it_is_saved(client, set
     user = _user("page-size-ceiling")
     client.force_login(user)
     device = _device("page-size-ceiling-device")
+    _set_netbox_page_size(user, 10)
 
     assert _interfaces(client, device, interfaces_per_page="500") == 20
     assert _stored(user, INTERFACES_PREFERENCE) == 20
@@ -124,15 +141,52 @@ def test_a_saved_page_size_is_not_shown_to_another_user(client):
     assert _interfaces(client, device) != 7
 
 
-def test_a_user_without_a_preference_row_or_a_login_gets_the_page_size_it_asked_for():
-    """The sync tabs require a login, so these two users only reach the helper directly."""
-    user = _user("page-size-no-config")
-    UserConfig.objects.filter(user=user).delete()
-    no_config = RequestFactory().get("/", {"interfaces_per_page": "7"})
-    no_config.user = get_user_model().objects.get(pk=user.pk)
+def test_an_anonymous_request_gets_the_page_size_it_asked_for():
+    """The sync tabs require a login, so an anonymous request only reaches the helper directly."""
     anonymous = RequestFactory().get("/", {"interfaces_per_page": "7"})
     anonymous.user = AnonymousUser()
 
-    assert get_table_paginate_count(no_config, "interfaces_") == 7
     assert get_table_paginate_count(anonymous, "interfaces_") == 7
-    assert not UserConfig.objects.filter(user=user).exists()
+
+
+def test_a_page_link_that_carries_the_rendered_size_saves_nothing(client):
+    """Each page link carries the rendered size, so paging does not pin NetBox's page size on the tab."""
+    user = _user("page-size-paging")
+    client.force_login(user)
+    device = _paged_device("page-size-paging-device")
+    _set_netbox_page_size(user, 10)
+    assert _interfaces(client, device) == 10
+
+    assert _interfaces(client, device, interfaces_page="2", interfaces_per_page="10") == 10
+    assert _stored(user, INTERFACES_PREFERENCE) is None
+
+    _set_netbox_page_size(user, 25)
+    assert _interfaces(client, device) == 25
+
+
+def test_a_sync_post_that_carries_the_rendered_size_saves_nothing(client):
+    user = _user("page-size-sync-post")
+    client.force_login(user)
+    device = _paged_device("page-size-sync-post-device")
+    _set_netbox_page_size(user, 10)
+
+    response = _post(client, device, _sync_data(FIRST_PORT + 12, page=2, per_page=10))
+
+    assert response.status_code == 200
+    assert "Showing 11-20 of 30" in response.content.decode()
+    assert _stored(user, INTERFACES_PREFERENCE) is None
+
+
+def test_selecting_the_netbox_page_size_after_another_size_is_saved(client):
+    """The selected size is kept for the tab, also when it is equal to the NetBox page size at that time."""
+    user = _user("page-size-back-to-netbox")
+    client.force_login(user)
+    device = _paged_device("page-size-back-to-netbox-device")
+    _set_netbox_page_size(user, 10)
+    assert _interfaces(client, device, interfaces_per_page="7") == 7
+
+    assert _interfaces(client, device, interfaces_per_page="10") == 10
+    assert _stored(user, INTERFACES_PREFERENCE) == 10
+
+    _set_netbox_page_size(user, 25)
+    assert _interfaces(client, device) == 10
