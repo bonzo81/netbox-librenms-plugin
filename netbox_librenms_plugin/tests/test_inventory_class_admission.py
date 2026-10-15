@@ -1,6 +1,7 @@
 """Inventory class admission through include rules: the seeded classes, filters, display flag and failures."""
 
 import json
+import re
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -241,7 +242,7 @@ class TestEmptyPolicy:
         response, module_sync = _refresh(device, server_key)
 
         content = response.content.decode()
-        assert module_sync["no_inventory_class_admitted"] is True
+        assert module_sync["devices_without_inventory_class"] == [device]
         assert 'id="module-no-inventory-class"' in content
         assert reverse("plugins:netbox_librenms_plugin:inventoryignorerule_list") in content
         # Rows from the transceivers API keep their own path.
@@ -254,8 +255,78 @@ class TestEmptyPolicy:
 
         response, module_sync = _refresh(device, server_key)
 
-        assert module_sync["no_inventory_class_admitted"] is False
+        assert module_sync["devices_without_inventory_class"] == []
         assert 'id="module-no-inventory-class"' not in response.content.decode()
+
+    @staticmethod
+    def _render_vc_modules_tab(client, settings, tag, inventory, admitted_manufacturer_of):
+        """Render a mixed-vendor VC's Modules tab with one include rule scoped to one member's vendor."""
+        from django.core.cache import cache
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.tests.test_modules_view import _make_mixed_manufacturer_chassis, configure_servers
+        from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        configure_servers(
+            settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
+        )
+        page, member, _member_manufacturer = _make_mixed_manufacturer_chassis(tag)
+        admitting = page if admitted_manufacturer_of == "page" else member
+        InventoryIgnoreRule.objects.filter(action=InventoryIgnoreRule.ACTION_INCLUDE).update(enabled=False)
+        InventoryIgnoreRule.objects.create(
+            name="Admit modules for one vendor",
+            match_type=InventoryIgnoreRule.MATCH_CLASS_IS,
+            pattern="module",
+            action=InventoryIgnoreRule.ACTION_INCLUDE,
+            require_serial_match_parent=False,
+            manufacturer=admitting.device_type.manufacturer,
+        )
+        payload = trusted_module_inventory_payload(page, inventory, librenms_id=9304)
+        cache.set(DeviceModuleTableView().get_cache_key(page, "inventory", server_key="default"), payload, 300)
+        cache.set("librenms_device_info_default_9304", (True, {"device_id": 9304, "hostname": page.name}), 300)
+        client.force_login(make_superuser(f"{tag}-user"))
+
+        response = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[page.pk]),
+            {"tab": "modules", "server_key": "default"},
+        )
+
+        assert response.status_code == 200
+        rows = list(response.context["module_sync"]["table"].data)
+        alert = re.search(r'id="module-no-inventory-class".*?</div>', response.content.decode(), re.S)
+        return page, member, rows, alert
+
+    @pytest.mark.parametrize("admitted_manufacturer_of", ["page", "member"])
+    def test_a_vc_alert_names_the_member_whose_rows_no_rule_admits(self, client, settings, admitted_manufacturer_of):
+        """VC rows follow their member's policy, so the alert reads every policy that a row uses."""
+        # Position 2 attributes a row to the member; a row without a position stays on the page.
+        member_row = _entity(161, "module", "Member card", "Member card", contained_in=0, position=2)
+        page_row = _entity(163, "module", "Page card", "Page card", contained_in=0)
+        del page_row["entPhysicalParentRelPos"]
+
+        page, member, rows, alert = self._render_vc_modules_tab(
+            client, settings, f"vc-alert-{admitted_manufacturer_of}", [member_row, page_row], admitted_manufacturer_of
+        )
+
+        admitting, refused = (page, member) if admitted_manufacturer_of == "page" else (member, page)
+        assert [row["selected_device_id"] for row in rows] == [admitting.pk]
+        assert alert is not None
+        assert refused.name in alert.group(0)
+        assert admitting.name not in alert.group(0)
+
+    def test_a_vc_shows_no_alert_when_no_row_uses_the_refusing_policy(self, client, settings):
+        """The page policy alone must not raise the alert when every row belongs to an admitted member."""
+        member_row = _entity(161, "module", "Member card", "Member card", contained_in=0, position=2)
+
+        _page, member, rows, alert = self._render_vc_modules_tab(
+            client, settings, "vc-alert-member-only", [member_row], "member"
+        )
+
+        assert [row["selected_device_id"] for row in rows] == [member.pk]
+        assert alert is None
 
 
 def _break_the_scb_filter():

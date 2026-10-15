@@ -86,7 +86,7 @@ A stored filter that does not compile stops the Modules tab with an error that n
 
 ### Inventory classes
 
-Module Sync shows an ENTITY-MIB row only when an enabled Include rule admits it. Migration 0025 seeds one editable rule for each class that earlier releases admitted from a fixed list: `module`, `powerSupply`, `fan`, `port`, `container`, `ioModule`, `cpmModule`, `mdaModule`, `fabricModule` and `xioModule`. Each rule is named `Inventory class: <class>`. To hide a class, disable or delete its rule. When no Include rule applies to a device, the Modules tab shows a warning, so an empty table does not look like a device without hardware. Rows from the transceivers API do not need a rule.
+Module Sync shows an ENTITY-MIB row only when an enabled Include rule admits it. Migration 0025 seeds one editable rule for each class that earlier releases admitted from a fixed list: `module`, `powerSupply`, `fan`, `port`, `container`, `ioModule`, `cpmModule`, `mdaModule`, `fabricModule` and `xioModule`. Each rule is named `Inventory class: <class>`. To hide a class, disable or delete its rule. When no Include rule applies to a device, or to a virtual chassis member that owns inventory rows, the Modules tab shows a warning that names it, so an empty table does not look like a device without hardware. Rows from the transceivers API do not need a rule.
 
 The migration keeps the existing Include rules working. A rule for a class outside that list gets **Prefer description**, so its rows keep `entPhysicalDescr` as their name. The migration adds a class rule only when no enabled, unscoped Include rule without filters already admits the class.
 
