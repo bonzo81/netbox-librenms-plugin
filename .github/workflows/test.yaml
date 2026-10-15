@@ -113,7 +113,7 @@ jobs:
           --cov-report=html:coverage_html -o pythonpath=../netbox/netbox
 
       - name: Upload coverage report
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         # Upload from exactly one job so the artifact name doesn't collide.
         if: matrix.netbox-ref == 'v4.6.5' && matrix.python-version == '3.12'
         with:
