@@ -5108,8 +5108,10 @@ class TestMatchedInterfaceLinking:
         assert row["matched_interface_confidence"] == "medium"
 
     def test_attach_interface_match_marks_installed_row_for_interface_update(self):
+        """An unbound same-name interface outside the installed module needs a binding update."""
+        from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays, make_superuser
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
-        from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
 
         device = make_device_with_module_bays("interface-attach-installed", ["Slot 1"])
         installed = install_module(device, "Slot 1", "INTERFACE-ATTACH-INSTALLED")
@@ -5118,19 +5120,17 @@ class TestMatchedInterfaceLinking:
             "librenms_port_id": 42,
             "installed_module_id": installed.pk,
         }
-        item = {"entPhysicalName": "Te1/1/1", "_librenms_port_id": 42}
+        item = {"entPhysicalName": "Te1/1/1", "_librenms_port_id": 42, "_librenms_ifname": "TenGigabitEthernet1/1/1"}
         iface = self._make_interface(device, "TenGigabitEthernet1/1/1")
-        context = {
-            "interfaces_by_pk": {iface.pk: iface},
-            "port_holders": {42: ("dcim.interface", iface.pk)},
-            "viewable_interface_ids": {iface.pk},
-            "changeable_interface_ids": {iface.pk},
-            "server_key": "default",
-        }
+        view = self._view()
+        view.request = make_request("get", user=make_superuser())
+        context = view._build_member_contexts(device, vc_members=[], items=[item])[device.pk]
+        assert context["port_holders"] == {}
 
         BaseModuleTableView._attach_interface_match(row, item, context)
 
         assert row["matched_interface_id"] == iface.pk
+        assert row["matched_interface_source"] == "name"
         assert row["matched_interface_module_id"] is None
         assert row["can_update_interface_binding"] is True
 
