@@ -17,6 +17,13 @@ from django.utils import timezone
 from django.utils.html import escape
 from django.views import View
 
+from netbox_librenms_plugin.breakout_cables import (
+    breakout_far_end,
+    breakout_parent,
+    decide_breakout_cable,
+    decide_channel_far_end,
+    lower_channel_far_end_ids,
+)
 from netbox_librenms_plugin.constants import (
     INTERFACE_NAME_FIELDS,
     OOB_INVENTORY_SOURCE,
@@ -455,11 +462,15 @@ class BaseCableTableView(
             ):
                 link["can_create_cable"] = False
 
-    def _cable_has_provenance(self, cable):
-        """Check the request's provenance tag without repeating settings/tag queries per row."""
+    def _provenance_tag(self):
+        """Return the request's provenance tag without repeating settings/tag queries per row."""
         if not hasattr(self, "_cable_provenance_tag"):
             self._cable_provenance_tag = get_librenms_cable_tag(create=False)
-        return cable_has_librenms_tag(cable, self._cable_provenance_tag)
+        return self._cable_provenance_tag
+
+    def _cable_has_provenance(self, cable):
+        """Check the request's provenance tag on *cable*."""
+        return cable_has_librenms_tag(cable, self._provenance_tag())
 
     def _build_trace_visibility(self, paths):
         """Resolve every object permission used by a page of cable traces in bounded queries."""
@@ -701,8 +712,13 @@ class BaseCableTableView(
             candidate_pks.update(Interface.objects.filter(candidate_q).values_list("pk", flat=True))
         catalog_interfaces = list(
             Interface.objects.filter(pk__in=candidate_pks)
-            .select_related("device", "cable")
-            .prefetch_related("cable__tags", "cable__terminations__termination")
+            .select_related("device", "cable", "parent__cable")
+            .prefetch_related(
+                "cable__tags",
+                "cable__terminations__termination",
+                "parent__cable__tags",
+                "parent__cable__terminations__termination",
+            )
         )
         # A manual pick can name an interface on a device no row resolved an owner for.
         owner_ids.update(interface.device_id for interface in catalog_interfaces if interface.pk in manual_ids)
@@ -716,6 +732,12 @@ class BaseCableTableView(
             if interface_librenms_id is not None:
                 interface_ids_by_device[(interface.device_id, interface_librenms_id)].append(interface)
         cable_ids = {interface.cable_id for interface in catalog_interfaces if interface.cable_id is not None}
+        # A channel row reads the cable on its parent.
+        cable_ids.update(
+            interface.parent.cable_id
+            for interface in catalog_interfaces
+            if interface.parent_id is not None and interface.parent.cable_id is not None
+        )
         return {
             "server_key": server_key,
             "interfaces_by_pk": interfaces_by_pk,
@@ -1653,6 +1675,8 @@ class BaseCableTableView(
                 except Interface.DoesNotExist:
                     link["cable_status"] = "Interface Not Available"
                     return link
+            if self._is_breakout_row(link, local_interface, remote_interface, actionable, normal_context):
+                return link
             local_cable = local_interface.cable
             remote_cable = remote_interface.cable
             if normal_context is not None:
@@ -1806,19 +1830,96 @@ class BaseCableTableView(
         peer_device = self._viewable_cable_peer_device(interface, cable)
         link["cable_status"] = f"Cabled to {peer_device.name}" if peer_device is not None else "Cabled in Netbox"
 
+    def _is_breakout_row(self, link, local_interface, remote_interface, actionable, normal_context):
+        """Return whether an end of the row is a channel; a channel row is then marked or decided."""
+        if (parent := breakout_parent(local_interface)) is not None:
+            # Decided after every row resolved: a channel needs the far ends of its lower channels.
+            link["_breakout"] = (local_interface, parent, remote_interface, actionable)
+            return True
+        if (decision := decide_channel_far_end(local_interface, remote_interface)) is None:
+            return False
+        cable = remote_interface.parent.cable
+        if self._breakout_cable_is_viewable(cable, normal_context):
+            self._set_breakout_row_status(link, decision, cable, actionable)
+        else:
+            link["cable_status"] = "Cable State Not Available"
+        return True
+
+    def _apply_breakout_status(self, links, normal_context=None):
+        """
+        Set the status of each channel row from the cable on its parent (:mod:`breakout_cables`).
+
+        The row also keeps the lower far ends it was decided with, so the writer reads the same ones.
+
+        Args:
+            links (list[dict]): The enriched rows, updated in place.
+            normal_context (dict | None): Preloaded interface and cable data.
+
+        Returns:
+            None
+
+        """
+        for link in links:
+            if (pending := link.pop("_breakout", None)) is None:
+                continue
+            channel, parent, remote, actionable = pending
+            cable = parent.cable
+            if not self._breakout_cable_is_viewable(cable, normal_context):
+                link["cable_status"] = "Cable State Not Available"
+                continue
+            far_ids = lower_channel_far_end_ids(channel, links) if cable is None else {}
+            link["breakout_lower_far_ends"] = {"channel": channel.pk, "far_ends": far_ids}
+            lower = {
+                interface.pk: interface
+                for interface in self._viewable_queryset(Interface).filter(pk__in=far_ids.values())
+            }
+            decision = decide_breakout_cable(
+                channel,
+                parent,
+                cable,
+                remote,
+                {channel_id: lower[pk] for channel_id, pk in far_ids.items() if pk in lower},
+                self._provenance_tag(),
+            )
+            self._set_breakout_row_status(link, decision, cable, actionable)
+
+    def _breakout_cable_is_viewable(self, cable, normal_context):
+        """Return whether the request may view the cable on a channelized parent; no cable is viewable."""
+        if cable is None:
+            return True
+        if normal_context is not None:
+            return cable.pk in normal_context["visible_cable_ids"]
+        return self._object_is_viewable(cable)
+
+    @staticmethod
+    def _set_breakout_row_status(link, decision, cable, actionable):
+        """Show a breakout decision on its row: matching, refused with the reason, or a write to offer."""
+        if cable is not None:
+            link["cable_url"] = reverse("dcim:cable", args=[cable.pk])
+        if decision.action == "matching":
+            link["cable_status"] = "Cable Found"
+        elif decision.action == "refuse":
+            link["cable_status"] = f"Breakout Not Synced: {decision.reason}"
+        else:
+            link["cable_status"] = "No Cable"
+            link["can_create_cable"] = actionable
+
     def _viewable_cable_peer_device(self, interface, cable):
         """Return the device at the far end of *cable*, only when the request may view it."""
-        if not cable_is_point_to_point(cable):
-            return None
-        a_terminations = list(cable.a_terminations)
-        b_terminations = list(cable.b_terminations)
-        if len(a_terminations) != 1 or len(b_terminations) != 1:
-            return None
-        near, far = a_terminations[0], b_terminations[0]
-        if near != interface:
-            near, far = far, near
-        if near != interface:
-            return None
+        if (parent := breakout_parent(interface)) is not None:
+            far = breakout_far_end(interface, parent, cable)
+        else:
+            if not cable_is_point_to_point(cable):
+                return None
+            a_terminations = list(cable.a_terminations)
+            b_terminations = list(cable.b_terminations)
+            if len(a_terminations) != 1 or len(b_terminations) != 1:
+                return None
+            near, far = a_terminations[0], b_terminations[0]
+            if near != interface:
+                near, far = far, near
+            if near != interface:
+                return None
         peer_device_id = getattr(far, "device_id", None)
         if peer_device_id is None:
             return None
@@ -2727,6 +2828,7 @@ class BaseCableTableView(
         # After resolution, so one adjacency reported over two protocols collapses on what the
         # rows resolved to rather than on the two protocols' differing name strings.
         links_data[:] = self._dedupe_protocol_duplicates(links_data)
+        self._apply_breakout_status(links_data, normal_context)
         self._apply_termination_change_scope(
             links_data,
             preloaded_changeable_ids={
@@ -3319,6 +3421,8 @@ class SingleCableVerifyView(BaseCableTableView):
                         # Check cable status if remote side was resolved
                         if link_data.get("netbox_remote_device_id"):
                             link_data = self.check_cable_status(link_data)
+                            # One row: the far ends of the lower channels are unknown here.
+                            self._apply_breakout_status([link_data])
                         else:
                             self._report_one_sided_cable(link_data, interface.pk, None)
 
