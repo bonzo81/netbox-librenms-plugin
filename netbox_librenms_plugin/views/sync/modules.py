@@ -55,7 +55,7 @@ from netbox_librenms_plugin.transactions import classify_conflict, update_existi
 from netbox_librenms_plugin.utils import (
     REGEX_COMPILE_ERRORS,
     acquire_advisory_transaction_lock,
-    get_module_template_interface_names,
+    get_module_adoptable_interface_names,
     get_module_template_interface_specs,
     get_module_types_indexed,
     get_vc_member_positions,
@@ -598,7 +598,7 @@ def _save_module_with_scoped_component_adoption(module, component_querysets):
 
 def _adopt_existing_template_interfaces(device, module, interfaces):
     """Adopt existing standalone interfaces into an already-installed module by template name."""
-    template_names = get_module_template_interface_names(device, module)
+    template_names = get_module_adoptable_interface_names(device, module).names
     if not template_names:
         return {
             "status": "skipped",
@@ -846,6 +846,14 @@ def _select_bind_candidate(device, item, module_pk, server_key, interfaces, port
     return candidate, None
 
 
+def _module_may_own_interface(device, module_pk, name):
+    """Return whether the bind may move the interface named *name* into the module."""
+    from dcim.models import Module
+
+    module = Module.objects.select_related("module_type").get(pk=module_pk)
+    return get_module_adoptable_interface_names(device, module).may_move(name)
+
+
 # Its own savepoint: callers catch a non-conflict error and keep their transaction.
 @transaction.atomic
 def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces):
@@ -907,7 +915,7 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
                 "status": "conflict",
                 "reason": (f"{candidate.name} already attached to module {candidate_module_id}; not reassigning"),
             }
-        set_module = not candidate_module_id
+        set_module = not candidate_module_id and _module_may_own_interface(device, module_pk, candidate.name)
 
     current_port_id = _coerce_positive_int(read_mapping(candidate).own_id(server_key))
     if current_port_id and current_port_id != port_id:
