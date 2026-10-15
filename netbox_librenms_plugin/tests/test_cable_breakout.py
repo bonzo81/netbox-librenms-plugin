@@ -559,3 +559,17 @@ def test_a_hidden_parent_is_never_named_and_its_channels_get_no_action():
     ]
     assert (verified["cable_status"], verified["can_create_cable"]) == (reason, False)
     assert setup.parent.name not in verified["cable_status"]
+
+
+@pytest.mark.usefixtures("breakout_server")
+def test_an_extend_needs_change_on_the_existing_parent_cable():
+    setup = _Breakout("cable-scope")
+    setup.seed(setup.row(1), setup.row(2))
+    setup.sync(1)
+    setup.client.force_login(_constrained_user("breakout-cable-scope", cable_change={"label": "permitted"}))
+
+    record = setup.records()["102"]
+    verified = setup.verify(2)
+
+    assert (record["cable_status"], record["can_create_cable"]) == ("No Cable", False)
+    assert verified["can_create_cable"] is False

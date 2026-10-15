@@ -1849,6 +1849,9 @@ class BaseCableTableView(
             return True
         if channel is local_interface:
             decision = decide_breakout_cable(channel, parent, cable, remote_interface, self._provenance_tag())
+            # An extend changes the existing cable, so the row needs change on that cable as the writer does.
+            if decision.action == "extend" and not self._changeable_queryset(Cable).filter(pk=cable.pk).exists():
+                actionable = False
             link["_extra_write_endpoint_ids"] = [endpoint.pk for endpoint in channel_write_endpoints(channel)]
         else:
             decision = decide_channel_far_end(local_interface, remote_interface)
