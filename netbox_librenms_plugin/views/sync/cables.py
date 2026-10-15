@@ -394,6 +394,9 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             local_term, remote_term = locked_terms
             if not self._locked_ends_may_be_row_ports(local_term, remote_term, link_data):
                 return {"status": "stale", "interface": display_name}
+            # The path is chosen from the locked rows: a port may have become a channel since the read.
+            if _channel_topology(local_term) != channel_topology:
+                return {"status": "stale", "interface": display_name}
             locked_parent = next(
                 (self._locked_terminations_by_key[(type(term), term.pk)] for term in extra_endpoints), None
             )
