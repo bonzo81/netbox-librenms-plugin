@@ -26,7 +26,7 @@ Fixed Cisco IOS XE platforms, such as the C8500L-8S4X, report their built-in uni
 
 Fixed Cisco NX-OS platforms, such as the Nexus 93180YC-FX, report their built-in line card as a `module` with the chassis PID inside a `LinecardSlot-1` container. The same rule hides that row. **Serial matches device** does not match it, because that rule only accepts a direct child of the chassis: on a modular chassis, a line card that shares the device serial is a real FRU.
 
-Migration 0026 creates the **Fixed-platform built-in units** rule below once for each Cisco manufacturer (slug `cisco` or `cisco-systems`), scoped to that manufacturer. It skips a manufacturer that already has a rule with the same match type and action, scoped to it or unscoped, enabled or disabled. A NetBox without a Cisco manufacturer gets no rule: import it from `contrib/inventory_ignore_rules.yaml`. Migration 0026 cannot be reversed.
+Migration 0026 creates the **Fixed-platform built-in units** rule below once for each Cisco manufacturer (slug `cisco` or `cisco-systems`), scoped to that manufacturer. It skips a manufacturer that already has a rule with the same match type and action and no name, description or model filter, scoped to it or unscoped, enabled or disabled. A NetBox without a Cisco manufacturer gets no rule: import it from `contrib/inventory_ignore_rules.yaml`. Migration 0026 cannot be reversed.
 
 ```yaml
 - name: "Cisco IOS-XR IDPROM phantom"

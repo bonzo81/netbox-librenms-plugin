@@ -16,13 +16,19 @@ FIXED_PLATFORM_RULE = {
 
 
 def seed_fixed_platform_rule(apps, schema_editor):
-    """Create the rule once per Cisco manufacturer that no rule of the same match type and action covers."""
+    """Create the rule once per Cisco manufacturer that no unfiltered rule of the same match type and action covers."""
     db_alias = schema_editor.connection.alias
     Manufacturer = apps.get_model("dcim", "Manufacturer")
     InventoryIgnoreRule = apps.get_model("netbox_librenms_plugin", "InventoryIgnoreRule")
     rules = InventoryIgnoreRule.objects.using(db_alias)
-    # An operator's rule decides, enabled or not: a disabled one means the operator turned it off.
-    equivalent = rules.filter(match_type=FIXED_PLATFORM_RULE["match_type"], action=FIXED_PLATFORM_RULE["action"])
+    # An operator's rule decides, enabled or not; a filtered one covers only some units, so it is no copy.
+    equivalent = rules.filter(
+        match_type=FIXED_PLATFORM_RULE["match_type"],
+        action=FIXED_PLATFORM_RULE["action"],
+        name_pattern="",
+        description_pattern="",
+        model_pattern="",
+    )
     if equivalent.filter(manufacturer__isnull=True).exists():
         return
     covered = set(equivalent.values_list("manufacturer_id", flat=True))

@@ -72,13 +72,26 @@ def test_each_cisco_manufacturer_gets_one_scoped_rule(slugs):
 def test_an_equivalent_scoped_rule_keeps_its_manufacturer_out(enabled):
     cisco = _manufacturer("cisco")
     cisco_systems = _manufacturer("cisco-systems")
-    operator = _operator_rule(cisco, enabled=enabled, description_pattern="^Built")
+    operator = _operator_rule(cisco, enabled=enabled)
 
     _run_data_step()
 
     rules = dict(_model_rules().values_list("pk", "manufacturer_id"))
     assert rules.pop(operator.pk) == cisco.pk
     assert list(rules.values()) == [cisco_systems.pk]
+
+
+@pytest.mark.parametrize("field", ["name_pattern", "description_pattern", "model_pattern"])
+@pytest.mark.parametrize("scoped", [True, False])
+def test_a_filtered_rule_is_no_equivalent(field, scoped):
+    """A filter narrows the rule to some units, so the other built-in units still need the seed."""
+    cisco = _manufacturer("cisco")
+    operator = _operator_rule(cisco if scoped else None, **{field: "^Built"})
+
+    _run_data_step()
+
+    seeded = _model_rules().exclude(pk=operator.pk)
+    assert list(seeded.values_list("manufacturer_id", flat=True)) == [cisco.pk]
 
 
 @pytest.mark.parametrize("enabled", [True, False])
