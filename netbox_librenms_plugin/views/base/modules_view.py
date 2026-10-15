@@ -46,7 +46,7 @@ from netbox_librenms_plugin.sync_cache import (
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     coerce_positive_int,
-    get_module_template_interface_names,
+    get_module_adoptable_interface_names,
     get_module_template_interface_specs,
     is_valid_ports_payload,
     load_module_type_bay_types,
@@ -452,6 +452,12 @@ def _serial_matches_an_ancestor(item_serial: str, parent_item: dict | None, inde
     return False
 
 
+def _installed_module_may_own(row, interface):
+    """Return whether the bind would move *interface* into the row's installed module."""
+    module = row["installed_module"]
+    return get_module_adoptable_interface_names(module.device, module).may_move(interface.name)
+
+
 def _get_item_port_identity(item):
     """Return an inventory item's LibreNMS port ID and its candidate interface names, in order."""
     port_id = normalize_librenms_port_id(item.get("_librenms_port_id") or item.get("port_id"))
@@ -667,7 +673,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         if not standalone_exists[device.pk]:
             return 0
 
-        template_names = get_module_template_interface_names(device, module)
+        template_names = get_module_adoptable_interface_names(device, module).names
         if not template_names:
             return 0
 
@@ -1734,7 +1740,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             # The writer refuses this bind, so it skips the template adoption too.
             row.pop("can_update_interface_binding", None)
             return
-        if candidate_module_id == installed_module_id and current_port_id == port_id:
+        if current_port_id == port_id and (
+            candidate_module_id == installed_module_id or not _installed_module_may_own(row, interface)
+        ):
             return
 
         row["can_update_interface_binding"] = True
@@ -2601,7 +2609,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         from dcim.models import ModuleBay
 
         # Prefetch the installed module's device/type/platform: the per-row interface-name
-        # prediction (get_module_template_interface_names → naming-plugin rule lookup) reads
+        # prediction (get_module_adoptable_interface_names → naming-plugin rule lookup) reads
         # installed_module.device.device_type/platform, which is otherwise an N+1 per
         # installed-module row (all resolving to the same page device).
         bays = (

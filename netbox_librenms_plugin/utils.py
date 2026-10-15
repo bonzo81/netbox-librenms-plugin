@@ -5,7 +5,7 @@ import re
 import threading
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import django_tables2 as tables
 import psycopg
@@ -1271,10 +1271,29 @@ def get_module_template_interface_specs(device: Device, module) -> list[tuple[st
     return predicted_specs
 
 
-def get_module_template_interface_names(device: Device, module) -> list[str]:
-    """Return unique instantiated interface-template names, rewritten for VC members when needed."""
-    template_names = [name for name, _template_type in _instantiate_module_template_interface_specs(device, module)]
+class ModuleInterfaceNames(NamedTuple):
+    """The interface names of a module that this plugin may move into the module."""
 
+    names: list[str]
+    # True when the prediction expands the templates into a family: the naming plugin owns its other rows.
+    family: bool
+
+    def may_move(self, name: str) -> bool:
+        """Return whether this plugin may set the module on the interface row named *name*."""
+        return not self.family or name in self.names
+
+
+def get_module_adoptable_interface_names(device: Device, module) -> ModuleInterfaceNames:
+    """Return the predicted template names, or only the raw ones when the prediction expands them into a family."""
+    template_names = [name for name, _template_type in _instantiate_module_template_interface_specs(device, module)]
+    predicted_names = _predict_template_interface_names(device, module, template_names)
+    if len(predicted_names) > len(template_names):
+        return ModuleInterfaceNames(template_names, True)
+    return ModuleInterfaceNames(predicted_names, False)
+
+
+def _predict_template_interface_names(device: Device, module, template_names: list[str]) -> list[str]:
+    """Return the names the prediction receivers give for the instantiated template names."""
     from netbox_librenms_plugin.signals import predict_module_interface_names
 
     # Adoption accepts a receiver's whole-list answer, while typed specs require one result per template.
@@ -1313,7 +1332,7 @@ def predict_module_interface_rename(device: Device, module, names) -> list[str]:
     """
     Return the INR-predicted post-rename names for an explicit list of *names*.
 
-    Same receiver semantics as :func:`get_module_template_interface_names`
+    Same receiver semantics as :func:`get_module_adoptable_interface_names`
     (``send_robust`` isolates a failing receiver and the last non-None list return
     wins), but the input is a caller-supplied list of names rather than template
     instantiations. Used to recognise when a standalone interface is the renamed
