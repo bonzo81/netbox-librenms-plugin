@@ -1934,6 +1934,7 @@ function restoreTableSelection(table) {
         if (entry.auto && blocked.has(row.dataset.portId)) return;
         // The rendered module row holds the controls of its rendered member, so another member is verified again.
         const reverify = _restoredModuleMemberSelect(table, row, checkbox.value, companionInputs);
+        if (reverify) _rememberRenderedModuleMember(reverify);
         row.querySelectorAll('select[name], input[type="hidden"][name]').forEach(function (input) {
             if (!_isSelectionCompanionName(input.name)) return;
             if (!Object.hasOwn(companionInputs, input.name)) return;
@@ -1977,6 +1978,19 @@ function _restoredModuleMemberSelect(table, row, rowKey, companionInputs) {
     const select = Array.from(row.querySelectorAll('select')).find((field) => field.name === name);
     if (!select || !Object.hasOwn(companionInputs, name) || companionInputs[name] === select.value) return null;
     return select;
+}
+
+/**
+ * Keep the member the page rendered as the verified one, which a failed verify rolls back to.
+ *
+ * Call it before any change of the select: with no option[selected], the browser shows its first option.
+ *
+ * @param {HTMLSelectElement} select - VC member dropdown for a module row
+ */
+function _rememberRenderedModuleMember(select) {
+    if (typeof select._lastVerifiedMember !== 'undefined') return;
+    const selectedOption = select.querySelector('option[selected]');
+    select._lastVerifiedMember = selectedOption ? selectedOption.value : select.value;
 }
 
 /** Tables whose rows carry a Virtual Chassis member that the row's verify request decided. */
@@ -2457,11 +2471,7 @@ function initializeVCMemberSelect() {
         if (moduleTable) {
             const moduleSelects = moduleTable.querySelectorAll('.vc-member-select');
             moduleSelects.forEach(select => {
-                // The rendered member is the verified one; a failed verify rolls back to it.
-                if (typeof select._lastVerifiedMember === 'undefined' && !select.dataset.moduleSelectInitialized) {
-                    const selectedOption = select.querySelector('option[selected]');
-                    select._lastVerifiedMember = selectedOption ? selectedOption.value : select.value;
-                }
+                if (!select.dataset.moduleSelectInitialized) _rememberRenderedModuleMember(select);
                 if (select.tomselect && !select.dataset.moduleSelectInitialized) {
                     select.dataset.moduleSelectInitialized = 'true';
                     select.tomselect.on('change', function (value) {
@@ -3489,10 +3499,6 @@ function handleModuleChange(select, value, options = {}) {
     const controller = new AbortController();
     select._moduleVerifyController = controller;
 
-    if (typeof select._lastVerifiedMember === 'undefined') {
-        const selectedOption = select.querySelector('option[selected]');
-        select._lastVerifiedMember = selectedOption ? selectedOption.value : null;
-    }
     // The install grant names the previous member, so it is withdrawn until the new member is verified.
     const grantField = row ? Array.from(row.querySelectorAll('input[type="hidden"]')).find(
         (field) => field.name === 'selection_grant_' + select.dataset.module
@@ -3512,8 +3518,9 @@ function handleModuleChange(select, value, options = {}) {
                 select.value = select._lastVerifiedMember;
             }
             if (grantField) grantField.value = select._lastVerifiedGrant || '';
-            _setModuleRowPending(row, false);
         }
+        // Without a baseline the grant stays cleared, so the released row cannot write for the refused member.
+        if (row) _setModuleRowPending(row, false);
         // A restored selection named the refused member, so it is not kept for the previous one.
         const checkbox = options.restored && row ? row.querySelector('td[data-col="selection"] input[name="select"]') : null;
         if (checkbox) checkbox.checked = false;
