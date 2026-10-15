@@ -20,6 +20,7 @@ from django.views import View
 from netbox_librenms_plugin.breakout_cables import (
     HIDDEN_REASONS,
     breakout_far_end,
+    channel_write_endpoints,
     decide_breakout_cable,
     decide_channel_far_end,
     holds_a_cable,
@@ -234,6 +235,13 @@ def _remote_port_name_candidates(row):
 def port_record(port):
     """Return the part of a LibreNMS port record the interface rules read (``PORT_RECORD_KEYS``)."""
     return {key: port[key] for key in PORT_RECORD_KEYS if key in port}
+
+
+def fetch_port_record(api, port_id):
+    """Read one LibreNMS port record by id, or None when LibreNMS returns none."""
+    success, data = api.get_port_by_id(port_id)
+    ports = data.get("port") if success and isinstance(data, dict) else None
+    return ports[0] if isinstance(ports, list) and ports and isinstance(ports[0], dict) else None
 
 
 def port_owner_id(row, side):
@@ -2836,23 +2844,24 @@ class BaseCableTableView(
             None
 
         """
-        rows = [
-            (link, ports)
-            for link in links
-            if link.get("can_create_cable") or link.get("remote_create_url")
-            if (ports := [port for port in cable_row_ports(link) if port[2] is not None])
-        ]
-        if not rows:
-            return
+        offered = [link for link in links if link.get("can_create_cable") or link.get("remote_create_url")]
         rules = interface_rules_for_request(self.request)
-        if not rules.ignores_any_port:
+        if not offered or not rules.ignores_any_port:
             return
+        rows = [(link, [port for port in cable_row_ports(link) if port[2] is not None]) for link in offered]
         owner_ids = {port_owner_id(link, side) for link, ports in rows for side, *_ in ports}
         owners = Device.objects.in_bulk(owner_ids - {None})
         decided = [
-            (link, [(port_id, record, owners.get(port_owner_id(link, side))) for side, port_id, record in ports])
+            (
+                link,
+                [
+                    *((port_id, record, owners.get(port_owner_id(link, side))) for side, port_id, record in ports),
+                    *self._endpoint_ports(link, server_key),
+                ],
+            )
             for link, ports in rows
         ]
+        decided = [(link, ports) for link, ports in decided if ports]
         disclose = PortDisclosure(self.request.user, server_key)
         disclose.preload((port_id, owner) for _link, ports in decided for port_id, _record, owner in ports)
         for link, ports in decided:
@@ -2867,6 +2876,26 @@ class BaseCableTableView(
                 link["can_create_cable"] = False
                 link.pop("remote_create_url", None)
                 link["rule_block"] = row_rule_block(*blocked)
+
+    def _endpoint_ports(self, link, server_key):
+        """
+        Return the LibreNMS ports bound to the other interfaces that the row's write writes (a channel's parent).
+
+        Each one is decided as the writer decides it: the record read from LibreNMS by id, and the
+        interface's device as the owner. A port without a record falls under the missing-record rule.
+        """
+        local_id = coerce_librenms_id(link.get("netbox_local_interface_id"))
+        local = None if local_id is None else Interface.objects.filter(pk=local_id).first()
+        records = self.__dict__.setdefault("_endpoint_port_records", {})
+        ports = []
+        for endpoint in channel_write_endpoints(local):
+            if (port_id := read_mapping(endpoint).own_id(server_key)) is None:
+                continue
+            if port_id not in records:
+                record = fetch_port_record(self.librenms_api, port_id)
+                records[port_id] = None if record is None else port_record(record)
+            ports.append((port_id, records[port_id], endpoint.device))
+        return ports
 
     def get_table(self, data, obj):
         """Return the cable table for *data*; concrete subclasses choose the table class."""
