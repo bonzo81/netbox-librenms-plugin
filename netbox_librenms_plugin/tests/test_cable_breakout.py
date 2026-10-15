@@ -534,6 +534,18 @@ def test_creating_the_far_end_of_a_channel_reads_the_record_of_a_bound_parent(li
 
 
 @pytest.mark.usefixtures("breakout_server")
+def test_the_verify_keeps_a_waiting_channel_selectable_like_the_table():
+    setup = _Breakout("verify-select")
+    setup.seed(*(setup.row(channel_id) for channel_id in (1, 2, 3, 4)))
+
+    record = setup.records()["102"]
+    verified = setup.verify(2)
+
+    assert (record["can_create_cable"], record["can_select_cable"]) == (False, True)
+    assert (verified["can_create_cable"], verified.get("can_select_cable")) == (False, True)
+
+
+@pytest.mark.usefixtures("breakout_server")
 def test_a_user_who_may_not_change_the_parent_gets_no_sync_action():
     from dcim.models import Device
 

@@ -613,6 +613,49 @@ class TestAMovedCableMemberIsNotRestored:
         assert ("device_selection_cable-10", "2") in pairs
 
 
+class TestTheCableVerifyAnswerSetsTheCheckbox:
+    """A cable row stays selectable after a member change when the verify says it can write or be selected."""
+
+    @pytest.mark.parametrize(
+        ("can_create", "can_select", "enabled"),
+        [(False, True, True), (True, False, True), (False, False, False)],
+        ids=["selectable-only", "writable", "neither"],
+    )
+    def test_the_checkbox_follows_the_answer(self, page, can_create, can_select, enabled):
+        _load_cable_member_page(page, ["cable-10"])
+        formatted_row = {
+            "local_port": "Ethernet1",
+            "remote_port": "",
+            "remote_device": "",
+            "cable_status": "No Cable",
+            "actions": "",
+            "can_create_cable": can_create,
+            "can_select_cable": can_select,
+        }
+        page.route(
+            f"{CABLE_VERIFY_URL}**",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"status": "success", "formatted_row": formatted_row}),
+            ),
+        )
+        with page.expect_response(f"{CABLE_VERIFY_URL}**"):
+            page.evaluate(
+                """() => {
+                    const select = document.getElementById('device_selection_cable-10');
+                    select.value = '2';
+                    handleCableChange(select, '2');
+                }"""
+            )
+
+        checkbox = page.locator("#cb-cable-10")
+        if enabled:
+            expect(checkbox).to_be_enabled()
+        else:
+            expect(checkbox).to_be_disabled()
+
+
 class TestADetachedVerifyChangesNothing:
     """A verify answer for a row the tab swap replaced must not touch the new page or storage."""
 

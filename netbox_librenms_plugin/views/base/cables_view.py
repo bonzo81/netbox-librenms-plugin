@@ -1846,7 +1846,8 @@ class BaseCableTableView(
         if channel is local_interface:
             decision = decide_breakout_cable(channel, parent, cable, remote_interface, self._provenance_tag())
             # Read by _apply_breakout_selection after the scope and rule gates.
-            link["_breakout_channel"] = (channel.parent_id, channel.channel_id, decision.waits_for)
+            link["breakout_channel"] = (channel.parent_id, channel.channel_id)
+            link["_breakout_waits_for"] = decision.waits_for
             link["_extra_write_endpoint_ids"] = [endpoint.pk for endpoint in channel_write_endpoints(channel)]
         else:
             decision = decide_channel_far_end(local_interface, remote_interface)
@@ -1854,26 +1855,35 @@ class BaseCableTableView(
         return True
 
     @staticmethod
-    def _apply_breakout_selection(links):
+    def _apply_breakout_selection(links, decided_rows=()):
         """
         Let a channel row that waits only for lower channels be selected when their rows can write first.
 
         One submit writes the channel rows in channel ID order, so such a row is selectable when each
-        channel it waits for has a row in *links* that may write or is itself selectable. Its single-row
-        Sync action stays off, because it refuses alone.
+        channel it waits for has a row in *links* or *decided_rows* that may write or is itself
+        selectable. Its single-row Sync action stays off, because it refuses alone.
 
         Args:
             links (list[dict]): The rows after the scope and rule gates, updated in place.
+            decided_rows (list[dict]): Other enriched rows of the same snapshot, already decided.
 
         Returns:
             None
 
         """
+        ready = {
+            row["breakout_channel"]
+            for row in decided_rows
+            if row.get("breakout_channel") and (row.get("can_create_cable") or row.get("can_select_cable"))
+        }
         channel_rows = sorted(
-            ((key, link) for link in links if (key := link.pop("_breakout_channel", None)) is not None),
+            (
+                ((*link["breakout_channel"], link.pop("_breakout_waits_for", ())), link)
+                for link in links
+                if link.get("breakout_channel")
+            ),
             key=lambda item: item[0][:2],
         )
-        ready = set()
         for (parent_id, channel_id, waits_for), link in channel_rows:
             if waits_for:
                 link["can_select_cable"] = bool(link.get("can_create_cable")) and all(
@@ -3286,6 +3296,7 @@ class SingleCableVerifyView(BaseCableTableView):
             "cable_status": "Missing Ports",
             "actions": "",
             "can_create_cable": False,
+            "can_select_cable": False,
             "expected_local_id": None,
             "expected_local_device_id": None,
             "expected_remote_id": None,
@@ -3431,10 +3442,21 @@ class SingleCableVerifyView(BaseCableTableView):
                         if not read_only_origin:
                             self._set_remote_create_affordance(link_data, selected_device, server_key)
                         self._apply_cable_rule_blocks([link_data], server_key)
-                        self._apply_breakout_selection([link_data])
+                        decided_rows = []
+                        if link_data.get("_breakout_waits_for"):
+                            # The table decided the lower channels from the whole snapshot: decide them alike.
+                            decided_rows = self.enrich_links_data(
+                                [dict(row) for row in valid_links if row.get("row_id") != row_id],
+                                origin_device,
+                                server_key=server_key,
+                                sync_device=primary_device,
+                            )
+                        self._apply_breakout_selection([link_data], decided_rows)
                         if read_only_origin:
                             link_data["can_create_cable"] = False
+                            link_data["can_select_cable"] = False
                         formatted_row["can_create_cable"] = bool(link_data.get("can_create_cable"))
+                        formatted_row["can_select_cable"] = bool(link_data.get("can_select_cable"))
                         formatted_row["expected_local_id"] = coerce_librenms_id(
                             link_data.get("netbox_local_interface_id")
                         )
