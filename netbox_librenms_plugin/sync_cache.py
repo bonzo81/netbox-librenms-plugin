@@ -16,7 +16,8 @@ from django.shortcuts import render
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
-from netbox_librenms_plugin.librenms_api import configured_cache_timeout
+from netbox_librenms_plugin.librenms_api import configured_cache_timeout, stored_librenms_id
+from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.server_mappings import mapped_device_servers, read_mapping
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.utils import cache_remaining_ttl
@@ -100,6 +101,42 @@ def module_inventory_oob_matches(payload, sync_device, server_key) -> bool:
     if mapping.has_oob(server_key) and current_oob_id is None:
         return False
     return payload.get("oob_librenms_id") == current_oob_id
+
+
+def module_snapshot_host_id(sync_device, server_key):
+    """
+    Return the host ID that a cache-only Modules read compares a cached snapshot with.
+
+    Args:
+        sync_device (Device): The device that owns the inventory.
+        server_key (str): The LibreNMS server key of the snapshot.
+
+    Returns:
+        int | None: The stored or cached host ID, or None when it is absent or corrupt.
+
+    """
+    return coerce_librenms_id(stored_librenms_id(sync_device, server_key))
+
+
+def module_inventory_snapshot_matches(payload, sync_device, server_key, librenms_id) -> bool:
+    """
+    Return whether a cached inventory payload was built for *librenms_id* and the current OOB link.
+
+    Args:
+        payload (dict): A payload that :func:`cached_module_inventory` accepts.
+        sync_device (Device): The device that owns the inventory.
+        server_key (str): The LibreNMS server key of the snapshot.
+        librenms_id (int | None): The device's current host ID; None never matches.
+
+    Returns:
+        bool: True when the Modules tab may render the snapshot.
+
+    """
+    return (
+        librenms_id is not None
+        and payload.get("librenms_id") == librenms_id
+        and module_inventory_oob_matches(payload, sync_device, server_key)
+    )
 
 
 class SyncTab(StrEnum):
@@ -738,8 +775,9 @@ class SyncCacheConsistency:
         key = self.snapshot_key(tab, server_key)
         if tab == SyncTab.MODULES:
             payload = cache.get(key)
-            return cached_module_inventory(payload) is not None and module_inventory_oob_matches(
-                payload, self._primary_owner(tab, server_key), server_key
+            owner = self._primary_owner(tab, server_key)
+            return cached_module_inventory(payload) is not None and module_inventory_snapshot_matches(
+                payload, owner, server_key, module_snapshot_host_id(owner, server_key)
             )
         return cache.has_key(key)
 
