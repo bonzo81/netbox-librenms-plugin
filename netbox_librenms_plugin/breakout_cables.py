@@ -33,24 +33,21 @@ def _cable_ends(cable):
     return [(term.cable_end, term.connector, term.termination) for term in terminations]
 
 
-def _parent_end(ends, parent):
-    """Return the cable end that *parent* terminates, or None."""
-    return next((end for end, _connector, termination in ends if termination == parent), None)
+def _readable_b_side(cable, parent):
+    """Return the B side of *cable* by connector, or None when it is not the layout this sync writes."""
+    if parent is None or cable is None or cable.profile != breakout_profile(parent.channels):
+        return None
+    ends = _cable_ends(cable)
+    # Only this layout maps channel N to B connector N: other profiles shuffle the positions.
+    if [(connector, term) for end, connector, term in ends if end == "A"] != [(1, parent)]:
+        return None
+    return {connector: term for end, connector, term in ends if end == "B"}
 
 
 def breakout_far_end(channel, parent, cable):
-    """Return the far end at connector ``channel_id`` of the parent's profiled *cable*, or None."""
-    if parent is None or cable is None or not getattr(cable, "profile", ""):
-        return None
-    ends = _cable_ends(cable)
-    near = _parent_end(ends, parent)
-    if near is None:
-        return None
-    far = "B" if near == "A" else "A"
-    return next(
-        (term for end, connector, term in ends if end == far and connector == channel.channel_id),
-        None,
-    )
+    """Return the far end at connector ``channel_id`` of the parent's breakout *cable*, or None."""
+    b_side = _readable_b_side(cable, parent)
+    return None if b_side is None else b_side.get(channel.channel_id)
 
 
 @dataclass(frozen=True)
@@ -119,21 +116,19 @@ def decide_breakout_cable(channel, parent, cable, remote, provenance_tag):
         if channel.channel_id != 1:
             return _sync_first(1, parent)
         return _far_end_refusal(remote) or BreakoutDecision("create", profile=profile, b_terminations=(remote,))
-    if breakout_far_end(channel, parent, cable) == remote:
+    if (b_side := _readable_b_side(cable, parent)) is None:
+        return _refuse(
+            f"the cable on {parent.name} uses profile {cable.profile or 'none'}, which this sync does not read"
+        )
+    if b_side.get(channel.channel_id) == remote:
         return BreakoutDecision("matching", profile=profile)
-    return _decide_extension(channel, parent, cable, remote, profile, provenance_tag)
+    return _decide_extension(channel, parent, cable, b_side, remote, profile, provenance_tag)
 
 
-def _decide_extension(channel, parent, cable, remote, profile, provenance_tag):
+def _decide_extension(channel, parent, cable, b_side, remote, profile, provenance_tag):
     """Append the far end to the plugin's breakout cable, when connectors 1 to ``channel_id - 1`` hold one."""
     if not cable_has_librenms_tag(cable, provenance_tag):
         return _refuse(f"the cable on {parent.name} does not have the LibreNMS cable tag")
-    if getattr(cable, "profile", "") != profile:
-        return _refuse(f"the cable on {parent.name} has no {profile} profile")
-    ends = _cable_ends(cable)
-    if _parent_end(ends, parent) != "A":
-        return _refuse(f"{parent.name} is not on the A side of its cable")
-    b_side = {connector: term for end, connector, term in ends if end == "B"}
     channel_id = channel.channel_id
     if channel_id in b_side:
         return _refuse(f"connector {channel_id} of the cable on {parent.name} ends on another interface")
