@@ -18,7 +18,6 @@ from django.urls import reverse
 from django.views import View
 
 from netbox_librenms_plugin.breakout_cables import (
-    CHANNELS_SUPPORTED,
     channel_write_endpoints,
     decide_breakout_cable,
     decide_channel_far_end,
@@ -1224,25 +1223,6 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         self._cable_provenance_tag_resolved = False
         return self.process_single_interface(interface, cached_links, force=force, port_records=port_records)
 
-    def _in_channel_order(self, selected_interfaces, cached_links):
-        """Return the selection with the channel rows in channel ID order, so that channel 1 creates the cable first."""
-        if not CHANNELS_SUPPORTED:
-            return selected_interfaces
-        # The local end the writer uses: the submitted chassis member applied.
-        local_ids = {}
-        for interface in selected_interfaces:
-            link_data, result = self._selected_row_link_data(interface, cached_links)
-            if result is None:
-                local_ids[interface.get("row_id")] = coerce_librenms_id(link_data.get("netbox_local_interface_id"))
-        channel_ids = dict(
-            Interface.objects.filter(pk__in=set(local_ids.values()) - {None}, channel_id__isnull=False).values_list(
-                "pk", "channel_id"
-            )
-        )
-        return sorted(
-            selected_interfaces, key=lambda interface: channel_ids.get(local_ids.get(interface.get("row_id")), 0)
-        )
-
     def process_interface_sync(self, selected_interfaces, cached_links, force=False):
         """
         Process cable sync for all selected interfaces and return results.
@@ -1288,7 +1268,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         }
         self._pending_conflicts = []
 
-        for interface in self._in_channel_order(selected_interfaces, cached_links):
+        for interface in selected_interfaces:
             try:
                 # Live LibreNMS reads happen here, before the row's transaction takes any lock.
                 port_records = self._prefetch_cable_port_records(interface, cached_links)
