@@ -73,7 +73,6 @@ from netbox_librenms_plugin.utils import (
 )
 from netbox_librenms_plugin.views.base.cables_view import (
     cable_row_ports,
-    fetch_port_record,
     port_owner_id,
     port_record,
     remote_port_ref,
@@ -673,7 +672,9 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
     def _fetch_port_record(self, port_id):
         """Read one LibreNMS port record by id, or None when LibreNMS returns none."""
-        return fetch_port_record(self.librenms_api, port_id)
+        success, data = self.librenms_api.get_port_by_id(port_id)
+        ports = data.get("port") if success and isinstance(data, dict) else None
+        return ports[0] if isinstance(ports, list) and ports and isinstance(ports[0], dict) else None
 
     def _prefetch_cable_port_records(self, interface, cached_links):
         """Resolve one selected row read-only and fetch its port records, before its transaction."""
@@ -683,8 +684,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         resolved = self._resolve_cable_terminations(link_data, interface)
         if "status" in resolved:
             return {}
-        local = resolved["local"]
-        return self._fetch_cable_port_records(link_data, (local, resolved["remote"], *channel_write_endpoints(local)))
+        return self._fetch_cable_port_records(link_data, (resolved["local"], resolved["remote"]))
 
     def _terminations_are_changeable(self, grouped):
         """Return whether the request may change every submitted termination."""
@@ -821,7 +821,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         )
         if decision.action in ("matching", "refuse"):
             return self._breakout_result(decision, display_name)
-        blocked = self._rule_block(link_data, [channel, parent, remote], port_records or {})
+        # The rules decide the channel's own port; the parent only holds the cable.
+        blocked = self._rule_block(link_data, [channel, remote], port_records or {})
         if blocked is not None:
             logger.info("Cable sync skipped %s: %s", display_name, blocked)
             return {"status": "blocked_by_rule", "interface": f"{display_name} ({blocked})", "reason": blocked}
@@ -1599,10 +1600,7 @@ class CableRemoteCreateView(SyncCablesView):
         ):
             messages.error(request, "This device has been migrated and is read-only for this LibreNMS server.")
             return self._sync_response(request, obj, server_key, redirect_url, close_modal=True)
-        local_interface = context["local_interface"]
-        port_records = self._fetch_cable_port_records(
-            context["row"], (local_interface, *channel_write_endpoints(local_interface))
-        )
+        port_records = self._fetch_cable_port_records(context["row"], (context["local_interface"],))
         try:
             with transaction.atomic():
                 # Lock owners before the insert can take a foreign-key lock on the remote device.
