@@ -82,18 +82,6 @@ class _Breakout:
         assert rendered.status_code == 200
         return {str(row.record["row_id"]): row.record for row in rendered.context["cable_sync"]["table"].rows}
 
-    def sync_rows(self, channel_ids):
-        """POST one Sync Cable submit that selects the rows of *channel_ids*, in that order."""
-        data = {}
-        for channel_id in channel_ids:
-            data.update(_rendered_sync_data(self.client, self.device, str(100 + channel_id)))
-        data["select"] = [str(100 + channel_id) for channel_id in channel_ids]
-        response = self.client.post(
-            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[self.device.pk]), data
-        )
-        assert response.status_code == 302
-        return [str(message) for message in get_messages(response.wsgi_request)]
-
     def verify(self, channel_id):
         """Return the row that the verify endpoint renders for the row of *channel_id*."""
         response = self.client.post(
@@ -206,42 +194,32 @@ class TestBreakoutCableWrites:
         assert (record["cable_status"], record["can_create_cable"]) == (f"Breakout Not Synced: {reason}", False)
         assert (verified["cable_status"], verified["can_create_cable"]) == (f"Breakout Not Synced: {reason}", False)
 
-    def test_one_submit_writes_the_channels_in_channel_order(self):
-        setup = _Breakout("bulk")
-        setup.seed(*(setup.row(channel_id) for channel_id in (1, 2, 3, 4)))
-
-        setup.sync_rows([4, 2, 3, 1])
-
-        assert Cable.objects.count() == 1
-        assert setup.b_side(setup.parent_cable()) == [(lane + 1, far) for lane, far in enumerate(setup.far_ends)]
-
-    def test_the_rendered_table_lets_one_submit_select_every_channel(self):
+    def test_the_table_offers_only_the_next_channel_of_the_parent(self):
         import re
 
-        setup = _Breakout("bulk-table")
+        setup = _Breakout("next-channel")
         setup.seed(*(setup.row(channel_id) for channel_id in (1, 2, 3, 4)))
 
-        rendered = setup.client.get(
-            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[setup.device.pk]),
-            {"tab": "cables", "server_key": SERVER_KEY},
-        )
-        # Read the table HTML the way the other cable table tests do.
-        page = rendered.context["cable_sync"]["table"].as_html(rendered.wsgi_request)
-        checkboxes = re.findall(r'<input[^>]*name="select"[^>]*>', page)
-        enabled = sorted(
-            int(re.search(r'value="(\d+)"', box).group(1)) - 100 for box in checkboxes if "disabled" not in box
-        )
-        sync_buttons = re.findall(r'name="sync_one"\s+value="(\d+)"', page)
+        for channel_id in (1, 2, 3, 4):
+            rendered = setup.client.get(
+                reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[setup.device.pk]),
+                {"tab": "cables", "server_key": SERVER_KEY},
+            )
+            # Read the table HTML the way the other cable table tests do.
+            page = rendered.context["cable_sync"]["table"].as_html(rendered.wsgi_request)
+            checkboxes = re.findall(r'<input[^>]*name="select"[^>]*>', page)
+            enabled = [re.search(r'value="(\d+)"', box).group(1) for box in checkboxes if "disabled" not in box]
+            assert enabled == [str(100 + channel_id)]
+            assert re.findall(r'name="sync_one"\s+value="(\d+)"', page) == [str(100 + channel_id)]
+            setup.sync(channel_id)
 
-        assert enabled == [1, 2, 3, 4]
-        assert sync_buttons == ["101"]
-        setup.sync_rows(enabled)
         assert setup.b_side(setup.parent_cable()) == [(lane + 1, far) for lane, far in enumerate(setup.far_ends)]
 
     def test_a_deleted_lower_far_end_never_moves_the_other_far_ends(self):
         setup = _Breakout("deleted-lower")
         setup.seed(setup.row(1), setup.row(2))
-        setup.sync_rows([1, 2])
+        setup.sync(1)
+        setup.sync(2)
         setup.far_ends[0].delete()
         replacement = make_interface(setup.peer, "Ethernet9")
         setup.seed(setup.row(2, far_end=replacement), setup.row(3))
@@ -397,7 +375,8 @@ def test_a_channel_reads_the_far_end_at_its_connector_and_never_its_parent():
 
     setup = _Breakout("far-read")
     setup.seed(setup.row(1), setup.row(2))
-    setup.sync_rows([1, 2])
+    setup.sync(1)
+    setup.sync(2)
     # The same channel, now towards a neighbour that NetBox does not know.
     setup.seed({**setup.row(1), "remote_device": "breakout-far-read-unknown"})
 
@@ -534,52 +513,6 @@ def test_creating_the_far_end_of_a_channel_reads_the_record_of_a_bound_parent(li
 
 
 @pytest.mark.usefixtures("breakout_server")
-def test_the_verify_keeps_a_waiting_channel_selectable_like_the_table():
-    setup = _Breakout("verify-select")
-    setup.seed(*(setup.row(channel_id) for channel_id in (1, 2, 3, 4)))
-
-    record = setup.records()["102"]
-    verified = setup.verify(2)
-
-    assert (record["can_create_cable"], record["can_select_cable"]) == (False, True)
-    assert (verified["can_create_cable"], verified.get("can_select_cable")) == (False, True)
-
-
-@pytest.mark.usefixtures("breakout_server")
-def test_one_submit_orders_the_channels_of_the_submitted_chassis_member():
-    from netbox_librenms_plugin.server_selection import get_librenms_sync_device
-    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
-
-    setup = _Breakout("vc-order")
-    page = make_device("breakout-vc-order-page")
-    persist_test_server_mapping(page, SERVER_KEY)
-    # The page member has plain ports with the channel names, so the cached rows resolve there.
-    for channel in setup.channels:
-        make_interface(page, channel.name)
-    make_virtual_chassis("breakout-vc-order", page, setup.device)
-    page.refresh_from_db()
-    setup.seed(setup.row(1), setup.row(2), device=get_librenms_sync_device(page, server_key=SERVER_KEY))
-    records = setup.records(page)
-    data = {"select": ["102", "101"], "server_key": SERVER_KEY}
-    for channel_id in (2, 1):
-        row_id = str(100 + channel_id)
-        data.update(
-            {
-                f"device_selection_{row_id}": setup.device.pk,
-                f"expected_local_id_{row_id}": setup.channels[channel_id - 1].pk,
-                f"expected_local_device_id_{row_id}": setup.device.pk,
-                f"expected_remote_id_{row_id}": records[row_id]["netbox_remote_interface_id"],
-                f"expected_remote_device_id_{row_id}": records[row_id]["netbox_remote_device_id"],
-            }
-        )
-
-    response = setup.client.post(reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[page.pk]), data)
-
-    texts = [str(message) for message in get_messages(response.wsgi_request)]
-    assert setup.b_side(setup.parent_cable()) == [(1, setup.far_ends[0]), (2, setup.far_ends[1])], texts
-
-
-@pytest.mark.usefixtures("breakout_server")
 def test_a_user_who_may_not_change_the_parent_gets_no_sync_action():
     from dcim.models import Device
 
@@ -598,4 +531,3 @@ def test_a_user_who_may_not_change_the_parent_gets_no_sync_action():
     records = setup.records()
 
     assert [records[row_id]["can_create_cable"] for row_id in ("101", "102")] == [False, False]
-    assert not records["102"].get("can_select_cable")

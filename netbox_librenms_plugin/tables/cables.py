@@ -29,9 +29,7 @@ class LibreNMSCableTable(tables.Table):
             "td": {"data-col": "selection"},
             "input": {
                 "name": "select",
-                "disabled": lambda record: (
-                    None if record.get("can_create_cable") or record.get("can_select_cable") else "disabled"
-                ),
+                "disabled": lambda record: None if record.get("can_create_cable") else "disabled",
             },
         },
     )

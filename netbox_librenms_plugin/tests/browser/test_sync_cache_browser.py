@@ -614,14 +614,10 @@ class TestAMovedCableMemberIsNotRestored:
 
 
 class TestTheCableVerifyAnswerSetsTheCheckbox:
-    """A cable row stays selectable after a member change when the verify says it can write or be selected."""
+    """After a member change, the cable row's checkbox follows can_create_cable of the verify answer."""
 
-    @pytest.mark.parametrize(
-        ("can_create", "can_select", "enabled"),
-        [(False, True, True), (True, False, True), (False, False, False)],
-        ids=["selectable-only", "writable", "neither"],
-    )
-    def test_the_checkbox_follows_the_answer(self, page, can_create, can_select, enabled):
+    @pytest.mark.parametrize("can_create", [True, False], ids=["writable", "not-writable"])
+    def test_the_checkbox_follows_the_answer(self, page, can_create):
         _load_cable_member_page(page, ["cable-10"])
         formatted_row = {
             "local_port": "Ethernet1",
@@ -630,7 +626,6 @@ class TestTheCableVerifyAnswerSetsTheCheckbox:
             "cable_status": "No Cable",
             "actions": "",
             "can_create_cable": can_create,
-            "can_select_cable": can_select,
         }
         page.route(
             f"{CABLE_VERIFY_URL}**",
@@ -650,7 +645,7 @@ class TestTheCableVerifyAnswerSetsTheCheckbox:
             )
 
         checkbox = page.locator("#cb-cable-10")
-        if enabled:
+        if can_create:
             expect(checkbox).to_be_enabled()
         else:
             expect(checkbox).to_be_disabled()
