@@ -825,7 +825,7 @@ class BaseLibreNMSSyncView(
         members_by_key = members_by_serial_key(vc_members, serial_key)
 
         result = []
-        for component in extract_vc_members(inventory):
+        for component in extract_vc_members(inventory, (serial_key,)):
             serial = serial_key(component["serial"])
             if not serial:
                 continue

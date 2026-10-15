@@ -27,6 +27,7 @@ from netbox_librenms_plugin.data_shapes.recordings_store import (
     recording_meta,
 )
 from netbox_librenms_plugin.import_utils.virtual_chassis import extract_vc_stack, select_vc_parent_index
+from netbox_librenms_plugin.utils import normalize_stack_serial
 
 # Vendor kinship for the *similarity* signal only — NOT for collapsing distinct OSes into one
 # "covered" verdict. ios / iosxr / nxos share a vendor but their ifName/ifDescr conventions differ,
@@ -165,7 +166,8 @@ def compute_shape_signature(recording):
     child_items = []
     if parent_index is not None:
         child_items = _inventory_items(_body(recording, lambda k: _contained_in_query(k) == str(parent_index)))
-    stack = extract_vc_stack([*root_items, *child_items])
+    # A recording carries no serial rules, so its stack serials compare without them.
+    stack = extract_vc_stack([*root_items, *child_items], (normalize_stack_serial,))
     members = stack.members
     vc = {
         "present": bool(members),
