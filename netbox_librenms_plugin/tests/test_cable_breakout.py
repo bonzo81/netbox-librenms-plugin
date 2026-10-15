@@ -366,3 +366,28 @@ def test_a_channel_reads_the_far_end_at_its_connector_and_never_its_parent():
         [setup.far_ends[1]],
     ]
     assert record["cable_status"] == f"Cabled to {setup.peer.name}"
+
+
+@pytest.mark.usefixtures("breakout_server")
+def test_a_port_that_becomes_a_channel_before_the_lock_gets_no_cable(monkeypatch):
+    from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+    setup = _Breakout("becomes-channel")
+    plain = make_interface(setup.device, "et-0/0/9")
+    other_parent = Interface.objects.create(device=setup.device, name="et-0/0/8", type="100gbase-x-qsfp28", channels=4)
+    setup.seed({**setup.row(1), "local_port_id": 109, "local_port": plain.name})
+    real_lock = SyncCablesView._lock_cable_terminations
+
+    def channelize_then_lock(view, local_term, remote_term, **kwargs):
+        # A concurrent change makes the row's port a channel after the read, before the lock.
+        Interface.objects.filter(pk=plain.pk).update(parent=other_parent, channel_id=1)
+        return real_lock(view, local_term, remote_term, **kwargs)
+
+    monkeypatch.setattr(SyncCablesView, "_lock_cable_terminations", channelize_then_lock)
+
+    texts = setup.sync(9)
+
+    assert any("The cable state or target changed" in text for text in texts), texts
+    assert Interface.objects.get(pk=plain.pk).cable_id is None
+    assert Interface.objects.get(pk=setup.far_ends[0].pk).cable_id is None
+    assert Cable.objects.count() == 0
