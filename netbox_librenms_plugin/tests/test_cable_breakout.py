@@ -475,7 +475,7 @@ def _records_row(channel_id, setup, record):
 
 
 @pytest.mark.usefixtures("breakout_server")
-def test_creating_the_far_end_of_a_channel_reads_the_record_of_a_bound_parent(librenms_server):
+def test_creating_the_far_end_of_a_channel_needs_no_record_of_a_bound_parent(librenms_server):
     from urllib.parse import parse_qs, urlsplit
 
     from netbox_librenms_plugin.models import InterfaceTypeMapping
@@ -489,7 +489,7 @@ def test_creating_the_far_end_of_a_channel_reads_the_record_of_a_bound_parent(li
     # Any Ignore rule makes a port without a record refuse the write.
     InterfaceTypeMapping.objects.create(action=InterfaceTypeMapping.ACTION_IGNORE, name_pattern=r"^no-such-port$")
     map_device_to_librenms(setup.peer, 9002, server_key=SERVER_KEY)
-    librenms_server.register("/api/v0/ports/300", {"status": "ok", "port": [_port(300, setup.parent.name)]})
+    # LibreNMS has no record of the parent's port 300: the rules never read it.
     librenms_server.register(
         "/api/v0/ports/202",
         {"status": "ok", "port": [{**_port(202, "Ethernet20"), "device_id": 9002, "deleted": 0}]},
@@ -666,7 +666,7 @@ def test_create_remote_is_not_offered_under_a_hidden_parent(librenms_server):
 
 
 @pytest.mark.usefixtures("breakout_server")
-def test_an_ignored_bound_parent_blocks_the_channel_in_the_table_verify_and_create_remote(librenms_server):
+def test_an_ignore_rule_on_the_parent_port_does_not_block_the_channel(librenms_server):
     from netbox_librenms_plugin.models import InterfaceTypeMapping
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.tests.test_interface_rule_writes import _port
@@ -674,24 +674,48 @@ def test_an_ignored_bound_parent_blocks_the_channel_in_the_table_verify_and_crea
     setup = _Breakout("ignored-parent")
     seed_mapping(setup.parent, SERVER_KEY, own=300, save=False)
     setup.parent.save()
-    # The rule matches only the parent's own port: the channel and the far end pass.
+    # The rule matches only the parent's own port; the rules decide the channel's port.
     InterfaceTypeMapping.objects.create(action=InterfaceTypeMapping.ACTION_IGNORE, name_pattern=r"^et-0/0/1$")
     librenms_server.register("/api/v0/ports/300", {"status": "ok", "port": [_port(300, setup.parent.name)]})
     setup.seed(_records_row(1, setup, setup.row(1)))
 
-    records = setup.records()
+    record = setup.records()["101"]
     verified = setup.verify(1)
     texts = setup.sync(1)
-    # Channel 1 again, now towards a far end that NetBox does not have: create-remote is the action.
-    missing = _missing_far_end(setup, librenms_server, 1, 9005)
-    setup.seed({**missing, **_records_row(1, setup, missing)})
-    create_record = setup.records()["101"]
 
-    reason = "LibreNMS port 300 (et-0/0/1)"
-    assert records["101"]["can_create_cable"] is False
-    assert reason in records["101"]["rule_block"]["reason"]
-    assert verified["can_create_cable"] is False and reason in verified["actions"]
-    assert create_record.get("remote_create_url") is None
-    assert reason in create_record["rule_block"]["reason"]
-    assert any("Skipped (the interface rules refuse a port)" in text and reason in text for text in texts), texts
-    assert setup.parent_cable() is None
+    assert (record["can_create_cable"], record.get("rule_block")) == (True, None)
+    assert verified["can_create_cable"] is True
+    assert "Successfully created cable for interfaces: et-0/0/1:0" in texts
+    assert setup.b_side(setup.parent_cable()) == [(1, setup.far_ends[0])]
+
+
+@pytest.mark.usefixtures("breakout_server")
+def test_a_cached_render_of_a_channel_row_never_calls_librenms(librenms_server):
+    from netbox_librenms_plugin.models import InterfaceTypeMapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
+    setup = _Breakout("cached-render")
+    seed_mapping(setup.parent, SERVER_KEY, own=300, save=False)
+    setup.parent.save()
+    InterfaceTypeMapping.objects.create(action=InterfaceTypeMapping.ACTION_IGNORE, name_pattern=r"^et-0/0/1$")
+    setup.seed(_records_row(1, setup, setup.row(1)))
+    before = len(librenms_server.requests)
+
+    page = setup.client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[setup.device.pk]),
+        {"tab": "cables", "server_key": SERVER_KEY},
+    )
+    after_page = len(librenms_server.requests)
+    fragment = setup.client.get(
+        reverse(
+            "plugins:netbox_librenms_plugin:sync_cache_fragment",
+            kwargs={"object_type": "device", "pk": setup.device.pk, "tab": "cables"},
+        ),
+        {"server_key": SERVER_KEY},
+    )
+
+    assert (page.status_code, fragment.status_code) == (200, 200)
+    # The page shell reads the device and its poller group; the cached cable table reads nothing.
+    page_paths = [request["path"] for request in librenms_server.requests[before:after_page]]
+    assert [path for path in page_paths if "/ports" in path] == []
+    assert [request["path"] for request in librenms_server.requests[after_page:]] == []
