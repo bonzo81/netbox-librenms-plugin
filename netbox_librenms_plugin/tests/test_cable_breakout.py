@@ -531,3 +531,31 @@ def test_a_user_who_may_not_change_the_parent_gets_no_sync_action():
     records = setup.records()
 
     assert [records[row_id]["can_create_cable"] for row_id in ("101", "102")] == [False, False]
+
+
+def _constrained_user(name, *, interface_view=None, cable_change=None):
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+    user = make_user_with_perms(name, [("view", Device), ("view", Cable), ("add", Cable), ("change", Interface)])
+    user = grant(user, "view", Interface, constraints=interface_view)
+    return grant(user, "change", Cable, constraints=cable_change)
+
+
+@pytest.mark.usefixtures("breakout_server")
+def test_a_hidden_parent_is_never_named_and_its_channels_get_no_action():
+    setup = _Breakout("hidden-parent")
+    setup.client.force_login(_constrained_user("breakout-hidden-parent", interface_view={"channels__isnull": True}))
+    setup.seed(setup.row(1), setup.row(2))
+
+    records = setup.records()
+    verified = setup.verify(2)
+
+    reason = "Breakout Not Synced: the parent interface of this channel is not available"
+    assert [(records[row_id]["cable_status"], records[row_id]["can_create_cable"]) for row_id in ("101", "102")] == [
+        (reason, False),
+        (reason, False),
+    ]
+    assert (verified["cable_status"], verified["can_create_cable"]) == (reason, False)
+    assert setup.parent.name not in verified["cable_status"]
