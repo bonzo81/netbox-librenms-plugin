@@ -1,5 +1,7 @@
 """Cable sync on a breakout channel writes one profiled cable on the channelized parent interface."""
 
+import json
+
 import pytest
 from dcim.models import Cable, Interface
 from django.contrib.messages import get_messages
@@ -80,6 +82,28 @@ class _Breakout:
         assert rendered.status_code == 200
         return {str(row.record["row_id"]): row.record for row in rendered.context["cable_sync"]["table"].rows}
 
+    def sync_rows(self, channel_ids):
+        """POST one Sync Cable submit that selects the rows of *channel_ids*, in that order."""
+        data = {}
+        for channel_id in channel_ids:
+            data.update(_rendered_sync_data(self.client, self.device, str(100 + channel_id)))
+        data["select"] = [str(100 + channel_id) for channel_id in channel_ids]
+        response = self.client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[self.device.pk]), data
+        )
+        assert response.status_code == 302
+        return [str(message) for message in get_messages(response.wsgi_request)]
+
+    def verify(self, channel_id):
+        """Return the row that the verify endpoint renders for the row of *channel_id*."""
+        response = self.client.post(
+            reverse("plugins:netbox_librenms_plugin:verify_cable"),
+            data=json.dumps({"device_id": self.device.pk, "row_id": str(100 + channel_id), "server_key": SERVER_KEY}),
+            content_type="application/json",
+        )
+        assert response.status_code == 200
+        return response.json()["formatted_row"]
+
     def sync(self, channel_id, device=None):
         """POST the Sync Cable form of the row for *channel_id*, and return the flashed messages."""
         device = device or self.device
@@ -146,21 +170,73 @@ class TestBreakoutCableWrites:
         records = setup.records()
         assert [records[row_id]["cable_status"] for row_id in ("101", "102")] == ["Cable Found", "Cable Found"]
 
-    def test_channel_two_creates_the_cable_with_the_known_far_end_of_channel_one(self):
-        setup = _Breakout("lower-known")
+    def test_channel_two_writes_nothing_while_channel_one_has_no_cable_also_when_channel_one_is_ignored(self):
+        from netbox_librenms_plugin.models import InterfaceTypeMapping
+        from netbox_librenms_plugin.tests.test_interface_rule_writes import _port
+        from netbox_librenms_plugin.views.base.cables_view import port_record
+
+        setup = _Breakout("lower-ignored")
+        InterfaceTypeMapping.objects.create(action=InterfaceTypeMapping.ACTION_IGNORE, name_pattern=r"^et-0/0/1:0$")
+        rows = [
+            {
+                **setup.row(channel_id),
+                "local_port_record": port_record(_port(100 + channel_id, setup.channels[channel_id - 1].name)),
+                "remote_port_record": port_record(_port(200 + channel_id, setup.far_ends[channel_id - 1].name)),
+                "remote_port_key": 200 + channel_id,
+            }
+            for channel_id in (1, 2)
+        ]
+        setup.seed(*rows)
+
+        texts = setup.sync(2)
+
+        reason = "channel ID 1 has no far end on et-0/0/1 yet, so sync channel ID 1 first"
+        assert any(reason in text for text in texts), texts
+        assert setup.parent_cable() is None
+        assert [Interface.objects.get(pk=far.pk).cable_id for far in setup.far_ends[:2]] == [None, None]
+
+    def test_the_table_and_the_verify_agree_on_channel_two(self):
+        setup = _Breakout("verify-agrees")
         setup.seed(setup.row(1), setup.row(2))
 
-        setup.sync(2)
+        record = setup.records()["102"]
+        verified = setup.verify(2)
 
-        assert setup.b_side(setup.parent_cable()) == [(1, setup.far_ends[0]), (2, setup.far_ends[1])]
-        records = setup.records()
-        assert [records[row_id]["can_create_cable"] for row_id in ("101", "102")] == [False, False]
+        reason = "channel ID 1 has no far end on et-0/0/1 yet, so sync channel ID 1 first"
+        assert (record["cable_status"], record["can_create_cable"]) == (f"Breakout Not Synced: {reason}", False)
+        assert (verified["cable_status"], verified["can_create_cable"]) == (f"Breakout Not Synced: {reason}", False)
+
+    def test_one_submit_writes_the_channels_in_channel_order(self):
+        setup = _Breakout("bulk")
+        setup.seed(*(setup.row(channel_id) for channel_id in (1, 2, 3, 4)))
+
+        setup.sync_rows([4, 2, 3, 1])
+
+        assert Cable.objects.count() == 1
+        assert setup.b_side(setup.parent_cable()) == [(lane + 1, far) for lane, far in enumerate(setup.far_ends)]
+
+    def test_a_deleted_lower_far_end_never_moves_the_other_far_ends(self):
+        setup = _Breakout("deleted-lower")
+        setup.seed(setup.row(1), setup.row(2))
+        setup.sync_rows([1, 2])
+        setup.far_ends[0].delete()
+        replacement = make_interface(setup.peer, "Ethernet9")
+        setup.seed(setup.row(2, far_end=replacement), setup.row(3))
+
+        texts = setup.sync(2)
+        texts_3 = setup.sync(3)
+
+        assert any("connector 2 of the cable on et-0/0/1 ends on another interface" in text for text in texts), texts
+        reason = "channel ID 1 has no far end on et-0/0/1 yet, so sync channel ID 1 first"
+        assert any(reason in text for text in texts_3), texts_3
+        assert setup.b_side(setup.parent_cable()) == [(2, setup.far_ends[1])]
+        assert Interface.objects.get(pk=replacement.pk).cable_id is None
 
     @pytest.mark.parametrize(
         ("sync_first", "reason"),
         [
-            (True, "channel ID 2 has no far end on the cable on et-0/0/1 yet, so sync it first"),
-            (False, "channel ID 2 has no known far end, and NetBox numbers the far ends in order"),
+            (True, "channel ID 2 has no far end on et-0/0/1 yet, so sync channel ID 2 first"),
+            (False, "channel ID 1 has no far end on et-0/0/1 yet, so sync channel ID 1 first"),
         ],
         ids=["extend", "create"],
     )
@@ -277,7 +353,7 @@ def test_a_channel_reads_the_far_end_at_its_connector_and_never_its_parent():
 
     setup = _Breakout("far-read")
     setup.seed(setup.row(1), setup.row(2))
-    setup.sync(2)
+    setup.sync_rows([1, 2])
     # The same channel, now towards a neighbour that NetBox does not know.
     setup.seed({**setup.row(1), "remote_device": "breakout-far-read-unknown"})
 
