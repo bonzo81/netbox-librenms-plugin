@@ -1839,6 +1839,10 @@ class BaseCableTableView(
         if not is_channel(channel):
             return False
         parent = channel.parent
+        if parent is not None and not self._object_is_viewable(parent):
+            # The decision reads the parent's name and state, so a hidden parent leaves only a generic reason.
+            link["cable_status"] = "Breakout Not Synced: the parent interface of this channel is not available"
+            return True
         cable = None if parent is None else parent.cable
         if not self._breakout_cable_is_viewable(cable, normal_context):
             link["cable_status"] = "Cable State Not Available"
