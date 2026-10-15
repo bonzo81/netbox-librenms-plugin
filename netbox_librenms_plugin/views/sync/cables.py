@@ -73,6 +73,7 @@ from netbox_librenms_plugin.utils import (
 )
 from netbox_librenms_plugin.views.base.cables_view import (
     cable_row_ports,
+    fetch_port_record,
     port_owner_id,
     port_record,
     remote_port_ref,
@@ -672,9 +673,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
     def _fetch_port_record(self, port_id):
         """Read one LibreNMS port record by id, or None when LibreNMS returns none."""
-        success, data = self.librenms_api.get_port_by_id(port_id)
-        ports = data.get("port") if success and isinstance(data, dict) else None
-        return ports[0] if isinstance(ports, list) and ports and isinstance(ports[0], dict) else None
+        return fetch_port_record(self.librenms_api, port_id)
 
     def _prefetch_cable_port_records(self, interface, cached_links):
         """Resolve one selected row read-only and fetch its port records, before its transaction."""
