@@ -178,17 +178,20 @@ def _is_junos_fpc(row: dict) -> bool:
     )
 
 
-def _junos_fpc_rows(root: dict, children: list) -> list:
-    """Return the FPC member rows of a Junos Virtual Chassis root, or [] when any condition fails."""
+def _junos_fpc_rows(root: dict, children: list, serial_keys) -> list:
+    """Return the FPC member rows of a Junos Virtual Chassis root, or [] when no serial key meets every condition."""
     if not _is_junos_vc_root(root):
         return []
     fpcs = [row for row in children if _is_junos_fpc(row)]
-    serials = [normalize_stack_serial(row.get("entPhysicalSerialNum")) for row in fpcs]
-    root_serial = normalize_stack_serial(root.get("entPhysicalSerialNum"))
-    # A false stack creates bogus member devices on import, so every condition must hold.
-    if len(fpcs) < 2 or not all(serials) or len(set(serials)) != len(serials) or serials.count(root_serial) != 1:
+    if len(fpcs) < 2:
         return []
-    return fpcs
+    # A false stack creates bogus member devices on import, so one serial key must meet every condition.
+    for key in serial_keys:
+        serials = [key(row.get("entPhysicalSerialNum")) for row in fpcs]
+        root_serial = key(root.get("entPhysicalSerialNum"))
+        if all(serials) and len(set(serials)) == len(serials) and serials.count(root_serial) == 1:
+            return fpcs
+    return []
 
 
 def vc_serial_key(manufacturer=None):
@@ -219,6 +222,22 @@ def chassis_serial_key(device):
     chassis = getattr(device, "virtual_chassis", None)
     master = getattr(chassis, "master", None) or device
     return vc_serial_key(getattr(getattr(master, "device_type", None), "manufacturer", None))
+
+
+def candidate_vc_serial_keys() -> tuple:
+    """
+    Return each :func:`vc_serial_key` that an import can compare members with, before its DeviceType is known.
+
+    These are the global key and the key of each manufacturer that has serial rules. Detection accepts a
+    shape that one of them explains, and :func:`identify_vc_master` then uses the key of the DeviceType.
+    """
+    from dcim.models import Manufacturer
+
+    from ..models import NormalizationRule
+
+    scoped_rules = NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL, manufacturer__isnull=False)
+    manufacturers = Manufacturer.objects.filter(pk__in=scoped_rules.values("manufacturer")).order_by("pk")
+    return (vc_serial_key(), *(vc_serial_key(manufacturer) for manufacturer in manufacturers))
 
 
 def members_by_serial_key(vc_members, serial_key) -> dict:
@@ -292,7 +311,7 @@ class VcStack(NamedTuple):
     shape: str | None
 
 
-def extract_vc_members(rows: list) -> list[dict]:
+def extract_vc_members(rows: list, serial_keys) -> list[dict]:
     """
     Return the Virtual Chassis members that ENTITY-MIB inventory rows describe.
 
@@ -302,23 +321,24 @@ def extract_vc_members(rows: list) -> list[dict]:
     * Two or more ``chassis`` children of the stack (or chassis) root.
     * Junos: a ``chassis`` root whose description names the Virtual Chassis, with two or more
       ``container`` children whose description starts with "FPC". Each FPC needs its own real
-      serial, and the root serial must match exactly one FPC. The model is the FPC name, and the
-      position is the FPC's parent-relative position (the member id).
+      serial, and the root serial must match exactly one FPC, all under one of *serial_keys*. The
+      model is the FPC name, and the position is the FPC's parent-relative position (the member id).
 
     Which member is the master is not part of this shape: :func:`identify_vc_master` decides it.
 
     Args:
         rows: Inventory rows. They must hold the root rows and at least their direct children;
             deeper rows are ignored.
+        serial_keys: The :func:`vc_serial_key` functions that may compare the Junos FPC serials.
 
     Returns:
         list[dict]: The members in position order, or [] when the rows describe no stack.
 
     """
-    return extract_vc_stack(rows).members
+    return extract_vc_stack(rows, serial_keys).members
 
 
-def extract_vc_stack(rows: list) -> VcStack:
+def extract_vc_stack(rows: list, serial_keys) -> VcStack:
     """Return the stack that :func:`extract_vc_members` reads, with the member shape that matched."""
     rows = [row for row in rows if isinstance(row, dict)]
     roots = [row for row in rows if _as_int(row.get("entPhysicalContainedIn")) == 0]
@@ -332,7 +352,7 @@ def extract_vc_stack(rows: list) -> VcStack:
     if len(chassis) >= 2:
         members = _member_entries(chassis, model_field="entPhysicalModelName")
         return VcStack(root, chassis, members, VC_MEMBER_SHAPE_CHASSIS)
-    fpcs = _junos_fpc_rows(root, children)
+    fpcs = _junos_fpc_rows(root, children, serial_keys)
     if fpcs:
         return VcStack(root, fpcs, _member_entries(fpcs, model_field="entPhysicalName"), VC_MEMBER_SHAPE_JUNOS_FPC)
     return VcStack(None, [], [], None)
@@ -355,9 +375,9 @@ class _StackRows(NamedTuple):
         return self.fpc_slots.get(int(named.group("member"))) if named else None
 
 
-def _stack_rows(rows) -> _StackRows:
+def _stack_rows(rows, serial_keys) -> _StackRows:
     """Return the stack root, the member rows' positions and the Junos FPC slots of an inventory."""
-    stack = extract_vc_stack(rows)
+    stack = extract_vc_stack(rows, serial_keys)
     if stack.root is None:
         return _StackRows(None, {}, {})
     fpc_slots = {}
@@ -387,7 +407,7 @@ class _Attribution:
         self.serial_key = serial_key
         self.by_serial = members_by_serial_key(vc_members, serial_key)
         self.by_index = {index: row for row in rows if (index := row.get("entPhysicalIndex")) is not None}
-        self.stack = _stack_rows(rows)
+        self.stack = _stack_rows(rows, (serial_key,))
         self.results = {}
 
     def member_at(self, position):
@@ -560,7 +580,7 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
             logger.warning(f"Could not read child inventory for device {device_id}")
             return _failed_virtual_chassis_data("LibreNMS child inventory request failed")
 
-        members = extract_vc_members([*root_items, *(child_items or [])])
+        members = extract_vc_members([*root_items, *(child_items or [])], candidate_vc_serial_keys())
         if not members:
             return None
 
