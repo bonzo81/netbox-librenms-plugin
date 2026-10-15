@@ -1224,14 +1224,16 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         self._cable_provenance_tag_resolved = False
         return self.process_single_interface(interface, cached_links, force=force, port_records=port_records)
 
-    @staticmethod
-    def _in_channel_order(selected_interfaces, cached_links):
+    def _in_channel_order(self, selected_interfaces, cached_links):
         """Return the selection with the channel rows in channel ID order, so that channel 1 creates the cable first."""
         if not CHANNELS_SUPPORTED:
             return selected_interfaces
-        local_ids = {
-            link.get("row_id"): coerce_librenms_id(link.get("netbox_local_interface_id")) for link in cached_links
-        }
+        # The local end the writer uses: the submitted chassis member applied.
+        local_ids = {}
+        for interface in selected_interfaces:
+            link_data, result = self._selected_row_link_data(interface, cached_links)
+            if result is None:
+                local_ids[interface.get("row_id")] = coerce_librenms_id(link_data.get("netbox_local_interface_id"))
         channel_ids = dict(
             Interface.objects.filter(pk__in=set(local_ids.values()) - {None}, channel_id__isnull=False).values_list(
                 "pk", "channel_id"

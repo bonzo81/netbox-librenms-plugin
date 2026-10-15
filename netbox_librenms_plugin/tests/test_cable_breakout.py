@@ -546,6 +546,40 @@ def test_the_verify_keeps_a_waiting_channel_selectable_like_the_table():
 
 
 @pytest.mark.usefixtures("breakout_server")
+def test_one_submit_orders_the_channels_of_the_submitted_chassis_member():
+    from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+
+    setup = _Breakout("vc-order")
+    page = make_device("breakout-vc-order-page")
+    persist_test_server_mapping(page, SERVER_KEY)
+    # The page member has plain ports with the channel names, so the cached rows resolve there.
+    for channel in setup.channels:
+        make_interface(page, channel.name)
+    make_virtual_chassis("breakout-vc-order", page, setup.device)
+    page.refresh_from_db()
+    setup.seed(setup.row(1), setup.row(2), device=get_librenms_sync_device(page, server_key=SERVER_KEY))
+    records = setup.records(page)
+    data = {"select": ["102", "101"], "server_key": SERVER_KEY}
+    for channel_id in (2, 1):
+        row_id = str(100 + channel_id)
+        data.update(
+            {
+                f"device_selection_{row_id}": setup.device.pk,
+                f"expected_local_id_{row_id}": setup.channels[channel_id - 1].pk,
+                f"expected_local_device_id_{row_id}": setup.device.pk,
+                f"expected_remote_id_{row_id}": records[row_id]["netbox_remote_interface_id"],
+                f"expected_remote_device_id_{row_id}": records[row_id]["netbox_remote_device_id"],
+            }
+        )
+
+    response = setup.client.post(reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[page.pk]), data)
+
+    texts = [str(message) for message in get_messages(response.wsgi_request)]
+    assert setup.b_side(setup.parent_cable()) == [(1, setup.far_ends[0]), (2, setup.far_ends[1])], texts
+
+
+@pytest.mark.usefixtures("breakout_server")
 def test_a_user_who_may_not_change_the_parent_gets_no_sync_action():
     from dcim.models import Device
 
