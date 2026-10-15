@@ -16,10 +16,8 @@ from netbox_librenms_plugin.tests.test_bulk_import_job_control import _libre_dev
 pytestmark = pytest.mark.django_db
 
 
-def _import_recording(live_librenms, recording, tag):
-    """Import the recording's device through the real bulk import and return its Virtual Chassis."""
-    from dcim.models import VirtualChassis
-
+def _bulk_import_recording(live_librenms, recording, tag):
+    """Import the recording's device through the real bulk import and return the import result."""
     from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
 
     device_id = recording["device_id"]
@@ -42,10 +40,18 @@ def _import_recording(live_librenms, recording, tag):
         libre_devices_cache={device_id: row},
         user=make_superuser(f"{tag}-user"),
     )
-
     assert result["failed"] == []
+    return result
+
+
+def _import_recording(live_librenms, recording, tag):
+    """Import the recording's device through the real bulk import and return its Virtual Chassis."""
+    from dcim.models import VirtualChassis
+
+    result = _bulk_import_recording(live_librenms, recording, tag)
+
     assert result["virtual_chassis_created"] == 1
-    return VirtualChassis.objects.get(domain=f"librenms-default-{device_id}")
+    return VirtualChassis.objects.get(domain=f"librenms-default-{recording['device_id']}")
 
 
 @pytest.mark.parametrize(
@@ -68,24 +74,31 @@ def test_an_imported_stack_puts_each_member_at_its_reported_number(live_librenms
         assert get_virtual_chassis_member(chassis.master, f"ge-{position}/0/0") == member
 
 
-def test_a_junos_root_serial_matches_its_fpc_through_the_manufacturer_serial_rules(live_librenms):
-    """The root serial matches the master FPC only after a manufacturer rule, as the import's member matching does."""
+def _recording_with_root_serial_rule(rule_manufacturer):
+    """Return the EX4400 VC recording whose root serial matches the master FPC only after a "-RE" serial rule."""
     import copy
 
     from netbox_librenms_plugin.models import NormalizationRule
-    from netbox_librenms_plugin.tests.conftest import _shared_infra
 
     recording = copy.deepcopy(load_recording("juniper-ex4400-vc-2member"))
-    device_id = recording["device_id"]
     for key, value in recording["responses"].items():
         if "/inventory/" in key:
             for row in unwrap_response(value)[1]["inventory"]:
                 if row["entPhysicalIndex"] == 1:
                     row["entPhysicalSerialNum"] = f"{row['entPhysicalSerialNum']}-RE"
-    _site, manufacturer, _device_type, _role = _shared_infra()
     NormalizationRule.objects.create(
-        scope="serial", manufacturer=manufacturer, match_pattern=r"^(.+)-RE$", replacement=r"\1"
+        scope="serial", manufacturer=rule_manufacturer, match_pattern=r"^(.+)-RE$", replacement=r"\1"
     )
+    return recording
+
+
+def test_a_junos_root_serial_matches_its_fpc_through_the_manufacturer_serial_rules(live_librenms):
+    """The root serial matches the master FPC only after a manufacturer rule, as the import's member matching does."""
+    from netbox_librenms_plugin.tests.conftest import _shared_infra
+
+    _site, manufacturer, _device_type, _role = _shared_infra()
+    recording = _recording_with_root_serial_rule(manufacturer)
+    device_id = recording["device_id"]
     inventory = unwrap_response(recording["responses"][f"GET /api/v0/inventory/{device_id}/all"])[1]["inventory"]
     fpc_serials = {row["entPhysicalIndex"]: row["entPhysicalSerialNum"] for row in inventory}
 
@@ -97,6 +110,21 @@ def test_a_junos_root_serial_matches_its_fpc_through_the_manufacturer_serial_rul
         1: fpc_serials[121],
     }
     assert chassis.master.vc_position == 0
+
+
+def test_another_manufacturers_serial_rule_does_not_make_a_junos_stack(live_librenms):
+    """Only the serial rules of the imported DeviceType's manufacturer may match the root serial to an FPC."""
+    from dcim.models import Device, Manufacturer, VirtualChassis
+
+    recording = _recording_with_root_serial_rule(
+        Manufacturer.objects.create(name="Unrelated serial rules", slug="unrelated-serial-rules")
+    )
+
+    result = _bulk_import_recording(live_librenms, recording, "unrelated-root-serial-rule")
+
+    assert result["virtual_chassis_created"] == 0
+    assert not VirtualChassis.objects.filter(domain=f"librenms-default-{recording['device_id']}").exists()
+    assert Device.objects.filter(name=f"unrelated-root-serial-rule-{recording['device_id']}").exists()
 
 
 def test_a_missing_member_position_numbers_the_whole_stack_in_row_order(live_librenms):
