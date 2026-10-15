@@ -3647,11 +3647,11 @@ class TestCheckIgnoreRules:
     def test_ancestor_walk_skips_when_grandparent_serial_matches(self):
         """IOS-XR case: IDPROM is child of empty-serial Mother Board, but grandparent serial matches."""
         # Mirrors actual 8201-SYS data: 0/RP0/CPU0-Base Board IDPROM (idx=7)
-        # parent=Mother Board (idx=30, serial=''), grandparent=0/RP0/CPU0 (idx=1, serial='FOC2418NHRK')
+        # parent=Mother Board (idx=30, serial=''), grandparent=0/RP0/CPU0 (idx=1, serial='FOC0000A0AA')
         grandparent = {
             "entPhysicalIndex": 1,
             "entPhysicalName": "0/RP0/CPU0",
-            "entPhysicalSerialNum": "FOC2418NHRK",
+            "entPhysicalSerialNum": "FOC0000A0AA",
             "entPhysicalContainedIn": 0,
         }
         parent = {
@@ -3663,7 +3663,7 @@ class TestCheckIgnoreRules:
         item = {
             "entPhysicalIndex": 7,
             "entPhysicalName": "0/RP0/CPU0-Base Board IDPROM",
-            "entPhysicalSerialNum": "FOC2418NHRK",
+            "entPhysicalSerialNum": "FOC0000A0AA",
             "entPhysicalContainedIn": 30,
         }
         index_map = {1: grandparent, 30: parent, 7: item}
@@ -3686,7 +3686,7 @@ class TestCheckIgnoreRules:
         item = {
             "entPhysicalIndex": 7,
             "entPhysicalName": "Board-IDPROM",
-            "entPhysicalSerialNum": "FOC2418NHRK",
+            "entPhysicalSerialNum": "FOC0000A0AA",
             "entPhysicalContainedIn": 30,
         }
         index_map = {1: grandparent, 30: parent, 7: item}
@@ -3695,14 +3695,14 @@ class TestCheckIgnoreRules:
     def test_serial_matches_device_transparent(self):
         """serial_matches_device rule with action=transparent returns 'transparent'."""
         rule = self._rule(match_type="serial_matches_device", pattern="", action="transparent")
-        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": "FOC2418NHRK", "entPhysicalIndex": 5}
-        assert self._check(item, None, [rule], device_serial="FOC2418NHRK") == "transparent"
+        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": "FOC0000A0AA", "entPhysicalIndex": 5}
+        assert self._check(item, None, [rule], device_serial="FOC0000A0AA") == "transparent"
 
     def test_serial_matches_device_skip(self):
         """serial_matches_device rule with action=skip returns 'skip'."""
         rule = self._rule(match_type="serial_matches_device", pattern="", action="skip")
-        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": "FOC2418NHRK"}
-        assert self._check(item, None, [rule], device_serial="FOC2418NHRK") == "skip"
+        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": "FOC0000A0AA"}
+        assert self._check(item, None, [rule], device_serial="FOC0000A0AA") == "skip"
 
     def test_numeric_serial_matches_device_after_normalization(self):
         """Numeric ENTITY serials use the same text normalization as the device serial."""
@@ -3715,26 +3715,26 @@ class TestCheckIgnoreRules:
         """serial_matches_device: item serial differs from device serial → no match."""
         rule = self._rule(match_type="serial_matches_device", pattern="", action="transparent")
         item = {"entPhysicalName": "Optics0/0/0/0", "entPhysicalSerialNum": "XCVR001"}
-        assert self._check(item, None, [rule], device_serial="FOC2418NHRK") is None
+        assert self._check(item, None, [rule], device_serial="FOC0000A0AA") is None
 
     def test_serial_matches_device_empty_device_serial(self):
         """serial_matches_device: device serial empty → no match (defensive)."""
         rule = self._rule(match_type="serial_matches_device", pattern="", action="transparent")
-        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": "FOC2418NHRK"}
+        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": "FOC0000A0AA"}
         assert self._check(item, None, [rule], device_serial="") is None
 
     def test_serial_matches_device_empty_item_serial(self):
         """serial_matches_device: item serial empty → no match (defensive)."""
         rule = self._rule(match_type="serial_matches_device", pattern="", action="transparent")
         item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": ""}
-        assert self._check(item, None, [rule], device_serial="FOC2418NHRK") is None
+        assert self._check(item, None, [rule], device_serial="FOC0000A0AA") is None
 
     def test_serial_matches_device_fires_when_parent_is_chassis(self):
         """serial_matches_device: matches when direct parent has class='chassis'."""
         rule = self._rule(match_type="serial_matches_device", pattern="", action="transparent")
-        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": "FOC2418NHRK"}
+        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": "FOC0000A0AA"}
         chassis = {"entPhysicalName": "Rack 0", "entPhysicalClass": "chassis"}
-        assert self._check(item, chassis, [rule], device_serial="FOC2418NHRK") == "transparent"
+        assert self._check(item, chassis, [rule], device_serial="FOC0000A0AA") == "transparent"
 
     def test_serial_matches_device_skipped_when_parent_is_container(self):
         """Verify serial_matches_device does not promote an item below a container to chassis-level matching."""

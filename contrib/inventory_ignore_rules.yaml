@@ -54,9 +54,9 @@
 # installable hardware.
 #
 # Hierarchy example (Cisco 8201-SYS):
-#   0/RP0/CPU0  (serial FOC2418NHRK)
+#   0/RP0/CPU0  (serial FOC0000A0AA)
 #   └── 0/RP0/CPU0-Mother Board  (serial empty)
-#       └── 0/RP0/CPU0-Base Board IDPROM  (serial FOC2418NHRK) ← SKIP
+#       └── 0/RP0/CPU0-Base Board IDPROM  (serial FOC0000A0AA) ← SKIP
 #   Optics0/0/0/0  (serial SN123)
 #   └── Optics0/0/0/0-IDPROM  (serial SN123)                  ← SKIP
 
