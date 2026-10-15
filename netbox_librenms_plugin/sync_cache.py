@@ -737,7 +737,10 @@ class SyncCacheConsistency:
         """Return whether the tab's snapshot exists in a form its reader accepts."""
         key = self.snapshot_key(tab, server_key)
         if tab == SyncTab.MODULES:
-            return cached_module_inventory(cache.get(key)) is not None
+            payload = cache.get(key)
+            return cached_module_inventory(payload) is not None and module_inventory_oob_matches(
+                payload, self._primary_owner(tab, server_key), server_key
+            )
         return cache.has_key(key)
 
     def status(self, server_key, *, actor_id=None):
