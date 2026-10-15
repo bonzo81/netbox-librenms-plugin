@@ -50,6 +50,14 @@ def breakout_far_end(channel, parent, cable):
     return None if b_side is None else b_side.get(channel.channel_id)
 
 
+def holds_a_cable(interface):
+    """Return whether *interface* is cabled; NetBox mirrors the parent's cable onto every channel."""
+    if is_channel(interface):
+        parent = interface.parent
+        return breakout_far_end(interface, parent, None if parent is None else parent.cable) is not None
+    return interface.cable_id is not None
+
+
 @dataclass(frozen=True)
 class BreakoutDecision:
     """What a cable sync on one channel does: ``matching``, ``create``, ``extend`` or ``refuse``."""
