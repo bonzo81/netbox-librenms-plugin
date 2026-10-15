@@ -113,8 +113,17 @@ def _clean_librenms_value(value) -> str:
     return "" if is_librenms_placeholder(text) else text
 
 
+def _names_another_part(item: dict, transceiver: dict) -> bool:
+    """Return whether an entity and a transceiver both have a real serial and the serials differ."""
+    item_serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
+    transceiver_serial = _clean_librenms_value(transceiver.get("serial"))
+    return bool(item_serial and transceiver_serial and item_serial != transceiver_serial)
+
+
 def _ifindex_entity_is_the_optic(item: dict, transceiver: dict) -> bool:
     """Return whether an entity matched only by port ifIndex has the optic's serial, or neither model nor serial."""
+    if _names_another_part(item, transceiver):
+        return False
     item_serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
     if item_serial:
         return item_serial == _clean_librenms_value(transceiver.get("serial"))
@@ -1768,8 +1777,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         Strategy:
         - For transceivers matching existing inventory items: supplement
           entPhysicalModelName if empty. An item matches by entity_physical_index when its
-          ifIndex agrees with the transceiver port's ifIndex, else by that ifIndex when its
-          serial is the transceiver's or it has neither model nor serial.
+          ifIndex agrees with the transceiver port's ifIndex and it has no other real serial,
+          else by that ifIndex when its serial is the transceiver's or it has neither model
+          nor serial.
         - For transceivers NOT in inventory: create synthetic inventory items
           so they appear in the modules table
 
@@ -1829,16 +1839,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
             # Junos reports the port's ifIndex as entity_physical_index, which can name an unrelated entity.
             existing = inv_by_index.get(ent_idx)
-            if port_ifindex is not None and (
-                existing is None or _coerce_idx(existing.get("ifIndex")) not in {None, port_ifindex}
+            index_taken = existing is not None
+            if existing is not None and (
+                _names_another_part(existing, txr)
+                or (port_ifindex is not None and _coerce_idx(existing.get("ifIndex")) not in {None, port_ifindex})
             ):
+                existing = None
+            if existing is None and port_ifindex is not None:
                 by_ifindex = inv_by_ifindex.get(port_ifindex)
-                if by_ifindex is not None and not _ifindex_entity_is_the_optic(by_ifindex, txr):
-                    by_ifindex = None
-                if by_ifindex is None and existing is not None:
-                    # A synthetic row would duplicate the unrelated entity's index.
-                    continue
-                existing = by_ifindex
+                if by_ifindex is not None and _ifindex_entity_is_the_optic(by_ifindex, txr):
+                    existing = by_ifindex
+            if existing is None and index_taken:
+                # A synthetic row would duplicate the unrelated entity's index.
+                continue
 
             model = _clean_librenms_value(txr.get("model"))
             serial = _clean_librenms_value(txr.get("serial"))
