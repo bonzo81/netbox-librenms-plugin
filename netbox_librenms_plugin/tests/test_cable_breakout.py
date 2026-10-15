@@ -663,3 +663,35 @@ def test_create_remote_is_not_offered_under_a_hidden_parent(librenms_server):
     assert verified["cable_status"] == reason
     assert response.status_code == 404
     assert not Interface.objects.filter(device=setup.peer, name="Ethernet20").exists()
+
+
+@pytest.mark.usefixtures("breakout_server")
+def test_an_ignored_bound_parent_blocks_the_channel_in_the_table_verify_and_create_remote(librenms_server):
+    from netbox_librenms_plugin.models import InterfaceTypeMapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+    from netbox_librenms_plugin.tests.test_interface_rule_writes import _port
+
+    setup = _Breakout("ignored-parent")
+    seed_mapping(setup.parent, SERVER_KEY, own=300, save=False)
+    setup.parent.save()
+    # The rule matches only the parent's own port: the channel and the far end pass.
+    InterfaceTypeMapping.objects.create(action=InterfaceTypeMapping.ACTION_IGNORE, name_pattern=r"^et-0/0/1$")
+    librenms_server.register("/api/v0/ports/300", {"status": "ok", "port": [_port(300, setup.parent.name)]})
+    setup.seed(_records_row(1, setup, setup.row(1)))
+
+    records = setup.records()
+    verified = setup.verify(1)
+    texts = setup.sync(1)
+    # Channel 1 again, now towards a far end that NetBox does not have: create-remote is the action.
+    missing = _missing_far_end(setup, librenms_server, 1, 9005)
+    setup.seed({**missing, **_records_row(1, setup, missing)})
+    create_record = setup.records()["101"]
+
+    reason = "LibreNMS port 300 (et-0/0/1)"
+    assert records["101"]["can_create_cable"] is False
+    assert reason in records["101"]["rule_block"]["reason"]
+    assert verified["can_create_cable"] is False and reason in verified["actions"]
+    assert create_record.get("remote_create_url") is None
+    assert reason in create_record["rule_block"]["reason"]
+    assert any("Skipped (the interface rules refuse a port)" in text and reason in text for text in texts), texts
+    assert setup.parent_cable() is None
