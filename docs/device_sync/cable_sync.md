@@ -76,4 +76,14 @@ Re-running the sync never silently destroys a cable. The configured provenance t
 
 When force confirmation is required, the sync leaves the database untouched and pops a warning modal showing, for each conflicting port, the **full cable path for context** — with the segment that would actually be deleted highlighted. Only the cable segment(s) directly attached to the endpoints are ever removed: **patch-panel trunks (e.g. rear-to-rear inter-rack cables) and every other mid-path segment stay in place** — they carry other circuits and are treated as permanent infrastructure. Submitting is blocked until you explicitly tick the force checkbox; forcing deletes the highlighted segment(s) and connects the port with a single LibreNMS-managed cable.
 
-Cable sync does not change multi-termination or breakout cables. These cables can carry unrelated lanes, so the table marks them as unsupported and does not offer a sync action.
+Apart from the breakout channels below, cable sync does not change multi-termination or breakout cables. These cables can carry unrelated lanes, so the table marks them as unsupported and does not offer a sync action.
+
+## Breakout channels (NetBox 4.7 and later)
+
+NetBox 4.7 models a breakout port as a channelized parent interface with one channel interface for each lane. A channel cannot have its own cable. The cable connects to the parent and has a breakout profile, for example `breakout-1c4p-4c1p`, and NetBox shows it on each channel. When the local interface of a row is a channel, cable sync writes that breakout cable on the parent:
+
+- The parent has no cable: sync creates one cable with the breakout profile for the number of channels. The A side is the parent. The B side is the far end of each channel from channel 1 to the channel of the row.
+- The parent has a breakout cable with the provenance tag and the same profile, and the cable has a far end for each lower channel: sync adds the far end of the row's channel.
+- The cable already connects the channel to the LibreNMS far end: the row shows **Cable Found**.
+
+NetBox numbers the far ends of a breakout cable by their order, so a channel can get its far end only when each lower channel has one. Otherwise the row shows **Breakout Not Synced** with the cause, and sync writes nothing. Other causes are: NetBox has no breakout profile for that number of channels, the cable on the parent does not have the provenance tag or has another profile, or the far end is a channel or already has a cable. When the far end of a plain port is a channel, sync the cable from the device of the channel. Cable sync never removes or changes the far ends of an existing breakout cable, also when you confirm an overwrite.
