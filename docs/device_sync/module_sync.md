@@ -60,6 +60,8 @@ When a module type defines interface templates, installing the module also recon
 
 For vendors whose naming conventions cannot be derived from templates alone, the predicted names can be adjusted by another plugin through a signal hook — see [Extension Points](../development/extension_points.md) for details.
 
+When the predicted names expand the templates into more interfaces (for example a breakout optic with a parent interface and its channels), the plugin moves only the interfaces with the template names into the module. The other interfaces of the family stay where they are, so that the naming plugin can take them over. The install still binds the LibreNMS port to the matched interface, also when that interface is a channel that stays outside the module.
+
 ## Carrier Modules
 
 Some chassis (e.g. Nokia 7750 SR-s) report child components (CPMs, MDAs) without the intermediate carrier/holder module that must first be installed in NetBox before the children become visible. When a CarrierAutoInstallRule matches, an **Install Carrier** button appears — clicking it installs the carrier module into the appropriate empty bay, after which the children can be synced normally.

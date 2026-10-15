@@ -2505,7 +2505,7 @@ def test_module_interface_prediction_signal_uses_real_templates():
     from django.dispatch import receiver
 
     from netbox_librenms_plugin.signals import predict_module_interface_names
-    from netbox_librenms_plugin.utils import get_module_template_interface_names
+    from netbox_librenms_plugin.utils import get_module_adoptable_interface_names
 
     device = make_device("prediction-device")
     module_type = make_module_type("PREDICTION-CARD")
@@ -2518,7 +2518,7 @@ def test_module_interface_prediction_signal_uses_real_templates():
         return [f"{name}/child" for name in names]
 
     try:
-        assert get_module_template_interface_names(device, module) == ["Ethernet1/child"]
+        assert get_module_adoptable_interface_names(device, module) == (["Ethernet1/child"], False)
     finally:
         predict_module_interface_names.disconnect(rewrite)
 
