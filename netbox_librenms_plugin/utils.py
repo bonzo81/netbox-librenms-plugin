@@ -805,11 +805,11 @@ def cable_far_terminations(cable, near_termination) -> list:
             the A side, else ``a_terminations``).
 
     """
-    from netbox_librenms_plugin.breakout_cables import breakout_far_end, breakout_parent
+    from netbox_librenms_plugin.breakout_cables import breakout_far_end, is_channel
 
     # A channel is no termination: its far end is the one at its connector of the parent's cable.
-    if (parent := breakout_parent(near_termination)) is not None:
-        far_end = breakout_far_end(near_termination, parent, cable)
+    if is_channel(near_termination):
+        far_end = breakout_far_end(near_termination, near_termination.parent, cable)
         return [] if far_end is None else [far_end]
     # Serial table enrichment prefetches the generic CableTermination rows and their concrete
     # objects for the whole page. Use that cache when present. The a_terminations/b_terminations
