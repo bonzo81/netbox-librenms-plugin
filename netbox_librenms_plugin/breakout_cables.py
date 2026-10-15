@@ -72,17 +72,16 @@ class BreakoutDecision:
     profile: str = ""
     # The full B side that the write stores.
     b_terminations: tuple = ()
-    # Refused only because these lower channels have no far end yet: one submit with their rows writes it.
-    waits_for: tuple = ()
 
 
 def _refuse(reason):
     return BreakoutDecision("refuse", reason=reason)
 
 
-def _sync_first(missing, parent):
-    reason = f"channel ID {missing[0]} has no far end on {parent.name} yet, so sync channel ID {missing[0]} first"
-    return BreakoutDecision("refuse", reason=reason, waits_for=tuple(missing))
+def _sync_first(channel_id, parent):
+    return _refuse(
+        f"channel ID {channel_id} has no far end on {parent.name} yet, so sync channel ID {channel_id} first"
+    )
 
 
 def _far_end_refusal(remote):
@@ -130,7 +129,7 @@ def decide_breakout_cable(channel, parent, cable, remote, provenance_tag):
         if refusal := _far_end_refusal(remote):
             return refusal
         if channel.channel_id != 1:
-            return _sync_first(range(1, channel.channel_id), parent)
+            return _sync_first(1, parent)
         return BreakoutDecision("create", profile=profile, b_terminations=(remote,))
     if (b_side := _readable_b_side(cable, parent)) is None:
         return _refuse(
@@ -151,7 +150,7 @@ def _decide_extension(channel, parent, cable, b_side, remote, profile, provenanc
     if refusal := _far_end_refusal(remote):
         return refusal
     if missing := [lower for lower in range(1, channel_id) if lower not in b_side]:
-        return _sync_first(missing, parent)
+        return _sync_first(missing[0], parent)
     if len(b_side) != channel_id - 1:
         return _refuse(f"the cable on {parent.name} has a far end after connector {channel_id}")
     b_terminations = (*(b_side[connector] for connector in range(1, channel_id)), remote)

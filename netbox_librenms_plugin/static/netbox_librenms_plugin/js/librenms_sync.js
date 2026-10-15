@@ -3380,7 +3380,7 @@ function handleCableChange(select, value) {
                 if (selection) {
                     delete selection.dataset.verifyLocked;
                     delete selection.dataset.wasDisabled;
-                    selection.disabled = !(formattedRow.can_create_cable || formattedRow.can_select_cable);
+                    selection.disabled = !formattedRow.can_create_cable;
                     if (selection.disabled) selection.checked = false;
                     const expectedValues = {
                         expected_local_id: formattedRow.expected_local_id,
