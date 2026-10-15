@@ -685,7 +685,7 @@ class LibreNMSAPI:
         except (requests.exceptions.RequestException, ValueError, IndexError, KeyError, TypeError):
             return None
 
-    def get_device_info(self, device_id, use_cache=True, cache_only=False):
+    def get_device_info(self, device_id, use_cache=True):
         """
         Fetch device information from LibreNMS using its primary IP.
 
@@ -699,22 +699,18 @@ class LibreNMSAPI:
             use_cache: When False, bypass the short read cache and fetch live data
                 (still refreshing the cache on success). Import decisions pass False so a
                 value just corrected in LibreNMS isn't read back stale within the cache window.
-            cache_only: When True, return a cached value or a miss without querying LibreNMS.
 
         Returns:
             tuple: ``(success, data)``. On success, ``data`` is the device dictionary. For an
-                absent device or a cache-only miss, ``data`` is ``None``. For a transport failure
+                absent device, ``data`` is ``None``. For a transport failure
                 or another non-2xx response, ``data`` is a :class:`LibreNMSLookupError`.
 
         """
         cache_key = f"librenms_device_info_{self.server_key}_{device_id}"
-        if use_cache or cache_only:
+        if use_cache:
             cached = cache.get(cache_key)
             if cached is not None:
                 return cached
-        if cache_only:
-            return False, None
-
         try:
             response = _session.get(
                 f"{self.librenms_url}/api/v0/devices/{device_id}",

@@ -876,38 +876,6 @@ class TestLibreNMSAPIDeviceOperations:
         )
         assert [request["path"] for request in librenms_server.requests] == [path, path]
 
-    def test_cache_only_reads_a_snapshot_even_when_live_cache_is_disabled(
-        self,
-        local_librenms_api,
-        librenms_server,
-    ):
-        """A cache-only read must use an existing snapshot regardless of the live-read flag."""
-        from django.core.cache import cache
-
-        # Start from a cold fixed key, so the cache-only assertion cannot pass on another
-        # test's snapshot instead of the one this test creates.
-        cache.delete("librenms_device_info_default_424243")
-        path = "/api/v0/devices/424243"
-        librenms_server.register(
-            path,
-            {"status": "ok", "devices": [{"device_id": 424243, "hostname": "cached-device"}]},
-            method="GET",
-        )
-        expected = (True, {"device_id": 424243, "hostname": "cached-device"})
-        assert local_librenms_api.get_device_info(device_id=424243) == expected
-
-        assert local_librenms_api.get_device_info(device_id=424243, use_cache=False, cache_only=True) == expected
-        assert [request["path"] for request in librenms_server.requests] == [path]
-
-    def test_cache_only_miss_does_not_contact_librenms(self, local_librenms_api, librenms_server):
-        """A cache-only miss returns a miss without crossing the HTTP boundary."""
-        from django.core.cache import cache
-
-        cache.delete("librenms_device_info_default_424244")
-
-        assert local_librenms_api.get_device_info(device_id=424244, use_cache=False, cache_only=True) == (False, None)
-        assert librenms_server.requests == []
-
     def test_list_devices_with_filters(self, local_librenms_api, librenms_server):
         """Verify listing devices with filter parameter."""
         librenms_server.register(
