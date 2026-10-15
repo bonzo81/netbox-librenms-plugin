@@ -1,5 +1,6 @@
 """Bulk import orchestration for devices and filter processing."""
 
+import functools
 import logging
 from dataclasses import dataclass
 from typing import List
@@ -48,6 +49,7 @@ from .filters import _safe_disabled, get_librenms_devices_for_import
 from .permissions import check_user_permissions, require_permissions
 from .virtual_chassis import (
     VC_MASTER_UNKNOWN_WARNING,
+    candidate_vc_serial_keys,
     create_virtual_chassis_with_members,
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
@@ -174,6 +176,7 @@ def detect_collisions_for_device_ids(
     devices = []
     unresolved_ids = []
     device_ids = list(device_ids)
+    candidate_keys = functools.cache(candidate_vc_serial_keys)
     for idx, device_id in enumerate(device_ids, start=1):
         # Same cancellation cadence as the import loops below (first id, then every 5th):
         # a large batch with many cache misses is one LibreNMS call per id, so a cancelled
@@ -252,7 +255,9 @@ def detect_collisions_for_device_ids(
             # guard can't silently drift from the producer's wording.
             unresolved_ids.append(device_id)
             continue
-        if device_id not in vm_id_set and get_virtual_chassis_data(api, device_id).get("detection_failed"):
+        if device_id not in vm_id_set and get_virtual_chassis_data(api, device_id, candidate_keys=candidate_keys).get(
+            "detection_failed"
+        ):
             unresolved_ids.append(device_id)
         devices.append(
             {
