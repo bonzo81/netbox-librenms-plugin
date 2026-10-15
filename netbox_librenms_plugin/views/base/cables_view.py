@@ -20,7 +20,6 @@ from django.views import View
 from netbox_librenms_plugin.breakout_cables import (
     HIDDEN_REASONS,
     breakout_far_end,
-    channel_write_endpoints,
     decide_breakout_cable,
     decide_channel_far_end,
     holds_a_cable,
@@ -235,13 +234,6 @@ def _remote_port_name_candidates(row):
 def port_record(port):
     """Return the part of a LibreNMS port record the interface rules read (``PORT_RECORD_KEYS``)."""
     return {key: port[key] for key in PORT_RECORD_KEYS if key in port}
-
-
-def fetch_port_record(api, port_id):
-    """Read one LibreNMS port record by id, or None when LibreNMS returns none."""
-    success, data = api.get_port_by_id(port_id)
-    ports = data.get("port") if success and isinstance(data, dict) else None
-    return ports[0] if isinstance(ports, list) and ports and isinstance(ports[0], dict) else None
 
 
 def port_owner_id(row, side):
@@ -1837,7 +1829,7 @@ class BaseCableTableView(
     def _is_breakout_row(self, link, local_interface, remote_interface, actionable):
         """Return whether an end of the row is a channel; the row then shows the breakout gate's decision."""
         if is_channel(local_interface):
-            decision = self._breakout_decision(local_interface, remote_interface, link)
+            decision = self._breakout_decision(local_interface, remote_interface)
         elif (decision := decide_channel_far_end(local_interface, remote_interface, self._may)) is None:
             return False
         channel = local_interface if is_channel(local_interface) else remote_interface
@@ -1853,10 +1845,8 @@ class BaseCableTableView(
             link["can_create_cable"] = actionable
         return True
 
-    def _breakout_decision(self, channel, remote, link):
-        """Return the breakout gate's decision for the channel of *link*, and mark the interfaces its write writes."""
-        # The rule gate reads the ports bound to these interfaces too, as the writer does.
-        link["_write_endpoint_ids"] = [endpoint.pk for endpoint in channel_write_endpoints(channel)]
+    def _breakout_decision(self, channel, remote):
+        """Return the breakout gate's decision for a channel row of this request."""
         return decide_breakout_cable(channel, remote, self._provenance_tag(), self._may)
 
     def _may(self, action, obj):
@@ -2439,7 +2429,7 @@ class BaseCableTableView(
             return
         local = self._viewable_queryset(Interface).filter(pk=link["netbox_local_interface_id"]).first()
         if is_channel(local):
-            decision = self._breakout_decision(local, None, link)
+            decision = self._breakout_decision(local, None)
             if decision.action not in ("create", "extend"):
                 link["cable_status"] = f"Breakout Not Synced: {decision.reason}"
                 return
@@ -2851,7 +2841,6 @@ class BaseCableTableView(
             for link in links
             if link.get("can_create_cable") or link.get("remote_create_url")
             if (ports := [port for port in cable_row_ports(link) if port[2] is not None])
-            or link.get("_write_endpoint_ids")
         ]
         if not rows:
             return
@@ -2860,17 +2849,8 @@ class BaseCableTableView(
             return
         owner_ids = {port_owner_id(link, side) for link, ports in rows for side, *_ in ports}
         owners = Device.objects.in_bulk(owner_ids - {None})
-        endpoint_ports = self._endpoint_ports(
-            {pk for link, _ports in rows for pk in link.get("_write_endpoint_ids", ())}, server_key
-        )
         decided = [
-            (
-                link,
-                [
-                    *((port_id, record, owners.get(port_owner_id(link, side))) for side, port_id, record in ports),
-                    *(endpoint_ports[pk] for pk in link.get("_write_endpoint_ids", ()) if pk in endpoint_ports),
-                ],
-            )
+            (link, [(port_id, record, owners.get(port_owner_id(link, side))) for side, port_id, record in ports])
             for link, ports in rows
         ]
         disclose = PortDisclosure(self.request.user, server_key)
@@ -2887,21 +2867,6 @@ class BaseCableTableView(
                 link["can_create_cable"] = False
                 link.pop("remote_create_url", None)
                 link["rule_block"] = row_rule_block(*blocked)
-
-    def _endpoint_ports(self, endpoint_ids, server_key):
-        """
-        Return the LibreNMS port bound to each interface in *endpoint_ids* (a channel's parent), by interface pk.
-
-        Each one is decided as the writer decides it: the record read from LibreNMS by id, and the
-        interface's device as the owner. A port without a record falls under the missing-record rule.
-        """
-        ports = {}
-        for endpoint in self._viewable_queryset(Interface).filter(pk__in=endpoint_ids).select_related("device"):
-            if (port_id := read_mapping(endpoint).own_id(server_key)) is None:
-                continue
-            record = fetch_port_record(self.librenms_api, port_id)
-            ports[endpoint.pk] = (port_id, None if record is None else port_record(record), endpoint.device)
-        return ports
 
     def get_table(self, data, obj):
         """Return the cable table for *data*; concrete subclasses choose the table class."""
