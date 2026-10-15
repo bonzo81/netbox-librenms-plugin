@@ -944,6 +944,38 @@ class TestMergeTransceiverDataPortIdentity:
         assert error is None
         assert inventory == inventory_seed
 
+    @pytest.mark.parametrize("port_ifindex", [50, None])
+    def test_entity_at_the_index_with_another_serial_is_not_the_optic(self, settings, librenms_server, port_ifindex):
+        """An entity at the transceiver's index that has a different serial is another part and keeps its data."""
+        view = _real_api_view(settings, librenms_server, librenms_id=108)
+        librenms_server.register(
+            "/api/v0/devices/108/transceivers",
+            {
+                "status": "ok",
+                "transceivers": [{"entity_physical_index": 50, "model": "SFP-10G-SR", "serial": "TX-50", "port_id": 9}],
+            },
+            method="GET",
+        )
+        librenms_server.register(
+            "/api/v0/devices/108/ports",
+            {"status": "ok", "ports": [{"port_id": 9, "ifName": "xe-0/0/9", "ifIndex": port_ifindex}]},
+            method="GET",
+        )
+        inventory_seed = [
+            {
+                "entPhysicalIndex": 50,
+                "entPhysicalName": "Fan 1",
+                "entPhysicalClass": "fan",
+                "entPhysicalSerialNum": "FAN-50",
+            }
+        ]
+
+        inventory, error = view._merge_transceiver_data(deepcopy(inventory_seed))
+
+        assert error is None
+        # The index is the fan's, so a synthetic row would duplicate it.
+        assert inventory == inventory_seed
+
     @pytest.mark.parametrize(("entity_index", "added"), [(77, [(77, "TX-77", 9)]), (12, [])])
     def test_port_ifindex_alone_does_not_merge_another_serial(self, settings, librenms_server, entity_index, added):
         """An entity that has the port's ifIndex but a different serial is not the optic."""
@@ -1247,6 +1279,49 @@ class TestPostInventoryRefresh:
             item = by_index[entity["entPhysicalIndex"]]
             assert item["entPhysicalName"] == entity["entPhysicalName"]
             assert (item["_librenms_port_id"], item["_librenms_ifname"]) == (port["port_id"], port["ifName"])
+
+    @pytest.mark.parametrize(
+        "recording_name",
+        ["arcos-lag-transceivers", "iosxe-subinterfaces", "junos-subinterfaces", "nokia-timos-transceivers"],
+    )
+    def test_post_keeps_every_recorded_optic(self, librenms_server, server_keys, recording_name):
+        """Every recorded transceiver serial reaches the cached inventory, bound to its own port when it is unique."""
+        from collections import Counter
+
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
+        from netbox_librenms_plugin.views.base.modules_view import _clean_librenms_value
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        recording = load_recording(recording_name)
+        librenms_id = recording["device_id"]
+        librenms_server.load_recording(recording)
+        server_key, _ = server_keys
+        device = _mapped_device(f"module-refresh-{recording_name}", server_key, librenms_id=librenms_id)
+        transceivers = recording["responses"][f"GET /api/v0/devices/{librenms_id}/transceivers"]["transceivers"]
+        serials = Counter(_clean_librenms_value(transceiver.get("serial")) for transceiver in transceivers)
+
+        view = DeviceModuleTableView()
+        response = post(view, make_request("post", {"server_key": server_key}), pk=device.pk)
+
+        assert response.status_code == 200
+        inventory = cache.get(view.get_cache_key(device, "inventory", server_key=server_key))["inventory"]
+        bound = {
+            (_clean_librenms_value(item.get("entPhysicalSerialNum")), item.get("_librenms_port_id"))
+            for item in inventory
+        }
+        cached_serials = {serial for serial, _port_id in bound}
+        assert set(serials) - {""} <= cached_serials
+        unique = [
+            transceiver
+            for transceiver in transceivers
+            if serials[_clean_librenms_value(transceiver.get("serial"))] == 1
+        ]
+        assert unique
+        for transceiver in unique:
+            assert (_clean_librenms_value(transceiver["serial"]), transceiver["port_id"]) in bound
 
     def test_post_treats_non_list_inventory_as_fetch_failure(self, librenms_server, server_keys):
         """get_device_inventory is an external boundary. A non-list inventory body is a fetch failure."""
