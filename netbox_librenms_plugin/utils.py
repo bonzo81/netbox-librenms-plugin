@@ -7,9 +7,11 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Optional
 
+import django_tables2 as tables
 import psycopg
 from dcim.models import Device, Interface
 from django.core.exceptions import FieldDoesNotExist, ObjectDoesNotExist, ValidationError
+from django.core.paginator import EmptyPage, PageNotAnInteger
 from django.db import DatabaseError, IntegrityError
 from django.db.models import Count, Max
 from django.http import HttpRequest
@@ -19,6 +21,7 @@ from django.utils.safestring import mark_safe
 from netbox.config import get_config
 from netbox.plugins import get_plugin_config
 from utilities.exceptions import AbortRequest
+from utilities.paginator import EnhancedPaginator
 from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 
 from netbox_librenms_plugin.constants import (
@@ -1509,9 +1512,15 @@ def build_vc_normalization_report(diagnostic: dict) -> str:
     return "\n".join(lines)
 
 
+SYNC_TAB_PAGE_SIZE_PREFERENCE = "plugins.netbox_librenms_plugin.per_page"
+
+
 def get_table_paginate_count(request: HttpRequest, table_prefix: str) -> int:
     """
-    Extend NetBox pagination for multiple tables with table-specific prefixes.
+    Return the page size of one sync tab table, and remember a requested size for that tab.
+
+    The order is: a valid ``<prefix>per_page`` request value (saved when it changes), the size
+    saved for the tab, then NetBox's own page size. Every size is clamped to MAX_PAGE_SIZE.
 
     Args:
         request: HTTP request object
@@ -1521,24 +1530,41 @@ def get_table_paginate_count(request: HttpRequest, table_prefix: str) -> int:
         int: Number of items to display per page
 
     """
-    config = get_config()
     # An HTMX refresh sends the new page size in POST while the URL can retain an old value.
     param_key = f"{table_prefix}per_page"
     param_value = request.POST.get(param_key) if param_key in request.POST else request.GET.get(param_key)
-    if param_value:
-        try:
-            per_page = int(param_value)
-            # Guard against 0/negative input, which would break the paginator.
-            if per_page < 1:
-                return netbox_get_paginate_count(request)
-            max_page_size = config.MAX_PAGE_SIZE
-            # MAX_PAGE_SIZE 0/None disables the NetBox ceiling; don't clamp to it (min() with 0
-            # would zero the page size, and with None it TypeErrors).
-            return min(per_page, max_page_size) if max_page_size else per_page
-        except ValueError:
-            pass
+    preference = f"{SYNC_TAB_PAGE_SIZE_PREFERENCE}.{table_prefix.rstrip('_')}"
+    requested = coerce_positive_int(param_value)
+    per_page = requested if requested is not None else coerce_positive_int(get_user_pref(request, preference))
+    if per_page is None:
+        return netbox_get_paginate_count(request)
+    max_page_size = get_config().MAX_PAGE_SIZE
+    # MAX_PAGE_SIZE 0/None disables the NetBox ceiling; don't clamp to it (min() with 0
+    # would zero the page size, and with None it TypeErrors).
+    if max_page_size:
+        per_page = min(per_page, max_page_size)
+    if requested is not None and per_page != get_user_pref(request, preference):
+        save_user_pref(request, preference, per_page)
+    return per_page
 
-    return netbox_get_paginate_count(request)
+
+def paginate_sync_table(table, request, page=None):
+    """
+    Order and paginate a sync tab table, with the page size from get_table_paginate_count().
+
+    RequestConfig would take a raw ``<prefix>per_page`` from GET past the size checks, so it only orders the table.
+    """
+    tables.RequestConfig(request, paginate=False).configure(table)
+    if page is None:
+        page = request.GET.get(table.prefixed_page_field, 1)
+    try:
+        table.paginate(
+            paginator_class=EnhancedPaginator, per_page=get_table_paginate_count(request, table.prefix), page=page
+        )
+    except PageNotAnInteger:
+        table.page = table.paginator.page(1)
+    except EmptyPage:
+        table.page = table.paginator.page(table.paginator.num_pages)
 
 
 def get_user_pref(request, path, default=None):
