@@ -5,7 +5,6 @@ import django_tables2 as tables
 from django.urls import reverse
 from django.utils.html import format_html, mark_safe
 from netbox.tables.columns import ToggleColumn
-from utilities.paginator import EnhancedPaginator
 
 from netbox_librenms_plugin.module_grants import (
     ACTION_INSTALL_BRANCH,
@@ -22,9 +21,9 @@ from netbox_librenms_plugin.module_grants import (
 from netbox_librenms_plugin.utils import (
     SYNC_TABLE_HEADER_ATTRS,
     coerce_positive_int,
-    get_table_paginate_count,
     netbox_relocates_module_subtree,
     oob_badge_html,
+    paginate_sync_table,
     render_vc_member_options,
 )
 
@@ -260,8 +259,7 @@ class LibreNMSModuleTable(tables.Table):
             self.return_url = safe_relative or request.get_full_path()
         else:
             self.return_url = ""
-        paginate = {"paginator_class": EnhancedPaginator, "per_page": get_table_paginate_count(request, self.prefix)}
-        tables.RequestConfig(request, paginate).configure(self)
+        paginate_sync_table(self, request)
 
     def render_name(self, value, record):
         """Render inventory item name with tree indentation for sub-components."""
