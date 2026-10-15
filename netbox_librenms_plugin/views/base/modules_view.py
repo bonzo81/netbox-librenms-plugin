@@ -1151,7 +1151,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             "cache_expiry": cache_expiry,
             "server_key": self._active_server_key,
             # An empty table must not read as a device without hardware.
-            "no_inventory_class_admitted": not any(rule.action == rule.ACTION_INCLUDE for rule in ignore_rules),
+            "devices_without_inventory_class": self._devices_without_inventory_class(
+                obj, ignore_rules, item_ignore_contexts
+            ),
             "install_selected_inventory_binding": module_inventory_binding_token(
                 obj.pk,
                 self._active_server_key,
@@ -1161,6 +1163,20 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 inventory_snapshot_digest,
             ),
         }
+
+    @staticmethod
+    def _devices_without_inventory_class(obj, ignore_rules, item_ignore_contexts):
+        """Return each device whose rows follow a policy that has no include rule, in row order."""
+        # A VC row follows the rules of the member it targets, so each policy that a row uses counts.
+        policies = {
+            context["selected_device"].pk: (context["selected_device"], context["ignore_rules"])
+            for context in item_ignore_contexts.values()
+        } or {obj.pk: (obj, ignore_rules)}
+        return [
+            device
+            for device, rules in policies.values()
+            if not any(rule.action == rule.ACTION_INCLUDE for rule in rules)
+        ]
 
     @staticmethod
     def _find_transparent_indices(inventory_data, ignore_cache):
