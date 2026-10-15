@@ -19,6 +19,7 @@ from django.views import View
 
 from netbox_librenms_plugin.breakout_cables import (
     breakout_far_end,
+    channel_write_endpoints,
     decide_breakout_cable,
     decide_channel_far_end,
     holds_a_cable,
@@ -428,7 +429,7 @@ class BaseCableTableView(
         return sync_device
 
     def _apply_termination_change_scope(self, links, preloaded_changeable_ids=None):
-        """Disable cable writes unless both resolved terminations are changeable."""
+        """Disable cable writes unless every interface the write writes is changeable."""
         required_ids = defaultdict(set)
         row_requirements = []
         for link in links:
@@ -443,6 +444,7 @@ class BaseCableTableView(
                     requirements = [
                         (Interface, coerce_librenms_id(link.get("netbox_local_interface_id"))),
                         (Interface, coerce_librenms_id(link.get("netbox_remote_interface_id"))),
+                        *((Interface, pk) for pk in link.get("_extra_write_endpoint_ids", ())),
                     ]
                 for model, object_id in requirements:
                     if object_id is not None:
@@ -1845,6 +1847,7 @@ class BaseCableTableView(
             decision = decide_breakout_cable(channel, parent, cable, remote_interface, self._provenance_tag())
             # Read by _apply_breakout_selection after the scope and rule gates.
             link["_breakout_channel"] = (channel.parent_id, channel.channel_id, decision.waits_for)
+            link["_extra_write_endpoint_ids"] = [endpoint.pk for endpoint in channel_write_endpoints(channel)]
         else:
             decision = decide_channel_far_end(local_interface, remote_interface)
         self._set_breakout_row_status(link, decision, cable, actionable)
