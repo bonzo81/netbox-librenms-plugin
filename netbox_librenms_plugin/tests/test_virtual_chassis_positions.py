@@ -68,6 +68,37 @@ def test_an_imported_stack_puts_each_member_at_its_reported_number(live_librenms
         assert get_virtual_chassis_member(chassis.master, f"ge-{position}/0/0") == member
 
 
+def test_a_junos_root_serial_matches_its_fpc_through_the_manufacturer_serial_rules(live_librenms):
+    """The root serial matches the master FPC only after a manufacturer rule, as the import's member matching does."""
+    import copy
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import _shared_infra
+
+    recording = copy.deepcopy(load_recording("juniper-ex4400-vc-2member"))
+    device_id = recording["device_id"]
+    for key, value in recording["responses"].items():
+        if "/inventory/" in key:
+            for row in unwrap_response(value)[1]["inventory"]:
+                if row["entPhysicalIndex"] == 1:
+                    row["entPhysicalSerialNum"] = f"{row['entPhysicalSerialNum']}-RE"
+    _site, manufacturer, _device_type, _role = _shared_infra()
+    NormalizationRule.objects.create(
+        scope="serial", manufacturer=manufacturer, match_pattern=r"^(.+)-RE$", replacement=r"\1"
+    )
+    inventory = unwrap_response(recording["responses"][f"GET /api/v0/inventory/{device_id}/all"])[1]["inventory"]
+    fpc_serials = {row["entPhysicalIndex"]: row["entPhysicalSerialNum"] for row in inventory}
+
+    chassis = _import_recording(live_librenms, recording, "root-serial-rule")
+
+    members = {member.vc_position: member for member in chassis.members.all()}
+    assert {position: member.serial for position, member in members.items()} == {
+        0: fpc_serials[120],
+        1: fpc_serials[121],
+    }
+    assert chassis.master.vc_position == 0
+
+
 def test_a_missing_member_position_numbers_the_whole_stack_in_row_order(live_librenms):
     """FPC 0 reports no slot and FPC 1 reports slot 1: detection, import and module sync all use 1 and 2."""
     import copy
