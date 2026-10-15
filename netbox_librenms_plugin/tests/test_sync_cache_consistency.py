@@ -408,6 +408,42 @@ def test_module_cache_status_rejects_a_snapshot_of_another_oob_link_like_the_tab
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("remap", ["save", "concurrent_row_write"])
+def test_module_cache_status_agrees_with_the_tab_after_the_host_mapping_changes(client, settings, remap):
+    """A snapshot of the old host id is one the Modules tab discards, so status must not call it ready."""
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping_row
+
+    _configure_servers(settings)
+    device = make_device("cache-status-module-host", librenms_cf={"primary": {"id": 6407}})
+    client.force_login(make_superuser("cache-status-module-host-user"))
+    status_url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_status",
+        kwargs={"object_type": "device", "pk": device.pk},
+    )
+    fragment_url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_fragment",
+        kwargs={"object_type": "device", "pk": device.pk, "tab": SyncTab.MODULES.value},
+    )
+
+    def status_and_fragment():
+        status = client.get(status_url, {"server_key": "primary"}).json()["tabs"]["modules"]
+        fragment = client.get(fragment_url, {"server_key": "primary"})
+        rendered = fragment.status_code == 200 and fragment.context["module_sync"]["table"] is not None
+        return status["snapshot_available"], rendered
+
+    cache.set(_cache_key("inventory", device, "primary"), module_inventory_cache_payload([], 6407, None), timeout=300)
+    before = status_and_fragment()
+    if remap == "save":
+        seed_mapping(device, "primary", own=6410)
+    else:
+        seed_stored_mapping_row(device, {"primary": {"id": 6410}})
+    after = status_and_fragment()
+
+    assert before == (True, True)
+    assert after == (False, False)
+
+
+@pytest.mark.django_db
 def test_module_cache_fragment_does_not_discover_a_missing_host_id(client, settings, primary_librenms):
     """An OOB-mapped module fragment must not discover a missing host identity."""
     _configure_servers(settings)
@@ -430,7 +466,8 @@ def test_module_cache_fragment_does_not_discover_a_missing_host_id(client, setti
     response = client.get(url, {"server_key": "primary"})
 
     assert len(primary_librenms.requests) == request_count
-    assert response.status_code == 200
+    # Without a stored host id the tab cannot render the snapshot, so the status offers none.
+    assert response.status_code == 404
 
 
 @pytest.mark.django_db

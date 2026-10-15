@@ -16,7 +16,6 @@ from netbox_librenms_plugin.constants import (
 from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory, chassis_serial_key, vc_serial_key
 from netbox_librenms_plugin.inventory_tree import DANGLING_PARENT_KEY, REPORTED_PARENT_KEY, repair_dangling_parents
 from netbox_librenms_plugin.librenms_ids import (
-    coerce_librenms_id,
     normalize_librenms_port_id,
 )
 from netbox_librenms_plugin.server_mappings import (
@@ -30,7 +29,8 @@ from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     cached_module_inventory,
     module_inventory_cache_payload,
-    module_inventory_oob_matches,
+    module_inventory_snapshot_matches,
+    module_snapshot_host_id,
     request_actor_id,
 )
 from netbox_librenms_plugin.utils import (
@@ -981,18 +981,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # id ("10" != 10, emptying the table until a manual refresh). None (unlinked or
         # uncoercible) never matches — post() can't cache without a valid id.
         if getattr(self, "cache_only", False):
-            current_librenms_id = coerce_librenms_id(
-                self.librenms_api.get_stored_librenms_id(sync_device, server_key=scoped_server)
-            )
+            # The tab status reads the same host ID, so both reach one verdict.
+            current_librenms_id = module_snapshot_host_id(sync_device, scoped_server)
         else:
             current_librenms_id, lookup_error = self.resolve_librenms_id(sync_device)
             if lookup_error is not None:
                 messages.error(request, self.scoped_lookup_message(lookup_error))
-        if current_librenms_id is None or cached_payload.get("librenms_id") != current_librenms_id:
-            cache.delete(cache_key)
-            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
-        # Same for the linked OOB controller: merged inventory built for another link is stale.
-        if not module_inventory_oob_matches(cached_payload, sync_device, scoped_server):
+        # The linked OOB controller must match too: merged inventory built for another link is stale.
+        if not module_inventory_snapshot_matches(cached_payload, sync_device, scoped_server, current_librenms_id):
             cache.delete(cache_key)
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
         # Pass the resolved server explicitly (like post() does) so _active_server_key keys on it
