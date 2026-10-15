@@ -67,7 +67,7 @@ def _failed_virtual_chassis_data(error: str) -> dict:
     return data
 
 
-_VC_CACHE_VERSION = "v4"
+_VC_CACHE_VERSION = "v5"
 
 
 def _vc_cache_key(api: LibreNMSAPI, device_id: int | str) -> str:
@@ -178,19 +178,26 @@ def _is_junos_fpc(row: dict) -> bool:
     )
 
 
+def _junos_fpc_serials_hold(root_serial, fpc_serials: list, serial_key) -> bool:
+    """Return whether two or more FPCs each have their own real serial and the root serial matches exactly one."""
+    serials = [serial_key(serial) for serial in fpc_serials]
+    return (
+        len(serials) >= 2
+        and all(serials)
+        and len(set(serials)) == len(serials)
+        and serials.count(serial_key(root_serial)) == 1
+    )
+
+
 def _junos_fpc_rows(root: dict, children: list, serial_keys) -> list:
     """Return the FPC member rows of a Junos Virtual Chassis root, or [] when no serial key meets every condition."""
     if not _is_junos_vc_root(root):
         return []
     fpcs = [row for row in children if _is_junos_fpc(row)]
-    if len(fpcs) < 2:
-        return []
+    fpc_serials = [row.get("entPhysicalSerialNum") for row in fpcs]
     # A false stack creates bogus member devices on import, so one serial key must meet every condition.
-    for key in serial_keys:
-        serials = [key(row.get("entPhysicalSerialNum")) for row in fpcs]
-        root_serial = key(root.get("entPhysicalSerialNum"))
-        if all(serials) and len(set(serials)) == len(serials) and serials.count(root_serial) == 1:
-            return fpcs
+    if any(_junos_fpc_serials_hold(root.get("entPhysicalSerialNum"), fpc_serials, key) for key in serial_keys):
+        return fpcs
     return []
 
 
@@ -256,6 +263,8 @@ def identify_vc_master(members: list, device_serial, serial_key) -> dict | None:
     This is the one master decision, for import and for the pages that preview it. The master is
     returned only when exactly one member matches: none or several mean that the stack is
     imported as a single device, because a guess splits it into more devices than switches.
+    Junos FPC members must also meet the FPC serial checks under *serial_key*, because detection
+    accepts a shape that the serial rules of any manufacturer explain.
 
     Args:
         members: Detected members, as :func:`extract_vc_members` returns them.
@@ -263,6 +272,13 @@ def identify_vc_master(members: list, device_serial, serial_key) -> dict | None:
         serial_key: From :func:`vc_serial_key`, for the DeviceType the device imports as.
 
     """
+    root_serials = [member["root_serial"] for member in members if "root_serial" in member]
+    if root_serials and (
+        len(root_serials) != len(members)
+        or len(set(root_serials)) != 1
+        or not _junos_fpc_serials_hold(root_serials[0], [member.get("serial") for member in members], serial_key)
+    ):
+        return None
     target = serial_key(device_serial)
     matches = [member for member in members if target and serial_key(member.get("serial")) == target]
     return matches[0] if len(matches) == 1 else None
@@ -354,7 +370,12 @@ def extract_vc_stack(rows: list, serial_keys) -> VcStack:
         return VcStack(root, chassis, members, VC_MEMBER_SHAPE_CHASSIS)
     fpcs = _junos_fpc_rows(root, children, serial_keys)
     if fpcs:
-        return VcStack(root, fpcs, _member_entries(fpcs, model_field="entPhysicalName"), VC_MEMBER_SHAPE_JUNOS_FPC)
+        # The master decision checks the FPC serials again under the key of the imported DeviceType.
+        members = [
+            {**member, "root_serial": root.get("entPhysicalSerialNum")}
+            for member in _member_entries(fpcs, model_field="entPhysicalName")
+        ]
+        return VcStack(root, fpcs, members, VC_MEMBER_SHAPE_JUNOS_FPC)
     return VcStack(None, [], [], None)
 
 
