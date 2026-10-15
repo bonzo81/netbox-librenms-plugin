@@ -3,9 +3,8 @@ import json
 import django_tables2 as tables
 from django.utils.html import format_html, mark_safe
 from netbox.tables.columns import ToggleColumn
-from utilities.paginator import EnhancedPaginator
 
-from netbox_librenms_plugin.utils import get_table_paginate_count, identify_ip_sync_rows, rule_block_html
+from netbox_librenms_plugin.utils import identify_ip_sync_rows, paginate_sync_table, rule_block_html
 
 
 def _shown_vrf_id(row):
@@ -37,7 +36,7 @@ class IPAddressTable(tables.Table):
         # renders empty and paging falls back to the default (Interfaces) tab.
         self.tab = "ipaddresses"
         # Give this table its own pagination namespace. configure() passes self.prefix to
-        # get_table_paginate_count() (and RequestConfig), which keys per_page on
+        # paginate_sync_table() and get_table_paginate_count(), which key per_page on
         # "{prefix}per_page"; left empty, the IP table shares the generic per-page param with
         # other tabs instead of reading "ipaddresses_per_page". Orthogonal to self.tab. Matches
         # the cables/modules/interfaces/vlans tables; preserve an explicit caller override.
@@ -163,9 +162,4 @@ class IPAddressTable(tables.Table):
 
     def configure(self, request):
         """Configure the table."""
-        paginate = {
-            "paginator_class": EnhancedPaginator,
-            "per_page": get_table_paginate_count(request, self.prefix),
-        }
-
-        tables.RequestConfig(request, paginate).configure(self)
+        paginate_sync_table(self, request)
