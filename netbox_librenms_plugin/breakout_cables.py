@@ -84,46 +84,81 @@ def _sync_first(channel_id, parent):
     )
 
 
+HIDDEN_PARENT_REASON = "the parent interface of this channel is not available"
+HIDDEN_CABLE_REASON = "the cable of the parent interface of this channel is not available"
+HIDDEN_REASONS = frozenset({HIDDEN_PARENT_REASON, HIDDEN_CABLE_REASON})
+
+
 def _far_end_refusal(remote):
-    """Return why *remote* cannot take a new termination, or None."""
-    if remote.cable_id is not None:
+    """Return why *remote* cannot take a new termination, or None; no remote is a far end still to create."""
+    if remote is not None and remote.cable_id is not None:
         return _refuse("the far end already has a cable")
     return None
 
 
-def decide_channel_far_end(local, remote):
+def _hidden_refusal(parent, cable, may):
+    """Refuse, naming nothing, when the user may not view the parent or its cable."""
+    if parent is not None and not may("view", parent):
+        return _refuse(HIDDEN_PARENT_REASON)
+    if cable is not None and not may("view", cable):
+        return _refuse(HIDDEN_CABLE_REASON)
+    return None
+
+
+def decide_channel_far_end(local, remote, may):
     """Decide a row whose far end is a channel and whose local end is not, or return None for another row."""
     if not is_channel(remote):
         return None
     parent = remote.parent
-    if parent is not None and breakout_far_end(remote, parent, parent.cable) == local:
+    cable = None if parent is None else parent.cable
+    if refusal := _hidden_refusal(parent, cable, may):
+        return refusal
+    if parent is not None and breakout_far_end(remote, parent, cable) == local:
         return BreakoutDecision("matching")
     return _refuse("the far end is a channel, so sync the cable from the device of the channel")
 
 
-def decide_breakout_cable(channel, parent, cable, remote, provenance_tag):
+def decide_breakout_cable(channel, remote, provenance_tag, may, *, parent=None, cable=None):
     """
-    Decide the cable sync of one channel row against the cable on its parent.
+    Decide the cable sync of one channel row: the one gate of every breakout path.
 
     Channel 1 creates the cable. Channel N appends its far end only when connectors 1 to N - 1 hold one.
+    The gate reads the parent and its cable only when *may* lets the user view them, and offers a write
+    only when the user may change the parent (and the cable, for an extend).
 
     Args:
         channel (Interface): The local channel interface.
-        parent (Interface | None): Its parent interface.
-        cable (Cable | None): The cable on the parent.
-        remote (Interface): The far end that LibreNMS reports for the channel.
+        remote (Interface | None): The far end that LibreNMS reports, or None when it is still to create.
         provenance_tag (Tag | None): The plugin's cable tag.
+        may (Callable[[str, Model], bool]): Whether the user may do an action (``view``, ``change``) on an object.
+        parent (Interface | None): The locked parent, for the writer; else read from *channel*.
+        cable (Cable | None): The locked cable on the parent, for the writer; else read from the parent.
 
     Returns:
         BreakoutDecision: The decision, with the reason of a refusal.
 
     """
+    if parent is None:
+        parent = channel.parent
+        cable = None if parent is None else parent.cable
+    if refusal := _hidden_refusal(parent, cable, may):
+        return refusal
+    decision = _decide(channel, parent, cable, remote, provenance_tag)
+    if decision.action in ("create", "extend") and not may("change", parent):
+        return _refuse(f"you may not change {parent.name}")
+    if decision.action == "extend" and not may("change", cable):
+        return _refuse(f"you may not change the cable on {parent.name}")
+    return decision
+
+
+def _decide(channel, parent, cable, remote, provenance_tag):
+    """Decide the breakout write from the parent's cable alone, for a user who may view both."""
     if parent is None or not parent.channels:
         return _refuse(f"{channel.name} is a channel without a channelized parent interface")
     profile = breakout_profile(parent.channels)
     if profile is None:
         return _refuse(f"NetBox has no breakout cable profile for {parent.channels} channels")
-    if is_channel(remote):
+    if remote is not None and is_channel(remote):
         return _refuse("the far end is a channel")
     if cable is None:
         if refusal := _far_end_refusal(remote):
@@ -135,7 +170,7 @@ def decide_breakout_cable(channel, parent, cable, remote, provenance_tag):
         return _refuse(
             f"the cable on {parent.name} uses profile {cable.profile or 'none'}, which this sync does not read"
         )
-    if b_side.get(channel.channel_id) == remote:
+    if remote is not None and b_side.get(channel.channel_id) == remote:
         return BreakoutDecision("matching", profile=profile)
     return _decide_extension(channel, parent, cable, b_side, remote, profile, provenance_tag)
 

@@ -406,7 +406,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 return self._apply_breakout_cable_action(
                     local_term, remote_term, locked_parent, link_data, display_name, locked_cables, port_records
                 )
-            if (decision := decide_channel_far_end(local_term, remote_term)) is not None:
+            if (decision := decide_channel_far_end(local_term, remote_term, self._may)) is not None:
                 return self._breakout_result(decision, display_name)
             if (
                 local_term.cable_id is not None
@@ -814,10 +814,11 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         sync_settings = self._get_cable_sync_settings(lock=True)
         decision = decide_breakout_cable(
             channel,
-            parent,
-            cable,
             remote,
             self._get_provenance_tag(sync_settings=sync_settings) if cable is not None else None,
+            self._may,
+            parent=parent,
+            cable=cable,
         )
         if decision.action in ("matching", "refuse"):
             return self._breakout_result(decision, display_name)
@@ -834,10 +835,12 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 profile=decision.profile,
             )
             return {"status": "valid" if created else "failed", "interface": display_name}
-        if not self.restricted_queryset(Cable, "change").filter(pk=cable.pk).exists():
-            return {"status": "denied", "interface": display_name}
         extended = self._extend_breakout_cable(cable, decision.b_terminations, self.request)
         return {"status": "valid" if extended else "failed", "interface": display_name}
+
+    def _may(self, action, obj):
+        """Return whether the request user may do *action* (``view`` or ``change``) on *obj*."""
+        return self.restricted_queryset(type(obj), action).filter(pk=obj.pk).exists()
 
     @staticmethod
     def _breakout_result(decision, display_name):
