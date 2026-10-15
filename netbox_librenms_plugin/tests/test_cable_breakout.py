@@ -719,3 +719,44 @@ def test_a_cached_render_of_a_channel_row_never_calls_librenms(librenms_server):
     page_paths = [request["path"] for request in librenms_server.requests[before:after_page]]
     assert [path for path in page_paths if "/ports" in path] == []
     assert [request["path"] for request in librenms_server.requests[after_page:]] == []
+
+
+@pytest.mark.usefixtures("breakout_server")
+def test_a_confirmed_overwrite_from_a_far_end_never_removes_the_breakout_cable():
+    from netbox_librenms_plugin.tests.test_cable_overwrite import _confirmed_intent
+
+    setup = _Breakout("far-end-overwrite")
+    setup.seed(setup.row(1))
+    setup.sync(1)
+    cable = setup.parent_cable()
+    persist_test_server_mapping(setup.peer, SERVER_KEY)
+    other = make_interface(make_device("breakout-far-end-overwrite-q"), "Ethernet7")
+    # The peer's Ethernet1 (far end of channel 1) now reports a plain neighbour.
+    setup.seed(
+        {
+            "_source": "main",
+            "local_port_id": 101,
+            "local_port": setup.far_ends[0].name,
+            "remote_device": other.device.name,
+            "remote_port": other.name,
+            "remote_port_id": 401,
+        },
+        device=setup.peer,
+    )
+
+    record = setup.records(setup.peer)["101"]
+    far_end = Interface.objects.get(pk=setup.far_ends[0].pk)
+    data = {
+        **_rendered_sync_data(setup.client, setup.peer, "101"),
+        "force": "on",
+        "expected_cable_intent_101": _confirmed_intent(far_end, other, cable),
+    }
+    response = setup.client.post(
+        reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[setup.peer.pk]), data
+    )
+
+    texts = [str(message) for message in get_messages(response.wsgi_request)]
+    assert Cable.objects.filter(pk=cable.pk).exists(), texts
+    assert (record["cable_status"], record["can_create_cable"]) == ("Multi-termination Cable Not Supported", False)
+    assert setup.b_side(cable) == [(1, setup.far_ends[0])]
+    assert Interface.objects.get(pk=other.pk).cable_id is None
