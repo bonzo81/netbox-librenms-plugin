@@ -480,3 +480,76 @@ def test_a_channel_with_an_empty_connector_offers_to_create_its_far_end(librenms
     assert response.status_code == 302, response.content.decode()
     created = Interface.objects.get(device=setup.peer, name="Ethernet20")
     assert setup.b_side(setup.parent_cable()) == [(1, setup.far_ends[0]), (2, created)]
+
+
+def _records_row(channel_id, setup, record):
+    """Return the port records and the matched remote key that let the rule gate decide a row offline."""
+    from netbox_librenms_plugin.tests.test_interface_rule_writes import _port
+    from netbox_librenms_plugin.views.base.cables_view import port_record
+
+    return {
+        **record,
+        "local_port_record": port_record(_port(100 + channel_id, record["local_port"])),
+        "remote_port_record": port_record(_port(record["remote_port_id"], record["remote_port"])),
+        "remote_port_key": record["remote_port_id"],
+    }
+
+
+@pytest.mark.usefixtures("breakout_server")
+def test_creating_the_far_end_of_a_channel_reads_the_record_of_a_bound_parent(librenms_server):
+    from urllib.parse import parse_qs, urlsplit
+
+    from netbox_librenms_plugin.models import InterfaceTypeMapping
+    from netbox_librenms_plugin.tests.conftest import map_device_to_librenms
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+    from netbox_librenms_plugin.tests.test_interface_rule_writes import _port
+
+    setup = _Breakout("bound-parent")
+    seed_mapping(setup.parent, SERVER_KEY, own=300, save=False)
+    setup.parent.save()
+    # Any Ignore rule makes a port without a record refuse the write.
+    InterfaceTypeMapping.objects.create(action=InterfaceTypeMapping.ACTION_IGNORE, name_pattern=r"^no-such-port$")
+    map_device_to_librenms(setup.peer, 9002, server_key=SERVER_KEY)
+    librenms_server.register("/api/v0/ports/300", {"status": "ok", "port": [_port(300, setup.parent.name)]})
+    librenms_server.register(
+        "/api/v0/ports/202",
+        {"status": "ok", "port": [{**_port(202, "Ethernet20"), "device_id": 9002, "deleted": 0}]},
+    )
+    unknown_far_end = {
+        **_records_row(2, setup, {**setup.row(2), "remote_port": "Ethernet20"}),
+        "remote_device_id": 9002,
+    }
+    setup.seed(_records_row(1, setup, setup.row(1)), unknown_far_end)
+    texts = setup.sync(1)
+
+    record = setup.records()["102"]
+    assert record.get("remote_create_url"), (texts, record)
+    query = {key: values[0] for key, values in parse_qs(urlsplit(record["remote_create_url"]).query).items()}
+    response = setup.client.post(urlsplit(record["remote_create_url"]).path, query)
+
+    created = Interface.objects.filter(device=setup.peer, name="Ethernet20").first()
+    texts = [str(message) for message in get_messages(response.wsgi_request)]
+    assert response.status_code == 302
+    assert setup.b_side(setup.parent_cable()) == [(1, setup.far_ends[0]), (2, created)], texts
+
+
+@pytest.mark.usefixtures("breakout_server")
+def test_a_user_who_may_not_change_the_parent_gets_no_sync_action():
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+    setup = _Breakout("parent-scope")
+    user = make_user_with_perms(
+        "breakout-parent-scope", [("view", Device), ("view", Interface), ("view", Cable), ("add", Cable)]
+    )
+    user = grant(user, "change", Cable)
+    # Change on every interface except a channelized parent.
+    user = grant(user, "change", Interface, constraints={"channels__isnull": True})
+    setup.client.force_login(user)
+    setup.seed(setup.row(1), setup.row(2))
+
+    records = setup.records()
+
+    assert [records[row_id]["can_create_cable"] for row_id in ("101", "102")] == [False, False]
+    assert not records["102"].get("can_select_cable")

@@ -50,6 +50,11 @@ def breakout_far_end(channel, parent, cable):
     return None if b_side is None else b_side.get(channel.channel_id)
 
 
+def channel_write_endpoints(interface):
+    """Return the other interfaces that a cable write on *interface* writes: a channel's parent."""
+    return [interface.parent] if is_channel(interface) and interface.parent_id is not None else []
+
+
 def holds_a_cable(interface):
     """Return whether *interface* is cabled; NetBox mirrors the parent's cable onto every channel."""
     if is_channel(interface):

@@ -19,6 +19,7 @@ from django.views import View
 
 from netbox_librenms_plugin.breakout_cables import (
     CHANNELS_SUPPORTED,
+    channel_write_endpoints,
     decide_breakout_cable,
     decide_channel_far_end,
     holds_a_cable,
@@ -115,11 +116,6 @@ def _termination_topology_columns():
 def _channel_topology(interface):
     """Return the channel ID and parent of a channel interface, or None for any other termination."""
     return (interface.channel_id, interface.parent_id) if is_channel(interface) else None
-
-
-def _channel_parent_endpoint(interface):
-    """Return the parent that a write on a channel cables, as a list of zero or one rows."""
-    return [interface.parent] if is_channel(interface) and interface.parent_id is not None else []
 
 
 class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -358,7 +354,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
 
         """
         channel_topology = _channel_topology(local_term)
-        extra_endpoints = _channel_parent_endpoint(local_term)
+        extra_endpoints = channel_write_endpoints(local_term)
         with transaction.atomic():
             locked_terms = self._lock_cable_terminations(
                 local_term,
@@ -690,7 +686,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         if "status" in resolved:
             return {}
         local = resolved["local"]
-        return self._fetch_cable_port_records(link_data, (local, resolved["remote"], *_channel_parent_endpoint(local)))
+        return self._fetch_cable_port_records(link_data, (local, resolved["remote"], *channel_write_endpoints(local)))
 
     def _terminations_are_changeable(self, grouped):
         """Return whether the request may change every submitted termination."""
@@ -1619,7 +1615,10 @@ class CableRemoteCreateView(SyncCablesView):
         ):
             messages.error(request, "This device has been migrated and is read-only for this LibreNMS server.")
             return self._sync_response(request, obj, server_key, redirect_url, close_modal=True)
-        port_records = self._fetch_cable_port_records(context["row"], (context["local_interface"],))
+        local_interface = context["local_interface"]
+        port_records = self._fetch_cable_port_records(
+            context["row"], (local_interface, *channel_write_endpoints(local_interface))
+        )
         try:
             with transaction.atomic():
                 # Lock owners before the insert can take a foreign-key lock on the remote device.
