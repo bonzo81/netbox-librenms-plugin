@@ -21,6 +21,7 @@ from netbox_librenms_plugin.breakout_cables import (
     breakout_far_end,
     decide_breakout_cable,
     decide_channel_far_end,
+    holds_a_cable,
     is_channel,
 )
 from netbox_librenms_plugin.constants import (
@@ -784,6 +785,7 @@ class BaseCableTableView(
         return (
             local_interface is not None
             and remote_interface is not None
+            and not is_channel(local_interface)
             and local_interface.cable_id is not None
             and remote_interface.cable_id is not None
             and local_interface.cable_id != remote_interface.cable_id
@@ -1813,7 +1815,7 @@ class BaseCableTableView(
                 return
 
         cable = interface.cable
-        if cable is None:
+        if cable is None or not holds_a_cable(interface):
             return
         if interface.pk == link.get("netbox_local_interface_id"):
             link["_local_end_cabled"] = True

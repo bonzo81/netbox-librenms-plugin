@@ -21,6 +21,7 @@ from netbox_librenms_plugin.breakout_cables import (
     CHANNELS_SUPPORTED,
     decide_breakout_cable,
     decide_channel_far_end,
+    holds_a_cable,
     is_channel,
 )
 from netbox_librenms_plugin.constants import (
@@ -560,7 +561,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             dict: ``{(Interface, pk): device_id}``, without the endpoints themselves.
 
         """
-        cable_ids = {term.cable_id for term in terminations if term.cable_id is not None}
+        # A channel's cable is its parent's breakout cable, which a write never removes.
+        cable_ids = {term.cable_id for term in terminations if term.cable_id is not None and not is_channel(term)}
         if not cable_ids:
             return {}
         endpoints = {(type(term), term.pk) for term in terminations}
@@ -1715,7 +1717,7 @@ class CableRemoteCreateView(SyncCablesView):
         )
         if remote_device is None or local_interface is None:
             return None, HttpResponse("The row's NetBox objects are no longer available.", status=404)
-        if local_interface.cable_id is not None:
+        if holds_a_cable(local_interface):
             return None, HttpResponse("The local interface is already connected. Refresh the Cables tab.", status=409)
         port = self._remote_port_record(row)
         if port is None:

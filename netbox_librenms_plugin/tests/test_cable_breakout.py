@@ -435,3 +435,48 @@ def test_a_port_that_becomes_a_channel_before_the_lock_gets_no_cable(monkeypatch
     assert Interface.objects.get(pk=plain.pk).cable_id is None
     assert Interface.objects.get(pk=setup.far_ends[0].pk).cable_id is None
     assert Cable.objects.count() == 0
+
+
+@pytest.mark.usefixtures("breakout_server")
+def test_a_channel_with_an_empty_connector_offers_to_create_its_far_end(librenms_server):
+    from urllib.parse import parse_qs, urlsplit
+
+    from netbox_librenms_plugin.tests.conftest import map_device_to_librenms
+
+    setup = _Breakout("create-far")
+    map_device_to_librenms(setup.peer, 9001, server_key=SERVER_KEY)
+    librenms_server.register(
+        "/api/v0/ports/202",
+        {
+            "status": "ok",
+            "port": [
+                {
+                    "port_id": 202,
+                    "device_id": 9001,
+                    "deleted": 0,
+                    "ifName": "Ethernet20",
+                    "ifDescr": "Ethernet20",
+                    "ifType": "ethernetCsmacd",
+                    "ifSpeed": 25_000_000_000,
+                }
+            ],
+        },
+    )
+    unknown_far_end = {
+        **setup.row(2),
+        "remote_device_id": 9001,
+        "remote_port": "Ethernet20",
+        "remote_port_key": 202,
+    }
+    setup.seed(setup.row(1), unknown_far_end)
+    setup.sync(1)
+
+    record = setup.records()["102"]
+    assert record["cable_status"] == "Remote Interface Not Found in Netbox"
+    assert record.get("remote_create_url"), record
+    query = {key: values[0] for key, values in parse_qs(urlsplit(record["remote_create_url"]).query).items()}
+    response = setup.client.post(urlsplit(record["remote_create_url"]).path, query)
+
+    assert response.status_code == 302, response.content.decode()
+    created = Interface.objects.get(device=setup.peer, name="Ethernet20")
+    assert setup.b_side(setup.parent_cable()) == [(1, setup.far_ends[0]), (2, created)]
