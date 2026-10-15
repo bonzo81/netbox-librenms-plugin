@@ -872,6 +872,33 @@ def test_a_single_profile_serial_cable_reads_as_found():
 
 
 @pytest.mark.usefixtures("breakout_server")
+@pytest.mark.parametrize(
+    ("hidden", "reason"),
+    [
+        ({"interface_view": {"channels__isnull": True}}, "the parent interface of this channel is not available"),
+        ({"cable_view": {"label": "permitted"}}, "the cable of the parent interface of this channel is not available"),
+    ],
+    ids=["hidden-parent", "hidden-cable"],
+)
+def test_a_one_sided_channel_row_reveals_nothing_of_a_hidden_parent_or_cable(hidden, reason):
+    setup = _Breakout(f"one-sided-{next(iter(hidden))}")
+    setup.seed(setup.row(1))
+    setup.sync(1)
+    # Both channels now name a neighbour NetBox does not know: channel 1's connector is occupied, channel 2's is empty.
+    unknown = "breakout-one-sided-unknown"
+    setup.seed({**setup.row(1), "remote_device": unknown}, {**setup.row(2), "remote_device": unknown})
+    setup.client.force_login(_constrained_user(f"breakout-one-sided-{next(iter(hidden))}", **hidden))
+
+    records = setup.records()
+
+    rendered = [
+        (records[row_id]["cable_status"], records[row_id].get("cable_url"), records[row_id]["can_create_cable"])
+        for row_id in ("101", "102")
+    ]
+    assert rendered == [(f"Breakout Not Synced: {reason}", None, False)] * 2
+
+
+@pytest.mark.usefixtures("breakout_server")
 def test_a_cable_with_an_unknown_profile_renders_and_is_not_point_to_point():
     from netbox_librenms_plugin.utils import cable_is_point_to_point
 

@@ -105,6 +105,12 @@ def _hidden_refusal(parent, cable, may):
     return None
 
 
+def hidden_breakout_refusal(channel, may):
+    """Return the gate's refusal when the user may not view the parent of *channel* or its cable, else None."""
+    parent = channel.parent
+    return _hidden_refusal(parent, None if parent is None else parent.cable, may)
+
+
 def decide_channel_far_end(local, remote, may):
     """Decide a row whose far end is a channel and whose local end is not, or return None for another row."""
     if not is_channel(remote):

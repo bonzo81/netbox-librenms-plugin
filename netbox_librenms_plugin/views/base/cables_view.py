@@ -22,6 +22,7 @@ from netbox_librenms_plugin.breakout_cables import (
     breakout_far_end,
     decide_breakout_cable,
     decide_channel_far_end,
+    hidden_breakout_refusal,
     holds_a_cable,
     is_channel,
 )
@@ -1809,6 +1810,10 @@ class BaseCableTableView(
             if interface is None:
                 return
 
+        # The gate's view step comes first: a channel's connector state belongs to its parent's cable.
+        if is_channel(interface) and (refusal := hidden_breakout_refusal(interface, self._may)) is not None:
+            link["cable_status"] = f"Breakout Not Synced: {refusal.reason}"
+            return
         cable = interface.cable
         if cable is None or not holds_a_cable(interface):
             return
