@@ -1841,10 +1841,42 @@ class BaseCableTableView(
             return True
         if channel is local_interface:
             decision = decide_breakout_cable(channel, parent, cable, remote_interface, self._provenance_tag())
+            # Read by _apply_breakout_selection after the scope and rule gates.
+            link["_breakout_channel"] = (channel.parent_id, channel.channel_id, decision.waits_for)
         else:
             decision = decide_channel_far_end(local_interface, remote_interface)
         self._set_breakout_row_status(link, decision, cable, actionable)
         return True
+
+    @staticmethod
+    def _apply_breakout_selection(links):
+        """
+        Let a channel row that waits only for lower channels be selected when their rows can write first.
+
+        One submit writes the channel rows in channel ID order, so such a row is selectable when each
+        channel it waits for has a row in *links* that may write or is itself selectable. Its single-row
+        Sync action stays off, because it refuses alone.
+
+        Args:
+            links (list[dict]): The rows after the scope and rule gates, updated in place.
+
+        Returns:
+            None
+
+        """
+        channel_rows = sorted(
+            ((key, link) for link in links if (key := link.pop("_breakout_channel", None)) is not None),
+            key=lambda item: item[0][:2],
+        )
+        ready = set()
+        for (parent_id, channel_id, waits_for), link in channel_rows:
+            if waits_for:
+                link["can_select_cable"] = bool(link.get("can_create_cable")) and all(
+                    (parent_id, lower) in ready for lower in waits_for
+                )
+                link["can_create_cable"] = False
+            if link.get("can_create_cable") or link.get("can_select_cable"):
+                ready.add((parent_id, channel_id))
 
     def _breakout_cable_is_viewable(self, cable, normal_context):
         """Return whether the request may view the cable on a channelized parent; no cable is viewable."""
@@ -1863,6 +1895,8 @@ class BaseCableTableView(
             link["cable_status"] = "Cable Found"
         elif decision.action == "refuse":
             link["cable_status"] = f"Breakout Not Synced: {decision.reason}"
+            # Gated like a write; _apply_breakout_selection turns it into a selection only.
+            link["can_create_cable"] = actionable and bool(decision.waits_for)
         else:
             link["cable_status"] = "No Cable"
             link["can_create_cable"] = actionable
@@ -2801,6 +2835,7 @@ class BaseCableTableView(
             else None,
         )
         self._apply_cable_rule_blocks(links_data, server_key)
+        self._apply_breakout_selection(links_data)
         return links_data
 
     def _remote_port_owner(self, link, server_key, normal_context=None):
@@ -3047,6 +3082,7 @@ class BaseCableTableView(
             ):
                 continue
             link["can_create_cable"] = False
+            link.pop("can_select_cable", None)
             link.pop("picker_url", None)
             link.pop("remote_create_url", None)
 
@@ -3390,6 +3426,7 @@ class SingleCableVerifyView(BaseCableTableView):
                         if not read_only_origin:
                             self._set_remote_create_affordance(link_data, selected_device, server_key)
                         self._apply_cable_rule_blocks([link_data], server_key)
+                        self._apply_breakout_selection([link_data])
                         if read_only_origin:
                             link_data["can_create_cable"] = False
                         formatted_row["can_create_cable"] = bool(link_data.get("can_create_cable"))

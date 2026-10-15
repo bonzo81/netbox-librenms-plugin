@@ -215,6 +215,29 @@ class TestBreakoutCableWrites:
         assert Cable.objects.count() == 1
         assert setup.b_side(setup.parent_cable()) == [(lane + 1, far) for lane, far in enumerate(setup.far_ends)]
 
+    def test_the_rendered_table_lets_one_submit_select_every_channel(self):
+        import re
+
+        setup = _Breakout("bulk-table")
+        setup.seed(*(setup.row(channel_id) for channel_id in (1, 2, 3, 4)))
+
+        rendered = setup.client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[setup.device.pk]),
+            {"tab": "cables", "server_key": SERVER_KEY},
+        )
+        # Read the table HTML the way the other cable table tests do.
+        page = rendered.context["cable_sync"]["table"].as_html(rendered.wsgi_request)
+        checkboxes = re.findall(r'<input[^>]*name="select"[^>]*>', page)
+        enabled = sorted(
+            int(re.search(r'value="(\d+)"', box).group(1)) - 100 for box in checkboxes if "disabled" not in box
+        )
+        sync_buttons = re.findall(r'name="sync_one"\s+value="(\d+)"', page)
+
+        assert enabled == [1, 2, 3, 4]
+        assert sync_buttons == ["101"]
+        setup.sync_rows(enabled)
+        assert setup.b_side(setup.parent_cable()) == [(lane + 1, far) for lane, far in enumerate(setup.far_ends)]
+
     def test_a_deleted_lower_far_end_never_moves_the_other_far_ends(self):
         setup = _Breakout("deleted-lower")
         setup.seed(setup.row(1), setup.row(2))
