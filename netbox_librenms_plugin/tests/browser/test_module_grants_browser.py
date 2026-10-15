@@ -19,9 +19,11 @@ FORM_ATTRS = (
 )
 
 
-def _member_cell(index, member, grant="", binding=None):
+def _member_cell(index, member, grant="", binding=None, marked=True):
+    """*marked* False renders no option[selected], so the browser shows the first option."""
     options = "".join(
-        f'<option value="{value}"{" selected" if value == member else ""}>m{value}</option>' for value in ("1", "2")
+        f'<option value="{value}"{" selected" if marked and value == member else ""}>m{value}</option>'
+        for value in ("1", "2")
     )
     return (
         f'<select name="device_selection_{index}" id="device_selection_{index}" class="form-select vc-member-select"'
@@ -38,7 +40,7 @@ def _actions_cell(index, member):
     )
 
 
-def _row(index, *, member="1", grant="", checked=False):
+def _row(index, *, member="1", grant="", checked=False, marked=True):
     checkbox = f'<input type="checkbox" name="select" value="{index}" id="cb-{index}"{" checked" if checked else ""}>'
     cells = "".join(
         f'<td data-col="{col}">{col}-{index}</td>'
@@ -46,7 +48,7 @@ def _row(index, *, member="1", grant="", checked=False):
     )
     return (
         f'<tr data-ent-index="{index}" data-depth="0"><td data-col="selection">{checkbox}</td>'
-        f'<td data-col="device_selection">{_member_cell(index, member, grant)}</td>{cells}'
+        f'<td data-col="device_selection">{_member_cell(index, member, grant, marked=marked)}</td>{cells}'
         f'<td data-col="actions">{_actions_cell(index, member)}</td></tr>'
     )
 
@@ -268,3 +270,23 @@ def test_a_refused_reverify_clears_the_restored_selection_and_says_why(page):
     assert page.locator("#device_selection_30").input_value() == "1"
     stored = page.evaluate("Object.keys(readStoredSelection(document.getElementById('librenms-module-table')))")
     assert "30" not in stored
+
+
+def test_a_refused_reverify_of_a_select_without_a_marked_option_releases_the_row(page):
+    """The rendered member is the browser's default option, so the rollback goes back to it and unlocks the row."""
+    _answers(page, _success(30, "2", "override-30"), REFUSED)
+    _load(page, [_row(30), _row(31)], url=f"{PAGE_URL}?page=1")
+    with page.expect_response(VERIFY_ROUTE):
+        _change_member(page, 30, "2")
+    page.check("#cb-30")
+    _load(page, [_row(40)], url=f"{PAGE_URL}?page=2")
+
+    with page.expect_response(VERIFY_ROUTE):
+        _load(page, [_row(30, grant="earlier-override", marked=False), _row(31)], url=f"{PAGE_URL}?page=1")
+
+    expect(_toasts(page)).to_contain_text("The saved selection of this row is cleared.")
+    expect(page.locator('tr[data-ent-index="30"][data-verify-pending]')).to_have_count(0)
+    expect(page.locator("#install-30")).to_be_enabled()
+    expect(page.locator("#install-selected-btn")).to_be_enabled()
+    assert page.locator("#device_selection_30").input_value() == "1"
+    assert page.locator('[name="selection_grant_30"]').input_value() == "earlier-override"
