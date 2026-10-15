@@ -944,6 +944,46 @@ class TestMergeTransceiverDataPortIdentity:
         assert error is None
         assert inventory == inventory_seed
 
+    @pytest.mark.parametrize(("entity_index", "added"), [(77, [(77, "TX-77", 9)]), (12, [])])
+    def test_port_ifindex_alone_does_not_merge_another_serial(self, settings, librenms_server, entity_index, added):
+        """An entity that has the port's ifIndex but a different serial is not the optic."""
+        view = _real_api_view(settings, librenms_server, librenms_id=107)
+        librenms_server.register(
+            "/api/v0/devices/107/transceivers",
+            {
+                "status": "ok",
+                "transceivers": [
+                    {"entity_physical_index": entity_index, "model": "SFP-10G-SR", "serial": "TX-77", "port_id": 9}
+                ],
+            },
+            method="GET",
+        )
+        librenms_server.register(
+            "/api/v0/devices/107/ports",
+            {"status": "ok", "ports": [{"port_id": 9, "ifName": "Eth9", "ifIndex": 50}]},
+            method="GET",
+        )
+        inventory_seed = [
+            {
+                "entPhysicalIndex": 10,
+                "entPhysicalName": "Port 9",
+                "entPhysicalClass": "port",
+                "entPhysicalModelName": "PORT-MODEL",
+                "entPhysicalSerialNum": "PORT-SERIAL",
+                "ifIndex": 50,
+            },
+            {"entPhysicalIndex": 12, "entPhysicalName": "Fan 1", "entPhysicalClass": "fan", "ifIndex": 51},
+        ]
+
+        inventory, error = view._merge_transceiver_data(deepcopy(inventory_seed))
+
+        assert error is None
+        assert inventory[:2] == inventory_seed
+        assert [
+            (item["entPhysicalIndex"], item["entPhysicalSerialNum"], item["_librenms_port_id"])
+            for item in inventory[2:]
+        ] == added
+
     def test_enrich_inventory_port_identity_backfills_port_rows_from_ports_api(self, settings, librenms_server):
         view = _real_api_view(settings, librenms_server, librenms_id=102)
         librenms_server.register(
