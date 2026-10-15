@@ -533,15 +533,14 @@ def test_a_user_who_may_not_change_the_parent_gets_no_sync_action():
     assert [records[row_id]["can_create_cable"] for row_id in ("101", "102")] == [False, False]
 
 
-def _constrained_user(name, *, interface_view=None, cable_change=None):
+def _constrained_user(name, *, interface_view=None, cable_change=None, cable_view=None):
     from dcim.models import Device
 
     from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
-    user = make_user_with_perms(
-        name, [("view", Device), ("view", Cable), ("add", Cable), ("add", Interface), ("change", Interface)]
-    )
+    user = make_user_with_perms(name, [("view", Device), ("add", Cable), ("add", Interface), ("change", Interface)])
     user = grant(user, "view", Interface, constraints=interface_view)
+    user = grant(user, "view", Cable, constraints=cable_view)
     return grant(user, "change", Cable, constraints=cable_change)
 
 
@@ -870,3 +869,29 @@ def test_a_single_profile_serial_cable_reads_as_found():
     link = _make_view().enrich_links_data([make_serial_row(csp, "single-serial-r", acs)], acs, server_key=SERVER_KEY)[0]
 
     assert (link["cable_status"], link["can_create_cable"]) == ("Cable Found", False)
+
+
+@pytest.mark.usefixtures("breakout_server")
+def test_a_cable_with_an_unknown_profile_renders_and_is_not_point_to_point():
+    from netbox_librenms_plugin.utils import cable_is_point_to_point
+
+    device, local, remote, row = _plain_pair("unknown-profile")
+    cable = Cable(a_terminations=[local], b_terminations=[remote])
+    cable.save()
+    # A stored value that is no known profile, as an older or newer NetBox could leave it.
+    Cable.objects.filter(pk=cable.pk).update(profile="no-such-profile")
+    channel_setup = _Breakout("unknown-profile-channel")
+    channel_cable = Cable(a_terminations=[channel_setup.parent], b_terminations=[channel_setup.far_ends[0]])
+    channel_cable.save()
+    Cable.objects.filter(pk=channel_cable.pk).update(profile="no-such-profile")
+    channel_setup.seed(channel_setup.row(2))
+    client = TestASingleProfileCableIsPointToPoint()._client(device, row)
+
+    record = TestASingleProfileCableIsPointToPoint()._record(client, device)
+    channel_record = channel_setup.records()["102"]
+
+    assert cable_is_point_to_point(Cable.objects.get(pk=cable.pk)) is False
+    assert record["cable_status"] == "Multi-termination Cable Not Supported"
+    assert channel_record["cable_status"] == (
+        "Breakout Not Synced: the cable on et-0/0/1 uses profile no-such-profile, which this sync does not read"
+    )
