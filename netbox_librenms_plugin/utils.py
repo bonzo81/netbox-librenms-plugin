@@ -721,7 +721,10 @@ def cable_has_librenms_tag(cable, provenance_tag=_PROVENANCE_TAG_UNSET) -> bool:
 
 
 def cable_is_point_to_point(cable) -> bool:
-    """Return whether *cable* has exactly one termination on each end."""
+    """Return whether *cable* has exactly one termination on each end and no profile."""
+    # A profiled (breakout) cable can carry more lanes later, so a plain sync never adopts or replaces it.
+    if getattr(cable, "profile", ""):
+        return False
     prefetched = getattr(cable, "_prefetched_objects_cache", {}).get("terminations")
     if prefetched is not None:
         end_counts = {"A": 0, "B": 0}
