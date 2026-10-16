@@ -2019,12 +2019,74 @@ document.addEventListener('submit', function (e) {
     }
 });
 
-// A row action that changes durable state asks first; cancelling the click stops the submit.
+let pendingSyncConfirmAction = null;
+
+function syncConfirmModal() {
+    let modal = document.getElementById('librenms-confirm-modal');
+    if (modal) return modal;
+    modal = document.createElement('div');
+    modal.id = 'librenms-confirm-modal';
+    modal.className = 'modal fade';
+    modal.tabIndex = -1;
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-hidden', 'true');
+    modal.setAttribute('aria-labelledby', 'librenms-confirm-modal-title');
+    modal.innerHTML = `
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="librenms-confirm-modal-title">Confirm</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body" data-confirm-message></div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" data-confirm-accept>Confirm</button>
+                </div>
+            </div>
+        </div>`;
+    modal.querySelector('[data-confirm-accept]').addEventListener('click', () => {
+        const action = pendingSyncConfirmAction;
+        pendingSyncConfirmAction = null;
+        hideModal(modal);
+        action?.();
+    });
+    modal.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') hideModal(modal);
+    });
+    document.body.appendChild(modal);
+    return modal;
+}
+
+/**
+ * Ask in the plugin's confirm modal, and run *action* only when the user confirms.
+ * The message comes from LibreNMS data, so it is set as text only.
+ */
+function confirmSyncAction(message, action) {
+    const modal = syncConfirmModal();
+    modal.querySelector('[data-confirm-message]').textContent = message;
+    pendingSyncConfirmAction = action;
+    showModal(modal);
+    modal.querySelector('[data-confirm-accept]').focus();
+}
+
+// A row action that changes durable state asks first; only a confirmation submits it.
 document.addEventListener('click', function (e) {
     const button = e.target instanceof Element ? e.target.closest('button[data-confirm]') : null;
-    if (button && !window.confirm(button.dataset.confirm)) {
-        e.preventDefault();
-    }
+    if (!button?.form) return;
+    e.preventDefault();
+    confirmSyncAction(button.dataset.confirm, () => {
+        // htmx posts the submitter it last saw focused, so focus the button before the resubmit.
+        button.focus();
+        button.form.requestSubmit(button);
+    });
+});
+
+// An hx-confirm question asks in the same modal instead of the browser dialog.
+document.addEventListener('htmx:confirm', function (e) {
+    if (!e.detail.question) return;
+    e.preventDefault();
+    confirmSyncAction(e.detail.question, () => e.detail.issueRequest(true));
 });
 
 /**

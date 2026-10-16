@@ -1174,22 +1174,37 @@ def test_vlan_row_submit_keeps_another_page_selection_and_group(page):
     assert stored["101"]["inputs"]["vlan_group_101"] == "2"
 
 
-@pytest.mark.parametrize("accept", [False, True], ids=["dismissed", "accepted"])
-def test_rebind_asks_first_and_keeps_another_page_selection(page, accept):
-    """Rebind submits only after the confirmation, to its own action, and leaves the bulk selection alone."""
+# Tabler's modal layout: the open modal covers the viewport, so a click beside the dialog hits the modal itself.
+MODAL_CSS = (
+    "<style>.modal { display: none; position: fixed; inset: 0; } .modal.show { display: block; }"
+    " .modal-dialog { width: 400px; margin: 100px auto; }</style>"
+)
+CONFIRM_MODAL = "#librenms-confirm-modal"
+
+
+def _spy_on_window_confirm(page):
+    """Record every window.confirm call; the plugin must ask through its own modal instead."""
+    page.evaluate(
+        "() => { window.confirmCalls = []; window.confirm = (m) => { window.confirmCalls.push(m); return true; }; }"
+    )
+
+
+def _rebind_form_page(page, message="Move the binding?"):
     page.set_content(
-        """
+        MODAL_CSS
+        + f"""
         <form id="sync-form" method="post" action="/sync">
           <table id="librenms-interface-table"><tbody><tr>
             <td><input type="checkbox" name="select" value="201"></td>
             <td><input type="hidden" name="rebind_expected_port_201" value="8679">
                 <button id="rebind" type="submit" name="rebind_one" value="201"
-                formaction="/rebind?interface_name_field=ifName" data-confirm="Move the binding?">Rebind</button></td>
+                formaction="/rebind?interface_name_field=ifName" data-confirm="{escape(message)}">Rebind</button></td>
           </tr></tbody></table>
         </form>
         """
     )
     _add_page_scripts(page)
+    _spy_on_window_confirm(page)
     page.evaluate(
         """() => {
             writeStoredSelection(document.querySelector('table'), {'101': {inputs: {}, auto: ''}});
@@ -1200,30 +1215,129 @@ def test_rebind_asks_first_and_keeps_another_page_selection(page, accept):
             });
         }"""
     )
-    dialogs = []
 
-    def answer(dialog):
-        dialogs.append(dialog.message)
-        if accept:
-            dialog.accept()
-        else:
-            dialog.dismiss()
 
-    page.on("dialog", answer)
+@pytest.mark.parametrize("dismiss", ["cancel", "escape", "backdrop", "close"])
+def test_rebind_asks_in_the_plugin_modal_and_a_dismissal_submits_nothing(page, dismiss):
+    _rebind_form_page(page)
+
     page.click("#rebind")
 
-    submitted = page.evaluate("window.submitted")
-    stored = page.evaluate("readStoredSelection(document.querySelector('table'))")
-    assert dialogs == ["Move the binding?"]
-    assert list(stored) == ["101"]
-    if not accept:
-        assert submitted == []
-        return
-    [(action, pairs)] = submitted
+    modal = page.locator(CONFIRM_MODAL)
+    expect(modal).to_be_visible()
+    expect(modal.locator("[data-confirm-message]")).to_have_text("Move the binding?")
+    if dismiss == "cancel":
+        modal.get_by_role("button", name="Cancel").click()
+    elif dismiss == "escape":
+        page.keyboard.press("Escape")
+    elif dismiss == "close":
+        modal.get_by_role("button", name="Close").click()
+    else:
+        page.mouse.click(5, 5)
+    expect(modal).to_be_hidden()
+    assert page.evaluate("window.submitted") == []
+    assert page.evaluate("window.confirmCalls") == []
+    assert list(page.evaluate("readStoredSelection(document.querySelector('table'))")) == ["101"]
+
+
+def test_rebind_confirmed_in_the_modal_submits_once_with_its_submitter(page):
+    """Rebind submits only after the confirmation, to its own action, and leaves the bulk selection alone."""
+    _rebind_form_page(page)
+
+    page.click("#rebind")
+    page.locator(CONFIRM_MODAL).get_by_role("button", name="Confirm").click()
+
+    expect(page.locator(CONFIRM_MODAL)).to_be_hidden()
+    [(action, pairs)] = page.evaluate("window.submitted")
     assert action.endswith("/rebind?interface_name_field=ifName")
     assert ["rebind_one", "201"] in pairs
     assert ["rebind_expected_port_201", "8679"] in pairs
     assert ["select", "101"] not in pairs
+    assert page.evaluate("window.confirmCalls") == []
+    assert list(page.evaluate("readStoredSelection(document.querySelector('table'))")) == ["101"]
+
+
+def test_the_confirm_modal_shows_markup_in_the_message_as_text(page):
+    _rebind_form_page(page, message="Create NetBox VRF '<b>red</b>'?")
+
+    page.click("#rebind")
+
+    message = page.locator(f"{CONFIRM_MODAL} [data-confirm-message]")
+    expect(message).to_have_text("Create NetBox VRF '<b>red</b>'?")
+    assert message.locator("b").count() == 0
+
+
+def test_a_confirmed_htmx_row_action_posts_its_submitter_and_formaction(page):
+    """An htmx form reads the submitter it last saw, so the resubmit must keep the clicked button."""
+    requests = []
+
+    def answer(route):
+        requests.append((route.request.url, route.request.post_data))
+        route.fulfill(status=200, content_type="text/html", body='<span id="swapped">Done</span>')
+
+    page.route(f"{HTMX_SYNC_URL}**", answer)
+    page.set_content(
+        MODAL_CSS
+        + f"""
+        <div id="tab-content">
+          <form id="sync-form" method="post" action="{HTMX_SYNC_URL}" hx-post="{HTMX_SYNC_URL}"
+                hx-target="#tab-content" hx-swap="innerHTML">
+            <table id="librenms-ipaddress-table"><tbody><tr>
+              <td><button id="create-vrf" type="submit" name="create_vrf" value="row-7"
+                   formaction="{HTMX_SYNC_URL}/vrf" data-confirm="Create NetBox VRF 'red'?">VRF</button></td>
+            </tr></tbody></table>
+          </form>
+        </div>
+        """
+    )
+    _add_page_scripts(page)
+    _spy_on_window_confirm(page)
+
+    page.click("#create-vrf")
+    expect(page.locator(f"{CONFIRM_MODAL} [data-confirm-message]")).to_have_text("Create NetBox VRF 'red'?")
+    assert requests == []
+    page.locator(CONFIRM_MODAL).get_by_role("button", name="Confirm").click()
+    page.locator("#swapped").wait_for()
+
+    [(url, body)] = requests
+    assert url == f"{HTMX_SYNC_URL}/vrf"
+    assert "create_vrf=row-7" in body
+    assert page.evaluate("window.confirmCalls") == []
+
+
+@pytest.mark.parametrize("accept", [False, True], ids=["cancelled", "confirmed"])
+def test_an_hx_confirm_question_asks_in_the_plugin_modal(page, accept):
+    requests = []
+
+    def answer(route):
+        requests.append(route.request.url)
+        route.fulfill(status=200, content_type="text/html", body="")
+
+    page.route(f"{HTMX_SYNC_URL}**", answer)
+    page.set_content(
+        MODAL_CSS
+        + f"""
+        <button id="transfer" type="button" hx-post="{HTMX_SYNC_URL}/transfer" hx-swap="none"
+                hx-confirm="Transfer primary IPv4 (192.0.2.1/24) to <b>winner</b>?">Transfer</button>
+        """
+    )
+    _add_page_scripts(page)
+    _spy_on_window_confirm(page)
+
+    page.click("#transfer")
+    modal = page.locator(CONFIRM_MODAL)
+    expect(modal.locator("[data-confirm-message]")).to_have_text(
+        "Transfer primary IPv4 (192.0.2.1/24) to <b>winner</b>?"
+    )
+    if accept:
+        with page.expect_response(f"{HTMX_SYNC_URL}/transfer"):
+            modal.get_by_role("button", name="Confirm").click()
+    else:
+        modal.get_by_role("button", name="Cancel").click()
+    expect(modal).to_be_hidden()
+
+    assert requests == ([f"{HTMX_SYNC_URL}/transfer"] if accept else [])
+    assert page.evaluate("window.confirmCalls") == []
 
 
 @pytest.mark.parametrize(
