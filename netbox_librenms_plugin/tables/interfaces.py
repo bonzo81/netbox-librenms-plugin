@@ -31,6 +31,7 @@ from netbox_librenms_plugin.interface_diff import (
 )
 from netbox_librenms_plugin.interface_rules import RuleDecisionKind, decision_reason, rule_names
 from netbox_librenms_plugin.utils import (
+    SYNC_TABLE_HEADER_ATTRS,
     check_vlan_group_matches,
     convert_speed_to_kbps,
     format_mac_address,
@@ -134,6 +135,7 @@ class LibreNMSInterfaceTable(tables.Table):
         attrs = {
             "class": "table table-hover object-list",
             "id": "librenms-interface-table",
+            "th": SYNC_TABLE_HEADER_ATTRS,
         }
 
     def __init__(
@@ -838,8 +840,8 @@ class LibreNMSInterfaceTable(tables.Table):
 
         """
         return format_html(
-            '<div class="text-nowrap lh-sm">'
-            '<span class="badge bg-{}-lt fw-normal d-inline-flex align-items-center gap-1" title="{}">'
+            '<div class="lh-sm">'
+            '<span class="badge bg-{}-lt fw-normal d-inline-flex align-items-center gap-1 text-wrap text-start" title="{}">'
             '<i class="mdi {}"></i>{}</span></div>',
             color,
             title,
@@ -904,7 +906,7 @@ class LibreNMSInterfaceTable(tables.Table):
             badge_text = type_label  # may be "" (e.g. missing_lnms with no name) → icon-only pill
         title = f"{type_label}: {status_text}" if type_label else status_text
         badge = format_html(
-            '<span class="badge {} fw-normal d-inline-flex align-items-center gap-1" title="{}">'
+            '<span class="badge {} fw-normal d-inline-flex align-items-center gap-1 text-wrap text-start" title="{}">'
             '<i class="mdi {}"></i>{}</span>',
             badge_css,
             title,
@@ -936,7 +938,7 @@ class LibreNMSInterfaceTable(tables.Table):
             if not object_id:
                 # No resolvable owner. reverse() would raise NoReverseMatch and take down the
                 # whole table render, so degrade this one cell the way target_resolvable does.
-                return format_html('<div class="text-nowrap lh-sm">{}</div>', badge)
+                return format_html('<div class="lh-sm">{}</div>', badge)
             object_type = record.get("selected_object_type") or self.sync_object_type
             route_name = {
                 "lag-sync-btn": "sync_interface_lag",
@@ -971,11 +973,10 @@ class LibreNMSInterfaceTable(tables.Table):
                 sync_title,
                 sync_title,
             )
-            # text-nowrap keeps the pill + sync button on one line (no mid-line wrap); lh-sm keeps
-            # the LAG/Parent lines tightly stacked.
-            return format_html('<div class="text-nowrap lh-sm">{} {}</div>', badge, btn)
+            # lh-sm keeps the LAG/Parent lines tightly stacked; a narrow cell wraps the button under the pill.
+            return format_html('<div class="lh-sm">{} {}</div>', badge, btn)
 
-        return format_html('<div class="text-nowrap lh-sm">{}</div>', badge)
+        return format_html('<div class="lh-sm">{}</div>', badge)
 
     def _field_css_class(self, record, field):
         """Return one field's colour, read from the row's single sync verdict."""
@@ -1310,6 +1311,7 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         attrs = {
             "class": "table table-hover object-list",
             "id": "librenms-interface-table",
+            "th": SYNC_TABLE_HEADER_ATTRS,
         }
 
 
@@ -1340,6 +1342,7 @@ class LibreNMSVMInterfaceTable(LibreNMSInterfaceTable):
         attrs = {
             "class": "table table-hover object-list",
             "id": "librenms-interface-table-vm",
+            "th": SYNC_TABLE_HEADER_ATTRS,
         }
 
     # Remove the type and speed column for VMs

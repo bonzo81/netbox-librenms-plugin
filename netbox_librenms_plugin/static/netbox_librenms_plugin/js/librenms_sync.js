@@ -3457,6 +3457,102 @@ function initializeFilters() {
 }
 
 // ============================================
+// TABLE FIT
+// ============================================
+
+// Columns a sync table hides, lowest value first, when its wrapped cells are still wider than the card.
+const SYNC_TABLE_FIT_HIDE_ORDER = {
+    'librenms-interface-table': ['librenms_id', 'description', 'mtu', 'speed', 'enabled', 'vlans', 'mac_address', 'type'],
+    'librenms-interface-table-vm': ['librenms_id', 'description', 'mtu', 'enabled', 'vlans', 'mac_address'],
+    'librenms-module-table': ['description', 'item_class', 'model', 'serial', 'module_type', 'module_bay'],
+};
+const syncTableFitWidths = new WeakMap();
+const pendingSyncTableFits = new Set();
+const syncTableFitObserver = typeof ResizeObserver === 'undefined'
+    ? null
+    : new ResizeObserver((entries) => {
+        entries.forEach((entry) => {
+            const target = entry.target;
+            const table = target.matches('table') ? target : target.querySelector(':scope > table');
+            if (table) pendingSyncTableFits.add(table);
+        });
+        // Refit in the next frame: a refit inside the callback would resize the observed card again.
+        requestAnimationFrame(() => {
+            pendingSyncTableFits.forEach((table) => table.isConnected && fitSyncTable(table));
+            pendingSyncTableFits.clear();
+        });
+    });
+
+function _syncTableOverflows(table) {
+    return table.scrollWidth > table.parentElement.clientWidth + 1;
+}
+
+function _syncTableHeader(table, col) {
+    return Array.from(table.tHead?.rows[0]?.cells || []).find((th) => th.dataset.col === col);
+}
+
+function _hideSyncTableColumn(table, col) {
+    const header = _syncTableHeader(table, col);
+    if (!header) return false;
+    const width = header.parentElement.cells.length;
+    Array.from(table.rows).forEach((row) => {
+        // A full-width row (the empty-table message) has no cell per column.
+        if (row.cells.length !== width) return;
+        row.cells[header.cellIndex].classList.add('d-none');
+        row.cells[header.cellIndex].dataset.fitHidden = '';
+    });
+    return true;
+}
+
+function _showSyncTableFitNote(table, hiddenCols) {
+    let note = table.previousElementSibling;
+    if (!note?.hasAttribute('data-table-fit-note')) {
+        if (!hiddenCols.length) return;
+        note = document.createElement('div');
+        note.className = 'small text-muted px-2 pb-2';
+        note.setAttribute('data-table-fit-note', '');
+        table.before(note);
+    }
+    const labels = hiddenCols.map((col) => _syncTableHeader(table, col).textContent.trim());
+    note.textContent = `Hidden to fit the window: ${labels.join(', ')}. Widen the window to show them.`;
+    note.hidden = !hiddenCols.length;
+}
+
+/**
+ * Fit a sync table into its card: cells wrap first, then low-value columns hide, then words break.
+ * The table gets no horizontal scroll wrapper, because a wrapper clips the in-table dropdown menus.
+ */
+function fitSyncTable(table) {
+    const width = table.parentElement?.clientWidth || 0;
+    if (!width) return;
+    if (syncTableFitWidths.get(table) === width && !_syncTableOverflows(table)) return;
+    table.querySelectorAll('[data-fit-hidden]').forEach((cell) => {
+        cell.classList.remove('d-none');
+        delete cell.dataset.fitHidden;
+    });
+    table.classList.remove('text-break');
+    const hiddenCols = [];
+    for (const col of SYNC_TABLE_FIT_HIDE_ORDER[table.id] || []) {
+        if (!_syncTableOverflows(table)) break;
+        if (_hideSyncTableColumn(table, col)) hiddenCols.push(col);
+    }
+    if (_syncTableOverflows(table)) table.classList.add('text-break');
+    _showSyncTableFitNote(table, hiddenCols);
+    syncTableFitWidths.set(table, width);
+}
+
+function initializeSyncTableFit() {
+    Object.keys(SYNC_TABLE_FIT_HIDE_ORDER).forEach((tableId) => {
+        const table = document.getElementById(tableId);
+        if (!table?.parentElement) return;
+        fitSyncTable(table);
+        // The card resizes with the window and on a tab switch; the table resizes when a cell grows.
+        syncTableFitObserver?.observe(table.parentElement);
+        syncTableFitObserver?.observe(table);
+    });
+}
+
+// ============================================
 // SNMP CONFIGURATION MODAL
 // ============================================
 
@@ -4021,6 +4117,7 @@ function initializeScripts() {
     initializeInstallSelectedForm();
     initializeVCReportButtons();
     initializeSyncCacheConsistency();
+    initializeSyncTableFit();
 }
 
 

@@ -4177,3 +4177,167 @@ def test_programmatic_single_row_submit_keeps_off_page_selection(page, action):
     assert (action, "201") in _selection_form_pairs(bodies[0])
     assert ("select", "101") not in _selection_form_pairs(bodies[0])
     assert list(page.evaluate("readStoredSelection(document.querySelector('table'))")) == ["101"]
+
+
+# ===========================================================================
+# Table fit: a sync table must fit its card without a scroll wrapper
+# ===========================================================================
+# The netbox.css rules that set how wide a sync table can shrink.
+NETBOX_TABLE_CSS = """
+body { margin: 0; font: 14px/1.4 sans-serif; }
+.table { width: 100%; border-collapse: collapse; }
+.table th, .table td { padding: .5rem; vertical-align: top; }
+.table thead th { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
+.badge { display: inline-flex; gap: .25rem; padding: .25em .5em; font-size: .857em; white-space: nowrap; }
+.btn { display: inline-flex; padding: .25rem .5rem; white-space: nowrap; }
+.d-none { display: none !important; }
+.d-inline-block { display: inline-block !important; }
+.text-wrap { white-space: normal !important; }
+.text-break { word-wrap: break-word !important; word-break: break-word !important; }
+.text-start { text-align: left !important; }
+"""
+
+# Cell markup in the shape the interface and module tables render, with the widest values seen live.
+FIT_TABLES = {
+    "librenms-interface-table": {
+        "headers": [
+            ("selection", ""),
+            ("device_selection", "Virtual Chassis member"),
+            ("name", "Name"),
+            ("type", "Interface Type"),
+            ("speed", "Speed"),
+            ("vlans", "VLANs"),
+            ("mac_address", "MAC Address"),
+            ("mtu", "MTU"),
+            ("enabled", "Enabled"),
+            ("description", "Description"),
+            ("librenms_id", "LibreNMS ID"),
+            ("parent", "Relationships"),
+            ("actions", ""),
+        ],
+        "cells": {
+            "selection": '<input type="checkbox" name="select">',
+            "device_selection": '<select class="form-select" style="width: 100%"><option>Select a member</option></select>',
+            "name": '<span class="text-danger">2/x1/1/c36/1</span>',
+            "type": '<span>softwareLoopback <i class="mdi mdi-help-circle-outline"></i></span>',
+            "speed": "<span>100 Gbps</span>",
+            "vlans": "<span>2759(T) <i class='mdi mdi-alert'></i></span>",
+            "mac_address": "<span>02:00:00:CD:9F:07</span>",
+            "mtu": "<span>9208</span>",
+            "enabled": "<span>Disabled</span>",
+            "description": "<span>uplink to core router</span>",
+            "librenms_id": "<span>2005606206</span>",
+            "parent": (
+                '<div class="lh-sm"><span class="badge text-wrap text-start">1 stacked port</span></div>'
+                '<div class="lh-sm"><span class="badge text-wrap text-start">LAG lag-2</span>'
+                ' <button type="button" class="btn btn-sm">Sync</button></div>'
+            ),
+            "actions": '<div class="lh-sm"><span class="badge text-wrap text-start">Select a VC member</span></div>',
+        },
+        "keep": ["device_selection", "name", "parent", "actions"],
+    },
+    "librenms-module-table": {
+        "headers": [
+            ("selection", ""),
+            ("device_selection", "Virtual Chassis Member"),
+            ("name", "Name"),
+            ("model", "Model"),
+            ("serial", "Serial"),
+            ("description", "Description"),
+            ("item_class", "Class"),
+            ("module_bay", "Module Bay"),
+            ("module_type", "Module Type"),
+            ("status", "Status"),
+            ("actions", "Actions"),
+        ],
+        "cells": {
+            "selection": '<input type="checkbox" name="select">',
+            "device_selection": '<select class="form-select" style="width: 100%"><option>nokia1</option></select>',
+            "name": '<span class="d-inline-block" style="padding-left:40px">└─ entity-c0151e 2/x1/1</span>',
+            "model": "CFP2/QSFP28",
+            "serial": "SN-7890dd",
+            "description": "CFP2/QSFP28",
+            "item_class": '<i class="mdi mdi-power-plug me-1"></i> powerSupply',
+            "module_bay": '<span class="text-danger">No matching bay</span>',
+            "module_type": '<span class="text-warning">No matching type</span>',
+            "status": '<span class="badge text-wrap text-start">Integrated in entity-6d234b 2/x1</span>',
+            "actions": '<button type="button" class="btn btn-sm">Install</button>',
+        },
+        "keep": ["device_selection", "name", "status", "actions"],
+    },
+}
+
+
+def _render_fit_table(page, table_id, card_width):
+    """Render one sync table inside a card of the given width, with the page script initialized."""
+    spec = FIT_TABLES[table_id]
+    # The VC member column width comes from the interface template's style block.
+    vc_width = "width: 13rem; min-width: 13rem;"
+    head = "".join(f'<th class="text-wrap" data-col="{col}">{label}</th>' for col, label in spec["headers"])
+    row = "".join(
+        f'<td data-col="{col}" style="{vc_width if col == "device_selection" else ""}">{spec["cells"][col]}</td>'
+        for col, _label in spec["headers"]
+    )
+    page.set_content(
+        f"<style>{NETBOX_TABLE_CSS}</style>"
+        f'<div id="frame" style="width: {card_width}px"><div class="card">'
+        f'<table class="table" id="{table_id}"><thead><tr>{head}</tr></thead>'
+        f"<tbody>{f'<tr>{row}</tr>' * 3}</tbody></table></div></div>"
+    )
+    _add_page_scripts(page)
+    page.evaluate("initializeScripts()")
+
+
+def _fit_state(page, table_id):
+    """Return the table's overflow, the visible columns, and the fit note text."""
+    return page.evaluate(
+        """(tableId) => {
+            const table = document.getElementById(tableId);
+            const visible = (cell) => getComputedStyle(cell).display !== 'none';
+            const note = table.parentElement.querySelector('[data-table-fit-note]');
+            return {
+                scrollWidth: table.scrollWidth,
+                clientWidth: table.parentElement.clientWidth,
+                headers: Array.from(table.tHead.rows[0].cells).filter(visible).map((th) => th.dataset.col),
+                cells: Array.from(table.tBodies[0].rows[0].cells).filter(visible).map((td) => td.dataset.col),
+                note: note && !note.hidden ? note.textContent : '',
+            };
+        }""",
+        table_id,
+    )
+
+
+@pytest.mark.parametrize("table_id", sorted(FIT_TABLES))
+@pytest.mark.parametrize("card_width", [943, 750, 687])
+def test_sync_table_fits_its_card_at_narrow_widths(page, table_id, card_width):
+    """The card widths are the live ones at 1280 px and 1024 px with the sidebar, and at 768 px without it."""
+    _render_fit_table(page, table_id, card_width)
+
+    state = _fit_state(page, table_id)
+    assert state["scrollWidth"] <= state["clientWidth"] + 1, state
+    assert state["headers"] == state["cells"], "a hidden header must hide its cells too"
+    assert set(FIT_TABLES[table_id]["keep"]) <= set(state["cells"])
+    hidden = [col for col, _label in FIT_TABLES[table_id]["headers"] if col not in state["cells"]]
+    labels = dict(FIT_TABLES[table_id]["headers"])
+    noted = re.fullmatch(r"Hidden to fit the window: (.+)\. Widen the window to show them\.", state["note"])
+    assert sorted(noted.group(1).split(", ") if noted else []) == sorted(labels[col] for col in hidden)
+
+
+@pytest.mark.parametrize("table_id", sorted(FIT_TABLES))
+def test_sync_table_shows_hidden_columns_again_when_the_card_widens(page, table_id):
+    _render_fit_table(page, table_id, 687)
+    narrow = _fit_state(page, table_id)
+    assert len(narrow["cells"]) < len(FIT_TABLES[table_id]["headers"])
+
+    page.evaluate("document.getElementById('frame').style.width = '2400px'")
+    page.wait_for_function(
+        "(n) => document.querySelectorAll('#frame tbody tr:first-child td:not(.d-none)').length === n",
+        arg=len(FIT_TABLES[table_id]["headers"]),
+    )
+    assert _fit_state(page, table_id)["note"] == ""
+
+    page.evaluate("document.getElementById('frame').style.width = '687px'")
+    page.wait_for_function("() => !!document.querySelector('#frame [data-table-fit-note]:not([hidden])')")
+    state = _fit_state(page, table_id)
+    assert state["cells"] == narrow["cells"]
+    assert state["scrollWidth"] <= state["clientWidth"] + 1

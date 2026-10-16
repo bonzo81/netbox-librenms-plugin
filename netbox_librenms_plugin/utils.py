@@ -3295,6 +3295,10 @@ def index_vlan_source_rows(rows):
     return rows_by_vid, invalid_rows
 
 
+# Header attributes for the sync tables: a header may wrap, and librenms_sync.js finds a column by its data-col.
+SYNC_TABLE_HEADER_ATTRS = {"class": "text-wrap", "data-col": lambda bound_column: bound_column.name}
+
+
 def render_vc_member_options(members, selected_id):
     """
     Build the ``<option>`` list for a Virtual Chassis member dropdown.

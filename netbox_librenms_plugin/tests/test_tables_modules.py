@@ -43,6 +43,16 @@ def _actions(rendered):
 
 
 class TestRenderedColumns:
+    def test_each_header_names_its_column_for_the_table_fit_script(self):
+        table = _table(make_device("module-fit-headers"))
+
+        headers = {column.name: column.attrs["th"] for column in table.columns}
+
+        assert {name: th.get("data-col") for name, th in headers.items()} == {
+            column.name: column.attrs["td"]["data-col"] for column in table.columns
+        }
+        assert all("text-wrap" in th["class"].split() for th in headers.values())
+
     @pytest.mark.parametrize(
         ("value", "record", "expected"),
         [
@@ -121,7 +131,7 @@ class TestRenderedColumns:
         rendered = str(_table().render_module_bay("Bay 1", {"depth": 2}))
 
         assert "padding-left:40px" in rendered
-        assert "└─ Bay 1" in rendered
+        assert "└─\u00a0Bay 1" in rendered
 
 
 class TestStatusRendering:

@@ -1097,7 +1097,7 @@ class TestInterfaceTableFields:
         assert "bg-purple-lt" in html, "the OOB pill keeps the purple the rest of the plugin uses"
         assert "bg-warning-lt" in html
         assert "bg-purple text-white" not in html, "the solid name-column fill must not follow it over"
-        assert html.count('<div class="text-nowrap lh-sm">') == 2, "each marker stacks like a relationship pill"
+        assert html.count('<div class="lh-sm">') == 2, "each marker stacks like a relationship pill"
 
     def test_real_librenms_id_states(self):
         from netbox_librenms_plugin.utils import set_librenms_device_id
@@ -1543,6 +1543,20 @@ class TestVirtualChassisInterfaceTable:
         second = make_device(f"{tag}-2")
         make_virtual_chassis(f"{tag}-vc", first, second)
         return first, second
+
+    def test_each_header_names_its_column_for_the_table_fit_script(self):
+        from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
+
+        first, _second = self._members("vc-fit-headers")
+        table = VCInterfaceTable(data=[], device=first, interface_name_field="ifName")
+
+        headers = {column.name: column.attrs["th"] for column in table.columns}
+
+        assert "device_selection" in headers
+        assert {name: th.get("data-col") for name, th in headers.items()} == {
+            column.name: column.attrs["td"]["data-col"] for column in table.columns
+        }
+        assert all("text-wrap" in th["class"].split() for th in headers.values())
 
     def test_physical_rows_select_the_named_member_and_logical_rows_use_the_viewed_member(self):
         from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable

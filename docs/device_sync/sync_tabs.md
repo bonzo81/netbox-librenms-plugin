@@ -2,6 +2,8 @@
 
 The **LibreNMS Sync** page compares LibreNMS data with the selected NetBox Device or Virtual Machine. Refresh a tab to load current LibreNMS data before applying changes.
 
+The Interfaces and Modules tables always fit the window. When the cells cannot wrap enough, the table hides its least important columns first (for example, LibreNMS ID and Description) and names them above the table. Widen the window to show them again.
+
 ## Interfaces
 
 Available for Devices and Virtual Machines. This tab creates or updates interfaces and can synchronize descriptions, status, type, speed, VLAN assignments, MAC addresses, and MTU values.

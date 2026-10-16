@@ -8,12 +8,16 @@ from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
 
 from netbox_librenms_plugin.utils import (
+    SYNC_TABLE_HEADER_ATTRS,
     get_table_paginate_count,
     module_inventory_binding_token,
     netbox_relocates_module_subtree,
     oob_badge_html,
     render_vc_member_options,
 )
+
+# Child-row marker; the no-break space keeps the glyph on the first line when the cell wraps.
+TREE_PREFIX = "└─\u00a0"
 
 # Only an install keeps its visible label; carrier installs differ from each other only by that label.
 LABELLED_MODULE_ACTIONS = frozenset({"install", "install-carrier"})
@@ -62,7 +66,8 @@ class LibreNMSModuleTable(tables.Table):
         attrs={
             "td": {"data-col": "name"},
             "th": {
-                "title": "Name from ENTITY-MIB (entPhysicalName). May differ from interface names in ifDescr/ifName."
+                **SYNC_TABLE_HEADER_ATTRS,
+                "title": "Name from ENTITY-MIB (entPhysicalName). May differ from interface names in ifDescr/ifName.",
             },
         },
     )
@@ -78,7 +83,7 @@ class LibreNMSModuleTable(tables.Table):
     )
 
     class Meta:
-        attrs = {"class": "table table-hover object-list", "id": "librenms-module-table"}
+        attrs = {"class": "table table-hover object-list", "id": "librenms-module-table", "th": SYNC_TABLE_HEADER_ATTRS}
         row_attrs = {
             "data-ent-index": lambda record: record.get("ent_physical_index", ""),
             "data-status": lambda record: record.get("status", ""),
@@ -228,13 +233,12 @@ class LibreNMSModuleTable(tables.Table):
             return format_html("{}{}", rendered_name, oob_badge)
         # Build visual tree prefix based on nesting depth
         padding_px = depth * 20
-        prefix = "└─ "
         # Keep the OOB badge inside the padded container so it stays indented
         # with the module name on nested rows (was rendering at column 0).
         return format_html(
-            '<span style="padding-left:{}px"><span style="white-space: nowrap;">{}{}</span>{}</span>',
+            '<span class="d-inline-block" style="padding-left:{}px">{}{}{}</span>',
             padding_px,
-            prefix,
+            TREE_PREFIX,
             rendered_name,
             oob_badge,
         )
@@ -325,7 +329,12 @@ class LibreNMSModuleTable(tables.Table):
         depth = record.get("depth", 0)
         if depth > 0:
             padding_px = depth * 20
-            return format_html('<span style="padding-left:{}px">└─ {}</span>', padding_px, rendered_value)
+            return format_html(
+                '<span class="d-inline-block" style="padding-left:{}px">{}{}</span>',
+                padding_px,
+                TREE_PREFIX,
+                rendered_value,
+            )
 
         return rendered_value
 
@@ -454,7 +463,7 @@ class LibreNMSModuleTable(tables.Table):
                 "No separate NetBox bay/type is needed — this row is informational."
             )
             return format_html(
-                '<span class="badge {}" title="{}">Integrated in {}</span>',
+                '<span class="badge text-wrap text-start {}" title="{}">Integrated in {}</span>',
                 badge_class,
                 tooltip,
                 parent_name,
