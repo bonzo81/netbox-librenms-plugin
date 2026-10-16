@@ -148,6 +148,24 @@ class TestIgnoredRowsInTheTab:
         assert '<input type="hidden" name="interfaces_show_ignored" value="1">' in html
         assert 'aria-pressed="true"' in html
 
+    def test_the_toggle_icon_shows_an_open_eye_only_while_ignored_rows_are_shown(self, superuser_client):
+        platform = _platform("rule-tab-eye")
+        InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform, name_pattern="^Vlan")
+        device = _device("rule-tab-eye", platform)
+        _seed(device, _vlan_ports())
+
+        def toggle(html):
+            return re.search(r'<a [^>]*id="interfaces-show-ignored-toggle".*?</a>', html, re.S).group(0)
+
+        hidden, shown = (
+            toggle(_tab(superuser_client, device)),
+            toggle(_tab(superuser_client, device, interfaces_show_ignored="1")),
+        )
+
+        assert "mdi-eye-off-outline" in hidden and "mdi-eye-outline" not in hidden
+        assert "mdi-eye-outline" in shown and "mdi-eye-off-outline" not in shown
+        assert " active" not in hidden and " active" in shown
+
     def test_the_count_covers_the_whole_snapshot_and_pages_count_only_shown_rows(self, superuser_client):
         platform = _platform("rule-tab-pages")
         InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform, name_pattern="^Vlan")

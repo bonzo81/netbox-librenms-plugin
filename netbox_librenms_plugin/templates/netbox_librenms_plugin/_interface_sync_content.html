@@ -189,7 +189,7 @@
                         class="btn btn-sm btn-outline-secondary ms-2{% if interface_sync.show_ignored %} active{% endif %}"
                         id="interfaces-show-ignored-toggle" aria-pressed="{% if interface_sync.show_ignored %}true{% else %}false{% endif %}"
                         title="{% if interface_sync.show_ignored %}Hide the ports that interface rules ignore{% else %}Show the ports that interface rules ignore{% endif %}">
-                        <i class="mdi mdi-eye-off-outline me-1"></i>{{ interface_sync.ignored_count }} ignored
+                        <i class="mdi {% if interface_sync.show_ignored %}mdi-eye-outline{% else %}mdi-eye-off-outline{% endif %} me-1"></i>{{ interface_sync.ignored_count }} ignored
                     </a>
                     {% endif %}
                     {% if interface_sync.netbox_only_interfaces %}
