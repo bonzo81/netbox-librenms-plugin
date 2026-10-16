@@ -3760,7 +3760,6 @@ def _backends_blocked_by(observer, holder_pid):
 def test_a_writer_waiting_for_the_page_lock_refuses_a_change_committed_during_the_wait(client, writer, change):
     """Another session holds the page lock; a change commits while the writer waits, so the writer refuses it."""
     import time
-    from concurrent.futures import ThreadPoolExecutor
 
     from dcim.models import Device, Module
     from django.core.cache import cache
@@ -3821,7 +3820,7 @@ def test_a_writer_waiting_for_the_page_lock_refuses_a_change_committed_during_th
             close_old_connections()
 
     try:
-        with second_connection() as holder, second_connection() as observer, ThreadPoolExecutor(1) as executor:
+        with second_connection() as holder, second_connection() as observer, bounded_executor(1) as executor:
             with holder.cursor() as cursor:
                 cursor.execute(
                     "SELECT pg_advisory_xact_lock(%s)",
