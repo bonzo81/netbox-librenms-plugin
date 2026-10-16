@@ -638,7 +638,6 @@ def _bind_paused_after(read, bind, concurrent):
     *concurrent* runs and commits on the test's connection while the paused bind holds no row lock.
     Return what *bind* returned.
     """
-    from concurrent.futures import ThreadPoolExecutor
     from threading import Event
 
     from django.db import close_old_connections, connection
@@ -661,7 +660,7 @@ def _bind_paused_after(read, bind, concurrent):
         finally:
             connection.close()
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
+    with bounded_executor(max_workers=1) as executor:
         future = executor.submit(run)
         try:
             for _ in range(100):
