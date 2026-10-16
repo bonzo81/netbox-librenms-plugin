@@ -1,13 +1,12 @@
 """Concurrency coverage for automatic module interface adoption."""
 
-from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 from types import SimpleNamespace
 
 import pytest
 from django.apps import apps
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+from netbox_librenms_plugin.tests.conftest import bounded_executor, make_device, make_interface
 
 pytestmark = pytest.mark.django_db(
     transaction=True,
@@ -85,7 +84,7 @@ def test_concurrent_hidden_interface_is_not_adopted(monkeypatch):
         finally:
             close_old_connections()
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
+    with bounded_executor(max_workers=1) as executor:
         future = executor.submit(install_module)
         assert install_ready.wait(5), "module install did not reach the adoption race window"
         # The worker holds an open transaction while it waits. Bound the competing write too, so a

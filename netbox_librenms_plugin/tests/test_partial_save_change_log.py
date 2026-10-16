@@ -18,6 +18,7 @@ from django.urls import reverse
 from utilities.ordering import naturalize_interface
 
 from netbox_librenms_plugin.tests.conftest import (
+    bounded_executor,
     configure_default_librenms_server,
     make_device,
     make_interface,
@@ -346,8 +347,6 @@ def test_a_primary_ip_set_on_its_own_records_the_previous_address():
 
 @pytest.mark.django_db(transaction=True)
 def test_partial_device_save_protects_the_audit_snapshot_from_a_concurrent_edit():
-    from concurrent.futures import ThreadPoolExecutor
-
     from dcim.models import Device
     from django.db import OperationalError, connection, connections, transaction
 
@@ -373,7 +372,7 @@ def test_partial_device_save_protects_the_audit_snapshot_from_a_concurrent_edit(
     def edit_after_snapshot_read(execute, sql, params, many, context):
         result = execute(sql, params, many, context)
         if not concurrent_edits and sql.startswith("SELECT") and 'FROM "dcim_device"' in sql:
-            with ThreadPoolExecutor(max_workers=1) as executor:
+            with bounded_executor(max_workers=1) as executor:
                 concurrent_edits.append(executor.submit(concurrent_edit).result(timeout=10))
         return result
 

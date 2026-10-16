@@ -1,7 +1,6 @@
 """Coverage tests for views/imports/actions.py missing lines."""
 
 import json
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from functools import partial
 from types import SimpleNamespace as Namespace
@@ -12,6 +11,7 @@ from django.test import RequestFactory
 from django.urls import reverse as url_for
 
 from netbox_librenms_plugin.tests.conftest import (
+    bounded_executor,
     make_cluster,
     make_device,
     make_interface,
@@ -7177,7 +7177,7 @@ def _another_session_commits_before(create, model, statement, *, occurrence):
         if sql.lstrip().upper().startswith(statement) and table in sql:
             seen += 1
             if seen == occurrence:
-                with ThreadPoolExecutor(max_workers=1) as pool:
+                with bounded_executor(max_workers=1) as pool:
                     pool.submit(in_own_session).result()
         return execute(sql, params, many, context)
 

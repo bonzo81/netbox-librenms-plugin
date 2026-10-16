@@ -3,6 +3,7 @@
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from copy import deepcopy
 from itertools import chain
 from threading import BrokenBarrierError
@@ -832,6 +833,18 @@ def run_in_threads(*calls, barriers, timeout):
     if failures:
         raise failures[0]
     return [future.result() for future in futures]
+
+
+@contextmanager
+def bounded_executor(max_workers):
+    """Yield a ThreadPoolExecutor that does not wait for a hung worker when the block raises."""
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        yield executor
+    except BaseException:
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    executor.shutdown(wait=True)
 
 
 def make_superuser(username="review-su"):
