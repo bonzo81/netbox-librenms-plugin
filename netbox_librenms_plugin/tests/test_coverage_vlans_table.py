@@ -10,7 +10,6 @@ from django.test import RequestFactory
 
 from netbox_librenms_plugin.tests.conftest import make_device
 
-
 pytestmark = pytest.mark.django_db
 
 
@@ -321,7 +320,7 @@ class TestRenderState:
 
 
 # ===========================================================================
-# configure()
+# configure
 # ===========================================================================
 
 
@@ -329,8 +328,9 @@ class TestLibreNMSVLANTableConfigure:
     """Tests for LibreNMSVLANTable.configure()."""
 
     def test_configure_paginates_with_enhanced_paginator(self):
-        from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
         from utilities.paginator import EnhancedPaginator
+
+        from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
 
         rows = [{"vlan_id": vlan_id, "name": f"VLAN {vlan_id}", "exists_in_netbox": False} for vlan_id in range(1, 61)]
         table = LibreNMSVLANTable(data=rows)

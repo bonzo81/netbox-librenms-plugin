@@ -13,7 +13,7 @@ from django.urls import reverse
 from django.views import View
 from virtualization.models import VirtualMachine, VMInterface
 
-from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
+from netbox_librenms_plugin.constants import HOST_NAME_COLLISION_REASON, OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.interface_relationships import (
     build_interface_index,
     filter_interface_index,
@@ -42,6 +42,7 @@ from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_interface_port_identity_sets,
     get_librenms_sync_device,
+    host_owned_interface_names,
     interface_name_fallback_matches_port,
     interface_name_rejection_reason,
     is_list_of_dicts,
@@ -275,6 +276,12 @@ class SyncInterfacesView(
 
     def get_selected_port_ids(self, request):
         """Return selected visible LibreNMS port IDs from POST data."""
+        # A row's own Sync button wins over the tick boxes: the user pressed one row, not the
+        # selection, and the browser submits both. Same shape as the cables tab, so the row goes
+        # through this one view with the same permission, cache and duplicate-id checks.
+        sync_one = normalize_librenms_port_id(request.POST.get("sync_one"))
+        if sync_one is not None:
+            return {sync_one}
         visible = {
             port_id
             for raw_port_id in request.POST.getlist("select")
@@ -336,15 +343,18 @@ class SyncInterfacesView(
         if not isinstance(obj, Device) or not port_ids:
             return {}
 
-        if members is None:
-            members = list(obj.virtual_chassis.members.all()) if obj.virtual_chassis else [obj]
+        locked_members = {member.pk: member for member in members or ()}
+        members = (
+            [locked_members.get(member.pk, member) for member in obj.virtual_chassis.members.all()]
+            if obj.virtual_chassis_id is not None
+            else [locked_members.get(obj.pk, obj)]
+        )
         members_by_position = {member.vc_position: member for member in members if member.vc_position is not None}
         members_by_id = {member.pk: member for member in members}
         ports_by_id = {
             port_id: port
             for port in ports_data
             if (port_id := normalize_librenms_port_id(port.get("port_id"))) is not None
-            and port.get("_source") != OOB_INVENTORY_SOURCE
         }
         candidate_port_ids = [
             ports_by_id[port_id].get("port_id", port_id)
@@ -374,7 +384,7 @@ class SyncInterfacesView(
                 interfaces_by_port_id=interface_index["by_lnms_id"],
                 members_by_position=members_by_position,
                 members_by_id=members_by_id,
-                return_device_on_failure=False,
+                return_device_on_failure=port.get("_source") == OOB_INVENTORY_SOURCE,
             )
             if target is not None:
                 targets[port_id] = target.pk
@@ -820,6 +830,8 @@ class SyncInterfacesView(
             related_iface (Interface | VMInterface): The interface assigned to the relationship field.
             prepare_related (callable | None): The hook that prepares the related interface before validation.
             log_kind (str): The relationship label used in log messages.
+            prepare_source (callable | None): The hook that prepares the source interface before
+                validation, mirroring ``prepare_related`` on the other side of the edge.
 
         Returns:
             bool: True when the relationship is saved, or False when validation or persistence fails.
@@ -908,36 +920,55 @@ class SyncInterfacesView(
                     return
                 self.object = obj
                 vlan_scope_devices = [obj]
+            default_owner_ids = {}
+            if isinstance(obj, Device) and obj.virtual_chassis_id is not None:
+                snapshot_port_ids = {
+                    port_id
+                    for port in ports_data
+                    if (port_id := normalize_librenms_port_id(port.get("port_id"))) is not None
+                }
+                default_owner_ids = self._resolve_auto_selected_target_ids(
+                    obj,
+                    ports_data,
+                    snapshot_port_ids,
+                    interface_name_field,
+                    self._post_server_key,
+                    members=list(self._locked_target_devices.values()),
+                )
+                # Use the displayed owner for each source. Explicit selections still win.
+                self._auto_selected_target_ids.update(
+                    {
+                        port_id: owner_id
+                        for port_id, owner_id in default_owner_ids.items()
+                        if port_id in selected_port_ids
+                    }
+                )
             if "vlans" not in exclude_columns:
                 if isinstance(obj, Device):
                     vlan_scope_devices = self._selected_vlan_scope_devices(obj, ports_data, interface_name_field)
                 self._prepare_vlan_lookup_maps(vlan_scope_devices)
+
+            def owner_id_for_port(port):
+                port_id = normalize_librenms_port_id(port.get("port_id"))
+                if self._selected_row_target_id(port_id):
+                    target = self._resolve_row_target_device(obj, port_id)
+                    return target.pk if target is not None else None
+                return default_owner_ids.get(port_id, obj.pk)
+
+            host_owned_names = host_owned_interface_names(ports_data, interface_name_field, owner_id_for_port)
             try:
                 for port in ports_data:
-                    # An OOB controller is a second device in LibreNMS but the SAME device in
-                    # NetBox, so its ports are modelled as interfaces here. port_id is a LibreNMS
-                    # global primary key, so an OOB row can never resolve onto a host row's
-                    # interface by id; a name clash is caught by _resolve_device_interface and
-                    # recorded as a skipped conflict rather than overwriting the host interface.
-                    # A shared LOM is the exception: one physical port reported on both sides, so
-                    # syncing both rows would model it twice.
-                    if (
-                        port.get("_source") == OOB_INVENTORY_SOURCE
-                        and port.get("_dedup_conflict")
-                        and normalize_librenms_port_id(port.get("port_id")) in selected_port_ids
-                    ):
-                        self._record_skipped_conflict(
-                            port.get(interface_name_field),
-                            "shared LOM already synced from the host side",
-                        )
-                        continue
                     port_id = normalize_librenms_port_id(port.get("port_id"))
-
-                    if port_id in selected_port_ids:
-                        row_excludes = exclude_columns
-                        if port_id in getattr(self, "_auto_selected_port_ids", set()) and "vlans" not in row_excludes:
-                            row_excludes = [*row_excludes, "vlans"]
-                        self.sync_interface(obj, port, row_excludes, interface_name_field)
+                    if port_id not in selected_port_ids:
+                        continue
+                    if port.get("_source") == OOB_INVENTORY_SOURCE and self._oob_row_is_unsyncable(
+                        port, interface_name_field, host_owned_names.get(owner_id_for_port(port), set())
+                    ):
+                        continue
+                    row_excludes = exclude_columns
+                    if port_id in getattr(self, "_auto_selected_port_ids", set()) and "vlans" not in row_excludes:
+                        row_excludes = [*row_excludes, "vlans"]
+                    self.sync_interface(obj, port, row_excludes, interface_name_field)
             finally:
                 if not keep_locked_targets:
                     self.__dict__.pop("_locked_target_devices", None)
@@ -1104,6 +1135,7 @@ class SyncInterfacesView(
             )
             return
 
+        target_device = None
         if isinstance(obj, Device):
             server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
             target_device = self._resolve_row_target_device(obj, port_id=port_id)
@@ -1137,7 +1169,10 @@ class SyncInterfacesView(
             )
             # Record for the user-facing summary in post(). Defensive getattr: sync_interface
             # may be exercised directly (without post() initialising the list).
-            self._record_skipped_conflict(interface_name, "port already mapped elsewhere or ambiguous")
+            self._record_skipped_conflict(
+                interface_name,
+                self._unresolved_row_reason(librenms_interface, target_device, interface_name),
+            )
             return
 
         # An interface resolved and is being synced — count it explicitly (defensive getattr:
@@ -1173,6 +1208,63 @@ class SyncInterfacesView(
         skipped = getattr(self, "_skipped_conflicts", None)
         if skipped is not None:
             skipped.append(f"{interface_name or '(unnamed)'} ({reason})")
+
+    def _unresolved_row_reason(self, port, target_device, interface_name):
+        """
+        Return why a row resolved to no interface, naming a host name collision as one.
+
+        An OOB row can reach here with the name still owned by the host side: the host port has
+        dropped out of the LibreNMS snapshot, so the pre-loop guard saw no host row, but its
+        NetBox interface remains and holds a different port_id. "Port already mapped elsewhere
+        or ambiguous" describes a different failure and offers no remedy, where a collision has
+        one.
+
+        Args:
+            port (dict): The LibreNMS port row.
+            target_device (Device | None): The resolved owner, None on the VM path.
+            interface_name (str): The name the row would have been synced under.
+
+        Returns:
+            str: The skip reason to report.
+
+        """
+        if (
+            port.get("_source") == OOB_INVENTORY_SOURCE
+            and target_device is not None
+            and self.restricted_queryset(Interface).filter(device=target_device, name=interface_name).exists()
+        ):
+            return HOST_NAME_COLLISION_REASON
+        return "port already mapped elsewhere or ambiguous"
+
+    def _oob_row_is_unsyncable(self, port, interface_name_field, host_owned_names):
+        """
+        Report whether a selected OOB row must be skipped, recording why.
+
+        Two conditions stop an OOB row before it reaches a write. A shared LOM is one physical
+        port reported on both sides, so syncing both rows would model it twice. A name owned by
+        a host row belongs to the host: letting the OOB row create it would bind the name to the
+        OOB port_id, after which the host row could never resolve its own interface again.
+
+        Args:
+            port (dict): The OOB port row.
+            interface_name_field (str): Port field that contains the selected interface name.
+            host_owned_names (set[str]): Names the host rows of this snapshot own.
+
+        Returns:
+            bool: True when the row was skipped and the skip recorded.
+
+        """
+        if port.get("_dedup_conflict"):
+            self._record_skipped_conflict(
+                port.get(interface_name_field),
+                "shared LOM already synced from the host side",
+            )
+            return True
+        name = syncable_interface_name(port, interface_name_field)
+        if name is not None and name in host_owned_names:
+            self._record_skipped_conflict(name, HOST_NAME_COLLISION_REASON)
+            return True
+        return False
 
     def _resolve_device_interface(self, target_device, interface_name, port_id, server_key, *, oob=False):
         """Resolve a device interface using port_id first, then safe name fallback."""
@@ -1258,7 +1350,7 @@ class SyncInterfacesView(
         return interface if created or changeable.filter(pk=interface.pk).exists() else None
 
     def get_netbox_interface_type(self, librenms_interface):
-        """Return the NetBox interface type mapped from LibreNMS type and speed."""
+        """Return the NetBox type mapped from LibreNMS type and speed, or None when unmapped."""
         return get_netbox_interface_type(librenms_interface, speed_converter=convert_speed_to_kbps)
 
     def handle_mac_address(self, interface, ifPhysAddress):
@@ -1298,8 +1390,9 @@ class SyncInterfacesView(
         """
         port_id = normalize_librenms_port_id(librenms_port.get("port_id"))
 
-        # Build VLAN data from port
+        # Build VLAN data from port. "mode" is the 802.1Q mode LibreNMS reported via ifTrunk.
         vlan_data = {
+            "mode": librenms_port.get("mode"),
             "untagged_vlan": librenms_port.get("untagged_vlan"),
             "tagged_vlans": librenms_port.get("tagged_vlans", []),
         }

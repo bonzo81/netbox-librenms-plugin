@@ -1,5 +1,7 @@
 """Real-ORM tests for the bulk installer's parent, bay, and mapping resolution."""
 
+import re
+
 import pytest
 
 from netbox_librenms_plugin.tests.conftest import (
@@ -7,10 +9,33 @@ from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_device_with_module_bays,
     make_module_bay,
+    make_module_bay_type,
     make_module_type,
 )
+from netbox_librenms_plugin.utils import netbox_constrains_module_bay_types
 
 pytestmark = pytest.mark.django_db
+
+requires_module_bay_types = pytest.mark.skipif(
+    not netbox_constrains_module_bay_types(), reason="NetBox constrains module bays by type from 4.7"
+)
+
+
+def test_contributed_mappings_load_under_an_ascii_default(monkeypatch):
+    from pathlib import Path
+
+    from netbox_librenms_plugin.tests.conftest import load_contrib_bay_mappings
+
+    original_open = Path.open
+
+    def ascii_default(path, *args, **kwargs):
+        if "encoding" not in kwargs and (not args or "b" not in args[0]):
+            kwargs["encoding"] = "ascii"
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", ascii_default)
+
+    assert load_contrib_bay_mappings()
 
 
 def _item(index, model, name, *, parent=0, descr=None, phys_class="module", serial="", **extra):
@@ -214,6 +239,135 @@ class TestCandidateBaysForItem:
 
         assert combined["Transceiver 1"].pk == device_bay.pk
 
+    def test_the_fallback_offers_no_bay_owned_by_a_module_outside_the_subtree(self):
+        """A sibling module sits outside the resolved parent's subtree, so its bay is not offered.
+
+        The two cards carry DISTINCT child bay names on purpose: a duplicated name is already
+        dropped as ambiguous, so it would not tell the old combined fallback from this one.
+        """
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        device = make_device_with_module_bays("fallback-sibling", ["Slot 1", "Slot 2"])
+        first = install_module(device, "Slot 1", "FALLBACK-SIB-A", child_bays=("Transceiver A",))
+        install_module(device, "Slot 2", "FALLBACK-SIB-B", child_bays=("Transceiver B",))
+
+        fallback = InstallBranchView._fallback_bays_for_resolved_parent(device, _bays(device), first.pk)
+
+        assert "Transceiver B" not in fallback, "the sibling's bay is never offered"
+        assert set(fallback) == {"Slot 1", "Slot 2", "Transceiver A"}
+        assert fallback["Slot 1"].installed_module.pk == first.pk, "the parent's own bay is kept"
+
+    def test_the_fallback_keeps_a_nested_parents_own_module_scoped_bay(self):
+        """The parent's own bay is added by identity, so nesting does not hide it."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        device = make_device_with_module_bays("fallback-nested-helper", ["Slot 1"])
+        card = install_module(device, "Slot 1", "FALLBACK-NESTED-HELPER-CARD", child_bays=("X2 Port 2",))
+        converter = install_module(device, "X2 Port 2", "FALLBACK-NESTED-HELPER-CONV", parent_module=card)
+
+        fallback = InstallBranchView._fallback_bays_for_resolved_parent(device, _bays(device), converter.pk)
+
+        assert fallback["X2 Port 2"].installed_module.pk == converter.pk
+        assert set(fallback) == {"Slot 1", "X2 Port 2"}
+
+    def test_fallback_reuses_the_preloaded_module_ancestry(self):
+        from dcim.models import Module
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        device = make_device_with_module_bays("fallback-cached-ancestry", ["Slot 1"])
+        parent = install_module(device, "Slot 1", "FALLBACK-CACHED-PARENT", child_bays=("Child Bay",))
+        holder_of = dict(Module.objects.filter(device=device).values_list("pk", "module_bay__module_id"))
+        bays = _bays(device)
+
+        with CaptureQueriesContext(connection) as queries:
+            fallback = InstallBranchView._fallback_bays_for_resolved_parent(
+                device, bays, parent.pk, holder_of=holder_of
+            )
+
+        assert "Child Bay" in fallback
+        assert not any('FROM "dcim_module"' in query["sql"] for query in queries)
+
+
+class TestBayEligibilityPredicates:
+    """The two questions the fallback answers, asked one at a time.
+
+    They share one candidate set in production because _match_bay's method order would otherwise
+    be split across two searches. Asking them separately here is what keeps each rule legible.
+    """
+
+    @staticmethod
+    def _holder_of(device):
+        """Build the device-wide ancestry map the production code passes in."""
+        from dcim.models import Module
+
+        return dict(Module.objects.filter(device=device).values_list("pk", "module_bay__module_id"))
+
+    def _nokia_chain(self, tag):
+        """IOM in a device bay, XIOM inside it, MDA inside that, each with one child bay."""
+        device = make_device_with_module_bays(tag, ["Slot 2"])
+        iom = install_module(device, "Slot 2", f"{tag}-IOM", child_bays=("2/x1",))
+        xiom = install_module(device, "2/x1", f"{tag}-XIOM", child_bays=("x1/1",), parent_module=iom)
+        mda = install_module(device, "x1/1", f"{tag}-MDA", child_bays=("1/c2",), parent_module=xiom)
+        return device, iom, xiom, mda
+
+    def _bay_named(self, device, name):
+        from dcim.models import ModuleBay
+
+        return ModuleBay.objects.select_related("installed_module").get(device=device, name=name)
+
+    def test_the_subtree_test_reaches_a_bay_owned_two_levels_down(self):
+        """The walk must not stop at the parent's direct children."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        device, _iom, xiom, _mda = self._nokia_chain("pred-subtree-deep")
+        holder_of = self._holder_of(device)
+
+        assert InstallBranchView._bay_is_owned_within_subtree(self._bay_named(device, "1/c2"), xiom.pk, holder_of), (
+            "the MDA's bay is below the XIOM"
+        )
+
+    def test_the_subtree_test_rejects_a_bay_owned_by_a_sibling(self):
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        device = make_device_with_module_bays("pred-subtree-sibling", ["Slot 1", "Slot 2"])
+        first = install_module(device, "Slot 1", "PRED-SIB-A", child_bays=("Transceiver A",))
+        install_module(device, "Slot 2", "PRED-SIB-B", child_bays=("Transceiver B",))
+        holder_of = self._holder_of(device)
+
+        assert not InstallBranchView._bay_is_owned_within_subtree(
+            self._bay_named(device, "Transceiver B"), first.pk, holder_of
+        )
+
+    def test_the_subtree_test_rejects_the_bay_that_holds_the_parent(self):
+        """It is above the parent, not below, which is why identity is a separate question."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        device, _iom, xiom, _mda = self._nokia_chain("pred-subtree-holder")
+        holder_of = self._holder_of(device)
+
+        assert not InstallBranchView._bay_is_owned_within_subtree(self._bay_named(device, "2/x1"), xiom.pk, holder_of)
+
+    def test_the_identity_test_finds_the_bay_holding_the_parent(self):
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        device, _iom, xiom, _mda = self._nokia_chain("pred-identity")
+
+        assert InstallBranchView._bay_holds_resolved_parent(self._bay_named(device, "2/x1"), xiom.pk)
+
+    def test_the_identity_test_rejects_an_empty_bay_and_another_modules_bay(self):
+        """An empty bay must not raise on the reverse one-to-one, and must answer False."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        device, _iom, xiom, _mda = self._nokia_chain("pred-identity-negative")
+        empty = self._bay_named(device, "1/c2")
+        other = self._bay_named(device, "x1/1")
+
+        assert not InstallBranchView._bay_holds_resolved_parent(empty, xiom.pk)
+        assert not InstallBranchView._bay_holds_resolved_parent(other, xiom.pk)
+
 
 class TestMatchBay:
     """Bay matching falls through mappings, direct names, and finally position."""
@@ -284,6 +438,300 @@ class TestInstallSingleResolutionPaths:
             module_types,
             **kwargs,
         )
+
+    def test_a_resolved_parent_narrows_the_search_without_hiding_a_device_level_bay(self):
+        """An installed parent must narrow the candidate bays, not shrink them to nothing.
+
+        _find_parent_module_id only resolves a parent once that parent is installed, and the
+        candidate set then collapses to that module's own child bays with no fallback. A row whose
+        NetBox bay is device-level installs on a first pass and then skips as "no matching bay" on
+        the next, which is what a second branch install (or installing the rows one at a time
+        first) produces.
+        """
+        from dcim.models import Module
+
+        device = make_device_with_module_bays("parent-hides-device-bay", ["Slot 1", "Supervisor Slot"])
+        install_module(device, "Slot 1", "PARENT-HIDES-CARD", child_bays=("Transceiver 1",))
+        module_type = make_module_type("PARENT-HIDES-SUP")
+        # The parent resolves through a mapping, so its own name is not a bay name and cannot be
+        # what the item matches on.
+        _mapping(librenms_name="Linecard 1", librenms_class="container", netbox_bay_name="Slot 1")
+        index_map = {
+            10: _item(10, "", "Linecard 1", phys_class="container"),
+            20: _item(20, module_type.model, "Supervisor Slot", parent=10),
+        }
+
+        result = self._install(device, index_map[20], index_map, module_types=[module_type])
+
+        assert result["status"] == "installed", result
+        installed = Module.objects.get(device=device, module_type=module_type)
+        assert installed.module_bay.name == "Supervisor Slot"
+        assert installed.module_bay.module_id is None, "the device-level bay, not one under the parent"
+
+    def test_the_same_row_installs_while_no_parent_module_is_installed_yet(self):
+        """The control: the trigger is the installed parent, not the row.
+
+        Nothing about the item or its bay changes. Leaving the line card out is the only
+        difference, and then the combined candidate set is used and the row installs.
+        """
+        device = make_device_with_module_bays("parent-absent-device-bay", ["Slot 1", "Supervisor Slot"])
+        module_type = make_module_type("PARENT-ABSENT-SUP")
+        _mapping(librenms_name="Linecard 1", librenms_class="container", netbox_bay_name="Slot 1")
+        index_map = {
+            10: _item(10, "", "Linecard 1", phys_class="container"),
+            20: _item(20, module_type.model, "Supervisor Slot", parent=10),
+        }
+
+        result = self._install(device, index_map[20], index_map, module_types=[module_type])
+
+        assert result["status"] == "installed", result
+
+    def test_the_fallback_cannot_install_into_a_sibling_modules_bay(self):
+        """The fallback must not reach a bay owned by a module other than the resolved parent.
+
+        An unambiguous bay name is not the same as a correctly owned one. The resolved parent
+        here owns no child bays, so the narrowed search is empty and the fallback runs. A
+        sibling module's child bay carries the row's name and no other bay does, so the
+        combined set offered it and the row installed under the wrong module.
+        """
+        from dcim.models import Module, ModuleBay
+
+        device = make_device_with_module_bays("bay-sibling-write", ["Slot 1", "Slot 2"])
+        install_module(device, "Slot 1", "BAY-SIBLING-PARENT")
+        sibling = install_module(device, "Slot 2", "BAY-SIBLING-OTHER", child_bays=("Transceiver 2",))
+        module_type = make_module_type("BAY-SIBLING-SFP")
+        _mapping(librenms_name="Linecard 1", librenms_class="container", netbox_bay_name="Slot 1")
+        index_map = {
+            10: _item(10, "", "Linecard 1", phys_class="container"),
+            20: _item(20, module_type.model, "Transceiver 2", parent=10),
+        }
+
+        result = self._install(device, index_map[20], index_map, module_types=[module_type])
+
+        assert not Module.objects.filter(module_type=module_type).exists(), f"wrong-bay write: {result}"
+        assert not ModuleBay.objects.filter(module=sibling, installed_module__isnull=False).exists()
+        assert result == {"status": "skipped", "name": "Transceiver 2", "reason": "no matching bay"}
+
+    def test_a_row_for_an_already_installed_module_still_reports_its_own_bay(self):
+        """The occupancy report is how an existing module's LibreNMS port gets bound.
+
+        LibreNMS reports a container and the module inside it as two rows, so the container name
+        resolves to the very bay the row's own module occupies. _install_single then returns
+        "bay already occupied" carrying that module pk, which is the only signal
+        _should_attempt_bind_for_result accepts to bind the row's port to an interface. Dropping
+        that bay from the fallback silently stopped the bind.
+        """
+        from netbox_librenms_plugin.views.sync.modules import _should_attempt_bind_for_result
+
+        device = make_device("existing-module-rebind")
+        make_module_bay(device, "SFP 1")
+        module = install_module(device, "SFP 1", "EXISTING-REBIND-SFP")
+        index_map = {
+            10: _item(10, "", "SFP 1", phys_class="container"),
+            30: _item(30, module.module_type.model, "Optic", parent=10),
+        }
+
+        result = self._install(device, index_map[30], index_map, module_types=[module.module_type])
+
+        assert result == {
+            "status": "skipped",
+            "name": "Optic",
+            "reason": "bay already occupied",
+            "module_pk": module.pk,
+        }
+        assert _should_attempt_bind_for_result(result), "the bind path must still run for this row"
+
+    def test_a_row_for_an_already_installed_nested_module_still_reports_its_own_bay(self):
+        """The row's own module can sit in a bay nested under another module.
+
+        A converter installed in a line card's bay is the shape the supplied Cisco mappings
+        produce. The resolved parent is the converter itself, its own child bays miss, and the
+        fallback has to still offer the module-scoped bay it occupies. Restricting the fallback
+        to device-level bays returned "no matching bay" and stopped the port bind.
+        """
+        from netbox_librenms_plugin.views.sync.modules import _should_attempt_bind_for_result
+
+        device = make_device_with_module_bays("nested-module-rebind", ["Slot 1"])
+        card = install_module(device, "Slot 1", "NESTED-REBIND-CARD", child_bays=("X2 Port 2",))
+        converter = install_module(device, "X2 Port 2", "NESTED-REBIND-CONV", parent_module=card)
+        _mapping(librenms_name="Port Container 3/2", librenms_class="", netbox_bay_name="X2 Port 2")
+        index_map = {
+            10: _item(10, "", "Port Container 3/2", phys_class="container"),
+            30: _item(30, converter.module_type.model, "Converter 3/2", parent=10),
+        }
+
+        result = self._install(device, index_map[30], index_map, module_types=[converter.module_type])
+
+        assert result == {
+            "status": "skipped",
+            "name": "Converter 3/2",
+            "reason": "bay already occupied",
+            "module_pk": converter.pk,
+        }
+        assert _should_attempt_bind_for_result(result), "the bind path must still run for this row"
+
+    def test_a_bay_under_a_descendant_module_is_still_reachable(self):
+        """LibreNMS can omit an intermediate module, so the row's bay belongs to a descendant.
+
+        A Nokia connector reports as ``2/x1/1/c2`` and nests under the XIOM when the MDA is
+        missing (see _nest_synthetic_transceivers). The resolved parent is then the XIOM, while
+        the target bay ``1/c2`` belongs to the MDA below it. Bounding the fallback to the parent
+        itself returned "no matching bay" for a bay that is legitimately in its subtree.
+        """
+        from dcim.models import Module
+
+        device = make_device_with_module_bays("descendant-bay", ["Slot 2"])
+        iom = install_module(device, "Slot 2", "DESCENDANT-IOM", child_bays=("2/x1",))
+        xiom = install_module(device, "2/x1", "DESCENDANT-XIOM", child_bays=("x1/1",), parent_module=iom)
+        install_module(device, "x1/1", "DESCENDANT-MDA", child_bays=("1/c2",), parent_module=xiom)
+        module_type = make_module_type("DESCENDANT-OPTIC")
+        _mapping(librenms_name="XIOM 2/x1", librenms_class="container", netbox_bay_name="2/x1")
+        _mapping(librenms_name="2/x1/1/c2", librenms_class="", netbox_bay_name="1/c2")
+        index_map = {
+            10: _item(10, "", "XIOM 2/x1", phys_class="container"),
+            30: _item(30, module_type.model, "2/x1/1/c2", parent=10),
+        }
+
+        holder_of = dict(Module.objects.filter(device=device).values_list("pk", "module_bay__module_id"))
+        result = self._install(device, index_map[30], index_map, module_types=[module_type], holder_of=holder_of)
+
+        assert result["status"] == "installed", result
+        installed = Module.objects.get(device=device, module_type=module_type)
+        assert installed.module_bay.name == "1/c2"
+        assert installed.module_bay.module.module_type.model == "DESCENDANT-MDA"
+        assert holder_of[installed.pk] == installed.module_bay.module_id
+
+    def test_a_descendant_bay_survives_a_bay_the_caller_cannot_change(self):
+        """Ancestry must not be read from the permission-filtered bay queryset.
+
+        The caller passes only the bays the user may change. If the bay that HOLDS an
+        intermediate module is filtered out, deriving the subtree from that same queryset cuts
+        the chain and drops the descendant bay the user CAN change. Ancestry is read from the
+        device's modules instead, so only the candidate targets stay restricted.
+        """
+        from dcim.models import Module, ModuleBay
+
+        device = make_device_with_module_bays("descendant-hidden-link", ["Slot 2"])
+        iom = install_module(device, "Slot 2", "HIDDEN-IOM", child_bays=("2/x1",))
+        xiom = install_module(device, "2/x1", "HIDDEN-XIOM", child_bays=("x1/1",), parent_module=iom)
+        install_module(device, "x1/1", "HIDDEN-MDA", child_bays=("1/c2",), parent_module=xiom)
+        module_type = make_module_type("HIDDEN-OPTIC")
+        _mapping(librenms_name="XIOM 2/x1", librenms_class="container", netbox_bay_name="2/x1")
+        _mapping(librenms_name="2/x1/1/c2", librenms_class="", netbox_bay_name="1/c2")
+        index_map = {
+            10: _item(10, "", "XIOM 2/x1", phys_class="container"),
+            30: _item(30, module_type.model, "2/x1/1/c2", parent=10),
+        }
+
+        result = self._install(
+            device,
+            index_map[30],
+            index_map,
+            module_types=[module_type],
+            module_bays=ModuleBay.objects.exclude(name="x1/1"),
+        )
+
+        assert result["status"] == "installed", result
+        assert Module.objects.get(device=device, module_type=module_type).module_bay.name == "1/c2"
+
+    @staticmethod
+    def _optic_in_first_cage(module_type):
+        rows = [
+            _item(1, "CARRIER-4X", "subslot 0/1"),
+            _item(10, "", "", parent=1, phys_class="container", entPhysicalParentRelPos=0),
+            _item(30, module_type.model, "transceiver 0", parent=10),
+        ]
+        return {row["entPhysicalIndex"]: row for row in rows}
+
+    def test_the_position_fallback_never_installs_an_optic_into_a_power_supply_bay(self):
+        from dcim.models import Module
+
+        device = make_device("install-fit-psu-name")
+        make_module_bay(device, "Power Supply Module 1", position="1")
+        module_type = make_module_type("INSTALL-FIT-OPTIC")
+        index_map = self._optic_in_first_cage(module_type)
+
+        result = self._install(device, index_map[30], index_map, module_types=[module_type])
+
+        assert result == {"status": "skipped", "name": "transceiver 0", "reason": "no matching bay"}
+        assert not Module.objects.filter(device=device).exists()
+
+    @requires_module_bay_types
+    def test_the_install_skips_a_bay_whose_bay_types_refuse_the_module(self):
+        from dcim.models import Module
+
+        device = make_device("install-fit-type-refused")
+        make_module_bay(device, "Module 1", position="1", bay_types=("psu",))
+        module_type = make_module_type("INSTALL-FIT-TYPED-OPTIC")
+        module_type.module_bay_types.set([make_module_bay_type("sfp-plus")])
+        index_map = self._optic_in_first_cage(module_type)
+
+        result = self._install(device, index_map[30], index_map, module_types=[module_type])
+
+        assert result == {"status": "skipped", "name": "transceiver 0", "reason": "no matching bay"}
+        assert not Module.objects.filter(device=device).exists()
+
+    @requires_module_bay_types
+    def test_the_install_picks_the_fitting_bay_among_bays_at_one_position(self):
+        from dcim.models import Module
+
+        device = make_device("install-fit-type-picks")
+        make_module_bay(device, "Module 1", position="1", bay_types=("psu",))
+        make_module_bay(device, "Optic 1", position="1", bay_types=("sfp-plus",))
+        module_type = make_module_type("INSTALL-FIT-PICKED-OPTIC")
+        module_type.module_bay_types.set([make_module_bay_type("sfp-plus")])
+        index_map = self._optic_in_first_cage(module_type)
+
+        result = self._install(device, index_map[30], index_map, module_types=[module_type])
+
+        assert result["status"] == "installed", result
+        assert Module.objects.get(device=device).module_bay.name == "Optic 1"
+
+    @requires_module_bay_types
+    def test_a_refused_interface_label_bay_does_not_hide_a_fitting_one(self):
+        """Te1/1/2 names port 2: a refused "SFP 2" must leave "Port 2" to be tried."""
+        from dcim.models import Module
+
+        device = make_device("install-fit-label")
+        make_module_bay(device, "SFP 2", bay_types=("psu",))
+        make_module_bay(device, "Port 2", bay_types=("sfp-plus",))
+        module_type = make_module_type("INSTALL-FIT-LABEL-OPTIC")
+        module_type.module_bay_types.set([make_module_bay_type("sfp-plus")])
+        rows = [
+            _item(1, "CARRIER-4X", "subslot 1/1"),
+            _item(10, "", "", parent=1, phys_class="container", entPhysicalParentRelPos=0),
+            _item(30, module_type.model, "Te1/1/2", parent=10, phys_class="port"),
+        ]
+        index_map = {row["entPhysicalIndex"]: row for row in rows}
+
+        result = self._install(device, index_map[30], index_map, module_types=[module_type])
+
+        assert result["status"] == "installed", result
+        assert Module.objects.get(device=device).module_bay.name == "Port 2"
+
+    @requires_module_bay_types
+    def test_a_preloaded_bay_type_map_adds_no_query_per_install(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.utils import load_module_type_bay_types
+
+        device = make_device("install-fit-preloaded")
+        make_module_bay(device, "Optic 1", position="1", bay_types=("sfp-plus",))
+        module_type = make_module_type("INSTALL-FIT-PRELOADED-OPTIC")
+        module_type.module_bay_types.set([make_module_bay_type("sfp-plus")])
+        index_map = self._optic_in_first_cage(module_type)
+        type_bay_types = load_module_type_bay_types()
+
+        with CaptureQueriesContext(connection) as queries:
+            result = self._install(
+                device, index_map[30], index_map, module_types=[module_type], type_bay_types=type_bay_types
+            )
+
+        assert result["status"] == "installed", result
+        # NetBox's own install validation reads full bay type rows; only a per-type id read is the plugin's.
+        per_type_read = re.compile(r'SELECT "dcim_modulebaytype"\."id"(?: AS "pk")? FROM')
+        assert not [q for q in queries.captured_queries if per_type_read.match(q["sql"])]
 
     def test_omitted_mappings_are_loaded_from_the_database(self):
         device = make_device_with_module_bays("install-loads-mappings", ["PS1"])

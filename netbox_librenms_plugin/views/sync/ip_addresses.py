@@ -1,6 +1,8 @@
 import logging
 from urllib.parse import quote_plus
 
+import netaddr
+
 from dcim.models import Device, Interface, VirtualChassis
 from django.contrib import messages
 from django.core import signing
@@ -28,14 +30,14 @@ from netbox_librenms_plugin.utils import (
     get_librenms_device_id,
     get_migrated_to_marker,
     get_virtual_chassis_members,
-    ip_family,
-    normalize_librenms_port_id,
-    normalize_ip_sync_row_id,
-    index_ip_sync_rows,
     index_ip_source_interfaces,
+    index_ip_sync_rows,
+    ip_family,
+    normalize_ip_sync_row_id,
+    normalize_librenms_port_id,
+    resolve_create_missing_interfaces,
     resolve_interface_row_device,
     resolve_ip_source_interface,
-    resolve_create_missing_interfaces,
     resolve_set_primary_ip,
     same_host,
     syncable_interface_name,
@@ -938,7 +940,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             )
 
         ip_obj = IPAddress.objects.create(
-            address=str(parsed),
+            # netaddr, as NetBox loads it: save() keeps a str as is, and post_save receivers parse the value.
+            address=netaddr.IPNetwork(str(parsed)),
             assigned_object=interface,
             status="active",
             vrf=vrf,
@@ -983,7 +986,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 or ip_obj.vrf_id != target_vrf_id
             ):
                 raise ValueError("The destination VRF changed after confirmation. Refresh the IP data and try again.")
-            ip_obj.address = str(parsed)
+            ip_obj.address = netaddr.IPNetwork(str(parsed))
         else:
             raise ValueError("IP address confirmation is invalid. Refresh the IP data and try again.")
 

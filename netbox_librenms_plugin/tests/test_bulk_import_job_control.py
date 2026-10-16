@@ -195,7 +195,7 @@ class TestCollisionScanCancellation:
 
         job = _JobContext(rq_job(JobStatus.STOPPED), stop_after=99, logger=logging.getLogger("collision-scan"))
 
-        collisions, unresolved = detect_collisions_for_device_ids(
+        collisions, unresolved, _stack_ambiguities = detect_collisions_for_device_ids(
             [201, 202, 203], live_librenms.api, libre_devices_cache={}, job=job
         )
 
@@ -214,13 +214,15 @@ class TestCollisionScanCancellation:
             )
         job = _JobContext(rq_job(), stop_after=1)
 
-        collisions, unresolved = detect_collisions_for_device_ids(
+        collisions, unresolved, _stack_ambiguities = detect_collisions_for_device_ids(
             device_ids, live_librenms.api, libre_devices_cache={}, job=job
         )
 
         assert collisions == []
         assert unresolved == device_ids[4:]
-        assert len(live_librenms.server.requests) == 4
+        # Four scanned rows, each costing a device lookup plus the stack-identity inventory read.
+        # The remaining three ids are never requested, which is what proves the scan stopped.
+        assert len(live_librenms.server.requests) == 8
 
 
 class TestCollisionScanFetchFailure:
@@ -244,7 +246,7 @@ class TestCollisionScanFetchFailure:
             },
         )
 
-        collisions, unresolved = detect_collisions_for_device_ids(
+        collisions, unresolved, _stack_ambiguities = detect_collisions_for_device_ids(
             [301], LibreNMSAPI(server_key="default"), libre_devices_cache={}
         )
 
@@ -262,7 +264,9 @@ class TestCollisionScanFetchFailure:
         )
 
         with caplog.at_level("WARNING", logger=_MODULE_LOGGER), override_settings(CACHES=_dead_cache_settings()):
-            collisions, unresolved = detect_collisions_for_device_ids([302], live_librenms.api, libre_devices_cache={})
+            collisions, unresolved, _stack_ambiguities = detect_collisions_for_device_ids(
+                [302], live_librenms.api, libre_devices_cache={}
+            )
 
         assert collisions == []
         assert unresolved == [302]
@@ -282,7 +286,7 @@ class TestCollisionScanFetchFailure:
         job = _JobContext(rq_job(), stop_after=99, logger=logging.getLogger("collision-scan-job"))
 
         with caplog.at_level("WARNING", logger="collision-scan-job"), override_settings(CACHES=_dead_cache_settings()):
-            _collisions, unresolved = detect_collisions_for_device_ids(
+            _collisions, unresolved, _stack_ambiguities = detect_collisions_for_device_ids(
                 [303], live_librenms.api, libre_devices_cache={}, job=job
             )
 

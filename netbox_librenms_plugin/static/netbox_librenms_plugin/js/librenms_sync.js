@@ -2673,6 +2673,12 @@ function handleInterfaceChange(select, value) {
                 if (parentCell && typeof formattedRow.parent !== 'undefined') {
                     parentCell.innerHTML = formattedRow.parent;
                 }
+                // The row's own Sync button is shown only while the row differs from the
+                // resolved member, so a member switch that brings it into sync must clear it.
+                const actionsCell = row.querySelector('td[data-col="actions"]');
+                if (actionsCell && typeof formattedRow.actions !== 'undefined') {
+                    actionsCell.innerHTML = formattedRow.actions;
+                }
                 [
                     ['parentPortId', 'librenms_parent_port_id'],
                     ['parentName', 'librenms_parent_name'],

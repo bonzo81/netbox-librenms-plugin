@@ -1,5 +1,6 @@
 import logging
 import re
+import time
 from collections import defaultdict
 from urllib.parse import quote_plus
 from uuid import uuid4
@@ -16,30 +17,35 @@ from django.utils import timezone
 from django.utils.html import escape
 from django.views import View
 
-from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE, SERIAL_INVENTORY_SOURCE
+from netbox_librenms_plugin.constants import (
+    INTERFACE_NAME_FIELDS,
+    OOB_INVENTORY_SOURCE,
+    SERIAL_INVENTORY_SOURCE,
+)
+from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.utils import (
     apply_cable_manual_picks,
     assign_cable_row_ids,
-    cache_remaining_ttl,
-    cable_manual_pick_cache_key,
-    cable_snapshot_token,
     build_librenms_id_qs,
     cable_far_terminations,
     cable_has_librenms_tag,
     cable_is_point_to_point,
+    cable_manual_pick_cache_key,
     cable_path_reaches,
+    cable_snapshot_token,
+    cache_remaining_ttl,
     coerce_librenms_id,
     get_interface_name_field,
     get_librenms_cable_tag,
     get_librenms_device_id,
-    get_migrated_to_marker,
     get_librenms_oob,
     get_librenms_sync_device,
+    get_migrated_to_marker,
     get_virtual_chassis_member,
     oob_badge_html,
+    remote_port_html,
     resolve_interface_on_device,
 )
-from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -148,6 +154,116 @@ def _librenms_id_q(server_key: str, value, *, include_oob: bool = True) -> Q:
 
 _SUB_UNIT_RE = re.compile(r"^(?P<physical>.+)\.\d+$")
 
+# LLDP is the standard and names ports the way the device does; CDP is the fallback. Used to
+# pick a survivor when one adjacency is reported over both and neither row resolved.
+_PROTOCOL_PREFERENCE = ("lldp", "cdp")
+
+# Wall-clock budget for the neighbour port-name reads one cable refresh may spend. A switch with
+# fifty neighbours would otherwise serialize fifty requests, each able to reach the API timeout.
+REMOTE_ALIAS_FETCH_BUDGET_SECONDS = 15.0
+
+
+def _neighbour_group_key(row):
+    """
+    Identify the adjacency a row describes: one local port plus one remote device.
+
+    Two rows sharing this key describe the same neighbour relationship, whether they differ by
+    sub-unit (see :func:`_drop_masked_sub_units`) or by discovery protocol (see
+    :meth:`BaseCableTableView._dedupe_protocol_duplicates`). Defined once so the two filters
+    cannot drift apart on what "the same neighbour" means.
+
+    Args:
+        row (dict): A collected cable row.
+
+    Returns:
+        tuple | None: The adjacency identity, or None when the row names no remote device.
+
+    """
+    local_port_id = coerce_librenms_id(row.get("local_port_id"))
+    if local_port_id is None:
+        return None
+    remote_device = coerce_librenms_id(row.get("remote_device_id"))
+    hostname = row.get("remote_device")
+    if remote_device is not None:
+        remote_identity = ("id", remote_device)
+    elif isinstance(hostname, str) and hostname.strip():
+        # The hostname lookup in get_device_by_id_or_name is name__iexact, so fold case here too.
+        remote_identity = ("hostname", hostname.strip().casefold())
+    else:
+        return None
+    return local_port_id, remote_identity
+
+
+def _remote_endpoint_identity(row):
+    """
+    Identify the far end a row names, or None when nothing proves which port it is.
+
+    The LibreNMS port the row names (:func:`remote_port_ref`) is the strongest evidence and
+    outranks the NetBox interface: two protocols naming one port can resolve differently,
+    because each resolves through its own advertised name. The table lookup reads the same
+    port, so two rows grouped here resolve to one interface.
+
+    Args:
+        row (dict): An enriched cable row.
+
+    Returns:
+        tuple | None: The endpoint identity, or None when the row proves no particular port.
+
+    """
+    port_key = remote_port_ref(row)
+    if port_key is not None:
+        return ("port", port_key)
+    if interface_id := row.get("netbox_remote_interface_id"):
+        return ("interface", interface_id)
+    return None
+
+
+def _endpoint_group_key(row):
+    """
+    Identify the reported link *row* describes, or None when nothing proves which one it is.
+
+    Two rows carrying this key report one link over two discovery protocols. A serial row's
+    ``local_port_id`` is not a LibreNMS port id, so it groups with nothing; OOB rows keep their
+    own namespace, because their local ports live on the controller.
+
+    Args:
+        row (dict): A cable row.
+
+    Returns:
+        tuple | None: The group identity, or None when the row proves no particular link.
+
+    """
+    neighbour = _neighbour_group_key(row)
+    endpoint = _remote_endpoint_identity(row)
+    if neighbour is None or endpoint is None:
+        return None
+    return (row.get("_source"), neighbour, endpoint)
+
+
+def remote_port_ref(link):
+    """
+    Identify the far-end LibreNMS port of *link*: the matched port record, else the advertised ID.
+
+    ``remote_port_key`` is the only ID proven to be on the neighbour now: it comes from the
+    neighbour's current port list. An advertised ID that list does not hold is stale or names
+    another device's port, so it is used only when no record matched.
+
+    Args:
+        link (dict): A cable row.
+
+    Returns:
+        int | None: The far-end LibreNMS port ID, or None when the row names none.
+
+    """
+    port_key = coerce_librenms_id(link.get("remote_port_key"))
+    return port_key if port_key is not None else coerce_librenms_id(link.get("remote_port_id"))
+
+
+def _remote_port_name_candidates(row):
+    """Every LibreNMS name the far end of *row* is known by: advertised first, then the aliases."""
+    names = [row.get("remote_port"), *(row.get("remote_port_aliases") or [])]
+    return [name for name in names if isinstance(name, str) and name]
+
 
 def _drop_masked_sub_units(rows):
     """
@@ -161,26 +277,10 @@ def _drop_masked_sub_units(rows):
     reports its exact parent name on the SAME remote device. A sub-unit reported on its
     own is kept, because it is then the only evidence of that neighbour.
     """
-
-    def group_key(row):
-        local_port_id = coerce_librenms_id(row["local_port_id"])
-        if local_port_id is None:
-            return None
-        remote_device = coerce_librenms_id(row["remote_device_id"])
-        hostname = row.get("remote_device")
-        if remote_device is not None:
-            remote_identity = ("id", remote_device)
-        elif isinstance(hostname, str) and hostname.strip():
-            # The hostname lookup below is name__iexact, so the grouping identity folds case too.
-            remote_identity = ("hostname", hostname.strip().casefold())
-        else:
-            return None
-        return local_port_id, remote_identity
-
     physical_by_group = {}
     for row in rows:
         remote_port = row["remote_port"]
-        key = group_key(row)
+        key = _neighbour_group_key(row)
         if key is not None and isinstance(remote_port, str) and not _SUB_UNIT_RE.match(remote_port):
             physical_by_group.setdefault(key, set()).add(remote_port)
 
@@ -188,7 +288,7 @@ def _drop_masked_sub_units(rows):
     for row in rows:
         remote_port = row["remote_port"]
         match = _SUB_UNIT_RE.match(remote_port) if isinstance(remote_port, str) else None
-        if match and match.group("physical") in physical_by_group.get(group_key(row), ()):
+        if match and match.group("physical") in physical_by_group.get(_neighbour_group_key(row), ()):
             continue
         kept.append(row)
     return kept
@@ -236,6 +336,8 @@ _RAW_LINK_KEYS = frozenset(
         "link_id",
         "protocol",
         "remote_port",
+        "remote_port_aliases",
+        "remote_port_key",
         "remote_device",
         "remote_port_id",
         "remote_device_id",
@@ -553,10 +655,8 @@ class BaseCableTableView(
                     candidate_specs[local_owner.pk]["ids"].add(local_id)
             remote_owner = remote_owner_by_link.get(id(link))
             if remote_owner is not None:
-                remote_name = link.get("remote_port")
-                if isinstance(remote_name, str) and remote_name:
-                    candidate_specs[remote_owner.pk]["names"].add(remote_name)
-                if (remote_id := coerce_librenms_id(link.get("remote_port_id"))) is not None:
+                candidate_specs[remote_owner.pk]["names"].update(_remote_port_name_candidates(link))
+                if (remote_id := remote_port_ref(link)) is not None:
                     candidate_specs[remote_owner.pk]["ids"].add(remote_id)
         return manual_ids, candidate_specs
 
@@ -631,8 +731,8 @@ class BaseCableTableView(
                 remote_interface = self._resolve_context_interface(
                     context,
                     remote_owner_by_link.get(id(link)),
-                    link.get("remote_port_id"),
-                    [link.get("remote_port")],
+                    remote_port_ref(link),
+                    _remote_port_name_candidates(link),
                 )
             if self._link_ends_conflict(local_interface, remote_interface, context["visible_cable_ids"]):
                 if local_interface.pk not in trace_paths:
@@ -792,6 +892,233 @@ class BaseCableTableView(
                 }
             )
         return _drop_masked_sub_units(rows)
+
+    def _attach_remote_port_aliases(self, links_data):
+        """
+        Carry the other LibreNMS names of each remote port onto its row.
+
+        The local end resolves against the displayed port name and its ifName/ifDescr counterpart
+        (issue #88); the remote end only ever had the neighbour-advertised string, so a remote
+        interface named in NetBox from the other field read as "Remote Interface Not Found in
+        Netbox". An action that creates the far end on top of that would then duplicate an
+        interface that is already there.
+
+        One ``/devices/<remote>/ports`` read serves every row pointing at that neighbour, so a
+        LAG to one switch costs one request, not one per member. A neighbour LibreNMS does not
+        monitor (``remote_device_id`` 0) is never fetched: it has no port record to read.
+
+        Args:
+            links_data (list[dict]): The collected cable rows, updated in place.
+
+        Returns:
+            None
+
+        """
+        rows_by_device = defaultdict(list)
+        for link in links_data:
+            remote_device_id = coerce_librenms_id(link.get("remote_device_id"))
+            if remote_device_id is not None:
+                rows_by_device[remote_device_id].append(link)
+
+        deadline = time.monotonic() + REMOTE_ALIAS_FETCH_BUDGET_SECONDS
+        for remote_device_id, rows in rows_by_device.items():
+            by_port_id, by_name = self._remote_port_name_index(remote_device_id, deadline)
+            for link in rows:
+                remote_port = link.get("remote_port")
+                matched = by_port_id.get(coerce_librenms_id(link.get("remote_port_id")))
+                if matched is None and isinstance(remote_port, str) and remote_port:
+                    matched = by_name.get(remote_port.casefold())
+                if matched is None:
+                    continue
+                port_id, port_names = matched
+                # Two rows that matched one port record are one link, whatever each advertised.
+                link["remote_port_key"] = port_id
+                aliases = []
+                for field in sorted(INTERFACE_NAME_FIELDS):
+                    name = port_names.get(field)
+                    if isinstance(name, str) and name and name != remote_port and name not in aliases:
+                        aliases.append(name)
+                if aliases:
+                    link["remote_port_aliases"] = aliases
+
+    def _remote_port_name_index(self, remote_device_id, deadline):
+        """
+        Index one neighbour's LibreNMS port names by port id and by every name field.
+
+        Every explicit refresh reads the neighbour's current ports. The caller groups rows by
+        neighbour, so one refresh reads each neighbour once. A later refresh must see renamed
+        or re-created ports rather than reuse an earlier port list.
+
+        Args:
+            remote_device_id (int): The neighbour's LibreNMS device id.
+            deadline (float): The ``time.monotonic()`` reading after which no further neighbour
+                is read. Rows for unread neighbours keep their advertised names.
+
+        Returns:
+            tuple[dict, dict]: ``(port_id, names)`` keyed by port id, and by each unambiguous
+                case-folded name.
+
+        """
+        if time.monotonic() >= deadline:
+            # One slow or timing-out neighbour must not hold the whole refresh. The rows for
+            # the neighbours not read keep the advertised name only, which is what they had
+            # before aliases existed.
+            logger.warning(
+                "Remote port name lookup budget spent; leaving LibreNMS device %s unread on this refresh.",
+                remote_device_id,
+            )
+            return {}, {}
+        # VLAN associations say nothing about naming and make the payload much larger.
+        success, data = self.librenms_api.get_ports(remote_device_id, with_vlans=False)
+        ports = data.get("ports") if success and isinstance(data, dict) else None
+        if not isinstance(ports, list):
+            return {}, {}
+        records = []
+        for port in ports:
+            # A malformed LibreNMS payload can carry non-dict rows; skip them rather than 500.
+            if not isinstance(port, dict) or coerce_librenms_id(port.get("port_id")) is None:
+                continue
+            names = {
+                field: port[field]
+                for field in INTERFACE_NAME_FIELDS
+                if isinstance(port.get(field), str) and port[field]
+            }
+            if not names:
+                continue
+            records.append({"port_id": coerce_librenms_id(port.get("port_id")), **names})
+
+        by_port_id = {}
+        by_name = {}
+        owner_by_name = {}
+        for record in records:
+            # A poisoned cache entry must not crash the tab.
+            if not isinstance(record, dict):
+                continue
+            port_id = coerce_librenms_id(record.get("port_id"))
+            if port_id is None:
+                continue
+            names = {field: record[field] for field in INTERFACE_NAME_FIELDS if isinstance(record.get(field), str)}
+            by_port_id[port_id] = (port_id, names)
+            for name in names.values():
+                folded = name.casefold()
+                # A model name repeated as the ifDescr of every port ("Ethernet adapter") names
+                # no particular port. Binding the row to the first one would resolve a NetBox
+                # interface uniquely and offer to cable the wrong port.
+                if owner_by_name.setdefault(folded, port_id) != port_id:
+                    by_name.pop(folded, None)
+                else:
+                    by_name.setdefault(folded, (port_id, names))
+        return by_port_id, by_name
+
+    @staticmethod
+    def _dedupe_protocol_duplicates(links_data):
+        """
+        Collapse one adjacency that LibreNMS reported over more than one discovery protocol.
+
+        A neighbour discovered over both CDP and LLDP comes back as two link rows, so one
+        physical link renders twice and offers two Sync Cable buttons. The two protocols do not
+        report the same strings (CDP gives ``GigabitEthernet0/1`` where LLDP may give ``Gi0/1``,
+        a MAC or an ifIndex), so rows are never collapsed on the advertised name.
+
+        Two rows collapse only on AFFIRMATIVE proof that they name one endpoint
+        (:func:`_remote_endpoint_identity`): the same LibreNMS port, else the same NetBox
+        interface. A row that proves neither is always kept, because "reported on the same local
+        port, towards the same neighbour" is not evidence of the same port: a breakout or a hub
+        reaches several ports of one switch, and one extra CDP row must not cost an independent
+        LLDP report of another port. A row whose remote interface the request may not see proves
+        nothing either, so it keeps its own row rather than folding into a visible one.
+
+        Within one endpoint the survivor is the row that resolved, then the row with a usable
+        ``remote_port_id``, then LLDP over CDP. The protocols it absorbed are recorded on it as
+        ``also_reported_by`` so no evidence disappears silently, and they are recorded per
+        endpoint, never across the whole neighbour.
+
+        Runs at enrichment time, after resolution: the cached snapshot keeps both raw rows.
+
+        Args:
+            links_data (list[dict]): The enriched cable rows.
+
+        Returns:
+            list[dict]: The rows to render, in their original order.
+
+        """
+        dropped = set()
+        for positions in BaseCableTableView._endpoint_groups(links_data).values():
+            if len(positions) < 2:
+                continue
+            survivor = BaseCableTableView._best_duplicate_row(links_data, positions)
+            if absorbed := BaseCableTableView._absorbed_protocols(links_data, positions, survivor):
+                links_data[survivor]["also_reported_by"] = absorbed
+            dropped.update(position for position in positions if position != survivor)
+        return [link for position, link in enumerate(links_data) if position not in dropped]
+
+    @staticmethod
+    def _endpoint_groups(links_data):
+        """Group row positions by the link they report (:func:`_endpoint_group_key`)."""
+        endpoints = defaultdict(list)
+        for position, link in enumerate(links_data):
+            if (key := _endpoint_group_key(link)) is not None:
+                endpoints[key].append(position)
+        return endpoints
+
+    @staticmethod
+    def _absorbed_protocols(links_data, positions, keeper):
+        """Name the protocols the *keeper* row speaks for: its group's, minus its own."""
+        # Only a string is a protocol, on the keeper side too: LibreNMS ``protocol`` is copied
+        # unvalidated, and an unhashable one would 500 the table and the verify alike.
+        keeper_protocol = links_data[keeper].get("protocol")
+        return sorted(
+            {
+                protocol
+                for position in positions
+                if position != keeper and isinstance(protocol := links_data[position].get("protocol"), str)
+            }
+            - ({keeper_protocol} if isinstance(keeper_protocol, str) else set())
+        )
+
+    @staticmethod
+    def _also_reported_by(links_data, row_id):
+        """
+        Derive one row's ``also_reported_by`` without de-duplicating the whole set.
+
+        The single-row verify path enriches one row, so it never runs
+        :meth:`_dedupe_protocol_duplicates` and the badge would disappear the moment the user
+        re-verified the row. It reads the same grouping, so the two cannot drift. A row that
+        proves its endpoint only through a resolved NetBox interface groups with nothing here,
+        because verify resolves no row but its own.
+
+        Args:
+            links_data (list[dict]): The raw snapshot rows, with row ids assigned.
+            row_id (str): The row being verified.
+
+        Returns:
+            list[str]: The protocols the row speaks for, or ``[]``.
+
+        """
+        position = next((index for index, link in enumerate(links_data) if link.get("row_id") == row_id), None)
+        if position is None:
+            return []
+        key = _endpoint_group_key(links_data[position])
+        if key is None:
+            return []
+        positions = BaseCableTableView._endpoint_groups(links_data).get(key, [])
+        return BaseCableTableView._absorbed_protocols(links_data, positions, position)
+
+    @staticmethod
+    def _best_duplicate_row(links_data, positions):
+        """Pick the row to keep for one endpoint: resolved, then a usable port id, then LLDP."""
+
+        def rank(position):
+            link = links_data[position]
+            protocol = link.get("protocol")
+            return (
+                not link.get("netbox_remote_interface_id"),
+                coerce_librenms_id(link.get("remote_port_id")) is None,
+                _PROTOCOL_PREFERENCE.index(protocol) if protocol in _PROTOCOL_PREFERENCE else len(_PROTOCOL_PREFERENCE),
+                position,
+            )
+
+        return min(positions, key=rank)
 
     @staticmethod
     def _classify_links_fetch_error(success, data):
@@ -957,6 +1284,9 @@ class BaseCableTableView(
         oob_linked = self._merge_oob_cable_links(
             links_data, lookup_device, server_key, interface_name_field, alt_name_field
         )
+
+        # Both name fields of each remote port, so the far end resolves as widely as the near one.
+        self._attach_remote_port_aliases(links_data)
 
         # Append serial rows only when this request can view at least one ConsoleServerPort on the
         # sync device. The sensor endpoint is instance-wide, so a plain Device grant must not
@@ -1169,8 +1499,9 @@ class BaseCableTableView(
         """Add remote port URL if device and interface exist in NetBox."""
         remote_port = link.get("remote_port")
         if isinstance(remote_port, str) and remote_port:
+            remote_name_candidates = _remote_port_name_candidates(link)
             netbox_remote_interface = None
-            librenms_remote_port_id = link.get("remote_port_id")
+            librenms_remote_port_id = remote_port_ref(link)
             if server_key is None:
                 server_key = self._render_server_key()
 
@@ -1183,7 +1514,7 @@ class BaseCableTableView(
                     normal_context,
                     normal_context["remote_owner_by_link"].get(id(link)),
                     librenms_remote_port_id,
-                    [remote_port],
+                    remote_name_candidates,
                 )
             elif hasattr(device, "virtual_chassis") and device.virtual_chassis:
                 chassis_member = get_virtual_chassis_member(
@@ -1193,11 +1524,11 @@ class BaseCableTableView(
                 )
                 if chassis_member:
                     netbox_remote_interface = resolve_interface_on_device(
-                        chassis_member, server_key, librenms_remote_port_id, [remote_port]
+                        chassis_member, server_key, librenms_remote_port_id, remote_name_candidates
                     )
             else:
                 netbox_remote_interface = resolve_interface_on_device(
-                    device, server_key, librenms_remote_port_id, [remote_port]
+                    device, server_key, librenms_remote_port_id, remote_name_candidates
                 )
 
             if netbox_remote_interface:
@@ -1212,6 +1543,12 @@ class BaseCableTableView(
                 link["remote_device_display"] = netbox_remote_interface.device.name
                 link["remote_device_url"] = reverse("dcim:device", args=[netbox_remote_interface.device_id])
                 link["remote_port_name"] = netbox_remote_interface.name
+
+        # The Remote Port column reads remote_port_name, which only the resolved branch above and
+        # the device-not-found branch of process_remote_device set. A row whose DEVICE resolved and
+        # whose PORT did not therefore rendered an empty cell, hiding the very port the row is
+        # about. Fall back to what LibreNMS advertised, which is what the verify path already does.
+        link.setdefault("remote_port_name", remote_port if isinstance(remote_port, str) else "")
 
         # Return the link even when remote_port is empty (or unresolved): callers assign the
         # result back (link = process_remote_device(...)) and then dereference it, so returning
@@ -1244,6 +1581,7 @@ class BaseCableTableView(
             dict: The cable row with its status and sync affordance.
 
         """
+        link.pop("_local_end_cabled", None)
         local_interface_id = link.get("netbox_local_interface_id")
         remote_interface_id = link.get("netbox_remote_interface_id")
 
@@ -1254,6 +1592,8 @@ class BaseCableTableView(
         # verify response, which both gate the action on can_create_cable).
         link["can_create_cable"] = False
         actionable = link.get("_source") != OOB_INVENTORY_SOURCE
+        if link.get("manual_remote") and not remote_interface_id:
+            return link
 
         if local_interface_id and remote_interface_id:
             if normal_context is not None:
@@ -1369,8 +1709,86 @@ class BaseCableTableView(
                 if not local_interface_id
                 else "Remote Interface Not Found in Netbox"
             )
+            # LibreNMS gave only one end, so the row can never be synced. Reporting the cable
+            # the resolved end already has keeps a cabled port from reading as unconnected.
+            self._report_one_sided_cable(link, local_interface_id or remote_interface_id, normal_context)
 
         return link
+
+    def _report_one_sided_cable(self, link, interface_id, normal_context):
+        """
+        Report the NetBox cable on the end of a one-sided row that did resolve.
+
+        Scoped throughout: a cable the request cannot view is never linked, and the far end is
+        named only when its device is viewable. ``can_create_cable`` is left off, because there
+        is still no NetBox remote to cable to.
+
+        Args:
+            link (dict): The cable row to update in place.
+            interface_id (int | None): The one end that resolved, if any.
+            normal_context (dict | None): Preloaded interface, cable, and trace data.
+
+        Returns:
+            None
+
+        """
+        if link.get("cable_status") not in (
+            None,
+            "Device Not Found in NetBox",
+            "Both Interfaces Not Found in Netbox",
+            "Local Interface Not Found in Netbox",
+            "Remote Interface Not Found in Netbox",
+        ):
+            return
+        if not interface_id:
+            return
+        if normal_context is not None:
+            interface = normal_context["interfaces_by_pk"].get(interface_id)
+            if interface is None or interface.pk not in normal_context["visible_interface_ids"]:
+                return
+        else:
+            interface = self._viewable_queryset(Interface).filter(pk=interface_id).first()
+            if interface is None:
+                return
+
+        cable = interface.cable
+        if cable is None:
+            return
+        if interface.pk == link.get("netbox_local_interface_id"):
+            link["_local_end_cabled"] = True
+        if normal_context is not None:
+            cable_visible = cable.pk in normal_context["visible_cable_ids"]
+        else:
+            cable_visible = self._object_is_viewable(cable)
+        if not cable_visible:
+            link["cable_status"] = "Cable State Not Available"
+            return
+
+        link["cable_url"] = reverse("dcim:cable", args=[cable.pk])
+        peer_device = self._viewable_cable_peer_device(interface, cable)
+        link["cable_status"] = f"Cabled to {peer_device.name}" if peer_device is not None else "Cabled in Netbox"
+
+    def _viewable_cable_peer_device(self, interface, cable):
+        """Return the device at the far end of *cable*, only when the request may view it."""
+        if not cable_is_point_to_point(cable):
+            return None
+        a_terminations = list(cable.a_terminations)
+        b_terminations = list(cable.b_terminations)
+        if len(a_terminations) != 1 or len(b_terminations) != 1:
+            return None
+        near, far = a_terminations[0], b_terminations[0]
+        if near != interface:
+            near, far = far, near
+        if near != interface:
+            return None
+        peer_device_id = getattr(far, "device_id", None)
+        if peer_device_id is None:
+            return None
+        # One management switch is the peer of many ports: read its device once per request, by id.
+        memo = self.__dict__.setdefault("_peer_device_visibility", {})
+        if peer_device_id not in memo:
+            memo[peer_device_id] = self._viewable_queryset(Device).filter(pk=peer_device_id).first()
+        return memo[peer_device_id]
 
     def check_serial_cable_status(self, link, csp=None, remote_context=None):
         """
@@ -1465,7 +1883,6 @@ class BaseCableTableView(
             None
 
         """
-
         csp = self._resolve_serial_local_csp(link, csp)
         if csp is None:
             return
@@ -1876,6 +2293,50 @@ class BaseCableTableView(
             query += f"&server_key={quote_plus(server_key)}"
         link["picker_url"] = f"{url}?{query}"
 
+    def _set_remote_create_affordance(self, link, obj, server_key):
+        """
+        Attach a ``remote_create_url`` to a row whose neighbour is modelled but its port is not.
+
+        Such a row can never be synced: ``check_cable_status`` reports "Remote Interface Not Found
+        in Netbox" and ``SyncCablesView`` refuses it. The action offers to create the far end and
+        the cable together. It is the ONE rule the button and the view both read, so a row that
+        renders the button is exactly a row the endpoint will act on.
+
+        A row is offered the action only when the local end resolved, the remote DEVICE resolved,
+        the remote INTERFACE did not, and LibreNMS holds a port record to name and type the new
+        interface from. Without a modelled neighbour there is nothing to attach an interface to,
+        so the action is absent rather than failing.
+
+        Args:
+            link (dict): The enriched cable row, mutated in place.
+            obj: The page device (URL scope for the endpoint).
+            server_key: The active LibreNMS server key, carried in the URL.
+
+        """
+        link.pop("remote_create_url", None)
+        if (
+            not self.has_write_permission()
+            or link.get("_source") == OOB_INVENTORY_SOURCE
+            or link.get("manual_remote")
+            or link.get("_local_end_cabled")
+            or link.get("_multi_termination_unsupported")
+            or not link.get("netbox_local_interface_id")
+            or not link.get("netbox_remote_device_id")
+            or not link.get("remote_port_owner_id")
+            or link.get("netbox_remote_interface_id")
+        ):
+            return
+        # The port record is what names and types the interface; a row without one would create
+        # a bare "other" interface from a neighbour-advertised string, which is a guess.
+        if coerce_librenms_id(link.get("remote_port_key")) is None:
+            return
+        url = reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[obj.pk])
+        query = f"row_id={quote_plus(str(link.get('row_id', '')))}"
+        query += f"&expected_local_id={link['netbox_local_interface_id']}"
+        if server_key:
+            query += f"&server_key={quote_plus(server_key)}"
+        link["remote_create_url"] = f"{url}?{query}"
+
     def _remote_picker_action_html(self, link, obj, server_key):
         """Render the picker action shared by table-verify response paths."""
         self._set_remote_picker_affordance(link, obj, server_key)
@@ -1886,6 +2347,20 @@ class BaseCableTableView(
                     aria-label="Pick remote end"
                     data-cable-picker-url="{escape(picker_url)}">
                 <i class="mdi mdi-connection"></i>
+            </button>
+        """
+
+    def _remote_create_action_html(self, link, obj, server_key):
+        """Render the create action when the verified row still has no remote interface."""
+        self._set_remote_create_affordance(link, obj, server_key)
+        if not (create_url := link.get("remote_create_url")):
+            return ""
+        return f"""
+            <button type="button" class="btn btn-sm btn-outline-primary"
+                    title="Create the remote interface and the cable"
+                    aria-label="Create the remote interface and the cable"
+                    data-cable-picker-url="{escape(create_url)}">
+                <i class="mdi mdi-plus-network"></i>
             </button>
         """
 
@@ -2166,7 +2641,13 @@ class BaseCableTableView(
                 )
                 if link.get("netbox_remote_device_id"):
                     link = self.check_cable_status(link, normal_context=normal_context)
+            if not link.get("netbox_remote_device_id"):
+                self._report_one_sided_cable(link, link.get("netbox_local_interface_id"), normal_context)
+            link["remote_port_owner_id"] = getattr(
+                self._remote_port_owner(link, server_key, normal_context), "pk", None
+            )
             self._set_remote_picker_affordance(link, obj, server_key)
+            self._set_remote_create_affordance(link, obj, server_key)
 
         # Drop a serial row only when its ConsoleServerPort exists but is out of view scope. A
         # sensor with no NetBox port at all is LibreNMS data, not NetBox data: it renders as
@@ -2197,6 +2678,9 @@ class BaseCableTableView(
                     if link.get("_source") != SERIAL_INVENTORY_SOURCE
                     or link.get("local_port") not in hidden_serial_port_names
                 ]
+        # After resolution, so one adjacency reported over two protocols collapses on what the
+        # rows resolved to rather than on the two protocols' differing name strings.
+        links_data[:] = self._dedupe_protocol_duplicates(links_data)
         self._apply_termination_change_scope(
             links_data,
             preloaded_changeable_ids={
@@ -2207,6 +2691,29 @@ class BaseCableTableView(
             else None,
         )
         return links_data
+
+    def _remote_port_owner(self, link, server_key, normal_context=None):
+        """
+        Return the NetBox device that owns the row's advertised remote port, or None.
+
+        This is the neighbour the row names, or its chassis member for a VC, resolved the way the
+        remote end is. A manual pick does not change it. An owner the request may not view is None.
+        """
+        if normal_context is not None:
+            owner = normal_context["remote_owner_by_link"].get(id(link))
+            return owner if owner is not None and owner.pk in normal_context["visible_owner_ids"] else None
+        device, found, _error = self.get_device_by_id_or_name(
+            link.get("remote_device_id"),
+            link.get("remote_device"),
+            server_key=server_key,
+            queryset=self._viewable_queryset(Device),
+        )
+        if not found:
+            return None
+        if device.virtual_chassis_id is None:
+            return device
+        member = get_virtual_chassis_member(device, link.get("remote_port"), return_device_on_failure=False)
+        return member if member is not None and self._object_is_viewable(member) else None
 
     def get_table(self, data, obj):
         """Return the cable table for *data*; concrete subclasses choose the table class."""
@@ -2379,6 +2886,7 @@ class BaseCableTableView(
                 continue
             link["can_create_cable"] = False
             link.pop("picker_url", None)
+            link.pop("remote_create_url", None)
 
     @staticmethod
     def _cable_cache_expiry(cache_key):
@@ -2643,11 +3151,14 @@ class SingleCableVerifyView(BaseCableTableView):
                 )
                 if link_data:
                     manual_remote_id = link_data.get("manual_remote_id")
+                    also_reported_by = self._also_reported_by(valid_links, row_id)
                     # Strip derived fields from cached data to avoid stale
                     # IDs/URLs when NetBox objects are deleted after caching.
                     link_data = {k: v for k, v in link_data.items() if k in _RAW_LINK_KEYS}
                     if manual_remote_id is not None:
                         link_data["manual_remote_id"] = manual_remote_id
+                    if also_reported_by:
+                        link_data["also_reported_by"] = also_reported_by
 
                     # Serial rows have a fixed ConsoleServerPort owner. Their owner selector is
                     # disabled, so they never need the member-change verify path.
@@ -2670,6 +3181,9 @@ class SingleCableVerifyView(BaseCableTableView):
                         link_data = self.process_remote_device(
                             link_data, remote_hostname, link_data.get("remote_device_id"), server_key=server_key
                         )
+                    link_data["remote_port_owner_id"] = getattr(
+                        self._remote_port_owner(link_data, server_key), "pk", None
+                    )
 
                     # `or ""` (not a .get default): the OOB-merge path stores local_port=None when
                     # the port name can't be resolved, and a present-but-None value would otherwise
@@ -2707,6 +3221,8 @@ class SingleCableVerifyView(BaseCableTableView):
                         # Check cable status if remote side was resolved
                         if link_data.get("netbox_remote_device_id"):
                             link_data = self.check_cable_status(link_data)
+                        else:
+                            self._report_one_sided_cable(link_data, interface.pk, None)
 
                         self._apply_termination_change_scope([link_data])
                         if read_only_origin:
@@ -2728,9 +3244,8 @@ class SingleCableVerifyView(BaseCableTableView):
                         # Escape LibreNMS-sourced labels to prevent XSS
                         safe_local_port = escape(local_port)
                         remote_port_name = link_data.get("remote_port_name") or link_data.get("remote_port") or ""
-                        safe_remote_port = escape(remote_port_name)
-                        remote_device_name = link_data.get("remote_device_display") or link_data.get(
-                            "remote_device", ""
+                        remote_device_name = (
+                            link_data.get("remote_device_display") or link_data.get("remote_device") or ""
                         )
                         safe_remote_device = escape(remote_device_name)
                         safe_cable_status = escape(link_data.get("cable_status", "Missing Ports"))
@@ -2739,11 +3254,7 @@ class SingleCableVerifyView(BaseCableTableView):
                         formatted_row["local_port"] = (
                             f'<a href="{reverse("dcim:interface", args=[interface.pk])}">{safe_local_port}</a>{oob_badge}'
                         )
-                        formatted_row["remote_port"] = (
-                            f'<a href="{link_data["remote_port_url"]}">{safe_remote_port}</a>'
-                            if link_data.get("remote_port_url")
-                            else safe_remote_port
-                        )
+                        formatted_row["remote_port"] = remote_port_html(remote_port_name, link_data)
                         formatted_row["remote_device"] = (
                             f'<a href="{link_data["remote_device_url"]}">{safe_remote_device}</a>'
                             if link_data.get("remote_device_url")
@@ -2765,17 +3276,12 @@ class SingleCableVerifyView(BaseCableTableView):
                             """
                     else:
                         formatted_row["local_port"] = f"{escape(local_port)}{oob_badge}"
-                        # Keep remote port name visible, add URL if available
+                        # Keep remote port name visible, add URL and badges if available
                         remote_port_name = link_data.get("remote_port_name") or link_data.get("remote_port") or ""
-                        safe_remote_port = escape(remote_port_name)
-                        formatted_row["remote_port"] = (
-                            f'<a href="{link_data["remote_port_url"]}">{safe_remote_port}</a>'
-                            if link_data.get("remote_port_url")
-                            else safe_remote_port
-                        )
+                        formatted_row["remote_port"] = remote_port_html(remote_port_name, link_data)
                         # Keep remote device name visible, add URL if available
-                        remote_device_name = link_data.get("remote_device_display") or link_data.get(
-                            "remote_device", ""
+                        remote_device_name = (
+                            link_data.get("remote_device_display") or link_data.get("remote_device") or ""
                         )
                         safe_remote_device = escape(remote_device_name)
                         formatted_row["remote_device"] = (
@@ -2796,6 +3302,11 @@ class SingleCableVerifyView(BaseCableTableView):
                         formatted_row["actions"] = ""
 
                     if not read_only_origin:
+                        formatted_row["actions"] += self._remote_create_action_html(
+                            link_data,
+                            selected_device,
+                            server_key,
+                        )
                         formatted_row["actions"] += self._remote_picker_action_html(
                             link_data,
                             selected_device,

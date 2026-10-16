@@ -11,7 +11,9 @@ from netbox_librenms_plugin.constants import (
     LIBRENMS_PLACEHOLDER_VALUES as _PLACEHOLDER_VALUES,
     MAIN_INVENTORY_SOURCE,
     OOB_INVENTORY_SOURCE,
+    is_module_model_placeholder,
 )
+from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     coerce_librenms_id,
@@ -20,13 +22,17 @@ from netbox_librenms_plugin.utils import (
     get_librenms_sync_device,
     get_module_template_interface_names,
     is_valid_ports_payload,
+    load_module_type_bay_types,
+    module_bay_fits,
+    module_bay_type_fit,
     module_inventory_binding_token,
     module_inventory_row_digest,
     module_inventory_snapshot_digest,
+    module_type_bay_type_ids,
     normalize_librenms_port_id,
     normalize_serial,
+    prefetch_module_bay_types,
 )
-from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -57,6 +63,23 @@ _SKIP_TRANSCEIVER_TYPES = {"Port Container", "Port", ""}
 
 # Physical classes filtered out when counting hardware siblings under a parent bay.
 _NON_HARDWARE_CLASSES = {"sensor", "backplane", "stack"}
+
+# Bay name prefixes per hardware class: "<prefix><slot>" names the bay for that slot.
+_CLASS_BAY_PREFIXES = {
+    "fan": ("Fan Tray ", "Fan ", "FT ", "FT"),
+    "powersupply": ("Power Supply ", "PSU ", "PSU", "PS", "PEM ", "PM ", "PM"),
+}
+
+
+def _reserved_bay_class(bay_name):
+    """Return the hardware class a bay name reserves the bay for, or None."""
+    name = (bay_name or "").strip().casefold()
+    for cls, prefixes in _CLASS_BAY_PREFIXES.items():
+        for prefix in map(str.casefold, prefixes):
+            # A prefix with no trailing space reserves a name only when a number follows ("PS1", not "Port 1").
+            if name.startswith(prefix) and (prefix.endswith(" ") or name[len(prefix) : len(prefix) + 1].isdigit()):
+                return cls
+    return None
 
 
 def _normalize_librenms_text(value) -> str:
@@ -998,7 +1021,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         transparent_indices,
         ignore_cache,
         ignore_contexts=None,
-    ):  # noqa: C901
+    ):
         """
         Collect top-level inventory items for the sync table.
 
@@ -1620,8 +1643,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         the transceiver API provides SFP model, serial, and type info.
 
         Strategy:
-        - For transceivers matching existing inventory items by entity_physical_index:
-          supplement entPhysicalModelName if empty
+        - For transceivers matching existing inventory items: supplement
+          entPhysicalModelName if empty. An item matches by entity_physical_index when its
+          ifIndex agrees with the transceiver port's ifIndex, else by that ifIndex alone.
         - For transceivers NOT in inventory: create synthetic inventory items
           so they appear in the modules table
 
@@ -1654,6 +1678,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             idx: item for item in inventory_data if (idx := _coerce_idx(item.get("entPhysicalIndex"))) is not None
         }
         inv_serials = {s for item in inventory_data if (s := _clean_librenms_value(item.get("entPhysicalSerialNum")))}
+        inv_by_ifindex = {}
+        for item in inventory_data:
+            if (if_index := _coerce_idx(item.get("ifIndex"))) is not None:
+                inv_by_ifindex[if_index] = None if if_index in inv_by_ifindex else item
 
         # Build port_id → interface label lookup for better synthetic item naming
         port_name_map = self._build_port_name_map(transceivers, ports_data=ports_data)
@@ -1673,6 +1701,18 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             port_meta = port_name_map.get(port_id, {}) if port_id else {}
             ifname = (port_meta.get("ifName") or "").strip() or None
             ifdescr = (port_meta.get("ifDescr") or "").strip() or None
+            port_ifindex = _coerce_idx(port_meta.get("ifIndex"))
+
+            # Junos reports the port's ifIndex as entity_physical_index, which can name an unrelated entity.
+            existing = inv_by_index.get(ent_idx)
+            if port_ifindex is not None and (
+                existing is None or _coerce_idx(existing.get("ifIndex")) not in {None, port_ifindex}
+            ):
+                by_ifindex = inv_by_ifindex.get(port_ifindex)
+                if by_ifindex is None and existing is not None:
+                    # A synthetic row would duplicate the unrelated entity's index.
+                    continue
+                existing = by_ifindex
 
             model = _clean_librenms_value(txr.get("model"))
             serial = _clean_librenms_value(txr.get("serial"))
@@ -1685,11 +1725,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             # Use transceiver type as model fallback (e.g., "CFP2/QSFP28")
             display_model = model or (txr_type if txr_type not in _SKIP_TRANSCEIVER_TYPES else "")
 
-            if ent_idx in inv_by_index:
+            if existing is not None:
                 # Supplement existing inventory item if model/serial is missing or a placeholder
-                existing = inv_by_index[ent_idx]
                 existing_model = _clean_librenms_value(existing.get("entPhysicalModelName"))
-                if (not existing_model or existing_model.lower() == "builtin") and display_model:
+                # Any placeholder counts as missing, not just "builtin": a row reporting
+                # "unspecified" was never supplemented, even when the API knew the part number.
+                if is_module_model_placeholder(existing_model) and display_model:
                     existing["entPhysicalModelName"] = display_model
                 existing_serial = _clean_librenms_value(existing.get("entPhysicalSerialNum"))
                 if (not existing_serial or existing_serial.lower() == "builtin") and serial:
@@ -1917,6 +1958,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             port_map[port_id] = {
                 "ifName": ifname,
                 "ifDescr": ifdescr,
+                "ifIndex": port.get("ifIndex"),
             }
         return port_map
 
@@ -2039,11 +2081,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         return None
 
     @staticmethod
-    def _match_bay_by_interface_label(item, module_bays):
+    def _match_bay_by_interface_label(item, module_bays, accepted_bay_types):
         """Infer bay names from interface labels when positional matching is unavailable."""
         for port_index in BaseModuleTableView._extract_interface_port_indices(item):
             for pattern in [f"SFP {port_index}", f"Port {port_index}", f"Bay {port_index}", f"Slot {port_index}"]:
-                if pattern in module_bays:
+                if pattern in module_bays and module_bay_fits(module_bays[pattern], accepted_bay_types):
                     return module_bays[pattern]
         return None
 
@@ -2219,12 +2261,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         )
         device_bays = {}
         module_scoped_bays = {}
-        for bay in bays:
+        for bay in prefetch_module_bay_types(bays):
             if bay.module_id:
                 module_scoped_bays.setdefault(bay.module_id, {})[bay.name] = bay
             else:
                 device_bays[bay.name] = bay
         return device_bays, module_scoped_bays
+
+    def _accepted_bay_types(self, module_type):
+        """Return the module bay types *module_type* fits, from one load per render."""
+        type_bay_types = getattr(self, "_type_bay_types", None)
+        if type_bay_types is None:
+            type_bay_types = self._type_bay_types = load_module_type_bay_types()
+        return module_type_bay_type_ids(module_type, type_bay_types)
 
     def _get_module_types(self):
         """Get all module types indexed by model/part_number, with ModuleTypeMapping applied."""
@@ -2410,17 +2459,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 normalized_extras.append(normalized)
         return candidate_names + normalized_extras
 
-    def _match_module_bay(self, item, index_map, module_bays):
+    def _match_module_bay(self, item, index_map, module_bays, accepted_bay_types=frozenset()):
         """
         Try to match an inventory item to a NetBox ModuleBay.
 
         Checks ModuleBayMapping table first (exact then regex), then falls back
-        to exact parent name match, then positional matching.
+        to exact parent name match, then positional matching. The two fallbacks
+        guess, so they skip a bay whose module bay types refuse the module.
 
         Args:
             item (dict): The inventory item to match.
             index_map (dict): Inventory items keyed by physical index.
             module_bays (dict): Available NetBox module bays keyed by name.
+            accepted_bay_types (frozenset): The module bay types the matched module type fits.
 
         Returns:
             ModuleBay | None: The matched module bay, or None if no bay matches.
@@ -2463,22 +2514,42 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             if bay:
                 return bay
 
-        # Fallback: exact match on candidate names against bay dict, with FPC-scope check
-        for name in all_candidates:
-            if name in module_bays:
-                maps = module_bays.maps if hasattr(module_bays, "maps") else [module_bays]
-                for scope_map in maps:
-                    if name in scope_map:
-                        bay = scope_map[name]
-                        if BaseModuleTableView._fpc_slot_matches(name, bay):
-                            return bay
-
-        # Positional fallback: determine slot number from container sibling order
-        # Handles SFPs inside converters where containers are unnamed
-        bay = self._match_bay_by_position(item, index_map, module_bays)
+        bay = BaseModuleTableView._match_bay_by_name(all_candidates, module_bays, accepted_bay_types)
         if bay:
             return bay
 
+        # Positional fallback: determine slot number from container sibling order
+        # Handles SFPs inside converters where containers are unnamed
+        bay = self._match_bay_by_position(item, index_map, module_bays, accepted_bay_types)
+        if bay:
+            return bay
+
+        return None
+
+    @staticmethod
+    def _match_bay_by_name(candidate_names, module_bays, accepted_bay_types):
+        """
+        Return the first bay named like a candidate that passes the FPC-scope check and fits the module.
+
+        Args:
+            candidate_names (list[str]): Candidate bay names in matching order.
+            module_bays (dict): Available NetBox module bays keyed by name.
+            accepted_bay_types (frozenset): The module bay types the matched module type fits.
+
+        Returns:
+            ModuleBay | None: The name-matched module bay, or None if no bay matches.
+
+        """
+        maps = module_bays.maps if hasattr(module_bays, "maps") else [module_bays]
+        for name in candidate_names:
+            for scope_map in maps:
+                bay = scope_map.get(name)
+                if (
+                    bay is not None
+                    and BaseModuleTableView._fpc_slot_matches(name, bay)
+                    and module_bay_fits(bay, accepted_bay_types)
+                ):
+                    return bay
         return None
 
     @staticmethod
@@ -2642,7 +2713,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         return None
 
     @staticmethod
-    def _match_bay_by_position(item, index_map, module_bays):  # noqa: C901
+    def _match_bay_by_position(item, index_map, module_bays, accepted_bay_types=frozenset()):
         """
         Match bay by item's positional order among container siblings.
 
@@ -2654,6 +2725,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             item (dict): The inventory item to match.
             index_map (dict): Inventory items keyed by physical index.
             module_bays (dict): Available NetBox module bays keyed by name.
+            accepted_bay_types (frozenset): The module bay types the matched module type fits.
 
         Returns:
             ModuleBay | None: The position-matched module bay, or None if no bay matches.
@@ -2721,42 +2793,32 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # (e.g. no "Fan Tray N" / "PSU N" defined on the device type), we
         # surface "No Bay" and let the user fix the model rather than guess.
         phys_class = _normalize_librenms_text(item.get("entPhysicalClass")).lower()
-        if phys_class == "fan":
-            patterns = [f"Fan Tray {slot_num}", f"Fan {slot_num}", f"FT {slot_num}", f"FT{slot_num}"]
-        elif phys_class == "powersupply":
-            patterns = [
-                f"Power Supply {slot_num}",
-                f"PSU {slot_num}",
-                f"PSU{slot_num}",
-                f"PS{slot_num}",
-                f"PEM {slot_num}",
-                f"PM {slot_num}",
-                f"PM{slot_num}",
-            ]
+        if phys_class in _CLASS_BAY_PREFIXES:
+            patterns = [f"{prefix}{slot_num}" for prefix in _CLASS_BAY_PREFIXES[phys_class]]
         elif phys_class in {"module", "port", "iomodule", "cpmmodule", "mdamodule", "fabricmodule", "xiomodule"}:
             patterns = [f"SFP {slot_num}", f"Slot {slot_num}", f"Bay {slot_num}", f"Port {slot_num}"]
         else:
             return None
 
         for pattern in patterns:
-            if pattern in module_bays:
+            if pattern in module_bays and module_bay_fits(module_bays[pattern], accepted_bay_types):
                 return module_bays[pattern]
 
-        bay = BaseModuleTableView._match_bay_by_position_value(module_bays, slot_num)
+        bay = BaseModuleTableView._match_bay_by_position_value(module_bays, slot_num, phys_class, accepted_bay_types)
         if bay:
             return bay
 
         # Final fallback for interface-like children: infer bay index from
         # labels such as Te1/1/1 or TenGigabitEthernet1/1/1.
         if phys_class == "port":
-            bay = BaseModuleTableView._match_bay_by_interface_label(item, module_bays)
+            bay = BaseModuleTableView._match_bay_by_interface_label(item, module_bays, accepted_bay_types)
             if bay:
                 return bay
 
         return None
 
     @staticmethod
-    def _match_bay_by_position_value(module_bays, slot_num):
+    def _match_bay_by_position_value(module_bays, slot_num, phys_class, accepted_bay_types):
         """Match a bay by its NetBox ``position`` field when the name is inconsistent."""
         if not isinstance(slot_num, int) or slot_num < 1:
             return None
@@ -2776,7 +2838,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 seen.add(marker)
 
                 position = str(getattr(bay, "position", "") or "").strip().upper()
-                if position in expected_positions:
+                if position not in expected_positions:
+                    continue
+                type_fit = module_bay_type_fit(bay, accepted_bay_types)
+                # Shared bay types decide. Without them, a bay named for another hardware class only shares the number.
+                if type_fit or (type_fit is None and _reserved_bay_class(bay.name) in (None, phys_class)):
                     matches.append(bay)
 
         if len(matches) == 1:
@@ -2854,6 +2920,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         """
         from netbox_librenms_plugin.utils import (
             has_nested_name_conflict,
+            module_type_lookup_candidates,
             resolve_module_type,
         )
 
@@ -2928,9 +2995,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 "_source": item.get("_source", MAIN_INVENTORY_SOURCE),
             }
 
-        # Match to NetBox module bay
-        matched_bay = self._match_module_bay(item, index_map, module_bays)
-
         # Match to NetBox module type (direct lookup, normalization fallback, then Generic fallback).
         # Type mappings are manufacturer-scoped, so a virtual-chassis row resolves against the
         # member it targets rather than the page device.
@@ -2943,7 +3007,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             manufacturer=row_manufacturer,
             norm_rules=norm_rules_type,
             generic_fallback=generic_module_types,
+            fallback_names=module_type_lookup_candidates(item),
         )
+
+        # The type comes first because a guessed bay must fit it.
+        matched_bay = self._match_module_bay(item, index_map, module_bays, self._accepted_bay_types(matched_type))
 
         # Determine status; override to "Name Conflict" when the matched module
         # type uses {module} in interface templates and has sibling bays (which

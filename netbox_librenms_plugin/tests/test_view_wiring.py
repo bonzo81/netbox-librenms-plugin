@@ -235,7 +235,7 @@ class TestSourceMarkerConvention:
                 # Either operand may hold the access: `row["_source"] == "serial"` and
                 # `"serial" == row["_source"]` spell the marker inline just the same.
                 operands = [node.left, *node.comparators]
-                for first, second in zip(operands, operands[1:]):
+                for first, second in zip(operands, operands[1:], strict=False):
                     if any(
                         self._is_source_access(access)
                         and isinstance(literal, ast.Constant)
@@ -247,7 +247,7 @@ class TestSourceMarkerConvention:
                 if isinstance(node.value.value, str) and any(self._is_source_access(t) for t in node.targets):
                     hits.append(node.lineno)
             elif isinstance(node, ast.Dict):
-                for key, value in zip(node.keys, node.values):
+                for key, value in zip(node.keys, node.values, strict=True):
                     if (
                         isinstance(key, ast.Constant)
                         and key.value == "_source"
@@ -1905,8 +1905,8 @@ class TestInstallRefusesADuplicateSerial:
         """InstallSelectedView builds its work list from the cache, so the row's flags cannot guard it."""
         from types import SimpleNamespace
 
-        from django.core.cache import cache
         from dcim.models import Module
+        from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
@@ -2377,8 +2377,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
 
     def test_module_move_refuses_a_conflict_module_outside_the_grant(self):
         """MoveModuleView reassigns the conflict module's bay/device, and its pk comes from the POST — a secondary lookup the primary scoping does not cover."""
-        from dcim.models import Device, Module, ModuleBay, ModuleType
-        from dcim.models import Manufacturer
+        from dcim.models import Device, Manufacturer, Module, ModuleBay, ModuleType
 
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.views.sync.modules import MoveModuleView
@@ -2923,9 +2922,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
 
     def test_vc_serial_assign_refuses_a_member_outside_the_grant(self):
         """AssignVCSerialView overwrites the member's serial and takes its pk from the POST, guarded only by same-VC membership."""
-        from dcim.models import Device
-
-        from dcim.models import VirtualChassis
+        from dcim.models import Device, VirtualChassis
 
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.views.sync.device_fields import AssignVCSerialView
@@ -3110,3 +3107,15 @@ class TestRoutedSyncPagesScopeTheirObject:
 
         with pytest.raises(Http404):
             view.get_object(hidden.pk)
+
+
+def test_import_reexports_document_the_active_lint_policy():
+    """The package documents the lint configuration that keeps its public imports."""
+    import tomllib
+
+    from netbox_librenms_plugin import import_utils
+
+    config = tomllib.loads((Path(__file__).parents[2] / "pyproject.toml").read_text())
+    assert "F401" in config["tool"]["ruff"]["lint"]["per-file-ignores"]["__init__.py"]
+    assert "per-file ignore" in import_utils.__doc__
+    assert callable(import_utils.bulk_import_devices)

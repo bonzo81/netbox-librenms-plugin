@@ -291,27 +291,23 @@ class ImportDevicesJob(JobRunner):
         precheck_outcome = None
         skipped_id_set = set()
         if collision_check_ids:
-            # Defense-in-depth: block a batch where two LibreNMS rows resolve to the same NetBox
-            # device, mirroring the confirm-preview/sync-view gate so the async path can't import a
-            # colliding batch either. A single row can never collide, so skip the extra pass.
-            collisions, unresolved = (
-                detect_collisions_for_device_ids(
-                    collision_check_ids,
-                    api,
-                    libre_devices_cache=libre_devices_cache,
-                    sync_options=sync_options,
-                    # Job context so a cancellation stops the scan itself — without it, a large
-                    # cache-miss batch keeps issuing LibreNMS calls until the whole pre-check
-                    # finishes and only the import loops below would honor the cancel.
-                    job=self,
-                    # Each row validates in its actual import mode: a VM row checked in Device
-                    # mode would run the serial/IP matching bulk_import_vms skips and could
-                    # fabricate a collision that blocks a valid batch.
-                    vm_device_ids=vm_imports,
-                    user=self.job.user,
-                )
-                if len(collision_check_ids) >= 2
-                else ([], [])
+            # Block NetBox object collisions and ambiguous stack fingerprints on the async path.
+            # Every non-empty batch runs it. One row cannot collide, but the scan also fails a row
+            # closed when its virtual-chassis inventory can't be read, and that check is per row.
+            collisions, unresolved, stack_ambiguities = detect_collisions_for_device_ids(
+                collision_check_ids,
+                api,
+                libre_devices_cache=libre_devices_cache,
+                sync_options=sync_options,
+                # Job context so a cancellation stops the scan itself — without it, a large
+                # cache-miss batch keeps issuing LibreNMS calls until the whole pre-check
+                # finishes and only the import loops below would honor the cancel.
+                job=self,
+                # Each row validates in its actual import mode: a VM row checked in Device
+                # mode would run the serial/IP matching bulk_import_vms skips and could
+                # fabricate a collision that blocks a valid batch.
+                vm_device_ids=vm_imports,
+                user=self.job.user,
             )
             if unresolved and _is_job_cancelled(self):
                 # A cancelled pre-check returns its unscanned remainder as unresolved. Cancellation
@@ -326,10 +322,14 @@ class ImportDevicesJob(JobRunner):
                 device_result["failed"] = [{"device_id": device_id, "error": msg} for device_id in device_ids]
                 batch_blocked_msg = msg
             else:
-                # Shared decision, identical to the sync view: genuine collisions block the whole
-                # batch; rows that couldn't be collision-checked are SKIPPED (not a whole-batch
-                # block) so a transient miss on one row doesn't drop the entire import.
-                precheck_outcome = classify_bulk_precheck(collisions, unresolved, device_ids, vm_imports)
+                # Apply the same whole-batch blockers and unresolved-row skips as the sync view.
+                precheck_outcome = classify_bulk_precheck(
+                    collisions,
+                    unresolved,
+                    stack_ambiguities,
+                    device_ids,
+                    vm_imports,
+                )
                 skipped_id_set = set(precheck_outcome.skipped_ids)
                 if precheck_outcome.blocked:
                     self.logger.error(precheck_outcome.block_message)

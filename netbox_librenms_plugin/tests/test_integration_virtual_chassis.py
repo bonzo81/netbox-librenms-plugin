@@ -363,8 +363,8 @@ class TestDetectVCEdgeCases:
 
         assert result is None
 
-    def test_api_error_on_root_returns_none(self, librenms_server):
-        """500 error on root inventory → returns None."""
+    def test_api_error_on_root_reports_detection_failure(self, librenms_server):
+        """A root-inventory API error stays distinct from a confirmed non-stack."""
         from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
 
         api = _make_api(librenms_server.url)
@@ -376,7 +376,8 @@ class TestDetectVCEdgeCases:
 
         result = detect_virtual_chassis_from_inventory(api, device_id)
 
-        assert result is None
+        assert result["detection_failed"] is True
+        assert result["detection_error"] == "LibreNMS root inventory request failed"
 
     def test_empty_serial_included_in_members(self, librenms_server):
         """Members with empty entPhysicalSerialNum are included, not skipped."""
@@ -572,7 +573,7 @@ class TestPrefetchVCHTTP:
 
 
 class TestNegativeVCCaching:
-    """Negative results (non-stack, API errors) must be cached to suppress repeated hits."""
+    """Confirmed non-stack results are cached, but transient API failures are not."""
 
     def test_non_vc_device_result_is_cached(self, librenms_server):
         """Single device (not a stack) → detect returns None → empty result cached."""
@@ -599,8 +600,8 @@ class TestNegativeVCCaching:
         assert get_virtual_chassis_data(api, device_id) == result
         assert len(librenms_server.requests) == request_count
 
-    def test_api_error_result_is_cached(self, librenms_server):
-        """API 500 on inventory → detect returns None → empty result still cached."""
+    def test_api_error_result_is_not_cached(self, librenms_server):
+        """An inventory API failure remains visible and does not poison the negative cache."""
         from django.core.cache import cache
 
         from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key, get_virtual_chassis_data
@@ -615,7 +616,9 @@ class TestNegativeVCCaching:
 
         assert result is not None
         assert result.get("is_stack") is False
-        assert cache.get(_vc_cache_key(api, device_id))["is_stack"] is False
+        assert result.get("detection_failed") is True
+        assert result.get("detection_error") == "LibreNMS root inventory request failed"
+        assert cache.get(_vc_cache_key(api, device_id)) is None
 
     def test_force_refresh_bypasses_negative_cache(self, librenms_server):
         """force_refresh=True re-fetches even when a negative result is cached."""

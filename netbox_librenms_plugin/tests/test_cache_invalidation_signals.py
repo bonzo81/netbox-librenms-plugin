@@ -834,7 +834,9 @@ class TestEverySchedulingViewTakesTheClaim:
             for local_name, target in imports.items():
                 refers.setdefault(self._qualified_name(module_name, local_name), set()).add(target)
 
-            def visit(body, class_name=""):
+            # Bind this iteration's module scope: visit() runs immediately below, but the
+            # defaults make the capture explicit rather than relying on call order.
+            def visit(body, class_name="", module_name=module_name, imports=imports):
                 for node in body:
                     if isinstance(node, ast.ClassDef):
                         visit(node.body, self._qualified_name(class_name, node.name))

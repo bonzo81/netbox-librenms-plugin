@@ -1,8 +1,8 @@
 from django.urls import path
 from netbox.api.routers import NetBoxRouter
 
-from . import views
 from ..utils import slashless_route_aliases
+from . import views
 
 app_name = "netbox_librenms_plugin"
 

@@ -6,9 +6,7 @@ from utilities.paginator import EnhancedPaginator, get_paginate_count
 
 
 class SiteLocationSyncTable(tables.Table):
-    """
-    Table for displaying Netbox Site and Librenms Location data.
-    """
+    """Table for displaying Netbox Site and Librenms Location data."""
 
     netbox_site = tables.Column(linkify=True)
     latitude = tables.Column(accessor="netbox_site__latitude")

@@ -17,7 +17,6 @@ import ast
 import sys
 from pathlib import Path
 
-
 HASHABLE_NARROWING_TYPES = frozenset({"str", "int", "bytes", "float", "frozenset"})
 TAINTING_CALLS = frozenset({"get", "getlist", "loads", "pop"})
 # Literals that cannot be a set member or a dict key, so a read that can return one is tainting.
@@ -425,7 +424,7 @@ class MembershipChecker(ast.NodeVisitor):
             return
 
 
-def collect_container_names(paths):
+def collect_container_names(paths):  # noqa: C901
     """Return the container names visible to each path, including imports."""
     paths = tuple(paths)
     names_by_path = {path: set() for path in paths}

@@ -21,11 +21,11 @@
 
 import django.db.models.deletion
 import netbox.models.deletion
-import netbox_librenms_plugin.models
 import taggit.managers
 import utilities.json
 from django.db import migrations, models
 
+import netbox_librenms_plugin.models
 
 # Named at module level so the test-suite seed restore reads the same declared values this
 # migration inserts, rather than a second copy that can drift from them.
