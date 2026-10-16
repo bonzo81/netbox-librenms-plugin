@@ -1,0 +1,15 @@
+<!-- ruleid: no-scroll-wrapper-on-sync-table -->
+<div class="table-responsive">{% include 'inc/table.html' with table=cable_sync.table %}</div>
+<!-- ruleid: no-scroll-wrapper-on-sync-table -->
+<div class='table-responsive'>
+    {% include "inc/table.html" with table=table %}
+</div>
+<!-- ok: no-scroll-wrapper-on-sync-table -->
+{% include 'inc/table.html' with table=cable_sync.table %}
+<!-- ok: no-scroll-wrapper-on-sync-table -->
+<div class="table-responsive device-import-table-wrapper">
+    {% include 'inc/table.html' %}
+</div>
+<!-- ok: no-scroll-wrapper-on-sync-table -->
+<div class="table-responsive">
+    <table class="table table-hover">

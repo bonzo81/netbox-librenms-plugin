@@ -1339,6 +1339,22 @@ rules:
           - pattern-regex: \b(?:cf|custom_field_data)\s*\.\s*librenms_id\b
           - pattern-regex: \b(?:cf|custom_field_data)\s*\|\s*\w+\s*:\s*["']librenms_id["']
       - pattern-not-inside: "{# ... #}"
+  - id: no-scroll-wrapper-on-sync-table
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      A table-responsive wrapper scrolls its content, so it clips a member dropdown that opens
+      inside the table. Include the table without the wrapper.
+    metadata:
+      category: correctness
+      references:
+        - ".github/instructions/frontend.instructions.md"
+    paths:
+      include:
+        - "*.html"
+    patterns:
+      - pattern-regex: class=["']table-responsive["'][^>]*>\s*\{%\s*include\s+["']inc/table\.html["']
+
   - id: conflict-raised-without-record
     languages: [python]
     severity: ERROR

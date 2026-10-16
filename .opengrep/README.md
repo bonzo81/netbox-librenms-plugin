@@ -63,6 +63,7 @@ unchecked until that review.
 | `no-stored-mapping-access-orm` | error | A `custom_field_data__librenms_id` lookup, projection or ordering, also across a relation such as `device__`; a `has_key`, `has_keys`, `has_any_keys` or `contains` lookup on the container whose value names the key; a projection of the whole container; or a `custom_fields.librenms_id` path. |
 | `no-stored-mapping-access-private` | error | An import or attribute access of a private name of `server_mappings`, or a patch target string that names one. |
 | `no-stored-mapping-access-template` | error | A template that reads `cf.librenms_id` or `custom_field_data.librenms_id`, or looks the key up with a filter. |
+| `no-scroll-wrapper-on-sync-table` | error | A `table-responsive` wrapper directly around `inc/table.html`. It clips a member dropdown that opens inside the table. A wrapper with another class, or one written with `{% if %}` in its class, is outside this check. |
 | `conflict-raised-without-record` | error | A raise of a `TransactionConflict` or `ConcurrentRowChange` class that does not go through `recorded_conflict(...)`. |
 | `no-lock-on-exists` | error | A `select_for_update()` chain that ends in `exists()` or `count()`. |
 | `no-monkeypatch-on-django-proxy` | error | A test calls a monkeypatch `setattr` or `delattr` on the Django cache, settings or connection proxy, or on a `cache` attribute of a module, also as a dotted-string target. |
