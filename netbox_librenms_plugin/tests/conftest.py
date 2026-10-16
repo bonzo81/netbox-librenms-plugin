@@ -2,7 +2,7 @@
 
 import json
 import os
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from copy import deepcopy
 from itertools import chain
 from threading import BrokenBarrierError
@@ -780,9 +780,18 @@ def run_in_threads(*calls, barriers, timeout):
                 barrier.abort()
             raise
 
-    with ThreadPoolExecutor(max_workers=len(calls)) as executor:
+    executor = ThreadPoolExecutor(max_workers=len(calls))
+    try:
         futures = [executor.submit(run, call) for call in calls]
-        failures = [error for future in futures if (error := future.exception(timeout=timeout)) is not None]
+        # One deadline for all calls; a hung call must fail the run, not block the executor exit.
+        _done, pending = wait(futures, timeout=timeout)
+        if pending:
+            for barrier in barriers:
+                barrier.abort()
+            raise TimeoutError(f"{len(pending)} of {len(calls)} threaded calls did not finish in {timeout}s")
+        failures = [error for future in futures if (error := future.exception()) is not None]
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
     failures.sort(key=lambda error: isinstance(error, BrokenBarrierError))
     if failures:
         raise failures[0]

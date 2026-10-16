@@ -1181,6 +1181,35 @@ def test_run_in_threads_raises_the_failure_that_broke_the_barrier_at_once():
     assert monotonic() - started < 2
 
 
+def test_run_in_threads_fails_a_hung_call_within_its_timeout():
+    """A hung call fails the run at the deadline, and a peer at the barrier is released at once."""
+    from threading import Barrier, BrokenBarrierError, Timer
+    from time import monotonic
+
+    barrier = Barrier(2)
+    hung = Event()
+    # Release the hung thread later, so a helper that waits for it ends instead of hanging the session.
+    release = Timer(3, hung.set)
+    release.start()
+    peer_released = Event()
+
+    def peer():
+        try:
+            barrier.wait(timeout=30)
+        except BrokenBarrierError:
+            peer_released.set()
+
+    started = monotonic()
+    try:
+        with pytest.raises(TimeoutError):
+            run_in_threads(hung.wait, peer, barriers=(barrier,), timeout=0.5)
+        assert monotonic() - started < 2
+    finally:
+        hung.set()
+        release.cancel()
+    assert peer_released.wait(timeout=2)
+
+
 def test_opposite_order_port_claims_refuse_without_deadlock():
     from threading import Barrier
     from django.db import close_old_connections, connections, transaction
