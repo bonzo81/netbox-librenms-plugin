@@ -53,7 +53,7 @@ unchecked until that review.
 | `no-django-testcase-in-tests` | warning | A test directly imports or inherits Django `TestCase`. Dynamic bases are outside this check. |
 | `no-unittest-assertions` | warning | A test calls a `self` method with a unittest assertion API name. |
 | `xfail-needs-raises` | error | A test marks an expected failure with `pytest.mark.xfail` and does not name the exception with `raises=`, or gives `raises=None`. An alias of the marker is not followed. |
-| `executor-needs-bounded-executor` | error | A test uses `ThreadPoolExecutor` as a context manager, not `tests.conftest.bounded_executor`. |
+| `executor-needs-bounded-executor` | error | A test creates a `ThreadPoolExecutor` and does not use `tests.conftest.bounded_executor`. `tests/conftest.py` is excluded. |
 | `barrier-needs-run-in-threads` | error | A test creates a `threading.Barrier` and then starts threads with `ThreadPoolExecutor` or `Thread`, not with `tests.conftest.run_in_threads`. |
 | `recorded-response-needs-envelope` | error | Code reads a recorded response as a bare `[status, body]` list instead of through `data_shapes.envelope.unwrap_response`. |
 | `no-selected-fuzzy-apis` | warning | Code calls selected approximate-selection APIs. This does not prove exact-only selection. |
@@ -106,9 +106,9 @@ The Barrier rule checks a test function that assigns a `Barrier(...)` or `thread
 starts a thread. It does not follow a barrier that another function creates, a thread that a helper starts,
 or a handshake with an `Event`.
 
-The executor rule checks a `with` statement whose context manager is a `ThreadPoolExecutor(...)` call,
-also through an import alias. It does not see an executor that a variable or a helper supplies, or an
-explicit `shutdown(wait=True)` after a timeout.
+The executor rule checks each `ThreadPoolExecutor(...)` call, also through an import alias or a module
+alias. It does not see an executor that a variable of another type supplies, such as a class in a
+variable. It excludes `tests/conftest.py`, which holds `bounded_executor` and `run_in_threads`.
 
 The URL rule checks `<str:pk>` and `<pk>` in literal routes and local string constants.
 It leaves `<str:id>` alone because external IDs can contain text. The `pk` name is a package

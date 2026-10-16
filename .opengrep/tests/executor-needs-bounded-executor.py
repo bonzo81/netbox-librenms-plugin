@@ -45,9 +45,19 @@ def test_bounded_executor():
 
 
 def test_executor_with_explicit_shutdown():
-    # ok: executor-needs-bounded-executor
+    # ruleid: executor-needs-bounded-executor
     executor = ThreadPoolExecutor(max_workers=1)
     try:
         executor.submit(print).result(timeout=10)
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
+
+
+def test_executor_passed_on():
+    # ruleid: executor-needs-bounded-executor
+    run_later(futures.ThreadPoolExecutor(max_workers=1))
+
+
+def run_later(executor):
+    # ok: executor-needs-bounded-executor
+    executor.submit(print)

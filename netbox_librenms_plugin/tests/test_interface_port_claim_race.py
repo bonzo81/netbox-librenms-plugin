@@ -1,13 +1,18 @@
 """Two writers on one device that bind the same LibreNMS port at the same time leave one holder."""
 
 import time
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import wait
 from threading import Event
 
 import pytest
 from django.apps import apps
 
-from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_device, make_superuser
+from netbox_librenms_plugin.tests.conftest import (
+    bounded_executor,
+    configure_default_librenms_server,
+    make_device,
+    make_superuser,
+)
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
     SERVER_KEY,
     post_interface_sync,
@@ -172,20 +177,19 @@ def _on_own_connection(writer, *args, pids, role, paused=None, resume=None):
 def _race(first, second, while_first_paused):
     """Pause *first* at its first interface write, run *second*, observe, then release *first*."""
     first_paused, resume, pids = Event(), Event(), {}
-    executor = ThreadPoolExecutor(max_workers=2)
-    try:
-        first_future = executor.submit(
-            _on_own_connection, *first, pids=pids, role="first", paused=first_paused, resume=resume
-        )
-        assert first_paused.wait(timeout=PAUSE_TIMEOUT_SECONDS), "the first writer never reached its write"
-        second_future = executor.submit(_on_own_connection, *second, pids=pids, role="second")
-        observed = while_first_paused(second_future, pids)
-        resume.set()
-        first_result = first_future.result(timeout=PAUSE_TIMEOUT_SECONDS)
-        second_result = second_future.result(timeout=PAUSE_TIMEOUT_SECONDS)
-    finally:
-        resume.set()
-        executor.shutdown(wait=False, cancel_futures=True)
+    with bounded_executor(max_workers=2) as executor:
+        try:
+            first_future = executor.submit(
+                _on_own_connection, *first, pids=pids, role="first", paused=first_paused, resume=resume
+            )
+            assert first_paused.wait(timeout=PAUSE_TIMEOUT_SECONDS), "the first writer never reached its write"
+            second_future = executor.submit(_on_own_connection, *second, pids=pids, role="second")
+            observed = while_first_paused(second_future, pids)
+            resume.set()
+            first_result = first_future.result(timeout=PAUSE_TIMEOUT_SECONDS)
+            second_result = second_future.result(timeout=PAUSE_TIMEOUT_SECONDS)
+        finally:
+            resume.set()
     return first_result, second_result, observed
 
 

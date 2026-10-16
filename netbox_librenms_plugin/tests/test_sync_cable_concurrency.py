@@ -1,6 +1,5 @@
 """PostgreSQL concurrency coverage for cable overwrite decisions."""
 
-from concurrent.futures import ThreadPoolExecutor
 from queue import Queue
 from time import monotonic, sleep
 from types import SimpleNamespace
@@ -239,8 +238,7 @@ def test_termination_change_scope_is_rechecked_after_row_lock():
         finally:
             close_old_connections()
 
-    executor = ThreadPoolExecutor(max_workers=1)
-    try:
+    with bounded_executor(max_workers=1) as executor:
         with transaction.atomic():
             ConsoleServerPort.objects.select_for_update().get(pk=csp.pk)
             future = executor.submit(lock_terminations)
@@ -261,8 +259,6 @@ def test_termination_change_scope_is_rechecked_after_row_lock():
             ConsoleServerPort.objects.filter(pk=csp.pk).update(description="restricted")
 
         assert future.result(timeout=5) is None
-    finally:
-        executor.shutdown(wait=True)
 
 
 def test_termination_owner_device_is_locked_with_permission_scope():
@@ -313,20 +309,19 @@ def test_termination_owner_device_is_locked_with_permission_scope():
         finally:
             close_old_connections()
 
-    executor = ThreadPoolExecutor(max_workers=1)
-    try:
-        future = executor.submit(hold_sync_scope)
-        assert locked.get(timeout=5) is not None
-        with pytest.raises(OperationalError), transaction.atomic():
-            with connection.cursor() as cursor:
-                cursor.execute("SET LOCAL lock_timeout = '500ms'")
-            Device.objects.filter(pk=local_device.pk).update(site=out_of_scope)
-        release.put(True)
-        future.result(timeout=5)
-    finally:
-        if release.empty():
+    with bounded_executor(max_workers=1) as executor:
+        try:
+            future = executor.submit(hold_sync_scope)
+            assert locked.get(timeout=5) is not None
+            with pytest.raises(OperationalError), transaction.atomic():
+                with connection.cursor() as cursor:
+                    cursor.execute("SET LOCAL lock_timeout = '500ms'")
+                Device.objects.filter(pk=local_device.pk).update(site=out_of_scope)
             release.put(True)
-        executor.shutdown(wait=True)
+            future.result(timeout=5)
+        finally:
+            if release.empty():
+                release.put(True)
 
 
 def test_locked_local_owner_must_still_belong_to_the_page_virtual_chassis():
@@ -507,25 +502,24 @@ def test_concurrent_tag_renames_keep_settings_and_provenance_identity_together()
         finally:
             close_old_connections()
 
-    executor = ThreadPoolExecutor(max_workers=2)
-    try:
-        with transaction.atomic():
-            LibreNMSSettings.objects.select_for_update().get(pk=settings.pk)
-            first = executor.submit(rename_tag, forms[0], pause_after_settings_lock=True)
-            first_pid = worker_pids.get(timeout=5)
-            _wait_until_blocked(first_pid, first)
+    with bounded_executor(max_workers=2) as executor:
+        try:
+            with transaction.atomic():
+                LibreNMSSettings.objects.select_for_update().get(pk=settings.pk)
+                first = executor.submit(rename_tag, forms[0], pause_after_settings_lock=True)
+                first_pid = worker_pids.get(timeout=5)
+                _wait_until_blocked(first_pid, first)
 
-        assert first_has_settings_lock.get(timeout=5) is True
-        second = executor.submit(rename_tag, forms[1])
-        second_pid = worker_pids.get(timeout=5)
-        _wait_until_blocked(second_pid, second)
-        release_first.put(True)
-        assert first.result(timeout=10) is True
-        assert second.result(timeout=10) is True
-    finally:
-        if release_first.empty():
+            assert first_has_settings_lock.get(timeout=5) is True
+            second = executor.submit(rename_tag, forms[1])
+            second_pid = worker_pids.get(timeout=5)
+            _wait_until_blocked(second_pid, second)
             release_first.put(True)
-        executor.shutdown(wait=True)
+            assert first.result(timeout=10) is True
+            assert second.result(timeout=10) is True
+        finally:
+            if release_first.empty():
+                release_first.put(True)
 
     settings.refresh_from_db()
     tag.refresh_from_db()
