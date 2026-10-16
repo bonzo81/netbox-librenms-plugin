@@ -4695,11 +4695,11 @@ FIT_TABLES = {
 def _render_fit_table(page, table_id, card_width):
     """Render one sync table inside a card of the given width, with the page script initialized."""
     spec = FIT_TABLES[table_id]
-    # The VC member column width comes from the interface template's style block.
-    vc_width = "width: 13rem; min-width: 13rem;"
     head = "".join(f'<th class="text-wrap" data-col="{col}">{label}</th>' for col, label in spec["headers"])
+    # The VC member column opts into the shared width class from librenms_sync.css, as the tables do.
     row = "".join(
-        f'<td data-col="{col}" style="{vc_width if col == "device_selection" else ""}">{spec["cells"][col]}</td>'
+        f'<td data-col="{col}" class="{"device-selection-col" if col == "device_selection" else ""}">'
+        f"{spec['cells'][col]}</td>"
         for col, _label in spec["headers"]
     )
     page.set_content(
@@ -4708,6 +4708,7 @@ def _render_fit_table(page, table_id, card_width):
         f'<table class="table" id="{table_id}"><thead><tr>{head}</tr></thead>'
         f"<tbody>{f'<tr>{row}</tr>' * 3}</tbody></table></div></div>"
     )
+    page.add_style_tag(path=str(STYLE_PATH))
     _add_page_scripts(page)
     page.evaluate("initializeScripts()")
 

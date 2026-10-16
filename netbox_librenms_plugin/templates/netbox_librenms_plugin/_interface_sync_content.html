@@ -145,24 +145,6 @@
                 </div>
             </div>
             <style>
-                /* Your existing CSS rules */
-                .ts-wrapper.multi .ts-control {
-                    display: flex !important;
-                    flex-wrap: wrap;
-                    align-items: center;
-                }
-
-                /* A fixed width keeps the member dropdown from resizing on open, and narrow enough for the table to fit its card. */
-                td[data-col="device_selection"] {
-                    width: 13rem;
-                    min-width: 13rem;
-                }
-
-                td[data-col="device_selection"] .ts-wrapper {
-                    width: 100%;
-                    max-width: 100%;
-                }
-
                 /* A row the interface rules ignore is shown greyed, and only on request. */
                 #librenms-interface-table tr[data-rule-state="ignored"] > td,
                 #librenms-interface-table-vm tr[data-rule-state="ignored"] > td {
