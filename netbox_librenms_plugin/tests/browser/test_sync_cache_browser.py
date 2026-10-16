@@ -1176,8 +1176,9 @@ def test_vlan_row_submit_keeps_another_page_selection_and_group(page):
 
 # Tabler's modal layout: the open modal covers the viewport, so a click beside the dialog hits the modal itself.
 MODAL_CSS = (
-    "<style>.modal { display: none; position: fixed; inset: 0; } .modal.show { display: block; }"
-    " .modal-dialog { width: 400px; margin: 100px auto; }</style>"
+    "<style>.modal { display: none; position: fixed; inset: 0; z-index: 1055; } .modal.show { display: block; }"
+    " .modal-dialog { width: 400px; margin: 100px auto; background: #fff; }"
+    " .modal-backdrop { position: fixed; inset: 0; z-index: 1050; background: rgba(0, 0, 0, .5); }</style>"
 )
 CONFIRM_MODAL = "#librenms-confirm-modal"
 
@@ -1338,6 +1339,97 @@ def test_an_hx_confirm_question_asks_in_the_plugin_modal(page, accept):
 
     assert requests == ([f"{HTMX_SYNC_URL}/transfer"] if accept else [])
     assert page.evaluate("window.confirmCalls") == []
+
+
+def _modal_state(page):
+    """Return which modals are open, how many backdrops exist, and whether the page scroll is locked."""
+    return page.evaluate(
+        """() => ({
+            open: Array.from(document.querySelectorAll('.modal.show')).map((modal) => modal.id),
+            backdrops: document.querySelectorAll('.modal-backdrop').length,
+            locked: document.body.classList.contains('modal-open'),
+        })"""
+    )
+
+
+def _nested_confirm_page(page, requests):
+    def answer(route):
+        requests.append(route.request.url)
+        route.fulfill(status=200, content_type="text/html", body="")
+
+    page.route(f"{HTMX_SYNC_URL}**", answer)
+    page.set_content(
+        MODAL_CSS
+        + f"""
+        <div class="modal" id="parent-modal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">
+          <div class="modal-body">
+            <button id="move" type="button" hx-post="{HTMX_SYNC_URL}/move" hx-swap="none"
+                    hx-confirm="Move interface 'eth0' to winner?">Move</button>
+          </div>
+          <div class="modal-footer"><button type="button" data-bs-dismiss="modal">Close parent</button></div>
+        </div></div></div>
+        """
+    )
+    _add_page_scripts(page)
+    page.evaluate("showModal(document.getElementById('parent-modal'))")
+    assert _modal_state(page) == {"open": ["parent-modal"], "backdrops": 1, "locked": True}
+    page.click("#move")
+    confirm = page.locator(CONFIRM_MODAL)
+    expect(confirm).to_be_visible()
+    # The confirmation sits on top: the point under its buttons belongs to the confirm modal.
+    box = confirm.get_by_role("button", name="Confirm").bounding_box()
+    on_top = page.evaluate(
+        "([x, y]) => !!document.elementFromPoint(x, y)?.closest('#librenms-confirm-modal')",
+        [box["x"] + box["width"] / 2, box["y"] + box["height"] / 2],
+    )
+    assert on_top
+    return confirm
+
+
+@pytest.mark.parametrize("dismiss", ["cancel", "escape", "close", "backdrop"])
+def test_a_confirmation_over_an_open_modal_leaves_the_parent_open_when_dismissed(page, dismiss):
+    requests = []
+    confirm = _nested_confirm_page(page, requests)
+
+    if dismiss == "cancel":
+        confirm.get_by_role("button", name="Cancel").click()
+    elif dismiss == "escape":
+        page.keyboard.press("Escape")
+    elif dismiss == "close":
+        confirm.get_by_role("button", name="Close").click()
+    else:
+        page.mouse.click(5, 5)
+    expect(confirm).to_be_hidden()
+
+    assert requests == []
+    assert _modal_state(page) == {"open": ["parent-modal"], "backdrops": 1, "locked": True}
+    # Focus returns into the parent, so its own Escape and focus trap keep working.
+    assert page.evaluate("document.activeElement.id") == "move"
+
+
+def test_a_confirmation_over_an_open_modal_sends_once_and_leaves_the_parent_open(page):
+    requests = []
+    confirm = _nested_confirm_page(page, requests)
+
+    with page.expect_response(f"{HTMX_SYNC_URL}/move"):
+        confirm.get_by_role("button", name="Confirm").click()
+    expect(confirm).to_be_hidden()
+
+    assert requests == [f"{HTMX_SYNC_URL}/move"]
+    assert _modal_state(page) == {"open": ["parent-modal"], "backdrops": 1, "locked": True}
+    # Closing the parent afterwards removes the last backdrop and the scroll lock.
+    page.get_by_role("button", name="Close parent").click()
+    assert _modal_state(page) == {"open": [], "backdrops": 0, "locked": False}
+
+
+def test_a_standalone_confirmation_leaves_no_backdrop_or_scroll_lock(page):
+    _rebind_form_page(page)
+
+    page.click("#rebind")
+    assert _modal_state(page) == {"open": ["librenms-confirm-modal"], "backdrops": 1, "locked": True}
+    page.locator(CONFIRM_MODAL).get_by_role("button", name="Cancel").click()
+
+    assert _modal_state(page) == {"open": [], "backdrops": 0, "locked": False}
 
 
 @pytest.mark.parametrize(

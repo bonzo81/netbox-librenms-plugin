@@ -68,25 +68,39 @@ function showModal(el) {
     }
 
     // Fallback: manual DOM manipulation
+    const openBelow = Array.from(document.querySelectorAll('.modal.show')).filter((modal) => modal !== el);
+    // Focus goes back to the opener on close, so a key such as Escape reaches the modal below again.
+    el._syncReturnFocus = document.activeElement;
     el.classList.add('show');
     el.style.display = 'block';
     el.setAttribute('aria-modal', 'true');
     el.removeAttribute('aria-hidden');
+    document.body.classList.add('modal-open');
+    if (openBelow.length) {
+        // A modal over an open modal gets its own backdrop, and both stack above the modal below.
+        const top = Math.max(...openBelow.map((modal) => Number(getComputedStyle(modal).zIndex) || 1055));
+        const stacked = document.createElement('div');
+        stacked.className = 'modal-backdrop fade show';
+        stacked.style.zIndex = String(top + 5);
+        el.style.zIndex = String(top + 10);
+        el.before(stacked);
+        el._syncStackedBackdrop = stacked;
+        return;
+    }
     let backdrop = document.querySelector('.modal-backdrop');
     if (!backdrop) {
         backdrop = document.createElement('div');
         backdrop.className = 'modal-backdrop fade show';
         document.body.appendChild(backdrop);
     }
-    document.body.classList.add('modal-open');
 
     // Backdrop element click → close (only needed in manual fallback).
     // Bind once per backdrop so repeated showModal() calls do not stack handlers.
     if (!backdrop._syncBackdropClickBound) {
         backdrop.addEventListener('click', function () {
-            const activeModal = document.querySelector('.modal.show');
-            if (activeModal) {
-                hideModal(activeModal);
+            const openModals = document.querySelectorAll('.modal.show');
+            if (openModals.length) {
+                hideModal(openModals[openModals.length - 1]);
             }
         });
         backdrop._syncBackdropClickBound = true;
@@ -115,6 +129,13 @@ function hideModal(el) {
     el.style.display = 'none';
     el.setAttribute('aria-hidden', 'true');
     el.removeAttribute('aria-modal');
+    el.style.removeProperty('z-index');
+    el._syncStackedBackdrop?.remove();
+    el._syncStackedBackdrop = null;
+    if (el.contains(document.activeElement) && el._syncReturnFocus?.isConnected) el._syncReturnFocus.focus();
+    el._syncReturnFocus = null;
+    // A modal still open below keeps its backdrop and the scroll lock.
+    if (document.querySelector('.modal.show')) return;
     document.querySelectorAll('.modal-backdrop').forEach((backdrop) => backdrop.remove());
     document.body.classList.remove('modal-open');
     document.body.style.removeProperty('padding-right');
@@ -2053,7 +2074,10 @@ function syncConfirmModal() {
     });
     modal.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') hideModal(modal);
+        e.stopPropagation();
     });
+    // A click or key inside the confirmation must not reach a modal below, which would close on it.
+    modal.addEventListener('click', (e) => e.stopPropagation());
     document.body.appendChild(modal);
     return modal;
 }
@@ -2064,6 +2088,9 @@ function syncConfirmModal() {
  */
 function confirmSyncAction(message, action) {
     const modal = syncConfirmModal();
+    // Inside the top open modal, that modal's focus trap lets the confirmation take focus.
+    const below = Array.from(document.querySelectorAll('.modal.show')).filter((open) => open !== modal).pop();
+    (below || document.body).appendChild(modal);
     modal.querySelector('[data-confirm-message]').textContent = message;
     pendingSyncConfirmAction = action;
     showModal(modal);
