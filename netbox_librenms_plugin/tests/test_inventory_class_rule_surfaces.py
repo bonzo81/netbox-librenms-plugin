@@ -454,6 +454,21 @@ class TestListAndDetail:
         assert str(row.get_cell("description_pattern")) == r"<code>^CB \d+$</code>"
         assert str(row.get_cell("prefer_description")) == '<span class="text-success">Yes</span>'
 
+    def test_the_list_shows_only_the_core_columns_by_default(self, ui):
+        response = ui.get(_url("list"))
+
+        assert [column.name for column in response.context["table"].columns] == [
+            "pk",
+            "name",
+            "match_type",
+            "action",
+            "pattern",
+            "require_serial_match_parent",
+            "manufacturer",
+            "enabled",
+            "actions",
+        ]
+
     def test_the_list_shows_no_display_flag_for_a_skip_rule(self, ui):
         InventoryIgnoreRule.objects.create(name="Skip", match_type="contains", pattern="x", action="skip")
 

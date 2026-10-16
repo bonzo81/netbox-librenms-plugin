@@ -290,18 +290,14 @@ class InventoryIgnoreRuleTable(NetBoxTable):
             "description",
             "actions",
         )
+        # The filter columns are blank on most rules and push the table past its card.
         default_columns = (
             "pk",
-            "id",
             "name",
             "match_type",
             "action",
             "pattern",
             "require_serial_match_parent",
-            "name_pattern",
-            "description_pattern",
-            "model_pattern",
-            "prefer_description",
             "manufacturer",
             "enabled",
             "actions",
