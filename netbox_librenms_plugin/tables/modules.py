@@ -1240,7 +1240,7 @@ class VCModuleTable(LibreNMSModuleTable):
         accessor="selected_device_id",
         orderable=False,
         empty_values=(),
-        attrs={"td": {"data-col": "device_selection"}},
+        attrs={"td": {"class": "device-selection-col", "data-col": "device_selection"}},
         visible=False,
     )
 

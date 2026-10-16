@@ -1,4 +1,4 @@
-"""Guard: a Tabler ``.alert`` holds an optional icon plus ONE content block."""
+"""Template guards: a Tabler ``.alert`` holds one content block, and a template style rule styles only its own table."""
 
 from html.parser import HTMLParser
 from pathlib import Path
@@ -13,6 +13,9 @@ VOID_TAGS = {"br", "img", "input", "hr", "meta", "link", "source", "wbr"}
 # Alerts that choose their own layout keep it: d-flex rows of badges, or block/column alerts.
 OWN_LAYOUT_CLASSES = {"d-flex", "d-block", "flex-column"}
 TEMPLATE_TAGS_ONLY = re2.compile(r"(?s)^(\s|\{%.*?%\}|\{#.*?#\})*$")
+STYLE_BLOCK = re2.compile(r"(?s)<style[^>]*>(.*?)</style>")
+CSS_COMMENT = re2.compile(r"(?s)/\*.*?\*/")
+CSS_SELECTORS = re2.compile(r"([^{}]+)\{")
 
 
 class _AlertScanner(HTMLParser):
@@ -125,3 +128,30 @@ assert scan(source) == [(1, ["text", "div"])]
         check=True,
         timeout=5,
     )
+
+
+def _unscoped_column_selectors(source):
+    """Return the template style selectors that pick a table column without naming the table."""
+    return [
+        selector.strip()
+        for block in STYLE_BLOCK.findall(source)
+        for selectors in CSS_SELECTORS.findall(CSS_COMMENT.sub("", block))
+        for selector in selectors.split(",")
+        if "[data-col=" in selector and not selector.strip().startswith("#")
+    ]
+
+
+def test_the_style_guard_flags_a_column_rule_that_names_no_table():
+    source = '<style>td[data-col="device_selection"] { width: 300px; } #t td[data-col="vrf"] { width: 1px; }</style>'
+
+    assert _unscoped_column_selectors(source) == ['td[data-col="device_selection"]']
+
+
+def test_no_template_style_rule_styles_a_column_of_another_tab_table():
+    """Every tab template is on the same page, so an unscoped column rule also styles the other tabs' tables."""
+    offenders = [
+        f"{path.relative_to(TEMPLATES_DIR)}: {selector}"
+        for path in sorted(TEMPLATES_DIR.rglob("*.html"))
+        for selector in _unscoped_column_selectors(path.read_text(encoding="utf-8"))
+    ]
+    assert offenders == []

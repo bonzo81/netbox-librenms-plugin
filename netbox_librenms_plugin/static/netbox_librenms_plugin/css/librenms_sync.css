@@ -76,3 +76,22 @@
         min-width: min(23rem, calc(100vw - 2rem));
     }
 }
+
+/* The Virtual Chassis member column, which each sync table opts into with this class. A fixed width
+   keeps the member dropdown from resizing on open, and is narrow enough for the table to fit its card. */
+.device-selection-col {
+    width: 13rem;
+    min-width: 13rem;
+}
+
+.device-selection-col .ts-wrapper {
+    width: 100%;
+    max-width: 100%;
+}
+
+/* A multi-select dropdown wraps its chosen items. */
+.ts-wrapper.multi .ts-control {
+    display: flex !important;
+    flex-wrap: wrap;
+    align-items: center;
+}
