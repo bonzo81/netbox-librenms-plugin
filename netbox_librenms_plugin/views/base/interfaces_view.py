@@ -874,6 +874,9 @@ class BaseInterfaceTableView(
             )
 
             rules = interface_rules_for_request(request)
+            # A row with no resolved member is decided for any member: on their shared platform, else global rules only.
+            member_platform_ids = {member.platform_id for member in virtual_chassis_members}
+            any_member_platform_id = member_platform_ids.pop() if len(member_platform_ids) == 1 else None
             target_device_ids = {}
             for port in ports_data:
                 port_id = normalize_librenms_port_id(port.get("port_id"))
@@ -907,8 +910,7 @@ class BaseInterfaceTableView(
                 port["enabled"] = interface_enabled_from_port(port)
 
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                    # The rules read the owner's platform, so an unresolved host row decides nothing.
-                    # An OOB row belongs to the page device, as the writer holds.
+                    # The rules read the owner's platform. An OOB row belongs to the page device, as the writer holds.
                     rule_owner = resolve_interface_row_device(
                         obj,
                         port,
@@ -922,11 +924,12 @@ class BaseInterfaceTableView(
                 else:
                     rule_owner = chassis_member = obj
                 # The writer's own check, so a row never offers a sync the writer refuses.
-                port["rule_decision"] = (
-                    rules.check_interface_write(port, platform_id=rule_owner.platform_id)
-                    if rule_owner is not None
-                    else None
-                )
+                if rule_owner is not None:
+                    port["rule_decision"] = rules.check_interface_write(port, platform_id=rule_owner.platform_id)
+                else:
+                    # Ignored only when the writer refuses every member the user can pick; else it asks for one.
+                    any_member = rules.check_interface_write(port, platform_id=any_member_platform_id)
+                    port["rule_decision"] = any_member if any_member.kind is RuleDecisionKind.IGNORE else None
 
                 netbox_interface = resolve_relationship_row(
                     relationship_context,

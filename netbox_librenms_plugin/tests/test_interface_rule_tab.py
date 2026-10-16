@@ -265,6 +265,50 @@ class TestVirtualChassisOwners:
         assert f'<option value="{first.pk}" selected>' not in unresolved
         assert 'name="sync_one"' not in unresolved
 
+    def _members_on(self, tag, *platforms):
+        _vc, members = make_virtual_chassis_members(tag, count=len(platforms))
+        for member, platform in zip(members, platforms, strict=True):
+            member.platform = platform
+            member.save()
+        members[0].custom_field_data["librenms_id"] = {SERVER_KEY: {"id": 64}}
+        members[0].save()
+        return members[0]
+
+    @pytest.mark.parametrize("scoped", [False, True], ids=["global-rule", "platform-rule"])
+    def test_an_unresolved_row_is_ignored_when_every_member_shares_the_ignoring_platform(
+        self, superuser_client, scoped
+    ):
+        platform = _platform(f"rule-tab-null0-{int(scoped)}")
+        rule = InterfaceTypeMapping.objects.create(
+            action=IGNORE, platform=platform if scoped else None, name_pattern="^null0$"
+        )
+        first = self._members_on(f"rule-tab-null0-{int(scoped)}", platform, platform)
+        _seed(first, [_port(700, "Gi1/0/1"), _port(701, "null0", if_type="other")])
+
+        hidden = _tab(superuser_client, first)
+        shown = _rows(_tab(superuser_client, first, interfaces_show_ignored="1"))
+
+        assert sorted(_rows(hidden)) == [700]
+        assert "1 ignored" in hidden
+        assert 'data-rule-state="ignored"' in _row_tag(shown[701])
+        assert f"Not synced: ignored by interface rule {rule.pk} ({rule})" in shown[701]
+        assert "Select a VC member" not in shown[701]
+
+    def test_mixed_member_platforms_ignore_an_unresolved_row_by_global_rules_only(self, superuser_client):
+        platform_p, platform_q = _platform("rule-tab-mixed-p"), _platform("rule-tab-mixed-q")
+        InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform_p, name_pattern="^null0$")
+        InterfaceTypeMapping.objects.create(action=IGNORE, platform=None, name_pattern="^lo0$")
+        first = self._members_on("rule-tab-mixed", platform_p, platform_q)
+        _seed(first, [_port(710, "null0", if_type="other"), _port(711, "lo0", if_type="softwareLoopback")])
+
+        hidden = _tab(superuser_client, first)
+        shown = _rows(_tab(superuser_client, first, interfaces_show_ignored="1"))
+
+        assert sorted(_rows(hidden)) == [710]
+        assert "1 ignored" in hidden
+        assert 'data-rule-state="owner_unresolved"' in _row_tag(shown[710])
+        assert 'data-rule-state="ignored"' in _row_tag(shown[711])
+
     def test_the_verify_repaint_decides_with_the_selected_member(self, superuser_client):
         first, second = self._chassis("rule-tab-verify")
         _seed(first, [_port(600, "Vlan10", if_type="propVirtual")])
