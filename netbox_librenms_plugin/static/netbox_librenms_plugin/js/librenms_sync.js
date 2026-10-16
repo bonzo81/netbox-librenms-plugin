@@ -3594,12 +3594,14 @@ function _hideSyncTableColumn(table, col) {
 }
 
 function _showSyncTableFitNote(table, hiddenCols) {
-    let note = table.previousElementSibling;
-    if (!note?.hasAttribute('data-table-fit-note')) {
+    // Other notices are also inserted before the table, so find the note by its owner, not by position.
+    let note = Array.from(table.parentElement.querySelectorAll(':scope > [data-table-fit-note]'))
+        .find((el) => el.dataset.tableFitNote === table.id);
+    if (!note) {
         if (!hiddenCols.length) return;
         note = document.createElement('div');
         note.className = 'small text-muted px-2 pb-2';
-        note.setAttribute('data-table-fit-note', '');
+        note.setAttribute('data-table-fit-note', table.id);
         table.before(note);
     }
     const labels = hiddenCols.map((col) => _syncTableHeader(table, col).textContent.trim());

@@ -4530,6 +4530,28 @@ def test_sync_table_fits_its_card_at_narrow_widths(page, table_id, card_width):
 
 
 @pytest.mark.parametrize("table_id", sorted(FIT_TABLES))
+def test_sync_table_keeps_one_fit_note_when_a_notice_lands_before_the_table(page, table_id):
+    _render_fit_table(page, table_id, 687)
+    # The off-page selection notice and the cross-page notices are inserted directly before the table.
+    page.evaluate(
+        "(id) => { const n = document.createElement('div'); n.className = 'off-page-notice';"
+        " document.getElementById(id).before(n); }",
+        table_id,
+    )
+
+    page.evaluate("document.getElementById('frame').style.width = '2400px'")
+    page.wait_for_function(
+        "(n) => document.querySelectorAll('#frame tbody tr:first-child td:not(.d-none)').length === n",
+        arg=len(FIT_TABLES[table_id]["headers"]),
+    )
+    assert page.evaluate("document.querySelectorAll('#frame [data-table-fit-note]:not([hidden])').length") == 0
+
+    page.evaluate("document.getElementById('frame').style.width = '687px'")
+    page.wait_for_function("() => !!document.querySelector('#frame [data-table-fit-note]:not([hidden])')")
+    assert page.evaluate("document.querySelectorAll('#frame [data-table-fit-note]').length") == 1
+
+
+@pytest.mark.parametrize("table_id", sorted(FIT_TABLES))
 def test_sync_table_shows_hidden_columns_again_when_the_card_widens(page, table_id):
     _render_fit_table(page, table_id, 687)
     narrow = _fit_state(page, table_id)
