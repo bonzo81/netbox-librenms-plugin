@@ -718,7 +718,8 @@ class LibreNMSInterfaceTable(tables.Table):
         if state == ROW_INCOMPLETE:
             reason = decision_reason(record["rule_decision"])
             return self._render_info_pill("warning", "mdi-refresh", "Refresh needed", f"Not synced: {reason}")
-        return self._render_info_pill("warning", "mdi-help-circle", "Select a VC member", _OWNER_UNRESOLVED_HINT)
+        # A short label on one line keeps the actions column narrow; the title gives the full hint.
+        return self._render_info_pill("warning", "mdi-help-circle", "Select\u00a0member", _OWNER_UNRESOLVED_HINT)
 
     def _render_member_count_pill(self, member_names, icon, singular, plural, tooltip_prefix="In LibreNMS"):
         """

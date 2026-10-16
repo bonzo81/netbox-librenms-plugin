@@ -4346,7 +4346,7 @@ FIT_TABLES = {
                 '<div class="lh-sm"><span class="badge text-wrap text-start">LAG lag-2</span>'
                 ' <button type="button" class="btn btn-sm">Sync</button></div>'
             ),
-            "actions": '<div class="lh-sm"><span class="badge text-wrap text-start">Select a VC member</span></div>',
+            "actions": '<div class="lh-sm"><span class="badge text-wrap text-start">Select\u00a0member</span></div>',
         },
         "keep": ["device_selection", "name", "parent", "actions"],
     },

@@ -31,6 +31,9 @@ from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 SERVER_KEY = "default"
 IGNORE = InterfaceTypeMapping.ACTION_IGNORE
 RULE_TABLE = "netbox_librenms_plugin_interfacetypemapping"
+# The short pill label stays on one line; its title says which member to select and why.
+OWNER_PILL = "Select\u00a0member"
+OWNER_HINT = "Select the Virtual Chassis member this interface belongs to"
 
 
 def _port(port_id, name, *, if_type="ethernetCsmacd", descr=None):
@@ -278,7 +281,7 @@ class TestVirtualChassisOwners:
         assert 'data-rule-state=""' in _row_tag(rows[501])
         unresolved = rows[502]
         assert 'data-rule-state="owner_unresolved"' in _row_tag(unresolved)
-        assert "Select a VC member" in unresolved
+        assert OWNER_PILL in unresolved
         assert '<option value="" selected>Select a member</option>' in unresolved
         assert f'<option value="{first.pk}" selected>' not in unresolved
         assert 'name="sync_one"' not in unresolved
@@ -310,7 +313,7 @@ class TestVirtualChassisOwners:
         assert "1 ignored" in hidden
         assert 'data-rule-state="ignored"' in _row_tag(shown[701])
         assert f"Not synced: ignored by interface rule {rule.pk} ({rule})" in shown[701]
-        assert "Select a VC member" not in shown[701]
+        assert OWNER_PILL not in shown[701]
 
     def test_mixed_member_platforms_ignore_an_unresolved_row_by_global_rules_only(self, superuser_client):
         platform_p, platform_q = _platform("rule-tab-mixed-p"), _platform("rule-tab-mixed-q")
@@ -456,8 +459,9 @@ class TestTheRulePillSitsInTheActionsCell:
 
         assert 'data-rule-state="owner_unresolved"' in _row_tag(row)
         assert "LAG" in _cell(row, "parent") and "ae0" in _cell(row, "parent")
-        assert "Select a VC member" not in _cell(row, "parent")
-        assert "Select a VC member" in _cell(row, "actions")
+        assert OWNER_PILL not in _cell(row, "parent")
+        assert OWNER_PILL in _cell(row, "actions")
+        assert f'title="{OWNER_HINT}' in _cell(row, "actions")
 
     def test_the_verify_repaint_puts_the_pill_in_the_actions_cell(self, superuser_client):
         platform = _platform("rule-tab-pill-verify")
