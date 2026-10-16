@@ -292,8 +292,7 @@ class TestVirtualChassisOwners:
         for member, platform in zip(members, platforms, strict=True):
             member.platform = platform
             member.save()
-        members[0].custom_field_data["librenms_id"] = {SERVER_KEY: {"id": 64}}
-        members[0].save()
+        seed_mapping(members[0], SERVER_KEY, own=64)
         return members[0]
 
     @pytest.mark.parametrize("scoped", [False, True], ids=["global-rule", "platform-rule"])
