@@ -674,6 +674,9 @@ def test_a_sibling_refresh_clears_the_shared_tab_block_on_every_member(
                 "ifName": local.name,
                 "ifDescr": local.name,
                 "ifType": "ethernetCsmacd",
+                # Only a real field change makes the sync a mutation, and only a mutation
+                # invalidates the shared snapshot this test is about.
+                "ifAlias": "fresh description",
                 "ifAdminStatus": "up",
             }
         ],
@@ -2846,7 +2849,16 @@ def test_cache_mutation_resolves_the_shared_owner_once_per_server(
     interface.custom_field_data["librenms_id"] = {"primary": 7101}
     interface.save(update_fields=["custom_field_data"])
     source_payload = {
-        "ports": [{"port_id": 7101, "ifName": interface.name, "ifDescr": interface.name}],
+        # ifAlias: only a real field change makes the sync a mutation, and only a mutation
+        # reaches the post-commit cleanup this test counts.
+        "ports": [
+            {
+                "port_id": 7101,
+                "ifName": interface.name,
+                "ifDescr": interface.name,
+                "ifAlias": "fresh description",
+            }
+        ],
         "port_stack_relationships": {},
     }
     _seed_snapshot("ports", page_device, "primary", source_payload)

@@ -301,12 +301,13 @@ class TestGetNetboxInterfaceType:
 
         assert result == "virtual"
 
-    def test_no_mapping_returns_other(self):
+    def test_no_mapping_returns_no_opinion(self):
+        """None, not "other": the writer must not flatten a correct type it cannot map."""
         self._mapping("ethernetCsmacd", "virtual")  # a mapping exists, but not for this type
 
         result = _make_iv().get_netbox_interface_type({"ifType": "unknown", "ifSpeed": None})
 
-        assert result == "other"
+        assert result is None
 
 
 # ===========================================================================

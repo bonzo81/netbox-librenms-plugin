@@ -5,6 +5,7 @@ Focuses on the bay-scope tracking in _build_context and the serial
 comparison logic in _build_row.
 """
 
+import re
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -889,6 +890,56 @@ class TestMergeTransceiverDataPortIdentity:
         assert item["entPhysicalModelName"] == "SFP-10G-SR"
         assert item["_librenms_port_id"] == 7
 
+    def test_shared_entity_ifindex_links_the_transceiver_to_neither_entity(self, settings, librenms_server):
+        """Two entities with the port's ifIndex leave the transceiver as its own synthetic row."""
+        view = _real_api_view(settings, librenms_server, librenms_id=104)
+        librenms_server.register(
+            "/api/v0/devices/104/transceivers",
+            {
+                "status": "ok",
+                "transceivers": [{"entity_physical_index": 50, "model": "SFP-10G-SR", "serial": "TX-50", "port_id": 8}],
+            },
+            method="GET",
+        )
+        librenms_server.register(
+            "/api/v0/devices/104/ports",
+            {"status": "ok", "ports": [{"port_id": 8, "ifName": "Eth8", "ifIndex": 50}]},
+            method="GET",
+        )
+        inventory_seed = [
+            {"entPhysicalIndex": index, "entPhysicalName": f"Port {index}", "entPhysicalClass": "port", "ifIndex": 50}
+            for index in (10, 11)
+        ]
+
+        inventory, error = view._merge_transceiver_data(deepcopy(inventory_seed))
+
+        assert error is None
+        assert inventory[:2] == inventory_seed
+        assert [(item["entPhysicalIndex"], item["_librenms_port_id"]) for item in inventory[2:]] == [(50, 8)]
+
+    def test_entity_index_of_an_unrelated_entity_adds_no_row(self, settings, librenms_server):
+        """A transceiver whose entity index names another port's entity adds no row with that index."""
+        view = _real_api_view(settings, librenms_server, librenms_id=105)
+        librenms_server.register(
+            "/api/v0/devices/105/transceivers",
+            {
+                "status": "ok",
+                "transceivers": [{"entity_physical_index": 640, "model": "SFP-10G-SR", "serial": "NEW", "port_id": 9}],
+            },
+            method="GET",
+        )
+        librenms_server.register(
+            "/api/v0/devices/105/ports",
+            {"status": "ok", "ports": [{"port_id": 9, "ifName": "xe-0/0/3:2", "ifIndex": 640}]},
+            method="GET",
+        )
+        inventory_seed = [{"entPhysicalIndex": 640, "entPhysicalName": "Optic 0/5/0", "ifIndex": 600}]
+
+        inventory, error = view._merge_transceiver_data(deepcopy(inventory_seed))
+
+        assert error is None
+        assert inventory == inventory_seed
+
     def test_enrich_inventory_port_identity_backfills_port_rows_from_ports_api(self, settings, librenms_server):
         view = _real_api_view(settings, librenms_server, librenms_id=102)
         librenms_server.register(
@@ -1115,6 +1166,44 @@ class TestPostInventoryRefresh:
         assert transceiver_item["_librenms_port_id"] == 42
         assert transceiver_item["_librenms_ifname"] == "Gi0/2"
         assert message_texts(request, "success") == ["Inventory data refreshed successfully."]
+
+    def test_post_links_junos_optics_to_their_own_ports(self, librenms_server, server_keys):
+        """Junos reports a transceiver's ifIndex as its entity index; xe-0/0/3:2 has ifIndex 640, which is also the 0/5/0 optic's entity index."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        recording = load_recording("junos-subinterfaces")
+        librenms_id = recording["device_id"]
+        responses = recording["responses"]
+        librenms_server.load_recording(recording)
+        server_key, _ = server_keys
+        device = _mapped_device("module-refresh-junos-optics", server_key, librenms_id=librenms_id)
+        port_by_ifindex = {
+            port["ifIndex"]: port for port in responses[f"GET /api/v0/devices/{librenms_id}/ports"]["ports"]
+        }
+        entities = responses[f"GET /api/v0/inventory/{librenms_id}/all"]["inventory"]
+        optics = [entity for entity in entities if entity["entPhysicalIndex"] in (640, 642)]
+        assert [(entity["ifIndex"], port_by_ifindex[entity["entPhysicalIndex"]]["ifName"]) for entity in optics] == [
+            (600, "xe-0/0/3:2"),
+            (591, "xe-0/0/3:3"),
+        ]
+
+        view = DeviceModuleTableView()
+        response = post(view, make_request("post", {"server_key": server_key}), pk=device.pk)
+
+        assert response.status_code == 200
+        inventory = cache.get(view.get_cache_key(device, "inventory", server_key=server_key))["inventory"]
+        indexes = [item["entPhysicalIndex"] for item in inventory]
+        assert len(indexes) == len(set(indexes))
+        by_index = {item["entPhysicalIndex"]: item for item in inventory}
+        for entity in optics:
+            port = port_by_ifindex[entity["ifIndex"]]
+            item = by_index[entity["entPhysicalIndex"]]
+            assert item["entPhysicalName"] == entity["entPhysicalName"]
+            assert (item["_librenms_port_id"], item["_librenms_ifname"]) == (port["port_id"], port["ifName"])
 
     def test_post_treats_non_list_inventory_as_fetch_failure(self, librenms_server, server_keys):
         """get_device_inventory is an external boundary. A non-list inventory body is a fetch failure."""
@@ -2184,6 +2273,116 @@ class TestProdShapeWS4908Matching:
             "would resolve `Port Container 3/2` (grandparent) to `X2 Port 2` "
             "and incorrectly land the transceiver in the CVR's own bay."
         )
+
+
+def _requires_module_bay_types(test):
+    from netbox_librenms_plugin.utils import netbox_constrains_module_bay_types
+
+    return pytest.mark.skipif(
+        not netbox_constrains_module_bay_types(), reason="NetBox constrains module bays by type from 4.7"
+    )(test)
+
+
+@pytest.mark.django_db
+class TestGuessedBayMustFitTheModule:
+    """A guessed bay must accept the item, so an optic never lands in a power supply bay."""
+
+    # The fixed IOS XE recording: the first optic of subslot 0/1 sits in the first unnamed cage.
+    OPTIC_INDEX = 1332
+    OPTIC_MODEL = "MODEL-933e72"
+    CAGE_NAME = "entity-2a75ab"
+
+    def _optic_row(self, device_name, bays, optic_bay_types=()):
+        from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
+        from netbox_librenms_plugin.tests.conftest import (
+            make_device,
+            make_module_bay,
+            make_module_bay_type,
+            make_module_type_with_bays,
+        )
+
+        recording = load_recording("iosxe-subinterfaces")
+        inventory = recording["responses"][f"GET /api/v0/inventory/{recording['device_id']}/all"]["inventory"]
+        device = make_device(device_name)
+        for name, position, bay_types in bays:
+            make_module_bay(device, name, position=position, bay_types=bay_types)
+        module_type = make_module_type_with_bays(self.OPTIC_MODEL)
+        if optic_bay_types:
+            module_type.module_bay_types.set([make_module_bay_type(slug) for slug in optic_bay_types])
+        rows = _run_build_context_real(_make_view(), inventory, device)
+        return next(row for row in rows if row["ent_physical_index"] == self.OPTIC_INDEX)
+
+    def test_an_optic_skips_a_power_supply_bay_at_its_cage_position(self):
+        row = self._optic_row("fit-psu-name", [("Power Supply Module 1", "1", ())])
+
+        assert row["module_bay"] == "-"
+
+    def test_an_optic_skips_a_short_power_supply_name_at_a_shared_position(self):
+        """With the fan bay excluded, "PS1" must not become the one bay left at position 1."""
+        row = self._optic_row("fit-ps-short-name", [("PS1", "1", ()), ("Fan Tray 1", "1", ())])
+
+        assert row["module_bay"] == "-"
+
+    @_requires_module_bay_types
+    def test_shared_bay_types_outrank_a_reserved_bay_name(self):
+        """A module-class fan tray may report the class "module"; explicit bay types decide then."""
+        row = self._optic_row(
+            "fit-types-outrank-name", [("Fan Tray 1", "1", ("sfp-plus",))], optic_bay_types=("sfp-plus",)
+        )
+
+        assert row["module_bay"] == "Fan Tray 1"
+
+    @_requires_module_bay_types
+    def test_module_type_bay_types_load_in_one_query_per_render(self):
+        from dcim.models import ModuleType
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.tests.conftest import make_module_bay_type, make_module_type_with_bays
+
+        # Both subslots of the recording carry their own model, so three typed module types match rows.
+        for model in ("MODEL-394abd", "MODEL-d95c12"):
+            make_module_type_with_bays(model).module_bay_types.set([make_module_bay_type("epa")])
+        through_table = ModuleType.module_bay_types.through._meta.db_table
+
+        with CaptureQueriesContext(connection) as queries:
+            row = self._optic_row("fit-type-one-query", [("Module 1", "1", ("psu",))], optic_bay_types=("sfp-plus",))
+
+        assert row["module_bay"] == "-"
+        sql = [query["sql"] for query in queries.captured_queries]
+        # One read of the whole map, and no read of one module type's bay types.
+        assert sum(statement.startswith(f'SELECT "{through_table}"."moduletype_id"') for statement in sql) == 1
+        assert not [
+            statement
+            for statement in sql
+            if re.match(r'SELECT "dcim_modulebaytype"\."id"(?: AS "pk")? FROM', statement)
+        ]
+
+    @_requires_module_bay_types
+    def test_bay_types_refuse_a_bay_at_the_cage_position(self):
+        row = self._optic_row("fit-type-refused", [("Module 1", "1", ("psu",))], optic_bay_types=("sfp-plus",))
+
+        assert row["module_bay"] == "-"
+
+    @_requires_module_bay_types
+    def test_bay_types_pick_the_fitting_bay_among_bays_at_one_position(self):
+        bays = [("Module 1", "1", ("psu",)), ("Optic 1", "1", ("sfp-plus",))]
+
+        row = self._optic_row("fit-type-picks", bays, optic_bay_types=("sfp-plus",))
+
+        assert row["module_bay"] == "Optic 1"
+
+    @_requires_module_bay_types
+    def test_a_module_type_without_bay_types_fits_a_typed_bay(self):
+        row = self._optic_row("fit-type-unconstrained", [("Module 1", "1", ("psu",))])
+
+        assert row["module_bay"] == "Module 1"
+
+    @_requires_module_bay_types
+    def test_bay_types_refuse_a_bay_named_like_the_cage(self):
+        row = self._optic_row("fit-type-named", [(self.CAGE_NAME, "", ("psu",))], optic_bay_types=("sfp-plus",))
+
+        assert row["module_bay"] == "-"
 
 
 @pytest.mark.django_db

@@ -1,7 +1,7 @@
 """Views backing the LibreNMS sync tabs on Device and VM detail pages."""
 
-from .cache_status import SyncCacheFragmentView, SyncCacheStatusView  # noqa: F401
-from .devices import (  # noqa: F401
+from .cache_status import SyncCacheFragmentView, SyncCacheStatusView
+from .devices import (
     DeviceCableTableView,
     DeviceInterfaceTableView,
     DeviceIPAddressTableView,
@@ -14,7 +14,7 @@ from .devices import (  # noqa: F401
     SingleVlanGroupVerifyView,
     VerifyVlanSyncGroupView,
 )
-from .vms import (  # noqa: F401
+from .vms import (
     VMInterfaceTableView,
     VMIPAddressTableView,
     VMLibreNMSSyncView,

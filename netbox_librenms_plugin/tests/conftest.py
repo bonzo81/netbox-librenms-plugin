@@ -181,7 +181,12 @@ def _seeded_rule_rows():
     """
     import importlib
 
-    from netbox_librenms_plugin.models import InventoryIgnoreRule, NormalizationRule, PortStackLagPattern
+    from netbox_librenms_plugin.models import (
+        InterfaceTypeMapping,
+        InventoryIgnoreRule,
+        NormalizationRule,
+        PortStackLagPattern,
+    )
 
     # Migration 0010's rules are restored by :func:`restore_inventory_ignore_rules`, which reuses
     # the migration's own insert, so they are deliberately not repeated here.
@@ -200,6 +205,18 @@ def _seeded_rule_rows():
             "lag_name_pattern": bridge.LAG_PATTERN,
             "bridge_name_pattern": bridge.BRIDGE_PATTERN,
             "description": bridge.SEEDED_DESCRIPTION,
+        },
+    )
+    lag_type = importlib.import_module("netbox_librenms_plugin.migrations.0020_seed_lag_interface_type_mapping")
+    yield (
+        InterfaceTypeMapping,
+        {
+            "librenms_type": lag_type.SEEDED_MAPPING["librenms_type"],
+            "librenms_speed": lag_type.SEEDED_MAPPING["librenms_speed"],
+        },
+        {
+            "netbox_type": lag_type.SEEDED_MAPPING["netbox_type"],
+            "description": lag_type.SEEDED_MAPPING["description"],
         },
     )
 
@@ -605,11 +622,22 @@ def make_module_type(model, *, manufacturer=None):
     return ModuleType.objects.create(manufacturer=manufacturer, model=model)
 
 
-def make_module_bay(device, name):
-    """Create a real ModuleBay on *device*."""
+def make_module_bay(device, name, *, position="", bay_types=()):
+    """Create a real ModuleBay on *device*, typed by the *bay_types* slugs (NetBox 4.7)."""
     from dcim.models import ModuleBay
 
-    return ModuleBay.objects.create(device=device, name=name)
+    bay = ModuleBay.objects.create(device=device, name=name, position=position)
+    if bay_types:
+        bay.module_bay_types.set([make_module_bay_type(slug) for slug in bay_types])
+    return bay
+
+
+def make_module_bay_type(slug):
+    """get_or_create a real ModuleBayType (NetBox 4.7)."""
+    from dcim.models import ModuleBayType
+
+    bay_type, _ = ModuleBayType.objects.get_or_create(slug=slug, defaults={"name": slug})
+    return bay_type
 
 
 def make_module_type_with_bays(model, *, manufacturer=None, bay_names=()):
@@ -649,7 +677,7 @@ def load_contrib_bay_mappings():
     from netbox_librenms_plugin.models import ModuleBayMapping
 
     contrib = Path(__file__).resolve().parents[2] / "contrib" / "module_bay_mappings.yaml"
-    with open(contrib) as f:
+    with contrib.open(encoding="utf-8") as f:
         data = yaml.safe_load(f)
     return [
         ModuleBayMapping.objects.create(

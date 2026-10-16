@@ -10,6 +10,7 @@ from netbox_librenms_plugin.constants import SERIAL_INVENTORY_SOURCE
 from netbox_librenms_plugin.utils import (
     get_table_paginate_count,
     oob_badge_html,
+    remote_port_html,
     render_vc_member_options,
 )
 
@@ -71,6 +72,17 @@ class LibreNMSCableTable(tables.Table):
                 Sync Cable
             </button>
         {% endif %}
+        {% if record.remote_create_url %}
+            {# Shares the cable tab's modal opener with the remote picker; the attribute names #}
+            {# that loader, not the picker specifically. #}
+            <button type="button"
+                    class="btn btn-sm btn-outline-primary"
+                    title="Create the remote interface and the cable"
+                    aria-label="Create the remote interface and the cable"
+                    data-cable-picker-url="{{ record.remote_create_url }}">
+                <i class="mdi mdi-plus-network"></i>
+            </button>
+        {% endif %}
         {% if record.picker_url %}
             <button type="button"
                     class="btn btn-sm btn-outline-secondary"
@@ -124,7 +136,8 @@ class LibreNMSCableTable(tables.Table):
         """Render local port name as a link if URL is available."""
         # Leading space: the badge follows the port name.
         oob_badge = oob_badge_html(record, leading_space=True)
-        serial_badge = mark_safe(SERIAL_BADGE_HTML) if record.get("_source") == SERIAL_INVENTORY_SOURCE else ""  # noqa: S308
+        # Both badges are static trusted markup with no interpolation.
+        serial_badge = mark_safe(SERIAL_BADGE_HTML) if record.get("_source") == SERIAL_INVENTORY_SOURCE else ""
         # Normalize None to "" in both branches; otherwise the linked branch
         # renders the literal "None" as the link text when value is missing.
         display_value = value or ""
@@ -134,21 +147,8 @@ class LibreNMSCableTable(tables.Table):
 
     def render_remote_port(self, value, record):
         """Render remote port name as a link if URL is available; flag a manually picked remote."""
-        manual_badge = (
-            mark_safe(  # noqa: S308  (static trusted markup, mirrors the Serial badge idiom)
-                ' <i class="mdi mdi-gesture-tap-button text-muted" title="Remote end picked manually"></i>'
-            )
-            if record.get("manual_remote")
-            else ""
-        )
-        # Normalize None to "" like render_local_port/render_remote_device — an unset remote
-        # port name would otherwise render the literal "None" in every branch below.
-        display_value = value or ""
-        if url := record.get("remote_port_url"):
-            return format_html('<a href="{}">{}</a>{}', url, display_value, manual_badge)
-        if manual_badge:
-            return format_html("{}{}", display_value, manual_badge)
-        return display_value
+        # The one definition of this cell: the cable-verify formatter renders it too.
+        return remote_port_html(value, record)
 
     def render_cable_status(self, value, record):
         """Render cable status as a link if cable URL is available."""

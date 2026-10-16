@@ -188,9 +188,12 @@ class TestCableHTTPAndORM:
         assert links[0]["local_port_alt"] == "uplink-1"
         assert links[0]["remote_device"] == "remote-01.example"
         assert links[0]["_source"] == "main"
+        # One read per neighbour, for the other LibreNMS name its ports answer to: the far end
+        # must resolve as widely as the near one (see _attach_remote_port_aliases).
         assert [request["path"] for request in live_librenms.server.requests] == [
             "/api/v0/devices/42/links",
             "/api/v0/devices/42/ports",
+            "/api/v0/devices/99/ports",
         ]
 
     @pytest.mark.parametrize(
@@ -490,10 +493,10 @@ class TestIPAddressHTTPAndORM:
             "/api/v0/devices/42/ip",
             {"status": "ok", "addresses": addresses},
         )
-        live_librenms.server.register(
-            "/api/v0/ports/101",
-            {"status": "ok", "port": [{"port_id": 101, "ifName": "Ethernet1", "ifDescr": "uplink-1"}]},
-        )
+        port = {"port_id": 101, "ifName": "Ethernet1", "ifDescr": "uplink-1"}
+        live_librenms.server.register("/api/v0/ports/101", {"status": "ok", "port": [port]})
+        # The IP tab reads each row's interface name from the device's port list, not per port.
+        live_librenms.server.register("/api/v0/devices/42/ports", {"status": "ok", "ports": [port]})
         live_librenms.server.device_info_response(
             42,
             hostname="ip-address-device.example",
@@ -611,8 +614,32 @@ class TestIPAddressHTTPAndORM:
         assert warm["table"] is not None
         assert len(live_librenms.server.requests) == request_count
         cached = cache.get(view.get_cache_key(device, "ip_addresses", "default"))
-        assert cached["ports_by_id"][101]["ifName"] == "Ethernet1"
+        assert cached["ports_by_id"]["101"]["ifName"] == "Ethernet1"
         assert cached["mgmt_ip"] == "198.18.20.1"
+
+    def test_a_missing_port_is_cached_as_a_known_absence(self, live_librenms):
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceIPAddressTableView
+
+        live_librenms.api.cache_timeout = 300
+        device, _interface = self._device()
+        rows = [
+            {"ip_address": "198.18.50.1", "prefix_length": 24, "port_id": 101},
+            {"ip_address": "198.18.51.1", "prefix_length": 24, "port_id": 202},
+        ]
+        self._register(live_librenms, rows)
+        request = _request()
+        view = _view(DeviceIPAddressTableView, live_librenms, request)
+
+        fresh = view._prepare_context(request, device, "ifName", fetch_fresh=True, server_key="default")
+        request_count = len(live_librenms.server.requests)
+        view.cache_only = True
+        warm = view._prepare_context(request, device, "ifName", fetch_fresh=False, server_key="default")
+
+        assert fresh["table"] is not None
+        assert warm["table"] is not None
+        assert len(live_librenms.server.requests) == request_count
+        cached = cache.get(view.get_cache_key(device, "ip_addresses", "default"))
+        assert cached["ports_by_id"]["202"] is None
 
     @pytest.mark.parametrize(
         "body",
@@ -734,3 +761,18 @@ class TestVlanGroupOverrideScope:
 
         assert {value["group_id"] for value in port["vlan_group_map"].values()} == {str(in_scope.pk)}
         assert groups.iterations == 1
+
+
+@pytest.mark.parametrize("name", [["Ethernet1"], {"name": "Ethernet1"}])
+def test_oob_name_collision_check_rejects_unhashable_names(live_librenms, name):
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+    device = _mapped_device("oob-malformed-name")
+    request = _request()
+    view = _view(DeviceInterfaceTableView, live_librenms, request)
+    ports = _register_ports(live_librenms)
+    ports.append({**ports[0], "port_id": 102, "_source": "oob", "ifName": name})
+    cache.set(view.get_cache_key(device, "ports", "default"), {"status": "ok", "ports": ports}, timeout=300)
+    context = view.get_context_data(request, device, "ifName", server_key="default")
+    assert context.get("table") is not None, context.get("error")
+    assert len(context["table"].rows) == 2

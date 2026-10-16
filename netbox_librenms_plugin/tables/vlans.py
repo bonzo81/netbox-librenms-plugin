@@ -11,6 +11,7 @@ from netbox_librenms_plugin.utils import get_table_paginate_count, get_vlan_sync
 class LibreNMSVLANTable(tables.Table):
     """
     Table for displaying LibreNMS VLAN data for a device.
+
     Shows VLANs configured on the device and their sync status with NetBox.
     Includes per-row VLAN group selection dropdown.
     """

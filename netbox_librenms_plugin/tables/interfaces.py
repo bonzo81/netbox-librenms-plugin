@@ -12,6 +12,16 @@ from utilities.paginator import EnhancedPaginator
 from utilities.templatetags.helpers import humanize_speed
 
 from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
+from netbox_librenms_plugin.interface_diff import (
+    ABSENT,
+    DIFFERS,
+    MATCHES,
+    ROW_ABSENT,
+    ROW_IN_SYNC,
+    compute_row_sync_state,
+    interface_enabled_from_port,
+    parse_vlan_group_id,
+)
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.utils import (
     check_vlan_group_matches,
@@ -25,9 +35,9 @@ from netbox_librenms_plugin.utils import (
     get_untagged_vlan_css_class,
     interface_name_fallback_matches_port,
     normalize_librenms_port_id,
-    oob_badge_html,
     render_vc_member_options,
     resolve_interface_row_device,
+    select_interface_type_mapping,
 )
 
 # (colour, mdi icon, full status text) per relationship sync status. Colour + icon read at a
@@ -39,6 +49,11 @@ _RELATIONSHIP_STATUS_MAP = {
     "missing_nb": ("info", "mdi-plus-circle", "Not in NetBox"),
     "missing_lnms": ("secondary", "mdi-database-off", "Not in LibreNMS"),
 }
+
+
+# Per-field sync verdict to the colour the sync tab's key explains: red "not present in NetBox",
+# orange "mismatched values", green "matching values".
+_VERDICT_CSS_CLASS = {ABSENT: "text-danger", DIFFERS: "text-warning", MATCHES: "text-success"}
 
 
 class _VlanRowContext(NamedTuple):
@@ -79,6 +94,7 @@ class LibreNMSInterfaceTable(tables.Table):
             "description",
             "librenms_id",
             "parent",
+            "actions",
         ]
         attrs = {
             "class": "table table-hover object-list",
@@ -181,6 +197,49 @@ class LibreNMSInterfaceTable(tables.Table):
         orderable=False,
         attrs={"td": {"data-col": "vlans"}},
     )
+    actions = tables.Column(
+        verbose_name="",
+        empty_values=(),
+        orderable=False,
+        attrs={"td": {"data-col": "actions"}},
+    )
+
+    def row_sync_state(self, record):
+        """
+        Return how one row compares to the NetBox interface it resolved to.
+
+        Computed once per row and kept on the row, because every coloured column and the row's
+        sync button read the same verdict. ``format_interface_data`` drops the cached value when
+        it re-resolves a row, so a member switch cannot repaint against the previous member.
+
+        Args:
+            record (dict): The interface table row.
+
+        Returns:
+            RowSyncState: The row state and each field's verdict.
+
+        """
+        state = record.get("_sync_state")
+        if state is None:
+            state = compute_row_sync_state(
+                record,
+                interface_name_field=self.interface_name_field,
+                server_key=self.server_key,
+                netbox_type=self._row_netbox_type(record),
+                vlan_context=self._vlan_row_context(record),
+            )
+            record["_sync_state"] = state
+        return state
+
+    def _row_netbox_type(self, record):
+        """Return the NetBox type a sync would write for this row, or None when it has no opinion."""
+        # Resolving it reads the mapping table, so skip that for a row with no typed interface to
+        # compare against: VM rows carry no type, and an unmatched row compares nothing at all.
+        interface = record.get("netbox_interface")
+        if interface is None or not hasattr(interface, "type"):
+            return None
+        mapping = self.get_interface_mapping(record.get("ifType"), convert_speed_to_kbps(record.get("ifSpeed", 0)))
+        return mapping.netbox_type if mapping else None
 
     def render_vlans(self, value, record):
         """
@@ -212,20 +271,34 @@ class LibreNMSInterfaceTable(tables.Table):
 
         context = self._vlan_row_context(record)
         summary = self._render_vlan_summary(all_vlans, context)
+        inherited = self._render_vlan_inherited_badge(record)
 
         # Keep the LibreNMS VLAN summary visible, but do not expose or submit NetBox scope
         # details for a row whose owner is outside the user's Device view scope.
         if not record.get("sync_target_resolvable", True):
-            return summary
+            return format_html("{}{}", summary, inherited)
 
         interface_name = record.get(self.interface_name_field, "")
         row_key = self._vlan_row_key(record)
         return format_html(
-            '<span title="{}">{}</span>{}{}',
+            '<span title="{}">{}</span>{}{}{}',
             self._render_vlan_tooltip(all_vlans, context),
             summary,
+            inherited,
             self._render_vlan_edit_button(record, all_vlans, context, interface_name, row_key),
             self._render_vlan_hidden_inputs(all_vlans, context, interface_name, row_key),
+        )
+
+    @staticmethod
+    def _render_vlan_inherited_badge(record):
+        """Mark a row whose VLANs were filled from the other end of its LAG, not reported."""
+        donor = record.get("vlan_inherited_from")
+        if not donor:
+            return ""
+        return format_html(
+            ' <i class="mdi mdi-arrow-right-bottom text-muted" title="Inherited from {}:'
+            ' LibreNMS reported no VLANs on this port"></i>',
+            donor,
         )
 
     @staticmethod
@@ -273,7 +346,7 @@ class LibreNMSInterfaceTable(tables.Table):
 
     def _vlan_css_class(self, context, vlan_type, vid):
         """Return one VLAN's colour class. The inline summary and the modal must agree on it."""
-        selected_gid = self._parse_group_id(context.group_map.get(vid, {}).get("group_id", ""))
+        selected_gid = parse_vlan_group_id(context.group_map.get(vid, {}).get("group_id", ""))
         group_matches = check_vlan_group_matches(
             vlan_type,
             vid,
@@ -394,76 +467,36 @@ class LibreNMSInterfaceTable(tables.Table):
             escape(self._vlan_group_options_json(record)),
         )
 
-    @staticmethod
-    def _parse_group_id(group_id_str):
-        """Normalize a group ID string to int or None for comparison."""
-        return int(group_id_str) if group_id_str else None
-
     def render_speed(self, value, record):
         """Render interface speed with appropriate styling based on comparison with NetBox."""
         kbps_value = convert_speed_to_kbps(value)
-        return self._render_field(humanize_speed(kbps_value), record, "ifSpeed", "speed")
+        return self._render_field(humanize_speed(kbps_value), record, "speed")
 
     def render_name(self, value, record):
         """Render interface name with appropriate styling based on comparison with NetBox."""
-        rendered = self._render_field(value, record, self.interface_name_field, "name")
-        badges = oob_badge_html(record)
-        if record.get("_dedup_conflict"):
-            badges += '<span class="badge bg-warning text-dark ms-1" title="Same MAC seen on both main and OOB">Shared LOM</span>'
-        if badges:
-            return format_html("{}{}", rendered, mark_safe(badges))
-        return rendered
-
-    def _get_interface_status_display(self, enabled, record):
-        """
-        Determine interface status display and CSS class based on enabled state and NetBox comparison.
-
-        Args:
-            enabled (bool): Interface enabled state.
-            record (dict): Interface data record.
-
-        Returns:
-            tuple: (display_value, css_class)
-
-        """
-        display_value = "Enabled" if enabled else "Disabled"
-
-        if not record.get("exists_in_netbox"):
-            return display_value, "text-danger"
-
-        netbox_interface = record.get("netbox_interface")
-        if netbox_interface:
-            netbox_enabled = netbox_interface.enabled
-            if enabled == netbox_enabled:
-                return display_value, "text-success"
-            return display_value, "text-warning"
-
-        return display_value, "text-danger"
-
-    def _parse_enabled_status(self, value):
-        """Convert interface status value to boolean enabled state."""
-        if isinstance(value, str):
-            return value.lower() == "up"
-        return bool(value)
+        # Row markers (OOB, Shared LOM) belong to the relationship column; see render_parent.
+        return self._render_field(value, record, "name")
 
     def render_enabled(self, value, record):
-        """Render interface enabled status with appropriate styling based on comparison with NetBox."""
-        enabled = self._parse_enabled_status(value)
-        display_value, css_class = self._get_interface_status_display(enabled, record)
-        return format_html('<span class="{}">{}</span>', css_class, display_value)
+        """Render the enabled state the sync would write, coloured by how NetBox compares."""
+        # Read the row, not the column value: the two callers pass different things (the bound
+        # column passes the row's parsed "enabled", the row re-render passes raw ifAdminStatus),
+        # and only the row carries the rule the writer applies to an absent ifAdminStatus.
+        display_value = "Enabled" if interface_enabled_from_port(record) else "Disabled"
+        return self._render_field(display_value, record, "enabled")
 
     def render_description(self, value, record):
         """Render interface description with appropriate styling based on comparison with NetBox."""
-        return self._render_field(value, record, "ifAlias", "description")
+        return self._render_field(value, record, "description")
 
     def render_mac_address(self, value, record):
         """Render MAC address with appropriate styling based on comparison with NetBox."""
         formatted_mac = format_mac_address(value)
-        return self._render_field(formatted_mac, record, "ifPhysAddress", "mac_address")
+        return self._render_field(formatted_mac, record, "mac_address")
 
     def render_mtu(self, value, record):
         """Render MTU with appropriate styling based on comparison with NetBox."""
-        return self._render_field(value, record, "ifMtu", "mtu")
+        return self._render_field(value, record, "mtu")
 
     def render_librenms_id(self, value, record):
         """
@@ -481,19 +514,18 @@ class LibreNMSInterfaceTable(tables.Table):
             SafeString: The coloured ``<span>`` markup for the port_id.
 
         """
-        if not record.get("exists_in_netbox"):
+        state = self.row_sync_state(record)
+        if state.state == ROW_ABSENT:
             return format_html('<span class="text-danger">{}</span>', value)
 
-        netbox_interface = record.get("netbox_interface")
-        if not netbox_interface:
-            return format_html('<span class="text-danger">{}</span>', value)
-
-        netbox_librenms_id = get_librenms_device_id(netbox_interface, self.server_key, auto_save=False)
+        # The verdict decides whether a sync would write the id; the stored value is read only to
+        # name it in the tooltip, and to split "never stored" from "stored something else".
+        netbox_librenms_id = get_librenms_device_id(record["netbox_interface"], self.server_key, auto_save=False)
         if netbox_librenms_id is None:
             return format_html(
                 '<span class="text-danger" title="No librenms_id custom field value found">{}</span>', value
             )
-        if str(value) != str(netbox_librenms_id):
+        if state.verdict("librenms_id") == DIFFERS:
             return format_html(
                 '<span class="text-warning" title="Existing LibreNMS ID: {}">{}</span>', netbox_librenms_id, value
             )
@@ -518,6 +550,32 @@ class LibreNMSInterfaceTable(tables.Table):
 
         """
         parts = []
+
+        # Where the row came from, before what it is attached to. Both markers describe the row
+        # itself rather than a NetBox relationship, so they lead the stack and carry no sync
+        # button. The cable and module tables still badge their name column: those have no
+        # relationship column to move into.
+        if record.get("_source") == OOB_INVENTORY_SOURCE:
+            parts.append(self._render_row_marker_pill("purple", "mdi-chip", "OOB", "From OOB controller"))
+        if record.get("_dedup_conflict"):
+            parts.append(
+                self._render_row_marker_pill(
+                    "warning",
+                    "mdi-content-duplicate",
+                    "Shared LOM",
+                    "Same MAC seen on both main and OOB",
+                )
+            )
+
+        if record.get("host_name_collision"):
+            parts.append(
+                self._render_row_marker_pill(
+                    "danger",
+                    "mdi-alert-circle",
+                    "Name conflict",
+                    "The host interface of the same name owns it; the OOB port is not synced",
+                )
+            )
 
         lag_status = record.get("lag_sync_status")
         # LAG membership is device-only — VMInterface has no `lag` field and SyncInterfaceLagView
@@ -648,6 +706,35 @@ class LibreNMSInterfaceTable(tables.Table):
             ).pk
         return self.device.pk if self.device else ""
 
+    @staticmethod
+    def _render_row_marker_pill(color, icon, label, title):
+        """
+        Render one row-origin pill in the relationship column's badge language.
+
+        Matches the wrapper and badge classes :meth:`_render_relationship_column` emits, so the
+        markers stack with the LAG/Parent/Bridge pills instead of reading as a separate control.
+        Tabler's light (``-lt``) variants ship their own readable text colour in both themes.
+
+        Args:
+            color (str): Tabler colour name, used as ``bg-<color>-lt``.
+            icon (str): Material Design icon class.
+            label (str): The short pill text.
+            title (str): The hover description.
+
+        Returns:
+            SafeString: The pill markup.
+
+        """
+        return format_html(
+            '<div class="text-nowrap lh-sm">'
+            '<span class="badge bg-{}-lt fw-normal d-inline-flex align-items-center gap-1" title="{}">'
+            '<i class="mdi {}"></i>{}</span></div>',
+            color,
+            title,
+            icon,
+            label,
+        )
+
     def _render_relationship_column(
         self,
         lnms_name,
@@ -777,51 +864,51 @@ class LibreNMSInterfaceTable(tables.Table):
 
         return format_html('<div class="text-nowrap lh-sm">{}</div>', badge)
 
-    def _compare_mac_addresses(self, librenms_mac, netbox_interface):
-        """
-        Compare LibreNMS MAC address against all MAC addresses on NetBox interface.
+    def _field_css_class(self, record, field):
+        """Return one field's colour, read from the row's single sync verdict."""
+        return _VERDICT_CSS_CLASS[self.row_sync_state(record).verdict(field)]
 
-        Args:
-            librenms_mac (str): MAC address from LibreNMS.
-            netbox_interface (Interface): NetBox interface record.
-
-        Returns:
-            True if MAC exists on interface.
-
-        """
-        if not netbox_interface:
-            return False
-
-        interface_macs = [mac.mac_address for mac in netbox_interface.mac_addresses.all()]
-        return librenms_mac in interface_macs
-
-    def _render_field(self, value, record, librenms_key, netbox_key):
-        """Render a field value with appropriate styling based on the comparison with NetBox."""
+    def _render_field(self, value, record, field):
+        """Render a field value coloured by how a sync would treat it."""
         # value is an untrusted LibreNMS field (ifName, description, MAC, …). Use format_html so
         # it is auto-escaped — a device reporting e.g. ifName="<img src=x onerror=alert(1)>" must
         # not render as live HTML (stored XSS, issue #105). The class names stay literal.
-        if not record.get("exists_in_netbox"):
-            return format_html('<span class="text-danger">{}</span>', value)
+        return format_html('<span class="{}">{}</span>', self._field_css_class(record, field), value)
 
-        netbox_interface = record.get("netbox_interface")
-        if not netbox_interface:
-            return format_html('<span class="text-danger">{}</span>', value)
+    def render_actions(self, value, record):
+        """
+        Render the button that syncs this one row.
 
-        if librenms_key == "ifPhysAddress":
-            mac_matches = self._compare_mac_addresses(value, netbox_interface)
-            css_class = "text-success" if mac_matches else "text-warning"
-            return format_html('<span class="{}">{}</span>', css_class, value)
+        A plain submit inside the tab's existing form, carrying the row's LibreNMS port ID the
+        way the cables tab does, so the row goes through the same view, permissions and cache
+        checks as the bulk action. Shown only where a sync would do something: the row must
+        differ from NetBox, and its target must be one this user can write.
 
-        netbox_value = getattr(netbox_interface, netbox_key, None)
-        librenms_value = record.get(librenms_key)
+        Args:
+            value (object): The column value, unused.
+            record (dict): The interface table row.
 
-        if librenms_key == "ifSpeed":
-            librenms_value = convert_speed_to_kbps(librenms_value)
+        Returns:
+            SafeString: The button markup, or an empty cell.
 
-        if librenms_value != netbox_value:
-            return format_html('<span class="text-warning">{}</span>', value)
-
-        return format_html('<span class="text-success">{}</span>', value)
+        """
+        # A migrated donor renders no form at all, so a submit button here would do nothing.
+        if self.migrated_to_marker or not record.get("sync_target_resolvable", True):
+            return ""
+        if record.get("_source") == OOB_INVENTORY_SOURCE and (
+            record.get("host_name_collision") or record.get("_dedup_conflict")
+        ):
+            return ""
+        if self.row_sync_state(record).state == ROW_IN_SYNC:
+            return ""
+        port_id = normalize_librenms_port_id(record.get("port_id"))
+        if port_id is None:
+            return ""
+        return format_html(
+            '<button type="submit" class="btn btn-sm btn-primary" name="sync_one" value="{}"'
+            ' title="Sync only this interface">Sync</button>',
+            port_id,
+        )
 
     def render_type(self, value, record):
         """Render interface type with appropriate styling based on comparison with NetBox."""
@@ -831,19 +918,13 @@ class LibreNMSInterfaceTable(tables.Table):
 
         combined_display = format_html("{} {}", tooltip_value, icon)
 
-        if not record.get("exists_in_netbox"):
+        state = self.row_sync_state(record)
+        # An ifType with no mapping stays red even on a matched row: the sync holds no opinion on
+        # the type, and the column is the only place that gap is visible. It is not a difference,
+        # so it never puts the row's own state into "differs".
+        if state.state == ROW_ABSENT or mapping is None:
             return format_html('<span class="text-danger">{}</span>', combined_display)
-
-        netbox_interface = record.get("netbox_interface")
-
-        if netbox_interface:
-            netbox_type = getattr(netbox_interface, "type", None)
-            if mapping and mapping.netbox_type == netbox_type:
-                return format_html('<span class="text-success">{}</span>', combined_display)
-            elif mapping:
-                return format_html('<span class="text-warning">{}</span>', combined_display)
-
-        return format_html('<span class="text-danger">{}</span>', combined_display)
+        return format_html('<span class="{}">{}</span>', self._field_css_class(record, "type"), combined_display)
 
     def get_interface_mapping(self, librenms_type, speed):
         """
@@ -858,20 +939,18 @@ class LibreNMSInterfaceTable(tables.Table):
             speed (int | None): The interface speed in kilobits per second.
 
         Returns:
-            InterfaceTypeMapping | None: The exact or type-only mapping, if one exists.
+            InterfaceTypeMapping | None: The mapping the sync writer would apply, if any.
 
         """
         if getattr(self, "_interface_type_mapping_cache", None) is None:
             cache = {}
-            # Keep the FIRST mapping per key to match the previous .filter().first() semantics.
             for m in InterfaceTypeMapping.objects.all():
-                cache.setdefault((m.librenms_type, m.librenms_speed), m)
+                cache.setdefault(m.librenms_type, []).append(m)
             self._interface_type_mapping_cache = cache
 
-        # Exact (type, speed) match, then the type-only (speed is NULL) fallback.
-        return self._interface_type_mapping_cache.get((librenms_type, speed)) or self._interface_type_mapping_cache.get(
-            (librenms_type, None)
-        )
+        # The writer's rule, not a table-local one, so the row cannot claim a gap the sync
+        # does not have.
+        return select_interface_type_mapping(self._interface_type_mapping_cache.get(librenms_type, ()), speed)
 
     def render_mapping_tooltip(self, value, speed, mapping):
         """Render tooltip for interface type mapping."""
@@ -884,7 +963,12 @@ class LibreNMSInterfaceTable(tables.Table):
             )
         else:
             display = value
-            icon = mark_safe('<i class="mdi mdi-link-variant-off" title="No mapping to NetBox type"></i>')
+            # Name the ifType: the gap is only fixable if the user knows which mapping to add.
+            icon = format_html(
+                '<i class="mdi mdi-link-variant-off" title="No InterfaceTypeMapping for ifType'
+                ' {}; the sync leaves the NetBox type unchanged"></i>',
+                value,
+            )
         return display, icon
 
     def format_interface_data(self, port_data, device):
@@ -917,6 +1001,9 @@ class LibreNMSInterfaceTable(tables.Table):
                 else None
             )
         port_data["exists_in_netbox"] = bool(port_data["netbox_interface"])
+        # This row has just been re-resolved against a different member, so any verdict cached
+        # from the previous render is stale.
+        port_data.pop("_sync_state", None)
 
         # Stamp the row's actual object so the relationship sync button targets it even when the
         # row has no matching NetBox interface yet (missing_nb). This is set here, where the
@@ -947,6 +1034,9 @@ class LibreNMSInterfaceTable(tables.Table):
             # Render from the relationship enrichment keys the caller stamps onto
             # port_data; absent enrichment it returns "" (safe empty cell).
             "parent": self.render_parent(None, port_data),
+            # The row's own sync button: its visibility follows the re-resolved member's diff,
+            # so a member switch that brings the row into sync must clear it.
+            "actions": self.render_actions(None, port_data),
         }
         for relation in ("lag", "parent", "bridge"):
             for attribute in ("port_id", "name"):
@@ -1049,6 +1139,7 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
             "description",
             "librenms_id",
             "parent",
+            "actions",
         ]
         attrs = {
             "class": "table table-hover object-list",
@@ -1078,6 +1169,7 @@ class LibreNMSVMInterfaceTable(LibreNMSInterfaceTable):
             # relationship sync path resolves VMInterface targets — so the Parent/LAG column
             # must be exposed here too, otherwise the feature is unreachable on VM pages.
             "parent",
+            "actions",
         ]
         attrs = {
             "class": "table table-hover object-list",

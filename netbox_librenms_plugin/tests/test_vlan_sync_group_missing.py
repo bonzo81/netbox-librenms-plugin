@@ -37,7 +37,7 @@ def _post_request(device_pk, vid, group_pk):
     )
     request.user = get_user_model().objects.create_user(username="vlm-user", password="x", is_superuser=True)
     request.session = {}
-    setattr(request, "_messages", FallbackStorage(request))
+    request._messages = FallbackStorage(request)
     return request
 
 
@@ -94,7 +94,7 @@ class TestVlanSyncGroupMissing:
         )
         request.user = get_user_model().objects.create_user(username="vlm-user2", password="x", is_superuser=True)
         request.session = {}
-        setattr(request, "_messages", FallbackStorage(request))
+        request._messages = FallbackStorage(request)
         view.request = request  # dispatch() normally wires this; we call post() directly
 
         cache_key = view.get_cache_key(device, "vlans", "default")

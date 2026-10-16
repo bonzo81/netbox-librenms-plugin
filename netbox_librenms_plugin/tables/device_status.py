@@ -11,9 +11,9 @@ from django_tables2 import Column
 from netbox.tables.columns import ToggleColumn
 from virtualization.models import VirtualMachine
 
+from netbox_librenms_plugin.import_plan import ImportObjectType, VMPlacementMethod, import_row_hx_include
 from netbox_librenms_plugin.import_utils.disclosure import scope_validation_disclosures
 from netbox_librenms_plugin.import_utils.naming import import_name_variants
-from netbox_librenms_plugin.import_plan import ImportObjectType, VMPlacementMethod, import_row_hx_include
 from netbox_librenms_plugin.utils import (
     coerce_librenms_id,
     get_librenms_sync_device,
@@ -331,7 +331,9 @@ class DeviceImportTable(tables.Table):
         vc_data = validation.get("virtual_chassis") or {}
         vc_html = (
             self.render_virtual_chassis(None, record)
-            if vc_data.get("is_stack") and vc_data.get("member_count", 0) > 1
+            if (vc_data.get("is_stack") and vc_data.get("member_count", 0) > 1)
+            or vc_data.get("detection_failed")
+            or vc_data.get("detection_error")
             else ""
         )
         return format_html(
@@ -991,8 +993,12 @@ class DeviceImportTable(tables.Table):
         vc_data = validation.get("virtual_chassis", {})
         device_id = record.get("device_id")
 
-        # Show dash for non-VC or single member stacks
-        if not vc_data.get("is_stack") or vc_data.get("member_count", 0) <= 1:
+        # Show a dash only when detection completed without finding a stack.
+        if (
+            not vc_data.get("detection_failed")
+            and not vc_data.get("detection_error")
+            and (not vc_data.get("is_stack") or vc_data.get("member_count", 0) <= 1)
+        ):
             return mark_safe('<span class="text-muted">—</span>')
 
         vc_url = reverse(
@@ -1004,7 +1010,7 @@ class DeviceImportTable(tables.Table):
             vc_url += f"?server_key={quote_plus(str(server_key))}"
 
         # Show error button if detection failed
-        if vc_data.get("detection_error"):
+        if vc_data.get("detection_failed") or vc_data.get("detection_error"):
             return format_html(
                 '<button type="button" class="badge bg-yellow-lt border-0" '
                 'hx-get="{}" hx-target="#htmx-modal-content" hx-swap="innerHTML" '

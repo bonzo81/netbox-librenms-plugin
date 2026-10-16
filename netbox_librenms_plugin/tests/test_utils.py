@@ -157,6 +157,7 @@ class TestSiteMatching:
     def test_find_site_for_location_exact_match(self):
         """Location name matched to site."""
         from dcim.models import Site
+
         from netbox_librenms_plugin.utils import find_matching_site
 
         site = Site.objects.create(name="DC1", slug="utils-dc1")
@@ -180,6 +181,7 @@ class TestSiteMatching:
     def test_find_site_falls_back_to_mapping(self):
         """Resolve a stored alias when no exact site name matches."""
         from dcim.models import Site
+
         from netbox_librenms_plugin.models import LocationMapping
         from netbox_librenms_plugin.utils import find_matching_site
 
@@ -196,6 +198,7 @@ class TestSiteMatching:
     def test_find_site_exact_match_skips_mapping(self, django_assert_num_queries):
         """An exact site name wins without querying a conflicting alias."""
         from dcim.models import Site
+
         from netbox_librenms_plugin.models import LocationMapping
         from netbox_librenms_plugin.utils import find_matching_site
 
@@ -240,6 +243,7 @@ class TestPlatformMatching:
     def test_find_platform_for_os_exact_match(self):
         """OS string matched to platform."""
         from dcim.models import Platform
+
         from netbox_librenms_plugin.utils import find_matching_platform
 
         platform = Platform.objects.create(name="ios", slug="utils-ios")
@@ -1665,7 +1669,7 @@ class TestPredictModuleInterfaceRenameSignalGuard:
             pass
 
         @receiver(predict_module_interface_names)
-        def _bad(sender, device, module, names, **kwargs):  # noqa: ARG001
+        def _bad(sender, device, module, names, **kwargs):
             return return_value
 
         try:
@@ -1805,6 +1809,81 @@ class TestCoercePositiveInt:
         from netbox_librenms_plugin.utils import coerce_positive_int
 
         assert coerce_positive_int(value) == expected
+
+
+@pytest.mark.django_db
+class TestLibreNMSIdQueryMatchesDecoder:
+    """The SQL identity predicate finds a stored text form only when coerce_librenms_id reads it."""
+
+    @pytest.mark.parametrize(
+        "stored",
+        [
+            "42",
+            "+42",
+            " \t42\n",
+            "0042",
+            "0" * 17 + "42",  # 19 digits: the bigint width, still readable
+            "0" * 18 + "42",  # 20 digits: past the bound
+            "0" * 20 + "42",  # 22 digits
+        ],
+    )
+    @pytest.mark.parametrize("namespaced", [True, False])
+    def test_lookup_agrees_with_coerce(self, stored, namespaced):
+        """A query hit on a form the decoder rejects would name an owner nobody can read."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import coerce_librenms_id, find_by_librenms_id
+
+        dev = make_device(f"id-form-{len(stored)}-{namespaced}")
+        dev.custom_field_data["librenms_id"] = {"default": stored} if namespaced else stored
+        dev.save()
+
+        found = find_by_librenms_id(Device, 42, "default")
+
+        assert (found == dev) == (coerce_librenms_id(stored) == 42)
+
+    @pytest.mark.parametrize("stored", [42, "42", 42.0, 42.5])
+    @pytest.mark.parametrize(
+        "shape",
+        [
+            lambda v: {"default": v},
+            lambda v: {"default": {"id": v}},
+            lambda v: {"default": {"id": 7, "oob": {"id": v}}},
+            lambda v: v,
+        ],
+        ids=["scalar", "id", "oob", "legacy"],
+    )
+    def test_json_number_lookup_agrees_with_coerce(self, stored, shape):
+        """JSON 42.0 equals 42 in jsonb, but the decoder rejects a float, so no lookup may find it."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import coerce_librenms_id, find_by_librenms_id
+
+        dev = make_device(f"id-number-{stored!r}")
+        dev.custom_field_data["librenms_id"] = shape(stored)
+        dev.save()
+
+        found = find_by_librenms_id(Device, 42, "default")
+
+        assert (found == dev) == (coerce_librenms_id(stored) == 42)
+
+    @pytest.mark.parametrize("wide", [10**19, str(10**19)])
+    def test_id_past_the_digit_bound_is_neither_read_nor_found(self, wide):
+        """An ID wider than 19 digits is invalid in both int and text form, so no lookup finds it."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import coerce_librenms_id, find_by_librenms_id
+
+        dev = make_device("id-form-wide")
+        dev.custom_field_data["librenms_id"] = {"default": wide}
+        dev.save()
+        dev.refresh_from_db()
+
+        assert coerce_librenms_id(dev.custom_field_data["librenms_id"]["default"]) is None
+        assert find_by_librenms_id(Device, wide, "default") is None
 
 
 @pytest.mark.django_db

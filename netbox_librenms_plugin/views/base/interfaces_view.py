@@ -7,6 +7,7 @@ from django.utils import timezone
 from django.views import View
 
 from netbox_librenms_plugin.constants import MAIN_INVENTORY_SOURCE, OOB_INVENTORY_SOURCE
+from netbox_librenms_plugin.interface_diff import interface_enabled_from_port
 from netbox_librenms_plugin.interface_relationships import (
     RelationshipResolutionContext,
     build_relationship_maps,
@@ -15,6 +16,7 @@ from netbox_librenms_plugin.interface_relationships import (
 )
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.utils import (
+    apply_lag_vlan_fill,
     build_migrated_context,
     cache_remaining_ttl,
     coerce_librenms_id,
@@ -22,10 +24,13 @@ from netbox_librenms_plugin.utils import (
     get_interface_port_identity_sets,
     get_librenms_oob,
     get_librenms_sync_device,
+    host_owned_interface_names,
     is_list_of_dicts,
     is_valid_ports_payload,
     normalize_librenms_port_id,
+    normalize_relationship_maps,
     resolve_interface_row_device,
+    syncable_interface_name,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -171,15 +176,14 @@ class BaseInterfaceTableView(
         librenms_id_counts = {}
         duplicate_librenms_ids = set()
 
-        # Prefetch the M2M relations the table renderers dereference per matched row
-        # (render_vlans -> tagged_vlans, render_mac_address -> mac_addresses); without this each
-        # rendered interface row issues its own query for these. Also select related relationships
-        # FKs that render_parent and render_lag dereference.
+        # Prefetch the relations the row diff dereferences for every matched row (VLAN
+        # assignment and MAC addresses); without this each rendered interface row issues its own
+        # queries for these. Also select related relationship FKs that render_parent dereferences.
         related_field = self.get_select_related_field(obj)
         extra_related = ["parent", "bridge"] if related_field == "virtual_machine" else ["lag", "parent", "bridge"]
         interfaces = (
             self.get_interfaces(obj)
-            .select_related(related_field, *extra_related)
+            .select_related(related_field, "untagged_vlan", *extra_related)
             .prefetch_related("tagged_vlans", "tagged_vlans__group", "mac_addresses")
         )
         for interface in interfaces:
@@ -392,6 +396,13 @@ class BaseInterfaceTableView(
             host_ports_final,
             interface_name_field,
         )
+
+        # Fill the VLAN holes here, on the rows that get cached, so the table and the sync
+        # writer read one derivation instead of each computing its own.
+        lag_members, _sub_interfaces, _bridge_members = normalize_relationship_maps(
+            librenms_data.get("port_stack_relationships", {})
+        )
+        apply_lag_vlan_fill(host_ports_final, lag_members, interface_name_field=interface_name_field)
 
         # On an OOB-ports fetch failure the snapshot is host-only. Rather than dropping it
         # (which would leave downstream views — SingleInterfaceVerifyView,
@@ -791,15 +802,7 @@ class BaseInterfaceTableView(
             )
 
             for port in ports_data:
-                port["enabled"] = (
-                    True
-                    if port.get("ifAdminStatus") is None
-                    else (
-                        port["ifAdminStatus"].lower() == "up"
-                        if isinstance(port["ifAdminStatus"], str)
-                        else bool(port["ifAdminStatus"])
-                    )
-                )
+                port["enabled"] = interface_enabled_from_port(port)
 
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
                     chassis_member = resolve_interface_row_device(
@@ -850,6 +853,14 @@ class BaseInterfaceTableView(
                 # Add missing VLANs info for warning display
                 self._add_missing_vlans_info(port, row_lookup_maps)
 
+            host_owned_names = host_owned_interface_names(
+                ports_data, interface_name_field, lambda port: port.get("selected_object_id")
+            )
+            for port in ports_data:
+                if port.get("_source") == OOB_INVENTORY_SOURCE:
+                    owner_names = host_owned_names.get(port.get("selected_object_id"), set())
+                    port["host_name_collision"] = syncable_interface_name(port, interface_name_field) in owner_names
+
             table = self.get_table(ports_data, obj, interface_name_field, vlan_groups=vlan_groups)
             table.allowed_vc_member_ids = actionable_owner_ids
             # Propagate donor "migrated mode" so the table suppresses per-row relationship sync
@@ -858,15 +869,6 @@ class BaseInterfaceTableView(
             table.migrated_to_marker = bool(build_migrated_context(obj, server_key).get("migrated_to_marker"))
             table.configure(request)
 
-            # Identify NetBox-only interfaces (interfaces in NetBox but not in LibreNMS)
-            # Exclude OOB-controller rows: their names belong to a different
-            # device and must not suppress main-device netbox-only detection.
-            librenms_interface_names = {
-                port.get(interface_name_field)
-                for port in ports_data
-                if port.get(interface_name_field) and port.get("_source") != OOB_INVENTORY_SOURCE
-            }
-
             netbox_only_interfaces = []
             for device_id, device_interface_maps in interfaces_by_device.items():
                 if device_id not in actionable_owner_ids:
@@ -874,7 +876,10 @@ class BaseInterfaceTableView(
                 for interface_name, interface in device_interface_maps["by_name"].items():
                     if interface.id not in viewable_interface_ids or interface.id in matched_interface_ids:
                         continue
-                    if interface_name not in librenms_interface_names:
+                    # Host ownership is per device, so an OOB row's name cannot suppress
+                    # netbox-only detection here. It also drops names too long for NetBox to
+                    # store, which no NetBox interface name can equal anyway.
+                    if interface_name not in host_owned_names.get(device_id, set()):
                         # Get device name for the interface (reuse the pre-indexed members — the
                         # device_id keys come from interfaces_by_device, which was built from them —
                         # instead of a members.get(id=...) query per netbox-only interface).
@@ -944,7 +949,7 @@ class BaseInterfaceTableView(
         return any(
             port.get("ifType", "") == "ieee8023adLag"
             or any((match := sub_iface_re.match(name)) and match.group(1) in port_names for name in names)
-            for port, names in zip(ports, names_per_port)
+            for port, names in zip(ports, names_per_port, strict=True)
         )
 
     def _has_relationship_name_signals(

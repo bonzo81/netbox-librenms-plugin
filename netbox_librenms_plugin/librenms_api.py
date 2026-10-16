@@ -52,6 +52,11 @@ def _validate_api_url(url):
         raise ValueError("LibreNMS API URLs must not include a query or fragment.")
 
 
+def librenms_id_owned_message(librenms_id):
+    """Return the conflict text that names neither the owner nor its model."""
+    return f"LibreNMS ID {librenms_id} is already assigned to another NetBox object."
+
+
 class LibreNMSIDConflictError(ValueError):
     """A LibreNMS device ID is already assigned to another NetBox object."""
 
@@ -583,7 +588,7 @@ class LibreNMSAPI:
                 if conflict is not None:
                     object_label = "VM" if conflict._meta.model_name == "virtualmachine" else "device"
                     raise LibreNMSIDConflictError(
-                        f"LibreNMS ID {librenms_id} is already assigned to another {object_label}.",
+                        librenms_id_owned_message(librenms_id),
                         conflict=conflict,
                         named_message=(
                             f"LibreNMS ID {librenms_id} is already assigned to {object_label} '{conflict.name}'"
@@ -1612,7 +1617,7 @@ class LibreNMSAPI:
         except requests.exceptions.RequestException as e:
             return False, str(e)
 
-    def get_device_inventory(self, device_id):
+    def get_device_inventory(self, device_id, missing_is_empty=False):
         """
         Fetch complete inventory for a device from LibreNMS.
 
@@ -1622,6 +1627,9 @@ class LibreNMSAPI:
 
         Args:
             device_id: LibreNMS device ID
+            missing_is_empty: Read a 404 as an empty inventory instead of a failure, matching
+                get_inventory_filtered(). A caller that has already established the device
+                exists opts in; the default stays fail-closed for a possibly stale device id.
 
         Returns:
             tuple: (success: bool, data: list). On success ``data`` is always a list of dicts —
@@ -1653,6 +1661,13 @@ class LibreNMSAPI:
                 logger.warning(f"Unexpected inventory response for device {device_id}: {inventory_data}")
                 return False, msg or "Unexpected response format: invalid 'inventory' payload"
             return True, inventory
+        except requests.exceptions.HTTPError as e:
+            # Opt-in only, exactly as in get_inventory_filtered: LibreNMS answers 404 for a
+            # device that holds no inventory rows as well as for one it does not have.
+            if missing_is_empty and e.response is not None and e.response.status_code == HTTP_NOT_FOUND:
+                logger.debug(f"Device {device_id} has no inventory entries")
+                return True, []
+            return False, str(e)
         except (requests.exceptions.RequestException, ValueError) as e:
             return False, str(e)
 
@@ -1760,7 +1775,9 @@ class LibreNMSAPI:
         except (requests.exceptions.RequestException, ValueError) as e:
             return False, str(e)
 
-    def get_inventory_filtered(self, device_id, ent_physical_class=None, ent_physical_contained_in=None):
+    def get_inventory_filtered(
+        self, device_id, ent_physical_class=None, ent_physical_contained_in=None, missing_is_empty=False
+    ):
         """
         Fetch filtered inventory from LibreNMS with optional filtering.
 
@@ -1772,6 +1789,9 @@ class LibreNMSAPI:
             device_id: LibreNMS device ID
             ent_physical_class: Filter by entPhysicalClass (e.g., 'chassis', 'stack')
             ent_physical_contained_in: Filter by entPhysicalContainedIn (0=root, 1=first level, etc.)
+            missing_is_empty: Read a 404 as an empty inventory instead of a failure. LibreNMS
+                answers 404 for a device that holds no inventory rows, so a caller that has
+                already established the device exists opts in here.
 
         Returns:
             tuple: (success: bool, inventory: list)
@@ -1819,7 +1839,7 @@ class LibreNMSAPI:
             # try /all endpoint and filter client-side
             if params:
                 logger.debug("Filtered inventory API returned no results, falling back to client-side filtering")
-                success, all_inventory = self.get_device_inventory(device_id)
+                success, all_inventory = self.get_device_inventory(device_id, missing_is_empty=missing_is_empty)
 
                 if not success:
                     return False, all_inventory
@@ -1843,6 +1863,13 @@ class LibreNMSAPI:
                 return False, data.get("message") or "Unexpected response format"
             return False, "Unexpected response format"
 
+        except requests.exceptions.HTTPError as e:
+            # Opt-in only: a blanket 404 mapping would hide a stale device id from every caller.
+            if missing_is_empty and e.response is not None and e.response.status_code == HTTP_NOT_FOUND:
+                logger.debug(f"Device {device_id} has no inventory entries")
+                return True, []
+            logger.warning(f"Failed to fetch filtered inventory: {e}")
+            return False, str(e)
         except (requests.exceptions.RequestException, ValueError) as e:
             logger.warning(f"Failed to fetch filtered inventory: {e}")
             return False, str(e)

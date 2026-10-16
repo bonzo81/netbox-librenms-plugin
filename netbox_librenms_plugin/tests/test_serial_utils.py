@@ -1,14 +1,15 @@
 """Tests for serial_utils.py — mostly a pure mapper; the recognized-type map is DB-backed."""
 
 import json
-import os
+from pathlib import Path
+
 import pytest
 
-FIXTURE_PATH = os.path.join(os.path.dirname(__file__), "acs6048_sensors_fixture.json")
+FIXTURE_PATH = Path(__file__).parent / "acs6048_sensors_fixture.json"
 
 
 def _load_fixture() -> list[dict]:
-    with open(FIXTURE_PATH) as f:
+    with FIXTURE_PATH.open() as f:
         return json.load(f)
 
 

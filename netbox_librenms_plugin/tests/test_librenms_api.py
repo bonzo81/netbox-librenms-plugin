@@ -587,6 +587,33 @@ class TestLibreNMSAPIDeviceLookup:
         assert result == 77
         assert [request["path"] for request in librenms_server.requests] == [ip_path, hostname_path]
 
+    @pytest.mark.django_db
+    @pytest.mark.parametrize("owner_kind, label", [("device", "device"), ("vm", "VM")])
+    def test_a_discovered_id_conflict_names_the_owner_model_only_in_the_named_message(
+        self, local_librenms_api, librenms_server, owner_kind, label
+    ):
+        """The claim search is unrestricted, so the generic text names neither the owner nor its model."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSIDConflictError
+        from netbox_librenms_plugin.tests.conftest import make_device, make_vm
+
+        if owner_kind == "vm":
+            owner = make_vm("discovery-claimed-by-vm")
+            owner.custom_field_data["librenms_id"] = {"default": 4242}
+            owner.save()
+        else:
+            owner = make_device("discovery-claimed-by-device", librenms_cf={"default": 4242})
+        target = make_device(f"discovery-claim-target-{owner_kind}", librenms_cf={"default": None})
+        librenms_server.register(
+            f"/api/v0/devices/{target.name}", {"status": "ok", "devices": [{"device_id": 4242}]}, method="GET"
+        )
+
+        with pytest.raises(LibreNMSIDConflictError) as excinfo:
+            local_librenms_api.get_librenms_id(target)
+
+        assert str(excinfo.value) == "LibreNMS ID 4242 is already assigned to another NetBox object."
+        # Only a permission-checked caller shows this one.
+        assert excinfo.value.named_message == f"LibreNMS ID 4242 is already assigned to {label} '{owner.name}'"
+
     def test_get_device_id_by_ip_not_found(self, local_librenms_api, librenms_server):
         """Returns None when IP not found in LibreNMS."""
         path = "/api/v0/devices/192.0.2.99"
@@ -1184,6 +1211,32 @@ class TestLibreNMSAPIPortsAndInventory:
 
         assert success is True
         assert len(ips) == 0
+
+    def test_get_inventory_filtered_404_is_empty_not_failure(self, local_librenms_api, librenms_server):
+        """LibreNMS 404s /inventory/{id} for a device with no inventory rows, which is not a stack."""
+        librenms_server.register("/api/v0/inventory/123", {"status": "error"}, status=404, method="GET")
+
+        success, inventory = local_librenms_api.get_inventory_filtered(
+            123, ent_physical_contained_in=0, missing_is_empty=True
+        )
+
+        # An empty inventory must read as a successful empty result. Reporting it as a failed read
+        # makes virtual chassis detection fail closed and blocks importing ordinary devices.
+        assert success is True
+        assert inventory == []
+
+        # Without the opt-in a 404 stays a failure, so a stale device id is not hidden from
+        # callers that have not established the device exists.
+        default_success, _detail = local_librenms_api.get_inventory_filtered(123, ent_physical_contained_in=0)
+        assert default_success is False
+
+    def test_get_inventory_filtered_non_404_http_error_still_fails(self, local_librenms_api, librenms_server):
+        """A real inventory fault stays a failure so virtual chassis detection can fail closed."""
+        librenms_server.register("/api/v0/inventory/123", {"status": "error"}, status=500, method="GET")
+
+        success, _payload = local_librenms_api.get_inventory_filtered(123, missing_is_empty=True)
+
+        assert success is False
 
     def test_get_device_ips_404_is_empty_not_failure(self, local_librenms_api, librenms_server):
         """LibreNMS 404s /devices/{id}/ip for a device with no IPs — a successful empty result, not a fetch failure."""
