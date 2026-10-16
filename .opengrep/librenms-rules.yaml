@@ -432,6 +432,29 @@ rules:
           - pattern-not-inside: pytest.mark.xfail.with_args(..., raises=$EXCEPTION, ...)
           - pattern-not-inside: $ALIAS = pytest.mark.xfail
       - pattern: pytestmark = pytest.mark.xfail
+  - id: executor-needs-bounded-executor
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Use tests.conftest.bounded_executor(...) in place of a ThreadPoolExecutor context manager.
+      When a result timeout raises in the block, ThreadPoolExecutor.__exit__ waits for the hung
+      worker, so a deadlock hangs the test session instead of failing the test.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/tests/**"]
+    patterns:
+      - pattern-either:
+          - pattern: |
+              with $MANAGER as $EXECUTOR:
+                ...
+          - pattern: |
+              with $MANAGER:
+                ...
+      - focus-metavariable: $MANAGER
+      - pattern-either:
+          - pattern: ThreadPoolExecutor(...)
+          - pattern: concurrent.futures.ThreadPoolExecutor(...)
   - id: barrier-needs-run-in-threads
     languages: [python]
     severity: ERROR

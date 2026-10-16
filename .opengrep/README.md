@@ -53,6 +53,7 @@ unchecked until that review.
 | `no-django-testcase-in-tests` | warning | A test directly imports or inherits Django `TestCase`. Dynamic bases are outside this check. |
 | `no-unittest-assertions` | warning | A test calls a `self` method with a unittest assertion API name. |
 | `xfail-needs-raises` | error | A test marks an expected failure with `pytest.mark.xfail` and does not name the exception with `raises=`, or gives `raises=None`. An alias of the marker is not followed. |
+| `executor-needs-bounded-executor` | error | A test uses `ThreadPoolExecutor` as a context manager, not `tests.conftest.bounded_executor`. |
 | `barrier-needs-run-in-threads` | error | A test creates a `threading.Barrier` and then starts threads with `ThreadPoolExecutor` or `Thread`, not with `tests.conftest.run_in_threads`. |
 | `recorded-response-needs-envelope` | error | Code reads a recorded response as a bare `[status, body]` list instead of through `data_shapes.envelope.unwrap_response`. |
 | `no-selected-fuzzy-apis` | warning | Code calls selected approximate-selection APIs. This does not prove exact-only selection. |
@@ -66,8 +67,9 @@ definitions of the trusted names, and each reviewed read of a caught error, carr
 suppressions. The requests rule covers
 `netbox_librenms_plugin/`, except its root `librenms_api.py` and tests. The IPAddress rule covers
 `netbox_librenms_plugin/`, except tests and migrations. The htmx header rule excludes tests,
-because a test sends the header to build an htmx request. The two test-convention
-rules include only `netbox_librenms_plugin/tests/`. The remaining rules apply to Python files
+because a test sends the header to build an htmx request. The five test-convention
+rules (TestCase, unittest assertions, xfail, Barrier and executor) include only
+`netbox_librenms_plugin/tests/`. The remaining rules apply to Python files
 in the scan target.
 
 Opengrep 1.30.0 skips test directories during directory scans. The scan script expands the default
@@ -103,6 +105,10 @@ passed in as a `netaddr.IPNetwork` variable is also reported; wrap the value at 
 The Barrier rule checks a test function that assigns a `Barrier(...)` or `threading.Barrier(...)` before it
 starts a thread. It does not follow a barrier that another function creates, a thread that a helper starts,
 or a handshake with an `Event`.
+
+The executor rule checks a `with` statement whose context manager is a `ThreadPoolExecutor(...)` call,
+also through an import alias. It does not see an executor that a variable or a helper supplies, or an
+explicit `shutdown(wait=True)` after a timeout.
 
 The URL rule checks `<str:pk>` and `<pk>` in literal routes and local string constants.
 It leaves `<str:id>` alone because external IDs can contain text. The `pk` name is a package

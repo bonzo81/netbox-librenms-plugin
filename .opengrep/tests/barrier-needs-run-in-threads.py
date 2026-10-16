@@ -8,7 +8,7 @@ from netbox_librenms_plugin.tests.conftest import run_in_threads
 
 def test_executor_with_a_barrier():
     barrier = Barrier(2)
-    # ruleid: barrier-needs-run-in-threads
+    # ruleid: barrier-needs-run-in-threads, executor-needs-bounded-executor
     with ThreadPoolExecutor(max_workers=2) as executor:
         futures = [executor.submit(barrier.wait, timeout=5) for _ in range(2)]
         for future in futures:
@@ -41,12 +41,14 @@ def test_barrier_through_the_helper():
 
 def test_executor_without_a_barrier():
     # ok: barrier-needs-run-in-threads
+    # ruleid: executor-needs-bounded-executor
     with ThreadPoolExecutor(max_workers=1) as executor:
         executor.submit(print).result(timeout=10)
 
 
 def test_executor_before_the_barrier():
     # ok: barrier-needs-run-in-threads
+    # ruleid: executor-needs-bounded-executor
     with ThreadPoolExecutor(max_workers=1) as executor:
         executor.submit(print).result(timeout=10)
     barrier = Barrier(1)
