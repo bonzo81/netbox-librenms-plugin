@@ -1459,6 +1459,82 @@ def test_an_hx_confirm_question_asks_in_the_plugin_modal(page, accept):
     assert page.evaluate("window.confirmCalls") == []
 
 
+def _render_remove_mapping_form(page, server_key):
+    """Render the sync page's real remove-mapping form, cut out of its template, with the page script."""
+    from django.template import Context, Engine, Library
+
+    urls = Library()
+
+    @urls.simple_tag(name="url")
+    def url(name, **kwargs):
+        return "/remove-mapping/"
+
+    engine = Engine()
+    engine.template_builtins.append(urls)
+    source = (TEMPLATE_DIR / "librenms_sync_base.html").read_text(encoding="utf-8")
+    form = re.search(r"<form[^>]*remove_server_mapping.*?</form>", source, flags=re.S).group(0)
+    fragment = engine.from_string(form).render(
+        Context(
+            {
+                "mapping": {"server_key": server_key},
+                "server_key": "production",
+                "lookup_device_pk": 7,
+                "lookup_device_model_name": "device",
+                "csrf_token": "token",
+            },
+            use_l10n=False,
+        )
+    )
+    page.set_content(MODAL_CSS + fragment)
+    _add_page_scripts(page)
+    _spy_on_window_confirm(page)
+    page.evaluate(
+        """() => {
+            window.submitted = [];
+            document.querySelector('form').addEventListener('submit', event => {
+                event.preventDefault();
+                window.submitted.push(Array.from(new FormData(event.target, event.submitter).entries()));
+            });
+        }"""
+    )
+
+
+@pytest.mark.parametrize("dismiss", ["cancel", "escape", "backdrop"])
+def test_remove_mapping_asks_in_the_plugin_modal_and_a_dismissal_submits_nothing(page, dismiss):
+    _render_remove_mapping_form(page, "old-lab")
+
+    page.get_by_role("button", name="Remove").click()
+
+    modal = page.locator(CONFIRM_MODAL)
+    expect(modal.locator("[data-confirm-message]")).to_have_text(
+        "Remove mapping for server 'old-lab'? This cannot be undone."
+    )
+    if dismiss == "cancel":
+        modal.get_by_role("button", name="Cancel").click()
+    elif dismiss == "escape":
+        page.keyboard.press("Escape")
+    else:
+        page.mouse.click(5, 5)
+    expect(modal).to_be_hidden()
+    assert page.evaluate("window.submitted") == []
+    assert page.evaluate("window.confirmCalls") == []
+
+
+def test_remove_mapping_confirmed_in_the_modal_submits_once_and_shows_the_key_as_text(page):
+    _render_remove_mapping_form(page, "o'lab <b>x</b>")
+
+    page.get_by_role("button", name="Remove").click()
+    message = page.locator(f"{CONFIRM_MODAL} [data-confirm-message]")
+    expect(message).to_have_text("Remove mapping for server 'o'lab <b>x</b>'? This cannot be undone.")
+    assert message.locator("b").count() == 0
+    page.locator(CONFIRM_MODAL).get_by_role("button", name="Confirm").click()
+
+    [pairs] = page.evaluate("window.submitted")
+    assert ["server_key", "o'lab <b>x</b>"] in pairs
+    assert ["active_server_key", "production"] in pairs
+    assert page.evaluate("window.confirmCalls") == []
+
+
 def _modal_state(page):
     """Return which modals are open, how many backdrops exist, and whether the page scroll is locked."""
     return page.evaluate(
