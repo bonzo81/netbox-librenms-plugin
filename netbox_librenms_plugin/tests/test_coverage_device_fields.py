@@ -526,7 +526,8 @@ class TestCreateAndAssignPlatformView:
         assert device.platform is None
         assert any("Platform name is required" in text for text in _messages(response, "error"))
 
-    def test_mapping_conflict_is_reported_without_undoing_assignment(self, logged_in_client, librenms_server):
+    def test_an_os_mapping_that_now_resolves_makes_the_create_stale(self, logged_in_client, librenms_server):
+        """The modal opened while the OS had no platform; a mapping added since then wins over the named create."""
         from dcim.models import Platform
         from netbox_librenms_plugin.models import PlatformMapping
 
@@ -547,9 +548,9 @@ class TestCreateAndAssignPlatformView:
         )
 
         device.refresh_from_db()
-        assert device.platform == requested
+        assert device.platform is None
         assert PlatformMapping.objects.get(librenms_os="conflicted-os").netbox_platform == existing_target
-        assert any("could not be created" in text for text in _messages(response, "warning"))
+        assert any("now matches LibreNMS OS 'conflicted-os'" in text for text in _messages(response, "error"))
 
     def test_invalid_manufacturer_is_rejected_before_platform_creation(self, logged_in_client, librenms_server):
         from dcim.models import Manufacturer, Platform

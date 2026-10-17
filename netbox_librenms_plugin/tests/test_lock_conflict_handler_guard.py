@@ -75,9 +75,10 @@ ALLOWED = [
     ("import_utils/vm_operations.py", "bulk_import_vms", "Exception", _OWN_TRANSACTION),
     (
         "views/sync/device_fields.py",
-        "CreateAndAssignPlatformView.post",
-        "ValidationError",
-        "The platform is a root insert, which takes no tree lock, and a Device is not an ltree model.",
+        "_report_os_mapping",
+        "DatabaseError, ValidationError",
+        "The platform assignment committed before it; a conflict on the optional mapping is reported as "
+        "a mapping not created, through exception_text_for, not as a try-again for committed work.",
     ),
     *(
         (path, function, caught, _NOT_LTREE)
