@@ -920,6 +920,10 @@ class LibreNMSAPI:
           5. A configured bridge-name pattern identifies the bridge side from ifName or ifDescr.
              This classification is stable across name-field fallback, so one pair cannot be
              reinterpreted as a different relationship kind.
+          6. A port with ifType 'ipForward' is an L3 interface: never a LAG member or aggregate.
+             In a pair that rules 4 and 5 leave, an ipForward port with a partner of another
+             ifType is a sub-interface of that partner as reported (no '.N' stripping). A pair
+             of two ipForward ports stays unclassified.
 
         Configurable via PortStackLagPattern model:
           - Per-OS regex patterns identify LAG aggregates when ifType is not 'ieee8023adLag'.
@@ -1137,6 +1141,9 @@ class LibreNMSAPI:
                 name = port.get(field)
                 return _matches_name_patterns(name, compiled_patterns)
 
+            def _is_l3_interface(port: dict) -> bool:
+                return port.get("ifType") == "ipForward"
+
             def _is_bridge(port: dict) -> bool:
                 return any(
                     _matches_name_patterns(port.get(name_field), compiled_bridge_patterns)
@@ -1185,6 +1192,7 @@ class LibreNMSAPI:
                     return False
                 return child_name.startswith(parent_name + ".") and child_name[len(parent_name) + 1 :].isdigit()
 
+            l3_child_ids: set = set()
             for high_port, low_port in filtered_port_pairs:
                 pair_key = normalized_pair_key(high_port, low_port)
                 if pair_key is None or pair_key in excluded_pairs:
@@ -1209,11 +1217,24 @@ class LibreNMSAPI:
                     _claim("bridge_members", pair_key)
                     continue
 
+                low_is_l3 = _is_l3_interface(low_port)
+                high_is_l3 = _is_l3_interface(high_port)
+                if low_is_l3 != high_is_l3:
+                    child, parent = (low_port, high_port) if low_is_l3 else (high_port, low_port)
+                    _relate(sub_interfaces, conflicted_sub_interfaces, child, parent)
+                    l3_child_ids.add(normalize_librenms_port_id(child.get("port_id")))
+                    _claim("sub_interfaces", pair_key)
+                    continue
+                if low_is_l3:
+                    continue
+
                 high_phys = _resolve_physical_port(high_port)
                 low_phys = _resolve_physical_port(low_port)
                 if normalize_librenms_port_id(high_phys.get("port_id")) == normalize_librenms_port_id(
                     low_phys.get("port_id")
                 ):
+                    continue
+                if _is_l3_interface(high_phys) or _is_l3_interface(low_phys):
                     continue
 
                 low_is_agg = _is_lag_aggregate(low_phys)
@@ -1235,7 +1256,7 @@ class LibreNMSAPI:
                     _relate(lag_members, conflicted_lag_members, low_phys, high_phys)
                     _claim("lag_members", pair_key)
 
-            # Every sub-interface edge shortens the active-field name, so the graph cannot contain a cycle.
+            # A name-derived edge shortens the active-field name, so these edges alone cannot form a cycle.
             for port in ports_with_id:
                 child_id = normalize_librenms_port_id(port.get("port_id"))
                 if child_id is None or child_id in sub_interfaces or child_id in conflicted_sub_interfaces:
@@ -1251,6 +1272,16 @@ class LibreNMSAPI:
                     continue
                 _relate(sub_interfaces, conflicted_sub_interfaces, port, parent_port)
                 _claim("sub_interfaces", pair_key)
+
+            # An ipForward edge can close a parent cycle with name edges; the names are the stronger signal.
+            for child_id in sorted(l3_child_ids):
+                parent_id, seen = sub_interfaces.get(child_id), set()
+                while parent_id is not None and parent_id != child_id and parent_id not in seen:
+                    seen.add(parent_id)
+                    parent_id = sub_interfaces.get(parent_id)
+                if parent_id == child_id:
+                    sub_interfaces.pop(child_id)
+                    conflicted_sub_interfaces.add(child_id)
 
             return {
                 "lag_members": lag_members,

@@ -2236,6 +2236,90 @@ class TestResolvePortRelationships:
         result = mock_librenms_api.resolve_port_relationships(ports, port_stack, lag_patterns={})
         assert result["lag_members"] == {201: 202}
 
+    @pytest.mark.parametrize("inverted", [False, True], ids=["timos-order", "reversed-order"])
+    def test_an_ip_interface_on_a_lag_is_its_child_not_a_member(self, mock_librenms_api, inverted):
+        """A live TiMOS LAG has one physical member and an L3 interface stacked on it, never two members."""
+        ports = [
+            {"port_id": 34375, "ifName": "1/1/c8/1", "ifDescr": "1/1/c8/1", "ifType": "ethernetCsmacd"},
+            {"port_id": 34362, "ifName": "lag-67", "ifDescr": "lag-67", "ifType": "ieee8023adLag"},
+            {"port_id": 34353, "ifName": "to_core-ra1", "ifDescr": "to_core-ra1, IP interface", "ifType": "ipForward"},
+        ]
+        rows = [(34362, 34353), (34375, 34362)]
+        if inverted:
+            rows = [(low, high) for high, low in rows]
+        port_stack = [{"high_port_id": high, "low_port_id": low} for high, low in rows]
+
+        result = mock_librenms_api.resolve_port_relationships(
+            ports, port_stack, lag_patterns={"timos": r"^lag-\d+$"}, compiled_sap_patterns=[re.compile(":")]
+        )
+
+        assert result["lag_members"] == {34375: 34362}
+        assert result["sub_interfaces"] == {34353: 34362}
+        assert result["stacked_ports"] == {}
+
+    @pytest.mark.parametrize("lag_patterns", [{}, {"any": r"^lag"}], ids=["no-pattern", "ip-name-looks-like-a-lag"])
+    @pytest.mark.parametrize("inverted", [False, True], ids=["ip-low", "ip-high"])
+    def test_an_ip_interface_on_a_physical_port_is_its_child(self, mock_librenms_api, inverted, lag_patterns):
+        """An L3 interface on a physical port is its child, even when its name matches a LAG pattern."""
+        ports = [
+            {"port_id": 1, "ifName": "1/1/c9/1", "ifType": "ethernetCsmacd"},
+            {"port_id": 2, "ifName": "lag9", "ifType": "ipForward"},
+        ]
+        high, low = (2, 1) if inverted else (1, 2)
+
+        result = mock_librenms_api.resolve_port_relationships(
+            ports, [{"high_port_id": high, "low_port_id": low}], lag_patterns=lag_patterns
+        )
+
+        assert result["sub_interfaces"] == {2: 1}
+        assert result["lag_members"] == {}
+        assert result["stacked_ports"] == {}
+
+    def test_two_stacked_ip_interfaces_stay_unclassified(self, mock_librenms_api):
+        """Two stacked L3 interfaces have no direction, and neither one is a LAG aggregate."""
+        ports = [
+            {"port_id": 1, "ifName": "lag-2", "ifType": "ipForward"},
+            {"port_id": 2, "ifName": "lag2", "ifType": "ipForward"},
+        ]
+
+        result = mock_librenms_api.resolve_port_relationships(
+            ports, [{"high_port_id": 1, "low_port_id": 2}], lag_patterns={"any": r"^lag-\d+$"}
+        )
+
+        assert typed_maps(result) == {"lag_members": {}, "sub_interfaces": {}, "bridge_members": {}}
+        assert result["stacked_ports"] == {1: [2], 2: [1]}
+
+    def test_an_ip_interface_edge_that_closes_a_parent_loop_is_dropped(self, mock_librenms_api):
+        """Name-derived parents win over an ipForward edge that would make a parent cycle."""
+        ports = [
+            {"port_id": 1, "ifName": "eth0", "ifDescr": "eth0", "ifType": "ipForward"},
+            {"port_id": 2, "ifName": "eth0.1", "ifDescr": "eth0.1", "ifType": "l2vlan"},
+            {"port_id": 3, "ifName": "eth0.1.2", "ifDescr": "eth0.1.2", "ifType": "l2vlan"},
+        ]
+
+        result = mock_librenms_api.resolve_port_relationships(
+            ports, [{"high_port_id": 1, "low_port_id": 3}], lag_patterns={}
+        )
+
+        assert result["sub_interfaces"] == {2: 1, 3: 2}
+        kinds = {kind["key"]: kind for kind in result["diagnostics"]["kinds"]}
+        assert kinds["sub_interfaces"]["conflicted"] == 1
+
+    def test_a_sub_unit_of_an_ip_interface_is_not_a_lag_member(self, mock_librenms_api):
+        """The physical-level port of a stacked sub-unit can be an L3 interface, which never joins a LAG."""
+        ports = [
+            {"port_id": 1, "ifName": "to_core", "ifDescr": "to_core", "ifType": "ipForward"},
+            {"port_id": 2, "ifName": "to_core.5", "ifDescr": "to_core.5", "ifType": "l2vlan"},
+            {"port_id": 3, "ifName": "lag-1", "ifDescr": "lag-1", "ifType": "ieee8023adLag"},
+        ]
+
+        result = mock_librenms_api.resolve_port_relationships(
+            ports, [{"high_port_id": 2, "low_port_id": 3}], lag_patterns={}
+        )
+
+        assert result["lag_members"] == {}
+        assert result["stacked_ports"] == {2: [3], 3: [2]}
+
     @pytest.mark.parametrize(
         "port_stack",
         [
@@ -2363,6 +2447,8 @@ class TestResolvePortRelationships:
             NOKIA_SAP_PORTS, NOKIA_SAP_PORT_STACK, lag_patterns={}, compiled_sap_patterns=[re.compile(":")]
         )
         assert result["lag_members"] == {101: 102}
+        # The SAP is an ipForward port, which never joins a LAG, so only the skip count proves the rule fired.
+        assert result["diagnostics"]["pairs_skipped_sap"] == 1
         assert 200 not in result["lag_members"].values()
 
     def test_nokia_sap_excluded_when_colon_only_in_ifname_ifdescr_mode(self, mock_librenms_api):
@@ -2385,7 +2471,7 @@ class TestResolvePortRelationships:
             compiled_sap_patterns=[re.compile(":")],
         )
         assert result["lag_members"] == {101: 102}
-        assert 200 not in result["lag_members"]
+        assert result["diagnostics"]["pairs_skipped_sap"] == 1
 
     def test_sap_rows_stay_excluded_from_the_name_derived_sub_interface_fallback(self, mock_librenms_api):
         """
