@@ -9,6 +9,7 @@ from django.db import transaction
 
 from ..librenms_api import LibreNMSAPI
 from ..utils import (
+    exception_text_for,
     find_devices_by_serial,
     normalize_inventory_serial,
     normalize_stack_serial,
@@ -133,12 +134,12 @@ def prefetch_vc_data_for_devices(api: LibreNMSAPI, device_ids: List[int], *, for
         try:
             get_virtual_chassis_data(api, device_id, force_refresh=force_refresh)
         except (BrokenPipeError, ConnectionError, IOError, OSError) as e:
-            logger.warning(f"Connection error during VC prefetch at device {idx}: {e}")
+            logger.warning("Connection error during VC prefetch at device %s: %s", idx, e)
             # Stop processing if connection is broken
             return
         except Exception as e:
             # Log but continue for other errors
-            logger.warning(f"Error prefetching VC data for device {device_id}: {e}")
+            logger.warning("Error prefetching VC data for device %s: %s", device_id, e)
 
     logger.debug(f"VC cache warming complete for {len(device_ids)} devices")
 
@@ -335,8 +336,9 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> d
         }
 
     except Exception as e:
-        logger.exception(f"Error detecting virtual chassis for device {device_id}: {e}")
-        return _failed_virtual_chassis_data(str(e) or type(e).__name__)
+        logger.exception("Error detecting virtual chassis for device %s: %s", device_id, e)
+        # The detection result has no viewer: it is cached and shown to any import user.
+        return _failed_virtual_chassis_data(exception_text_for(e, VirtualChassis, None) or type(e).__name__)
 
 
 def _load_vc_member_name_pattern() -> str:
@@ -351,7 +353,7 @@ def _load_vc_member_name_pattern() -> str:
         pattern = settings.vc_member_name_pattern
         return pattern if isinstance(pattern, str) and pattern.strip() else default
     except Exception as e:
-        logger.warning(f"Could not load VC member name pattern from settings: {e}. Using default.")
+        logger.warning("Could not load VC member name pattern from settings: %s. Using default.", e)
         return default
 
 
@@ -443,18 +445,11 @@ def _safe_pos(value) -> int | None:
 
 
 def _sync_module_bay_counter(device: Device) -> None:
-    """Reconcile device module_bay_count with actual ModuleBay rows in the DB."""
-    try:
-        actual_count = device.modulebays.count()
-        if getattr(device, "module_bay_count", None) != actual_count:
-            Device.objects.filter(pk=device.pk).update(module_bay_count=actual_count)
-            device.module_bay_count = actual_count
-    except Exception as e:
-        logger.warning(
-            "Could not sync module_bay_count for device '%s': %s",
-            getattr(device, "name", "unknown"),
-            e,
-        )
+    """Reconcile device module_bay_count with actual ModuleBay rows in the DB; a failure fails the caller's transaction."""
+    actual_count = device.modulebays.count()
+    if getattr(device, "module_bay_count", None) != actual_count:
+        Device.objects.filter(pk=device.pk).update(module_bay_count=actual_count)
+        device.module_bay_count = actual_count
 
 
 def create_virtual_chassis_with_members(  # noqa: C901
@@ -524,6 +519,7 @@ def create_virtual_chassis_with_members(  # noqa: C901
 
     try:
         with transaction.atomic():
+            master_device.snapshot()
             # Load naming pattern once to avoid a DB query per member
             vc_pattern = _load_vc_member_name_pattern()
             # Rename master device to include position 1 pattern
@@ -556,7 +552,7 @@ def create_virtual_chassis_with_members(  # noqa: C901
             # Update master device
             master_device.virtual_chassis = vc
             master_device.vc_position = _master_pos
-            save_fields = ["virtual_chassis", "vc_position"]
+            save_fields = ["virtual_chassis", "vc_position", "last_updated"]
             if rename_master:
                 save_fields.append("name")
             master_device.save(update_fields=save_fields)
@@ -663,8 +659,9 @@ def create_virtual_chassis_with_members(  # noqa: C901
 
             # Assign VC master only after all members are attached to avoid
             # NetBox's create-time auto-master signal changing order/state.
+            vc.snapshot()
             vc.master = master_device
-            vc.save(update_fields=["master"])
+            vc.save(update_fields=["master", "last_updated"])
             _sync_module_bay_counter(master_device)
 
             logger.info(
@@ -678,8 +675,5 @@ def create_virtual_chassis_with_members(  # noqa: C901
         master_device.name = original_master_name
         master_device.virtual_chassis = original_vc
         master_device.vc_position = original_vc_position
-        logger.error(
-            f"Virtual Chassis creation failed for device {original_master_name}: {e}",
-            exc_info=True,
-        )
+        logger.error("Virtual Chassis creation failed for device %s: %s", original_master_name, e, exc_info=True)
         raise

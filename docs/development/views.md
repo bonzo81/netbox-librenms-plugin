@@ -7,7 +7,7 @@ Views are organized by resource type (e.g., devices, mappings, VMs) in the `view
 **Resource-specific views:**
 
   - Device and VM sync tabs live under `object_sync/` (see `object_sync/devices.py` and `object_sync/vms.py`), while mappings/settings/status views remain as individual modules alongside the package.
-  - The LibreNMS import workflow is grouped under `views/imports/`: `list.py` renders the main table view and `actions.py` contains the HTMX endpoints (preview, validation, bulk execute). All legacy handlers formerly in `librenms_import_views.py` and `device_import_views.py` were folded into this package.
+  - The LibreNMS import workflow is grouped under `views/imports/`: `list.py` renders the main table view and `actions.py` contains the HTMX endpoints (preview, validation, bulk execute).
 
 **Base views:**
 
@@ -70,3 +70,17 @@ class DeviceVLANTableView(BaseVLANTableView):
 - Check the `base/` directory for reusable logic before writing new view code.
 - Use mixins for cross-cutting concerns (API, caching, permissions).
 - Keep resource-specific views focused on their unique logic; delegate shared logic to base classes and mixins.
+
+## Module installation ownership
+
+The module table and branch installer share one inventory attribution context.
+Each item uses its destination member's manufacturer rules and serial. Transparent
+parents retain their children's attribution. Installation resets the parent-bay
+search when ownership changes. A hidden destination blocks the branch before any
+module is installed.
+
+The branch installer reloads the page device and inventory after it acquires the
+page advisory lock. It checks the signed snapshot and root destination before
+planning writes. All branch installs use one transaction. This provides current
+inputs after a lock wait but does not freeze virtual-chassis membership against
+unrelated edits through commit.

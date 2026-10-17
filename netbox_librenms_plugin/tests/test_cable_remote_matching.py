@@ -1340,6 +1340,33 @@ class TestCheckAndCreateTheRemoteEnd:
         assert local_interface.cable is not None
         assert created.cable_id == local_interface.cable_id
 
+    def test_the_create_records_the_port_binding_with_its_before_state(self, librenms_server, settings):
+        """The port is bound by a second, partial save of the new interface, and its change record has the before-state."""
+        from core.models import ObjectChange
+        from dcim.models import Interface
+        from django.contrib.contenttypes.models import ContentType
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        server_key, local_device, local_interface, remote_device, row_id = self._scenario(
+            "mk-log", librenms_server, settings
+        )
+
+        _logged_in(make_superuser("remote-create-mk-log")).post(
+            _remote_create_url(local_device),
+            {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": server_key},
+        )
+
+        created = Interface.objects.get(device=remote_device, name="Gi0/1")
+        changes = ObjectChange.objects.filter(
+            changed_object_type=ContentType.objects.get_for_model(Interface), changed_object_id=created.pk
+        ).order_by("time", "pk")
+        assert changes.filter(action="create").count() == 1
+        # The cable save that follows writes the whole row again, so only the change record shows the partial save.
+        binding = changes.filter(action="update").first()
+        assert binding.prechange_data["custom_fields"].get("librenms_id") is None
+        assert binding.postchange_data["custom_fields"].get("librenms_id") == {server_key: 500}
+
     @pytest.mark.parametrize("drift", ["owner", "migration"])
     def test_remote_create_rechecks_the_local_owner_after_proposal_resolution(
         self, librenms_server, settings, monkeypatch, drift
@@ -2472,3 +2499,72 @@ def test_remote_port_record_uses_the_shared_identity_resolver():
         isinstance(node, ast.Constant) and node.value in ("remote_port_key", "remote_port_id")
         for node in ast.walk(reader)
     )
+
+
+@transactional_db_with_all_apps()
+@pytest.mark.parametrize("htmx", [False, True])
+def test_committed_cable_follow_up_failure_reports_saved_and_invalidates_cache(client, htmx):
+    from dcim.models import Cable
+    from django.core.cache import cache
+    from django.db import transaction
+    from django.db.models.signals import post_save
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.middleware import FOLLOW_UP_FAILED_MESSAGE
+    from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
+    from netbox_librenms_plugin.tests.conftest import configured_server_key, make_serial_device, make_superuser
+    from netbox_librenms_plugin.tests.test_cable_overwrite import _rendered_sync_data
+    from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+    key = configured_server_key()
+    local, (csp,), _ = make_serial_device("saved-follow-up-local", csp_names=["ttyS5"])
+    remote, _, (cp,) = make_serial_device("saved-follow-up-remote", cp_names=["console"])
+    row_id = f"serial:{csp.pk}-s"
+    row = {
+        "local_port": csp.name,
+        "local_port_id": row_id,
+        "_source": "serial",
+        "device_id": local.pk,
+        "remote_device": remote.name,
+        "netbox_local_interface_id": csp.pk,
+        "netbox_remote_interface_id": cp.pk,
+        "can_create_cable": True,
+        "is_configured": True,
+        "sensor_id": 1,
+        "sensor_index_int": 5,
+    }
+    cache.set(SyncCablesView().get_cache_key(local, "links", key), {"links": [row]}, timeout=300)
+    client.force_login(make_superuser("saved-follow-up-user"))
+    data = _rendered_sync_data(client, local, row_id, key)
+    consistency = SyncCacheConsistency(local)
+    before = cache.get(consistency.state_key(SyncTab.CABLES, key))
+    callbacks = []
+
+    def fail_follow_up():
+        callbacks.append("failed")
+        raise RuntimeError("test commit callback failed")
+
+    def queue_follow_up(sender, instance, created, **kwargs):
+        if created:
+            transaction.on_commit(fail_follow_up)
+
+    post_save.connect(queue_follow_up, sender=Cable, weak=False)
+    try:
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[local.pk]),
+            data,
+            **({"HTTP_HX_REQUEST": "true"} if htmx else {}),
+        )
+    finally:
+        post_save.disconnect(queue_follow_up, sender=Cable)
+
+    csp.refresh_from_db()
+    cp.refresh_from_db()
+    assert csp.cable_id is not None and csp.cable_id == cp.cable_id
+    assert callbacks == ["failed"]
+    assert response.status_code == (200 if htmx else 302)
+    messages = [str(message) for message in response.wsgi_request._messages]
+    assert any(FOLLOW_UP_FAILED_MESSAGE in message for message in messages)
+    assert not any("Failed to sync cables" in message for message in messages)
+    after = cache.get(consistency.state_key(SyncTab.CABLES, key))
+    assert after is not None and after != before

@@ -116,6 +116,29 @@ def test_preference_post_changes_only_preference_and_keeps_transient_server(clie
 
 
 @pytest.mark.django_db
+def test_preference_post_records_the_mapping_change_with_its_before_state(client, servers):
+    """The owner is saved with only its custom field data, so the save must also move last_updated."""
+    from core.models import ObjectChange
+    from dcim.models import Device
+    from django.contrib.contenttypes.models import ContentType
+
+    mapping = {"primary": {"id": 13511}, "secondary": {"id": 13512}}
+    device = make_device("set-object-preference-log", librenms_cf=mapping)
+    old_last_updated = Device.objects.values_list("last_updated", flat=True).get(pk=device.pk)
+    client.force_login(make_superuser("object-preference-log-writer"))
+
+    client.post(_preference_url(device), {"object_type": "device", "server_key": "secondary"})
+
+    device.refresh_from_db()
+    assert device.last_updated > old_last_updated
+    change = ObjectChange.objects.get(
+        changed_object_type=ContentType.objects.get_for_model(Device), changed_object_id=device.pk, action="update"
+    )
+    assert change.prechange_data["custom_fields"]["librenms_id"] == mapping
+    assert change.postchange_data["custom_fields"]["librenms_id"] == {**mapping, "_preferred_server": "secondary"}
+
+
+@pytest.mark.django_db
 def test_preference_post_keeps_the_active_server_when_the_key_is_rejected(client, servers):
     """A malformed server_key must not drop a non-default page back to the default server."""
     device = make_device(

@@ -7,6 +7,7 @@ rule vendor-neutral (Juniper reports VLANs on the aggregate, other platforms on 
 """
 
 import pytest
+from dcim.models import Interface
 
 
 def _fixture(tag, vlans=()):
@@ -34,6 +35,7 @@ class TestReportedModeIsAuthoritative:
             {"mode": "tagged", "untagged_vlan": 100, "tagged_vlans": []},
             None,
             maps,
+            fresh_read_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -49,6 +51,7 @@ class TestReportedModeIsAuthoritative:
             {"mode": "access", "untagged_vlan": 100, "tagged_vlans": []},
             None,
             maps,
+            fresh_read_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -63,6 +66,7 @@ class TestReportedModeIsAuthoritative:
             {"mode": "access", "untagged_vlan": 100, "tagged_vlans": [200]},
             None,
             maps,
+            fresh_read_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -77,6 +81,7 @@ class TestReportedModeIsAuthoritative:
             {"mode": None, "untagged_vlan": 100, "tagged_vlans": []},
             None,
             maps,
+            fresh_read_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -94,6 +99,7 @@ class TestReportedModeIsAuthoritative:
             {"mode": None, "untagged_vlan": None, "tagged_vlans": []},
             None,
             maps,
+            fresh_read_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -109,6 +115,7 @@ class TestReportedModeIsAuthoritative:
             {"mode": "tagged", "untagged_vlan": None, "tagged_vlans": []},
             None,
             maps,
+            fresh_read_queryset=Interface.objects.all(),
         )
 
         interface.refresh_from_db()
@@ -119,27 +126,26 @@ class TestReportedModeIsAuthoritative:
 class TestTheViewPassesTheReportedMode:
     """The mode is on every enriched row; the sync view has to hand it to the writer."""
 
-    def test_the_row_mode_reaches_netbox(self):
+    def test_the_row_mode_reaches_netbox(self, client, settings):
         """A writer-only fix would pass while the view still dropped the reported mode."""
         from ipam.models import VLAN
 
-        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
+        from netbox_librenms_plugin.tests.conftest import (
+            configure_default_librenms_server,
+            make_device,
+            make_interface,
+            make_superuser,
+        )
+        from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports, sync_port
 
         device = make_device("vlan-mode-view")
         interface = make_interface(device, "Ethernet1")
         vlan = VLAN.objects.create(vid=100, name="VLAN-MODE-VIEW-100", status="active")
-        view = object.__new__(SyncInterfacesView)
-        view.request = make_request("post", {})
-        view._lookup_maps = view._index_vlans([vlan])
-        view._lookup_maps_by_owner = None
-        view._vlan_owners_by_id = {}
+        configure_default_librenms_server(settings)
+        client.force_login(make_superuser("vlan-mode-view-user"))
+        seed_ports(device, [sync_port(10, "Ethernet1", mode="tagged", untagged_vlan=100, tagged_vlans=[])])
 
-        view._sync_interface_vlans(
-            interface,
-            {"port_id": 10, "mode": "tagged", "untagged_vlan": 100, "tagged_vlans": []},
-        )
+        post_interface_sync(client, device, [10], htmx=False, exclude_columns=("mac_address",))
 
         interface.refresh_from_db()
         assert interface.mode == "tagged"
@@ -343,7 +349,9 @@ def test_lag_vlan_rollup_agrees_with_the_database_writer(modes, tagged, expected
     ]
     apply_lag_vlan_fill(rows, {2: 1, 3: 1})
     for interface, row in zip([aggregate, *members], rows, strict=True):
-        writer._update_interface_vlan_assignment(interface, row, None, maps)
+        writer._update_interface_vlan_assignment(
+            interface, row, None, maps, fresh_read_queryset=Interface.objects.all()
+        )
         interface.refresh_from_db()
     assert aggregate.mode == expected_mode
     assert aggregate.untagged_vlan_id == (vlans[0].pk if expected_mode else None)
@@ -354,3 +362,30 @@ def test_lag_vlan_rollup_agrees_with_the_database_writer(modes, tagged, expected
     else:
         assert {member.mode for member in members} == {"access", "tagged"}
         assert "vlan_inherited_from" not in rows[0]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("requested_vid, expected_vid", [(999, 100), (200, 200), (None, None)])
+def test_vlan_sync_preserves_an_existing_assignment_when_the_requested_vid_is_missing(
+    client, settings, requested_vid, expected_vid
+):
+    from ipam.models import VLAN
+
+    from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_superuser
+    from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports, sync_port
+
+    _mixin, interface, _maps, vlans = _fixture("unresolved-untagged", [100, 200])
+    interface.mode = "access"
+    interface.untagged_vlan = vlans[0]
+    interface.save()
+    configure_default_librenms_server(settings)
+    client.force_login(make_superuser("unresolved-untagged-user"))
+    seed_ports(
+        interface.device, [sync_port(10, interface.name, mode="access", untagged_vlan=requested_vid, tagged_vlans=[])]
+    )
+
+    post_interface_sync(client, interface.device, [10], htmx=False, exclude_columns=("mac_address",))
+
+    interface.refresh_from_db()
+    expected = VLAN.objects.get(vid=expected_vid) if expected_vid is not None else None
+    assert interface.untagged_vlan == expected

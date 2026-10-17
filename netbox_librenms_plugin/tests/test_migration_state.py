@@ -5,72 +5,33 @@ import importlib
 import pytest
 
 
-def test_interface_rule_migration_state_carries_the_model_help_text():
-    """Every InterfaceTypeMapping field in the final migration state has the model's help_text (NetBox's makemigrations ignores help_text, so only this test sees the drift)."""
+def test_migration_state_carries_the_attributes_netbox_hides_from_makemigrations():
+    """Every plugin model field in the final migration state keeps the model's choices, help_text and verbose_name (NetBox's deconstruct drops them, so makemigrations --check cannot see the drift)."""
+    from django.apps import apps
     from django.db.migrations.loader import MigrationLoader
+    from utilities.migration import EXEMPT_ATTRS, _deconstruct
 
-    from netbox_librenms_plugin.models import InterfaceTypeMapping
-
+    app_label = "netbox_librenms_plugin"
     loader = MigrationLoader(None, ignore_no_migrations=True)
-    (leaf,) = (node for node in loader.graph.leaf_nodes() if node[0] == "netbox_librenms_plugin")
-    state_fields = (
-        loader.project_state(leaf, at_end=True).models[("netbox_librenms_plugin", "interfacetypemapping")].fields
+    (leaf,) = (node for node in loader.graph.leaf_nodes() if node[0] == app_label)
+    state = loader.project_state(leaf, at_end=True)
+
+    def hidden_attrs(field):
+        # NetBox keeps Django's stock Field.deconstruct as _deconstruct; it still emits the exempt attributes.
+        kwargs = _deconstruct(field)[3]
+        return {attr: kwargs.get(attr) for attr in EXEMPT_ATTRS}
+
+    drifted = {}
+    for model in apps.get_app_config(app_label).get_models():
+        state_fields = state.models[(app_label, model._meta.model_name)].fields
+        for field in (*model._meta.local_fields, *model._meta.local_many_to_many):
+            model_attrs, state_attrs = hidden_attrs(field), hidden_attrs(state_fields[field.name])
+            for attr in EXEMPT_ATTRS:
+                if model_attrs[attr] != state_attrs[attr]:
+                    drifted[f"{model.__name__}.{field.name}.{attr}"] = (state_attrs[attr], model_attrs[attr])
+    assert not drifted, "migration state drifted from the model:\n" + "\n".join(
+        f"{key}: {state!r} -> {model!r}" for key, (state, model) in sorted(drifted.items())
     )
-
-    drifted = {
-        field.name: (state_fields[field.name].help_text, field.help_text)
-        for field in InterfaceTypeMapping._meta.get_fields()
-        if field.concrete and state_fields[field.name].help_text != field.help_text
-    }
-    assert not drifted, f"migration help_text drifted from the model: {drifted}"
-
-
-def test_migration_0013_field_help_text_matches_model():
-    """Migration 0013's PortStackLagPattern fields must carry the same help_text as the model (else the migration state drifts and makemigrations tracks a phantom AlterField)."""
-    from netbox_librenms_plugin.models import PortStackLagPattern
-
-    # Migration modules start with a digit (not a valid identifier), so import by string.
-    mod = importlib.import_module("netbox_librenms_plugin.migrations.0013_portstacklagpattern")
-    create_op = next(
-        op
-        for op in mod.Migration.operations
-        if op.__class__.__name__ == "CreateModel" and op.name == "PortStackLagPattern"
-    )
-    migration_fields = dict(create_op.fields)
-
-    for field_name in ("librenms_os", "lag_name_pattern"):
-        model_help = PortStackLagPattern._meta.get_field(field_name).help_text
-        assert migration_fields[field_name].help_text == model_help, (
-            f"{field_name}: migration help_text drifted from the model"
-        )
-
-
-def test_migration_0014_librenms_os_help_text_matches_model():
-    """Migration 0014 re-declares librenms_os via AlterField, so 0014 (not 0013's CreateModel) is the authoritative migration state makemigrations compares librenms_os against — its help_text must match the model too."""
-    from netbox_librenms_plugin.models import PortStackLagPattern
-
-    mod = importlib.import_module("netbox_librenms_plugin.migrations.0014_portstacklagpattern_ci_unique")
-    alter_op = next(
-        op
-        for op in mod.Migration.operations
-        if op.__class__.__name__ == "AlterField" and op.model_name == "portstacklagpattern" and op.name == "librenms_os"
-    )
-    model_help = PortStackLagPattern._meta.get_field("librenms_os").help_text
-    assert alter_op.field.help_text == model_help, "0014 AlterField librenms_os help_text drifted from the model"
-
-
-def test_migration_0019_bridge_help_text_matches_model():
-    """Migration 0019 must keep the bridge field state equal to the model."""
-    from netbox_librenms_plugin.models import PortStackLagPattern
-
-    mod = importlib.import_module("netbox_librenms_plugin.migrations.0019_portstacklagpattern_bridge_name_pattern")
-    add_op = next(
-        op
-        for op in mod.Migration.operations
-        if op.__class__.__name__ == "AddField" and op.model_name == "portstacklagpattern"
-    )
-    model_help = PortStackLagPattern._meta.get_field("bridge_name_pattern").help_text
-    assert add_op.field.help_text == model_help, "0019 bridge_name_pattern help_text drifted from the model"
 
 
 @pytest.mark.django_db
@@ -246,41 +207,6 @@ def test_inventory_seed_survives_duplicate_operator_rules():
     assert (
         NormalizationRule.objects.filter(scope="serial", match_pattern=module.SERIAL_RULE["match_pattern"]).count() == 2
     )
-
-
-def test_migration_0017_serial_sensor_field_help_text_matches_model():
-    """Same drift guard for SerialSensorTypePattern: migration 0017's fields must carry the model's help_text, else makemigrations tracks a phantom AlterField."""
-    from netbox_librenms_plugin.models import SerialSensorTypePattern
-
-    mod = importlib.import_module("netbox_librenms_plugin.migrations.0017_serialsensortypepattern")
-    create_op = next(
-        op
-        for op in mod.Migration.operations
-        if op.__class__.__name__ == "CreateModel" and op.name == "SerialSensorTypePattern"
-    )
-    migration_fields = dict(create_op.fields)
-
-    for field_name in ("sensor_type", "port_name_pattern"):
-        model_help = SerialSensorTypePattern._meta.get_field(field_name).help_text
-        assert migration_fields[field_name].help_text == model_help, (
-            f"{field_name}: migration help_text drifted from the model"
-        )
-
-
-def test_migration_0018_librenms_settings_field_help_text_matches_model():
-    """Same drift guard for LibreNMSSettings's cable-sync fields: migration 0018's AddField ops must carry the model's help_text, else makemigrations tracks a phantom AlterField."""
-    from netbox_librenms_plugin.models import LibreNMSSettings
-
-    mod = importlib.import_module("netbox_librenms_plugin.migrations.0018_librenmssettings_cable_sync")
-
-    for field_name in ("cable_sync_tag", "cable_sync_tag_color", "cable_sync_description"):
-        add_op = next(
-            op
-            for op in mod.Migration.operations
-            if op.__class__.__name__ == "AddField" and op.model_name == "librenmssettings" and op.name == field_name
-        )
-        model_help = LibreNMSSettings._meta.get_field(field_name).help_text
-        assert add_op.field.help_text == model_help, f"{field_name}: migration help_text drifted from the model"
 
 
 def test_plugin_cross_app_migration_dependencies_resolve():

@@ -5,6 +5,7 @@ import re
 
 import pytest
 from django.core.cache import cache
+from django.db import OperationalError, transaction
 
 from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
 from netbox_librenms_plugin.tests.conftest import (
@@ -16,14 +17,27 @@ from netbox_librenms_plugin.tests.conftest import (
     make_module_type,
     make_superuser,
     make_virtual_chassis,
+    transactional_db_with_all_apps,
+)
+from netbox_librenms_plugin.tests.lock_conflict_helpers import (
+    aborting_statement,
+    failing_statement,
+    hold_port_claim,
+    lock_row,
+    lock_timeout,
+    second_connection,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import (
     make_request,
     message_texts,
+    module_row_binding,
     post as view_post,
     trusted_module_inventory_payload,
 )
+from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE, classify_conflict
 from netbox_librenms_plugin.utils import (
+    LibreNMSPortBindingBusy,
+    get_librenms_device_id,
     module_inventory_binding_token,
     module_inventory_row_digest,
     module_inventory_snapshot_digest,
@@ -740,6 +754,48 @@ class TestInstallAndUpdateViews:
         assert module.module_type == module_type
         assert module.serial == "VIEW-SERIAL"
         assert any("Installed VIEW-INSTALL-CARD" in text for text in message_texts(request))
+
+    def test_a_database_error_in_the_bind_keeps_the_install(self, live_librenms):
+        """The bind's own savepoint takes a real PostgreSQL error; the install still commits."""
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        device = make_device("view-install-bind-error", librenms_cf={"default": 68})
+        bay = make_module_bay(device, "Bind Error Bay")
+        module_type = make_module_type("BIND-ERROR-CARD")
+        interface = make_interface(device, "Ethernet68")
+        item = _inventory_item(
+            680, module_type.model, bay.name, _librenms_port_id=6680, _librenms_ifname=interface.name
+        )
+        request = _post_request(
+            {
+                "module_bay_id": bay.pk,
+                "module_type_id": module_type.pk,
+                "ent_index": 680,
+                "server_key": "default",
+                "inventory_binding": module_inventory_binding_token(
+                    device.pk,
+                    "default",
+                    "install_module",
+                    {"module_bay_id": bay.pk, "module_type_id": module_type.pk},
+                    680,
+                    module_inventory_row_digest(item),
+                ),
+            }
+        )
+        view = _view(InstallModuleView, request, live_librenms)
+        seed_inventory(view, device, [item], librenms_id=68)
+
+        with aborting_statement(lambda sql, params: sql.startswith('UPDATE "dcim_interface"')) as failed:
+            response = view_post(view, request, pk=device.pk)
+
+        interface.refresh_from_db()
+        assert failed, "precondition: the bind wrote the interface"
+        assert response.status_code == 302
+        assert Module.objects.get(device=device, module_bay=bay).module_type == module_type
+        assert interface.module_id is None
+        assert any("interface binding was skipped: unexpected error" in text for text in message_texts(request))
 
     def test_single_install_refuses_a_reused_inventory_index(self, live_librenms):
         """A stale install form must not apply data from a replacement inventory row."""
@@ -1561,6 +1617,155 @@ class TestInstallAndUpdateViews:
         assert hidden.module_id is None
 
 
+class TestModuleBindLockConflicts:
+    """
+    A lock conflict in a module bind rolls back the whole action, so the middleware's "try again" is true.
+
+    The busy claim is real: a second connection holds the claim on the port in its open transaction.
+    """
+
+    @staticmethod
+    def _bound_item(index, module_type, bay, interface, port_id):
+        return _inventory_item(
+            index, module_type.model, bay.name, _librenms_port_id=port_id, _librenms_ifname=interface.name
+        )
+
+    def test_the_install_rolls_back_when_the_bind_meets_a_busy_port_claim(self, live_librenms):
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        device = make_device("bind-busy-install", librenms_cf={"default": 81})
+        bay = make_module_bay(device, "Busy Install Bay")
+        module_type = make_module_type("BUSY-INSTALL-CARD")
+        interface = make_interface(device, "Ethernet81")
+        item = self._bound_item(810, module_type, bay, interface, 8101)
+        request = _post_request(
+            {
+                "module_bay_id": bay.pk,
+                "module_type_id": module_type.pk,
+                "ent_index": 810,
+                "server_key": "default",
+                "inventory_binding": module_inventory_binding_token(
+                    device.pk,
+                    "default",
+                    "install_module",
+                    {"module_bay_id": bay.pk, "module_type_id": module_type.pk},
+                    810,
+                    module_inventory_row_digest(item),
+                ),
+            }
+        )
+        view = _view(InstallModuleView, request, live_librenms)
+        seed_inventory(view, device, [item], librenms_id=81)
+
+        with second_connection() as other:
+            hold_port_claim(other, 8101, "default")
+            with pytest.raises(LibreNMSPortBindingBusy):
+                view_post(view, request, pk=device.pk)
+
+        interface.refresh_from_db()
+        assert not Module.objects.filter(device=device, module_bay=bay).exists()
+        assert get_librenms_device_id(interface, "default", auto_save=False) is None
+
+    def test_the_replace_rolls_back_when_the_bind_meets_a_busy_port_claim(self, live_librenms):
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
+
+        device = make_device("bind-busy-replace", librenms_cf={"default": 82})
+        bay = make_module_bay(device, "Busy Replace Bay")
+        installed = install_module(device, bay.name, "BUSY-REPLACE-OLD")
+        new_type = make_module_type("BUSY-REPLACE-NEW")
+        interface = make_interface(device, "Ethernet82")
+        item = self._bound_item(820, new_type, bay, interface, 8201)
+        request = _post_request(
+            {
+                "module_id": installed.pk,
+                "ent_index": 820,
+                "server_key": "default",
+                "inventory_binding": module_row_binding(
+                    device, "replace_module", item, action_target={"module_id": installed.pk}
+                ),
+            }
+        )
+        view = _view(ReplaceModuleView, request, live_librenms)
+        seed_inventory(view, device, [item], librenms_id=82)
+
+        with second_connection() as other:
+            hold_port_claim(other, 8201, "default")
+            with pytest.raises(LibreNMSPortBindingBusy):
+                view_post(view, request, pk=device.pk)
+
+        interface.refresh_from_db()
+        assert list(Module.objects.filter(device=device, module_bay=bay)) == [installed]
+        assert get_librenms_device_id(interface, "default", auto_save=False) is None
+
+    def test_the_interface_update_raises_a_busy_port_claim(self, live_librenms):
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        device = make_device("bind-busy-update", librenms_cf={"default": 83})
+        bay = make_module_bay(device, "Busy Update Bay")
+        module = install_module(device, bay.name, "BUSY-UPDATE-CARD")
+        interface = make_interface(device, "Ethernet83")
+        item = self._bound_item(830, module.module_type, bay, interface, 8301)
+        request = _post_request(
+            {
+                "module_id": module.pk,
+                "ent_index": 830,
+                "server_key": "default",
+                "inventory_binding": _inventory_binding(device, module, 830, item, action="update_module_interface"),
+            }
+        )
+        view = _view(UpdateModuleInterfaceView, request, live_librenms)
+        seed_inventory(view, device, [item], librenms_id=83)
+
+        with second_connection() as other:
+            hold_port_claim(other, 8301, "default")
+            with pytest.raises(LibreNMSPortBindingBusy):
+                view_post(view, request, pk=device.pk)
+
+        interface.refresh_from_db()
+        assert interface.module_id is None
+        assert get_librenms_device_id(interface, "default", auto_save=False) is None
+
+    @transactional_db_with_all_apps()
+    def test_a_lock_conflict_in_the_adoption_rolls_back_the_bind_too(self, live_librenms):
+        """The bind and the adoption share one transaction: a conflict must not leave the bind committed alone."""
+        from dcim.models import Interface, InterfaceTemplate
+
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
+
+        device = make_device("adopt-lock-update", librenms_cf={"default": 84})
+        bay = make_module_bay(device, "Adopt Lock Bay")
+        module = install_module(device, bay.name, "ADOPT-LOCK-CARD")
+        InterfaceTemplate.objects.create(module_type=module.module_type, name="c2/1", type="other")
+        primary = make_interface(device, "Ethernet84")
+        standalone = make_interface(device, "c2/1")
+        item = self._bound_item(840, module.module_type, bay, primary, 8401)
+        request = _post_request(
+            {
+                "module_id": module.pk,
+                "ent_index": 840,
+                "server_key": "default",
+                "inventory_binding": _inventory_binding(device, module, 840, item, action="update_module_interface"),
+            }
+        )
+        view = _view(UpdateModuleInterfaceView, request, live_librenms)
+        seed_inventory(view, device, [item], librenms_id=84)
+
+        with second_connection() as other:
+            lock_row(other, Interface, standalone.pk)
+            with lock_timeout(200), pytest.raises(OperationalError) as caught:
+                view_post(view, request, pk=device.pk)
+
+        primary.refresh_from_db()
+        standalone.refresh_from_db()
+        assert classify_conflict(caught.value)
+        assert (primary.module_id, standalone.module_id) == (None, None)
+        assert get_librenms_device_id(primary, "default", auto_save=False) is None
+
+
 class TestModulesRedirectResponse:
     """_modules_redirect_response: the classic (non-HTMX) redirect back to the modules tab."""
 
@@ -2016,6 +2221,31 @@ class TestAddBayTemplatePostValidation:
         assert b"Invalid target_kind" in response.content
         assert not ModuleBayTemplate.objects.filter(name="Slot 1").exists()
 
+    def test_a_lock_conflict_on_the_new_bay_gives_the_try_again_answer(self, client):
+        """NetBox 4.7 turns a deadlock in a tree save into a ValidationError; it is still a conflict."""
+        from dcim.models import ModuleBay, ModuleBayTemplate
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.view_test_helpers import messages_on
+
+        device = make_device("add-bay-template-conflict")
+        make_module_bay(device, "Slot 1")
+        module = install_module(device, "Slot 1", "BAY-CONFLICT-CARD")
+        client.force_login(make_superuser())
+        url = reverse("plugins:netbox_librenms_plugin:add_bay_template", kwargs={"pk": device.pk})
+
+        with failing_statement(lambda sql, params: sql.startswith('INSERT INTO "dcim_modulebay"'), "40P01") as failed:
+            response = client.post(
+                url,
+                {"target_kind": "module_type", "target_pk": str(module.module_type.pk), "name": "Sub 1"},
+                HTTP_REFERER=f"http://testserver{reverse('dcim:device', kwargs={'pk': device.pk})}",
+            )
+
+        assert failed, "precondition: the bay insert ran"
+        assert messages_on(response.wsgi_request) == [("error", TRY_AGAIN_MESSAGE)]
+        assert not ModuleBayTemplate.objects.filter(module_type=module.module_type, name="Sub 1").exists()
+        assert not ModuleBay.objects.filter(module=module, name="Sub 1").exists()
+
 
 class TestVirtualChassisInterfaceNormalization:
     def _module(self, device, name):
@@ -2074,6 +2304,57 @@ class TestVirtualChassisInterfaceNormalization:
         assert result == {"renamed": 0, "adopted": 1, "removed": 1, "skipped": 0}
         assert standalone.module == module
         assert not Interface.objects.filter(pk=generated.pk).exists()
+
+    def _member_module_interface(self, tag, name):
+        from dcim.models import Interface
+
+        first = make_device(f"{tag}-first")
+        device = make_device(f"{tag}-second")
+        make_virtual_chassis(f"{tag}-vc", first, device)
+        module = self._module(device, f"{tag.upper()}-CARD")
+        return device, module, Interface.objects.create(device=device, module=module, name=name, type="other")
+
+    @pytest.mark.parametrize(
+        "statement, standalone",
+        [('UPDATE "dcim_interface"', False), ('DELETE FROM "dcim_interface"', True)],
+        ids=["rename", "remove"],
+    )
+    def test_a_lock_conflict_in_a_rename_or_a_removal_is_raised(self, statement, standalone):
+        """The caller's transaction must roll back: a skipped count would hide the conflict."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.views.sync.modules import _normalize_module_interface_names_for_vc_member
+
+        device, module, interface = self._member_module_interface(f"normalize-conflict-{int(standalone)}", "Te1/1/3")
+        if standalone:
+            make_interface(device, "Te2/1/3")
+
+        with pytest.raises(OperationalError) as caught, transaction.atomic():
+            with failing_statement(lambda sql, params: sql.startswith(statement), "40P01"):
+                _normalize_module_interface_names_for_vc_member(
+                    device, module, Interface.objects.all(), Interface.objects.all()
+                )
+
+        assert classify_conflict(caught.value)
+        interface.refresh_from_db()
+        assert interface.name == "Te1/1/3"
+
+    def test_a_rename_that_fails_for_another_reason_is_skipped_in_its_own_savepoint(self):
+        """The failed rename rolls back alone, so the caller's transaction stays usable and commits the rest."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.views.sync.modules import _normalize_module_interface_names_for_vc_member
+
+        device, module, interface = self._member_module_interface("normalize-failed-rename", "Te1/1/4")
+
+        with failing_statement(lambda sql, params: sql.startswith('UPDATE "dcim_interface"'), "23505"):
+            result = _normalize_module_interface_names_for_vc_member(
+                device, module, Interface.objects.all(), Interface.objects.all()
+            )
+
+        assert result == {"renamed": 0, "adopted": 0, "removed": 0, "skipped": 1}
+        interface.refresh_from_db()
+        assert interface.name == "Te1/1/4"
 
     @pytest.mark.parametrize(
         ("counts", "expected"),
@@ -3488,16 +3769,23 @@ def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(cli
 )
 def test_module_validation_details_are_plain_text(details, expected):
     from django.core.exceptions import ValidationError
-    from netbox_librenms_plugin.views.sync.modules import _module_error_detail
+    from dcim.models import Module
+    from django.contrib.auth import get_user_model
+    from netbox_librenms_plugin.views.sync.modules import _module_write_failure
 
-    assert _module_error_detail(ValidationError(details)) == expected
+    user = get_user_model()(is_superuser=True, is_active=True)
+    assert _module_write_failure(ValidationError(details), Module, user) == expected
 
 
-def test_module_database_conflict_details_are_preserved():
+def test_module_database_conflicts_use_safe_error_text():
     from django.db import IntegrityError
-    from netbox_librenms_plugin.views.sync.modules import _module_error_detail
+    from dcim.models import Module
+    from django.contrib.auth import get_user_model
+    from netbox_librenms_plugin.utils import DATABASE_ERROR_MESSAGE
+    from netbox_librenms_plugin.views.sync.modules import _module_write_failure
 
-    assert _module_error_detail(IntegrityError("Duplicate module.")) == "Duplicate module."
+    user = get_user_model()(is_superuser=True, is_active=True)
+    assert _module_write_failure(IntegrityError("Duplicate module."), Module, user) == DATABASE_ERROR_MESSAGE
 
 
 @pytest.mark.django_db

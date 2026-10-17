@@ -1,33 +1,43 @@
 """Integration tests for shared interface attribute and MAC synchronization."""
 
 import pytest
+from dcim.models import Interface
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_vm
-from netbox_librenms_plugin.tests.view_test_helpers import make_view
+from netbox_librenms_plugin.interface_sync import assign_interface_mac
+from netbox_librenms_plugin.tests.conftest import (
+    configure_default_librenms_server,
+    make_device,
+    make_interface,
+    make_superuser,
+    make_vm,
+    transactional_db_with_all_apps,
+)
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import bound_interface, post_interface_sync, seed_ports
+
+
+def _post_sync(client, settings, device, port, *, exclude_columns):
+    """Seed *port* for *device* and post the sync of that one row through the real URL, as a superuser."""
+    configure_default_librenms_server(settings)
+    client.force_login(make_superuser(f"{device.name}-user"))
+    seed_ports(device, [port])
+    return post_interface_sync(client, device, [port["port_id"]], htmx=False, exclude_columns=exclude_columns)
 
 
 @pytest.mark.django_db
 class TestUpdateInterfaceAttributes:
     """The interface writer must persist the real NetBox model state."""
 
-    @pytest.fixture
-    def view(self):
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        view = make_view(SyncInterfacesView)
-        view._post_server_key = "default"
-        return view
-
-    def test_updates_fields_and_stable_port_identity(self, view):
+    def test_updates_fields_and_stable_port_identity(self, client, settings):
+        from netbox_librenms_plugin.models import InterfaceTypeMapping
         from netbox_librenms_plugin.utils import get_librenms_device_id
 
-        from netbox_librenms_plugin.models import InterfaceTypeMapping
-
-        interface = make_interface(make_device("interface-fields"), "old-name")
+        interface = bound_interface(make_device("interface-fields"), "old-name", 77)
         InterfaceTypeMapping.objects.create(librenms_type="ethernetCsmacd", netbox_type="1000base-t")
 
-        view.update_interface_attributes(
-            interface,
+        _post_sync(
+            client,
+            settings,
+            interface.device,
             {
                 "ifName": "eth0",
                 "ifDescr": "eth0",
@@ -38,10 +48,7 @@ class TestUpdateInterfaceAttributes:
                 "ifAdminStatus": "down",
                 "port_id": 77,
             },
-            set(),
-            "ifName",
-            "eth0",
-            created=False,
+            exclude_columns=("vlans",),
         )
 
         interface.refresh_from_db()
@@ -53,18 +60,20 @@ class TestUpdateInterfaceAttributes:
         assert interface.enabled is False
         assert get_librenms_device_id(interface, "default", auto_save=False) == 77
 
-    def test_excluded_fields_and_mac_remain_unchanged(self, view):
+    def test_excluded_fields_and_mac_remain_unchanged(self, client, settings):
         from dcim.models import MACAddress
 
-        interface = make_interface(make_device("interface-exclusions"), "keep-name", iface_type="1000base-t")
+        interface = bound_interface(make_device("interface-exclusions"), "keep-name", 1, iface_type="1000base-t")
         interface.speed = 1000
         interface.description = "keep-description"
         interface.mtu = 9000
         interface.enabled = True
         interface.save()
 
-        view.update_interface_attributes(
-            interface,
+        _post_sync(
+            client,
+            settings,
+            interface.device,
             {
                 "ifName": "new-name",
                 "ifDescr": "new-name",
@@ -74,11 +83,9 @@ class TestUpdateInterfaceAttributes:
                 "ifMtu": 1500,
                 "ifAdminStatus": "down",
                 "ifPhysAddress": "aa:bb:cc:dd:ee:ff",
+                "port_id": 1,
             },
-            {"name", "type", "speed", "description", "mtu", "enabled", "mac_address"},
-            "ifName",
-            "new-name",
-            created=False,
+            exclude_columns=("name", "type", "speed", "description", "mtu", "enabled", "mac_address", "vlans"),
         )
 
         interface.refresh_from_db()
@@ -88,31 +95,22 @@ class TestUpdateInterfaceAttributes:
 
 
 @pytest.mark.django_db
-class TestHandleMacAddress:
+class TestAssignInterfaceMac:
     """
-    handle_mac_address() must work for both Interface and VMInterface. Both carry
+    assign_interface_mac() must work for both Interface and VMInterface. Both carry
     primary_mac_address in the NetBox versions this plugin supports."""
 
-    @pytest.fixture
-    def view(self):
-        """The real SyncInterfacesView; only the LibreNMS client is stubbed."""
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
-
-        v = make_view(SyncInterfacesView)
-        v._lookup_maps = {}
-        return v
-
-    def test_creates_new_mac_and_adds_to_interface(self, view):
+    def test_creates_new_mac_and_adds_to_interface(self):
         from dcim.models import MACAddress
 
         iface = make_interface(make_device("mac-create"), "Gi0/1")
 
-        view.handle_mac_address(iface, "aa:bb:cc:dd:ee:ff")
+        assign_interface_mac(iface, "aa:bb:cc:dd:ee:ff")
 
         mac = MACAddress.objects.get(mac_address="aa:bb:cc:dd:ee:ff")
         assert list(iface.mac_addresses.all()) == [mac]
 
-    def test_reuses_existing_mac(self, view):
+    def test_reuses_existing_mac(self):
         """The already-attached MAC is reused AND promoted to primary, not re-created."""
         from dcim.models import Interface, MACAddress
 
@@ -121,7 +119,7 @@ class TestHandleMacAddress:
         iface.mac_addresses.add(existing)
         assert iface.primary_mac_address is None  # the branch has done nothing yet
 
-        view.handle_mac_address(iface, "aa:bb:cc:dd:ee:ff")
+        assign_interface_mac(iface, "aa:bb:cc:dd:ee:ff")
         iface.save()
 
         assert MACAddress.objects.filter(mac_address="aa:bb:cc:dd:ee:ff").count() == 1
@@ -129,23 +127,23 @@ class TestHandleMacAddress:
         # Without this the test would pass on an early return: the m2m link predates the call.
         assert Interface.objects.get(pk=iface.pk).primary_mac_address == existing
 
-    def test_sets_primary_mac_when_attribute_present(self, view):
+    def test_sets_primary_mac_when_attribute_present(self):
         from dcim.models import Interface, MACAddress
 
         iface = make_interface(make_device("mac-primary"), "Gi0/1")
 
-        view.handle_mac_address(iface, "aa:bb:cc:dd:ee:ff")
+        assign_interface_mac(iface, "aa:bb:cc:dd:ee:ff")
         iface.save()
 
         mac = MACAddress.objects.get(mac_address="aa:bb:cc:dd:ee:ff")
         assert Interface.objects.get(pk=iface.pk).primary_mac_address == mac
 
-    def test_vm_interface_also_gets_its_primary_mac_set(self, view):
+    def test_vm_interface_also_gets_its_primary_mac_set(self):
         """VMInterface carries primary_mac_address in this NetBox version, same as Interface.
 
         The old mock built the VM interface with ``spec=["mac_addresses"]``, fabricating an
         absence NetBox no longer has, so it pinned a fact that had stopped being true. The
-        ``hasattr`` guard in handle_mac_address is now dead for both interface models.
+        writer no longer checks for the attribute.
         """
         from dcim.models import MACAddress
         from virtualization.models import VMInterface
@@ -153,101 +151,95 @@ class TestHandleMacAddress:
         vm = make_vm("mac-vm")
         vmiface = VMInterface.objects.create(virtual_machine=vm, name="eth0")
 
-        view.handle_mac_address(vmiface, "aa:bb:cc:dd:ee:ff")
+        assign_interface_mac(vmiface, "aa:bb:cc:dd:ee:ff")
         vmiface.save()
 
         mac = MACAddress.objects.get(mac_address="aa:bb:cc:dd:ee:ff")
         assert list(vmiface.mac_addresses.all()) == [mac]
         assert VMInterface.objects.get(pk=vmiface.pk).primary_mac_address == mac
 
-    def test_noop_when_mac_address_is_falsy(self, view):
+    def test_noop_when_mac_address_is_falsy(self):
         from dcim.models import MACAddress
 
         iface = make_interface(make_device("mac-falsy"), "Gi0/1")
 
-        view.handle_mac_address(iface, "")
-        view.handle_mac_address(iface, None)
+        assign_interface_mac(iface, "")
+        assign_interface_mac(iface, None)
 
         assert not MACAddress.objects.exists()
         assert not iface.mac_addresses.exists()
 
 
 @pytest.mark.django_db
-def test_interface_delete_does_not_expose_database_error_details(client):
-    """A failed delete does not roll back an earlier success or expose details."""
+@pytest.mark.parametrize("failure_type", [RuntimeError, ValueError, TypeError])
+def test_interface_delete_unexpected_error_keeps_private_details_out_of_json(client, failure_type):
+    from django.db import connection
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
+    device = make_device("interface-delete-private-error")
+    interface = make_interface(device, "Ethernet1")
+    client.force_login(make_superuser("interface-delete-private-user"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:delete_netbox_interfaces",
+        kwargs={"object_type": "device", "object_id": device.pk},
+    )
+
+    def fail_delete(execute, sql, params, many, context):
+        if sql.lstrip().upper().startswith("DELETE") and '"dcim_interface"' in sql:
+            raise failure_type("private validator path /internal/example.test")
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(fail_delete):
+        response = client.post(url, {"interface_ids": [str(interface.pk)]})
+
+    assert response.status_code == 409
+    assert "No interfaces were deleted" in response.json()["error"]
+    assert "private validator" not in response.json()["error"]
+    assert "/internal/" not in response.json()["error"]
+    assert type(interface).objects.filter(pk=interface.pk).exists()
+
+
+@pytest.mark.django_db
+def test_interface_delete_database_error_returns_json_and_deletes_nothing(client):
+    """A non-conflict database error returns safe JSON and rolls back every deletion."""
     from django.db import DatabaseError, connection
     from django.urls import reverse
 
     from netbox_librenms_plugin.tests.conftest import make_superuser
 
     device = make_device("interface-delete-error")
-    deleted_interface = make_interface(device, "Ethernet1")
+    first_interface = make_interface(device, "Ethernet1")
     failed_interface = make_interface(device, "Ethernet2")
     client.force_login(make_superuser("interface-delete-error-user"))
     url = reverse(
         "plugins:netbox_librenms_plugin:delete_netbox_interfaces",
         kwargs={"object_type": "device", "object_id": device.pk},
     )
-    sensitive_detail = "private database constraint detail"
+    failed_deletes = 0
 
     def fail_interface_delete(execute, sql, params, many, context):
+        nonlocal failed_deletes
         if (
             sql.lstrip().upper().startswith("DELETE")
             and '"dcim_interface"' in sql
             and failed_interface.pk in (params or ())
         ):
-            raise DatabaseError(sensitive_detail)
+            failed_deletes += 1
+            raise DatabaseError("private database constraint detail")
         return execute(sql, params, many, context)
 
     with connection.execute_wrapper(fail_interface_delete):
-        response = client.post(
-            url,
-            {"interface_ids": [str(deleted_interface.pk), str(failed_interface.pk)]},
-        )
+        response = client.post(url, {"interface_ids": [str(first_interface.pk), str(failed_interface.pk)]})
 
-    assert response.status_code == 200
-    assert sensitive_detail.encode() not in response.content
-    assert response.json()["deleted_count"] == 1
-    assert response.json()["errors"] == ["Error deleting interface Ethernet2. Check server logs."]
-    assert not type(deleted_interface).objects.filter(pk=deleted_interface.pk).exists()
+    assert response.status_code == 409
+    assert "No interfaces were deleted" in response.json()["error"]
+    assert "private database constraint detail" not in response.json()["error"]
+
+    assert failed_deletes == 1
+    assert type(first_interface).objects.filter(pk=first_interface.pk).exists()
     assert type(failed_interface).objects.filter(pk=failed_interface.pk).exists()
-
-
-@pytest.mark.django_db
-def test_interface_delete_counts_only_committed_savepoints(client):
-    """A savepoint release failure does not count or persist the deletion."""
-    from django.db import DatabaseError, connection
-    from django.urls import reverse
-
-    from netbox_librenms_plugin.tests.conftest import make_superuser
-
-    device = make_device("interface-delete-savepoint-error")
-    interface = make_interface(device, "Ethernet1")
-    client.force_login(make_superuser("interface-delete-savepoint-error-user"))
-    url = reverse(
-        "plugins:netbox_librenms_plugin:delete_netbox_interfaces",
-        kwargs={"object_type": "device", "object_id": device.pk},
-    )
-    delete_executed = False
-    release_failed = False
-
-    def fail_savepoint_release(execute, sql, params, many, context):
-        nonlocal delete_executed, release_failed
-        normalized_sql = sql.lstrip().upper()
-        if normalized_sql.startswith("DELETE") and '"DCIM_INTERFACE"' in normalized_sql:
-            delete_executed = True
-        if delete_executed and not release_failed and normalized_sql.startswith("RELEASE SAVEPOINT"):
-            release_failed = True
-            raise DatabaseError("private savepoint failure detail")
-        return execute(sql, params, many, context)
-
-    with connection.execute_wrapper(fail_savepoint_release):
-        response = client.post(url, {"interface_ids": [str(interface.pk)]})
-
-    assert response.status_code == 200
-    assert response.json()["deleted_count"] == 0
-    assert response.json()["errors"] == ["Error deleting interface Ethernet1. Check server logs."]
-    assert type(interface).objects.filter(pk=interface.pk).exists()
 
 
 @pytest.mark.django_db
@@ -274,8 +266,44 @@ def test_interface_update_ignores_non_string_mac(mac):
         server_key="default",
         interface_name_field="ifName",
         created=False,
+        fresh_read_queryset=Interface.objects.all(),
     )
     interface.refresh_from_db()
     assert interface.description == "updated description"
     assert interface.primary_mac_address_id is None
     assert not MACAddress.objects.exists()
+
+
+@transactional_db_with_all_apps()
+def test_interface_delete_keeps_a_committed_follow_up_failure(client):
+    """A callback failure must not report that a committed deletion was rolled back."""
+    from django.db import transaction
+    from django.db.models.signals import post_delete
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.transactions import CommittedFollowUpError
+
+    device = make_device("interface-delete-committed")
+    interface = make_interface(device, "Ethernet1")
+    interface_pk = interface.pk
+    client.force_login(make_superuser("interface-delete-committed-user"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:delete_netbox_interfaces",
+        kwargs={"object_type": "device", "object_id": device.pk},
+    )
+
+    def fail_after_commit():
+        raise RuntimeError("follow-up failed")
+
+    def schedule_failure(sender, instance, **kwargs):
+        if instance.pk == interface_pk:
+            transaction.on_commit(fail_after_commit)
+
+    post_delete.connect(schedule_failure, sender=Interface)
+    try:
+        with pytest.raises(CommittedFollowUpError):
+            client.post(url, {"interface_ids": [str(interface_pk)]})
+    finally:
+        post_delete.disconnect(schedule_failure, sender=Interface)
+
+    assert not Interface.objects.filter(pk=interface_pk).exists()

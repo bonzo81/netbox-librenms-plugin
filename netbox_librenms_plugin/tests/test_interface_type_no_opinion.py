@@ -39,6 +39,7 @@ def _sync(device, port):
         rules=InterfaceRuleMatcher.load(),
         server_key="default",
         interface_name_field="ifName",
+        addable_queryset=Interface.objects.all(),
         changeable_queryset=Interface.objects.all(),
         viewable_queryset=Interface.objects.all(),
     )

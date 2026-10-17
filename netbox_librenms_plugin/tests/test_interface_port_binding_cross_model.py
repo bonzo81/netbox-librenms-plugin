@@ -160,6 +160,7 @@ class TestTheSyncWriter:
                 server_key=SERVER_KEY,
                 interface_name_field="ifName",
                 created=False,
+                fresh_read_queryset=Interface.objects.all(),
             )
         assert (interface.name, interface.description, interface.enabled, interface.custom_field_data) == before
         interface.refresh_from_db()
@@ -187,6 +188,7 @@ class TestTheIPPathResolver:
                 rules=InterfaceRuleMatcher.load(),
                 server_key=SERVER_KEY,
                 interface_name_field="ifName",
+                addable_queryset=Interface.objects.all(),
                 changeable_queryset=Interface.objects.all(),
                 viewable_queryset=Interface.objects.all(),
             )

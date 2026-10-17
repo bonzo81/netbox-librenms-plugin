@@ -14,7 +14,9 @@ from netbox_librenms_plugin.tests.conftest import (
     make_ip,
     make_superuser,
     make_vm,
+    transactional_db_with_all_apps,
 )
+from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server as run_librenms_server
 from netbox_librenms_plugin.tests.test_modules_view import configure_servers as configure_test_servers
 from netbox_librenms_plugin.tests.view_test_helpers import (
@@ -25,6 +27,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     message_texts as view_message_texts,
     post as post_view,
 )
+from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
 
 
 @pytest.fixture(autouse=True)
@@ -4483,6 +4486,92 @@ class TestCreatePlatformAssignmentIndependence:
         assert b' id="htmx-modal-content"' in response.content
         assert b"hx-swap-oob" in response.content
 
+    def test_the_assignment_change_record_keeps_the_previous_platform(self, client):
+        from core.models import ObjectChange
+        from dcim.models import Device, Platform
+        from django.contrib.contenttypes.models import ContentType
+
+        target = self._mapped_device("platform-change-record-target")
+        previous = Platform.objects.create(
+            name="Previous OS", slug="previous-os", manufacturer=target.device_type.manufacturer
+        )
+        Device.objects.filter(pk=target.pk).update(platform=previous)
+
+        response = self._client_post(client, target, "Replacement OS")
+
+        assert response.status_code == 200
+        replacement = Platform.objects.get(name="Replacement OS")
+        change = ObjectChange.objects.get(
+            changed_object_type=ContentType.objects.get_for_model(Device), changed_object_id=target.pk
+        )
+        assert change.prechange_data is not None
+        assert (change.prechange_data["platform"], change.postchange_data["platform"]) == (
+            previous.pk,
+            replacement.pk,
+        )
+
+    def _client_post(self, client, device, platform_name):
+        """Post the modal form through the whole request stack, the lock-conflict middleware included."""
+        client.force_login(make_superuser("platform-lock-user"))
+        return client.post(
+            url_for("plugins:netbox_librenms_plugin:create_platform_from_import", kwargs={"device_id": 42}),
+            {
+                "server_key": self.server_key,
+                "platform_name": platform_name,
+                "manufacturer": str(device.device_type.manufacturer_id),
+                "device_pk": str(device.pk),
+            },
+            HTTP_HX_REQUEST="true",
+        )
+
+    @transactional_db_with_all_apps()
+    def test_a_lock_conflict_on_the_assignment_retries_and_assigns_the_platform(self, client):
+        """The conflict rolls back the platform with the assignment, so the second attempt creates it again."""
+        from dcim.models import Device, Platform
+        from django.db.models.signals import pre_save
+
+        target = self._mapped_device("platform-lock-retry-target")
+        attempts = []
+        with second_connection() as other:
+            lock_row(other, Device, target.pk)
+
+            def count_attempt(sender, instance, **kwargs):
+                attempts.append(instance.name)
+                if len(attempts) == 2:
+                    other.rollback()
+
+            pre_save.connect(count_attempt, sender=Platform, weak=False)
+            try:
+                with lock_timeout(200):
+                    response = self._client_post(client, target, "Retried OS")
+            finally:
+                pre_save.disconnect(count_attempt, sender=Platform)
+
+        assert attempts == ["Retried OS", "Retried OS"]
+        platform = Platform.objects.get(name="Retried OS")
+        target.refresh_from_db()
+        assert target.platform_id == platform.pk
+        assert b' id="htmx-modal-content"' in response.content
+
+    @transactional_db_with_all_apps()
+    def test_lock_conflicts_on_both_attempts_commit_no_platform_so_a_retry_works(self, client):
+        from dcim.models import Device, Platform
+
+        target = self._mapped_device("platform-lock-exhausted-target")
+        with second_connection() as other:
+            lock_row(other, Device, target.pk)
+            with lock_timeout(200):
+                response = self._client_post(client, target, "Busy OS")
+
+        assert response.status_code == 200
+        assert TRY_AGAIN_MESSAGE in response.content.decode()
+        assert not Platform.objects.filter(name="Busy OS").exists()
+
+        self._client_post(client, target, "Busy OS")
+
+        target.refresh_from_db()
+        assert target.platform_id == Platform.objects.get(name="Busy OS").pk
+
 
 @pytest.mark.django_db
 class TestBulkImportRunsInlineWithoutWorkers:
@@ -5662,6 +5751,32 @@ class TestPromoteToHostViewPost:
 
 
 @pytest.mark.django_db
+def test_a_lock_conflict_in_a_device_save_escapes_the_save_helper():
+    """Only the middleware answers a lock conflict; the helper keeps its 409 text for other database errors."""
+    from django.db import OperationalError, transaction
+
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import failing_statement
+    from netbox_librenms_plugin.transactions import classify_conflict
+    from netbox_librenms_plugin.views.imports.actions import _save_device
+
+    device = make_device("save-helper-conflict")
+    device.name = "save-helper-conflict-renamed"
+
+    def update(sql, params):
+        return sql.startswith('UPDATE "dcim_device"')
+
+    with pytest.raises(OperationalError) as caught, transaction.atomic():
+        with failing_statement(update, "40P01"):
+            _save_device(device, update_fields=["name"])
+    with transaction.atomic(), failing_statement(update, "57014"):
+        response = _save_device(device, update_fields=["name"])
+        transaction.set_rollback(True)
+
+    assert classify_conflict(caught.value)
+    assert response.status_code == 409
+
+
+@pytest.mark.django_db
 class _MergeViewHarness:
     """Drive merge actions through real validation, permissions, HTTP, and ORM state."""
 
@@ -5974,6 +6089,27 @@ class TestMergeNetBoxDevicesViewVCSyncDevice(_MergeViewHarness):
 @pytest.mark.django_db
 class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
     """Merge preparation failures must return a toast and leave the donor unmigrated."""
+
+    @transactional_db_with_all_apps()
+    def test_a_lock_conflict_on_the_merge_locks_reaches_the_middleware(self):
+        """The merge rolls back and the conflict escapes, so the middleware gives its "try again" answer."""
+        from dcim.models import Device
+        from django.db import OperationalError
+
+        from netbox_librenms_plugin.transactions import classify_conflict
+
+        winner = make_device("merge-lock-winner", librenms_cf={self.server_key: {"id": 20}})
+        # A serial of its own, so the harness writes nothing while the donor row is locked.
+        donor = make_device("merge-lock-donor", serial="MERGE-LOCK-DONOR", librenms_cf={self.server_key: {"id": 10}})
+
+        with second_connection() as other:
+            lock_row(other, Device, donor.pk)
+            with lock_timeout(200), pytest.raises(OperationalError) as caught:
+                self._post_merge(winner, donor)
+
+        assert classify_conflict(caught.value)
+        donor.refresh_from_db()
+        assert donor.custom_field_data["librenms_id"][self.server_key] == {"id": 10}
 
     def test_orphan_host_id_merge_fails_closed_and_leaves_donor_unmigrated(self):
         """A winner holding both host id + oob and a donor with a distinct host-id-only link fails closed."""
@@ -7156,7 +7292,7 @@ class TestRebindOrHtmxErrorHelper:
 
 class TestHtmxErrorResponse:
     def test_plain_dynamic_message_is_html_escaped_once(self):
-        from netbox_librenms_plugin.views.imports.actions import _htmx_error_response
+        from netbox_librenms_plugin.views.mixins import _htmx_error_response
 
         response = _htmx_error_response("Conflict with '<script>alert(1)</script>'.")
 

@@ -13,6 +13,7 @@ from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.tests.conftest import make_superuser
 from netbox_librenms_plugin.tests.import_server_helpers import librenms_device, selector_html
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+from netbox_librenms_plugin.tests.view_test_helpers import queued_request
 
 
 @pytest.fixture
@@ -919,6 +920,7 @@ def test_queued_job_rejects_a_server_key_that_is_no_longer_configured(settings, 
             )
         else:
             ImportDevicesJob(job).run(
+                request=queued_request(job.user),
                 import_plans=[],
                 server_key="default",
             )

@@ -8,10 +8,12 @@ from django.core.cache import cache
 from django.http import HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import get_script_prefix
+from django.utils.html import format_html
 from django.utils.http import url_has_allowed_host_and_scheme
 from utilities.permissions import get_permission_for_model
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
+from netbox_librenms_plugin.interface_sync import write_interface_row
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSIDConflictError, LibreNMSLookupError
 from netbox_librenms_plugin.utils import coerce_librenms_id, coerce_model_pk, effective_vlan_mode, is_list_of_dicts
 
@@ -147,7 +149,7 @@ def _safe_redirect_response(request):
 
     """
     target = _get_safe_redirect_url(request)
-    is_htmx = bool(request.headers.get("HX-Request"))
+    is_htmx = bool(request.htmx)
 
     if url_has_allowed_host_and_scheme(
         target,
@@ -162,6 +164,46 @@ def _safe_redirect_response(request):
     if is_htmx:
         return HttpResponse("", headers={"HX-Redirect": app_root})
     return redirect(app_root)
+
+
+def _htmx_error_response(message: str) -> HttpResponse:
+    """
+    Return an HTMX-friendly error response that surfaces ``message`` as a toast.
+
+    Uses an out-of-band swap of NetBox's ``#django-messages`` container so the
+    toast renders through the same Bootstrap pipeline NetBox uses for the
+    standard ``messages`` framework. It does not depend on ``window.bootstrap``.
+
+    Returns ``200`` (with ``HX-Reswap: none``) so the primary swap target is
+    left untouched *and* so ``django-htmx``'s DEBUG-mode handler does not
+    replace the page body with the response payload (it only does so for
+    4xx/5xx responses).
+
+    Args:
+        message (str): The error message to show in the toast.
+
+    Returns:
+        HttpResponse: The HTMX error response.
+
+    """
+    toast_html = format_html(
+        '<div id="django-messages" class="toast-container position-fixed bottom-0 end-0 p-3" hx-swap-oob="true">'
+        '<div class="toast toast-dark border-0 shadow-sm" role="alert" aria-live="assertive" '
+        'aria-atomic="true" data-bs-delay="12000">'
+        '<div class="toast-header text-bg-danger">'
+        '<i class="mdi mdi-alert-circle me-1"></i>Error'
+        '<button type="button" class="btn-close me-0 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>'
+        "</div>"
+        '<div class="toast-body">{}</div>'
+        "</div>"
+        "</div>",
+        message,
+    )
+    resp = HttpResponse(toast_html, content_type="text/html")
+    # Prevent the triggering element's hx-swap from clobbering its target with
+    # our OOB-only payload; OOB still applies regardless of HX-Reswap.
+    resp["HX-Reswap"] = "none"
+    return resp
 
 
 def resolve_configured_server_key(server_key):
@@ -1640,9 +1682,15 @@ class VlanAssignmentMixin:
         vlans = vid_to_vlans.get(vid, [])
         return vlans[0] if vlans else None
 
-    def _update_interface_vlan_assignment(self, interface, vlan_data, vlan_group_map, lookup_maps):
+    def _update_interface_vlan_assignment(
+        self, interface, vlan_data, vlan_group_map, lookup_maps, *, fresh_read_queryset
+    ):
         """
         Update interface VLAN assignments in NetBox (mode, untagged_vlan, tagged_vlans).
+
+        The mode and the untagged VLAN are written through ``write_interface_row``, so they are
+        written to the current row, and only when no other operation changed it after the read.
+        The tagged VLANs follow on the written instance.
 
         Args:
             interface: NetBox Interface or VMInterface object
@@ -1650,14 +1698,20 @@ class VlanAssignmentMixin:
             vlan_group_map: Dict mapping VID (str) to VLAN group ID for per-VLAN group lookups.
                            Can also be a single group ID string for backward compat.
             lookup_maps: Dict from _build_vlan_lookup_maps()
+            fresh_read_queryset: The rows that the write's fresh read may find, as in ``write_interface_row``.
 
         Returns:
             Dict with sync results:
+                - interface: the instance that holds the row as written
                 - mode_set: str or None
                 - untagged_set: VLAN object or None
                 - tagged_set: list of VLAN objects
                 - missing_vlans: list of VIDs not found in NetBox
                 - changed: bool, True when the mode, the untagged VLAN or the tagged VLANs were written
+
+        Raises:
+            ConcurrentRowChange: The row left *fresh_read_queryset*, or another operation changed
+                it after the write read it.
 
         """
         # Support both dict (per-VLAN) and string/int/None (single group) for backward compat
@@ -1670,8 +1724,6 @@ class VlanAssignmentMixin:
         untagged_vid = vlan_data.get("untagged_vlan")
         tagged_vids = vlan_data.get("tagged_vlans", [])
         missing_vlans = []
-        prior_mode = interface.mode
-        prior_untagged_vlan_id = interface.untagged_vlan_id
         prior_tagged_vlan_ids = set(interface.tagged_vlans.values_list("pk", flat=True))
 
         def _get_group_id_for_vid(vid):
@@ -1680,27 +1732,24 @@ class VlanAssignmentMixin:
                 return vlan_group_map.get(str(vid), "")
             return single_group_id or ""
 
-        interface.mode = effective_vlan_mode(vlan_data)
+        mode = effective_vlan_mode(vlan_data)
 
-        # Set untagged VLAN
         untagged_set = None
         if untagged_vid:
-            vlan = self._find_vlan_in_group(untagged_vid, _get_group_id_for_vid(untagged_vid), lookup_maps)
-            if vlan:
-                interface.untagged_vlan = vlan
-                untagged_set = vlan
-            else:
+            untagged_set = self._find_vlan_in_group(untagged_vid, _get_group_id_for_vid(untagged_vid), lookup_maps)
+            if untagged_set is None:
                 missing_vlans.append(untagged_vid)
-                interface.untagged_vlan = None
-        else:
-            interface.untagged_vlan = None
+
+        def apply_vlans(row):
+            row.mode = mode
+            if not (untagged_vid and untagged_set is None):
+                row.untagged_vlan = untagged_set
+            return False
 
         # Save mode + untagged_vlan before M2M operations.
         # tagged_vlans.set() triggers a DB refresh that wipes unsaved
         # in-memory attributes, so we must persist first.
-        fields_changed = prior_mode != interface.mode or prior_untagged_vlan_id != interface.untagged_vlan_id
-        if fields_changed:
-            interface.save()
+        interface, fields_changed = write_interface_row(interface, apply_vlans, fresh_read_queryset=fresh_read_queryset)
 
         # Set tagged VLANs (M2M - requires the instance to be saved first)
         tagged_set = []
@@ -1712,14 +1761,19 @@ class VlanAssignmentMixin:
                 else:
                     missing_vlans.append(vid)
             tagged_vlan_ids = {vlan.pk for vlan in tagged_set}
-            if tagged_vlan_ids != prior_tagged_vlan_ids:
-                interface.tagged_vlans.set(tagged_set)
         else:
             tagged_vlan_ids = set()
-            if prior_tagged_vlan_ids:
+        if tagged_vlan_ids != prior_tagged_vlan_ids:
+            # An unsaved row has no change-log before-state yet, and its tagged VLANs are about to change.
+            if not fields_changed:
+                interface.snapshot()
+            if tagged_vids:
+                interface.tagged_vlans.set(tagged_set)
+            else:
                 interface.tagged_vlans.clear()
 
         return {
+            "interface": interface,
             "mode_set": interface.mode,
             "untagged_set": untagged_set,
             "tagged_set": tagged_set,

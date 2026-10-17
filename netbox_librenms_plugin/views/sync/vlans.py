@@ -198,7 +198,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
     def _redirect(self, object_type: str, object_id: int):
         """Redirect back to sync page with VLAN tab active."""
         url = self.get_vlan_tab_url(object_type, object_id)
-        if getattr(getattr(self, "request", None), "headers", {}).get("HX-Request") == "true":
+        if self.request.htmx:
             return HttpResponse("", headers={"HX-Redirect": url})
         return redirect(url)
 
@@ -254,7 +254,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             "server_key": self._post_server_key,
             "cancel_url": self.get_vlan_tab_url(object_type, object_id),
         }
-        if request.headers.get("HX-Request") == "true":
+        if request.htmx:
             template_name = "netbox_librenms_plugin/htmx/vlan_conflicts.html"
         else:
             context["full_page"] = True
@@ -315,7 +315,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         vlan.name = proposed_name
         try:
             with transaction.atomic():
-                vlan.save(update_fields=["name"])
+                vlan.save(update_fields=["name", "last_updated"])
         except IntegrityError as exc:
             raise ValueError(
                 "The proposed VLAN name already exists in the selected group. Refresh the VLAN data and try again."

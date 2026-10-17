@@ -6,10 +6,10 @@ from uuid import uuid4
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_cluster, make_device
+from netbox_librenms_plugin.tests.conftest import make_cluster, make_device, transactional_db_with_all_apps
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.test_modules_view import configure_servers
-from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, queued_request
 
 
 def _plugin_url(view_name, *, kwargs=None):
@@ -486,6 +486,37 @@ def test_device_target_rejects_forged_vm_placement(client, settings):
     assert not VirtualMachine.objects.filter(name="vm-forged-placement.example.test").exists()
 
 
+@transactional_db_with_all_apps()
+def test_a_lock_conflict_in_a_vm_create_fails_only_that_row_with_the_try_again_text(live_librenms):
+    """The VM's own transaction rolls back; its row never shows PostgreSQL's text."""
+    from virtualization.models import Cluster, VirtualMachine
+
+    from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import _libre_device
+    from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
+
+    cluster = make_cluster("vm-conflict-cluster")
+    row = _libre_device(7311, "vm-conflict.example.test", location="Unmatched VM location")
+    live_librenms.server.register("/api/v0/devices/7311", {"status": "ok", "devices": [row]})
+
+    with second_connection() as other:
+        # The new VM's cluster key check waits for this lock.
+        lock_row(other, Cluster, cluster.pk)
+        with lock_timeout(200):
+            result = bulk_import_vms(
+                {7311: {"placement": "cluster", "cluster_id": cluster.pk}},
+                live_librenms.api,
+                libre_devices_cache={7311: row},
+                user=make_superuser("vm-conflict-user"),
+            )
+
+    assert result["success"] == []
+    assert result["failed"] == [{"device_id": 7311, "error": TRY_AGAIN_MESSAGE}]
+    assert not VirtualMachine.objects.filter(name="vm-conflict.example.test").exists()
+
+
 @pytest.mark.django_db
 def test_background_job_deserializes_the_same_site_placement_plan(settings):
     """The queued path must consume the explicit plan without cluster-based classification."""
@@ -530,6 +561,7 @@ def test_background_job_deserializes_the_same_site_placement_plan(settings):
     }
 
     ImportDevicesJob(job).run(
+        request=queued_request(job.user),
         import_plans=[
             {
                 "source_device_id": source_device_id,
@@ -599,6 +631,7 @@ def test_background_job_applies_host_placement(settings):
     }
 
     ImportDevicesJob(job).run(
+        request=queued_request(job.user),
         import_plans=[
             {
                 "source_device_id": source_device_id,

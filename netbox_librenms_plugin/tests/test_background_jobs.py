@@ -1,15 +1,17 @@
 """Integration coverage for import decisions and NetBox background jobs."""
 
+import pickle
 from copy import deepcopy
 from uuid import uuid4
 
 import pytest
 from django.http import QueryDict
+from django.urls import reverse
 
 from netbox_librenms_plugin.tests.conftest import make_cluster, make_device, make_superuser
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.view_test_helpers import grant as grant_view_permission
-from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, queued_request
 
 SERVER_KEY = "default"
 
@@ -82,36 +84,21 @@ def _import_user(tag, *, devices=True, vms=True):
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize(
-    ("job_kind", "legacy_kwargs"),
-    [
-        pytest.param(
-            "filter",
-            {
-                "filters": {},
-                "vc_detection_enabled": False,
-                "clear_cache": False,
-                "show_disabled": False,
-            },
-            id="filter-devices",
-        ),
-        pytest.param(
-            "import",
-            {"import_plans": []},
-            id="import-devices",
-        ),
-    ],
-)
-def test_legacy_job_payload_without_server_key_reaches_explicit_validation(job_kind, legacy_kwargs):
+def test_legacy_filter_payload_without_server_key_reaches_explicit_validation():
     """The real NetBox runner must record the missing server instead of a signature error."""
     from core.choices import JobStatusChoices
 
-    from netbox_librenms_plugin.jobs import FilterDevicesJob, ImportDevicesJob
+    from netbox_librenms_plugin.jobs import FilterDevicesJob
 
-    job_class = FilterDevicesJob if job_kind == "filter" else ImportDevicesJob
-    job = _job(make_superuser(f"background-legacy-{job_kind}-owner"), f"legacy-{job_kind}")
+    job = _job(make_superuser("background-legacy-filter-owner"), "legacy-filter")
 
-    job_class.handle(job=job, **legacy_kwargs)
+    FilterDevicesJob.handle(
+        job=job,
+        filters={},
+        vc_detection_enabled=False,
+        clear_cache=False,
+        show_disabled=False,
+    )
 
     job.refresh_from_db()
     assert job.status == JobStatusChoices.STATUS_ERRORED
@@ -274,58 +261,185 @@ class TestFilterDevicesJob:
         assert FilterDevicesJob.Meta.name == "LibreNMS Device Filter"
 
 
+FLUSHED_EVENTS = []
+
+
+def record_events(events):
+    """An ``EVENTS_PIPELINE`` entry that keeps each flushed event."""
+    FLUSHED_EVENTS.extend((event["object_type"].model, event["object_id"], event["event_type"]) for event in events)
+
+
+@pytest.fixture
+def event_recorder(settings):
+    FLUSHED_EVENTS.clear()
+    settings.EVENTS_PIPELINE = [*settings.EVENTS_PIPELINE, f"{__name__}.record_events"]
+    yield FLUSHED_EVENTS
+    FLUSHED_EVENTS.clear()
+
+
+class _RecordingQueue:
+    """Stands in for the Redis-backed RQ queue: it pickles each call and keeps it for the test to run."""
+
+    def __init__(self):
+        self.calls = []
+
+    def enqueue(self, func, *, job_id, **kwargs):
+        self.calls.append(pickle.loads(pickle.dumps((func, job_id, kwargs))))
+
+
+def _post_import(client, librenms_server, tag, device_id, *, background):
+    from dcim.models import DeviceRole
+
+    make_device(f"{tag}-infra")  # seeds the shared site, device type and role
+    role = DeviceRole.objects.get(slug="test-role")
+    name = f"{tag}.example.test"
+    librenms_server.register(
+        f"/api/v0/devices/{device_id}",
+        {"status": "ok", "devices": [_device_payload(device_id, hostname=name)]},
+    )
+    user = make_superuser(f"{tag}-importer")
+    client.force_login(user)
+    data = {"select": [str(device_id)], "server_key": SERVER_KEY, f"role_{device_id}": str(role.pk)}
+    if background:
+        data["use_background_job"] = "on"
+    response = client.post(reverse("plugins:netbox_librenms_plugin:bulk_import_devices"), data)
+    assert response.status_code == 302, response.content
+    return name, user
+
+
+def _logged_and_evented_change(name, user, events):
+    from core.models import ObjectChange
+    from dcim.models import Device
+    from django.contrib.contenttypes.models import ContentType
+
+    device = Device.objects.get(name=name)
+    changes = ObjectChange.objects.filter(
+        changed_object_type=ContentType.objects.get_for_model(Device), changed_object_id=device.pk
+    )
+    assert [(change.action, change.user_id) for change in changes] == [("create", user.pk)]
+    assert ("device", device.pk, "object_created") in events, events
+    return changes.get()
+
+
 @pytest.mark.django_db
-class TestImportDevicesJob:
-    def test_queued_legacy_payload_imports_real_objects_after_upgrade(self, librenms_server):
-        """A queued pre-upgrade payload must retain its Device and VM import intent."""
-        from core.choices import JobStatusChoices
-        from dcim.models import Device, DeviceRole
-        from virtualization.models import VirtualMachine
+class TestQueuedImportRunsAsTheQueuedRequest:
+    """
+    An import writes the NetBox change log and event queue on both paths.
+
+    The background path enqueues ``ImportDevicesJob`` through NetBox's real ``Job.enqueue``. A fake RQ
+    queue pickles the call as RQ does. The test then runs it outside any request, as an RQ worker does.
+    """
+
+    @staticmethod
+    def _queue_import(client, librenms_server, monkeypatch, capture_on_commit, tag, device_id):
+        import django_rq
+        from dcim.models import Device
+        from netbox.context import current_request
 
         from netbox_librenms_plugin.jobs import ImportDevicesJob
 
-        infrastructure = make_device("background-legacy-import-infrastructure")
-        cluster = make_cluster("background-legacy-import-cluster")
-        user = _import_user("legacy-mixed")
-        user = grant_view_permission(user, "view", DeviceRole, constraints={"pk": infrastructure.role_id})
-        job = _job(user, "legacy-mixed-import")
-        rows = {
-            6411: _device_payload(
-                6411,
-                hostname="background-legacy-imported-device",
-                hardware=infrastructure.device_type.model,
-                location=infrastructure.site.name,
-            ),
-            6412: _device_payload(6412, hostname="background-legacy-imported-vm"),
-        }
-        librenms_server.register("/api/v0/devices/6411", {"status": "ok", "devices": [rows[6411]]})
+        queue, real_get_queue = _RecordingQueue(), django_rq.get_queue
+        monkeypatch.setattr("utilities.rqworker.get_workers_for_queue", lambda name: 1)
+        monkeypatch.setattr(django_rq, "get_queue", lambda *args, **kwargs: queue)
+        with capture_on_commit(execute=True):
+            name, user = _post_import(client, librenms_server, tag, device_id, background=True)
+        monkeypatch.setattr(django_rq, "get_queue", real_get_queue)  # the job's cancellation check reads the real queue
 
-        ImportDevicesJob.handle(
-            job=job,
-            device_ids=[6411],
-            vm_imports={6412: {"cluster_id": cluster.pk}},
-            manual_mappings_per_device={
-                6411: {
-                    "site_id": infrastructure.site_id,
-                    "device_type_id": infrastructure.device_type_id,
-                    "device_role_id": infrastructure.role_id,
-                }
-            },
-            server_key=SERVER_KEY,
-            sync_options={"sync_interfaces": False, "sync_cables": False},
-            libre_devices_cache=rows,
+        # Precondition: the view queued the job and did not import inline.
+        assert not Device.objects.filter(name=name).exists()
+        assert current_request.get() is None
+        [kwargs] = [call[2] for call in queue.calls if call[0] == ImportDevicesJob.handle]
+        return name, user, kwargs
+
+    def test_a_synchronous_import_writes_the_change_log(self, client, librenms_server, event_recorder):
+        name, user = _post_import(client, librenms_server, "changelog-sync", 6601, background=False)
+
+        change = _logged_and_evented_change(name, user, event_recorder)
+        assert change.request_id is not None
+
+    def test_a_background_import_writes_the_change_log_of_the_queued_request(
+        self, client, librenms_server, event_recorder, monkeypatch, django_capture_on_commit_callbacks
+    ):
+        from core.choices import JobStatusChoices
+        from core.models import Job
+        from netbox.context import current_request
+
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        name, user, kwargs = self._queue_import(
+            client, librenms_server, monkeypatch, django_capture_on_commit_callbacks, "changelog-job", 6602
         )
 
+        ImportDevicesJob.handle(**kwargs)
+
+        job = Job.objects.get(pk=kwargs["job"].pk)
+        assert job.status == JobStatusChoices.STATUS_COMPLETED, (job.status, job.error, job.log_entries)
+        assert job.data["success_count"] == 1, job.data
+        change = _logged_and_evented_change(name, user, event_recorder)
+        assert change.user_id == job.user_id
+        assert change.request_id == kwargs["request"].id
+        assert current_request.get() is None
+
+    @pytest.mark.parametrize(
+        ("revoked_field", "error"),
+        [
+            pytest.param("is_superuser", "dcim.add_device", id="demoted"),
+            pytest.param("is_active", "no longer exists or is inactive", id="deactivated"),
+        ],
+    )
+    def test_a_background_import_checks_the_user_as_stored_when_it_runs(
+        self, client, librenms_server, monkeypatch, django_capture_on_commit_callbacks, revoked_field, error
+    ):
+        """The queued payload holds a copy of the user from the enqueue time; the job must not trust it."""
+        from core.choices import JobStatusChoices
+        from core.models import Job
+        from dcim.models import Device
+        from netbox.context import current_request
+
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        name, user, kwargs = self._queue_import(
+            client, librenms_server, monkeypatch, django_capture_on_commit_callbacks, f"revoked-{revoked_field}", 6603
+        )
+        setattr(user, revoked_field, False)
+        user.save(update_fields=[revoked_field])
+
+        ImportDevicesJob.handle(**kwargs)
+
+        job = Job.objects.get(pk=kwargs["job"].pk)
+        assert job.status == JobStatusChoices.STATUS_ERRORED
+        assert "PermissionDenied" in job.error and error in job.error, job.error
+        assert not Device.objects.filter(name=name).exists()
+        assert current_request.get() is None
+
+
+@pytest.mark.django_db
+class TestImportDevicesJob:
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            pytest.param({"import_plans": [], "server_key": SERVER_KEY}, id="current-fields"),
+            pytest.param({"device_ids": [6411], "vm_imports": {}, "server_key": SERVER_KEY}, id="legacy-fields"),
+        ],
+    )
+    def test_a_payload_queued_before_the_upgrade_fails_without_importing(self, librenms_server, payload):
+        """A job queued without the request has no change-log identity, so it must not import."""
+        from core.choices import JobStatusChoices
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.jobs import ImportDevicesJob
+
+        job = _job(make_superuser("background-no-request-owner"), "no-request-import")
+        device_count = Device.objects.count()
+
+        ImportDevicesJob.handle(job=job, **payload)
+
         job.refresh_from_db()
-        imported_device = Device.objects.get(name="background-legacy-imported-device")
-        imported_vm = VirtualMachine.objects.get(name="background-legacy-imported-vm")
-        assert job.data["imported_device_pks"] == [imported_device.pk]
-        assert job.data["imported_vm_pks"] == [imported_vm.pk]
-        assert job.data["imported_libre_device_ids"] == [6411]
-        assert job.data["imported_libre_vm_ids"] == [6412]
-        assert job.status == JobStatusChoices.STATUS_COMPLETED
-        assert job.data["success_count"] == 2
-        assert job.data["errors"] == []
+        assert job.status == JobStatusChoices.STATUS_ERRORED
+        assert "Import job payload has no request. Submit the import again." in job.error
+        assert job.data == {}
+        assert Device.objects.count() == device_count
+        assert librenms_server.requests == []
 
     def test_mixed_device_and_vm_batch_imports_real_objects_and_persists_ids(self, librenms_server):
         from dcim.models import Device, DeviceRole
@@ -350,6 +464,7 @@ class TestImportDevicesJob:
         librenms_server.register("/api/v0/devices/6401", {"status": "ok", "devices": [rows[6401]]})
 
         ImportDevicesJob(job).run(
+            request=queued_request(job.user),
             import_plans=[
                 {
                     "source_device_id": 6401,
@@ -404,6 +519,7 @@ class TestImportDevicesJob:
         }
         librenms_server.register("/api/v0/devices/6404", {"status": "ok", "devices": [rows[6404]]})
         ImportDevicesJob(job).run(
+            request=queued_request(job.user),
             import_plans=[
                 {
                     "source_device_id": device_id,
@@ -455,6 +571,7 @@ class TestImportDevicesJob:
         assert detection["is_stack"] is False
 
         ImportDevicesJob(job).run(
+            request=queued_request(job.user),
             import_plans=[
                 {
                     "source_device_id": 6421,
@@ -490,6 +607,7 @@ class TestImportDevicesJob:
         vm_count = VirtualMachine.objects.count()
 
         ImportDevicesJob(job).run(
+            request=queued_request(job.user),
             import_plans=[
                 {
                     "source_device_id": 6405,
@@ -530,6 +648,7 @@ class TestImportDevicesJob:
 
         with pytest.raises(PermissionDenied, match="dcim.add_device"):
             ImportDevicesJob(job).run(
+                request=queued_request(job.user),
                 import_plans=[
                     {
                         "source_device_id": 6407,
@@ -555,6 +674,7 @@ class TestImportDevicesJob:
         job = _job(user, "vm-only-import")
 
         ImportDevicesJob(job).run(
+            request=queued_request(job.user),
             import_plans=[
                 {
                     "source_device_id": 6408,
@@ -578,6 +698,7 @@ class TestImportDevicesJob:
         job = _job(make_superuser("background-empty-import-owner"), "empty-import")
 
         ImportDevicesJob(job).run(
+            request=queued_request(job.user),
             import_plans=[],
             server_key=SERVER_KEY,
         )
@@ -608,6 +729,7 @@ class TestImportDevicesJob:
 
         with pytest.raises(ValueError, match="configured LibreNMS server"):
             ImportDevicesJob(job).run(
+                request=queued_request(job.user),
                 import_plans=[],
                 server_key=SERVER_KEY,
             )

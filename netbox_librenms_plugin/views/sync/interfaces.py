@@ -1,5 +1,6 @@
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from functools import partial
 from urllib.parse import quote_plus
 
 from dcim.models import Device, Interface, VirtualChassis
@@ -37,8 +38,11 @@ from netbox_librenms_plugin.interface_rules import (
     rule_names,
 )
 from netbox_librenms_plugin.interface_sync import (
-    assign_interface_mac,
+    changed_fields,
+    collect_interface_writes,
+    copy_before_change,
     interface_owner_platform_id,
+    keep_change_log_before_state,
     update_interface_from_port,
 )
 from netbox_librenms_plugin.sync_cache import (
@@ -47,6 +51,7 @@ from netbox_librenms_plugin.sync_cache import (
     apply_transition_to_response,
     schedule_request_cache_mutation,
 )
+from netbox_librenms_plugin.transactions import CommittedFollowUpError, classify_conflict, run_transaction
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     LibreNMSPortBindingConflict,
@@ -84,12 +89,110 @@ from netbox_librenms_plugin.views.mixins import (
 logger = logging.getLogger(__name__)
 
 
+def _log_write(message, *args):
+    """Log a write when its transaction commits, so a write that rolls back logs nothing."""
+    transaction.on_commit(partial(logger.info, message, *args))
+
+
 class _ConflictingRowTargetError(Exception):
     """A sync POST names more than one Virtual Chassis member for one row."""
 
 
 class _DuplicatedSelectionError(Exception):
     """The related-row walk reached a port ID the cached snapshot holds more than once."""
+
+
+# The text for an interface that the user may not view: nothing identifies it.
+HIDDEN_INTERFACE = "an interface you cannot view"
+RELATIONSHIPS_NOT_SYNCED = (
+    "The LAG, parent and bridge links were not synced: the interface owner changed during the sync. "
+    "Refresh the LibreNMS data and try again."
+)
+
+
+@dataclass
+class _RowSelection:
+    """
+    The existing interfaces that one sync attempt may change or name, read before its first write.
+
+    Every pass of the attempt reads the change scope here, never again from the database: a write
+    of the attempt can take a row out of the scope for a moment, and the final check decides on the
+    rows as the attempt leaves them. A row that the attempt creates may be changed, and a text names
+    it by the name that the user selected. A retry is a new attempt, so it reads a new selection.
+    """
+
+    model: type
+    # The locked owners (Devices or the VirtualMachine) whose interfaces the selection holds.
+    owner_ids: frozenset
+    changeable_ids: frozenset
+    # The name of each row in the user's view scope, read with the scope.
+    viewable_names: dict
+    created_names: dict = field(default_factory=dict)
+
+    def covers(self, interface):
+        """Return whether *interface* belongs to an owner of the selection."""
+        owner_id = interface.virtual_machine_id if isinstance(interface, VMInterface) else interface.device_id
+        return type(interface) is self.model and owner_id in self.owner_ids
+
+    def selected(self, model, pk):
+        """Return whether the attempt may write row *pk* of *model*: a selected row, or one that it created."""
+        return model is self.model and (pk in self.changeable_ids or pk in self.created_names)
+
+    def may_change(self, interface):
+        """Return whether the attempt may write *interface*."""
+        return self.selected(type(interface), interface.pk)
+
+    def add_created(self, interface):
+        """Record *interface*, which the attempt created with the name that the user selected."""
+        self.created_names[interface.pk] = interface.name
+
+    def permitted(self, pks):
+        """Return the rows of *pks* that the user may view and those that the attempt may change."""
+        pks = set(pks)
+        created = self.created_names.keys()
+        return pks & (self.viewable_names.keys() | created), pks & (self.changeable_ids | created)
+
+    def shown_name(self, model, pk):
+        """Return the name that a text may show for row *pk* of *model*, or None when the user may not view it."""
+        if model is not self.model:
+            return None
+        return self.created_names.get(pk, self.viewable_names.get(pk))
+
+    def shown(self, interface):
+        """Return the name of *interface* for a text, or ``HIDDEN_INTERFACE`` when the user may not view it."""
+        name = self.shown_name(type(interface), interface.pk)
+        return HIDDEN_INTERFACE if name is None else name
+
+    def check_writes(self, writes):
+        """
+        Refuse the attempt when a row of *writes* is outside the user's scope or outside this selection.
+
+        This is the final write check. Call it after the last write, inside the transaction of the writes.
+
+        Raises:
+            _RowsOutsideScopeError: A written row is outside the scope. The text names only a row that the user may view.
+
+        """
+        if refused := writes.outside_scope(self.selected):
+            named = sorted(
+                (name, actions) for model, pk, actions in refused if (name := self.shown_name(model, pk)) is not None
+            )
+            raise _RowsOutsideScopeError(named, len(refused) - len(named))
+
+
+class _RowsOutsideScopeError(Exception):
+    """Rows that a sync attempt wrote are outside the user's add or change scope; the attempt rolls back."""
+
+    def __init__(self, named, hidden):
+        rows = ", ".join(f"{name} ({', '.join(actions)})" for name, actions in named)
+        if hidden:
+            # Nothing identifies a row that the user may not view: not its name, not its actions.
+            unnamed = f"{hidden} interface{'s' if hidden > 1 else ''} you cannot view"
+            rows = f"{rows} and {unnamed}" if rows else unnamed
+        self.user_message = (
+            f"Nothing was saved. These interfaces are outside the scope of your permissions after the sync: {rows}."
+        )
+        super().__init__(self.user_message)
 
 
 _DUPLICATED_SELECTION_MESSAGE = (
@@ -150,6 +253,17 @@ class _HostInterfaceNameConflict(Exception):
     """An OOB row cannot claim a host interface by its name."""
 
 
+@dataclass(frozen=True)
+class _InterfaceSyncOutcome:
+    """What one committed sync attempt reports; ``post()`` publishes it after the transaction."""
+
+    skipped_conflicts: tuple
+    kept_name_conflicts: tuple
+    synced_count: int
+    mutated: bool
+    warnings: tuple
+
+
 class SyncInterfacesView(
     LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, VlanAssignmentMixin, CacheMixin, View
 ):
@@ -165,6 +279,16 @@ class SyncInterfacesView(
             return [("view", VirtualMachine), ("add", VMInterface), ("change", VMInterface)]
         else:
             raise Http404(f"Invalid object type: {object_type}")
+
+    @property
+    def _attempt_selection(self):
+        """Return the row selection of the running attempt, or raise RuntimeError when no attempt set it."""
+        selection = getattr(self, "_selection", None)
+        if selection is None:
+            raise RuntimeError(
+                "The interface sync reads its row selection only inside _sync_attempt, after _lock_sync_scope."
+            )
+        return selection
 
     def post(self, request, object_type, object_id):
         """Sync selected interfaces from LibreNMS into NetBox."""
@@ -199,8 +323,6 @@ class SyncInterfacesView(
         if selected_port_ids is None:
             return self._tab_response(request, object_type, interface_name_field, server_key)
         visible_port_ids = selected_port_ids
-        self._selected_port_ids = set(visible_port_ids)
-        self._auto_selected_port_ids = set()
 
         ports_data = self.get_cached_ports_data(request, obj, server_key)
         if ports_data is None:
@@ -211,57 +333,37 @@ class SyncInterfacesView(
         self._related_walk = (
             normalize_relationship_maps(relationships) if request.POST.get("auto_select_lag_members") else None
         )
-        if self._selected_port_ids & _duplicated_port_ids(ports_data):
+        if visible_port_ids & _duplicated_port_ids(ports_data):
             messages.warning(request, _DUPLICATED_SELECTION_MESSAGE)
             return self._tab_response(request, object_type, interface_name_field, server_key)
-        # Resolve inferred off-page owners only after the chassis and its members are locked.
-        # A pre-lock position guess can become stale if membership positions change concurrently.
-        self._auto_selected_target_ids = {}
 
-        # Collects interfaces skipped because their LibreNMS port_id resolves to an
-        # interface on a *different* device (see _resolve_device/vm_interface). Surfaced
-        # below so the skip isn't silent — otherwise the user only sees it in the logs.
-        self._skipped_conflicts = []
-        self._kept_name_conflicts = []
-        self._synced_count = 0
-        self._mutated = False
         try:
-            with transaction.atomic():
-                try:
-                    self.sync_selected_interfaces(
-                        obj,
-                        ports_data,
-                        exclude_columns,
-                        interface_name_field,
-                        keep_locked_targets=True,
-                    )
-
-                    # Keep the target-device locks and their current object map through relationship
-                    # validation and persistence. Reusing the map also avoids one permission-filtered
-                    # Device lookup per selected VC relationship edge.
-                    self._sync_interface_relationships(
-                        self.object,
-                        ports_data,
-                        relationships,
-                        server_key,
-                        excluded_columns=exclude_columns,
-                    )
-                finally:
-                    self.__dict__.pop("_locked_target_devices", None)
+            outcome = run_transaction(
+                lambda: self._sync_attempt(
+                    visible_port_ids,
+                    ports_data,
+                    relationships,
+                    exclude_columns,
+                    interface_name_field,
+                    server_key,
+                )
+            )
         except LibreNMSPortBindingConflict as conflict:
             self._synced_count = 0
             self._mutated = False
             messages.warning(request, str(conflict))
             return self._tab_response(request, object_type, interface_name_field, server_key)
         except _DuplicatedSelectionError:
-            # The walk reached a duplicated port before anything was written; the atomic block rolled back.
+            # The walk reached a duplicated port before anything was written; the attempt rolled back.
             messages.warning(request, _DUPLICATED_SELECTION_MESSAGE)
             return self._tab_response(request, object_type, interface_name_field, server_key)
+        except _RowsOutsideScopeError as refused:
+            messages.error(request, refused.user_message)
+            return self._tab_response(request, object_type, interface_name_field, server_key)
         except IntegrityError:
-            # This block is the outermost transaction, and Postgres validates Django's DEFERRABLE
-            # INITIALLY DEFERRED foreign keys at its COMMIT. A related row deleted mid-sync
-            # therefore surfaces here, past every inner savepoint handler, and would otherwise 500.
-            logger.warning("Bulk sync: rolled back by a concurrent DB conflict at commit", exc_info=True)
+            # The runner checks Django's deferred foreign keys as the attempt's last step. A related
+            # row deleted mid-sync therefore surfaces here, past every inner savepoint handler.
+            logger.warning("Bulk sync: rolled back by a concurrent DB conflict", exc_info=True)
             messages.error(
                 request,
                 "The sync was rolled back by a concurrent change to a related interface. "
@@ -269,29 +371,29 @@ class SyncInterfacesView(
             )
             return self._tab_response(request, object_type, interface_name_field, server_key)
 
-        if self._skipped_conflicts:
-            skipped = ", ".join(self._skipped_conflicts)
+        for warning in outcome.warnings:
+            messages.warning(request, warning)
+        if outcome.skipped_conflicts:
+            skipped = ", ".join(outcome.skipped_conflicts)
             messages.warning(
                 request,
-                f"{len(self._skipped_conflicts)} interface(s) skipped: {skipped}.",
+                f"{len(outcome.skipped_conflicts)} interface(s) skipped: {skipped}.",
             )
-        for current_name, reported_name, conflict_reason in self._kept_name_conflicts:
+        for current_name, reported_name, conflict_reason in outcome.kept_name_conflicts:
             reason = (
                 f"the {conflict_reason}"
                 if conflict_reason is not None
                 else "the reported name is in use on the same interface owner"
             )
-            messages.warning(
-                request,
-                f"Interface '{current_name}' kept its current name because {reason}: '{reported_name}'.",
-            )
+            subject = HIDDEN_INTERFACE.capitalize() if current_name is None else f"Interface '{current_name}'"
+            messages.warning(request, f"{subject} kept its current name because {reason}: '{reported_name}'.")
         # Only claim success when at least one interface was actually synced. Track an explicit
         # synced count rather than comparing skip-vs-selected sizes: a single selected display name
         # can be skipped after another selected port succeeds, so the explicit count remains the
         # source of truth for the success banner.
-        if self._synced_count > 0:
+        if outcome.synced_count > 0:
             messages.success(request, "Selected interfaces synced successfully.")
-        if self._mutated:
+        if outcome.mutated:
             cache_transition = schedule_request_cache_mutation(
                 request,
                 obj,
@@ -302,6 +404,93 @@ class SyncInterfacesView(
             cache_transition = None
         return apply_transition_to_response(
             request, self._tab_response(request, object_type, interface_name_field, server_key), cache_transition
+        )
+
+    def _sync_attempt(
+        self,
+        visible_port_ids,
+        ports_data,
+        relationships,
+        exclude_columns,
+        interface_name_field,
+        server_key,
+    ):
+        """
+        Run one attempt of the sync transaction and return what it reports.
+
+        ``run_transaction`` calls this once for each attempt. Each attempt sets every attempt list and
+        counter afresh, and it re-locks and re-reads the objects it writes, so a retry reads nothing
+        that a failed attempt derived. It adds no message: ``post()`` publishes the committed outcome.
+
+        Three rules decide the scope, each in one place. Selection: under its owner locks and before
+        its first write, the attempt reads which existing rows it may change and which a text may
+        name (``_RowSelection``); every pass uses that selection. Write: after the last write, each
+        interface row that the attempt created or changed must be in the user's change scope, and each
+        created row also in the add scope (``_RowSelection.check_writes``); one row outside the scope
+        rolls the whole attempt back, as a NetBox edit view does, and the runner does not retry it.
+        Display: every text names a row through ``_RowSelection.shown_name`` only. A retry is a new
+        attempt, so it reads a new selection.
+
+        Args:
+            visible_port_ids (set[int]): The port IDs the user selected.
+            ports_data (list[dict]): The cached snapshot rows.
+            relationships (dict): The cached relationship maps.
+            exclude_columns (list[str]): The columns this sync must not write.
+            interface_name_field (str): Port field that contains the interface name.
+            server_key (str): The validated POSTed server key.
+
+        Returns:
+            _InterfaceSyncOutcome: What the attempt synced, skipped and warned about.
+
+        Raises:
+            _RowsOutsideScopeError: A written row is outside the user's add or change scope.
+
+        """
+        self._selected_port_ids = set(visible_port_ids)
+        self._auto_selected_port_ids = set()
+        # Inferred off-page owners are resolved only after the chassis and its members are locked.
+        self._auto_selected_target_ids = {}
+        # Rows the sync skips (for example a port ID bound to another device's interface) are reported.
+        self._skipped_conflicts = []
+        self._kept_name_conflicts = []
+        self._synced_count = 0
+        self._mutated = False
+        self._attempt_warnings = []
+        # The attribute pass reads the selection under its owner locks.
+        self._selection = None
+        with collect_interface_writes(self.request.user) as writes:
+            try:
+                self.sync_selected_interfaces(
+                    self.object,
+                    ports_data,
+                    exclude_columns,
+                    interface_name_field,
+                    keep_locked_targets=True,
+                )
+                # No selection: the attribute pass found no owner to lock, so it selected and wrote no row.
+                if self._selection is not None:
+                    # The relationship pass reuses the locked target map and the selection of the attribute pass.
+                    self._sync_interface_relationships(
+                        self.object,
+                        ports_data,
+                        relationships,
+                        server_key,
+                        excluded_columns=exclude_columns,
+                    )
+            finally:
+                self.__dict__.pop("_locked_target_devices", None)
+        if self._selection is None:
+            # No locked owner means no selected row, so a write here is a defect of a write path.
+            if any(writes.written.values()):
+                raise RuntimeError("The interface sync wrote an interface row with no selection.")
+        else:
+            self._selection.check_writes(writes)
+        return _InterfaceSyncOutcome(
+            skipped_conflicts=tuple(self._skipped_conflicts),
+            kept_name_conflicts=tuple(self._kept_name_conflicts),
+            synced_count=self._synced_count,
+            mutated=self._mutated,
+            warnings=tuple(self._attempt_warnings),
         )
 
     def _tab_response(self, request, object_type, interface_name_field, server_key):
@@ -324,7 +513,7 @@ class SyncInterfacesView(
 
         """
         obj = self.object
-        if request.headers.get("HX-Request") != "true":
+        if not request.htmx:
             url_name = (
                 "dcim:device_librenms_sync"
                 if object_type == "device"
@@ -428,9 +617,10 @@ class SyncInterfacesView(
         interface_name_field,
         server_key,
         *,
+        selection,
         members=None,
     ):
-        """Resolve snapshot rows to the Virtual Chassis members inferred by the render path."""
+        """Resolve snapshot rows to the Virtual Chassis members inferred by the render path, within *selection*."""
         if not isinstance(obj, Device) or not port_ids:
             return {}
 
@@ -455,9 +645,7 @@ class SyncInterfacesView(
         if not candidate_port_ids:
             return {}
         candidate_ids = relationship_candidate_ids(obj, server_key, candidate_port_ids, ())
-        interface_queryset = interface_queryset_for_object(obj).filter(pk__in=candidate_ids)
-        viewable_ids = set(interface_queryset.restrict(self.request.user, "view").values_list("pk", flat=True))
-        changeable_ids = set(interface_queryset.restrict(self.request.user, "change").values_list("pk", flat=True))
+        viewable_ids, changeable_ids = selection.permitted(candidate_ids)
         interface_index = build_interface_index(
             obj,
             server_key,
@@ -617,11 +805,10 @@ class SyncInterfacesView(
         )
         try:
             with transaction.atomic():
-                obj, locked_device_ids = _lock_relationship_scope(
-                    obj,
-                    self.restricted_queryset(type(obj)),
-                )
-                if obj is None:
+                # The same locks in the same order; the owners and their view scope come from the selection.
+                obj, locked_device_ids = _lock_relationship_scope(obj)
+                if obj is None or obj.pk not in self._attempt_selection.owner_ids:
+                    self._attempt_warnings.append(RELATIONSHIPS_NOT_SYNCED)
                     return
                 candidate_ids = relationship_candidate_ids(
                     obj,
@@ -629,11 +816,12 @@ class SyncInterfacesView(
                     candidate_port_ids,
                     candidate_names,
                 )
-                catalog_index, source_index, related_index, changeable_ids = _build_locked_relationship_indexes(
+                # The selection of the attempt start: this pass does not read the scopes again.
+                catalog_index, source_index, related_index, _, changeable_ids = _build_locked_relationship_indexes(
                     obj,
                     server_key,
-                    self.request.user,
                     locked_device_ids,
+                    self._attempt_selection.permitted,
                     candidate_ids=candidate_ids,
                 )
                 context = _BulkRelationshipContext(
@@ -661,9 +849,8 @@ class SyncInterfacesView(
                 "Bulk sync: relationship pass rolled back by a concurrent DB conflict",
                 exc_info=True,
             )
-            messages.warning(
-                self.request,
-                "Interfaces synced, but relationships hit a concurrent change and were not applied. Re-run the sync.",
+            self._attempt_warnings.append(
+                "Interfaces synced, but relationships hit a concurrent change and were not applied. Re-run the sync."
             )
 
     def _relationship_source_rows(
@@ -776,9 +963,8 @@ class SyncInterfacesView(
         if decisions is None:
             return
         if _lag_aggregate_needs_promotion(aggregate) and (conflict := _promotion_conflict(decisions[1], "lag")):
-            self._record_skipped_conflict(
-                member.name, f"LAG link to {aggregate.name} not synced; {aggregate.name}: {conflict}"
-            )
+            shown = self._shown(aggregate)
+            self._record_skipped_conflict(self._shown(member), f"LAG link to {shown} not synced; {shown}: {conflict}")
             return
         if aggregate.type != "lag" and "type" in context.excluded_columns:
             logger.warning(
@@ -786,7 +972,7 @@ class SyncInterfacesView(
                 member.name,
                 aggregate.name,
             )
-            self._record_skipped_conflict(member.name, "aggregate type is excluded")
+            self._record_skipped_conflict(self._shown(member), "aggregate type is excluded")
             return
         if aggregate.type != "lag" and aggregate.pk not in context.changeable_ids:
             logger.warning(
@@ -810,7 +996,9 @@ class SyncInterfacesView(
         if decisions is None:
             return
         if _parent_child_needs_promotion(child) and (conflict := _promotion_conflict(decisions[0], "virtual")):
-            self._record_skipped_conflict(child.name, f"parent link to {parent.name} not synced; {conflict}")
+            self._record_skipped_conflict(
+                self._shown(child), f"parent link to {self._shown(parent)} not synced; {conflict}"
+            )
             return
         if _parent_child_needs_promotion(child) and "type" in context.excluded_columns:
             logger.warning(
@@ -818,7 +1006,7 @@ class SyncInterfacesView(
                 child.name,
                 parent.name,
             )
-            self._record_skipped_conflict(child.name, "child type is excluded")
+            self._record_skipped_conflict(self._shown(child), "child type is excluded")
             return
         if self._apply_relationship_edge(
             child,
@@ -866,8 +1054,9 @@ class SyncInterfacesView(
             (context.port_by_id.get(str(normalize_librenms_port_id(related_port_id))), related_iface),
         )
         if reason is not None and blocked_end is related_iface:
+            shown = self._shown(related_iface)
             self._record_skipped_conflict(
-                source_iface.name, f"{label} link to {related_iface.name} not synced; {related_iface.name}: {reason}"
+                self._shown(source_iface), f"{label} link to {shown} not synced; {shown}: {reason}"
             )
         return decisions
 
@@ -1078,7 +1267,7 @@ class SyncInterfacesView(
                 exc,
             )
             return False
-        logger.info("Bulk sync: set %s.%s = %s", source_iface.name, relation_field, related_iface.name)
+        _log_write("Bulk sync: set %s.%s = %s", source_iface.name, relation_field, related_iface.name)
         return True
 
     def sync_selected_interfaces(
@@ -1110,7 +1299,8 @@ class SyncInterfacesView(
                     if isinstance(obj, Device)
                     else [obj]
                 )
-                self._prepare_vlan_lookup_maps(vlan_scope_devices)
+                if vlan_warning := self._prepare_vlan_lookup_maps(vlan_scope_devices):
+                    self._attempt_warnings.append(vlan_warning)
             writer_model = VMInterface if isinstance(obj, VirtualMachine) else Interface
             server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
             decisions = self._snapshot_name_decisions(obj, ports_data, interface_name_field, writer_model, server_key)
@@ -1175,12 +1365,14 @@ class SyncInterfacesView(
 
         Returns:
             Device | VirtualMachine | None: The locked page object, or None when it is unavailable.
+                With the owners locked, it sets ``self._selection``, before the sync writes a row.
 
         """
         if isinstance(obj, VirtualMachine):
             obj = self.restricted_queryset(VirtualMachine).select_for_update(of=("self",)).filter(pk=obj.pk).first()
             if obj is not None:
                 self.object = obj
+                self._selection = self._select_rows(VMInterface, {obj.pk})
                 self._expand_related_rows(obj, ports_data, interface_name_field, inferred_ids={}, device_for=None)
             return obj
         if not isinstance(obj, Device):
@@ -1191,6 +1383,7 @@ class SyncInterfacesView(
             return None
         self._locked_target_devices = locked_targets
         self.object = obj
+        self._selection = self._select_rows(Interface, set(locked_targets))
         snapshot_port_ids = {
             port_id for port in ports_data if (port_id := normalize_librenms_port_id(port.get("port_id"))) is not None
         }
@@ -1200,6 +1393,7 @@ class SyncInterfacesView(
             snapshot_port_ids,
             interface_name_field,
             self._post_server_key,
+            selection=self._attempt_selection,
             members=list(locked_targets.values()),
         )
         host_port_ids = {
@@ -1283,7 +1477,42 @@ class SyncInterfacesView(
         if owner is None:
             return None
         holder = self._name_holder_filter(writer_model, decisions.target_device_ids.get(port_id), owner.name)
-        return owner.port_id if self.restricted_queryset(writer_model, "view").filter(**holder).exists() else None
+        holder_pk = writer_model.objects.filter(**holder).values_list("pk", flat=True).first()
+        if holder_pk is None or self._shown_name(writer_model, holder_pk) is None:
+            return None
+        return owner.port_id
+
+    def _select_rows(self, model, owner_ids):
+        """
+        Return the ``_RowSelection`` of the interfaces of *owner_ids*, read now through the user's scopes.
+
+        Args:
+            model (type): ``Interface`` or ``VMInterface``.
+            owner_ids (set[int]): The locked owners of the attempt: Devices, or the VirtualMachine.
+
+        """
+        owner_field = "virtual_machine_id" if model is VMInterface else "device_id"
+        interfaces = model.objects.filter(**{f"{owner_field}__in": owner_ids})
+        user = self.request.user
+        return _RowSelection(
+            model=model,
+            owner_ids=frozenset(owner_ids),
+            changeable_ids=frozenset(interfaces.restrict(user, "change").values_list("pk", flat=True)),
+            viewable_names=dict(interfaces.restrict(user, "view").values_list("pk", "name")),
+        )
+
+    def _shown_name(self, model, pk):
+        """
+        Return the name that a text of the sync may show for row *pk* of *model*, or None: the one display rule.
+
+        A text names a row only when the user could view it when the attempt selected its rows, or
+        when the attempt created it with the name that the user selected.
+        """
+        return self._attempt_selection.shown_name(model, pk)
+
+    def _shown(self, interface):
+        """Return the name of *interface* for a text, or ``HIDDEN_INTERFACE`` when the user may not view it."""
+        return self._attempt_selection.shown(interface)
 
     def _reserved_name_port_ids(self, obj, server_key):
         """Return active-server port IDs bound to each target interface name."""
@@ -1331,7 +1560,7 @@ class SyncInterfacesView(
         return list(owners.values())
 
     def _prepare_vlan_lookup_maps(self, vlan_scope_devices):
-        """Build VLAN scope maps from owner rows locked for this sync transaction."""
+        """Build VLAN scope maps from owner rows locked for this sync transaction; return a warning or None."""
         # The gate checks add/change on the interface model, not IPAM, so read VLANs as the
         # caller. A caller without the grant matches no VLAN, which the warning below names.
         vlan_scope_user = self.vlan_scope_user()
@@ -1357,19 +1586,18 @@ class SyncInterfacesView(
             scoped_groups=vlan_groups,
         )
         if hidden:
-            messages.warning(
-                self.request,
+            return (
                 f"VLANs were not synced for the selected interfaces: your account is missing "
-                f"{', '.join(hidden)}. Existing VLAN assignments were left unchanged.",
+                f"{', '.join(hidden)}. Existing VLAN assignments were left unchanged."
             )
-        elif self._vlan_scope_incomplete:
+        if self._vlan_scope_incomplete:
             # A constrained grant passes the permission-name check, so the branch above says
             # nothing. Without this the VLAN write is skipped silently and the user cannot tell why.
-            messages.warning(
-                self.request,
+            return (
                 "VLANs were not synced for the selected interfaces: your account cannot view every "
-                "VLAN in scope for this device. Existing VLAN assignments were left unchanged.",
+                "VLAN in scope for this device. Existing VLAN assignments were left unchanged."
             )
+        return None
 
     def _lock_selected_device_targets(self, obj):
         """Lock the page Device and its current chassis scope in the shared lock order."""
@@ -1602,23 +1830,21 @@ class SyncInterfacesView(
         if getattr(self, "_synced_count", None) is not None:
             self._synced_count += 1
 
-        current_name = interface.name
         created = bool(getattr(interface, "_librenms_sync_created", False))
-        changed = (
-            self.update_interface_attributes(
-                interface,
-                librenms_interface,
-                exclude_columns,
-                interface_name_field,
-                synced_name,
-                created=created,
-            )
-            or created
+        interface, changed = self.update_interface_attributes(
+            interface,
+            librenms_interface,
+            exclude_columns,
+            interface_name_field,
+            synced_name,
+            created=created,
         )
+        changed = changed or created
+        # The writer kept the stored name, so the written row still carries it.
         if "name" not in exclude_columns and interface.name != synced_name:
             kept_names = getattr(self, "_kept_name_conflicts", None)
             if kept_names is not None:
-                kept_names.append((current_name, synced_name, name_conflict_reason))
+                kept_names.append((self._shown_name(type(interface), interface.pk), synced_name, name_conflict_reason))
 
         # Sync VLANs if not excluded, and never when the caller cannot read the whole VLAN scope.
         if "vlans" not in exclude_columns and not getattr(self, "_vlan_scope_incomplete", False):
@@ -1674,13 +1900,13 @@ class SyncInterfacesView(
 
     def _resolve_device_interface(self, target_device, interface_name, port_id, server_key, *, port_owner, oob=False):
         """Resolve a device interface from the port's owner first, then safe name fallback."""
-        changeable = self.restricted_queryset(Interface, "change")
+        selection = self._attempt_selection
         if port_id and port_owner is not None:
             if not isinstance(port_owner, Interface) or port_owner.device_id != target_device.pk:
                 raise LibreNMSPortBindingConflict(
                     "The LibreNMS port ID is already assigned to another NetBox interface."
                 )
-            return port_owner if changeable.filter(pk=port_owner.pk).exists() else None
+            return port_owner if selection.may_change(port_owner) else None
         if interface_name is None:
             return None
         interface, created = Interface.objects.get_or_create(device=target_device, name=interface_name)
@@ -1693,17 +1919,18 @@ class SyncInterfacesView(
             return None
         if created:
             interface._librenms_sync_created = True
-        return interface if created or changeable.filter(pk=interface.pk).exists() else None
+            selection.add_created(interface)
+        return interface if selection.may_change(interface) else None
 
     def _resolve_vm_interface(self, vm, interface_name, port_id, server_key, *, port_owner):
         """Resolve a VM interface from the port's owner first, then safe name fallback."""
-        changeable = self.restricted_queryset(VMInterface, "change")
+        selection = self._attempt_selection
         if port_id and port_owner is not None:
             if not isinstance(port_owner, VMInterface) or port_owner.virtual_machine_id != vm.pk:
                 raise LibreNMSPortBindingConflict(
                     "The LibreNMS port ID is already assigned to another NetBox interface."
                 )
-            return port_owner if changeable.filter(pk=port_owner.pk).exists() else None
+            return port_owner if selection.may_change(port_owner) else None
         if interface_name is None:
             return None
         interface, created = VMInterface.objects.get_or_create(virtual_machine=vm, name=interface_name)
@@ -1711,11 +1938,8 @@ class SyncInterfacesView(
             return None
         if created:
             interface._librenms_sync_created = True
-        return interface if created or changeable.filter(pk=interface.pk).exists() else None
-
-    def handle_mac_address(self, interface, ifPhysAddress):
-        """Assign or create the MAC address for the given interface."""
-        assign_interface_mac(interface, ifPhysAddress)
+            selection.add_created(interface)
+        return interface if selection.may_change(interface) else None
 
     def update_interface_attributes(
         self,
@@ -1727,7 +1951,7 @@ class SyncInterfacesView(
         *,
         created,
     ):
-        """Update interface fields from LibreNMS data, respecting excluded columns (``created`` as in the writer)."""
+        """Update interface fields from LibreNMS data, respecting excluded columns (``created`` and the result as in the writer)."""
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
         return update_interface_from_port(
             interface,
@@ -1737,6 +1961,8 @@ class SyncInterfacesView(
             server_key=server_key,
             interface_name_field=interface_name_field,
             created=created,
+            # The attempt checks the scope of every written row after its last write.
+            fresh_read_queryset=type(interface).objects.all(),
             exclude_columns=exclude_columns,
             speed_converter=convert_speed_to_kbps,
         )
@@ -1807,7 +2033,14 @@ class SyncInterfacesView(
                 vlan_group_map.pop(vid, None)
             else:
                 vlan_group_map[vid] = str(selected_group.pk)
-        result = self._update_interface_vlan_assignment(interface, vlan_data, vlan_group_map, lookup_maps)
+        result = self._update_interface_vlan_assignment(
+            interface,
+            vlan_data,
+            vlan_group_map,
+            lookup_maps,
+            # The attempt checks the scope of every written row after its last write.
+            fresh_read_queryset=type(interface).objects.all(),
+        )
         return bool(result and result.get("changed"))
 
 
@@ -1975,6 +2208,8 @@ class DeleteNetBoxInterfacesView(
     """Delete interfaces that exist only in NetBox."""
 
     DROP_SYNC_SUBJECT_CLAIM_WITHOUT_SERVER = True
+    # A fetch() caller parses JSON, so the lock-conflict middleware answers with a JSON error.
+    answers_json = True
 
     def get_required_permissions_for_object_type(self, object_type):
         """Return the required permissions based on object type."""
@@ -1987,7 +2222,7 @@ class DeleteNetBoxInterfacesView(
         else:
             raise Http404(f"Invalid object type: {object_type}")
 
-    def post(self, request, object_type, object_id):  # noqa: C901
+    def post(self, request, object_type, object_id):
         """Delete selected NetBox-only interfaces not present in LibreNMS."""
         # Set permissions dynamically based on object type
         self.required_object_permissions = {
@@ -2011,55 +2246,21 @@ class DeleteNetBoxInterfacesView(
 
         if not interface_ids:
             return JsonResponse({"error": "No interfaces selected for deletion"}, status=400)
-
-        deleted_count = 0
-        errors = []
-        interface_name = None
+        if not all(interface_id.isdecimal() for interface_id in interface_ids):
+            return JsonResponse({"error": "Interface IDs must be integers"}, status=400)
 
         try:
-            with transaction.atomic():
-                for interface_id in interface_ids:
-                    interface_name = None
-                    try:
-                        with transaction.atomic():
-                            if object_type == "device":
-                                # Scoped by "delete": the ownership checks below prove where the
-                                # interface sits, not that the grant covers it.
-                                interface = self.restricted_queryset(Interface, "delete").get(id=interface_id)
-                                interface_name = interface.name
-                                if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                                    valid_device_ids = [member.id for member in obj.virtual_chassis.members.all()]
-                                    if interface.device_id not in valid_device_ids:
-                                        errors.append(
-                                            "Interface {} does not belong to this device or its virtual chassis".format(
-                                                interface.name
-                                            )
-                                        )
-                                        continue
-                                elif interface.device_id != obj.id:
-                                    errors.append(f"Interface {interface.name} does not belong to this device")
-                                    continue
-                            else:
-                                interface = self.restricted_queryset(VMInterface, "delete").get(id=interface_id)
-                                interface_name = interface.name
-                                if interface.virtual_machine_id != obj.id:
-                                    errors.append(f"Interface {interface.name} does not belong to this virtual machine")
-                                    continue
-
-                            interface.delete()
-                        deleted_count += 1
-
-                    except (Interface.DoesNotExist, VMInterface.DoesNotExist):
-                        errors.append(f"Interface with ID {interface_id} not found")
-                        continue
-                    except Exception:  # pragma: no cover - defensive
-                        logger.exception("Failed to delete interface %s", interface_name or interface_id)
-                        errors.append(f"Error deleting interface {interface_name or interface_id}. Check server logs.")
-                        continue
-
-        except Exception:  # pragma: no cover
-            logger.exception("DeleteNetBoxInterfacesView transaction failed")
-            return JsonResponse({"error": "Transaction failed. Please check server logs."}, status=500)
+            deleted_count, errors = run_transaction(partial(self._delete_attempt, obj, object_type, interface_ids))
+        except Exception as exc:
+            if classify_conflict(exc):
+                raise
+            if isinstance(exc, CommittedFollowUpError):
+                raise
+            logger.exception("Interface deletion for %s %s failed", object_type, obj.pk)
+            return JsonResponse(
+                {"error": "No interfaces were deleted. Refresh the data and try again."},
+                status=409,
+            )
 
         response_data = {
             "status": "success",
@@ -2080,6 +2281,42 @@ class DeleteNetBoxInterfacesView(
                 source_fragment_required=True,
             )
         return apply_request_cache_transition(request, JsonResponse(response_data))
+
+    def _delete_attempt(self, obj, object_type, interface_ids):
+        """
+        Delete the selected interfaces of *obj*; return the deleted count and the per-row errors.
+
+        ``run_transaction`` calls this once for each attempt, so each call builds its own count and errors.
+        """
+        deleted_count = 0
+        errors = []
+        for interface_id in interface_ids:
+            try:
+                if object_type == "device":
+                    # Scoped by "delete": the ownership checks below prove where the
+                    # interface sits, not that the grant covers it.
+                    interface = self.restricted_queryset(Interface, "delete").get(id=interface_id)
+                    if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+                        valid_device_ids = [member.id for member in obj.virtual_chassis.members.all()]
+                        if interface.device_id not in valid_device_ids:
+                            errors.append(
+                                f"Interface {interface.name} does not belong to this device or its virtual chassis"
+                            )
+                            continue
+                    elif interface.device_id != obj.id:
+                        errors.append(f"Interface {interface.name} does not belong to this device")
+                        continue
+                else:
+                    interface = self.restricted_queryset(VMInterface, "delete").get(id=interface_id)
+                    if interface.virtual_machine_id != obj.id:
+                        errors.append(f"Interface {interface.name} does not belong to this virtual machine")
+                        continue
+            except (Interface.DoesNotExist, VMInterface.DoesNotExist):
+                errors.append(f"Interface with ID {interface_id} not found")
+                continue
+            interface.delete()
+            deleted_count += 1
+        return deleted_count, errors
 
 
 def _lock_relationship_scope(obj, owner_queryset=None):
@@ -2118,13 +2355,23 @@ def _lock_relationship_scope(obj, owner_queryset=None):
 def _build_locked_relationship_indexes(
     obj,
     server_key,
-    user,
     locked_device_ids,
+    permitted,
     *,
     candidate_q=None,
     candidate_ids=None,
 ):
-    """Lock candidate interfaces, then derive permission indexes from their locked state."""
+    """
+    Lock candidate interfaces, then derive the permission indexes from *permitted*.
+
+    *permitted* takes a set of candidate pks and returns the pks that the user may view and the pks
+    that the user may change. It is called before the row locks and again for the locked rows.
+
+    Returns:
+        tuple: The catalog, source and related indexes, the name of each locked row that the user
+            may view by pk, and the pks of the locked rows that the user may change.
+
+    """
     if candidate_ids is None:
         candidate_queryset = interface_queryset_for_object(obj).filter(candidate_q)
         candidate_ids = set(candidate_queryset.values_list("pk", flat=True))
@@ -2145,18 +2392,10 @@ def _build_locked_relationship_indexes(
         catalog_index = filter_interface_index(catalog_index, locked_ids)
         candidate_ids &= locked_ids
 
-    # A constrained grant can stop matching while this transaction waits for a candidate
-    # row lock. Lock only rows the user could act on before the wait, then evaluate the grant
-    # again from their locked state. The catalog stays unfiltered so hidden duplicate IDs and
-    # names still make resolution fail closed without locking rows that were never permitted.
-    permission_candidates = interface_queryset_for_object(obj).filter(pk__in=candidate_ids)
-    if isinstance(obj, Device):
-        actionable_owner_ids = set(
-            Device.objects.restrict(user, "view").filter(pk__in=locked_device_ids).values_list("pk", flat=True)
-        )
-        permission_candidates = permission_candidates.filter(device_id__in=actionable_owner_ids)
-    prelock_viewable_ids = set(permission_candidates.restrict(user, "view").values_list("pk", flat=True))
-    prelock_changeable_ids = set(permission_candidates.restrict(user, "change").values_list("pk", flat=True))
+    # Lock only rows the user could act on before the wait, then ask *permitted* again for their
+    # locked state. The catalog stays unfiltered so hidden duplicate IDs and names still make
+    # resolution fail closed without locking rows that were never permitted.
+    prelock_viewable_ids, prelock_changeable_ids = permitted(candidate_ids)
     prelock_permitted_ids = prelock_viewable_ids | prelock_changeable_ids
     locked_index = build_interface_index(
         obj,
@@ -2164,12 +2403,58 @@ def _build_locked_relationship_indexes(
         lock=True,
         allowed_ids=prelock_permitted_ids,
     )
-    locked_candidates = interface_queryset_for_object(obj).filter(pk__in=prelock_permitted_ids)
-    viewable_ids = set(locked_candidates.restrict(user, "view").values_list("pk", flat=True))
-    changeable_ids = set(locked_candidates.restrict(user, "change").values_list("pk", flat=True))
+    viewable_ids, changeable_ids = permitted(prelock_permitted_ids)
     related_index = filter_interface_index(locked_index, viewable_ids | changeable_ids)
     source_index = filter_interface_index(related_index, changeable_ids)
-    return catalog_index, source_index, related_index, changeable_ids
+    viewable_names = {
+        interface.pk: interface.name
+        for interfaces in related_index["by_name"].values()
+        for interface in interfaces
+        if interface.pk in viewable_ids
+    }
+    return catalog_index, source_index, related_index, viewable_names, changeable_ids
+
+
+def _user_scope(obj, user, locked_device_ids):
+    """
+    Return a *permitted* function that reads the view and change scopes of *user* each time it is called.
+
+    A constrained grant can stop matching while a transaction waits for a row lock, so a view that
+    does not select its rows before its writes reads the scopes again for the locked rows.
+    """
+    actionable_owner_ids = None
+    if isinstance(obj, Device):
+        actionable_owner_ids = set(
+            Device.objects.restrict(user, "view").filter(pk__in=locked_device_ids).values_list("pk", flat=True)
+        )
+
+    def permitted(pks):
+        candidates = interface_queryset_for_object(obj).filter(pk__in=pks)
+        if actionable_owner_ids is not None:
+            candidates = candidates.filter(device_id__in=actionable_owner_ids)
+        return (
+            set(candidates.restrict(user, "view").values_list("pk", flat=True)),
+            set(candidates.restrict(user, "change").values_list("pk", flat=True)),
+        )
+
+    return permitted
+
+
+def _relationship_selection(obj, locked_device_ids, viewable_names, changeable_ids):
+    """Return the ``_RowSelection`` of a single-row link from the scopes read for its locked rows."""
+    if isinstance(obj, Device):
+        return _RowSelection(Interface, frozenset(locked_device_ids), frozenset(changeable_ids), viewable_names)
+    return _RowSelection(VMInterface, frozenset({obj.pk}), frozenset(changeable_ids), viewable_names)
+
+
+@dataclass(frozen=True)
+class _RelationshipLink:
+    """The link that one attempt of a single-row relationship sync made."""
+
+    obj: Device | VirtualMachine
+    source: Interface | VMInterface
+    related: Interface | VMInterface
+    changed: bool
 
 
 def _relationship_decisions(rules, *ends):
@@ -2219,9 +2504,9 @@ def _promote_lag_aggregate(agg, *, with_restore):
     endpoint (``SyncInterfaceLagView._prepare_related``) so they can't drift on the promotion or the
     save fields. Returns None when *agg* isn't an Interface or is already ``type=lag``.
 
-    The persist saves ONLY the ``type`` column (``update_fields=["type"]``) so a concurrent edit to
-    the aggregate's other fields — loaded into the shared interface index outside the row lock — is
-    not clobbered.
+    The persist saves ONLY the ``type`` column and ``last_updated`` (which ``update_fields`` skips
+    otherwise) so a concurrent edit to the aggregate's other fields — loaded into the shared
+    interface index outside the row lock — is not clobbered.
 
     Args:
         agg: The aggregate interface to promote.
@@ -2246,8 +2531,8 @@ def _promote_lag_aggregate(agg, *, with_restore):
             raise ValidationError({"type": "A LAG aggregate cannot have a parent interface."})
         # Validate the rest of the prepared aggregate state before saving its new type.
         agg.clean()
-        agg.save(update_fields=["type"])
-        logger.info("Set interface %s type=lag", agg.name)
+        agg.save(update_fields=["type", "last_updated"])
+        _log_write("Set interface %s type=lag", agg.name)
 
     if with_restore:
         return (_persist, lambda: setattr(agg, "type", original_type))
@@ -2260,19 +2545,18 @@ def _parent_child_needs_promotion(child):
 
 
 def _promote_parent_child(child, *, with_restore):
-    """Promote a non-channel child to type=virtual before parent validation."""
+    """Promote a non-channel child to type=virtual before parent validation; the save of its parent link writes the type."""
     if not _parent_child_needs_promotion(child):
         return None
     original_type = child.type
     child.type = "virtual"
 
-    def _persist():
-        child.save(update_fields=["type"])
-        logger.info("Set interface %s type=virtual", child.name)
+    def _report():
+        _log_write("Set interface %s type=virtual", child.name)
 
     if with_restore:
-        return (_persist, lambda: setattr(child, "type", original_type))
-    return _persist
+        return (_report, lambda: setattr(child, "type", original_type))
+    return _report
 
 
 def _apply_interface_relationship(
@@ -2291,11 +2575,15 @@ def _apply_interface_relationship(
 
     The optional preparation hooks may mutate either interface before validation. Each hook
     returns a persist callable or a ``(persist, restore)`` pair. The persist call runs only after
-    validation. The restore call repairs shared in-memory objects after a failed edge.
+    validation. The restore call repairs shared in-memory objects after a failed edge. The related
+    hook's persist saves the related row. The source is saved once, with every column that the
+    edge changed on it (also a column that the source hook changed), and then the source hook's
+    persist runs.
 
     Both rows are persisted with ``update_fields`` so a concurrent edit to their other columns
     isn't clobbered: the objects may have been loaded into a shared index outside any row lock,
-    so a full ``save()`` of the stale instance would lose-update the concurrent write.
+    so a full ``save()`` of the stale instance would lose-update the concurrent write. Each saved
+    row gets its state before the edge as the change log's before-state.
 
     Raises:
         ValidationError: when the source fails ``clean()`` (after restoring the related
@@ -2309,6 +2597,7 @@ def _apply_interface_relationship(
     # member sharing it skips the type bump and never persists it, leaving the DB type stale.
     relation_id_field = f"{relation_field}_id"
     original_related_id = getattr(source_iface, relation_id_field)
+    source_before, related_before = copy_before_change(source_iface), copy_before_change(related_iface)
     setattr(source_iface, relation_field, related_iface)
     prepared_source = prepare_source(source_iface) if prepare_source else None
     prepared_related = prepare_related(related_iface) if prepare_related else None
@@ -2333,10 +2622,13 @@ def _apply_interface_relationship(
         # adding several SELECTs per edge while all relationship rows remain locked.
         netbox_interface_clean(source_iface)
         if persist_related:
+            keep_change_log_before_state(related_iface, related_before)
             persist_related()
+        if source_fields := [field.name for field in changed_fields(source_iface, source_before)]:
+            keep_change_log_before_state(source_iface, source_before)
+            source_iface.save(update_fields=[*source_fields, "last_updated"])
         if persist_source:
             persist_source()
-        source_iface.save(update_fields=[relation_field])
     except (ValidationError, IntegrityError):
         # clean() rejection OR a statement-time persist failure (the savepoint rolls back
         # the DB, but the in-memory instances stay mutated): undo both before the caller skips
@@ -2377,6 +2669,8 @@ class _BaseRelationshipSyncView(
     source_label: str
     related_label: str
     supports_vm: bool = False
+    # A fetch() caller parses JSON, so the lock-conflict middleware answers with a JSON error.
+    answers_json = True
 
     @staticmethod
     def _migrated_donor_error(obj, server_key):
@@ -2498,7 +2792,7 @@ class _BaseRelationshipSyncView(
             related_name = related_port.get(interface_name_field) or ""
         return source_port, related_port, source_name, related_name, interface_name_field
 
-    def post(self, request, object_type, object_id):  # noqa: C901
+    def post(self, request, object_type, object_id):
         # Set the object-type-scoped permissions BEFORE the gate (an unsupported type raises
         # Http404 here). JSON endpoint: require_all_permissions would return the mixin's
         # HTML/redirect on denial, breaking the fetch() caller, so use the _json variant.
@@ -2524,174 +2818,44 @@ class _BaseRelationshipSyncView(
                 {"error": "The LibreNMS relationship changed or expired. Refresh and retry."},
                 status=409,
             )
-        source_port, related_port, source_name, related_name, _interface_name_field = current_edge
 
-        # The IntegrityError wrapper sits OUTSIDE the atomic: a concurrent conflict (e.g. the
+        # The IntegrityError handler sits OUTSIDE the transaction: a concurrent conflict (e.g. the
         # related interface deleted in the validate/write TOCTOU window) raises either at the
-        # failed statement — propagating out of the atomic after rollback — or, for Django's
-        # INITIALLY DEFERRED Postgres FKs, only at the atomic's COMMIT. Both land here and
-        # become a JSON 409 instead of an unhandled 500 to the fetch() caller, mirroring the
-        # bulk pass (_apply_relationship_edge).
-        source_iface = None
-        related_iface = None
-        relationship_changed = False
+        # failed statement or, for Django's INITIALLY DEFERRED Postgres FKs, at the runner's
+        # constraint check. Both roll the attempt back and become a JSON 409 instead of an
+        # unhandled 500 to the fetch() caller, mirroring the bulk pass (_apply_relationship_edge).
         try:
-            with transaction.atomic():
-                obj, locked_device_ids = _lock_relationship_scope(
-                    obj,
-                    self.restricted_queryset(type(obj)),
-                )
-                if obj is None:
-                    return JsonResponse(
-                        {"error": "The interface owner changed concurrently. Refresh and retry."},
-                        status=409,
-                    )
-                if error := self._migrated_donor_error(obj, server_key):
-                    return error
-
-                candidate_q = relationship_candidate_q(
-                    server_key,
-                    (source_port.get("port_id"), related_port.get("port_id")),
-                    (source_name, related_name),
-                )
-                catalog_index, source_index, related_index, changeable_ids = _build_locked_relationship_indexes(
-                    obj,
-                    server_key,
-                    request.user,
-                    locked_device_ids,
-                    candidate_q=candidate_q,
-                )
-
-                _, err = resolve_interface_by_port_id(
-                    obj,
-                    port_id,
-                    server_key,
-                    name_hint=source_name,
-                    expected_owner=interface_owner_for_object(obj),
-                    index=catalog_index,
-                )
-                if err:
-                    return JsonResponse({"error": f"{self.source_label} interface: {err}"}, status=404)
-                source_iface, err = resolve_interface_by_port_id(
-                    obj,
-                    port_id,
-                    server_key,
-                    name_hint=source_name,
-                    expected_owner=interface_owner_for_object(obj),
-                    index=source_index,
-                )
-                if err:
-                    return JsonResponse({"error": f"{self.source_label} interface: {err}"}, status=404)
-
-                _, err = resolve_interface_by_port_id(
-                    obj,
-                    related_port_id,
-                    server_key,
-                    name_hint=related_name,
-                    index=catalog_index,
-                )
-                if err:
-                    return JsonResponse({"error": f"{self.related_label} interface: {err}"}, status=404)
-                related_iface, err = resolve_interface_by_port_id(
-                    obj,
-                    related_port_id,
-                    server_key,
-                    name_hint=related_name,
-                    index=related_index,
-                )
-                if err:
-                    return JsonResponse({"error": f"{self.related_label} interface: {err}"}, status=404)
-                decisions, blocked_end, reason = _relationship_decisions(
-                    interface_rules_for_request(request), (source_port, source_iface), (related_port, related_iface)
-                )
-                if reason is None and (conflict := self._promotion_conflict(source_iface, related_iface, decisions)):
-                    blocked_end, reason = conflict
-                if reason is not None:
-                    return JsonResponse(
-                        {
-                            "error": (
-                                f"Cannot link {source_iface.name} to {self.relation_label} {related_iface.name}. "
-                                f"{blocked_end.name}: {reason}."
-                            )
-                        },
-                        status=409,
-                    )
-                if (
-                    self.relation_field == "lag"
-                    and related_iface.type != "lag"
-                    and related_iface.pk not in changeable_ids
-                ):
-                    return JsonResponse(
-                        {"error": "Aggregate interface cannot be changed to type LAG."},
-                        status=403,
-                    )
-
-                # Validate before persisting: a crafted POST with port_id == related_port_id
-                # resolves source == related, so clean() rejects the resulting
-                # self-relationship. The shared helper sets the FK, runs
-                # _prepare_related (e.g. the aggregate's type=lag, persisted only on success), and
-                # saves with update_fields.
-                try:
-                    if (
-                        getattr(source_iface, f"{self.relation_field}_id") != related_iface.pk
-                        or self._related_needs_preparation(related_iface)
-                        or self._source_needs_preparation(source_iface)
-                    ):
-                        _apply_interface_relationship(
-                            source_iface,
-                            self.relation_field,
-                            related_iface,
-                            self._prepare_related,
-                            self._prepare_source,
-                        )
-                        relationship_changed = True
-                except ValidationError as exc:
-                    # Log the validation detail server-side and return a fixed message — don't echo
-                    # exception text to the client (CodeQL py/stack-trace-exposure). The
-                    # detail can include a self-link, incompatible types, or invalid chassis scope.
-                    logger.warning(
-                        "%s link validation failed (%s -> %s): %s",
-                        self.relation_label,
-                        source_iface.name,
-                        related_iface.name,
-                        validation_error_detail(exc),
-                    )
-                    return JsonResponse(
-                        {
-                            "error": (
-                                f"Cannot link {source_iface.name} to {self.relation_label} {related_iface.name}: "
-                                f"NetBox rejected the {self.relation_label} relationship. Check the interface "
-                                "types, chassis membership, and that the two interfaces are not the same interface."
-                            )
-                        },
-                        status=409,
-                    )
-                if relationship_changed:
-                    logger.info("Set %s.%s = %s", source_iface.name, self.relation_field, related_iface.name)
+            outcome = run_transaction(
+                lambda: self._link_attempt(request, obj, server_key, port_id, related_port_id, current_edge)
+            )
+        except _RowsOutsideScopeError as refused:
+            return JsonResponse({"error": refused.user_message}, status=403)
         except IntegrityError as exc:
-            source_name = getattr(source_iface, "name", self.source_label.lower())
-            related_name = getattr(related_iface, "name", self.related_label.lower())
+            source_iface, related_iface = self._attempt_ends
             logger.warning(
                 "%s link hit a concurrent DB conflict (%s -> %s): %s",
                 self.relation_label,
-                source_name,
-                related_name,
+                getattr(source_iface, "name", self.source_label.lower()),
+                getattr(related_iface, "name", self.related_label.lower()),
                 exc,
             )
+            source_text, related_text = self._attempt_texts
             return JsonResponse(
                 {
                     "error": (
-                        f"Cannot link {source_name} to {self.relation_label} {related_name}: "
+                        f"Cannot link {source_text} to {self.relation_label} {related_text}: "
                         "a concurrent change interrupted the update. Refresh and retry."
                     )
                 },
                 status=409,
             )
+        if isinstance(outcome, JsonResponse):
+            return outcome
 
-        if relationship_changed:
+        if outcome.changed:
             schedule_request_cache_mutation(
                 request,
-                obj,
+                outcome.obj,
                 SyncTab.INTERFACES,
                 server_key,
                 source_fragment_required=True,
@@ -2699,10 +2863,176 @@ class _BaseRelationshipSyncView(
         response = JsonResponse(
             {
                 "status": "success",
-                "message": f"Linked {source_iface.name} to {self.relation_label} {related_iface.name}",
+                "message": f"Linked {self._attempt_texts[0]} to {self.relation_label} {self._attempt_texts[1]}",
             }
         )
         return apply_request_cache_transition(request, response)
+
+    def _link_attempt(self, request, obj, server_key, port_id, related_port_id, current_edge):
+        """
+        Run one attempt of the link transaction, and return its answer or the link that it wrote.
+
+        ``run_transaction`` calls this once for each attempt, and each attempt locks and reads its
+        rows again. The attempt reads its selection under the owner and row locks, before its first
+        write: the rows that it may change and the name of each row that the user may view. After
+        the last write, ``_RowSelection.check_writes`` refuses the whole attempt when a written row is
+        outside the user's change scope or the selection. The refusal rolls back every write and
+        the NetBox events of the writes.
+
+        Args:
+            request (HttpRequest): The POST request.
+            obj (Device | VirtualMachine): The owner that the request resolved through the view scope.
+            server_key (str): The validated POSTed server key.
+            port_id (str): The posted port ID of the source interface.
+            related_port_id (str): The posted port ID of the related interface.
+            current_edge (tuple): The cached edge rows and name hints from ``_get_current_edge``.
+
+        Returns:
+            JsonResponse | _RelationshipLink: The answer of an attempt that stopped before its
+                first write, or the link that the attempt made.
+
+        Raises:
+            _RowsOutsideScopeError: A written row is outside the user's change scope or the selection.
+
+        """
+        source_port, related_port, source_name, related_name, _interface_name_field = current_edge
+        # The ends of this attempt and their texts, for the answers that post() gives after the transaction.
+        self._attempt_ends = (None, None)
+        self._attempt_texts = (self.source_label.lower(), self.related_label.lower())
+        obj, locked_device_ids = _lock_relationship_scope(
+            obj,
+            self.restricted_queryset(type(obj)),
+        )
+        if obj is None:
+            return JsonResponse(
+                {"error": "The interface owner changed concurrently. Refresh and retry."},
+                status=409,
+            )
+        if error := self._migrated_donor_error(obj, server_key):
+            return error
+
+        candidate_q = relationship_candidate_q(
+            server_key,
+            (source_port.get("port_id"), related_port.get("port_id")),
+            (source_name, related_name),
+        )
+        catalog_index, source_index, related_index, viewable_names, changeable_ids = _build_locked_relationship_indexes(
+            obj,
+            server_key,
+            locked_device_ids,
+            _user_scope(obj, request.user, locked_device_ids),
+            candidate_q=candidate_q,
+        )
+        selection = _relationship_selection(obj, locked_device_ids, viewable_names, changeable_ids)
+
+        _, err = resolve_interface_by_port_id(
+            obj,
+            port_id,
+            server_key,
+            name_hint=source_name,
+            expected_owner=interface_owner_for_object(obj),
+            index=catalog_index,
+        )
+        if err:
+            return JsonResponse({"error": f"{self.source_label} interface: {err}"}, status=404)
+        source_iface, err = resolve_interface_by_port_id(
+            obj,
+            port_id,
+            server_key,
+            name_hint=source_name,
+            expected_owner=interface_owner_for_object(obj),
+            index=source_index,
+        )
+        if err:
+            return JsonResponse({"error": f"{self.source_label} interface: {err}"}, status=404)
+
+        _, err = resolve_interface_by_port_id(
+            obj,
+            related_port_id,
+            server_key,
+            name_hint=related_name,
+            index=catalog_index,
+        )
+        if err:
+            return JsonResponse({"error": f"{self.related_label} interface: {err}"}, status=404)
+        related_iface, err = resolve_interface_by_port_id(
+            obj,
+            related_port_id,
+            server_key,
+            name_hint=related_name,
+            index=related_index,
+        )
+        if err:
+            return JsonResponse({"error": f"{self.related_label} interface: {err}"}, status=404)
+        self._attempt_ends = (source_iface, related_iface)
+        self._attempt_texts = source_text, related_text = selection.shown(source_iface), selection.shown(related_iface)
+        decisions, blocked_end, reason = _relationship_decisions(
+            interface_rules_for_request(request), (source_port, source_iface), (related_port, related_iface)
+        )
+        if reason is None and (conflict := self._promotion_conflict(source_iface, related_iface, decisions)):
+            blocked_end, reason = conflict
+        if reason is not None:
+            return JsonResponse(
+                {
+                    "error": (
+                        f"Cannot link {source_text} to {self.relation_label} {related_text}; "
+                        f"{selection.shown(blocked_end)}: {reason}."
+                    )
+                },
+                status=409,
+            )
+        if self.relation_field == "lag" and related_iface.type != "lag" and not selection.may_change(related_iface):
+            return JsonResponse(
+                {"error": "Aggregate interface cannot be changed to type LAG."},
+                status=403,
+            )
+
+        # Validate before persisting: a crafted POST with port_id == related_port_id
+        # resolves source == related, so clean() rejects the resulting
+        # self-relationship. The shared helper sets the FK, runs
+        # _prepare_related (e.g. the aggregate's type=lag, persisted only on success), and
+        # saves with update_fields.
+        relationship_changed = False
+        with collect_interface_writes(request.user) as writes:
+            try:
+                if (
+                    getattr(source_iface, f"{self.relation_field}_id") != related_iface.pk
+                    or self._related_needs_preparation(related_iface)
+                    or self._source_needs_preparation(source_iface)
+                ):
+                    _apply_interface_relationship(
+                        source_iface,
+                        self.relation_field,
+                        related_iface,
+                        self._prepare_related,
+                        self._prepare_source,
+                    )
+                    relationship_changed = True
+            except ValidationError as exc:
+                # Log the validation detail server-side and return a fixed message — don't echo
+                # exception text to the client (CodeQL py/stack-trace-exposure). The
+                # detail can include a self-link, incompatible types, or invalid chassis scope.
+                logger.warning(
+                    "%s link validation failed (%s -> %s): %s",
+                    self.relation_label,
+                    source_iface.name,
+                    related_iface.name,
+                    validation_error_detail(exc),
+                )
+                return JsonResponse(
+                    {
+                        "error": (
+                            f"Cannot link {source_text} to {self.relation_label} {related_text}: "
+                            f"NetBox rejected the {self.relation_label} relationship. Check the interface "
+                            "types, chassis membership, and that the two interfaces are not the same interface."
+                        )
+                    },
+                    status=409,
+                )
+        selection.check_writes(writes)
+        if relationship_changed:
+            _log_write("Set %s.%s = %s", source_iface.name, self.relation_field, related_iface.name)
+        return _RelationshipLink(obj=obj, source=source_iface, related=related_iface, changed=relationship_changed)
 
 
 class SyncInterfaceLagView(_BaseRelationshipSyncView):

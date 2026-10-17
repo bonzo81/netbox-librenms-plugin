@@ -157,7 +157,7 @@ class TestUpdateDeviceNameView:
         device.refresh_from_db()
         assert device.name == "name-before-invalid-oob"
         errors = _messages(response, "error")
-        assert any("validation fails on oob_ip" in text for text in errors), errors
+        assert any("another field fails validation. oob_ip:" in text for text in errors), errors
         # The old rendering dumped a raw error dict, which read as though the rename needed oob_ip.
         assert not any("{'oob_ip'" in text for text in errors), errors
 
@@ -175,8 +175,8 @@ class TestUpdateDeviceNameView:
 
     def test_repeated_server_keys_fail_closed(self, logged_in_client, librenms_server):
         """Two different configured keys in one POST are ambiguous, so no server may be chosen."""
-        device = _linked_device("name-repeated-server", 6505)
-        librenms_server.device_info_response(device_id=6505, hostname="renamed-by-ambiguous-post")
+        device = _linked_device("name-repeated-server", 6506)
+        librenms_server.device_info_response(device_id=6506, hostname="renamed-by-ambiguous-post")
 
         response = logged_in_client.post(
             _url("update_device_name", device.pk),
@@ -744,6 +744,25 @@ class TestRemoveServerMappingView:
         assert mapping == {SERVER_KEY: 6541}
         assert response.url.endswith(f"?tab=interfaces&server_key={SERVER_KEY}")
         assert any("Removed LibreNMS mapping" in text for text in _messages(response, "success"))
+
+    def test_a_removed_mapping_is_recorded_with_its_before_state(self, logged_in_client, librenms_server):
+        """The owner is saved with only its custom field data, so the save must also move last_updated."""
+        from core.models import ObjectChange
+        from dcim.models import Device
+        from django.contrib.contenttypes.models import ContentType
+
+        device = make_device("mapping-remove-log", librenms_cf={SERVER_KEY: 6544, "retired": 9003})
+        old_last_updated = Device.objects.values_list("last_updated", flat=True).get(pk=device.pk)
+
+        _post(logged_in_client, "remove_server_mapping", device, {"object_type": "device", "server_key": "retired"})
+
+        device.refresh_from_db()
+        assert device.last_updated > old_last_updated
+        change = ObjectChange.objects.get(
+            changed_object_type=ContentType.objects.get_for_model(Device), changed_object_id=device.pk, action="update"
+        )
+        assert change.prechange_data["custom_fields"]["librenms_id"] == {SERVER_KEY: 6544, "retired": 9003}
+        assert change.postchange_data["custom_fields"]["librenms_id"] == {SERVER_KEY: 6544}
 
     def test_configured_mapping_cannot_be_removed(self, logged_in_client, librenms_server):
         device = _linked_device("mapping-configured", 6542)

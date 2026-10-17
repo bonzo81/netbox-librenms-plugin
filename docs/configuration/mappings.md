@@ -32,7 +32,7 @@ LibreNMS reports speed in bits per second. The plugin converts it to Kbps before
 
 The Type column of the Interface Sync table shows :material-link-variant: and the rule when a rule sets the type, and :material-link-variant-off: when no rule does.
 
-Rules with only a type and a speed keep their old result. For example:
+Rules can select a type by minimum speed or use a more specific platform and name match. For example:
 
 ```text
 ethernetCsmacd + 10000000 -> 10GBASE-T (10GE)

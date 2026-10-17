@@ -41,13 +41,14 @@ from netbox_librenms_plugin.utils import (
     get_migrated_to_marker,
     set_device_ip_fk,
     validation_error_detail,
+    exception_text_for,
 )
-from netbox_librenms_plugin.views.imports.actions import _htmx_error_response
 from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
     SyncSubjectClaimMixin,
+    _htmx_error_response,
     relock_scoped_row,
     resolve_configured_server_key,
     validated_referer,
@@ -259,7 +260,7 @@ def _hx_response(request, message, level=messages.SUCCESS, *, status=200, fallba
             the validated Referer / fallback otherwise.
     """
     messages.add_message(request, level, message)
-    if request.headers.get("HX-Request"):
+    if request.htmx:
         response = HttpResponse(status=status, headers={"HX-Refresh": "true"})
     else:
         response = redirect(_safe_referer(request, fallback_url))
@@ -391,7 +392,7 @@ class _BaseMoveToWinnerView(
         Returns:
             HttpResponse: The OOB-toast response (HTMX) or a redirect (non-HTMX).
         """
-        if request.headers.get("HX-Request"):
+        if request.htmx:
             # Reuse the shared OOB-toast builder (same #django-messages container, toast classes and
             # HX-Reswap:none) so move-to-winner error toasts can't drift from the import flow's markup.
             return _htmx_error_response(msg)
@@ -672,7 +673,13 @@ class MoveInterfaceToWinnerView(_BaseMoveToWinnerView):
                 try:
                     interface.full_clean()
                 except ValidationError as exc:
-                    detail = validation_error_detail(exc)
+                    logger.warning(
+                        "Cannot move interface pk=%s to winner pk=%s: %s",
+                        interface.pk,
+                        winner.pk,
+                        validation_error_detail(exc),
+                    )
+                    detail = exception_text_for(exc, Interface, request.user)
                     return self._fail(
                         request,
                         f"Cannot move interface '{interface.name}' to '{winner.name}': {detail}",
@@ -843,8 +850,9 @@ class MoveIPAddressToWinnerView(_BaseMoveToWinnerView):
                         "Move the interface first, then retry.",
                         status=409,
                     )
+                ip.snapshot()
                 ip.assigned_object = winner_iface
-                ip.save(update_fields=["assigned_object_type", "assigned_object_id"])
+                ip.save(update_fields=["assigned_object_type", "assigned_object_id", "last_updated"])
 
                 # The moved address may itself be the donor's primary_ip4/primary_ip6/oob_ip;
                 # reconcile those device FKs so the donor isn't left referencing an address now on a
