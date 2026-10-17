@@ -22,6 +22,12 @@ def legacy_loop_reader(recording):
         yield value[1] if isinstance(value, list) else value
 
 
+def legacy_values_reader(recording):
+    for value in recording["responses"].values():
+        # ruleid: recorded-response-needs-envelope
+        yield value[1] if isinstance(value, list) else value
+
+
 def envelope_reader(value):
     # ok: recorded-response-needs-envelope
     return unwrap_response(value)[1]

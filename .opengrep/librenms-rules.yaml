@@ -1083,6 +1083,9 @@ rules:
               - pattern-inside: |
                   for $K, $V in <... "responses" ...>:
                     ...
+              - pattern-inside: |
+                  for $V in <... "responses" ...>:
+                    ...
   - id: no-stored-mapping-access
     languages: [python]
     severity: ERROR
