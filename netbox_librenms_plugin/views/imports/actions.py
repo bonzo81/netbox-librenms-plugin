@@ -1071,8 +1071,7 @@ def _apply_import_intent_to_validation(
     """
     Apply an explicit import-row intent to a validation dict.
 
-    This helper consolidates the logic shared across DeviceValidationDetailsView,
-    DeviceRoleUpdateView, DeviceClusterUpdateView, and DeviceRackUpdateView.
+    DeviceImportHelperMixin calls this helper for every view that validates an import row.
     It mutates validation in place with the placement, role, and rack selections.
 
     Args:
@@ -2142,18 +2141,6 @@ class DeviceImportPlanUpdateView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Devi
             return _htmx_error_response("Device not found")
 
         return self.render_device_row(request, libre_device, validation, intent)
-
-
-class DeviceRoleUpdateView(DeviceImportPlanUpdateView):
-    """Keep the former role-refresh route as an import-row refresh alias."""
-
-
-class DeviceClusterUpdateView(DeviceImportPlanUpdateView):
-    """Keep the former cluster-refresh route as an import-row refresh alias."""
-
-
-class DeviceRackUpdateView(DeviceImportPlanUpdateView):
-    """Keep the former rack-refresh route as an import-row refresh alias."""
 
 
 class DeviceConflictActionView(

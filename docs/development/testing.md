@@ -64,7 +64,7 @@ The test suite covers all major plugin functionality. Tests are organized by the
 | [test_coverage_sync_views.py](../../netbox_librenms_plugin/tests/test_coverage_sync_views.py) | Sync action views—cables, IP addresses, VLAN sync action handlers |
 | [test_coverage_sync_views2.py](../../netbox_librenms_plugin/tests/test_coverage_sync_views2.py) | Additional sync action view coverage—device fields, device name/type sync |
 | [test_coverage_sync_views3.py](../../netbox_librenms_plugin/tests/test_coverage_sync_views3.py) | Further sync action view coverage—location sync, VLAN assignment edge cases |
-| [test_coverage_actions.py](../../netbox_librenms_plugin/tests/test_coverage_actions.py) | Import action views—bulk import, device role/cluster/rack update, validation details |
+| [test_coverage_actions.py](../../netbox_librenms_plugin/tests/test_coverage_actions.py) | Import action views—bulk import, import-row plan update, validation details |
 | [test_coverage_filters.py](../../netbox_librenms_plugin/tests/test_coverage_filters.py) | Import filter logic—filter form processing and device count helpers |
 | [test_init.py](../../netbox_librenms_plugin/tests/test_init.py) | Plugin startup—`_ensure_librenms_id_custom_field` creation, type migration, and multi-DB alias handling |
 | [test_coverage_tables.py](../../netbox_librenms_plugin/tests/test_coverage_tables.py) | Sync tables—column rendering, row data, interface and cable table helpers |
