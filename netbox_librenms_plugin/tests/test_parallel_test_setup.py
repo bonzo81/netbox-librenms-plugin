@@ -1109,3 +1109,47 @@ def test_configured_norecursedirs_still_skips_pytest_default_directories(tmp_pat
     assert "test_skipped_by_default" not in collection.stdout, (
         "norecursedirs dropped pytest's default exclusions:\n" + collection.stdout
     )
+
+
+@pytest.mark.django_db
+def test_bounded_executor_releases_a_worker_blocked_on_a_row_lock_this_thread_holds():
+    """A hung block must stop its worker, not leave it blocked into teardown and interpreter exit."""
+    from threading import current_thread
+    from time import monotonic, sleep
+
+    from django.contrib.contenttypes.models import ContentType
+    from django.db import connection, connections, transaction
+
+    from netbox_librenms_plugin.tests.conftest import bounded_executor
+
+    # Migrations committed this row, so the worker's own connection sees it and waits for our lock.
+    locked = ContentType.objects.select_for_update().order_by("pk").first()
+    workers = []
+
+    def lock_the_same_row():
+        workers.append(current_thread())
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                workers.append(cursor.fetchone()[0])
+            with transaction.atomic():
+                ContentType.objects.select_for_update().get(pk=locked.pk)
+        finally:
+            connections.close_all()
+
+    with pytest.raises(TimeoutError), bounded_executor(max_workers=1) as executor:
+        future = executor.submit(lock_the_same_row)
+        deadline = monotonic() + 10
+        with connection.cursor() as cursor:
+            while True:
+                pids = workers[1:]
+                if pids:
+                    cursor.execute("SELECT cardinality(pg_blocking_pids(%s))", pids)
+                    if cursor.fetchone()[0]:
+                        break
+                assert monotonic() < deadline, "the worker never waited for the row lock"
+                sleep(0.05)
+        future.result(timeout=0.1)
+    # This thread still holds the lock, so only the helper can have ended the worker.
+    assert future.done(), "the worker still waits for the row lock"
+    assert not workers[0].is_alive()
