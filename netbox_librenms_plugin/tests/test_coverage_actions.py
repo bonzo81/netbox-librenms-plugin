@@ -4723,6 +4723,7 @@ class TestCreatePlatformAssignmentIndependence:
             {
                 "server_key": self.server_key,
                 "platform_name": platform_name,
+                "librenms_os": "test-os",
                 "manufacturer": str(manufacturer_id),
                 "device_pk": str(device.pk),
                 **extra,
@@ -4834,6 +4835,7 @@ class TestCreatePlatformAssignmentIndependence:
             {
                 "server_key": self.server_key,
                 "platform_name": platform_name,
+                "librenms_os": "test-os",
                 "manufacturer": str(device.device_type.manufacturer_id),
                 "device_pk": str(device.pk),
             },

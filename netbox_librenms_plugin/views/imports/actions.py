@@ -2782,7 +2782,12 @@ class CreatePlatformFromImportView(
             return error
 
         tracking = platform_version_tracking_enabled()
-        named = NewOSPlatform(platform_name, manufacturer, request.POST.get("librenms_version") or "")
+        named = NewOSPlatform(
+            platform_name,
+            request.POST.get("librenms_os") or "",
+            manufacturer=manufacturer,
+            reported_version=request.POST.get("librenms_version") or "",
+        )
         if target_model is None:
             outcome = run_transaction(lambda: create_os_platform(named, facts, tracking=tracking, actor=request.user))
         else:
