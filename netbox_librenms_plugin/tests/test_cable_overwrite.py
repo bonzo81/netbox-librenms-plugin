@@ -27,6 +27,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_serial_row,
     make_superuser,
     persist_test_server_mapping,
+    seed_own_mapping,
 )
 
 SERVER_KEY = configured_server_key()
@@ -123,6 +124,134 @@ def _classify(local, remote):
     local.refresh_from_db()
     remote.refresh_from_db()
     return classify_cable_action(local, remote)
+
+
+@pytest.mark.django_db
+class TestNameFallbackRespectsThePortBinding:
+    """A same-name local interface bound to a different LibreNMS port is not the row's port."""
+
+    @pytest.mark.parametrize(
+        ("binding_server", "attached"),
+        [(SERVER_KEY, False), ("other-server", True)],
+        ids=("bound-to-another-port", "bound-on-another-server"),
+    )
+    def test_the_sync_attaches_only_an_interface_that_may_be_the_port(
+        self, binding_server, attached, librenms_server, settings
+    ):
+        from django.core.cache import cache
+        from django.test import Client
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import bind_librenms_server
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
+        local_device = make_device(f"fallback-local-{attached}")
+        local = make_interface(local_device, "eth0")
+        seed_own_mapping(local, 7, binding_server)
+        local.save()
+        remote_device = make_device(f"fallback-remote-{attached}")
+        remote = make_interface(remote_device, "Ethernet2")
+        row = {
+            "_source": "main",
+            "local_port_id": 6,
+            "local_port": "eth0",
+            "remote_device": remote_device.name,
+            "remote_port": remote.name,
+            "remote_port_id": 202,
+        }
+        cache_key = object.__new__(SyncCablesView).get_cache_key(local_device, "links", SERVER_KEY)
+        cache.set(cache_key, {"links": [row], "snapshot_token": f"fallback-{attached}"}, timeout=300)
+        client = Client()
+        client.force_login(make_superuser(f"fallback-user-{attached}"))
+        persist_test_server_mapping(local_device, SERVER_KEY)
+
+        rendered = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local_device.pk]),
+            {"tab": "cables", "server_key": SERVER_KEY},
+        )
+        record = next(iter(rendered.context["cable_sync"]["table"].rows)).record
+        assert (record.get("netbox_local_interface_id") == local.pk) is attached
+
+        # A stale page that still names eth0 must not get the cable either.
+        client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[local_device.pk]),
+            {
+                "select": 6,
+                "server_key": SERVER_KEY,
+                "expected_local_id_6": local.pk,
+                "expected_local_device_id_6": local_device.pk,
+                "expected_remote_id_6": remote.pk,
+                "expected_remote_device_id_6": remote_device.pk,
+            },
+        )
+        local.refresh_from_db()
+        remote.refresh_from_db()
+        assert (local.cable_id is not None and local.cable_id == remote.cable_id) is attached
+
+    def test_a_binding_to_another_port_before_the_lock_refuses_the_row(self, librenms_server, settings, monkeypatch):
+        """eth0 resolves by name for port 6, then a concurrent write binds it to port 7 before the lock."""
+        from dcim.models import Interface
+        from django.contrib.messages import get_messages
+        from django.core.cache import cache
+        from django.test import Client
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.server_mappings import read_mapping
+        from netbox_librenms_plugin.tests.conftest import bind_librenms_server
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
+        local_device = make_device("fallback-local-rebound")
+        local = make_interface(local_device, "eth0")
+        remote_device = make_device("fallback-remote-rebound")
+        remote = make_interface(remote_device, "Ethernet2")
+        row = {
+            "_source": "main",
+            "local_port_id": 6,
+            "local_port": "eth0",
+            "remote_device": remote_device.name,
+            "remote_port": remote.name,
+            "remote_port_id": 202,
+        }
+        cache_key = object.__new__(SyncCablesView).get_cache_key(local_device, "links", SERVER_KEY)
+        cache.set(cache_key, {"links": [row], "snapshot_token": "fallback-rebound"}, timeout=300)
+        client = Client()
+        client.force_login(make_superuser("fallback-user-rebound"))
+        persist_test_server_mapping(local_device, SERVER_KEY)
+        real_lock = SyncCablesView._lock_cable_terminations
+        pre_lock_bindings = []
+
+        def bind_eth0_to_port_7_then_lock(view, local_term, remote_term, **kwargs):
+            # The endpoints are resolved; the binder commits before the lock re-reads them.
+            pre_lock_bindings.append(read_mapping(local_term).own_id(SERVER_KEY))
+            rebound = Interface.objects.get(pk=local.pk)
+            seed_own_mapping(rebound, 7, SERVER_KEY)
+            rebound.save()
+            return real_lock(view, local_term, remote_term, **kwargs)
+
+        monkeypatch.setattr(SyncCablesView, "_lock_cable_terminations", bind_eth0_to_port_7_then_lock)
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[local_device.pk]),
+            {
+                "select": 6,
+                "server_key": SERVER_KEY,
+                "expected_local_id_6": local.pk,
+                "expected_local_device_id_6": local_device.pk,
+                "expected_remote_id_6": remote.pk,
+                "expected_remote_device_id_6": remote_device.pk,
+            },
+        )
+
+        local.refresh_from_db()
+        remote.refresh_from_db()
+        assert pre_lock_bindings == [None]
+        assert read_mapping(local).own_id(SERVER_KEY) == 7
+        assert local.cable_id is None and remote.cable_id is None
+        assert any(
+            "The cable state or target changed after confirmation" in str(message) and "eth0" in str(message)
+            for message in get_messages(response.wsgi_request)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -644,17 +773,48 @@ class TestSerialCableOverwriteBehaviour:
         assert target_port.cable_id is None
 
     def test_same_connection_untagged_gets_tagged_not_recreated(self):
+        from netbox_librenms_plugin.tests.view_test_helpers import assert_update_logged, change_logging
+
         acs, csp, cp_a, _cp_b = self._setup("tag")
         cable = cable_together(csp, cp_a)  # untagged, already the desired connection
 
         sync = _sync_view()
-        result = sync.handle_cable_creation(_serial_link(csp, cp_a), {"device_id": acs.id})
+        with change_logging(sync.request):
+            result = sync.handle_cable_creation(_serial_link(csp, cp_a), {"device_id": acs.id})
 
         assert result["status"] == "tagged"
         cable.refresh_from_db()
         assert "librenms" in set(cable.tags.values_list("slug", flat=True))
         csp.refresh_from_db()
         assert csp.cable_id == cable.pk  # same cable, not recreated
+        assert_update_logged(cable, "tags", [], [cable.tags.get().name])
+
+    def test_the_tag_before_state_is_the_cable_as_locked(self):
+        """A write that lands just before the sync locks the cable is in the before-state of the tag add."""
+        from django.db import connection
+
+        from netbox_librenms_plugin.tests.view_test_helpers import change_logging, update_change
+
+        acs, csp, cp_a, _cp_b = self._setup("tag-locked")
+        cable = cable_together(csp, cp_a)
+        fired = []
+
+        def write_before_the_cable_lock(execute, sql, params, many, context):
+            if not fired and 'FROM "dcim_cable"' in sql and "FOR UPDATE" in sql:
+                fired.append(sql)
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        'UPDATE "dcim_cable" SET description = %s WHERE id = %s', ["written-first", cable.pk]
+                    )
+            return execute(sql, params, many, context)
+
+        sync = _sync_view()
+        with change_logging(sync.request), connection.execute_wrapper(write_before_the_cable_lock):
+            result = sync.handle_cable_creation(_serial_link(csp, cp_a), {"device_id": acs.id})
+
+        assert result["status"] == "tagged"
+        assert fired
+        assert update_change(cable).prechange_data["description"] == "written-first"
 
 
 # ---------------------------------------------------------------------------
@@ -798,7 +958,7 @@ class TestCableOverwriteHtmxModal:
         )
         old = Cable(a_terminations=csps, b_terminations=old_ports, status="connected")
         old.save()
-        acs.custom_field_data["librenms_id"] = {SERVER_KEY: 13}
+        seed_own_mapping(acs, 13, SERVER_KEY)
         acs.save(update_fields=["custom_field_data"])
         row = make_serial_row(csps[0], target_device.name, acs)
         snapshot = {"links": [row], "snapshot_token": "multi-termination"}

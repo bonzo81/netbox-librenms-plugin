@@ -83,7 +83,7 @@ from dcim.models import (
 from django.db import transaction
 
 from netbox_librenms_plugin.models import ModuleTypeMapping
-from netbox_librenms_plugin.utils import set_librenms_device_id
+from netbox_librenms_plugin.server_mappings import assign_own, persist_mapping
 
 created = {{}}
 
@@ -130,8 +130,11 @@ with transaction.atomic():
     )
     created["device"] = [device.pk, True]
 
-    set_librenms_device_id(device, {STUB_DEVICE_ID}, "{SERVER_KEY}")
-    device.save()
+    persist_mapping(
+        device,
+        assign_own(device, "{SERVER_KEY}", {STUB_DEVICE_ID}),
+        write=lambda row, fields: row.save(update_fields=[*fields, "last_updated"]),
+    )
 print("E2E_SETUP " + json.dumps(created))
 """
 

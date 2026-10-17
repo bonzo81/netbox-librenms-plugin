@@ -8,7 +8,6 @@ with particular focus on HTTP method correctness to prevent regression bugs.
 import inspect
 import re
 import time
-from types import SimpleNamespace
 
 import pytest
 import requests
@@ -493,23 +492,22 @@ class TestLibreNMSAPIConnection:
 # ====================================================================================
 
 
+@pytest.mark.django_db
 class TestLibreNMSAPIDeviceLookup:
-    """Test device lookup functionality."""
+    """Test device lookup functionality on unsaved Device and Interface instances."""
 
     @staticmethod
     def _device(*, stored_id=None, ip_address=None, name="test-device"):
-        primary_ip = None
-        if ip_address is not None:
-            primary_ip = SimpleNamespace(address=SimpleNamespace(ip=ip_address), dns_name="")
+        """Return an unsaved Device, so a discovered ID goes to the cache and not to a row."""
+        from dcim.models import Device
+        from ipam.models import IPAddress
+        from netaddr import IPNetwork
+
         custom_field_data = {} if stored_id is None else {"librenms_id": stored_id}
-        return SimpleNamespace(
-            name=name,
-            cf=dict(custom_field_data),
-            custom_field_data=custom_field_data,
-            primary_ip=primary_ip,
-            _meta=SimpleNamespace(model_name="device"),
-            pk=123,
-        )
+        device = Device(name=name, custom_field_data=custom_field_data)
+        if ip_address is not None:
+            device.primary_ip4 = IPAddress(address=IPNetwork(f"{ip_address}/32"), dns_name="")
+        return device
 
     def test_get_librenms_id_from_custom_field(self, mock_librenms_api):
         """Returns ID when already stored in cf['librenms_id']."""
@@ -553,11 +551,9 @@ class TestLibreNMSAPIDeviceLookup:
 
     def test_get_librenms_id_handles_objects_without_device_identity_attrs(self, mock_librenms_api):
         """Objects like interfaces should return None cleanly when they have no stored or cached ID."""
-        interface = SimpleNamespace(
-            cf={},
-            _meta=SimpleNamespace(model_name="interface"),
-            pk=123,
-        )
+        from dcim.models import Interface
+
+        interface = Interface()
 
         result = mock_librenms_api.get_librenms_id(interface)
 
@@ -565,12 +561,9 @@ class TestLibreNMSAPIDeviceLookup:
 
     def test_get_stored_librenms_id_skips_hostname_lookup(self, local_librenms_api, librenms_server):
         """Stored-only helper must not trigger discovery lookups for interface-like objects."""
-        interface = SimpleNamespace(
-            cf={},
-            name="GigabitEthernet1/0/1",
-            _meta=SimpleNamespace(model_name="interface"),
-            pk=123,
-        )
+        from dcim.models import Interface
+
+        interface = Interface(name="GigabitEthernet1/0/1")
 
         result = local_librenms_api.get_stored_librenms_id(interface)
 
@@ -1472,6 +1465,7 @@ class TestLibreNMSAPIErrorHandling:
 # ====================================================================================
 
 
+@pytest.mark.django_db
 class TestGetLibreNMSIdIntGuard:
     """Tests for the int conversion guard in get_librenms_id."""
 

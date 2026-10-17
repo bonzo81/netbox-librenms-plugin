@@ -23,13 +23,21 @@ from netbox_librenms_plugin.constants import (
     SERIAL_INVENTORY_SOURCE,
 )
 from netbox_librenms_plugin.interface_rules import PORT_RECORD_KEYS, interface_rules_for_request, row_rule_block
+from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+from netbox_librenms_plugin.server_mappings import (
+    AmbiguousLibreNMSIdError,
+    MappingRole,
+    find_port_owner,
+    get_librenms_sync_device,
+    identity_q,
+    name_match_may_be_port,
+    read_mapping,
+    resolve_device_port,
+)
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.utils import (
-    AmbiguousLibreNMSIdError,
     apply_cable_manual_picks,
     assign_cable_row_ids,
-    build_librenms_id_qs,
-    build_librenms_ids_qs,
     cable_far_terminations,
     cable_has_librenms_tag,
     cable_is_point_to_point,
@@ -37,19 +45,12 @@ from netbox_librenms_plugin.utils import (
     cable_path_reaches,
     cable_snapshot_token,
     cache_remaining_ttl,
-    coerce_librenms_id,
-    find_interface_by_librenms_port_id,
     get_interface_name_field,
     get_librenms_cable_tag,
-    get_librenms_device_id,
-    get_librenms_oob,
-    get_librenms_sync_device,
-    get_migrated_to_marker,
     get_virtual_chassis_member,
     oob_badge_html,
     PortDisclosure,
     remote_port_html,
-    resolve_interface_on_device,
     rule_block_html,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -107,55 +108,6 @@ def _remote_name_devices(names):
     for name_q in _remote_name_queries(names):
         by_pk.update((device.pk, device) for device in Device.objects.filter(name_q))
     return [by_pk[pk] for pk in sorted(by_pk)]
-
-
-def _librenms_id_q(server_key: str, value, *, include_oob: bool = True) -> Q:
-    """
-    Return a combined Q matching JSON-field and legacy bare-int librenms_id.
-
-    Matches both integer and string representations, and both the scalar form
-    (``{server_key: 42}``) and the dict form
-    (``{server_key: {"id": 42, "oob": {"id": 99}}}``) so a device carrying OOB
-    metadata or a merged link still resolves by LibreNMS ID. Mirrors the path
-    coverage of :func:`utils.find_by_librenms_id`.
-
-    Args:
-        server_key (str): The LibreNMS server key whose JSON sub-key is matched.
-        value: The LibreNMS id to match (int or string form).
-        include_oob (bool): When True (default), also match the OOB-controller
-            sub-key (``{server_key: {"oob": {"id": value}}}``). Pass ``False`` when
-            resolving a device by its *own* LibreNMS identity (e.g. a cable's remote
-            ``device_id``): the OOB path matches a *different* device that merely
-            references this id as its controller, so including it would match both the
-            real device and that referencer and raise ``MultipleObjectsReturned``.
-
-    Returns:
-        Q: A combined lookup matching any stored form of the id (matches nothing for
-            a bool *value*).
-
-    """
-    # Match nothing for values that can't be a valid librenms_id. Reject bools (an int subclass)
-    # and any non-int/str type up front: int() would truncate a float like 1.9 to 1 and match the
-    # wrong device/interface — looser than find_by_librenms_id's int/str-only contract (issue
-    # #103). Also reject blank strings and non-positive ids.
-    _match_nothing = Q(pk__isnull=True) & Q(pk__isnull=False)
-    if isinstance(value, bool) or not isinstance(value, (int, str)):
-        return _match_nothing
-    if isinstance(value, str) and not value.strip():
-        return _match_nothing
-    try:
-        if int(value) <= 0:
-            return _match_nothing
-    except (TypeError, ValueError):
-        # Non-numeric string: it can't equal a numeric id, but keep the literal match below
-        # rather than failing closed (no behaviour change for that case).
-        pass
-
-    # Single source of truth for the path coverage (host scalar / __id / legacy bare, + the OOB
-    # sub-key), shared with utils.find_by_librenms_id so the two can't drift on which stored
-    # shapes resolve.
-    host_q, oob_q = build_librenms_id_qs(server_key, value)
-    return host_q | oob_q if include_oob else host_q
 
 
 _SUB_UNIT_RE = re.compile(r"^(?P<physical>.+)\.\d+$")
@@ -598,8 +550,14 @@ class BaseCableTableView(
         sorted_remote_ids = sorted(remote_ids)
         # Chunked so a wide page cannot build one unbounded OR chain.
         for offset in range(0, len(sorted_remote_ids), 32):
-            host_q, _oob_q = build_librenms_ids_qs(server_key, sorted_remote_ids[offset : offset + 32])
-            device_pks.update(Device.objects.filter(host_q).values_list("pk", flat=True))
+            # The remote device_id is the device's own identity; an OOB match names a different device.
+            id_q = identity_q(
+                Device,
+                server=server_key,
+                identities=sorted_remote_ids[offset : offset + 32],
+                roles=(MappingRole.OWN,),
+            )
+            device_pks.update(Device.objects.filter(id_q).values_list("pk", flat=True))
         catalog_devices = list(Device.objects.filter(pk__in=device_pks).select_related("virtual_chassis"))
         visible_device_ids = set(
             self._viewable_queryset(Device)
@@ -611,7 +569,7 @@ class BaseCableTableView(
         for device in catalog_devices:
             if device.name:
                 devices_by_name[device.name.lower()].append(device)
-            device_librenms_id = get_librenms_device_id(device, server_key, auto_save=False)
+            device_librenms_id = read_mapping(device).own_id(server_key)
             if device_librenms_id is not None:
                 devices_by_librenms_id[device_librenms_id].append(device)
         return devices_by_name, devices_by_librenms_id, visible_device_ids
@@ -734,8 +692,12 @@ class BaseCableTableView(
             chunk = id_candidate_items[offset : offset + 32]
             # One regex per JSON path. The catalog keys each match by its own (device, ID) and name, so
             # a match that pairs one owner with the ID of another owner is never read.
-            host_q, oob_q = build_librenms_ids_qs(server_key, {port_id for _owner_id, port_id in chunk})
-            candidate_q = Q(device_id__in={owner_id for owner_id, _port_id in chunk}) & (host_q | oob_q)
+            candidate_q = Q(device_id__in={owner_id for owner_id, _port_id in chunk}) & identity_q(
+                Interface,
+                server=server_key,
+                identities={port_id for _owner_id, port_id in chunk},
+                roles=(MappingRole.OWN, MappingRole.OOB),
+            )
             candidate_pks.update(Interface.objects.filter(candidate_q).values_list("pk", flat=True))
         catalog_interfaces = list(
             Interface.objects.filter(pk__in=candidate_pks)
@@ -750,11 +712,12 @@ class BaseCableTableView(
         for interface in catalog_interfaces:
             interfaces_by_pk[interface.pk] = interface
             interfaces_by_name[(interface.device_id, interface.name)].append(interface)
-            interface_librenms_id = get_librenms_device_id(interface, server_key, auto_save=False)
+            interface_librenms_id = read_mapping(interface).own_id(server_key)
             if interface_librenms_id is not None:
                 interface_ids_by_device[(interface.device_id, interface_librenms_id)].append(interface)
         cable_ids = {interface.cable_id for interface in catalog_interfaces if interface.cable_id is not None}
         return {
+            "server_key": server_key,
             "interfaces_by_pk": interfaces_by_pk,
             "interfaces_by_name": interfaces_by_name,
             "interface_ids_by_device": interface_ids_by_device,
@@ -829,6 +792,8 @@ class BaseCableTableView(
         if len(matches) != 1:
             return None
         interface = next(iter(matches.values()))
+        if not name_match_may_be_port(interface, server=context["server_key"], port_id=port_id):
+            return None
         return interface if interface.pk in context["visible_interface_ids"] else None
 
     def get_ip_address(self, obj):
@@ -1218,23 +1183,21 @@ class BaseCableTableView(
             bool: True when an OOB controller is linked, otherwise False.
 
         """
-        oob = get_librenms_oob(lookup_device, server_key=server_key)
-        if not oob:
+        lookup_mapping = read_mapping(lookup_device)
+        if not lookup_mapping.has_oob(server_key):
             # No OOB controller linked — a genuinely unmapped/host-only device.
             return False
-        # Coerce the OOB controller id like the host id: a non-numeric/bool/zero/negative stored
-        # id fails closed (skip the fetch) rather than building a GET /devices/<garbage>/... that
-        # 404s and silently drops OOB rows.
-        oob_id = coerce_librenms_id(oob.get("id"))
+        # A non-numeric/bool/zero/negative stored id fails closed (skip the fetch) rather than
+        # building a GET /devices/<garbage>/... that 404s and silently drops OOB rows.
+        oob_id = lookup_mapping.oob_id(server_key)
         if not oob_id:
             # An OOB controller IS linked, but its stored id is corrupt. Mirror interfaces_view's
             # fail-closed pattern: flag + warn and return True (OOB linked) so post() surfaces the
             # dropped OOB rows instead of showing a "successful" banner over silently-missing rows.
             self._oob_links_fetch_failed = True
             logger.warning(
-                "OOB controller linked for device %s but its stored id is invalid (%r); skipping OOB links",
+                "OOB controller linked for device %s but its stored id is invalid; skipping OOB links",
                 self.librenms_id,
-                oob.get("id"),
             )
             return True
         oob_success, oob_data = self.librenms_api.get_device_links(oob_id)
@@ -1443,7 +1406,9 @@ class BaseCableTableView(
         # device that references this id as its controller, tripping MultipleObjectsReturned.
         if remote_device_id is not None:
             result = resolve_catalog_match(
-                Device.objects.filter(_librenms_id_q(server_key, remote_device_id, include_oob=False)),
+                Device.objects.filter(
+                    identity_q(Device, server=server_key, identities=(remote_device_id,), roles=(MappingRole.OWN,))
+                ),
                 f"Multiple devices found with the same LibreNMS ID: {remote_device_id}.",
             )
             if result[3]:
@@ -1550,14 +1515,13 @@ class BaseCableTableView(
                 chassis_member = get_virtual_chassis_member(obj, local_port)
 
                 if chassis_member:
-                    interface = resolve_interface_on_device(
-                        chassis_member,
-                        server_key,
-                        local_port_id,
-                        name_candidates,
+                    interface = resolve_device_port(
+                        chassis_member, server=server_key, port_id=local_port_id, name_candidates=name_candidates
                     )
             else:
-                interface = resolve_interface_on_device(obj, server_key, local_port_id, name_candidates)
+                interface = resolve_device_port(
+                    obj, server=server_key, port_id=local_port_id, name_candidates=name_candidates
+                )
 
             if interface:
                 if normal_context is None and not self._object_is_viewable(interface):
@@ -1594,12 +1558,15 @@ class BaseCableTableView(
                     return_device_on_failure=False,
                 )
                 if chassis_member:
-                    netbox_remote_interface = resolve_interface_on_device(
-                        chassis_member, server_key, librenms_remote_port_id, remote_name_candidates
+                    netbox_remote_interface = resolve_device_port(
+                        chassis_member,
+                        server=server_key,
+                        port_id=librenms_remote_port_id,
+                        name_candidates=remote_name_candidates,
                     )
             else:
-                netbox_remote_interface = resolve_interface_on_device(
-                    device, server_key, librenms_remote_port_id, remote_name_candidates
+                netbox_remote_interface = resolve_device_port(
+                    device, server=server_key, port_id=librenms_remote_port_id, name_candidates=remote_name_candidates
                 )
 
             if netbox_remote_interface:
@@ -2400,11 +2367,12 @@ class BaseCableTableView(
             return
         # The port record is what names and types the interface; a row without one would create
         # a bare "other" interface from a neighbour-advertised string, which is a guess.
-        if coerce_librenms_id(link.get("remote_port_key")) is None:
+        port_key = coerce_librenms_id(link.get("remote_port_key"))
+        if port_key is None:
             return
         # A port another interface holds (another device, or a VM) would get a second owner.
         try:
-            if find_interface_by_librenms_port_id(link["remote_port_key"], server_key) is not None:
+            if find_port_owner(port_key, server=server_key) is not None:
                 return
         except AmbiguousLibreNMSIdError:
             return
@@ -3002,8 +2970,10 @@ class BaseCableTableView(
                 for device in self._viewable_queryset(Device).filter(pk__in=local_owner_ids - owner_devices.keys())
             }
         )
+        # A render without a resolved server reads the marker under "default", as the marker reader always did.
+        marker_key = server_key or "default"
         read_only_owner_ids = {
-            device_id for device_id, device in owner_devices.items() if get_migrated_to_marker(device, server_key)
+            device_id for device_id, device in owner_devices.items() if read_mapping(device).migrated_to(marker_key)
         }
         page_is_read_only = obj.pk in read_only_owner_ids or cache_device.pk in read_only_owner_ids
         for link in links_data:
@@ -3185,7 +3155,7 @@ class SingleCableVerifyView(BaseCableTableView):
         row_id = data.get("row_id")
         # Read server_key from POST so we use the exact server the user was viewing, but only honour
         # it when it names a configured server: the raw value scopes the links cache and the
-        # _librenms_id_q() JSONField lookups below, so a forged/unconfigured key must not address
+        # mapping lookups below, so a forged/unconfigured key must not address
         # another server's namespace (mirrors the interfaces POST path, issues #108/#109). Fall back
         # to the active server when the POSTed key isn't configured.
         # get_available_servers() is a dict, so the membership test hashes requested_server_key;
@@ -3252,7 +3222,7 @@ class SingleCableVerifyView(BaseCableTableView):
                 primary_device = selected_device
 
             read_only_origin = any(
-                get_migrated_to_marker(device, server_key)
+                read_mapping(device).migrated_to(server_key or "default")
                 for device in {origin_device, primary_device, selected_device}
             )
 
@@ -3333,11 +3303,11 @@ class SingleCableVerifyView(BaseCableTableView):
                         # Shared id→dual-name resolution core (issue #88 fallback included), so
                         # this path can't drift from enrich_local_port's again.
                         name_candidates = [n for n in (local_port, link_data.get("local_port_alt")) if n]
-                        interface = resolve_interface_on_device(
+                        interface = resolve_device_port(
                             lookup_device,
-                            server_key,
-                            link_data.get("local_port_id"),
-                            name_candidates,
+                            server=server_key,
+                            port_id=link_data.get("local_port_id"),
+                            name_candidates=name_candidates,
                         )
                         if interface is not None and not self._object_is_viewable(interface):
                             interface = None
@@ -3518,11 +3488,11 @@ class CableRemotePickerView(BaseCableTableView):
             owner = get_virtual_chassis_member(obj, local_name)
             if owner is None or not self.restricted_queryset(Device).filter(pk=owner.pk).exists():
                 return False
-            interface = resolve_interface_on_device(
+            interface = resolve_device_port(
                 owner,
-                server_key,
-                row.get("local_port_id"),
-                [local_name, row.get("local_port_alt")],
+                server=server_key,
+                port_id=row.get("local_port_id"),
+                name_candidates=[local_name, row.get("local_port_alt")],
             )
             return bool(interface is not None and self.restricted_queryset(Interface).filter(pk=interface.pk).exists())
 

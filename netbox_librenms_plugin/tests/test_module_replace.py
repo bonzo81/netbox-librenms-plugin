@@ -16,6 +16,8 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
 from netbox_librenms_plugin.tests.view_test_helpers import (
+    assert_update_logged,
+    change_logging,
     get as view_get,
     make_request,
     make_user_with_perms,
@@ -538,13 +540,17 @@ class TestMoveModuleView:
         )
 
         # Relocation exists from NetBox 4.7; CI also gates 4.4/4.6, where the view refuses.
-        with patch("netbox_librenms_plugin.views.sync.modules.netbox_relocates_module_subtree", return_value=True):
+        with (
+            change_logging(request),
+            patch("netbox_librenms_plugin.views.sync.modules.netbox_relocates_module_subtree", return_value=True),
+        ):
             response = view_post(_view(MoveModuleView, request), request, pk=target_device.pk)
 
         moving.refresh_from_db()
         assert response.status_code == 302
         assert moving.device == target_device
         assert moving.module_bay == target_bay
+        assert_update_logged(moving, "module_bay", source_bay.pk, target_bay.pk)
         assert not Module.objects.filter(pk=occupant.pk).exists()
         assert any(
             "Moved MOVE-TYPE from move-source/Source Bay to Target Bay" in text for text in message_texts(request)

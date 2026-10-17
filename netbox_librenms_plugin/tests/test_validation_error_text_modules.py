@@ -25,6 +25,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_module_bay,
     make_module_type,
     make_superuser,
+    seed_own_mapping,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import (
     make_request,
@@ -115,7 +116,7 @@ def _row(index, model, name, **extra):
 
 
 def _linked(device):
-    device.custom_field_data["librenms_id"] = {"default": device.pk}
+    seed_own_mapping(device, device.pk, "default")
     device.save(update_fields=["custom_field_data"])
     return device
 

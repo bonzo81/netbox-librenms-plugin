@@ -22,12 +22,12 @@ from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
     make_device,
     make_vm,
+    seed_own_mapping,
     transactional_db_with_all_apps,
 )
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import SERVER_KEY, seed_ports, sync_port
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 from netbox_librenms_plugin.transactions import row_changed
-from netbox_librenms_plugin.utils import set_librenms_device_id
 from netbox_librenms_plugin.views.sync import interfaces as interfaces_view
 
 CACHE_TRANSITION_HEADER = "X-LibreNMS-Cache-Transition"
@@ -62,7 +62,7 @@ def _bound(owner, name, port_id, **fields):
         interface = Interface(device=owner, name=name, type=fields.pop("type", "other"), **fields)
     else:
         interface = VMInterface(virtual_machine=owner, name=name, **fields)
-    set_librenms_device_id(interface, port_id, SERVER_KEY)
+    seed_own_mapping(interface, port_id, SERVER_KEY)
     interface.save()
     return interface
 

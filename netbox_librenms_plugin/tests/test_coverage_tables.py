@@ -97,12 +97,12 @@ class TestDeviceStatusTable:
 
     def test_virtual_chassis_member_links_to_the_real_sync_member(self):
         from netbox_librenms_plugin.tables.device_status import DeviceStatusTable
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         viewed = make_device("status-vc-viewed")
         sync_member = make_device("status-vc-sync")
         make_virtual_chassis("status-vc", viewed, sync_member)
-        set_librenms_device_id(sync_member, 4102, "default")
+        seed_own_mapping(sync_member, 4102, "default")
         sync_member.save()
         table = DeviceStatusTable(type(viewed).objects.none())
 
@@ -879,7 +879,7 @@ class TestInterfaceTableFields:
     def test_complete_record_renders_against_a_real_interface(self):
         from dcim.models import MACAddress
         from netbox_librenms_plugin.models import InterfaceTypeMapping
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         device = make_device("interface-fields")
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
@@ -887,7 +887,7 @@ class TestInterfaceTableFields:
         interface.mtu = 1500
         interface.enabled = True
         interface.description = "Uplink"
-        set_librenms_device_id(interface, 42, "default")
+        seed_own_mapping(interface, 42, "default")
         interface.save()
         mac = MACAddress.objects.create(mac_address="AA:BB:CC:DD:EE:FF")
         interface.mac_addresses.add(mac)
@@ -1100,7 +1100,7 @@ class TestInterfaceTableFields:
         assert html.count('<div class="lh-sm">') == 2, "each marker stacks like a relationship pill"
 
     def test_real_librenms_id_states(self):
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         device = make_device("interface-id-states")
         interface = make_interface(device, "Ethernet1")
@@ -1111,7 +1111,7 @@ class TestInterfaceTableFields:
             return _port(port_id=42, exists_in_netbox=True, netbox_interface=iface, synced_name="Ethernet1")
 
         missing = str(table.render_librenms_id(42, _row(interface)))
-        set_librenms_device_id(interface, 99, "default")
+        seed_own_mapping(interface, 99, "default")
         interface.save()
         interface = type(interface).objects.get(pk=interface.pk)
         mismatch = str(table.render_librenms_id(42, _row(interface)))
@@ -1461,20 +1461,16 @@ class TestInterfaceRelationships:
 
 @pytest.mark.django_db
 class TestInterfaceFormatting:
-    def test_main_row_can_bind_by_name_but_oob_row_cannot(self):
+    def test_the_formatted_row_keeps_the_resolved_interface(self):
+        """The verify view resolves the interface by port_id first, so formatting must not change it."""
         device = make_device("format-interface")
         interface = make_interface(device, "Ethernet1")
-        table = _interface_table(device)
-        main = _port(name_fallback_allowed=True, _source="main")
-        oob = _port(port_id=43, name_fallback_allowed=True, _source="oob")
+        main = _port(netbox_interface=interface, exists_in_netbox=True, _source="main")
 
-        main_result = table.format_interface_data(main, device)
-        table.format_interface_data(oob, device)
+        main_result = _interface_table(device).format_interface_data(main, device)
 
         assert main["netbox_interface"] == interface
         assert main["exists_in_netbox"] is True
-        assert oob["netbox_interface"] is None
-        assert oob["exists_in_netbox"] is False
         assert set(main_result) == {
             "selection",
             "rule_state",

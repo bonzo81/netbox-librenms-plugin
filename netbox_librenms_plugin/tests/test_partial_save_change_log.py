@@ -8,6 +8,7 @@ a real view through the test client, so NetBox's change logging runs as in produ
 import uuid
 from contextlib import contextmanager
 
+import netaddr
 import pytest
 from core.models import ObjectChange
 from dcim.models import Interface, InterfaceTemplate, Module
@@ -16,7 +17,9 @@ from django.core.cache import cache
 from django.urls import reverse
 from utilities.ordering import naturalize_interface
 
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
+    bounded_executor,
     configure_default_librenms_server,
     make_device,
     make_interface,
@@ -308,19 +311,115 @@ def test_a_device_save_of_some_columns_records_the_stored_before_state():
     )
 
 
-def test_a_normalized_string_librenms_id_records_the_stored_string():
-    from netbox_librenms_plugin.utils import get_librenms_device_id
+def test_a_mapping_change_saves_with_the_other_columns_in_one_record():
+    """The import actions save a mapping change and the other columns in one save, so in one change record."""
+    from django.db import transaction
 
+    from netbox_librenms_plugin.server_mappings import link_import
+    from netbox_librenms_plugin.views.imports.actions import _save_device
+
+    device = make_device("partial-save-mapping", librenms_cf={"other": 7301})
+
+    with _change_logging("partial-save-mapping-user"), transaction.atomic():
+        locked = type(device).objects.select_for_update().get(pk=device.pk)
+        change = link_import(locked, SERVER_KEY, 7302, configured_servers=[SERVER_KEY, "other"])
+        locked.name = "partial-save-mapping-linked"
+        response = _save_device(locked, update_fields=["name"], mapping=change)
+
+    assert response is None
+    change = _update(device)
+    assert (change.prechange_data["name"], change.postchange_data["name"]) == (
+        "partial-save-mapping",
+        "partial-save-mapping-linked",
+    )
+    assert change.prechange_data["custom_fields"]["librenms_id"] == {"other": 7301}
+    assert change.postchange_data["custom_fields"]["librenms_id"] == {
+        "other": 7301,
+        SERVER_KEY: 7302,
+        "_preferred_server": "other",
+    }
+
+
+def test_a_refused_targeted_check_saves_neither_the_columns_nor_the_mapping():
+    """The partial save keeps its targeted checks: a refusal writes no mapping and records no change."""
+    from dcim.models import Device, DeviceType, Manufacturer, Platform
+
+    from netbox_librenms_plugin.server_mappings import assign_own
+    from netbox_librenms_plugin.views.imports.actions import _save_device
+
+    stale = make_device("partial-save-mapping-refused")
+    platform = Platform.objects.create(
+        name="Mapping refused platform", slug="mapping-refused-platform", manufacturer=stale.device_type.manufacturer
+    )
+    other_type = DeviceType.objects.create(
+        manufacturer=Manufacturer.objects.create(name="Mapping refused maker", slug="mapping-refused-maker"),
+        model="Mapping refused type",
+        slug="mapping-refused-type",
+    )
+    Device.objects.filter(pk=stale.pk).update(device_type=other_type)
+    stale.platform = platform
+
+    with _change_logging("partial-save-mapping-refused-user"):
+        response = _save_device(stale, ["platform"], mapping=assign_own(stale, SERVER_KEY, 7303))
+
+    assert response is not None
+    assert _changes(stale, "update") == []
+    stale.refresh_from_db()
+    assert stale.platform_id is None
+    assert read_mapping(stale).own_id(SERVER_KEY) is None
+
+
+def test_a_merge_saves_each_side_once_and_a_refusal_rolls_the_group_back():
+    """The donor saves first; a refusal of a later row rolls back the donor's marker too."""
+    from django.db import transaction
+
+    from netbox_librenms_plugin.server_mappings import merge_links, persist_merge
+    from netbox_librenms_plugin.views.imports.actions import _save_device
+
+    winner = make_device("partial-save-merge-winner", librenms_cf={SERVER_KEY: {"id": 7304}})
+    donor = make_device("partial-save-merge-donor", librenms_cf={SERVER_KEY: {"id": 7305}})
+
+    class _Refused(Exception):
+        pass
+
+    def save_donor_then_refuse():
+        assert _save_device(donor, update_fields=[], mapping=merge.change_for(donor)) is None
+        raise _Refused
+
+    with _change_logging("partial-save-merge-user"), transaction.atomic():
+        merge = merge_links(winner, donor, SERVER_KEY)
+        with pytest.raises(_Refused):
+            persist_merge(merge, write=save_donor_then_refuse)
+    donor.refresh_from_db()
+    assert read_mapping(donor).own_id(SERVER_KEY) == 7305
+    assert _changes(donor, "update") == []
+
+    def save_both():
+        for row in (donor, winner):
+            assert _save_device(row, update_fields=[], mapping=merge.change_for(row)) is None
+
+    with _change_logging("partial-save-merge-user"), transaction.atomic():
+        merge = merge_links(winner, donor, SERVER_KEY)
+        persist_merge(merge, write=save_both)
+    assert _update(donor).postchange_data["custom_fields"]["librenms_id"][SERVER_KEY]["_migrated_to"]["device_id"] == (
+        winner.pk
+    )
+    assert _update(winner).postchange_data["custom_fields"]["librenms_id"] == {
+        SERVER_KEY: {"id": 7304, "oob": {"id": 7305, "type": "oob"}}
+    }
+
+
+def test_reading_a_string_librenms_id_saves_nothing_and_records_no_change():
     device = make_device("partial-save-string-id", librenms_cf={SERVER_KEY: "42"})
     before = _stored_last_updated(device)
 
     with _change_logging("partial-save-string-id-user"):
-        assert get_librenms_device_id(device, SERVER_KEY) == 42
+        assert read_mapping(device).own_id(SERVER_KEY) == 42
 
-    assert _stored_last_updated(device) > before
-    change = _update(device)
-    assert change.prechange_data["custom_fields"]["librenms_id"] == {SERVER_KEY: "42"}
-    assert change.postchange_data["custom_fields"]["librenms_id"] == {SERVER_KEY: 42}
+    assert _stored_last_updated(device) == before
+    assert _changes(device, "update") == []
+    device.refresh_from_db()
+    assert device.custom_field_data["librenms_id"] == {SERVER_KEY: "42"}
 
 
 def test_a_primary_ip_set_on_its_own_records_the_previous_address():
@@ -330,7 +429,9 @@ def test_a_primary_ip_set_on_its_own_records_the_previous_address():
 
     device = make_device("partial-save-primary-ip")
     interface = make_interface(device, "eth0")
-    address = IPAddress.objects.create(address="198.18.40.10/24", assigned_object=interface, status="active")
+    address = IPAddress.objects.create(
+        address=netaddr.IPNetwork("198.18.40.10/24"), assigned_object=interface, status="active"
+    )
     before = _stored_last_updated(device)
 
     with _change_logging("partial-save-primary-ip-user"):
@@ -343,8 +444,6 @@ def test_a_primary_ip_set_on_its_own_records_the_previous_address():
 
 @pytest.mark.django_db(transaction=True)
 def test_partial_device_save_protects_the_audit_snapshot_from_a_concurrent_edit():
-    from concurrent.futures import ThreadPoolExecutor
-
     from dcim.models import Device
     from django.db import OperationalError, connection, connections, transaction
 
@@ -370,7 +469,7 @@ def test_partial_device_save_protects_the_audit_snapshot_from_a_concurrent_edit(
     def edit_after_snapshot_read(execute, sql, params, many, context):
         result = execute(sql, params, many, context)
         if not concurrent_edits and sql.startswith("SELECT") and 'FROM "dcim_device"' in sql:
-            with ThreadPoolExecutor(max_workers=1) as executor:
+            with bounded_executor(max_workers=1) as executor:
                 concurrent_edits.append(executor.submit(concurrent_edit).result(timeout=10))
         return result
 

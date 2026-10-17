@@ -25,6 +25,7 @@ from extras.validators import CustomValidator
 from ipam.models import IPAddress
 
 from netbox_librenms_plugin.models import InterfaceTypeMapping
+from netbox_librenms_plugin.server_mappings import get_librenms_sync_device, read_mapping
 from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncTab, sync_snapshot_key
 from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
@@ -32,9 +33,9 @@ from netbox_librenms_plugin.tests.conftest import (
     make_interface,
     make_superuser,
     make_virtual_chassis_members,
+    seed_own_mapping,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
-from netbox_librenms_plugin.utils import get_librenms_device_id, get_librenms_sync_device, set_librenms_device_id
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
 SERVER_KEY = "default"
@@ -70,7 +71,7 @@ def _device(name, platform=None):
 
 def _bound(device, name, port_id, iface_type="other"):
     interface = make_interface(device, name, iface_type=iface_type)
-    set_librenms_device_id(interface, port_id, SERVER_KEY)
+    seed_own_mapping(interface, port_id, SERVER_KEY)
     interface.save()
     return interface
 
@@ -948,7 +949,7 @@ def test_rebind_refuses_an_ignored_port(superuser_client):
     )
 
     holder.refresh_from_db()
-    assert get_librenms_device_id(holder, SERVER_KEY, auto_save=False) == 8679
+    assert read_mapping(holder).own_id(SERVER_KEY) == 8679
     assert any(
         f"Rebind is refused for LibreNMS port 9001: ignored by interface rule {rule.pk}" in text
         for text in _messages(response)
@@ -1028,7 +1029,8 @@ class TestTheCableFarEndCreate:
         # Fixed ids, never the device pk, so the neighbour's id cannot be the local device's.
         map_device_to_librenms(local_device, 8, server_key=server_key)
         map_device_to_librenms(remote_device, 9, server_key=server_key)
-        librenms_server.register("/api/v0/ports/500", {"status": "ok", "port": [_port(500, "Gi0/1")]})
+        port = {**_port(500, "Gi0/1"), "device_id": 9, "deleted": 0}
+        librenms_server.register("/api/v0/ports/500", {"status": "ok", "port": [port]})
         row_id = _seed_cable_row(
             local_device, _row(local_port="eth0", remote_device=remote_device.name, remote_port_key=500), server_key
         )

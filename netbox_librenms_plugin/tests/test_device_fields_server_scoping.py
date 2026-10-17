@@ -17,7 +17,7 @@ import pytest
 from django.conf import settings
 from django.test import override_settings
 
-from netbox_librenms_plugin.tests.conftest import make_device
+from netbox_librenms_plugin.tests.conftest import make_device, map_device_to_librenms
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.view_test_helpers import make_request
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
@@ -71,14 +71,14 @@ class TestUpdateDeviceNameServerScoping:
         sib_default = make_device("vcscope-a-default")
         sib_default.virtual_chassis = vc
         sib_default.vc_position = 1
-        sib_default.custom_field_data["librenms_id"] = {"default": {"id": 10}}
         sib_default.save()
+        map_device_to_librenms(sib_default, 10, server_key="default")
 
         sib_siteB = make_device("vcscope-b-siteb")
         sib_siteB.virtual_chassis = vc
         sib_siteB.vc_position = 2
-        sib_siteB.custom_field_data["librenms_id"] = {"siteB": {"id": 20}}
         sib_siteB.save()
+        map_device_to_librenms(sib_siteB, 20, server_key="siteB")
 
         viewed = make_device("vcscope-c-viewed")
         viewed.virtual_chassis = vc

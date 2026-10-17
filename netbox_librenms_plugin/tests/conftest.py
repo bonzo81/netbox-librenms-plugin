@@ -3,6 +3,7 @@
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from copy import deepcopy
 from itertools import chain
 from threading import BrokenBarrierError
@@ -12,6 +13,7 @@ from uuid import uuid4
 import pytest
 import requests
 
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.parallel import isolated_test_database_name
 
 _TEST_DATABASE_BASE_NAME = os.environ["TEST_DB_NAME"]
@@ -42,12 +44,25 @@ def configured_server_key():
     return next(iter(LibreNMSAPI.get_available_servers()))
 
 
+def apply_mapping_change(obj, change):
+    """Test setup: put a built mapping change on *obj*, with no claim, no owner check and no save."""
+    from netbox_librenms_plugin.server_mappings import _put_on
+
+    _put_on(obj, change)
+    return obj
+
+
+def seed_own_mapping(obj, identity, server_key="default"):
+    """Test setup: put the own ID that ``assign_own`` builds on *obj*, unsaved, as the old setter did."""
+    from netbox_librenms_plugin.server_mappings import assign_own
+
+    return apply_mapping_change(obj, assign_own(obj, server_key, identity))
+
+
 def persist_test_server_mapping(obj, server_key):
     """Persist the server mapping required by a real sync-page request."""
-    from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
-
-    if get_librenms_device_id(obj, server_key, auto_save=False) is None:
-        set_librenms_device_id(obj, obj.pk, server_key)
+    if read_mapping(obj).own_id(server_key) is None:
+        seed_own_mapping(obj, obj.pk, server_key)
         obj.save(update_fields=["custom_field_data"])
 
 
@@ -66,6 +81,26 @@ def _isolate_test_cache(settings):
     """Give each test a unique namespace inside its pytest worker's cache database."""
     settings.CACHES = _isolated_cache_config(settings.CACHES)
     yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _install_before_state_guard():
+    """Watch every write of a change-logged row for the whole session."""
+    from netbox_librenms_plugin.tests import before_state_guard
+
+    with before_state_guard.installed():
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _fail_on_missing_before_state(_install_before_state_guard):
+    """Fail a test in which plugin code wrote a change-logged row without a fresh before-state."""
+    from netbox_librenms_plugin.tests import before_state_guard
+
+    before_state_guard.reset()
+    yield
+    if before_state_guard.violations:
+        pytest.fail(before_state_guard.report(), pytrace=False)
 
 
 @pytest.fixture(scope="session")
@@ -812,6 +847,18 @@ def run_in_threads(*calls, barriers, timeout):
     if failures:
         raise failures[0]
     return [future.result() for future in futures]
+
+
+@contextmanager
+def bounded_executor(max_workers):
+    """Yield a ThreadPoolExecutor that does not wait for a hung worker when the block raises."""
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        yield executor
+    except BaseException:
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    executor.shutdown(wait=True)
 
 
 def make_superuser(username="review-su"):

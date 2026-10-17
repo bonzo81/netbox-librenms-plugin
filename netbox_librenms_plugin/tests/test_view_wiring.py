@@ -403,6 +403,43 @@ class TestGenericViewPermissionWiring:
             assert tuple(view_class.additional_permissions) == expected_perms
 
 
+@pytest.mark.django_db
+class TestStatusListsShowABusyClaimAsUnknown:
+    """A row whose discovery meets another operation's claim is Unknown; the other rows keep their status."""
+
+    @pytest.mark.parametrize("object_type", ["device", "vm"])
+    def test_a_busy_row_is_unknown_with_one_warning(self, client, live_librenms, object_type):
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.claim_race_helpers import held_device_claim
+        from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, make_vm
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts
+
+        prefix = f"status-busy-{object_type}"
+        make = make_device if object_type == "device" else make_vm
+        busy, found, missing = (make(f"{prefix}-{suffix}.example.test") for suffix in ("busy", "found", "missing"))
+        found.custom_field_data["librenms_id"] = {"default": 5302}
+        found.save()
+        live_librenms.server.register(
+            f"/api/v0/devices/{busy.name}", {"status": "ok", "devices": [{"device_id": 5301}]}
+        )
+        live_librenms.server.register(f"/api/v0/devices/{missing.name}", {"status": "error"}, status=404)
+        client.force_login(make_superuser(f"{prefix}-user"))
+        url_name = "device_status_list" if object_type == "device" else "vm_status_list"
+
+        with held_device_claim("default", 5301):
+            response = client.get(reverse(f"plugins:netbox_librenms_plugin:{url_name}"), {"q": prefix})
+
+        statuses = {row.record.pk: row.record.librenms_status for row in response.context["table"].rows}
+        assert response.status_code == 200
+        assert statuses == {busy.pk: None, found.pk: True, missing.pk: False}
+        assert message_texts(response.wsgi_request, level="warning") == [
+            "Another operation is linking some of these objects. Refresh to see their status."
+        ]
+        busy.refresh_from_db()
+        assert busy.custom_field_data.get("librenms_id") is None
+
+
 class TestRequiredObjectPermissionsWiring:
     """POST-only sync views declare required object permissions and include both permission mixins."""
 

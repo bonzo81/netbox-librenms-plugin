@@ -13,7 +13,11 @@ query path is broken. Reserve mocks for the LibreNMS HTTP boundary and for error
 cannot produce (a lock ``DatabaseError``, a ``save()`` that raises).
 """
 
+from contextlib import contextmanager
+from uuid import uuid4
+
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import make_superuser
 
 
@@ -158,6 +162,38 @@ def message_texts(request, level=None):
     return [str(m.message) for m in get_messages(request) if wanted is None or m.level == wanted]
 
 
+@contextmanager
+def change_logging(request):
+    """Run the block as NetBox runs *request*: each save in it records a change record."""
+    from netbox.context_managers import event_tracking
+
+    request.id = uuid4()
+    with event_tracking(request):
+        yield
+
+
+def update_change(obj):
+    """Return the one change-log record of an update of *obj*."""
+    from core.models import ObjectChange
+    from django.contrib.contenttypes.models import ContentType
+
+    return ObjectChange.objects.get(
+        changed_object_type=ContentType.objects.get_for_model(obj), changed_object_id=obj.pk, action="update"
+    )
+
+
+def assert_update_logged(obj, field, before, after):
+    """Assert the one change-log record of the update of *obj* holds *field* (a dotted path) before and after."""
+    change = update_change(obj)
+    assert change.prechange_data is not None, "the update has no before-state"
+    logged = []
+    for data in (change.prechange_data, change.postchange_data):
+        for key in field.split("."):
+            data = data[key]
+        logged.append(data)
+    assert logged == [before, after]
+
+
 def missing_pk(model, offset=1000):
     """Return a primary key that is above every current row for *model*."""
     highest_pk = model.objects.order_by("-pk").values_list("pk", flat=True).first()
@@ -168,11 +204,11 @@ def trusted_module_inventory_payload(device, inventory, *, server_key="default",
     """Build a module inventory payload bound to the device's verified current LibreNMS mapping."""
     from django.db.models import Model
 
-    from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
+    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
     if not isinstance(device.custom_field_data, dict):
         device.custom_field_data = {}
-    set_librenms_device_id(device, librenms_id, server_key)
+    seed_own_mapping(device, librenms_id, server_key)
     device.save(update_fields=["custom_field_data"])
     if isinstance(device, Model):
         # cf is a cached_property over the APPLICABLE custom fields. Drop the cached value so the
@@ -182,12 +218,12 @@ def trusted_module_inventory_payload(device, inventory, *, server_key="default",
     else:
         # A stub caller has no cached_property to invalidate, so give it the written mapping.
         device.cf = device.custom_field_data
-    # set_librenms_device_id() only logs and returns when it refuses a write (legacy bare
+    # assign_own() only logs and skips when it refuses a write (legacy bare
     # integer, non-positive id), which would leave the payload claiming a mapping the device
     # does not have; every caller would then fail on the production staleness guard instead.
-    stored = get_librenms_device_id(device, server_key, auto_save=False)
+    stored = read_mapping(device).own_id(server_key)
     assert stored == librenms_id, (
-        f"set_librenms_device_id declined the write (stored {stored!r}, wanted {librenms_id!r}); "
+        f"assign_own declined the write (stored {stored!r}, wanted {librenms_id!r}); "
         "the payload fingerprint would not match the device mapping"
     )
     return {

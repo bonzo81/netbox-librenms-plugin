@@ -7,9 +7,8 @@ from django.core.cache import cache
 from django.urls import reverse
 
 from netbox_librenms_plugin.middleware import REQUEST_FAILED_EVENT
-from netbox_librenms_plugin.tests.conftest import make_interface
+from netbox_librenms_plugin.tests.conftest import make_interface, seed_own_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import messages_on
-from netbox_librenms_plugin.utils import set_librenms_device_id
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
 SERVER_KEY = "default"
@@ -46,7 +45,7 @@ def seed_ports(device, ports, *, lag_members=None, sub_interfaces=None, bridge_m
 def bound_interface(device, name, port_id, *, iface_type="other"):
     """Create an interface on *device* that is bound to LibreNMS port *port_id*."""
     interface = make_interface(device, name, iface_type=iface_type)
-    set_librenms_device_id(interface, port_id, SERVER_KEY)
+    seed_own_mapping(interface, port_id, SERVER_KEY)
     interface.save()
     return interface
 

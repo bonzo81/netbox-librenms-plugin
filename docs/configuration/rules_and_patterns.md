@@ -14,9 +14,15 @@ The available actions are:
 - **Transparent** hides the matched row and promotes its children to device-level bay matching. Use this for a fixed-chassis system board whose children should match device-level bays.
 - **Include** admits an `entPhysicalClass` that the plugin's built-in class list omits. This action must be paired with the **Class is** match type.
 
-Name-based rules can use **Ends with**, **Starts with**, **Contains**, or a Python regular expression against `entPhysicalName`. These comparisons are case-insensitive except for regular expressions, whose behavior is controlled by the expression. **Serial matches device** compares `entPhysicalSerialNum` with the NetBox device serial. **Class is** compares `entPhysicalClass` case-insensitively and is used only with the Include action.
+Name-based rules can use **Ends with**, **Starts with**, **Contains**, or a Python regular expression against `entPhysicalName`. These comparisons are case-insensitive except for regular expressions, whose behavior is controlled by the expression. **Serial matches device** compares `entPhysicalSerialNum` with the NetBox device serial. **Model matches device type** compares `entPhysicalModelName` case-insensitively with the model and the part number of the NetBox device type. **Class is** compares `entPhysicalClass` case-insensitively and is used only with the Include action.
 
 For name-based rules, **Require serial match parent** adds a safety check: the rule applies only when the item's serial also matches an ancestor entity's serial.
+
+**Serial matches device** and **Model matches device type** need no pattern, and they ignore **Require serial match parent**. Both match only a chassis-level item: an item with no parent, or an item whose direct parent is the `chassis` entity. **Model matches device type** also matches an item that reaches the chassis through `container` entities only, such as a slot container. It never matches the chassis entity itself. In a virtual chassis, each item is compared with the member that it targets.
+
+Fixed Cisco IOS XE platforms, such as the C8500L-8S4X, report their built-in units as `module` entities directly below the chassis: `module 0` (SPA Interface Processor), `module R0` (route processor) and `module F0` (ESP). These entities report the chassis PID as their model. `module R0` has its own serial, so **Serial matches device** does not match it. A name rule is not safe either, because on a modular platform such as the ASR 1000 the same names are field-replaceable units with their own PIDs. A **Model matches device type** rule with the **Transparent** action hides the three rows and matches their subslots and transceivers against device-level bays.
+
+Fixed Cisco NX-OS platforms, such as the Nexus 93180YC-FX, report their built-in line card as a `module` with the chassis PID inside a `LinecardSlot-1` container. The same rule hides that row. **Serial matches device** does not match it, because that rule only accepts a direct child of the chassis: on a modular chassis, a line card that shares the device serial is a real FRU.
 
 ```yaml
 - name: "Cisco IOS-XR IDPROM phantom"
@@ -26,6 +32,14 @@ For name-based rules, **Require serial match parent** adds a safety check: the r
   require_serial_match_parent: true
   enabled: true
   description: "Remove duplicate IDPROM inventory entries"
+
+- name: "Fixed-platform built-in units"
+  match_type: model_matches_device_type
+  pattern: ""
+  action: transparent
+  require_serial_match_parent: false
+  enabled: true
+  description: "Hide built-in units that report the chassis PID"
 
 - name: "Additional inventory class"
   match_type: class_is

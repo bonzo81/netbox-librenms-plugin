@@ -47,9 +47,9 @@ class TestEnrichRemotePortLibrenmsIdRealDB:
             name="ge-0/0/77",
             type="1000base-t",
         )
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
-        set_librenms_device_id(iface, 20, "default")
+        seed_own_mapping(iface, 20, "default")
         iface.save(update_fields=["custom_field_data"])
 
         view = _make_view()
@@ -95,9 +95,9 @@ class TestEnrichRemotePortLibrenmsIdRealDB:
             name="xe-1/0/5",
             type="10gbase-x-sfpp",
         )
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
-        set_librenms_device_id(iface, 21, "default")
+        seed_own_mapping(iface, 21, "default")
         iface.save(update_fields=["custom_field_data"])
 
         view = _make_view()

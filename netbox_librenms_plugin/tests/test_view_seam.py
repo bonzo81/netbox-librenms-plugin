@@ -136,10 +136,10 @@ class TestRealView:
         from dcim.models import Device
 
         from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceSerialView
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         dev = make_device("seam-serial")
-        set_librenms_device_id(dev, 42, "default")
+        seed_own_mapping(dev, 42, "default")
         dev.save(update_fields=["custom_field_data"])
         live_librenms.server.device_info_response(device_id=42, hostname=dev.name, serial="SN-SEAM")
         request = make_request("post")
@@ -154,10 +154,10 @@ class TestRealView:
         from dcim.models import Device
 
         from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceSerialView
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         dev = make_device("seam-denied")
-        set_librenms_device_id(dev, 42, "default")
+        seed_own_mapping(dev, 42, "default")
         dev.save(update_fields=["custom_field_data"])
         live_librenms.server.device_info_response(device_id=42, hostname=dev.name, serial="SN-DENIED")
         user = make_user_with_perms("seam-viewer", [("view", Device)])
@@ -175,12 +175,12 @@ class TestRealView:
         from django.http import Http404
 
         from netbox_librenms_plugin.views.sync.device_fields import UpdateDeviceSerialView
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
         from dcim.models import Device
 
         mine = make_device("seam-scoped-mine")
         theirs = make_device("seam-scoped-theirs")
-        set_librenms_device_id(mine, 42, "default")
+        seed_own_mapping(mine, 42, "default")
         mine.save(update_fields=["custom_field_data"])
         live_librenms.server.device_info_response(device_id=42, hostname=mine.name, serial="SN-X")
         user = make_user_with_perms("seam-scoped", [("change", Device)], constraints={"name": "seam-scoped-mine"})

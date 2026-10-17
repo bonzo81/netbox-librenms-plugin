@@ -7,7 +7,6 @@ a test counts attempts and releases the second connection's lock between them), 
 outcome the committed attempt returns to ``post()``, and a counter of relationship passes.
 """
 
-from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 from types import SimpleNamespace
 
@@ -19,6 +18,7 @@ from django.urls import reverse
 
 from netbox_librenms_plugin.middleware import FOLLOW_UP_FAILED_MESSAGE, TRY_AGAIN_MESSAGE
 from netbox_librenms_plugin.tests.conftest import (
+    bounded_executor,
     configure_default_librenms_server,
     make_device,
     make_interface,
@@ -170,7 +170,7 @@ def test_a_real_deadlock_on_the_first_attempt_is_retried_once(client, attempts, 
             lock_row(other, Device, device.pk)
             other.commit()
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
+    with bounded_executor(max_workers=1) as executor:
         holder = executor.submit(hold_the_interface_then_lock_the_device)
         assert interface_held.wait(5), "the second session did not lock the interface"
         response = post_interface_sync(client, device, [10], htmx=False)
