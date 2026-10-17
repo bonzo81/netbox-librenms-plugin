@@ -680,7 +680,12 @@ class TestImportCreatePlatformModal:
         Platform.objects.create(name="Juniper Other", slug="juniper-junos", manufacturer=manufacturer)
         client.force_login(make_superuser("import-slug-su"))
 
-        _import_post(client, device, 7401, {"platform_name": "Juniper Junos", "manufacturer": str(manufacturer.pk)})
+        _import_post(
+            client,
+            device,
+            7401,
+            {"platform_name": "Juniper Junos", "librenms_os": "junos", "manufacturer": str(manufacturer.pk)},
+        )
 
         created = Platform.objects.get(name="Juniper Junos")
         device.refresh_from_db()
@@ -698,7 +703,7 @@ class TestImportCreatePlatformModal:
             )
         )
 
-        response = _import_post(client, device, 7402, {"platform_name": "Juniper Junos"})
+        response = _import_post(client, device, 7402, {"platform_name": "Juniper Junos", "librenms_os": "junos"})
 
         device.refresh_from_db()
         assert "You do not have permission to add platforms, so 'Juniper Junos' cannot be created." in _import_error(
@@ -715,7 +720,7 @@ class TestImportCreatePlatformModal:
         existing = Platform.objects.create(name="Juniper Junos", slug="juniper-junos")
         client.force_login(_import_actor("import-reuse", ("view", Platform, None)))
 
-        response = _import_post(client, device, 7403, {"platform_name": "juniper junos"})
+        response = _import_post(client, device, 7403, {"platform_name": "juniper junos", "librenms_os": "junos"})
 
         device.refresh_from_db()
         assert response.status_code == 200
@@ -733,7 +738,12 @@ class TestImportCreatePlatformModal:
         other = Manufacturer.objects.create(name="Import other vendor", slug="import-other-vendor")
         client.force_login(make_superuser("import-refused-su"))
 
-        response = _import_post(client, device, 7405, {"platform_name": "Juniper Junos", "manufacturer": str(other.pk)})
+        response = _import_post(
+            client,
+            device,
+            7405,
+            {"platform_name": "Juniper Junos", "librenms_os": "junos", "manufacturer": str(other.pk)},
+        )
 
         device.refresh_from_db()
         assert "Failed to assign platform 'Juniper Junos' to the device: " in _import_error(response)
@@ -748,7 +758,12 @@ class TestImportCreatePlatformModal:
         client.force_login(make_superuser("import-stale-su"))
         count = Platform.objects.count()
 
-        response = _import_post(client, device, 7406, {"platform_name": "Juniper Junos", "librenms_version": VERSION})
+        response = _import_post(
+            client,
+            device,
+            7406,
+            {"platform_name": "Juniper Junos", "librenms_os": "junos", "librenms_version": VERSION},
+        )
 
         device.refresh_from_db()
         assert "now reports version '22.1R1'" in _import_error(response)
@@ -809,8 +824,6 @@ _MAPPING_OUTCOMES = {
     "added": (_mapping_added, "junos", *_ADDED),
     "not-granted": (_mapping_not_granted, "junos", *_DENIED),
     "constrained-grant": (_mapping_constrained, "junos", *_DENIED),
-    # LibreNMS reports junos: a posted OS chooses neither the OS platform lookup nor the mapping.
-    "tampered-os": (_mapping_added, "eos", *_ADDED),
 }
 
 
@@ -838,6 +851,35 @@ def test_both_create_platform_modals_report_the_mapping_alike(client, librenms_s
     assert not PlatformMapping.objects.filter(librenms_os="eos").exists()
 
 
+@pytest.mark.parametrize("endpoint", ["sync", "import"])
+@pytest.mark.parametrize("posted_os", ["junos", None], ids=["changed-os", "missing-os"])
+def test_an_os_that_differs_from_the_form_creates_and_maps_nothing(client, librenms_server, endpoint, posted_os):
+    """LibreNMS now reports eos; the form showed junos, or posted no OS."""
+    from dcim.models import Platform
+
+    from netbox_librenms_plugin.models import PlatformMapping
+
+    _tracking(False)
+    device = _import_linked(f"os-changed-{endpoint}-{posted_os}", librenms_server, 7411, os="eos")
+    client.force_login(make_superuser(f"os-changed-{endpoint}-{posted_os}"))
+    data = {"platform_name": "Juniper Junos", "create_mapping": "1"}
+    if posted_os is not None:
+        data["librenms_os"] = posted_os
+    count = Platform.objects.count()
+
+    if endpoint == "sync":
+        response = _post(client, "create_and_assign_platform", device, data)
+        errors = " ".join(message_texts(response.wsgi_request, "error"))
+    else:
+        errors = _import_error(_import_post(client, device, 7411, data))
+
+    device.refresh_from_db()
+    assert "LibreNMS now reports OS 'eos', not the OS the page showed." in errors
+    assert device.platform is None
+    assert Platform.objects.count() == count
+    assert not PlatformMapping.objects.exists()
+
+
 @transactional_db_with_all_apps()
 class TestANamedPlatformRaceWinnerNeedsViewScope:
     def test_a_winner_created_between_preflight_and_apply_is_not_reused_without_view(self, client, librenms_server):
@@ -863,7 +905,9 @@ class TestANamedPlatformRaceWinnerNeedsViewScope:
             return execute(sql, params, many, context)
 
         with connection.execute_wrapper(insert_after_the_winner):
-            response = _post(client, "create_and_assign_platform", device, {"platform_name": "Juniper Junos"})
+            response = _post(
+                client, "create_and_assign_platform", device, {"platform_name": "Juniper Junos", "librenms_os": "junos"}
+            )
 
         device.refresh_from_db()
         assert winners
