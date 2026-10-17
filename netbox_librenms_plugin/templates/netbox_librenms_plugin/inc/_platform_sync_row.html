@@ -24,7 +24,7 @@ Requires: object, platform_info, update_url (the subject's platform sync endpoin
                         </span>
                     {% elif assessment.operation == "create_os_platform" %}
                         <button type="button" class="btn btn-sm btn-warning"
-                                data-bs-toggle="modal" data-bs-target="#create-platform-modal"
+                                onclick="showModal(document.getElementById('create-platform-modal'))"
                                 title="Platform doesn't exist - create and sync">
                             <i class="mdi mdi-plus"></i> Create & Sync
                         </button>
