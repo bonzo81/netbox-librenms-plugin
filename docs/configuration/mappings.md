@@ -174,6 +174,8 @@ Platform Mappings translate a LibreNMS OS string, such as `junos`, `eos`, or `io
 
 Matching is case-insensitive. The plugin first tries an exact NetBox Platform name. If that does not produce a unique result, it uses a Platform Mapping. If neither method produces a unique result, the platform remains unset.
 
+A mapping points at the OS platform. With [Platform Version Tracking](import_settings.md#platform-version-tracking) on, the plugin assigns a version platform nested under it.
+
 ```yaml
 - librenms_os: junos
   netbox_platform: JunOS
