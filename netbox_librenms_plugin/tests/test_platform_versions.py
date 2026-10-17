@@ -335,7 +335,7 @@ class TestApplication:
             _facts(),
             tracking=True,
             actor=make_superuser("named-su"),
-            new_os_platform=NewOSPlatform("Juniper Junos", None),
+            new_os_platform=NewOSPlatform("Juniper Junos", None, reported_version="21.2R3-S4.8"),
         )
 
         device.refresh_from_db()
@@ -356,7 +356,7 @@ class TestApplication:
             _facts(),
             tracking=True,
             actor=make_superuser("named-blocked-su"),
-            new_os_platform=NewOSPlatform("Juniper Junos", None),
+            new_os_platform=NewOSPlatform("Juniper Junos", None, reported_version="21.2R3-S4.8"),
         )
 
         assert outcome.reason is PlatformReason.NAME_TAKEN
@@ -439,6 +439,67 @@ class TestImportPlatform:
         assert result.assessment.reason is PlatformReason.OS_PLATFORM_MISSING
 
 
+def _platform_viewer_without_platforms(username):
+    """A user who may view and change devices but may not view any platform."""
+    from dcim.models import Device
+
+    return make_user_with_perms(username, [("view", Device), ("change", Device)])
+
+
+@pytest.mark.django_db
+class TestDisplayedPlatformsFollowTheViewerScope:
+    def test_the_name_clash_holder_is_named_only_to_a_viewer_who_may_view_it(self):
+        from netbox_librenms_plugin.platform_versions import HIDDEN_PLATFORM, reason_text
+
+        _platform("junos")
+        _platform("junos 21.2R3-S4.8")
+        assessment = _assess(make_device("label-clash"), _facts())
+        hidden_viewer = _platform_viewer_without_platforms("label-clash-viewer")
+
+        shown = reason_text(assessment.reason, assessment, make_superuser("label-clash-su"))
+        hidden = reason_text(assessment.reason, assessment, hidden_viewer)
+        saved = reason_text(assessment.reason, assessment, None)
+
+        assert "'junos 21.2R3-S4.8'" in shown
+        for text in (hidden, saved):
+            assert "junos 21.2R3-S4.8" not in text, text
+            assert "'junos'" not in text, text
+            assert HIDDEN_PLATFORM in text, text
+
+    def test_ambiguous_version_platforms_are_not_named_to_a_viewer_who_cannot_view_them(self):
+        from netbox_librenms_plugin.platform_versions import reason_text
+
+        os_platform = _platform("junos")
+        _platform("21.2R3-S4.8", parent=os_platform)
+        _platform("Lab 21.2R3-S4.8", parent=os_platform)
+        assessment = _assess(make_device("label-ambiguous"), _facts())
+
+        text = reason_text(assessment.reason, assessment, _platform_viewer_without_platforms("label-ambiguous-viewer"))
+
+        assert "Lab 21.2R3-S4.8" not in text
+        assert "'junos'" not in text
+
+    def test_a_new_version_platform_under_a_hidden_os_platform_is_named_by_its_version_only(self):
+        from netbox_librenms_plugin.platform_versions import target_label
+
+        _platform("Secret Junos", slug="secret-junos")
+        from netbox_librenms_plugin.models import PlatformMapping
+
+        PlatformMapping.objects.create(librenms_os="junos", netbox_platform=_platform_by_name("Secret Junos"))
+        assessment = _assess(make_device("label-new"), _facts())
+
+        label = target_label(assessment, _platform_viewer_without_platforms("label-new-viewer"))
+
+        assert "Secret" not in label
+        assert "21.2R3-S4.8" in label
+
+
+def _platform_by_name(name):
+    from dcim.models import Platform
+
+    return Platform.objects.get(name=name)
+
+
 @pytest.mark.django_db
 class TestCollisionSafeSlugs:
     def test_versions_whose_slugs_collide_get_the_next_free_suffix(self):
@@ -474,3 +535,65 @@ class TestCollisionSafeSlugs:
 
         assert outcome.status is OutcomeStatus.APPLIED
         assert outcome.created[0].slug == "cisco-ios-xr-2"
+
+
+@pytest.mark.django_db
+class TestStaleNamedCreate:
+    def test_a_changed_version_since_the_form_was_rendered_changes_nothing(self):
+        from dcim.models import Device, Platform
+
+        device = make_device("stale-version")
+        count = Platform.objects.count()
+
+        outcome = apply_platform(
+            Device,
+            device.pk,
+            _facts(version="22.1R1"),
+            tracking=True,
+            actor=make_superuser("stale-version-su"),
+            new_os_platform=NewOSPlatform("Juniper Junos", None, reported_version="21.2R3-S4.8"),
+        )
+
+        device.refresh_from_db()
+        assert outcome.status is OutcomeStatus.STALE
+        assert outcome.reason is PlatformReason.VERSION_CHANGED
+        assert device.platform is None
+        assert Platform.objects.count() == count
+
+    def test_an_os_platform_that_resolves_since_the_form_was_rendered_changes_nothing(self):
+        from dcim.models import Device, Platform
+
+        from netbox_librenms_plugin.models import PlatformMapping
+
+        device = make_device("stale-mapping")
+        PlatformMapping.objects.create(librenms_os="junos", netbox_platform=_platform("Mapped Junos"))
+        count = Platform.objects.count()
+
+        outcome = apply_platform(
+            Device,
+            device.pk,
+            _facts(),
+            tracking=True,
+            actor=make_superuser("stale-mapping-su"),
+            new_os_platform=NewOSPlatform("Juniper Junos", None, reported_version="21.2R3-S4.8"),
+        )
+
+        device.refresh_from_db()
+        assert outcome.status is OutcomeStatus.STALE
+        assert outcome.reason is PlatformReason.OS_PLATFORM_RESOLVED
+        assert device.platform is None
+        assert Platform.objects.count() == count
+
+    def test_a_known_os_platform_is_used_without_the_named_create_recheck(self):
+        from dcim.models import Device
+
+        os_platform = _platform("junos")
+        device = make_device("known-os")
+
+        outcome = apply_platform(
+            Device, device.pk, _facts(), tracking=True, actor=make_superuser("known-os-su"), os_platform=os_platform
+        )
+
+        device.refresh_from_db()
+        assert outcome.status is OutcomeStatus.APPLIED
+        assert device.platform.parent == os_platform

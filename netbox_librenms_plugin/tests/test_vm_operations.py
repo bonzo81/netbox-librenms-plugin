@@ -611,9 +611,10 @@ class TestBulkImportVms:
             assert result["warnings"] == []
         else:
             assert vm.platform == os_platform
+            # The importing user may not view platforms, so the warning names none.
             assert result["warnings"] == [
-                "Imported VM 6220 with OS platform 'vm-tracked-os': "
-                "You do not have permission to add platform 'vm-tracked-os 5.15'."
+                "Imported VM 6220 with OS platform a platform you cannot view: You do not have permission to "
+                "add platforms, so a new version platform for version '5.15' cannot be created."
             ]
 
     def test_one_bad_row_does_not_stop_later_real_imports(self, librenms_api):
