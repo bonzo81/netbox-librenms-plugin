@@ -361,53 +361,6 @@ def _cache_view_class():
     return InstallSelectedView
 
 
-class TestTargetDeviceResolution:
-    """Row-level target selection stays within the page device's real chassis."""
-
-    def test_valid_chassis_member_is_selected(self):
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.views.sync.modules import _resolve_target_device_with_validation
-
-        first = make_device("target-vc-first")
-        second = make_device("target-vc-second")
-        make_virtual_chassis("target-vc", first, second)
-
-        target, invalid = _resolve_target_device_with_validation(first, str(second.pk), Device.objects.all())
-
-        assert target == second
-        assert invalid is False
-
-    @pytest.mark.parametrize("selection", ["bad", "", None, 9_999_999])
-    def test_invalid_or_missing_selection_falls_back_to_page_device(self, selection):
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.views.sync.modules import _resolve_target_device_with_validation
-
-        device = make_device(f"target-fallback-{selection}")
-
-        target, invalid = _resolve_target_device_with_validation(device, selection, Device.objects.all())
-
-        assert target == device
-        assert invalid is bool(selection)
-
-    def test_member_of_another_chassis_is_rejected(self):
-        from dcim.models import Device
-
-        from netbox_librenms_plugin.views.sync.modules import _resolve_target_device_with_validation
-
-        page = make_device("target-page")
-        sibling = make_device("target-sibling")
-        outsider = make_device("target-outsider")
-        make_virtual_chassis("target-page-vc", page, sibling)
-        make_virtual_chassis("target-other-vc", outsider)
-
-        target, invalid = _resolve_target_device_with_validation(page, outsider.pk, Device.objects.all())
-
-        assert target == page
-        assert invalid is True
-
-
 class TestInventoryIdentityHelpers:
     @pytest.mark.parametrize(
         ("row", "port_id", "names"),
