@@ -1394,8 +1394,12 @@ class TestCommonFieldUpdateFailures:
         [
             ("update_device_serial", "device", {}),
             ("convert_legacy_librenms_id", "device", {"object_type": "device"}),
-            ("create_and_assign_platform", "device", {"platform_name": "Wrapped Existing Platform"}),
-            ("create_and_assign_platform", "platform", {"platform_name": "Wrapped New Platform"}),
+            (
+                "create_and_assign_platform",
+                "device",
+                {"platform_name": "Wrapped Existing Platform", "librenms_os": "ios"},
+            ),
+            ("create_and_assign_platform", "platform", {"platform_name": "Wrapped New Platform", "librenms_os": "ios"}),
         ],
         ids=["field-write", "legacy-convert", "platform-assign", "platform-create"],
     )

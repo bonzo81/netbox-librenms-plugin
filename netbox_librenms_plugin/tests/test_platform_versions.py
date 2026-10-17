@@ -337,7 +337,7 @@ class TestApplication:
             _facts(),
             tracking=True,
             actor=make_superuser("named-su"),
-            new_os_platform=NewOSPlatform("Juniper Junos", None, reported_version="21.2R3-S4.8"),
+            new_os_platform=NewOSPlatform("Juniper Junos", "junos", reported_version="21.2R3-S4.8"),
         )
 
         device.refresh_from_db()
@@ -358,7 +358,7 @@ class TestApplication:
             _facts(),
             tracking=True,
             actor=make_superuser("named-blocked-su"),
-            new_os_platform=NewOSPlatform("Juniper Junos", None, reported_version="21.2R3-S4.8"),
+            new_os_platform=NewOSPlatform("Juniper Junos", "junos", reported_version="21.2R3-S4.8"),
         )
 
         assert outcome.reason is PlatformReason.NAME_TAKEN
@@ -533,7 +533,7 @@ class TestCollisionSafeSlugs:
             _facts(os="iosxr", version=""),
             tracking=False,
             actor=make_superuser("slug-named-su"),
-            new_os_platform=NewOSPlatform("Cisco IOS-XR", None),
+            new_os_platform=NewOSPlatform("Cisco IOS-XR", "iosxr"),
         )
 
         assert outcome.status is OutcomeStatus.APPLIED
@@ -554,7 +554,7 @@ class TestStaleNamedCreate:
             _facts(version="22.1R1"),
             tracking=True,
             actor=make_superuser("stale-version-su"),
-            new_os_platform=NewOSPlatform("Juniper Junos", None, reported_version="21.2R3-S4.8"),
+            new_os_platform=NewOSPlatform("Juniper Junos", "junos", reported_version="21.2R3-S4.8"),
         )
 
         device.refresh_from_db()
@@ -562,6 +562,46 @@ class TestStaleNamedCreate:
         assert outcome.reason is PlatformReason.VERSION_CHANGED
         assert device.platform is None
         assert Platform.objects.count() == count
+
+    @pytest.mark.parametrize("reported_os", ["eos", ""], ids=["other-os", "no-os"])
+    def test_a_changed_os_since_the_form_was_rendered_changes_nothing(self, reported_os):
+        from dcim.models import Device, Platform
+
+        device = make_device(f"stale-os-{reported_os}")
+        count = Platform.objects.count()
+
+        outcome = apply_platform(
+            Device,
+            device.pk,
+            _facts(),
+            tracking=False,
+            actor=make_superuser(f"stale-os-{reported_os}-su"),
+            new_os_platform=NewOSPlatform("Juniper Junos", reported_os),
+        )
+
+        device.refresh_from_db()
+        assert (outcome.status, outcome.reason) == (OutcomeStatus.STALE, PlatformReason.OS_CHANGED)
+        assert "LibreNMS now reports OS 'junos'" in reason_text_for(outcome, None)
+        assert device.platform is None
+        assert Platform.objects.count() == count
+
+    def test_the_shown_os_matches_without_regard_to_case(self):
+        from dcim.models import Device
+
+        device = make_device("stale-os-case")
+
+        outcome = apply_platform(
+            Device,
+            device.pk,
+            _facts(os="JunOS", version=""),
+            tracking=False,
+            actor=make_superuser("stale-os-case-su"),
+            new_os_platform=NewOSPlatform("Juniper Junos", "junos"),
+        )
+
+        device.refresh_from_db()
+        assert outcome.status is OutcomeStatus.APPLIED
+        assert device.platform.name == "Juniper Junos"
 
     def test_an_os_platform_that_resolves_since_the_form_was_rendered_changes_nothing(self):
         from dcim.models import Device, Platform
@@ -578,7 +618,7 @@ class TestStaleNamedCreate:
             _facts(),
             tracking=True,
             actor=make_superuser("stale-mapping-su"),
-            new_os_platform=NewOSPlatform("Juniper Junos", None, reported_version="21.2R3-S4.8"),
+            new_os_platform=NewOSPlatform("Juniper Junos", "junos", reported_version="21.2R3-S4.8"),
         )
 
         device.refresh_from_db()
@@ -609,7 +649,7 @@ class TestANamedPlatformThatExistsNeedsViewScope:
             _facts(os="", version=""),
             tracking=False,
             actor=_add_only_actor("named-hidden-existing-actor"),
-            new_os_platform=NewOSPlatform("juniper junos", None),
+            new_os_platform=NewOSPlatform("juniper junos", ""),
         )
 
         device.refresh_from_db()
@@ -631,7 +671,7 @@ class TestANamedPlatformThatExistsNeedsViewScope:
             _facts(os="", version=""),
             tracking=False,
             actor=actor,
-            new_os_platform=NewOSPlatform("Juniper Junos", None),
+            new_os_platform=NewOSPlatform("Juniper Junos", ""),
         )
 
         device.refresh_from_db()
@@ -789,7 +829,7 @@ class TestCreateOSPlatform:
         manufacturer = Manufacturer.objects.get_or_create(name="TestMfr", slug="test-mfr")[0]
 
         outcome = create_os_platform(
-            NewOSPlatform("Juniper Junos", manufacturer, reported_version="21.2R3-S4.8"),
+            NewOSPlatform("Juniper Junos", "junos", manufacturer=manufacturer, reported_version="21.2R3-S4.8"),
             _facts(),
             tracking=True,
             actor=make_superuser("create-os-su"),
@@ -808,7 +848,7 @@ class TestCreateOSPlatform:
         existing = _platform("Juniper Junos")
         actor = grant(make_user_with_perms("create-os-reuse", []), "view", Platform)
 
-        outcome = create_os_platform(NewOSPlatform("juniper junos"), _facts(), tracking=False, actor=actor)
+        outcome = create_os_platform(NewOSPlatform("juniper junos", "junos"), _facts(), tracking=False, actor=actor)
 
         assert outcome.status is OutcomeStatus.UNCHANGED
         assert outcome.created == ()
@@ -821,13 +861,28 @@ class TestCreateOSPlatform:
         count = Platform.objects.count()
 
         outcome = create_os_platform(
-            NewOSPlatform("Juniper Junos", reported_version="21.2R3-S4.8"),
+            NewOSPlatform("Juniper Junos", "junos", reported_version="21.2R3-S4.8"),
             _facts(version="22.1R1"),
             tracking=True,
             actor=make_superuser("create-os-stale-su"),
         )
 
         assert (outcome.status, outcome.reason) == (OutcomeStatus.STALE, PlatformReason.VERSION_CHANGED)
+        assert Platform.objects.count() == count
+
+    def test_a_changed_os_creates_nothing(self):
+        from dcim.models import Platform
+
+        count = Platform.objects.count()
+
+        outcome = create_os_platform(
+            NewOSPlatform("Juniper Junos", "eos"),
+            _facts(),
+            tracking=False,
+            actor=make_superuser("create-os-changed-su"),
+        )
+
+        assert (outcome.status, outcome.reason) == (OutcomeStatus.STALE, PlatformReason.OS_CHANGED)
         assert Platform.objects.count() == count
 
     def test_an_os_platform_that_resolves_since_the_form_was_rendered_creates_nothing(self):
@@ -839,7 +894,10 @@ class TestCreateOSPlatform:
         count = Platform.objects.count()
 
         outcome = create_os_platform(
-            NewOSPlatform("Juniper Junos"), _facts(), tracking=False, actor=make_superuser("create-os-resolved-su")
+            NewOSPlatform("Juniper Junos", "junos"),
+            _facts(),
+            tracking=False,
+            actor=make_superuser("create-os-resolved-su"),
         )
 
         assert (outcome.status, outcome.reason) == (OutcomeStatus.STALE, PlatformReason.OS_PLATFORM_RESOLVED)
@@ -850,7 +908,7 @@ class TestCreateOSPlatform:
 
         actor = grant(make_user_with_perms("create-os-denied", []), "add", Platform, constraints={"name": "other"})
 
-        outcome = create_os_platform(NewOSPlatform("Juniper Junos"), _facts(), tracking=False, actor=actor)
+        outcome = create_os_platform(NewOSPlatform("Juniper Junos", "junos"), _facts(), tracking=False, actor=actor)
 
         assert (outcome.status, outcome.reason) == (OutcomeStatus.BLOCKED, PlatformReason.ADD_PLATFORM_DENIED)
         assert not Platform.objects.filter(name="Juniper Junos").exists()
@@ -866,7 +924,10 @@ class TestCreateOSPlatform:
         settings.CUSTOM_VALIDATORS = {"dcim.platform": [Refuses()]}
 
         outcome = create_os_platform(
-            NewOSPlatform("Juniper Junos"), _facts(), tracking=False, actor=make_superuser("create-os-invalid-su")
+            NewOSPlatform("Juniper Junos", "junos"),
+            _facts(),
+            tracking=False,
+            actor=make_superuser("create-os-invalid-su"),
         )
 
         assert (outcome.status, outcome.reason) == (OutcomeStatus.FAILED, PlatformReason.PLATFORM_INVALID)
