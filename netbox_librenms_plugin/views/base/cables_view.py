@@ -3205,6 +3205,9 @@ class BaseCableTableView(
 class SingleCableVerifyView(BaseCableTableView):
     """View to verify a single cable link between two devices."""
 
+    # A fetch() caller reads the answer, so the middleware answers with a JSON error.
+    answers_json = True
+
     # Read-only verify endpoint: require object-view permission (mirrors the interface/module
     # verify views). Without it any user with mere plugin-view rights could POST an arbitrary
     # device id and read back that device's rendered cable/topology rows.

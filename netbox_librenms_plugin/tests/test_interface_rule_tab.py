@@ -361,6 +361,31 @@ class TestVirtualChassisOwners:
         assert on_second["rule_state"] == ""
         assert 'name="select"' in on_second["selection"]
 
+    def test_a_rule_broken_after_the_render_answers_the_verify_with_a_json_error(self, superuser_client):
+        """The member select posts with fetch() and parses JSON, so a redirect would lose the rule's name."""
+        first, second = self._chassis("rule-tab-verify-broken")
+        _seed(first, [_port(610, "Gi1/0/1")])
+        rule = InterfaceTypeMapping.objects.get(platform=first.platform)
+        InterfaceTypeMapping.objects.filter(pk=rule.pk).update(name_pattern="(")
+
+        response = superuser_client.post(
+            reverse("plugins:netbox_librenms_plugin:verify_interface"),
+            json.dumps(
+                {
+                    "device_id": second.pk,
+                    "origin_device_id": first.pk,
+                    "port_id": 610,
+                    "interface_name_field": "ifName",
+                    "server_key": SERVER_KEY,
+                }
+            ),
+            content_type="application/json",
+        )
+
+        assert response.status_code == 409
+        assert list(response.json()) == ["error"]
+        assert f"(ID {rule.pk}) stores an invalid name_pattern: (." in response.json()["error"]
+
 
 @pytest.mark.django_db
 class TestAnIncompleteRecordIsBlocked:
