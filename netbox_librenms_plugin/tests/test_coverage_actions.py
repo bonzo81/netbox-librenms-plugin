@@ -3974,6 +3974,25 @@ class TestDeviceConflictActionBranches:
         )
         assert Device.objects.get(pk=target.pk).platform_id is None
 
+    def test_sync_platform_reports_a_refused_assignment_like_the_sync_page(self):
+        from dcim.models import Device, Manufacturer, Platform
+
+        view = self._make_view()
+        target = make_device("branches-sync-platform-refused-target")
+        other = Manufacturer.objects.create(name="Branches other vendor", slug="branches-other-vendor")
+        platform = Platform.objects.create(
+            name="branches-sync-platform-refused-os", slug="branches-sync-platform-refused-os", manufacturer=other
+        )
+        self._register_device(42, target.name, os=platform.name)
+        request = self._request(
+            "sync_platform", target, "branches-sync-platform-refused-user", [("change", Device), ("view", Platform)]
+        )
+
+        response = post_view(view, request, device_id=42)
+
+        self._assert_htmx_error(response, f"Failed to assign platform '{platform.name}' to the device: ")
+        assert Device.objects.get(pk=target.pk).platform_id is None
+
     def test_sync_device_type_sets_the_matching_real_type_then_renders_the_row(self):
         from dcim.models import Device, DeviceType
 
