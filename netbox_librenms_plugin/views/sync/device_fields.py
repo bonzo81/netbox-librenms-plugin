@@ -35,6 +35,8 @@ from netbox_librenms_plugin.utils import (
     migrate_legacy_librenms_id,
     normalize_serial,
     resolve_naming_preferences,
+    validation_error_detail,
+    exception_text_for,
 )
 from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
@@ -99,19 +101,19 @@ def _server_mapping_redirect(object_type, pk, active_server_key=None, active_syn
     return redirect(url)
 
 
-def _write_failure_message(exc, action, written_field):
-    """Describe a failed single-field write, naming the fields that actually failed validation."""
-    errors = getattr(exc, "message_dict", None)
-    if not errors:
-        return f"Failed to {action}: {exc}"
-    detail = "; ".join(f"{field}: {' '.join(texts)}" for field, texts in sorted(errors.items()))
+def _write_failure_message(exc, action, written_field, model, user):
+    """Describe a failed single-field write to *user*, and say when the failure is on another field."""
+    detail = exception_text_for(exc, model, user)
     # full_clean() validates the whole object, so the failure can sit on a field this write never
-    # touched. Name that field rather than report the raw dict, which reads as though the write
-    # needed it. Whether the write caused the failure is not knowable from the error keys alone:
+    # touched. Whether the write caused the failure is not knowable from the error keys alone:
     # a custom validator can add any key, so the wording states what failed, never when it broke.
-    elsewhere = [field for field in errors if field not in (written_field, NON_FIELD_ERRORS)]
-    if elsewhere and len(elsewhere) == len(errors):
-        return f"Cannot {action}: validation fails on {detail} Resolve that, then retry."
+    # The keys only choose the wording; the text comes from exception_text_for.
+    # nosemgrep: caught-error-text  # noqa: ERA001
+    keys = exc.error_dict if hasattr(exc, "error_dict") else ()
+    # nosemgrep: caught-error-text  # noqa: ERA001
+    elsewhere = [key for key in keys if key not in (written_field, NON_FIELD_ERRORS)]
+    if elsewhere and len(elsewhere) == len(keys):
+        return f"Cannot {action}: another field fails validation. {detail.rstrip('.')}. Resolve that, then retry."
     return f"Failed to {action}: {detail}"
 
 
@@ -228,7 +230,16 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             device.save()
         except (ValidationError, IntegrityError) as e:
             device.name = old_name
-            messages.error(request, _write_failure_message(e, f"update device name to '{resolved_name}'", "name"))
+            failure = _write_failure_message(
+                # The keys only choose the wording; the text comes from exception_text_for.
+                # nosemgrep: caught-error-text  # noqa: ERA001
+                e,
+                f"update device name to '{resolved_name}'",
+                "name",
+                Device,
+                request.user,
+            )
+            messages.error(request, failure)
             return _device_sync_redirect(request, pk, server_key)
 
         messages.success(request, f"Device name updated from '{old_name}' to '{resolved_name}'")
@@ -289,7 +300,10 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
             device.save()
         except (ValidationError, IntegrityError) as e:
             device.serial = old_serial
-            messages.error(request, _write_failure_message(e, f"update serial to '{serial}'", "serial"))
+            # The keys only choose the wording; the text comes from exception_text_for.
+            # nosemgrep: caught-error-text  # noqa: ERA001
+            failure = _write_failure_message(e, f"update serial to '{serial}'", "serial", Device, request.user)
+            messages.error(request, failure)
             return _device_sync_redirect(request, pk, server_key)
 
         if old_serial:
@@ -373,7 +387,16 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             device.save()
         except (ValidationError, IntegrityError) as e:
             device.device_type = old_device_type
-            messages.error(request, _write_failure_message(e, f"update device type to '{device_type}'", "device_type"))
+            failure = _write_failure_message(
+                # The keys only choose the wording; the text comes from exception_text_for.
+                # nosemgrep: caught-error-text  # noqa: ERA001
+                e,
+                f"update device type to '{device_type}'",
+                "device_type",
+                Device,
+                request.user,
+            )
+            messages.error(request, failure)
             return _device_sync_redirect(request, pk, server_key)
 
         messages.success(
@@ -455,7 +478,10 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
             device.save()
         except (ValidationError, IntegrityError) as e:
             device.platform = old_platform
-            messages.error(request, _write_failure_message(e, f"update platform to '{platform}'", "platform"))
+            # The keys only choose the wording; the text comes from exception_text_for.
+            # nosemgrep: caught-error-text  # noqa: ERA001
+            failure = _write_failure_message(e, f"update platform to '{platform}'", "platform", Device, request.user)
+            messages.error(request, failure)
             return _device_sync_redirect(request, pk, server_key)
 
         if old_platform:
@@ -574,16 +600,16 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                     platform_created = True
                 except ValidationError as e:
                     transaction.set_rollback(True)
-                    error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
                     logger.exception(
                         "ValidationError creating platform '%s' for device pk=%s: %s",
                         platform_name,
                         pk,
-                        error_msg,
+                        validation_error_detail(e),
                     )
                     messages.error(
                         request,
-                        f"Platform '{platform_name}' could not be created: {error_msg}",
+                        f"Platform '{platform_name}' could not be created: "
+                        f"{exception_text_for(e, Platform, request.user)}",
                     )
                     return self._sync_redirect(
                         request, pk, getattr(getattr(self, "_librenms_api", None), "server_key", None)
@@ -603,7 +629,8 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                         )
                         messages.error(
                             request,
-                            f"Platform '{platform_name}' could not be created: {e}",
+                            f"Platform '{platform_name}' could not be created: "
+                            f"{exception_text_for(e, Platform, request.user)}",
                         )
                         return self._sync_redirect(
                             request, pk, getattr(getattr(self, "_librenms_api", None), "server_key", None)
@@ -632,16 +659,17 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 device.full_clean()
             except ValidationError as e:
                 transaction.set_rollback(True)
-                error_msg = e.message_dict if hasattr(e, "message_dict") else str(e)
-                logger.exception(
-                    "ValidationError validating device pk=%s: %s",
-                    pk,
-                    error_msg,
+                logger.exception("ValidationError validating device pk=%s: %s", pk, validation_error_detail(e))
+                failure = _write_failure_message(
+                    # The keys only choose the wording; the text comes from exception_text_for.
+                    # nosemgrep: caught-error-text  # noqa: ERA001
+                    e,
+                    f"assign platform '{platform}' to device (pk={pk})",
+                    "platform",
+                    Device,
+                    request.user,
                 )
-                messages.error(
-                    request,
-                    _write_failure_message(e, f"assign platform '{platform}' to device (pk={pk})", "platform"),
-                )
+                messages.error(request, failure)
                 return self._sync_redirect(
                     request, pk, getattr(getattr(self, "_librenms_api", None), "server_key", None)
                 )
@@ -652,7 +680,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 logger.exception("IntegrityError saving device pk=%s after platform assignment", pk)
                 messages.error(
                     request,
-                    f"Error saving device (pk={pk}): {e}",
+                    f"Error saving device (pk={pk}): {exception_text_for(e, Device, request.user)}",
                 )
                 return self._sync_redirect(
                     request, pk, getattr(getattr(self, "_librenms_api", None), "server_key", None)
@@ -695,7 +723,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                             mapping.save()
                         mapping_created = True
                     except ValidationError as e:
-                        mapping_error = e.message_dict if hasattr(e, "message_dict") else str(e)
+                        mapping_error = exception_text_for(e, PlatformMapping, request.user)
                         logger.exception("Failed to create PlatformMapping '%s' -> '%s'", librenms_os, platform_name)
                     except IntegrityError as e:
                         # Only treat this as "already exists" if a row is actually present now AND
@@ -717,7 +745,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                                 f"'{existing.netbox_platform}', not '{platform}'."
                             )
                         else:
-                            mapping_error = str(e)
+                            mapping_error = exception_text_for(e, PlatformMapping, request.user)
                             logger.exception(
                                 "IntegrityError creating PlatformMapping '%s' -> '%s' with no existing row",
                                 librenms_os,
@@ -837,7 +865,10 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
                     member.save()
                 except (ValidationError, IntegrityError) as e:
                     member.serial = old_serial
-                    errors.append(_write_failure_message(e, f"set serial on {member.name}", "serial"))
+                    # The keys only choose the wording; the text comes from exception_text_for.
+                    # nosemgrep: caught-error-text  # noqa: ERA001
+                    failure = _write_failure_message(e, f"set serial on {member.name}", "serial", Device, request.user)
+                    errors.append(failure)
                     counter += 1
                     continue
 
@@ -846,7 +877,8 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
             except Device.DoesNotExist:
                 errors.append(f"Device with ID {member_id} not found")
             except Exception as exc:  # pragma: no cover - defensive guard
-                errors.append(f"Error assigning serial to member {member_id}: {str(exc)}")
+                detail = exception_text_for(exc, Device, request.user)
+                errors.append(f"Error assigning serial to member {member_id}: {detail}")
 
             counter += 1
 
@@ -952,6 +984,7 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                 legacy_url_configured and not configured_servers and server_key == "default"
             )
             if isinstance(cf, dict) and server_key in cf and not _is_protected:
+                obj_locked.snapshot()
                 cf = without_server_mapping(cf, server_key)
                 obj_locked.custom_field_data["librenms_id"] = cf
                 usable_count = sum(mapping.is_selectable for mapping in build_server_mappings(obj_locked))
@@ -962,19 +995,26 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                     obj_locked.clean_fields(
                         exclude={field.name for field in obj_locked._meta.fields if field.name != "custom_field_data"}
                     )
-                    obj_locked.save(update_fields=["custom_field_data"])
+                    obj_locked.save(update_fields=["custom_field_data", "last_updated"])
                 except ValidationError as exc:
                     transaction.set_rollback(True)
-                    error_msg = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
                     logger.exception(
-                        "Validation error removing LibreNMS mapping for server %r: %s", server_key, error_msg
+                        "Validation error removing LibreNMS mapping for server %r: %s",
+                        server_key,
+                        validation_error_detail(exc),
                     )
-                    messages.error(request, f"Validation error removing LibreNMS mapping: {error_msg}")
+                    messages.error(
+                        request,
+                        f"Validation error removing LibreNMS mapping: {exception_text_for(exc, model, request.user)}",
+                    )
                     return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
                 except Exception as exc:
                     transaction.set_rollback(True)
                     logger.exception("Unexpected error removing LibreNMS mapping for server %r", server_key)
-                    messages.error(request, f"Unexpected error removing LibreNMS mapping: {exc}")
+                    messages.error(
+                        request,
+                        f"Unexpected error removing LibreNMS mapping: {exception_text_for(exc, model, request.user)}",
+                    )
                     return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
                 messages.success(request, f"Removed LibreNMS mapping for server '{server_key}'.")
             else:
@@ -1030,16 +1070,24 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
                 messages.error(request, "The preferred server is not a usable mapping for this object.")
                 return self._redirect(object_type, pk, active_server_key, active_sync_tab)
 
+            owner.snapshot()
             owner.custom_field_data["librenms_id"] = with_preferred_server(raw_mapping, requested_key)
             try:
                 owner.clean_fields(
                     exclude={field.name for field in owner._meta.fields if field.name != "custom_field_data"}
                 )
-                owner.save(update_fields=["custom_field_data"])
+                owner.save(update_fields=["custom_field_data", "last_updated"])
             except ValidationError as exc:
                 transaction.set_rollback(True)
-                error = exc.message_dict if hasattr(exc, "message_dict") else str(exc)
-                messages.error(request, f"Validation error changing preferred server: {error}")
+                logger.warning(
+                    "Validation error saving the preferred LibreNMS server %r: %s",
+                    requested_key,
+                    validation_error_detail(exc),
+                )
+                messages.error(
+                    request,
+                    f"Validation error changing preferred server: {exception_text_for(exc, model, request.user)}",
+                )
                 return self._redirect(object_type, pk, active_server_key, active_sync_tab)
             except Exception:
                 transaction.set_rollback(True)
@@ -1201,12 +1249,23 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 locked.save()
             except ValidationError as exc:
                 transaction.set_rollback(True)
-                messages.error(request, _write_failure_message(exc, "save converted librenms_id", "custom_field_data"))
+                failure = _write_failure_message(
+                    # The keys only choose the wording; the text comes from exception_text_for.
+                    # nosemgrep: caught-error-text  # noqa: ERA001
+                    exc,
+                    "save converted librenms_id",
+                    "custom_field_data",
+                    model,
+                    request.user,
+                )
+                messages.error(request, failure)
                 return self._sync_url(object_type, pk)
             except Exception as exc:
                 transaction.set_rollback(True)
                 logger.exception("Failed saving converted librenms_id for %s/%s", object_type, pk)
-                messages.error(request, f"Failed to save converted librenms_id: {exc}")
+                messages.error(
+                    request, f"Failed to save converted librenms_id: {exception_text_for(exc, model, request.user)}"
+                )
                 return self._sync_url(object_type, pk)
 
         messages.success(

@@ -5,6 +5,7 @@ value it accepts reaches the column as-is.
 """
 
 import pytest
+from dcim.models import Interface
 
 from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface
@@ -42,6 +43,7 @@ class TestInterfaceMacContract:
             interface_name_field="ifName",
             created=False,
             rules=InterfaceRuleMatcher.load(),
+            fresh_read_queryset=Interface.objects.all(),
         )
         interface.refresh_from_db()
         return interface
@@ -118,6 +120,7 @@ class TestInterfaceMtuContract:
             interface_name_field="ifName",
             created=False,
             rules=InterfaceRuleMatcher.load(),
+            fresh_read_queryset=Interface.objects.all(),
         )
         # The contract is about what reaches the column, so read the row back rather than
         # asserting on the attribute the writer just assigned in memory.
@@ -152,6 +155,7 @@ class TestInterfaceAliasContract:
             interface_name_field="ifName",
             created=False,
             rules=InterfaceRuleMatcher.load(),
+            fresh_read_queryset=Interface.objects.all(),
         )
         # The contract is about what reaches the column, so read the row back rather than
         # asserting on the attribute the writer just assigned in memory.
@@ -174,48 +178,50 @@ class TestInterfaceAliasContract:
 class TestInterfaceNameGateModel:
     """The view's name gate must read the same column bound the writer enforces."""
 
-    def test_a_vm_row_is_gated_by_the_vminterface_column(self, monkeypatch):
+    @staticmethod
+    def _post_sync(client, settings, vm, port):
+        """Seed *port* for *vm* and post the sync of that one row through the real URL, as a superuser."""
+        from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_superuser
+        from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts
+
+        configure_default_librenms_server(settings)
+        client.force_login(make_superuser(f"{vm.name}-user"))
+        seed_ports(vm, [port])
+        response = post_interface_sync(client, vm, [port["port_id"]], htmx=False)
+        return message_texts(response.wsgi_request, "warning")
+
+    def test_a_vm_row_is_gated_by_the_vminterface_column(self, client, settings, monkeypatch):
         """A name the VMInterface column cannot hold is skipped, not handed to the writer."""
         from virtualization.models import VMInterface
 
         from netbox_librenms_plugin.tests.conftest import make_vm
-        from netbox_librenms_plugin.tests.view_test_helpers import make_view
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         # NetBox gives both models a 64-character name today. The writer already reads the
         # concrete model so the two cannot drift; shrink one to prove the gate reads it too.
         monkeypatch.setattr(VMInterface._meta.get_field("name"), "max_length", 8)
         vm = make_vm("vm-name-gate")
-        view = make_view(SyncInterfacesView)
-        view._skipped_conflicts = []
-        view._selected_port_ids = {8100}
-        view._auto_selected_port_ids = set()
 
-        view.sync_selected_interfaces(vm, [_port(ifName="E" * 20)], ["vlans"], "ifName")
+        warnings = self._post_sync(client, settings, vm, _port(ifName="E" * 20))
 
         assert not VMInterface.objects.filter(virtual_machine=vm).exists()
-        assert view._skipped_conflicts == [
-            "EEEEEEEEEEEEEEEEEEEE (interface name is longer than the 8 characters NetBox stores)"
+        assert warnings == [
+            "1 interface(s) skipped: EEEEEEEEEEEEEEEEEEEE "
+            "(interface name is longer than the 8 characters NetBox stores)."
         ]
 
-    def test_a_vm_name_that_fits_still_syncs(self):
+    def test_a_vm_name_that_fits_still_syncs(self, client, settings):
         """Positive control: the stricter model must not reject an ordinary name."""
         from virtualization.models import VMInterface
 
         from netbox_librenms_plugin.tests.conftest import make_vm
-        from netbox_librenms_plugin.tests.view_test_helpers import make_view
-        from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         vm = make_vm("vm-name-gate-ok")
-        view = make_view(SyncInterfacesView)
-        view._skipped_conflicts = []
-        view._selected_port_ids = {8100}
-        view._auto_selected_port_ids = set()
 
-        view.sync_selected_interfaces(vm, [_port(ifName="eth0")], ["vlans"], "ifName")
+        warnings = self._post_sync(client, settings, vm, _port(ifName="eth0"))
 
         assert VMInterface.objects.filter(virtual_machine=vm, name="eth0").exists()
-        assert view._skipped_conflicts == []
+        assert warnings == []
 
 
 @pytest.mark.django_db
@@ -247,6 +253,7 @@ class TestInterfaceStringLengthContract:
             interface_name_field="ifName",
             created=False,
             rules=InterfaceRuleMatcher.load(),
+            fresh_read_queryset=Interface.objects.all(),
         )
         interface.refresh_from_db()
         return interface
@@ -303,4 +310,5 @@ class TestInterfaceStringLengthContract:
                 interface_name_field="ifName",
                 created=False,
                 rules=InterfaceRuleMatcher.load(),
+                fresh_read_queryset=Interface.objects.all(),
             )

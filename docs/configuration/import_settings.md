@@ -78,7 +78,7 @@ Configure it under **LibreNMS → Settings → Plugin Settings**:
 - **Location Parse Pattern** — describes the structure of your location string
 - **Use regex** — treat the pattern as a raw regular expression instead of placeholders
 
-Leave the pattern blank to keep the original behaviour: the whole location string is matched against the site (and location) name.
+Leave the pattern blank to match the whole location string against the site (and location) name.
 
 ### Placeholder Mode (default)
 

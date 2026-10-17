@@ -29,6 +29,14 @@ from netbox_librenms_plugin.sync_cache import (
     render_sync_cache_miss,
     schedule_request_cache_mutation,
 )
+from netbox_librenms_plugin.transactions import (
+    FOLLOW_UP_FAILED_MESSAGE,
+    TRY_AGAIN_MESSAGE,
+    CommittedFollowUpError,
+    TransactionConflict,
+    classify_conflict,
+    run_transaction,
+)
 from netbox_librenms_plugin.utils import (
     AmbiguousLibreNMSIdError,
     LibreNMSPortBindingConflict,
@@ -47,6 +55,7 @@ from netbox_librenms_plugin.utils import (
     get_migrated_to_marker,
     is_list_of_dicts,
     PortDisclosure,
+    exception_text_for,
     render_cable_trace,
     resolve_interface_on_device,
     set_librenms_device_id,
@@ -279,8 +288,10 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 if not self.restricted_queryset(Cable, "add").filter(pk=cable.pk).exists():
                     raise PermissionDenied("You may not add this cable.")
             return True
-        except Exception as exc:  # pragma: no cover - protects UX
-            messages.error(request, f"Failed to create cable: {str(exc)}")
+        except Exception as exc:
+            if classify_conflict(exc):
+                raise
+            messages.error(request, f"Failed to create cable: {exception_text_for(exc, Cable, request.user)}")
             return False
 
     def _apply_cable_action(self, local_term, remote_term, link_data, display_name, force, port_records=None):
@@ -1068,12 +1079,18 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             endpoints.update((local_key, remote_key))
         return True
 
+    def _sync_row_attempt(self, interface, cached_links, force, port_records):
+        """Run one attempt of one row; read the tag again, since a rolled-back attempt drops a tag it created."""
+        self._cable_provenance_tag_resolved = False
+        return self.process_single_interface(interface, cached_links, force=force, port_records=port_records)
+
     def process_interface_sync(self, selected_interfaces, cached_links, force=False):
         """
         Process cable sync for all selected interfaces and return results.
 
-        Each interface is processed in its own atomic block so individual
-        failures roll back only that cable without affecting others.
+        Each interface is processed in its own transaction (``run_transaction``), so a failure
+        rolls back only that cable, and a lock conflict runs the row once more. A row whose
+        attempts all met a conflict is reported under ``busy``.
 
         Force-protected replacements submitted without ``force`` are bucketed under ``conflict``
         and stashed in full. The state includes the re-submit row identity and the doomed cable's
@@ -1093,6 +1110,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             "valid": [],
             "invalid": [],
             "failed": [],
+            "saved_follow_up_failed": [],
             "duplicate": [],
             "missing_remote": [],
             "rejected_selection": [],
@@ -1106,6 +1124,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             "unsupported": [],
             "patch_path": [],
             "blocked_by_rule": [],
+            "busy": [],
         }
         self._pending_conflicts = []
 
@@ -1113,10 +1132,9 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             try:
                 # Live LibreNMS reads happen here, before the row's transaction takes any lock.
                 port_records = self._prefetch_cable_port_records(interface, cached_links)
-                with transaction.atomic():
-                    result = self.process_single_interface(
-                        interface, cached_links, force=force, port_records=port_records
-                    )
+                result = run_transaction(
+                    functools.partial(self._sync_row_attempt, interface, cached_links, force, port_records)
+                )
                 results[result["status"]].append(result.get("interface", ""))
                 if result["status"] == "conflict":
                     # Carry the row's RESOLVED sync device so the force re-submit re-targets the
@@ -1124,6 +1142,13 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                     # (device_selection_<row_id>) would silently revert to the page device.
                     result["device_id"] = interface.get("device_id")
                     self._pending_conflicts.append(result)
+            except TransactionConflict:
+                # Nothing of the row was committed; the other rows are independent.
+                logger.warning("Cable sync row %s met a lock conflict on every attempt", interface.get("row_id", ""))
+                results["busy"].append(interface.get("row_id", ""))
+            except CommittedFollowUpError:
+                logger.exception("Follow-up work failed after saving cable row %s", interface.get("row_id", ""))
+                results["saved_follow_up_failed"].append(interface.get("row_id", ""))
             except PermissionDenied:
                 # A permission raised anywhere below (signals, custom validators) is a denial, not
                 # missing link data.
@@ -1204,7 +1229,12 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         ):
             results = self.process_interface_sync(selected_interfaces, cached_links, force=force)
             self.display_sync_results(request, results)
-            if results["valid"] or results.get("overwritten") or results.get("tagged"):
+            if (
+                results["valid"]
+                or results.get("overwritten")
+                or results.get("tagged")
+                or results.get("saved_follow_up_failed")
+            ):
                 schedule_request_cache_mutation(
                     request,
                     initial_device,
@@ -1239,10 +1269,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             HttpResponse: The partial render or full-page redirect response.
 
         """
-        # htmx always sends "HX-Request: true"; match the exact value (mirrors modules.py) so a
-        # non-htmx POST — or a test's mock request whose headers aren't a real dict — falls through
-        # to the redirect rather than the partial re-render.
-        if request.headers.get("HX-Request") != "true":
+        if not request.htmx:
             return redirect(redirect_url)
 
         # Delegate the table/partial machinery to the cable-table view. Imported locally to avoid
@@ -1295,6 +1322,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         ("missing_remote", "error", "Remote device or interface not found in NetBox for: {items}"),
         ("invalid", "error", "No LibreNMS link data found for interfaces: {items}"),
         ("failed", "error", "Failed to sync cables for interfaces: {items}"),
+        ("saved_follow_up_failed", "warning", FOLLOW_UP_FAILED_MESSAGE + " Interfaces: {items}"),
+        ("busy", "error", TRY_AGAIN_MESSAGE + " Not synced: {items}"),
         (
             "rejected_selection",
             "error",
@@ -1643,6 +1672,7 @@ class CableRemoteCreateView(SyncCablesView):
         if not Interface.objects.restrict(request.user, "add").filter(pk=interface.pk).exists():
             raise _RemoteCreateAborted(f"You may not add interfaces to {remote_device.name}.")
         # The row resolves by LibreNMS port id from now on, never by name luck.
+        interface.snapshot()
         set_librenms_device_id(interface, context["row"].get("remote_port_key"), context["server_key"])
-        interface.save(update_fields=["custom_field_data"])
+        interface.save(update_fields=["custom_field_data", "last_updated"])
         return interface

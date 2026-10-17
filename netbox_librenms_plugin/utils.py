@@ -8,10 +8,11 @@ from dataclasses import dataclass
 from typing import Optional
 
 import netaddr
+import psycopg
 from dcim.models import Device, Interface
 from django.core import signing
-from django.core.exceptions import ObjectDoesNotExist, ValidationError
-from django.db import IntegrityError
+from django.core.exceptions import FieldDoesNotExist, ObjectDoesNotExist, ValidationError
+from django.db import DatabaseError, IntegrityError
 from django.db.models import Count, Max, Q
 from django.http import HttpRequest
 from django.utils.functional import SimpleLazyObject
@@ -19,6 +20,7 @@ from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
 from netbox.config import get_config
 from netbox.plugins import get_plugin_config
+from utilities.exceptions import AbortRequest
 from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 
 from netbox_librenms_plugin.constants import (
@@ -43,6 +45,13 @@ from netbox_librenms_plugin.server_mappings import (
     is_server_key,
     iter_server_mapping_entries,
     require_server_key,
+)
+from netbox_librenms_plugin.transactions import (
+    TRY_AGAIN_MESSAGE,
+    TransactionConflict,
+    classify_conflict,
+    nearest_database_error,
+    recorded_conflict,
 )
 
 logger = logging.getLogger(__name__)
@@ -267,11 +276,30 @@ def acquire_advisory_transaction_lock(lock_identity: str, *, using: str | None =
 
 
 class LibreNMSPortBindingConflict(ValueError):
-    """A port cannot be claimed safely by this transaction."""
+    """Another NetBox interface holds the LibreNMS port, or more than one does."""
+
+
+class LibreNMSPortBindingBusy(TransactionConflict):
+    """Another open transaction holds the claim on this LibreNMS port; the claim does not wait."""
+
+    def __init__(self):
+        super().__init__("Another operation is binding this LibreNMS port. Refresh and try again.")
+
+
+def port_binding_lock_identity(port_id, server_key):
+    """Return the advisory lock identity of the claim on LibreNMS port *port_id* of *server_key*."""
+    return json.dumps(["librenms-port-binding", server_key, port_id], separators=(",", ":"))
 
 
 def claim_librenms_port_binding(port_id, server_key, *, using=None):
-    """Claim one cross-model port identity until commit, or refuse without waiting."""
+    """
+    Claim one cross-model port identity until commit, or refuse without waiting.
+
+    Raises:
+        LibreNMSPortBindingBusy: Another open transaction holds the claim. It is recorded for the
+            runner's attempt, so a handler that catches it cannot commit the attempt.
+
+    """
     from django.db import DEFAULT_DB_ALIAS, connections
 
     server_key = require_server_key(server_key)
@@ -281,12 +309,13 @@ def claim_librenms_port_binding(port_id, server_key, *, using=None):
     connection = connections[using or DEFAULT_DB_ALIAS]
     if not connection.in_atomic_block:
         raise RuntimeError("claim_librenms_port_binding() requires an open transaction")
-    identity = json.dumps(["librenms-port-binding", server_key, port_id], separators=(",", ":"))
     with connection.cursor() as cursor:
-        cursor.execute("SELECT pg_try_advisory_xact_lock(%s)", [advisory_lock_key(identity)])
+        cursor.execute(
+            "SELECT pg_try_advisory_xact_lock(%s)", [advisory_lock_key(port_binding_lock_identity(port_id, server_key))]
+        )
         acquired = cursor.fetchone()[0]
     if not acquired:
-        raise LibreNMSPortBindingConflict("Another operation is binding this LibreNMS port. Refresh and retry.")
+        raise recorded_conflict(LibreNMSPortBindingBusy())
 
 
 def is_list_of_dicts(value) -> bool:
@@ -1138,7 +1167,7 @@ def get_virtual_chassis_member(
         if members_by_position:
             return members_by_position.get(vc_position, fallback)
         return device.virtual_chassis.members.get(vc_position=vc_position)
-    except (re.error, ValueError, ObjectDoesNotExist):
+    except (ValueError, ObjectDoesNotExist):
         return fallback
 
 
@@ -2821,7 +2850,7 @@ def parse_librenms_location(location_string: str, pattern: str, is_regex: bool =
         else:
             compiled = re.compile(_placeholder_pattern_to_regex(pattern))
             match = compiled.match(location_string)
-    except re.error:
+    except REGEX_COMPILE_ERRORS:
         logger.warning("Invalid LibreNMS location parse pattern: %r", pattern)
         return result
 
@@ -3603,8 +3632,9 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
         if int_id <= 0:
             return None
         if auto_save:
+            obj.snapshot()
             obj.custom_field_data["librenms_id"] = int_id
-            obj.save(update_fields=["custom_field_data"])
+            obj.save(update_fields=["custom_field_data", "last_updated"])
         return int_id
     if isinstance(cf_value, dict):
         value = cf_value.get(server_key)
@@ -3617,9 +3647,10 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
                 return None
             # Normalise a string-stored id ("42" → 42) back to the DB.
             if auto_save and isinstance(inner, str):
+                obj.snapshot()
                 value["id"] = int_id
                 obj.custom_field_data["librenms_id"] = cf_value
-                obj.save(update_fields=["custom_field_data"])
+                obj.save(update_fields=["custom_field_data", "last_updated"])
             return int_id
         # Bare scalar entry ({"primary": 42} / {"primary": "42"}): coerce_librenms_id
         # rejects bools, non-positive, and non-numeric strings in one place.
@@ -3628,9 +3659,10 @@ def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool 
             return None
         # Normalise a string-stored id back to the DB so later queries use a plain int.
         if auto_save and isinstance(value, str):
+            obj.snapshot()
             cf_value[server_key] = int_id
             obj.custom_field_data["librenms_id"] = cf_value
-            obj.save(update_fields=["custom_field_data"])
+            obj.save(update_fields=["custom_field_data", "last_updated"])
         return int_id
     return None
 
@@ -4922,6 +4954,8 @@ def merge_librenms_links(winner, donor, server_key: str = "default") -> dict:  #
     return summary
 
 
+# This is the formatter that caught-error-text trusts in a log call.
+# nosemgrep: caught-error-text-shadow  # noqa: ERA001
 def validation_error_detail(exc: ValidationError) -> str:
     """
     Flatten a ValidationError into a single human-readable string for a JSON error body.
@@ -4939,6 +4973,92 @@ def validation_error_detail(exc: ValidationError) -> str:
     if hasattr(exc, "message_dict"):
         return "; ".join(f"{field}: {' '.join(str(m) for m in msgs)}" for field, msgs in exc.message_dict.items())
     return "; ".join(str(m) for m in exc.messages) if hasattr(exc, "messages") else str(exc)
+
+
+def is_active_superuser(user) -> bool:
+    """Return whether *user* is an authenticated, active superuser: the only viewer who may view every object."""
+    return bool(
+        getattr(user, "is_authenticated", False)
+        and getattr(user, "is_active", False)
+        and getattr(user, "is_superuser", False)
+    )
+
+
+def refused_model_field(model, key) -> str | None:
+    """Return the concrete *model* field that a ValidationError key names, or None for any other key."""
+    # A validator or a post_clean receiver can key an error by any text, such as an object's name.
+    try:
+        field = model._meta.get_field(key)
+    except FieldDoesNotExist:
+        return None
+    return field.name if field.concrete else None
+
+
+def hidden_refusal_text(model, fields) -> str:
+    """
+    Return the text that tells a viewer which *model* fields NetBox refuses, without NetBox's message.
+
+    Args:
+        model (type[Model]): The model that NetBox validated.
+        fields (list[str]): The concrete *model* fields that NetBox refuses (from ``refused_model_field``).
+
+    Returns:
+        str: For example "NetBox refuses the serial field (only a superuser sees the message)".
+
+    """
+    if not fields:
+        subject = f"the {model._meta.verbose_name}"
+    elif len(fields) == 1:
+        subject = f"the {fields[0]} field"
+    else:
+        subject = f"the {', '.join(fields[:-1])} and {fields[-1]} fields"
+    return f"NetBox refuses {subject} (only a superuser sees the message)"
+
+
+# The one text of a database error: PostgreSQL's own text can name rows and values outside the viewer's scope.
+DATABASE_ERROR_MESSAGE = "The database refused the operation. Refresh the data and try again."
+
+
+# This is the rule that caught-error-text trusts.
+# nosemgrep: caught-error-text-shadow  # noqa: ERA001
+def exception_text_for(exc: Exception, model, user) -> str:
+    """
+    Return the text of a caught *exc* that *user* may read.
+
+    NetBox's ``clean()`` messages can name related objects, and admin ``CUSTOM_VALIDATORS`` or
+    ``post_clean`` and ``pre_save`` receivers can add any text under any key. So only a superuser
+    gets the message of a ValidationError. Every other viewer gets the concrete *model* fields
+    that the error keys name, or the model. Identity conflicts and database errors use generic
+    text because their details can identify objects outside the viewer's scope. A database error
+    is a ``DatabaseError``, a psycopg ``Error``, or an ``AbortRequest`` that NetBox raised from one.
+    A lock conflict (``classify_conflict``) gets the "try again" text for every viewer.
+
+    Args:
+        exc (Exception): The caught error.
+        model (type[Model]): The model that NetBox validated.
+        user (User | None): The viewer.
+
+    Returns:
+        str: The "try again" text, safe identity or database error text, scoped validation text,
+            or the other exception's text.
+
+    """
+    if classify_conflict(exc):
+        return TRY_AGAIN_MESSAGE
+    if isinstance(exc, AmbiguousLibreNMSIdError):
+        return "Multiple records use this LibreNMS ID. Ask an administrator to correct the mappings."
+    if isinstance(exc, (DatabaseError, psycopg.Error)) or (
+        isinstance(exc, AbortRequest) and nearest_database_error(exc) is not None
+    ):
+        logger.warning("The database rejected %s: %s", model.__name__, exc)
+        return DATABASE_ERROR_MESSAGE
+    if not isinstance(exc, ValidationError):
+        return str(exc)
+    if is_active_superuser(user):
+        return validation_error_detail(exc)
+    keys = exc.error_dict if hasattr(exc, "error_dict") else ()
+    fields = [name for name in dict.fromkeys(refused_model_field(model, key) for key in keys) if name]
+    return hidden_refusal_text(model, fields)
 
 
 # The device-level IP foreign keys this plugin re-homes during OOB linking, merges, and the
@@ -5008,9 +5128,11 @@ def set_device_ip_fk(device, field, ip, *, save=True):
             raise ValueError(f"set_device_ip_fk: refusing to set primary_ip4 to non-IPv4 address {ip}")
         if field == "primary_ip6" and family != 6:
             raise ValueError(f"set_device_ip_fk: refusing to set primary_ip6 to non-IPv6 address {ip}")
+    if save:
+        device.snapshot()
     setattr(device, field, ip)
     if save:
-        device.save(update_fields=[field])
+        device.save(update_fields=[field, "last_updated"])
     return field
 
 
@@ -5601,7 +5723,7 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, prel
         for rule in rules_qs:
             try:
                 val = re.sub(rule.match_pattern, rule.replacement, val)
-            except (re.error, IndexError):
+            except (*REGEX_COMPILE_ERRORS, IndexError):
                 logger.error(
                     "Invalid regex in NormalizationRule pk=%s pattern=%r — skipping", rule.pk, rule.match_pattern
                 )

@@ -16,6 +16,7 @@ from copy import deepcopy
 import pytest
 from django.conf import settings
 from django.test import RequestFactory, override_settings
+from django_htmx.middleware import HtmxDetails
 
 import netbox_librenms_plugin.views as views_pkg
 from netbox_librenms_plugin.tests.conftest import make_device
@@ -68,6 +69,8 @@ def test_vlan_redirect_url_propagates_server_key():
     device = make_device("redir-vlan")
     view = object.__new__(SyncVLANsView)
     view._post_server_key = "prod"
+    view.request = RequestFactory().post("/")
+    view.request.htmx = HtmxDetails(view.request)
 
     resp = view._redirect("device", device.pk)
 

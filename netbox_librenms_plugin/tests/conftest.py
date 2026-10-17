@@ -660,6 +660,22 @@ def librenms_server(monkeypatch):
         yield server
 
 
+@pytest.fixture
+def flushed_events(monkeypatch):
+    """Record the model name and pk of each event that NetBox sends at the end of a request; NetBox still sends it."""
+    from netbox import context_managers
+
+    real_flush = context_managers.flush_events
+    flushed = []
+
+    def recording_flush(events):
+        flushed.extend((event["object_type"].model, event["object_id"]) for event in events)
+        return real_flush(events)
+
+    monkeypatch.setattr(context_managers, "flush_events", recording_flush)
+    return flushed
+
+
 def make_module_type(model, *, manufacturer=None):
     """Create a real ModuleType (on the shared TestMfr unless one is supplied)."""
     from dcim.models import ModuleType

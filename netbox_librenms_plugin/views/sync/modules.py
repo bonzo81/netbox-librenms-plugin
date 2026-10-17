@@ -14,6 +14,7 @@ from django.http import HttpResponse, QueryDict
 from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views import View
+from utilities.exceptions import AbortRequest
 
 from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.interface_diff import type_change_refusal
@@ -22,9 +23,10 @@ from netbox_librenms_plugin.sync_cache import (
     apply_request_cache_transition,
     schedule_request_cache_mutation,
 )
+from netbox_librenms_plugin.transactions import classify_conflict
 from netbox_librenms_plugin.utils import (
+    REGEX_COMPILE_ERRORS,
     AmbiguousLibreNMSIdError,
-    LibreNMSPortBindingConflict,
     claim_librenms_port_binding,
     acquire_advisory_transaction_lock,
     find_interface_by_librenms_port_id,
@@ -46,7 +48,7 @@ from netbox_librenms_plugin.utils import (
     prefetch_module_bay_types,
     rewrite_interface_name_for_vc_member,
     set_librenms_device_id,
-    validation_error_detail,
+    exception_text_for,
 )
 from netbox_librenms_plugin.utils import (
     coerce_positive_int as _coerce_positive_int,
@@ -73,11 +75,6 @@ NO_LIBRENMS_SERVER_MESSAGE = (
 # that can act on an inventory row rejects them. The marker itself is shared with the readers in
 # constants.py; only the wording of the refusal belongs to this module.
 OOB_INVENTORY_READ_ONLY_REASON = "OOB controller inventory is read-only"
-
-
-def _module_error_detail(error):
-    """Render validation messages as text and preserve database conflict details."""
-    return validation_error_detail(error) if isinstance(error, ValidationError) else str(error)
 
 
 def _modules_redirect_response(request, sync_url, server_key=None):
@@ -131,7 +128,7 @@ def _modules_action_response(request, page_device, server_key=None):
 
     """
     sync_url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": page_device.pk})
-    if request.headers.get("HX-Request") != "true":
+    if not request.htmx:
         return _modules_redirect_response(request, sync_url, server_key)
     # The action URL has no query, so the table's page and sort come from the page the post was sent from.
     render_request = copy.copy(request)
@@ -265,6 +262,30 @@ def _get_cached_inventory_for_device(sync_device, server_key, get_cache_key):
         return None
 
     return inventory
+
+
+def _module_write_failure(exc, model, user):
+    """
+    Return the text of a failed module write that a page may show *user*.
+
+    Args:
+        exc (AbortRequest | ValidationError | IntegrityError): The error of the write.
+        model (type[Model]): The model that NetBox validated.
+        user (User | None): The viewer.
+
+    Returns:
+        str: The duplicate interface name hint, else the text from ``exception_text_for``.
+
+    """
+    # It looks for a constraint name in the text; the page gets fixed text or exception_text_for.
+    # nosemgrep: caught-error-text  # noqa: ERA001
+    if isinstance(exc, IntegrityError) and "dcim_interface_unique_device_name" in str(exc):
+        return (
+            "duplicate interface name — this module type's interface template "
+            "uses the '{module}' token which resolves to the same name for all siblings. "
+            "An interface naming plugin with a rewrite rule for this module type can fix this."
+        )
+    return exception_text_for(exc, model, user)
 
 
 def _report_install_results(request, installed, skipped, failed):
@@ -575,8 +596,9 @@ def _adopt_existing_template_interfaces(device, module, interfaces):
     adopted_names = []
     with transaction.atomic():
         for interface in adoptable:
+            interface.snapshot()
             interface.module = module
-            interface.save(update_fields=["module"])
+            interface.save(update_fields=["module", "last_updated"])
             adopted_names.append(interface.name)
 
     return {
@@ -702,24 +724,32 @@ def _normalize_module_interface_names_for_vc_member(
                 if interface.pk not in deletable_interface_ids:
                     result["skipped"] += 1
                     continue
+                conflict.snapshot()
                 conflict.module = module
-                conflict.save(update_fields=["module"])
+                conflict.save(update_fields=["module", "last_updated"])
                 result["adopted"] += 1
                 try:
-                    interface.delete()
+                    with transaction.atomic():
+                        interface.delete()
                     result["removed"] += 1
-                except Exception:
+                except Exception as exc:
+                    if classify_conflict(exc):
+                        raise
                     result["skipped"] += 1
             else:
                 result["skipped"] += 1
             continue
 
+        interface.snapshot()
         interface.name = desired_name
         try:
-            interface.full_clean()
-            interface.save(update_fields=["name"])
+            with transaction.atomic():
+                interface.full_clean()
+                interface.save(update_fields=["name", "_name", "last_updated"])
             result["renamed"] += 1
-        except Exception:
+        except Exception as exc:
+            if classify_conflict(exc):
+                raise
             result["skipped"] += 1
 
     return result
@@ -743,6 +773,7 @@ def _format_vc_adjustment_summary(adjustments):
     return ", ".join(parts)
 
 
+# Its own savepoint: callers catch a non-conflict error and keep their transaction.
 @transaction.atomic
 def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces):  # noqa: C901
     """
@@ -762,6 +793,9 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
     Returns:
         dict | None: The binding outcome, or ``None`` when the item has no port ID.
 
+    Raises:
+        LibreNMSPortBindingBusy: Another open transaction holds the claim on the port.
+
     """
     from dcim.models import Interface
 
@@ -769,10 +803,7 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
     if not port_id:
         return None
 
-    try:
-        claim_librenms_port_binding(port_id, server_key)
-    except LibreNMSPortBindingConflict as conflict:
-        return {"status": "conflict", "reason": str(conflict)}
+    claim_librenms_port_binding(port_id, server_key)
     try:
         existing_owner = find_interface_by_librenms_port_id(port_id, server_key)
     except AmbiguousLibreNMSIdError:
@@ -830,7 +861,7 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
             "reason": f"no matching interface found for port_id {port_id}",
         }
 
-    update_fields = []
+    set_module = False
     if module_pk:
         candidate_module_id = getattr(candidate, "module_id", None)
         if candidate_module_id and candidate_module_id != module_pk:
@@ -838,9 +869,7 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
                 "status": "conflict",
                 "reason": (f"{candidate.name} already attached to module {candidate_module_id}; not reassigning"),
             }
-        if not candidate_module_id:
-            candidate.module_id = module_pk
-            update_fields.append("module")
+        set_module = not candidate_module_id
 
     current_port_id = _coerce_positive_int(get_librenms_device_id(candidate, server_key, auto_save=False))
     if current_port_id and current_port_id != port_id:
@@ -849,12 +878,19 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
             "reason": f"{candidate.name} already mapped to port_id {current_port_id}; not overwriting",
         }
 
-    if current_port_id != port_id:
+    bind_port = current_port_id != port_id
+    if set_module or bind_port:
+        candidate.snapshot()
+    update_fields = []
+    if set_module:
+        candidate.module_id = module_pk
+        update_fields.append("module")
+    if bind_port:
         set_librenms_device_id(candidate, port_id, server_key)
         update_fields.append("custom_field_data")
 
     if update_fields:
-        candidate.save(update_fields=sorted(set(update_fields)))
+        candidate.save(update_fields=[*update_fields, "last_updated"])
 
     return {"status": "bound", "interface": candidate.name, "port_id": port_id, "changed": bool(update_fields)}
 
@@ -912,6 +948,16 @@ def _should_attempt_bind_for_result(result):
     if result.get("status") == "skipped" and result.get("module_pk"):
         return result.get("reason") == "bay already occupied"
     return False
+
+
+def _record_install_result(result, installed, skipped, failed):
+    """Add one install result to the list of its status in the install summary."""
+    if result["status"] == "installed":
+        installed.append(result["name"])
+    elif result["status"] == "skipped":
+        skipped.append(f"{result['name']}: {result['reason']}")
+    else:
+        failed.append(f"{result['name']}: {result['reason']}")
 
 
 def _record_bind_outcome(bind_result, result, skipped):
@@ -1035,22 +1081,24 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     changeable_interfaces,
                     deletable_interfaces,
                 )
-
-            bind_result = None
-            if bind_item and server_key:
-                try:
-                    bind_result = _bind_interface_librenms_id(
-                        target_device,
-                        bind_item,
-                        module.pk,
-                        server_key,
-                        changeable_interfaces,
-                    )
-                except Exception:
-                    bind_result = {
-                        "status": "failed",
-                        "reason": "unexpected error while binding interface to installed module",
-                    }
+                # In the install's transaction: a lock conflict in the bind rolls back the install too.
+                bind_result = None
+                if bind_item and server_key:
+                    try:
+                        bind_result = _bind_interface_librenms_id(
+                            target_device,
+                            bind_item,
+                            module.pk,
+                            server_key,
+                            changeable_interfaces,
+                        )
+                    except Exception as exc:
+                        if classify_conflict(exc):
+                            raise
+                        bind_result = {
+                            "status": "failed",
+                            "reason": "unexpected error while binding interface to installed module",
+                        }
 
             messages.success(
                 request, f"Installed {module_type.model} in {locked_bay.name} (serial: {serial or 'N/A'})."
@@ -1083,8 +1131,13 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             pass
         except _ModuleComponentAdoptionUnavailable as exc:
             messages.error(request, f"A matching {exc.component_label} is not available for module adoption.")
-        except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Failed to install module: {_module_error_detail(e)}")
+        except (AbortRequest, ValidationError, IntegrityError) as e:
+            if classify_conflict(e):
+                raise
+            # It looks for a constraint name in the text; the page gets fixed text or exception_text_for.
+            # nosemgrep: caught-error-text  # noqa: ERA001
+            detail = _module_write_failure(e, Module, request.user)
+            messages.error(request, f"Failed to install module: {detail}")
 
         return _modules_action_response(request, page_device, server_key)
 
@@ -1133,7 +1186,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
     @transaction.atomic
     def _install_branch(self, request, page_device, server_key, parent_index):
         """Plan and write under the page lock, then commit before response rendering."""
-        from dcim.models import Device, Interface, ModuleBay, ModuleType
+        from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
 
         module_bays = self.restricted_queryset(ModuleBay)
         changeable_components = _restricted_module_component_querysets(self)
@@ -1271,14 +1324,10 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         changeable_interfaces=changeable_interfaces,
                         deletable_interfaces=deletable_interfaces,
                         holder_of=holder_of,
+                        user=request.user,
                     )
                     should_bind = _should_attempt_bind_for_result(result)
-                    if result["status"] == "installed":
-                        installed.append(result["name"])
-                    elif result["status"] == "skipped":
-                        skipped.append(f"{result['name']}: {result['reason']}")
-                    else:
-                        failed.append(f"{result['name']}: {result['reason']}")
+                    _record_install_result(result, installed, skipped, failed)
 
                     if should_bind:
                         bind_result = _bind_interface_librenms_id(
@@ -1289,8 +1338,13 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                             changeable_interfaces,
                         )
                         bound_any = _record_bind_outcome(bind_result, result, skipped) or bound_any
-        except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Branch install failed: {_module_error_detail(e)}")
+        except (AbortRequest, ValidationError, IntegrityError) as e:
+            if classify_conflict(e):
+                raise
+            # It looks for a constraint name in the text; the page gets fixed text or exception_text_for.
+            # nosemgrep: caught-error-text  # noqa: ERA001
+            detail = _module_write_failure(e, Module, request.user)
+            messages.error(request, f"Branch install failed: {detail}")
             return
 
         _report_install_results(request, installed, skipped, failed)
@@ -1474,6 +1528,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         norm_rules_serial=None,
         holder_of=None,
         type_bay_types=None,
+        user=None,
     ):
         """
         Try to install a single inventory item.
@@ -1498,6 +1553,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             norm_rules_serial (dict | None): The optional serial normalization rules.
             holder_of (dict | None): Mutable module ancestry reused during a bulk install.
             type_bay_types (dict | None): Preloaded module bay types per module type, for a bulk install.
+            user (User | None): The viewer of a failure reason; only a superuser gets NetBox's message.
 
         Returns:
             dict: The install status and its result details.
@@ -1607,15 +1663,13 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 "name": name,
                 "reason": f"a matching {exc.component_label} is not available for module adoption",
             }
-        except (ValidationError, IntegrityError) as e:
-            error_msg = _module_error_detail(e)
-            if "dcim_interface_unique_device_name" in error_msg:
-                error_msg = (
-                    "duplicate interface name — this module type's interface template "
-                    "uses the '{module}' token which resolves to the same name for all siblings. "
-                    "An interface naming plugin with a rewrite rule for this module type can fix this."
-                )
-            return {"status": "failed", "name": name, "reason": error_msg}
+        except (AbortRequest, ValidationError, IntegrityError) as e:
+            if classify_conflict(e):
+                raise
+            # It looks for a constraint name in the text; the page gets fixed text or exception_text_for.
+            # nosemgrep: caught-error-text  # noqa: ERA001
+            reason = _module_write_failure(e, Module, user)
+            return {"status": "failed", "name": name, "reason": reason}
 
         if holder_of is not None:
             holder_of[module.pk] = locked_bay.module_id
@@ -1909,10 +1963,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     compiled = rm._compiled_pattern
                     if compiled is None:
                         continue
-                    try:
-                        match = compiled.fullmatch(name)
-                    except re.error:
-                        continue
+                    match = compiled.fullmatch(name)
                     if not match:
                         continue
                     try:
@@ -2235,14 +2286,10 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         changeable_interfaces=changeable_interfaces,
                         deletable_interfaces=deletable_interfaces,
                         holder_of=holder_of,
+                        user=request.user,
                     )
                     should_bind = _should_attempt_bind_for_result(result)
-                    if result["status"] == "installed":
-                        installed.append(result["name"])
-                    elif result["status"] == "skipped":
-                        skipped.append(f"{result['name']}: {result['reason']}")
-                    else:
-                        failed.append(f"{result['name']}: {result['reason']}")
+                    _record_install_result(result, installed, skipped, failed)
 
                     if should_bind:
                         bind_result = _bind_interface_librenms_id(
@@ -2253,8 +2300,13 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             changeable_interfaces,
                         )
                         bound_any = _record_bind_outcome(bind_result, result, skipped) or bound_any
-        except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Install failed: {_module_error_detail(e)}")
+        except (AbortRequest, ValidationError, IntegrityError) as e:
+            if classify_conflict(e):
+                raise
+            # It looks for a constraint name in the text; the page gets fixed text or exception_text_for.
+            # nosemgrep: caught-error-text  # noqa: ERA001
+            detail = _module_write_failure(e, Module, request.user)
+            messages.error(request, f"Install failed: {detail}")
             return _modules_action_response(request, page_device, server_key)
 
         if invalid_selection_seen:
@@ -2335,9 +2387,10 @@ class UpdateModuleSerialView(
                     return _modules_action_response(request, page_device, server_key)
                 changed = module.serial != serial
                 if changed:
+                    module.snapshot()
                     module.serial = serial
                     module.full_clean()
-                    module.save(update_fields=["serial"])
+                    module.save(update_fields=["serial", "last_updated"])
             if changed:
                 messages.success(
                     request,
@@ -2347,8 +2400,13 @@ class UpdateModuleSerialView(
                     _schedule_module_cache_mutation(request, page_device, server_key)
             else:
                 messages.info(request, "The module serial already matches LibreNMS. No change was needed.")
-        except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Failed to update serial: {_module_error_detail(e)}")
+        except (AbortRequest, ValidationError, IntegrityError) as e:
+            if classify_conflict(e):
+                raise
+            # It looks for a constraint name in the text; the page gets fixed text or exception_text_for.
+            # nosemgrep: caught-error-text  # noqa: ERA001
+            detail = _module_write_failure(e, Module, request.user)
+            messages.error(request, f"Failed to update serial: {detail}")
 
         return _modules_action_response(request, page_device, server_key)
 
@@ -2400,76 +2458,85 @@ class UpdateModuleInterfaceView(
         module = self.restrict_object_or_404(Module, "view", pk=module_id, device=target_device)
 
         bind_result = None
-        # The missing-server guard above already returned, so a resolved primary is always bound.
-        try:
-            bind_result = _bind_interface_librenms_id(
-                target_device,
-                bind_item,
-                module.pk,
-                server_key,
-                changeable_interfaces,
-            )
-        except Exception:
-            logger.exception(
-                "Unexpected error binding interface to module (device %s, module %s)",
-                target_device.pk,
-                module.pk,
-            )
-            bind_result = {
-                "status": "failed",
-                "reason": "unexpected error while associating interface to installed module",
-            }
-        else:
-            # The port_id bind only associates the single LibreNMS-identified interface, but a
-            # module can also own template interfaces (e.g. breakout children like c2/1) that
-            # remain standalone and independently keep the row's "Update Interface" action on
-            # (see _count_adoptable_template_interfaces). Adopt those too when the bind found
-            # nothing to do (None) or succeeded (bound) — otherwise an already-bound interface
-            # makes the bind a no-op, the adoption is skipped, and the button never clears.
-            # A hard conflict/skip is left untouched so we don't mutate past an unresolved issue.
-            if bind_result is None or bind_result.get("status") == "bound":
-                try:
-                    adopt_result = _adopt_existing_template_interfaces(
-                        target_device,
-                        module,
-                        changeable_interfaces,
-                    )
-                except Exception:
-                    logger.exception(
-                        "Unexpected error adopting standalone template interfaces (device %s, module %s)",
-                        target_device.pk,
-                        module.pk,
-                    )
-                    # The adoption step is isolated so its failure can't clobber an
-                    # already-committed primary bind: that interface is bound regardless, and
-                    # reporting "failed" would make a retry look like a fresh conflict. Only the
-                    # bind-less path (nothing committed yet) downgrades to a hard failure.
-                    if bind_result is None:
-                        bind_result = {
-                            "status": "failed",
-                            "reason": "unexpected error while associating interface to installed module",
-                        }
-                    else:
-                        messages.warning(
-                            request,
-                            "Primary interface binding succeeded, but adopting standalone "
-                            "template interfaces failed; see server logs for details.",
+        adoption_failed = False
+        # One transaction: a lock conflict in the bind or the adoption rolls back both.
+        with transaction.atomic():
+            # The missing-server guard above already returned, so a resolved primary is always bound.
+            try:
+                bind_result = _bind_interface_librenms_id(
+                    target_device,
+                    bind_item,
+                    module.pk,
+                    server_key,
+                    changeable_interfaces,
+                )
+            except Exception as exc:
+                if classify_conflict(exc):
+                    raise
+                logger.exception(
+                    "Unexpected error binding interface to module (device %s, module %s)",
+                    target_device.pk,
+                    module.pk,
+                )
+                bind_result = {
+                    "status": "failed",
+                    "reason": "unexpected error while associating interface to installed module",
+                }
+            else:
+                # The port_id bind only associates the single LibreNMS-identified interface, but a
+                # module can also own template interfaces (e.g. breakout children like c2/1) that
+                # remain standalone and independently keep the row's "Update Interface" action on
+                # (see _count_adoptable_template_interfaces). Adopt those too when the bind found
+                # nothing to do (None) or succeeded (bound) — otherwise an already-bound interface
+                # makes the bind a no-op, the adoption is skipped, and the button never clears.
+                # A hard conflict/skip is left untouched so we don't mutate past an unresolved issue.
+                if bind_result is None or bind_result.get("status") == "bound":
+                    try:
+                        with transaction.atomic():
+                            adopt_result = _adopt_existing_template_interfaces(
+                                target_device,
+                                module,
+                                changeable_interfaces,
+                            )
+                    except Exception as exc:
+                        if classify_conflict(exc):
+                            raise
+                        logger.exception(
+                            "Unexpected error adopting standalone template interfaces (device %s, module %s)",
+                            target_device.pk,
+                            module.pk,
                         )
-                else:
-                    if bind_result is None:
-                        bind_result = adopt_result
-                    elif adopt_result.get("status") == "bound":
-                        bind_result = {
-                            "status": "bound",
-                            "interface": bind_result.get("interface"),
-                            # Keep the primary bind's port_id so the merged result still
-                            # carries the bound interface's LibreNMS identity, not just the
-                            # adoption tally.
-                            "port_id": bind_result.get("port_id"),
-                            "changed": bind_result.get("changed", False),
-                            "adopted_count": (bind_result.get("adopted_count") or 0)
-                            + (adopt_result.get("adopted_count") or 0),
-                        }
+                        # The adoption's savepoint keeps the primary bind: that interface is bound
+                        # regardless, and reporting "failed" would make a retry look like a fresh
+                        # conflict. Only the bind-less path downgrades to a hard failure.
+                        if bind_result is None:
+                            bind_result = {
+                                "status": "failed",
+                                "reason": "unexpected error while associating interface to installed module",
+                            }
+                        else:
+                            adoption_failed = True
+                    else:
+                        if bind_result is None:
+                            bind_result = adopt_result
+                        elif adopt_result.get("status") == "bound":
+                            bind_result = {
+                                "status": "bound",
+                                "interface": bind_result.get("interface"),
+                                # Keep the primary bind's port_id so the merged result still
+                                # carries the bound interface's LibreNMS identity, not just the
+                                # adoption tally.
+                                "port_id": bind_result.get("port_id"),
+                                "changed": bind_result.get("changed", False),
+                                "adopted_count": (bind_result.get("adopted_count") or 0)
+                                + (adopt_result.get("adopted_count") or 0),
+                            }
+        if adoption_failed:
+            messages.warning(
+                request,
+                "Primary interface binding succeeded, but adopting standalone "
+                "template interfaces failed; see server logs for details.",
+            )
 
         if bind_result is None:
             messages.error(request, "No LibreNMS interface identity is available for this row.")
@@ -2526,7 +2593,7 @@ def _apply_module_interface_type(interface, template_type, current_type, offered
         return "validation_failed", refusal
     interface.snapshot()
     interface.type = template_type
-    interface.save(update_fields=["type"])
+    interface.save(update_fields=["type", "last_updated"])
     return "updated", None
 
 
@@ -3113,21 +3180,23 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                     changeable_interfaces,
                     deletable_interfaces,
                 )
-
-            if server_key:
-                try:
-                    bind_result = _bind_interface_librenms_id(
-                        target_device,
-                        librenms_item,
-                        new_module.pk,
-                        server_key,
-                        changeable_interfaces,
-                    )
-                except Exception:
-                    bind_result = {
-                        "status": "failed",
-                        "reason": "unexpected error while binding interface to replaced module",
-                    }
+                # In the replace's transaction: a lock conflict in the bind rolls back the replace too.
+                if server_key:
+                    try:
+                        bind_result = _bind_interface_librenms_id(
+                            target_device,
+                            librenms_item,
+                            new_module.pk,
+                            server_key,
+                            changeable_interfaces,
+                        )
+                    except Exception as exc:
+                        if classify_conflict(exc):
+                            raise
+                        bind_result = {
+                            "status": "failed",
+                            "reason": "unexpected error while binding interface to replaced module",
+                        }
 
             if conflict_removed_msg:
                 messages.info(request, conflict_removed_msg)
@@ -3175,15 +3244,13 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 f"Serial '{exc.serial}' is assigned to a module you cannot remove. "
                 "Ask an administrator to resolve the conflict.",
             )
-        except (ValidationError, IntegrityError) as e:
-            error_msg = _module_error_detail(e)
-            if "dcim_interface_unique_device_name" in error_msg:
-                error_msg = (
-                    "duplicate interface name — this module type's interface template "
-                    "uses the '{module}' token which resolves to the same name for all siblings. "
-                    "An interface naming plugin with a rewrite rule for this module type can fix this."
-                )
-            messages.error(request, f"Replace failed: {error_msg}")
+        except (AbortRequest, ValidationError, IntegrityError) as e:
+            if classify_conflict(e):
+                raise
+            # It looks for a constraint name in the text; the page gets fixed text or exception_text_for.
+            # nosemgrep: caught-error-text  # noqa: ERA001
+            detail = _module_write_failure(e, Module, request.user)
+            messages.error(request, f"Replace failed: {detail}")
 
         return _modules_action_response(request, page_device, server_key)
 
@@ -3314,8 +3381,13 @@ class MoveModuleView(
             messages.success(request, moved_msg)
             if server_key:
                 _schedule_module_cache_mutation(request, page_device, server_key)
-        except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Move failed: {_module_error_detail(e)}")
+        except (AbortRequest, ValidationError, IntegrityError) as e:
+            if classify_conflict(e):
+                raise
+            # It looks for a constraint name in the text; the page gets fixed text or exception_text_for.
+            # nosemgrep: caught-error-text  # noqa: ERA001
+            detail = _module_write_failure(e, Module, request.user)
+            messages.error(request, f"Move failed: {detail}")
 
         return _modules_action_response(request, page_device, server_key)
 
@@ -3466,7 +3538,7 @@ class AddBayTemplateView(
         netbox_replacement = "".join(replacement_parts)
         try:
             compiled = re.compile(librenms_pattern)
-        except re.error:
+        except REGEX_COMPILE_ERRORS:
             return None
         if not compiled.fullmatch(librenms_name):
             return None
@@ -3517,7 +3589,7 @@ class AddBayTemplateView(
             try:
                 if re.compile(mapping.librenms_name).fullmatch(librenms_name):
                     return True
-            except re.error:
+            except REGEX_COMPILE_ERRORS:
                 continue
         return False
 
@@ -3603,7 +3675,10 @@ class AddBayTemplateView(
                     mapping.full_clean()
                     mapping.save()
             except (ValidationError, IntegrityError) as exc:
-                messages.error(request, f"Failed to add bay mapping: {_module_error_detail(exc)}")
+                # It looks for a constraint name in the text; the page gets fixed text or exception_text_for.
+                # nosemgrep: caught-error-text  # noqa: ERA001
+                detail = _module_write_failure(exc, ModuleBayMapping, request.user)
+                messages.error(request, f"Failed to add bay mapping: {detail}")
             else:
                 messages.success(request, f"Added bay mapping for '{librenms_name}' to '{name}'.")
                 if server_key:
@@ -3852,6 +3927,11 @@ class AddBayTemplateView(
             if server_key:
                 _schedule_module_cache_mutation(request, device, server_key)
         except (ValidationError, IntegrityError) as e:
-            messages.error(request, f"Failed to add bay template: {_module_error_detail(e)}")
+            if classify_conflict(e):
+                raise
+            # It looks for a constraint name in the text; the page gets fixed text or exception_text_for.
+            # nosemgrep: caught-error-text  # noqa: ERA001
+            detail = _module_write_failure(e, ModuleBayTemplate, request.user)
+            messages.error(request, f"Failed to add bay template: {detail}")
 
         return _modules_action_response(request, device, server_key)

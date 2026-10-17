@@ -353,8 +353,10 @@ class LibreNMSAPI:
 
             if response.status_code == 200:
                 data = response.json()
-                if data.get("status") == "ok" and data.get("system"):
-                    return data["system"][0] if data["system"] else None
+                if isinstance(data, dict) and data.get("status") == "ok":
+                    system = data.get("system")
+                    if isinstance(system, list) and system and isinstance(system[0], dict):
+                        return system[0]
 
             # Handle different HTTP status codes with user-friendly messages
             if response.status_code == 401:
@@ -398,8 +400,8 @@ class LibreNMSAPI:
                 "error": True,
                 "message": "Connection timeout - server may be slow or unreachable",
             }
-        except Exception as e:
-            return {"error": True, "message": f"Unexpected error: {str(e)}"}
+        except requests.exceptions.RequestException as e:
+            return {"error": True, "message": f"Unexpected error: {e}"}
 
     @classmethod
     def get_available_servers(cls):
@@ -632,8 +634,9 @@ class LibreNMSAPI:
                             f"LibreNMS ID {librenms_id} is already assigned to {object_label} '{conflict.name}'"
                         ),
                     )
+                locked_obj.snapshot()
                 set_librenms_device_id(locked_obj, librenms_id, self.server_key)
-                locked_obj.save(update_fields=["custom_field_data"])
+                locked_obj.save(update_fields=["custom_field_data", "last_updated"])
             # locked_obj is a second row read of the same object, so copying its whole field data
             # would discard every custom-field edit the caller has not saved yet.
             obj.custom_field_data["librenms_id"] = locked_obj.custom_field_data.get("librenms_id")
@@ -1020,11 +1023,13 @@ class LibreNMSAPI:
         else:
             import re as _re
 
+            from netbox_librenms_plugin.utils import REGEX_COMPILE_ERRORS
+
             compiled_patterns = []
             for pattern_str in lag_patterns.values():
                 try:
                     compiled_patterns.append(_re.compile(pattern_str))
-                except (_re.error, TypeError) as exc:
+                except (*REGEX_COMPILE_ERRORS, TypeError) as exc:
                     logger.warning("Skipping invalid LAG name pattern %r: %s", pattern_str, exc)
 
         if compiled_sap_patterns is None:
@@ -1047,11 +1052,13 @@ class LibreNMSAPI:
             else:
                 import re as _re
 
+                from netbox_librenms_plugin.utils import REGEX_COMPILE_ERRORS
+
                 compiled_bridge_patterns = []
                 for pattern_str in bridge_patterns.values():
                     try:
                         compiled_bridge_patterns.append(_re.compile(pattern_str))
-                    except (_re.error, TypeError) as exc:
+                    except (*REGEX_COMPILE_ERRORS, TypeError) as exc:
                         logger.warning("Skipping invalid bridge name pattern %r: %s", pattern_str, exc)
 
         def _matches_name_patterns(name, patterns) -> bool:

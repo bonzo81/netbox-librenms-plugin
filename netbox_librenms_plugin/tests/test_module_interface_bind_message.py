@@ -14,6 +14,7 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.contrib.messages.storage.fallback import FallbackStorage
 from django.test import RequestFactory
+from django_htmx.middleware import HtmxDetails
 
 from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
 
@@ -86,6 +87,7 @@ def _post(device, module, inventory_item):
     request.user = get_user_model().objects.create_superuser(username=f"mib-{device.pk}", email="", password="x")
     request.session = {}
     request._messages = FallbackStorage(request)
+    request.htmx = HtmxDetails(request)
     return request
 
 

@@ -10,7 +10,14 @@ Targets:
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_virtual_chassis_members, make_vm
+from netbox_librenms_plugin.tests.conftest import (
+    configure_default_librenms_server,
+    make_device,
+    make_interface,
+    make_virtual_chassis_members,
+    make_vm,
+)
+from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports
 from netbox_librenms_plugin.tests.view_test_helpers import (
     grant,
     make_request,
@@ -42,6 +49,14 @@ def _make_iv(request=None):
     v._post_server_key = "default"
     v.object = None
     return v
+
+
+def _post_sync(client, settings, user, owner, port, *, extra=None):
+    """Seed *port* for *owner* and post the sync of that one row through the real URL, as *user*."""
+    configure_default_librenms_server(settings)
+    client.force_login(user)
+    seed_ports(owner, [port])
+    return post_interface_sync(client, owner, [port["port_id"]], htmx=False, extra=extra)
 
 
 def _make_dv(request=None):
@@ -129,93 +144,31 @@ class TestSyncInterfacesGetObject:
 class TestSyncInterface:
     """Verify which real device or virtual chassis member receives each LibreNMS interface row."""
 
-    def _v(self, request=None):
-        v = _make_iv(request)
-        v._lookup_maps = {}
-        v._skipped_conflicts = []
-        return v
-
-    def test_device_no_vc_uses_obj(self):
-        from dcim.models import Interface
-
-        dev = make_device("sync-novc")
-        v = self._v()
-
-        v.sync_interface(dev, _record(ifName="eth0"), [], "ifName", "eth0")
-
-        assert Interface.objects.filter(device=dev, name="eth0").exists()
-
-    def test_device_vc_target_in_valid_ids(self):
-        """A posted sibling of the same chassis is honoured: the interface lands on the sibling."""
-        from dcim.models import Interface
-
-        _vc, (host, sibling) = make_virtual_chassis_members("sync-vc-ok")
-        req = make_request("post", {"device_selection_10": str(sibling.pk)})
-        v = self._v(req)
-
-        v.sync_interface(host, _record(ifName="eth0", port_id=10), [], "ifName", "eth0")
-
-        assert Interface.objects.filter(device=sibling, name="eth0").exists()
-        assert not Interface.objects.filter(device=host, name="eth0").exists()
-
-    def test_device_vc_target_not_in_valid_ids_is_skipped(self):
+    def test_device_vc_target_not_in_valid_ids_is_skipped(self, client, settings):
         """An explicit device outside the chassis is refused without a fallback write."""
         from dcim.models import Interface
 
+        from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
+
         _vc, (host, _sibling) = make_virtual_chassis_members("sync-vc-outsider")
         outsider = make_device("sync-vc-outsider-x")
-        req = make_request("post", {"device_selection_10": str(outsider.pk)})
-        v = self._v(req)
 
-        v.sync_interface(host, _record(ifName="eth0", port_id=10), [], "ifName", "eth0")
+        response = _post_sync(
+            client,
+            settings,
+            make_superuser("sync-vc-outsider-user"),
+            host,
+            _record(ifName="eth0", port_id=10),
+            extra={"device_selection_10": str(outsider.pk)},
+        )
 
         assert not Interface.objects.filter(device=host, name="eth0").exists()
         assert not Interface.objects.filter(device=outsider, name="eth0").exists()
-        assert v._skipped_conflicts == ["eth0 (selected target unavailable)"]
+        assert message_texts(response.wsgi_request, "warning") == [
+            "1 interface(s) skipped: eth0 (selected target unavailable)."
+        ]
 
-    def test_device_no_vc_wrong_selection_is_skipped(self):
-        from dcim.models import Interface
-
-        dev = make_device("sync-novc-self")
-        other = make_device("sync-novc-other")
-        req = make_request("post", {"device_selection_10": str(other.pk)})
-        v = self._v(req)
-
-        v.sync_interface(dev, _record(ifName="eth0", port_id=10), [], "ifName", "eth0")
-
-        assert not Interface.objects.filter(device=dev, name="eth0").exists()
-        assert not Interface.objects.filter(device=other, name="eth0").exists()
-        assert v._skipped_conflicts == ["eth0 (selected target unavailable)"]
-
-    def test_device_selection_does_not_exist_is_skipped(self):
-        from dcim.models import Device, Interface
-
-        dev = make_device("sync-gone")
-        absent_pk = missing_pk(Device)
-        req = make_request("post", {"device_selection_10": str(absent_pk)})
-        v = self._v(req)
-
-        v.sync_interface(dev, _record(ifName="eth0", port_id=10), [], "ifName", "eth0")
-
-        assert not Interface.objects.filter(device=dev, name="eth0").exists()
-        assert v._skipped_conflicts == ["eth0 (selected target unavailable)"]
-
-    def test_device_selection_outside_the_grant_is_skipped(self):
-        """The posted id is client-supplied, so a constrained grant must not reach the sibling."""
-        from dcim.models import Device, Interface
-
-        _vc, (host, sibling) = make_virtual_chassis_members("sync-vc-scoped")
-        user = make_user_with_perms("sync-scoped", [("view", Device)], constraints={"name": "sync-vc-scoped-m1"})
-        req = make_request("post", {"device_selection_10": str(sibling.pk)}, user=user)
-        v = self._v(req)
-
-        v.sync_interface(host, _record(ifName="eth0", port_id=10), [], "ifName", "eth0")
-
-        assert not Interface.objects.filter(device=host, name="eth0").exists()
-        assert not Interface.objects.filter(device=sibling, name="eth0").exists()
-        assert v._skipped_conflicts == ["eth0 (selected target unavailable)"]
-
-    def test_existing_interface_outside_the_change_grant_is_skipped(self):
+    def test_existing_interface_outside_the_change_grant_is_skipped(self, client, settings):
         """A natural-key match must not bypass the caller's constrained change grant."""
         from dcim.models import Device, Interface
 
@@ -227,14 +180,14 @@ class TestSyncInterface:
             [("view", Device), ("add", Interface)],
         )
         user = grant(user, "change", Interface, constraints={"pk": allowed.pk})
-        request = make_request("post", user=user)
-        view = self._v(request)
 
-        view.sync_interface(device, _record(ifName=hidden.name), [], "ifName", hidden.name)
+        response = _post_sync(client, settings, user, device, _record(ifName=hidden.name, port_id=1))
 
-        assert view._skipped_conflicts == ["eth0 (port already mapped elsewhere or ambiguous)"]
+        assert message_texts(response.wsgi_request, "warning") == [
+            "1 interface(s) skipped: eth0 (port already mapped elsewhere or ambiguous)."
+        ]
 
-    def test_existing_interface_with_an_unconstrained_change_grant_is_synced(self):
+    def test_existing_interface_with_an_unconstrained_change_grant_is_synced(self, client, settings):
         """The permission-scoped skip must disappear when the existing interface is changeable."""
         from dcim.models import Device, Interface
 
@@ -245,22 +198,11 @@ class TestSyncInterface:
             "sync-interface-change-control",
             [("view", Device), ("add", Interface), ("change", Interface)],
         )
-        request = make_request("post", user=user)
-        view = self._v(request)
 
-        view.sync_interface(device, _record(ifName=existing.name), [], "ifName", existing.name)
+        response = _post_sync(client, settings, user, device, _record(ifName=existing.name, port_id=1))
 
-        assert view._skipped_conflicts == []
-
-    def test_vm_uses_vminterface(self):
-        from virtualization.models import VMInterface
-
-        vm = make_vm("sync-vm")
-        v = self._v()
-
-        v.sync_interface(vm, _record(ifName="eth0"), [], "ifName", "eth0")
-
-        assert VMInterface.objects.filter(virtual_machine=vm, name="eth0").exists()
+        assert message_texts(response.wsgi_request, "warning") == []
+        assert message_texts(response.wsgi_request, "success") == ["Selected interfaces synced successfully."]
 
 
 # ===========================================================================
@@ -394,6 +336,20 @@ class TestDeleteNetBoxInterfacesPost:
         response = _post(_make_dv(req), req, object_type="device", object_id=dev.pk)
 
         assert response.status_code == 400
+
+    def test_non_integer_id_400_deletes_nothing(self):
+        """A malformed id is refused before the transaction; the valid id beside it stays."""
+        from dcim.models import Interface
+
+        dev = make_device("del-badid")
+        iface = make_interface(dev, "eth0")
+        req = make_request("post", {"interface_ids": [str(iface.pk), "abc"]})
+
+        response = _post(_make_dv(req), req, object_type="device", object_id=dev.pk)
+
+        assert response.status_code == 400
+        assert self._payload(response) == {"error": "Interface IDs must be integers"}
+        assert Interface.objects.filter(pk=iface.pk).exists()
 
     def test_device_successful_delete(self):
         from dcim.models import Interface

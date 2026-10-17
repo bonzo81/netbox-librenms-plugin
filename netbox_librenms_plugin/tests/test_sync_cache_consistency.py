@@ -11,6 +11,7 @@ from django.core.cache import cache
 from django.db import transaction
 from django.http import HttpResponse
 from django.test import RequestFactory, override_settings
+from django_htmx.middleware import HtmxDetails
 from django.urls import reverse
 from ipam.models import IPAddress, VLAN
 
@@ -211,6 +212,7 @@ def test_configured_cache_timeout_clamps_positive_fractions(settings):
 def test_one_response_preserves_both_cache_mutation_results():
     """A response event must retain revisions and cleanup failures from both owners."""
     request = RequestFactory().post("/sync", HTTP_HX_REQUEST="true")
+    request.htmx = HtmxDetails(request)
     donor = CacheMutationTransition(
         transition_id="donor-transition",
         removed_tabs={("primary", SyncTab.IP_ADDRESSES)},
@@ -1421,6 +1423,7 @@ def test_configured_unmapped_server_action_invalidates_mapped_snapshots_without_
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason=(
         "Two transitions for different servers in one request delete each other's source. "
         "No view reaches this today: ordinary views schedule once, and the migration views "
@@ -1448,6 +1451,7 @@ def test_request_transitions_for_different_servers_preserve_both_sources(setting
         _seed_snapshot("ports", device, server_key, payload)
     _seed_snapshot("ports", device, idle_server, {"snapshot": "idle-server"})
     request = RequestFactory().post("/sync")
+    request.htmx = HtmxDetails(request)
     request.user = make_superuser("cache-multi-server-request-transitions-user")
 
     with claim_sync_subjects(sync_subject_key(device)), transaction.atomic():
@@ -1486,6 +1490,7 @@ def test_a_response_built_inside_the_transaction_reports_the_committed_cleanup(s
     # the device is mapped to the active server, so seeding "ports" would clean nothing.
     _seed_snapshot("ip_addresses", device, server_key, {"snapshot": "pre-commit"})
     request = RequestFactory().post("/sync", HTTP_HX_REQUEST="true")
+    request.htmx = HtmxDetails(request)
     request.user = make_superuser("cache-deferred-response-user")
 
     with claim_sync_subjects(sync_subject_key(device)), transaction.atomic():

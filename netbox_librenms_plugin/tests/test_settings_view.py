@@ -8,6 +8,45 @@ from netbox_librenms_plugin.tests.conftest import cable_together, make_serial_de
 
 
 @pytest.mark.django_db
+def test_the_connection_test_hides_a_database_error(client):
+    """PostgreSQL's text can name rows and roles, so the connection answer shows the generic text."""
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import failing_statement
+    from netbox_librenms_plugin.utils import DATABASE_ERROR_MESSAGE
+
+    client.force_login(make_superuser("connection-db-error-user"))
+    # A blank key makes the client read the selected server from LibreNMSSettings.
+    settings_read = 'FROM "netbox_librenms_plugin_librenmssettings"'
+
+    with failing_statement(lambda sql, params: settings_read in sql, "42501") as failed:
+        response = client.post(reverse("plugins:netbox_librenms_plugin:test_connection"), {"selected_server": " "})
+
+    assert failed, "precondition: the client read LibreNMSSettings"
+    body = response.content.decode()
+    assert DATABASE_ERROR_MESSAGE in body
+    assert "SQLSTATE" not in body
+
+
+@pytest.mark.django_db
+def test_the_connection_test_reports_an_answer_that_is_not_json(client, settings, librenms_server):
+    """The client's own request error handler, not a broad one, reports a body that is not JSON."""
+    from copy import deepcopy
+
+    plugin_config = deepcopy(settings.PLUGINS_CONFIG)
+    plugin_config["netbox_librenms_plugin"]["servers"] = {
+        "default": {"librenms_url": librenms_server.url, "api_token": "test-token", "verify_ssl": False}
+    }
+    settings.PLUGINS_CONFIG = plugin_config
+    librenms_server.register_raw("/api/v0/system", "<html>maintenance</html>", method="GET")
+    client.force_login(make_superuser("connection-not-json-user"))
+
+    response = client.post(reverse("plugins:netbox_librenms_plugin:test_connection"), {"selected_server": "default"})
+
+    body = response.content.decode()
+    assert "Connection failed:" in body
+    assert "Unexpected error: Expecting value" in body
+
+
+@pytest.mark.django_db
 class TestCableSyncSettingsTab:
     """End-to-end through the real view: render, persist, and validate the cable-sync form."""
 
@@ -75,6 +114,38 @@ class TestCableSyncSettingsTab:
         assert renamed.color == "ff5722"
         cable.refresh_from_db()
         assert cable_has_librenms_tag(cable) is True
+
+    def test_renaming_provenance_tag_records_the_rename_with_its_before_state(self, client):
+        """The tag is saved with only some columns, so the save must also move last_updated."""
+        from core.models import ObjectChange
+        from django.contrib.contenttypes.models import ContentType
+        from extras.models import Tag
+
+        from netbox_librenms_plugin.utils import get_librenms_cable_tag
+
+        client.force_login(make_superuser())
+        settings, _ = LibreNMSSettings.objects.get_or_create()
+        tag = get_librenms_cable_tag(sync_settings=settings)
+        old_name, old_color, old_last_updated = tag.name, tag.color, tag.last_updated
+
+        client.post(
+            self._url(),
+            {
+                "form_type": "cable_sync_settings",
+                "cable_sync_tag": "logged-cables",
+                "cable_sync_tag_color": "ff5722",
+                "cable_sync_description": "Managed cable",
+            },
+        )
+
+        tag.refresh_from_db()
+        assert (tag.name, tag.color) == ("logged-cables", "ff5722")
+        assert tag.last_updated > old_last_updated
+        change = ObjectChange.objects.get(
+            changed_object_type=ContentType.objects.get_for_model(Tag), changed_object_id=tag.pk, action="update"
+        )
+        assert (change.prechange_data["name"], change.prechange_data["color"]) == (old_name, old_color)
+        assert (change.postchange_data["name"], change.postchange_data["color"]) == ("logged-cables", "ff5722")
 
     def test_tag_rename_requires_permission_for_the_existing_tag(self, client):
         """Plugin settings access must not authorize a global Tag mutation."""
@@ -176,6 +247,39 @@ class TestCableSyncSettingsTab:
         ) == settings_state
         assert (target.name, target.color) == target_state
         assert Tag.objects.count() == 1
+
+    def test_a_tag_insert_that_loses_a_race_shows_the_form_refusal(self, client):
+        """The refusal carries the database error as its cause; the page shows only the form's text."""
+        from extras.models import Tag
+
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import failing_statement
+
+        settings, _ = LibreNMSSettings.objects.get_or_create()
+        settings.cable_sync_tag = "gone-provenance"
+        settings.save(update_fields=["cable_sync_tag"])
+        Tag.objects.filter(name="gone-provenance").delete()
+        client.force_login(make_superuser("settings-tag-race-user"))
+        tag_insert = 'INSERT INTO "extras_tag"'
+
+        with failing_statement(lambda sql, params: tag_insert in sql, "23505") as failed:
+            response = client.post(
+                self._url(),
+                {
+                    "form_type": "cable_sync_settings",
+                    "cable_sync_tag": "raced-provenance",
+                    "cable_sync_tag_color": "ff5722",
+                    "cable_sync_description": "Managed cable",
+                },
+            )
+
+        assert failed, "precondition: the form inserted the provenance tag"
+        assert response.status_code == 200
+        assert list(response.context["cable_sync_form"]["cable_sync_tag"].errors) == [
+            "A different tag already uses this name."
+        ]
+        assert "SQLSTATE" not in response.content.decode()
+        settings.refresh_from_db()
+        assert settings.cable_sync_tag == "gone-provenance"
 
     def test_a_tag_that_claims_the_name_after_clean_is_not_adopted(self):
         """clean() runs before save() re-locks, so save() must re-check the collision itself."""

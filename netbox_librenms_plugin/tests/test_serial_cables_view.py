@@ -18,8 +18,18 @@ from netbox_librenms_plugin.tests.conftest import (
     cable_together,
     configured_server_key,
     make_serial_device,
+    make_superuser,
     persist_test_server_mapping,
+    transactional_db_with_all_apps,
 )
+from netbox_librenms_plugin.tests.lock_conflict_helpers import (
+    failing_statement,
+    lock_row,
+    lock_timeout,
+    second_connection,
+)
+from netbox_librenms_plugin.tests.view_test_helpers import messages_on
+from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
 
 
 # ---------------------------------------------------------------------------
@@ -1335,6 +1345,164 @@ class TestSerialSyncSurvivesHostLinks404:
 
 
 # ---------------------------------------------------------------------------
+# A lock conflict on a cable row: the row is retried, then reported as busy
+# ---------------------------------------------------------------------------
+class TestCableSyncLockConflicts:
+    """
+    Each cable row is its own retried transaction: a lock conflict never ends as a failed row.
+
+    The row conflicts are real: a second connection holds the console port row that the row locks.
+    A conflict inside the cable create is injected at the database layer, because the cable rows
+    it writes exist only in the row's own transaction.
+    """
+
+    @staticmethod
+    def _serial_row(tag):
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        acs, (csp,), _ = make_serial_device(f"acs-{tag}", csp_names=["ttyS3"])
+        _router, _, (cp,) = make_serial_device(f"router-{tag}", cp_names=["console"])
+        server_key = configured_server_key()
+        link = {
+            "local_port": "ttyS3",
+            "local_port_id": f"serial:{csp.pk}-s",
+            "_source": "serial",
+            "device_id": acs.id,
+            "remote_device": f"router-{tag}",
+            "is_configured": True,
+            "sensor_id": 1,
+            "sensor_index_int": 3,
+        }
+        cache.set(object.__new__(SyncCablesView).get_cache_key(acs, "links", server_key), {"links": [link]}, 300)
+        return acs, csp, cp, link["local_port_id"], server_key
+
+    @staticmethod
+    def _post(client, acs, csp, cp, row_id, server_key):
+        from django.urls import reverse
+
+        client.force_login(make_superuser("cable-conflict-user"))
+        return client.post(
+            reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[acs.pk]),
+            data={
+                "select": row_id,
+                f"expected_local_id_{row_id}": csp.pk,
+                f"expected_local_device_id_{row_id}": acs.pk,
+                f"expected_remote_id_{row_id}": cp.pk,
+                f"expected_remote_device_id_{row_id}": cp.device_id,
+                "server_key": server_key,
+            },
+        )
+
+    @pytest.fixture
+    def attempts(self, monkeypatch):
+        """Count row attempts; ``before_retry`` runs when the second attempt starts."""
+        from types import SimpleNamespace
+
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        real_attempt = SyncCablesView.process_single_interface
+        state = SimpleNamespace(count=0, before_retry=None)
+
+        def counting_attempt(self, *args, **kwargs):
+            state.count += 1
+            if state.count == 2 and state.before_retry is not None:
+                state.before_retry()
+            return real_attempt(self, *args, **kwargs)
+
+        monkeypatch.setattr(SyncCablesView, "process_single_interface", counting_attempt)
+        return state
+
+    @transactional_db_with_all_apps()
+    def test_a_lock_conflict_on_a_row_is_retried_and_the_cable_is_created(self, client, attempts):
+        from dcim.models import ConsolePort
+
+        acs, csp, cp, row_id, server_key = self._serial_row("conflict-retry")
+
+        with second_connection() as other:
+            lock_row(other, ConsolePort, cp.pk)
+            attempts.before_retry = other.rollback
+            with lock_timeout(200):
+                response = self._post(client, acs, csp, cp, row_id, server_key)
+
+        csp.refresh_from_db()
+        assert attempts.count == 2
+        assert csp.cable_id is not None
+        assert [level for level, _text in messages_on(response.wsgi_request)] == ["success"]
+
+    @transactional_db_with_all_apps()
+    def test_a_row_that_conflicts_on_every_attempt_is_reported_as_busy_not_failed(self, client, attempts):
+        from dcim.models import ConsolePort
+
+        acs, csp, cp, row_id, server_key = self._serial_row("conflict-busy")
+
+        with second_connection() as other:
+            lock_row(other, ConsolePort, cp.pk)
+            with lock_timeout(200):
+                response = self._post(client, acs, csp, cp, row_id, server_key)
+
+        csp.refresh_from_db()
+        assert attempts.count == 2
+        assert csp.cable_id is None
+        assert messages_on(response.wsgi_request) == [("error", f"{TRY_AGAIN_MESSAGE} Not synced: {row_id}")]
+
+    @transactional_db_with_all_apps()
+    def test_a_lock_conflict_inside_the_cable_create_is_retried(self, client, attempts):
+        acs, csp, cp, row_id, server_key = self._serial_row("create-conflict")
+
+        with failing_statement(lambda sql, params: sql.startswith('INSERT INTO "dcim_cable"'), "40P01") as failed:
+            response = self._post(client, acs, csp, cp, row_id, server_key)
+
+        csp.refresh_from_db()
+        assert failed, "precondition: the cable insert ran"
+        assert attempts.count == 2
+        assert csp.cable_id is not None
+        assert [level for level, _text in messages_on(response.wsgi_request)] == ["success"]
+
+    @transactional_db_with_all_apps()
+    @pytest.mark.parametrize("sqlstate", ["23505", "22001", "57014"], ids=["integrity", "data", "operational"])
+    def test_another_database_error_in_the_cable_create_shows_only_the_generic_text(self, client, attempts, sqlstate):
+        """PostgreSQL's text can name rows and values, so no database error reaches the page as raw text."""
+        from netbox_librenms_plugin.utils import DATABASE_ERROR_MESSAGE
+
+        acs, csp, cp, row_id, server_key = self._serial_row(f"create-db-error-{sqlstate}")
+
+        with failing_statement(lambda sql, params: sql.startswith('INSERT INTO "dcim_cable"'), sqlstate) as failed:
+            response = self._post(client, acs, csp, cp, row_id, server_key)
+
+        csp.refresh_from_db()
+        assert failed, "precondition: the cable insert ran"
+        assert attempts.count == 1
+        assert csp.cable_id is None
+        errors = [text for level, text in messages_on(response.wsgi_request) if level == "error"]
+        assert f"Failed to create cable: {DATABASE_ERROR_MESSAGE}" in errors
+        assert not any("SQLSTATE" in text for text in errors)
+
+    @transactional_db_with_all_apps()
+    def test_the_retry_creates_the_tag_again_when_the_first_attempt_created_it(self, client, attempts):
+        """The conflicting attempt created the provenance tag and rolled it back; the retry must not reuse it."""
+        from extras.models import Tag
+
+        from netbox_librenms_plugin.utils import get_cable_sync_settings
+
+        acs, csp, cp, row_id, server_key = self._serial_row("tag-retry")
+        Tag.objects.filter(name=get_cable_sync_settings().cable_sync_tag).delete()
+
+        # The tag's link to the new cable is written after the tag.
+        with failing_statement(
+            lambda sql, params: sql.startswith('INSERT INTO "extras_taggeditem"'), "40P01"
+        ) as failed:
+            response = self._post(client, acs, csp, cp, row_id, server_key)
+
+        csp.refresh_from_db()
+        assert failed, "precondition: the tag link of the new cable was written"
+        assert attempts.count == 2
+        assert csp.cable.tags.filter(name=get_cable_sync_settings().cable_sync_tag).exists()
+        assert [level for level, _text in messages_on(response.wsgi_request)] == ["success"]
+
+
+# ---------------------------------------------------------------------------
 # HTMX: making a cable swaps the table partial in place (no full-page reload)
 # ---------------------------------------------------------------------------
 @pytest.mark.django_db
@@ -1856,7 +2024,7 @@ class TestSerialCableReadScope:
         from django.urls import reverse
 
         from netbox_librenms_plugin.models import LibreNMSSettings
-        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface, map_device_to_librenms
         from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
@@ -1897,7 +2065,8 @@ class TestSerialCableReadScope:
             {"pk__in": [local_interface.pk, visible_interface.pk]},
         )
         client.force_login(user)
-        persist_test_server_mapping(local, server_key)
+        # Fixed ids, never the device pk: a local pk of 42 made the neighbour's id 42 ambiguous.
+        map_device_to_librenms(local, 41, server_key=server_key)
 
         response = client.get(
             reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[local.pk]),

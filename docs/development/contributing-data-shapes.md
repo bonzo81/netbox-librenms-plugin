@@ -136,5 +136,5 @@ patterns are excluded. RE2 treats `\d` as ASCII digits and `$` as the end of the
 text, including when it ends in a newline.
 
 Use at most 100 patterns per map and 200 characters per pattern. Each compiled
-program has a 1 MiB RE2 memory budget. Malformed Unicode patterns are excluded;
-malformed Unicode name strings are rejected by the engine.
+program has a 1 MiB RE2 memory budget. Malformed Unicode patterns are excluded.
+A name with malformed Unicode (for example, a lone surrogate) never matches a pattern.

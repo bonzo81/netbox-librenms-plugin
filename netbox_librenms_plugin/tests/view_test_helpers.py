@@ -85,16 +85,29 @@ def plugin_perms():
 
 
 def make_request(method="post", data=None, *, user=None, path="/", **factory_kwargs):
-    """Build a real Django request with a user, session, and working message storage."""
+    """Build a real Django request with a user, session, message storage and django-htmx's ``request.htmx``."""
     from django.contrib.messages.storage.fallback import FallbackStorage
     from django.contrib.sessions.backends.db import SessionStore
     from django.test import RequestFactory
+    from django_htmx.middleware import HtmxDetails
 
     request = getattr(RequestFactory(), method)(path, data if data is not None else {}, **factory_kwargs)
     request.user = user if user is not None else make_superuser()
     request.session = SessionStore()
     request._messages = FallbackStorage(request)
+    request.htmx = HtmxDetails(request)
     return request
+
+
+def queued_request(user):
+    """Return the ``copy_safe_request()`` copy that the import view queues with a background job."""
+    from uuid import uuid4
+
+    from utilities.request import copy_safe_request
+
+    request = make_request(user=user)
+    request.id = uuid4()
+    return copy_safe_request(request)
 
 
 def module_row_binding(target_device, action, row, *, action_target=None, server_key="default"):

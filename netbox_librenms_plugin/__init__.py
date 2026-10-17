@@ -1,3 +1,5 @@
+import logging
+
 from django.core.exceptions import ImproperlyConfigured
 from netbox.plugins import PluginConfig
 
@@ -5,6 +7,8 @@ from netbox_librenms_plugin.constants import DEFAULT_INTERFACE_NAME_FIELD
 
 __author__ = "Andy Norwood"
 __version__ = "0.4.8"
+
+logger = logging.getLogger(__name__)
 
 
 class LibreNMSSyncConfig(PluginConfig):
@@ -16,6 +20,7 @@ class LibreNMSSyncConfig(PluginConfig):
     base_url = "librenms_plugin"
     min_version = "4.4.0"
     required_settings = []  # Custom validation in ready() method
+    middleware = ["netbox_librenms_plugin.middleware.LockConflictMiddleware"]
     default_settings = {
         "enable_caching": True,
         "verify_ssl": True,
@@ -60,6 +65,32 @@ class LibreNMSSyncConfig(PluginConfig):
         from netbox_librenms_plugin import cache_signals
 
         cache_signals.connect()
+
+        # The late write of an interface row locks the row and checks its version just before the UPDATE.
+        from dcim.models import Interface
+        from django.db.models.signals import m2m_changed, post_save, pre_save
+        from virtualization.models import VMInterface
+
+        from netbox_librenms_plugin.interface_sync import record_interface_save, record_tagged_vlan_change
+        from netbox_librenms_plugin.transactions import lock_row_at_version
+
+        for model in (Interface, VMInterface):
+            pre_save.connect(
+                lock_row_at_version,
+                sender=model,
+                dispatch_uid=f"netbox_librenms_plugin_row_version_{model._meta.label_lower}",
+            )
+            # The interface sync checks the scope of every row that it wrote, from the writes themselves.
+            post_save.connect(
+                record_interface_save,
+                sender=model,
+                dispatch_uid=f"netbox_librenms_plugin_written_row_{model._meta.label_lower}",
+            )
+            m2m_changed.connect(
+                record_tagged_vlan_change,
+                sender=model.tagged_vlans.through,
+                dispatch_uid=f"netbox_librenms_plugin_written_tagged_vlans_{model._meta.label_lower}",
+            )
 
     def _validate_multi_server_config(self, servers_config):
         """Validate multi-server configuration."""
@@ -114,8 +145,6 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
     if db_alias in executed_aliases:
         return
 
-    import logging
-
     try:
         from django.contrib.contenttypes.models import ContentType
         from extras.models import CustomField
@@ -137,10 +166,8 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
         # dict format {"server_key": device_id} is accepted by the UI/API.
         if not created and cf.type == "integer":
             cf.type = "json"
-            cf.save(using=db_alias, update_fields=["type"])
-            logging.getLogger("netbox_librenms_plugin").info(
-                "Migrated 'librenms_id' custom field type from integer to json"
-            )
+            cf.save(using=db_alias, update_fields=["type", "last_updated"])
+            logger.info("Migrated 'librenms_id' custom field type from integer to json")
 
         # Ensure the field is assigned to the required object types
         from dcim.models import Device, Interface
@@ -159,9 +186,7 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
                 cf.object_types.add(ct)
 
         if created:
-            logging.getLogger("netbox_librenms_plugin").info(
-                "Auto-created 'librenms_id' custom field for Device, VirtualMachine, Interface, VMInterface"
-            )
+            logger.info("Auto-created 'librenms_id' custom field for Device, VirtualMachine, Interface, VMInterface")
 
         # Mark this alias as executed after successful completion to allow retry on failure.
         executed_aliases.add(db_alias)
@@ -169,7 +194,7 @@ def _ensure_librenms_id_custom_field(sender, **kwargs):
     except Exception as e:
         # Don't break startup if custom field creation fails (e.g., during initial migration),
         # but log the error so it's not silently swallowed.
-        logging.getLogger("netbox_librenms_plugin").exception("Failed to auto-create 'librenms_id' custom field: %s", e)
+        logger.exception("Failed to auto-create 'librenms_id' custom field: %s", e)
 
 
 config = LibreNMSSyncConfig
