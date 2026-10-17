@@ -74,11 +74,11 @@ ALLOWED = [
     ("import_utils/device_operations.py", "import_single_device", "Exception", _OWN_TRANSACTION),
     ("import_utils/vm_operations.py", "bulk_import_vms", "Exception", _OWN_TRANSACTION),
     (
-        "views/sync/device_fields.py",
-        "_report_os_mapping",
+        "platform_versions.py",
+        "map_os_platform",
         "DatabaseError, ValidationError",
-        "The platform assignment committed before it; a conflict on the optional mapping is reported as "
-        "a mapping not created, through exception_text_for, not as a try-again for committed work.",
+        "The platform work committed before it; a conflict on the optional mapping is reported as a "
+        "mapping not created, through exception_text_for, not as a try-again for committed work.",
     ),
     *(
         (path, function, caught, _NOT_LTREE)
