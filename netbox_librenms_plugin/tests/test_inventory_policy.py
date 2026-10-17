@@ -214,7 +214,7 @@ def test_a_rule_that_does_not_work_refuses_the_load(chassis, model, fields, fiel
         )
     _update(getattr(models, model), rule.pk, **fields)
 
-    with pytest.raises(models.InventoryRuleFilterError) as excinfo:
+    with pytest.raises(models.RuleConfigurationError) as excinfo:
         load_inventory_policy(page.pk)
 
     assert (excinfo.value.rule_pk, excinfo.value.field, excinfo.value.rule_url) == (
