@@ -1550,11 +1550,41 @@ class TestImportSingleDevice:
 
         assert result["success"] is True
         assert result["device"].platform == os_platform
+        # Saved text names no platform.
         assert result["warnings"] == [
-            "Imported device 5612 with OS platform 'import-denied-os': "
-            "You do not have permission to add platform 'import-denied-os 7.2.2'."
+            "Imported device 5612 with OS platform a platform you cannot view: You do not have permission to "
+            "add platforms, so a new version platform for version '7.2.2' cannot be created."
         ]
         assert not Platform.objects.filter(parent=os_platform).exists()
+
+    def test_the_import_warning_names_the_platforms_to_a_reader_who_may_view_them(self, librenms_api):
+        from dcim.models import Device, DeviceRole, DeviceType, Platform, Site
+
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        self._track_versions()
+        site, device_type, role = self._infrastructure("tracked-reader")
+        Platform.objects.create(name="import-reader-os", slug="import-reader-os")
+        actor = make_user_with_perms(
+            "import-reader-no-add",
+            [("add", Device), ("change", Device), ("view", Site), ("view", DeviceType), ("view", DeviceRole)],
+        )
+
+        result = import_single_device(
+            5613,
+            SERVER_KEY,
+            _validation(site=site, device_type=device_type, role=role, resolved_name="tracked-reader-import"),
+            libre_device=_device_payload(5613, os="import-reader-os", version="7.2.3"),
+            user=actor,
+            text_viewer=make_superuser("import-reader-su"),
+        )
+
+        assert result["warnings"] == [
+            "Imported device 5613 with OS platform 'import-reader-os': You do not have permission to add "
+            "platforms, so 'import-reader-os 7.2.3' cannot be created."
+        ]
 
     def test_manual_rack_outside_the_user_view_scope_is_rejected(self, librenms_api):
         """The persistence boundary must reject a forged hidden rack ID."""

@@ -21,6 +21,7 @@ from netbox_librenms_plugin.transactions import classify_conflict, update_existi
 
 _ADD_PLATFORM = "dcim.add_platform"
 _SLUG_MAX_LENGTH = 100
+HIDDEN_PLATFORM = "a platform you cannot view"
 
 
 class PlatformState(StrEnum):
@@ -46,6 +47,8 @@ class PlatformReason(StrEnum):
     ADD_PLATFORM_DENIED = "add_platform_denied"
     PLATFORM_INVALID = "platform_invalid"
     SUBJECT_UNAVAILABLE = "subject_unavailable"
+    VERSION_CHANGED = "version_changed"
+    OS_PLATFORM_RESOLVED = "os_platform_resolved"
 
 
 class PlatformOperation(StrEnum):
@@ -62,6 +65,7 @@ class OutcomeStatus(StrEnum):
     APPLIED = "applied"
     UNCHANGED = "unchanged"
     BLOCKED = "blocked"
+    STALE = "stale"
     FAILED = "failed"
 
 
@@ -111,10 +115,16 @@ class PlatformAssessment:
 
 @dataclass(frozen=True)
 class NewOSPlatform:
-    """The OS platform that the actor names when no platform matches the LibreNMS OS."""
+    """
+    The OS platform that the actor names when no platform matches the LibreNMS OS.
+
+    ``reported_version`` is the version that the actor saw; with tracking on, a different current
+    version makes the application stale.
+    """
 
     name: str
     manufacturer: object = None
+    reported_version: str = ""
 
 
 @dataclass(frozen=True)
@@ -385,7 +395,26 @@ def _create_version_platform(assessment, actor):
     )
 
 
-def apply_platform(model, pk, facts, *, tracking, actor, new_os_platform=None):
+def _assess_locked(row, facts, *, tracking, actor, known, new, named, created):
+    """
+    Assess the locked subject under the *known* OS platform, the *new* one the actor names, or the OS rule.
+
+    A named OS platform is created (and added to *created*) only while the LibreNMS OS still has no
+    platform.
+    """
+    if known is not None:
+        return _assess_under(row, known, facts, tracking=tracking, actor=actor)
+    if new is None:
+        return assess_platform(row, facts, tracking=tracking, actor=actor)
+    if facts.librenms_os and _find_os_platform(facts.librenms_os)[1] is not PlatformReason.OS_PLATFORM_MISSING:
+        raise _Stop(PlatformOutcome(OutcomeStatus.STALE, PlatformReason.OS_PLATFORM_RESOLVED, named))
+    os_platform, made = _named_os_platform(new, actor, named)
+    if made is not None:
+        created.append(made)
+    return _assess_under(row, os_platform, facts, tracking=tracking, actor=actor)
+
+
+def apply_platform(model, pk, facts, *, tracking, actor, new_os_platform=None, os_platform=None):
     """
     Assess the subject again under its row lock, create the platforms it needs, and write it.
 
@@ -397,32 +426,42 @@ def apply_platform(model, pk, facts, *, tracking, actor, new_os_platform=None):
         actor: The synchronization actor; the write needs ``change`` on the subject, and every
             create needs ``add`` on Platform.
         new_os_platform (NewOSPlatform | None): The OS platform the actor names when none matches
-            the LibreNMS OS. A platform with that name is used as it is.
+            the LibreNMS OS. A platform with that name is used as it is. When a platform or a
+            Platform Mapping now matches the OS, or the version changed, the outcome is stale.
+        os_platform (Platform | None): The OS platform, when the caller already knows it.
 
     Returns:
         PlatformOutcome: The outcome. A lock conflict is raised, not returned.
 
     """
     seen = {"created": [], "writing": model}
+    named = None
+    if new_os_platform is not None:
+        named = PlatformAssessment(
+            PlatformState.PROPOSED,
+            PlatformReason.OS_PLATFORM_MISSING,
+            facts,
+            tracking,
+            target_name=new_os_platform.name,
+            operation=PlatformOperation.CREATE_OS_PLATFORM,
+        )
+        if tracking and _fact(new_os_platform.reported_version) != facts.version:
+            return PlatformOutcome(OutcomeStatus.STALE, PlatformReason.VERSION_CHANGED, named)
 
     def apply(row):
         seen["previous"] = row.platform
         seen["writing"] = Platform
-        if new_os_platform is None:
-            assessment = assess_platform(row, facts, tracking=tracking, actor=actor)
-        else:
-            seen["assessment"] = PlatformAssessment(
-                PlatformState.PROPOSED,
-                PlatformReason.OS_PLATFORM_MISSING,
-                facts,
-                tracking,
-                target_name=new_os_platform.name,
-                operation=PlatformOperation.CREATE_OS_PLATFORM,
-            )
-            os_platform, created = _named_os_platform(new_os_platform, actor, seen["assessment"])
-            if created is not None:
-                seen["created"].append(created)
-            assessment = _assess_under(row, os_platform, facts, tracking=tracking, actor=actor)
+        seen["assessment"] = named
+        assessment = _assess_locked(
+            row,
+            facts,
+            tracking=tracking,
+            actor=actor,
+            known=os_platform,
+            new=new_os_platform,
+            named=named,
+            created=seen["created"],
+        )
         seen["assessment"] = assessment
         if assessment.state is PlatformState.CURRENT:
             return False
@@ -516,32 +555,101 @@ def import_platform(facts, *, tracking, actor, os_platform=None):
     return ImportPlatform(platform, assessment, created=platform if created else None)
 
 
-def reason_text(reason, assessment):
-    """Return the plain words for *reason*; *assessment* gives its parameters."""
+def platform_visible(platform, viewer):
+    """Return whether *viewer* may view *platform*; None as *viewer* views nothing."""
+    return viewer is not None and Platform.objects.restrict(viewer, "view").filter(pk=platform.pk).exists()
+
+
+def platform_label(platform, viewer):
+    """Return the quoted name of *platform* when *viewer* may view it, or a neutral phrase."""
+    return f"'{platform.name}'" if platform_visible(platform, viewer) else HIDDEN_PLATFORM
+
+
+def attempted_label(platform, viewer):
+    """
+    Return the words for *platform* that an application tried to write.
+
+    A failed write rolls back the platforms it created. A rolled-back platform without a parent is
+    the OS platform that the actor named; a version platform is named only when *viewer* may view
+    its OS platform.
+    """
+    if Platform.objects.filter(pk=platform.pk).exists():
+        return platform_label(platform, viewer)
+    if platform.parent_id is None:
+        return f"'{platform.name}'"
+    if platform_visible(platform.parent, viewer):
+        return f"'{platform.name}'"
+    return "a new version platform"
+
+
+def target_label(assessment, viewer):
+    """Return the words for the target platform of *assessment* that *viewer* may read."""
+    if assessment.target is not None:
+        return platform_label(assessment.target, viewer)
+    if not assessment.target_name:
+        return "the platforms it needs"
+    # A new version platform's name holds the OS platform's name.
+    if assessment.os_platform is not None and platform_label(assessment.os_platform, viewer) == HIDDEN_PLATFORM:
+        return f"a new version platform for version '{assessment.facts.version}'"
+    return f"'{assessment.target_name}'"
+
+
+def _labels(platforms, viewer):
+    labels = [platform_label(platform, viewer) for platform in platforms]
+    shown = [label for label in labels if label != HIDDEN_PLATFORM]
+    hidden = len(labels) - len(shown)
+    if hidden:
+        shown.append(HIDDEN_PLATFORM if hidden == 1 else f"{hidden} platforms you cannot view")
+    return ", ".join(shown)
+
+
+def reason_text(reason, assessment, viewer):
+    """
+    Return the plain words for *reason*; *assessment* gives its parameters.
+
+    A platform that *viewer* may not view is not named. None as *viewer* is text that is saved or
+    shown to any user, so it names no platform.
+    """
     facts = assessment.facts if assessment is not None else PlatformFacts("", "")
-    name = assessment.target_name if assessment is not None else ""
-    os_platform = assessment.os_platform if assessment is not None else None
-    named = ", ".join(f"'{platform}'" for platform in assessment.named) if assessment is not None else ""
+    os_name = facts.librenms_os
+
+    def os_platform():
+        return platform_label(assessment.os_platform, viewer)
+
+    def target():
+        return target_label(assessment, viewer)
+
     texts = {
-        PlatformReason.NO_OS: "LibreNMS reports no OS.",
-        PlatformReason.ON_TARGET: "The platform matches LibreNMS.",
-        PlatformReason.OFF_TARGET: f"The platform must be '{name}'.",
-        PlatformReason.VERSION_PLATFORM_MISSING: f"Version platform '{name}' does not exist yet.",
-        PlatformReason.OS_PLATFORM_MISSING: f"No NetBox platform matches LibreNMS OS '{facts.librenms_os}'.",
-        PlatformReason.OS_PLATFORM_AMBIGUOUS: (
-            f"Multiple platforms match '{facts.librenms_os}'. Resolve the ambiguity with a Platform Mapping."
+        PlatformReason.NO_OS: lambda: "LibreNMS reports no OS.",
+        PlatformReason.ON_TARGET: lambda: "The platform matches LibreNMS.",
+        PlatformReason.OFF_TARGET: lambda: f"The platform must be {target()}.",
+        PlatformReason.VERSION_PLATFORM_MISSING: lambda: f"The version platform {target()} does not exist yet.",
+        PlatformReason.OS_PLATFORM_MISSING: lambda: f"No NetBox platform matches LibreNMS OS '{os_name}'.",
+        PlatformReason.OS_PLATFORM_AMBIGUOUS: lambda: (
+            f"Multiple platforms match '{os_name}'. Resolve the ambiguity with a Platform Mapping."
         ),
-        PlatformReason.OS_MAPPING_AMBIGUOUS: (
-            f"Multiple Platform Mappings match '{facts.librenms_os}'. Resolve the conflict in Platform Mappings."
+        PlatformReason.OS_MAPPING_AMBIGUOUS: lambda: (
+            f"Multiple Platform Mappings match '{os_name}'. Resolve the conflict in Platform Mappings."
         ),
-        PlatformReason.VERSION_PLATFORM_AMBIGUOUS: (
-            f"Multiple version platforms under '{os_platform}' match version '{facts.version}': {named}."
+        PlatformReason.VERSION_PLATFORM_AMBIGUOUS: lambda: (
+            f"Multiple version platforms under {os_platform()} match version '{facts.version}': "
+            f"{_labels(assessment.named, viewer)}."
         ),
-        PlatformReason.NAME_TAKEN: (
-            f"Platform {named} outside OS platform '{os_platform}' already uses the name '{name}'."
+        PlatformReason.NAME_TAKEN: lambda: (
+            f"The name of the new version platform is taken by {_labels(assessment.named, viewer)}, "
+            f"which is outside OS platform {os_platform()}."
         ),
-        PlatformReason.ADD_PLATFORM_DENIED: f"You do not have permission to add platform '{name}'.",
-        PlatformReason.PLATFORM_INVALID: f"Platform '{name}' could not be created.",
-        PlatformReason.SUBJECT_UNAVAILABLE: "The object no longer exists, or you may not change it.",
+        PlatformReason.ADD_PLATFORM_DENIED: lambda: (
+            f"You do not have permission to add platforms, so {target()} cannot be created."
+        ),
+        PlatformReason.PLATFORM_INVALID: lambda: f"NetBox refused to create {target()}.",
+        PlatformReason.SUBJECT_UNAVAILABLE: lambda: "The object no longer exists, or you may not change it.",
+        PlatformReason.VERSION_CHANGED: lambda: (
+            f"LibreNMS now reports version '{facts.version}', not the version the page showed. "
+            "Refresh the page and try again."
+        ),
+        PlatformReason.OS_PLATFORM_RESOLVED: lambda: (
+            f"A platform now matches LibreNMS OS '{os_name}'. Refresh the page and try again."
+        ),
     }
-    return texts[reason]
+    return texts[reason]()

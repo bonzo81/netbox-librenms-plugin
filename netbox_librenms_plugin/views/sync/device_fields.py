@@ -4,7 +4,7 @@ from urllib.parse import urlencode
 from dcim.models import Device, Manufacturer, Platform
 from django.contrib import messages
 from django.core.exceptions import NON_FIELD_ERRORS, ValidationError
-from django.db import IntegrityError, transaction
+from django.db import DatabaseError, IntegrityError, transaction
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
@@ -21,8 +21,11 @@ from netbox_librenms_plugin.platform_versions import (
     PlatformFacts,
     PlatformReason,
     apply_platform,
+    attempted_label,
+    platform_label,
     platform_version_tracking_enabled,
     reason_text,
+    target_label,
 )
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
@@ -186,15 +189,15 @@ def _write_device_field(view, request, pk, server_key, field, value, action):
     return old_values[0], None
 
 
-def _live_platform_facts(view, device):
+def _live_platform_facts(view, subject):
     """
-    Return the live LibreNMS platform facts of *device*, read through *view*'s bound server.
+    Return the live LibreNMS platform facts of *subject*, read through *view*'s bound server.
 
     Returns:
         tuple: ``(PlatformFacts, None)``, or ``(None, text)`` when the lookup failed.
 
     """
-    view.librenms_id, lookup_error = view.resolve_librenms_id(device)
+    view.librenms_id, lookup_error = view.resolve_librenms_id(subject)
     if lookup_error is not None:
         return None, view.scoped_lookup_message(lookup_error)
     if not view.librenms_id:
@@ -205,44 +208,56 @@ def _live_platform_facts(view, device):
     return PlatformFacts.from_librenms(device_info.get("os"), device_info.get("version")), None
 
 
-def _report_platform_outcome(request, outcome):
-    """Add the message of one platform application to *request*."""
+def _report_platform_outcome(request, outcome, model):
+    """Add the message of one platform application on a *model* subject to *request*."""
+    viewer = request.user
+    subject = model._meta.verbose_name.capitalize()
     if outcome.status is OutcomeStatus.FAILED:
         if outcome.error_model is Platform:
-            detail = exception_text_for(outcome.error, Platform, request.user)
-            messages.error(request, f"Platform '{outcome.assessment.target_name}' could not be created: {detail}")
+            detail = exception_text_for(outcome.error, Platform, viewer)
+            target = target_label(outcome.assessment, viewer)
+            messages.error(request, f"Platform {target} could not be created: {detail}")
             return
-        action = f"assign platform '{outcome.platform}' to device"
-        messages.error(request, _write_failure_message(outcome.error, action, "platform", Device, request.user))
+        action = f"assign platform {attempted_label(outcome.platform, viewer)} to the {model._meta.verbose_name}"
+        messages.error(request, _write_failure_message(outcome.error, action, "platform", model, viewer))
         return
     if outcome.reason is PlatformReason.SUBJECT_UNAVAILABLE:
-        messages.error(request, "Device no longer exists.")
+        messages.error(request, f"{subject} no longer exists.")
         return
-    if outcome.status is OutcomeStatus.BLOCKED:
-        text = reason_text(outcome.reason, outcome.assessment)
+    if outcome.status in (OutcomeStatus.BLOCKED, OutcomeStatus.STALE):
+        text = reason_text(outcome.reason, outcome.assessment, viewer)
         if outcome.reason is PlatformReason.OS_PLATFORM_MISSING:
             text = f"{text} Use the 'Create & Sync' button to create it first."
         messages.error(request, text)
         return
     for platform in outcome.created:
-        messages.success(request, f"Created platform '{platform}'")
+        messages.success(request, f"Created platform {platform_label(platform, viewer)}")
+    platform = platform_label(outcome.platform, viewer)
     if outcome.status is OutcomeStatus.UNCHANGED:
-        messages.info(request, f"Device platform is already '{outcome.platform}'")
+        messages.info(request, f"{subject} platform is already {platform}")
     elif outcome.previous is not None:
-        messages.success(request, f"Device platform updated from '{outcome.previous}' to '{outcome.platform}'")
+        previous = platform_label(outcome.previous, viewer)
+        messages.success(request, f"{subject} platform updated from {previous} to {platform}")
     else:
-        messages.success(request, f"Device platform set to '{outcome.platform}'")
+        messages.success(request, f"{subject} platform set to {platform}")
 
 
 def _report_os_mapping(request, librenms_os, platform):
-    """Add a Platform Mapping from *librenms_os* to the OS *platform* when none exists, and report it."""
+    """
+    Add a Platform Mapping from *librenms_os* to the OS *platform* when none exists, and report it.
+
+    The platform assignment has committed, so no failure here reaches the request's retry answer.
+    """
     from utilities.permissions import get_permission_for_model
 
+    viewer = request.user
+
+    def not_created(reason):
+        messages.warning(request, f"Platform assigned; OS mapping not created: {reason}")
+
     def points_elsewhere(mapping):
-        messages.warning(
-            request,
-            f"Platform mapping '{librenms_os}' to '{platform}' could not be created: a mapping for "
-            f"'{librenms_os}' already points to '{mapping.netbox_platform}'.",
+        not_created(
+            f"a mapping for '{librenms_os}' already points to {platform_label(mapping.netbox_platform, viewer)}."
         )
 
     existing = PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).first()
@@ -252,39 +267,24 @@ def _report_os_mapping(request, librenms_os, platform):
         else:
             points_elsewhere(existing)
         return
-    if not request.user.has_perm(get_permission_for_model(PlatformMapping, "add")):
-        messages.warning(
-            request,
-            f"Platform mapping for '{librenms_os}' was not created: you lack permission to add mappings.",
-        )
+    if not viewer.has_perm(get_permission_for_model(PlatformMapping, "add")):
+        not_created("you lack permission to add mappings.")
         return
     try:
         with transaction.atomic():
             mapping = PlatformMapping(librenms_os=librenms_os, netbox_platform=platform)
             mapping.full_clean()
             mapping.save()
-    except ValidationError as exc:
-        if classify_conflict(exc):
-            raise
-        detail = exception_text_for(exc, PlatformMapping, request.user)
-        messages.warning(request, f"Platform mapping '{librenms_os}' to '{platform}' could not be created: {detail}")
-        return
-    except IntegrityError as exc:
-        if classify_conflict(exc):
-            raise
-        # A concurrent request added the mapping first.
+    except (ValidationError, DatabaseError) as exc:
         winner = PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).first()
         if winner is None:
-            detail = exception_text_for(exc, PlatformMapping, request.user)
-            messages.warning(
-                request, f"Platform mapping '{librenms_os}' to '{platform}' could not be created: {detail}"
-            )
+            not_created(exception_text_for(exc, PlatformMapping, viewer))
         elif winner.netbox_platform_id == platform.pk:
             messages.info(request, f"Platform mapping for '{librenms_os}' already exists; not modified.")
         else:
             points_elsewhere(winner)
         return
-    messages.success(request, f"Platform mapping '{librenms_os}' to '{platform}' added")
+    messages.success(request, f"Platform mapping '{librenms_os}' to {platform_label(platform, viewer)} added")
 
 
 class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
@@ -519,45 +519,60 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
 
 
 class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
-    """Update NetBox Platform based on LibreNMS OS info."""
+    """Give the device the platform that its LibreNMS OS (and version, when tracked) calls for."""
 
+    subject_model = Device
+    sync_url_name = "plugins:netbox_librenms_plugin:device_librenms_sync"
     required_object_permissions = {
         "POST": [("change", Device)],
     }
 
     def post(self, request, pk):
-        """Sync the device platform from LibreNMS OS name."""
-        # Check both plugin write and NetBox object permissions
+        """Apply the platform assessment of the subject, with live LibreNMS facts."""
         if error := self.require_all_permissions("POST"):
             return error
 
-        device = self.restrict_object_or_404(Device, "change", pk=pk)
+        subject = self.restrict_object_or_404(self.subject_model, "change", pk=pk)
 
-        # Rebind the API client to the POSTed server before resolving the per-server librenms_id,
-        # so a multi-server user acting on a non-default tab isn't routed through the globally
-        # selected server (returning the wrong device's id, or none). Mirrors
-        # ConvertLegacyLibreNMSIdView.
+        # Rebind to the POSTed server so a multi-server user reads this tab's LibreNMS device.
         server_key = self.rebind_api_for_posted_server(request.POST)
         if server_key is None:
             messages.error(request, "Selected LibreNMS server is no longer configured.")
-            return _device_sync_redirect(request, pk, server_key)
+            return self._redirect(request, pk, server_key)
 
-        facts, lookup_failure = _live_platform_facts(self, device)
+        facts, lookup_failure = _live_platform_facts(self, subject)
         if lookup_failure:
             messages.error(request, lookup_failure)
-            return _device_sync_redirect(request, pk, server_key)
+            return self._redirect(request, pk, server_key)
         if not facts.librenms_os:
             messages.warning(request, "No OS information available in LibreNMS")
-            return _device_sync_redirect(request, pk, server_key)
+            return self._redirect(request, pk, server_key)
 
-        outcome = apply_platform(Device, pk, facts, tracking=platform_version_tracking_enabled(), actor=request.user)
-        _report_platform_outcome(request, outcome)
-        return _device_sync_redirect(request, pk, server_key)
+        outcome = apply_platform(
+            self.subject_model, pk, facts, tracking=platform_version_tracking_enabled(), actor=request.user
+        )
+        _report_platform_outcome(request, outcome, self.subject_model)
+        return self._redirect(request, pk, server_key)
+
+    def _redirect(self, request, pk, server_key):
+        return redirect_with_server_key(request, reverse(self.sync_url_name, kwargs={"pk": pk}), server_key)
+
+
+class UpdateVMPlatformView(UpdateDevicePlatformView):
+    """Give the virtual machine the platform that its LibreNMS OS (and version, when tracked) calls for."""
+
+    subject_model = VirtualMachine
+    sync_url_name = "plugins:netbox_librenms_plugin:vm_librenms_sync"
+    required_object_permissions = {
+        "POST": [("change", VirtualMachine)],
+    }
 
 
 class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
     """Create the OS platform the user names (and its version platform when tracked) and assign it to the device."""
 
+    subject_model = Device
+    sync_url_name = "plugins:netbox_librenms_plugin:device_librenms_sync"
     required_object_permissions = {
         "POST": [
             ("change", Device),
@@ -566,11 +581,11 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
     }
 
     def post(self, request, pk):
-        """Create the named OS platform (or reuse one with that name), then assign the device its platform."""
+        """Create the named OS platform (or reuse one with that name), then assign the subject its platform."""
         create_mapping = bool(request.POST.get("create_mapping"))
         # A stray space must not force the create path past the case-insensitive name match.
         platform_name = (request.POST.get("platform_name") or "").strip()
-        # The page posts the LibreNMS facts it rendered, as the mapping already needs the OS.
+        # The facts the page rendered; with tracking on they are checked against LibreNMS below.
         facts = PlatformFacts.from_librenms(request.POST.get("librenms_os"), request.POST.get("librenms_version"))
 
         # A platform with this name is reused as it is: it needs "view", not "add".
@@ -578,7 +593,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         if platform_name:
             existing_platform = Platform.objects.filter(name__iexact=platform_name).first()
 
-        required = [("change", Device)]
+        required = [("change", self.subject_model)]
         if existing_platform is None:
             required.append(("add", Platform))
         else:
@@ -598,8 +613,8 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 messages.error(request, "Selected platform is not available.")
                 return self._sync_redirect(request, pk, self._active_key())
 
-        self.restrict_object_or_404(Device, "change", pk=pk)
-        # Rebinding keeps the redirect on the active server; this view makes no LibreNMS request.
+        subject = self.restrict_object_or_404(self.subject_model, "change", pk=pk)
+        # Rebinding keeps the redirect on the active server.
         self.rebind_api_for_posted_server(request.POST)
 
         if not platform_name:
@@ -615,20 +630,30 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 messages.error(request, "Selected manufacturer is not available.")
                 return self._sync_redirect(request, pk, self._active_key())
 
+        tracking = platform_version_tracking_enabled()
+        reported_version = facts.version
+        if tracking:
+            # A version platform is named from LibreNMS, never from the posted form alone.
+            facts, lookup_failure = _live_platform_facts(self, subject)
+            if lookup_failure:
+                messages.error(request, lookup_failure)
+                return self._sync_redirect(request, pk, self._active_key())
+
         outcome = apply_platform(
-            Device,
+            self.subject_model,
             pk,
             facts,
-            tracking=platform_version_tracking_enabled(),
+            tracking=tracking,
             actor=request.user,
-            new_os_platform=NewOSPlatform(platform_name, manufacturer),
+            new_os_platform=NewOSPlatform(platform_name, manufacturer, reported_version),
         )
-        _report_platform_outcome(request, outcome)
+        _report_platform_outcome(request, outcome, self.subject_model)
         if outcome.status not in (OutcomeStatus.APPLIED, OutcomeStatus.UNCHANGED):
             return self._sync_redirect(request, pk, self._active_key())
         os_platform = outcome.assessment.os_platform
         if os_platform not in outcome.created:
-            messages.success(request, f"Platform '{os_platform}' already existed and was used as it is")
+            label = platform_label(os_platform, request.user)
+            messages.success(request, f"Platform {label} already existed and was used as it is")
         if create_mapping and facts.librenms_os:
             _report_os_mapping(request, facts.librenms_os.lower(), os_platform)
         return self._sync_redirect(request, pk, self._active_key())
@@ -636,39 +661,31 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
     def _active_key(self):
         return getattr(getattr(self, "_librenms_api", None), "server_key", None)
 
-    @staticmethod
-    def _sync_redirect(request, pk, fallback_server_key=None):
+    def _sync_redirect(self, request, pk, fallback_server_key=None):
         """
-        Redirect to the device sync tab, preserving the POST-scoped server_key.
+        Redirect to the subject's sync tab, preserving the POST-scoped server_key.
 
-        A multi-server user returns to the same server tab instead of the default
-        one. When the form omits server_key, fall back to *fallback_server_key* (the
-        active API server) so the redirect doesn't drop a non-default server context
-        the action actually ran against.
-
-        The server_key is reflected only when it matches a configured server, and the
-        final redirect is gated by Django's ``url_has_allowed_host_and_scheme`` with
-        the sink inside the validated branch — the open-redirect barrier CodeQL
-        recognises for py/url-redirection (CWE-601). Mirrors
-        :func:`mixins._safe_redirect_response`.
-
-        Args:
-            request: The current HTTP request (source of the ``server_key`` POST).
-            pk: The device primary key the sync tab is reversed for.
-            fallback_server_key: The active API server key used when the form omits
-                ``server_key``.
-
-        Returns:
-            HttpResponseRedirect: A redirect to the sync tab, with the validated
-                ``server_key`` query param when one matches a configured server.
-
+        When the form omits server_key, *fallback_server_key* (the active API server) keeps the
+        server context. The key is reflected only when it matches a configured server, and the
+        redirect is gated by ``redirect_with_server_key`` (the CWE-601 barrier).
         """
-        url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": pk})
+        url = reverse(self.sync_url_name, kwargs={"pk": pk})
         requested = (request.POST.get("server_key") or "").strip() or (fallback_server_key or "").strip()
-        # Re-source the matched key from the trusted config rather than echoing the raw request
-        # value; the shared helper then gates the redirect on url_has_allowed_host_and_scheme.
         server_key = resolve_configured_server_key(requested)
         return redirect_with_server_key(request, url, server_key)
+
+
+class CreateAndAssignVMPlatformView(CreateAndAssignPlatformView):
+    """Create the OS platform the user names (and its version platform when tracked) and assign it to the VM."""
+
+    subject_model = VirtualMachine
+    sync_url_name = "plugins:netbox_librenms_plugin:vm_librenms_sync"
+    required_object_permissions = {
+        "POST": [
+            ("change", VirtualMachine),
+            ("add", Platform),
+        ],
+    }
 
 
 class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):

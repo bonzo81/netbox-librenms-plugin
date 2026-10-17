@@ -639,65 +639,8 @@
                             </td>
                         </tr>
 
-                        <!-- Platform / OS Row -->
-                        <tr>
-                            <td style="padding-left: 1rem;">Platform</td>
-                            <td>
-                                <div class="d-flex align-items-center">
-                                    <div class="text-nowrap">
-                                        {% if object.platform %}
-                                            <a href="{{ object.platform.get_absolute_url }}">
-                                                {{ object.platform }}
-                                            </a>
-                                        {% else %}
-                                            <span class="text-muted">Not set</span>
-                                        {% endif %}
-                                    </div>
-                                    <div class="ms-3">
-                                        {% with assessment=platform_info.assessment %}
-                                        {% if assessment and assessment.reason != "no_os" %}
-                                            {% if assessment.state == "current" %}
-                                                <span class="text-success" title="Synced with LibreNMS">
-                                                    <i class="mdi mdi-check-circle"></i>
-                                                </span>
-                                            {% elif assessment.operation == "create_os_platform" %}
-                                                <button type="button" class="btn btn-sm btn-warning"
-                                                        data-bs-toggle="modal" data-bs-target="#create-platform-modal"
-                                                        title="Platform doesn't exist - create and sync">
-                                                    <i class="mdi mdi-plus"></i> Create & Sync
-                                                </button>
-                                            {% elif assessment.state == "proposed" %}
-                                                <form method="post"
-                                                      action="{% url 'plugins:netbox_librenms_plugin:update_device_platform' pk=object.pk %}"
-                                                      style="display: inline;">
-                                                    {% csrf_token %}
-                                                    {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
-                                                    <button type="submit" class="btn btn-sm btn-outline-primary"
-                                                            title="{% if assessment.operation == 'create_version_platform' %}Create version platform {{ assessment.target_name }} and set it{% else %}Set platform to {{ assessment.target_name }}{% endif %}">
-                                                        <i class="mdi mdi-sync"></i> Sync to NetBox
-                                                    </button>
-                                                </form>
-                                            {% else %}
-                                                <span class="text-danger small" data-platform-blocked="{{ assessment.reason }}">
-                                                    <i class="mdi mdi-alert-circle"></i> {{ platform_info.reason_text }}
-                                                </span>
-                                            {% endif %}
-                                        {% endif %}
-                                        {% endwith %}
-                                    </div>
-                                </div>
-                            </td>
-                            <td>
-                                <div class="d-flex align-items-center">
-                                    <span>{{ platform_info.librenms_os }}{% if platform_info.assessment.tracks_version %} {{ platform_info.librenms_version }}{% endif %}</span>
-                                    {% if platform_info.assessment.reason == "os_platform_missing" %}
-                                        <span class="badge bg-warning bg-opacity-75 text-dark ms-2" style="font-size: 0.7rem;" title="Platform doesn't exist in NetBox">
-                                            <i class="mdi mdi-alert"></i> Not in NetBox
-                                        </span>
-                                    {% endif %}
-                                </div>
-                            </td>
-                        </tr>
+                        {% url 'plugins:netbox_librenms_plugin:update_device_platform' pk=object.pk as update_platform_url %}
+                        {% include "netbox_librenms_plugin/inc/_platform_sync_row.html" with update_url=update_platform_url %}
 
                         <!-- Location Row -->
                         <tr>
@@ -730,6 +673,28 @@
 
                         {% endif %}
                         {% endwith %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    {% elif model_name == "virtualmachine" %}
+    <!-- Right: Virtual Machine Information Sync Card -->
+    <div class="col-md-9">
+        <div class="card">
+            <h5 class="card-header">Virtual Machine Information Sync</h5>
+            <div class="card-body p-0">
+                <table class="table table-sm table-hover mb-0">
+                    <thead>
+                        <tr>
+                            <th style="width: 20%; padding-left: 1rem;">Field</th>
+                            <th style="width: 40%;">NetBox Value</th>
+                            <th style="width: 40%;">LibreNMS Value</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% url 'plugins:netbox_librenms_plugin:update_vm_platform' pk=object.pk as update_platform_url %}
+                        {% include "netbox_librenms_plugin/inc/_platform_sync_row.html" with update_url=update_platform_url %}
                     </tbody>
                 </table>
             </div>
@@ -1252,13 +1217,17 @@ that may well be correct.
 </div>
 {% endif %}
 
-{% if object_model_name == "device" and platform_info.assessment.operation == "create_os_platform" and found_in_librenms %}
+{% if platform_info.assessment.operation == "create_os_platform" and found_in_librenms %}
 <!-- Create Platform Modal -->
 <div class="modal fade" id="create-platform-modal" tabindex="-1" aria-labelledby="createPlatformModalLabel" aria-hidden="true">
     <div class="modal-dialog">
         <div class="modal-content">
+            {% if object_model_name == "virtualmachine" %}
+            {% url 'plugins:netbox_librenms_plugin:create_and_assign_vm_platform' pk=object.pk as create_platform_url %}
+            {% else %}
             {% url 'plugins:netbox_librenms_plugin:create_and_assign_platform' pk=object.pk as create_platform_url %}
-            {% include "netbox_librenms_plugin/htmx/create_platform_modal.html" with librenms_os=platform_info.librenms_os platform_name=platform_info.librenms_os form_action=create_platform_url device_pk=object.pk selected_manufacturer_pk=object.device_type.manufacturer_id tracked_version=platform_info.assessment.tracks_version librenms_version=platform_info.librenms_version %}
+            {% endif %}
+            {% include "netbox_librenms_plugin/htmx/create_platform_modal.html" with librenms_os=platform_info.librenms_os platform_name=platform_info.librenms_os form_action=create_platform_url device_pk=object.pk selected_manufacturer_pk=object.device_type.manufacturer_id tracked_version=platform_info.assessment.tracks_version librenms_version=platform_info.librenms_version subject_noun=object|meta:"verbose_name" %}
         </div>
     </div>
 </div>

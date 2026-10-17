@@ -80,16 +80,19 @@ from netbox_librenms_plugin.ip_rules import ip_rules_for_request
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.platform_versions import (
-    NewOSPlatform,
     OutcomeStatus,
     PlatformFacts,
     PlatformReason,
     PlatformState,
     apply_platform,
     assess_platform,
+    attempted_label,
     import_platform,
+    platform_label,
     platform_version_tracking_enabled,
+    platform_visible,
     reason_text,
+    target_label,
 )
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
@@ -1937,6 +1940,19 @@ def _suggest_oob_interface(device, oob_candidate, interfaces=None):
     return None, default_new_name
 
 
+def _platform_display(platform_plan, viewer):
+    """Return the words for an import row's platform plan that name only platforms *viewer* may view."""
+    platform = platform_plan.get("platform")
+    assessment = platform_plan.get("assessment")
+    visible = platform is not None and platform_visible(platform, viewer)
+    return {
+        "platform_pk": platform.pk if visible else None,
+        "platform": platform_label(platform, viewer) if platform is not None else "",
+        "target": target_label(assessment, viewer) if assessment is not None else "",
+        "reason": reason_text(assessment.reason, assessment, viewer) if assessment is not None else "",
+    }
+
+
 class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View):
     """HTMX view to show detailed validation information."""
 
@@ -1976,6 +1992,7 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
             "import_row_hx_include": import_row_hx_include(device_id),
             # Without it the import assigns the OS platform and reports the missing version platform.
             "can_add_platform": request.user.has_perm("dcim.add_platform"),
+            "platform_display": _platform_display(validation.get("platform") or {}, request.user),
         }
 
         # Add sync comparison data for existing devices
@@ -2024,7 +2041,8 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         platform_info = {
             "librenms_os": librenms_os,
             "assessment": platform_assessment,
-            "reason_text": reason_text(platform_assessment.reason, platform_assessment),
+            "reason_text": reason_text(platform_assessment.reason, platform_assessment, actor),
+            "target_label": target_label(platform_assessment, actor),
         }
         platform_synced = platform_assessment.state is PlatformState.CURRENT
 
@@ -2408,12 +2426,17 @@ class DeviceConflictActionView(
                 actor=request.user,
             )
             if outcome.status is OutcomeStatus.FAILED:
+                target = (
+                    attempted_label(outcome.platform, request.user)
+                    if outcome.platform is not None
+                    else target_label(outcome.assessment, request.user)
+                )
                 return _htmx_error_response(
-                    f"Could not set platform '{outcome.platform or outcome.assessment.target_name}': "
+                    f"Could not set platform {target}: "
                     f"{exception_text_for(outcome.error, outcome.error_model, request.user)}"
                 )
-            if outcome.status is OutcomeStatus.BLOCKED:
-                return _htmx_error_response(reason_text(outcome.reason, outcome.assessment))
+            if outcome.status in (OutcomeStatus.BLOCKED, OutcomeStatus.STALE):
+                return _htmx_error_response(reason_text(outcome.reason, outcome.assessment, request.user))
             logger.info(f"Synced platform on '{existing_device.name}' to {outcome.platform}")
 
         elif action == "sync_device_type":
@@ -2941,7 +2964,7 @@ class CreatePlatformFromImportView(
                         # of reporting a clean success. Same-platform winner is a true no-op.
                         winner = PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).first()
                         if winner is not None and getattr(winner, "netbox_platform_id", None) != platform.pk:
-                            winner_target = getattr(winner.netbox_platform, "name", None)
+                            winner_target = platform_label(winner.netbox_platform, request.user)
                             transaction.on_commit(
                                 lambda os=librenms_os, target=winner_target: messages.warning(
                                     request,
@@ -2986,7 +3009,7 @@ class CreatePlatformFromImportView(
                 # imports for this OS keep resolving through the pre-existing mapping.
                 # Surface that mismatch instead of reporting a clean success.
                 existing = PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).first()
-                existing_target = getattr(existing.netbox_platform, "name", None) if existing else None
+                existing_target = platform_label(existing.netbox_platform, request.user) if existing else None
                 transaction.on_commit(
                     lambda os=librenms_os, target=existing_target: messages.warning(
                         request,
@@ -3002,7 +3025,10 @@ class CreatePlatformFromImportView(
             if tracking:
                 plan = import_platform(facts, tracking=tracking, actor=request.user, os_platform=platform)
                 if plan.reason is not None:
-                    text = f"Platform created, but its version platform was not: {reason_text(plan.reason, plan.assessment)}"
+                    text = (
+                        "Platform created, but its version platform was not: "
+                        f"{reason_text(plan.reason, plan.assessment, request.user)}"
+                    )
                     transaction.on_commit(lambda: messages.warning(request, text))
             return platform, None
         # A refusal must not roll back the platform: the platform is the primary action.
@@ -3012,7 +3038,7 @@ class CreatePlatformFromImportView(
             facts,
             tracking=tracking,
             actor=request.user,
-            new_os_platform=NewOSPlatform(platform.name, manufacturer),
+            os_platform=platform,
         )
         verbose_name = target_model._meta.verbose_name
         if outcome.reason is PlatformReason.SUBJECT_UNAVAILABLE:
@@ -3040,7 +3066,7 @@ class CreatePlatformFromImportView(
         if outcome.status is OutcomeStatus.BLOCKED:
             return platform, (
                 f'Platform "{platform.name}" was created, but not assigned: '
-                f"{reason_text(outcome.reason, outcome.assessment)}"
+                f"{reason_text(outcome.reason, outcome.assessment, request.user)}"
             )
         return platform, None
 

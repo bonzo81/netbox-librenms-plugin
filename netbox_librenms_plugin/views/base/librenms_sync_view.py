@@ -21,6 +21,7 @@ from netbox_librenms_plugin.platform_versions import (
     assess_platform,
     platform_version_tracking_enabled,
     reason_text,
+    target_label,
 )
 from netbox_librenms_plugin.server_mappings import mapped_device_servers, read_mapping
 from netbox_librenms_plugin.server_selection import (
@@ -840,7 +841,8 @@ class BaseLibreNMSSyncView(
 
         Returns:
             dict: ``librenms_os`` and ``librenms_version`` (raw, ``-`` when absent), ``assessment``
-                (PlatformAssessment), and ``reason_text`` (its words).
+                (PlatformAssessment), and ``reason_text`` and ``target_label`` (words that name only
+                platforms the actor may view).
 
         """
         details = librenms_info["librenms_device_details"]
@@ -856,5 +858,6 @@ class BaseLibreNMSSyncView(
             "librenms_os": librenms_os,
             "librenms_version": librenms_version,
             "assessment": assessment,
-            "reason_text": reason_text(assessment.reason, assessment),
+            "reason_text": reason_text(assessment.reason, assessment, actor),
+            "target_label": target_label(assessment, actor),
         }
