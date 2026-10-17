@@ -1133,6 +1133,7 @@ rules:
       - pattern: $OBJ.cf
       # The custom fields of a serialized object, such as a change record.
       - pattern: $DATA["custom_fields"]
+      - pattern: $DATA.get("custom_fields", ...)
     pattern-sinks:
       - patterns:
           - pattern-either:
