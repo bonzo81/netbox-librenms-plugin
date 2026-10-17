@@ -327,6 +327,8 @@ class ImportSettingsForm(NetBoxModelForm):
         valid_tokens = {"region", "site", "location", "rack", "tenant"}
 
         if is_regex:
+            # The form validates the typed pattern and shows the error on the field.
+            # nosemgrep: regex-error-must-raise
             try:
                 compiled = re.compile(pattern)
             except REGEX_COMPILE_ERRORS as exc:
