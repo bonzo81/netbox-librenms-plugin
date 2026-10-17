@@ -374,7 +374,7 @@ def _authorize_module_grant(view, page_device, server_key, action, token):
     """
     from dcim.models import Device
 
-    from netbox_librenms_plugin.models import InventoryRuleFilterError
+    from netbox_librenms_plugin.models import RuleConfigurationError
 
     sync_device = _get_sync_device_for_inventory(page_device, server_key)
     inventory = _get_cached_inventory_for_device(sync_device, server_key, view.get_cache_key)
@@ -384,7 +384,7 @@ def _authorize_module_grant(view, page_device, server_key, action, token):
         policy = load_inventory_policy(page_device.pk)
     except Device.DoesNotExist as exc:
         raise GrantRefused(GrantRefusal.DESTINATION) from exc
-    except InventoryRuleFilterError as exc:
+    except RuleConfigurationError as exc:
         logger.error("Module action %s on %s refused: %s", action, page_device, exc)
         raise GrantRefused(GrantRefusal.RULE_ERROR) from exc
     grant = read_module_grant(token, action=action, page_device_id=page_device.pk, server_key=server_key)
@@ -3326,13 +3326,7 @@ class AddBayTemplateView(
             qs = qs.filter(models.Q(manufacturer=manufacturer) | models.Q(manufacturer__isnull=True))
         else:
             qs = qs.filter(manufacturer__isnull=True)
-        for mapping in qs.only("librenms_name"):
-            try:
-                if re.compile(mapping.librenms_name).fullmatch(librenms_name):
-                    return True
-            except REGEX_COMPILE_ERRORS:
-                continue
-        return False
+        return any(mapping._compiled_pattern.fullmatch(librenms_name) for mapping in qs)
 
     @staticmethod
     def _existing_bay_mapping(librenms_name, librenms_class, manufacturer):

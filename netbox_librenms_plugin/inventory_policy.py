@@ -8,11 +8,8 @@ for one policy cannot pass a writer that loads another.
 
 import hashlib
 import json
-import re
 from dataclasses import dataclass
 from functools import cached_property
-
-from netbox_librenms_plugin.utils import REGEX_COMPILE_ERRORS
 
 # Change this when the fingerprint reads other inputs or the collector reads them differently.
 INVENTORY_POLICY_VERSION = 1
@@ -41,28 +38,12 @@ def _device_identity(device):
 
 
 def _validate_rules(inventory_rules, serial_rules):
-    """Raise InventoryRuleFilterError for the first rule whose regex or replacement does not work."""
-    from netbox_librenms_plugin.models import InventoryRuleFilterError, _validate_replacement_template
-
+    """Raise RuleConfigurationError for the first rule whose regex or replacement does not work."""
     for rule in inventory_rules:
-        if not rule.enabled:
-            continue
-        # The model's own matcher reads a broken primary regex as "matches nothing", so compile it here.
-        if rule.match_type == rule.MATCH_REGEX and rule.pattern:
-            try:
-                re.compile(rule.pattern)
-            except REGEX_COMPILE_ERRORS as exc:
-                raise InventoryRuleFilterError(rule, "pattern") from exc
-        _ = rule.compiled_filters
+        if rule.enabled:
+            _ = rule._compiled_pattern, rule.compiled_filters
     for rule in serial_rules:
-        try:
-            compiled = re.compile(rule.match_pattern)
-        except REGEX_COMPILE_ERRORS as exc:
-            raise InventoryRuleFilterError(rule, "match_pattern") from exc
-        try:
-            _validate_replacement_template(compiled, rule.replacement)
-        except (*REGEX_COMPILE_ERRORS, IndexError) as exc:
-            raise InventoryRuleFilterError(rule, "replacement") from exc
+        _ = rule.compiled_match_pattern
 
 
 @dataclass(frozen=True)
@@ -142,7 +123,7 @@ def load_inventory_policy(page_device_id) -> InventoryPolicy:
 
     Raises:
         Device.DoesNotExist: When the page device no longer exists.
-        InventoryRuleFilterError: When an enabled InventoryIgnoreRule stores a regex that does not compile,
+        RuleConfigurationError: When an enabled InventoryIgnoreRule stores a regex that does not compile,
             or a serial NormalizationRule stores a pattern or replacement that does not work.
 
     """

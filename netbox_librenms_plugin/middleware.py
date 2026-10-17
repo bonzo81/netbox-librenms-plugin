@@ -1,12 +1,14 @@
-"""Show a lock conflict that escapes a plugin view as one "try again" answer, not as a 500 page."""
+"""Show a lock conflict or a broken stored rule that escapes a plugin view as one answer, not as a 500 page."""
 
 import json
 import logging
 
 from django.contrib import messages
 from django.http import JsonResponse
+from django.shortcuts import render
 from utilities.api import is_api_request
 
+from netbox_librenms_plugin.models import RuleConfigurationError
 from netbox_librenms_plugin.transactions import (
     FOLLOW_UP_FAILED_MESSAGE,
     TRY_AGAIN_MESSAGE,
@@ -78,3 +80,30 @@ class LockConflictMiddleware:
             return None
         logger.warning("Lock conflict in %s: %s", request.path, exception, exc_info=exception)
         return _answer(request, message)
+
+
+class RuleConfigurationErrorMiddleware:
+    """
+    Map a broken stored rule that escapes a plugin view to an answer that names the rule.
+
+    The error comes from the evaluation of the rule, so a writer stops before it writes and its
+    transaction rolls back. A full page that a plain GET asks for shows the rule in a banner page.
+    Every other request gets the same JSON, toast or message answer as a lock conflict.
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        return self.get_response(request)
+
+    def process_exception(self, request, exception):
+        """Return the answer for a broken rule in a plugin view, or None to let the exception propagate."""
+        if not isinstance(exception, RuleConfigurationError) or is_api_request(request) or not _is_plugin_view(request):
+            return None
+        logger.error("Rule configuration error in %s: %s", request.path, exception)
+        if request.method == "GET" and not request.htmx and not getattr(_resolved_view(request), "answers_json", False):
+            return render(
+                request, "netbox_librenms_plugin/rule_configuration_error.html", {"rule_error": exception}, status=409
+            )
+        return _answer(request, str(exception))

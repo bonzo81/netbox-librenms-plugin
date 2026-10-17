@@ -19,6 +19,7 @@ from ..import_validation_helpers import (
 from ..ip_addressing import parse_host_address
 from ..librenms_api import LibreNMSAPI, librenms_id_owned_message
 from ..librenms_ids import coerce_librenms_id
+from ..models import RuleConfigurationError
 from ..platform_versions import (
     PlatformFacts,
     PlatformReason,
@@ -280,6 +281,8 @@ def _try_chassis_device_type_match(api, device_id, preloaded_device_type_rules: 
                         chassis_match["match_type"] = "chassis"
                         chassis_match["chassis_model"] = value
                         return chassis_match
+    except RuleConfigurationError:
+        raise
     except Exception:
         logger.debug(f"Chassis inventory fallback failed for device {device_id}", exc_info=True)
 
