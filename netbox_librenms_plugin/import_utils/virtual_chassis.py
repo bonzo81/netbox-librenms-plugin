@@ -548,7 +548,7 @@ def attribute_inventory(rows: list, vc_members: list, serial_key) -> list[tuple]
     that :func:`extract_vc_members` recognizes, only a member row gives a member by its position,
     its descendants inherit it unless a nearer serial names another member, and the stack root and
     the other rows directly under it own no member. A Junos PSU or fan tray named "FPC <n> ..."
-    follows the FPC that reports slot n. For an inventory that is no recognized stack, a row
+    follows the FPC that reports slot n. For an inventory that is not a recognized stack, a row
     inherits its parent's member, or a position or leading name number of 1 or more names one.
 
     Args:
