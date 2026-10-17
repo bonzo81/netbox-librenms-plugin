@@ -14,7 +14,7 @@ from typing import NamedTuple
 from dcim.models import Platform
 from django.contrib.messages import constants as message_levels
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, transaction
+from django.db import DatabaseError, IntegrityError, transaction
 from django.db.models import Q
 from django.utils.text import slugify
 
@@ -23,6 +23,7 @@ from netbox_librenms_plugin.transactions import classify_conflict, update_existi
 from netbox_librenms_plugin.utils import exception_text_for, write_failure_message
 
 _ADD_PLATFORM = "dcim.add_platform"
+_ADD_MAPPING = "netbox_librenms_plugin.add_platformmapping"
 _SLUG_MAX_LENGTH = 100
 HIDDEN_PLATFORM = "a platform you cannot view"
 
@@ -226,9 +227,7 @@ def _find_os_platform(librenms_os):
     by_name = list(Platform.objects.filter(name__iexact=librenms_os)[:2])
     if len(by_name) == 1:
         return by_name[0], None, ()
-    mappings = list(
-        PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).select_related("netbox_platform")[:2]
-    )
+    mappings = _os_mappings(librenms_os)
     if len(mappings) == 1:
         return mappings[0].netbox_platform, None, ()
     if mappings:
@@ -236,6 +235,11 @@ def _find_os_platform(librenms_os):
     if by_name:
         return None, PlatformReason.OS_PLATFORM_AMBIGUOUS, tuple(by_name)
     return None, PlatformReason.OS_PLATFORM_MISSING, ()
+
+
+def _os_mappings(librenms_os):
+    """Return up to two Platform Mappings whose OS is *librenms_os* (case-insensitive), with their platforms."""
+    return list(PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).select_related("netbox_platform")[:2])
 
 
 def _may_add_platform(actor):
@@ -677,6 +681,77 @@ def reason_text(reason, assessment, viewer):
         PlatformReason.NAMED_PLATFORM_UNAVAILABLE: lambda: f"Platform '{assessment.target_name}' is not available.",
     }
     return texts[reason]()
+
+
+def map_os_platform(librenms_os, platform, actor):
+    """
+    Add the Platform Mapping from *librenms_os* to the OS *platform* when no mapping exists, and report it.
+
+    The call runs in one transaction. The caller's platform work has committed before it, so a
+    failed query or a refused insert, a lock conflict too, is a warning and never an exception.
+
+    Args:
+        librenms_os (str): The LibreNMS OS; the mapping stores it in lowercase.
+        platform (Platform): The OS platform.
+        actor: The user; the insert needs ``add`` on PlatformMapping for the new row.
+
+    Returns:
+        Report: The message for *actor*.
+
+    """
+    librenms_os = librenms_os.lower()
+    try:
+        with transaction.atomic():
+            return _map_os_platform(librenms_os, platform, actor)
+    except (ValidationError, DatabaseError) as exc:
+        return _mapping_not_created(librenms_os, exception_text_for(exc, PlatformMapping, actor))
+
+
+def _map_os_platform(librenms_os, platform, actor):
+    existing = _os_mappings(librenms_os)
+    if existing:
+        return _existing_mapping_report(librenms_os, existing, platform, actor)
+    denied = _mapping_not_created(librenms_os, "you lack permission to add mappings.")
+    if not actor.has_perm(_ADD_MAPPING):
+        return denied
+    # Read the label before the insert, so a failed query cannot follow a committed mapping.
+    added = Report(
+        message_levels.SUCCESS, f"Platform mapping '{librenms_os}' to {platform_label(platform, actor)} added"
+    )
+    try:
+        with transaction.atomic():
+            mapping = PlatformMapping(librenms_os=librenms_os, netbox_platform=platform)
+            mapping.full_clean()
+            mapping.save()
+            # A constrained grant decides on the saved row; a denial rolls this savepoint back.
+            if not PlatformMapping.objects.restrict(actor, "add").filter(pk=mapping.pk).exists():
+                raise _AddDenied
+    except _AddDenied:
+        return denied
+    except IntegrityError:
+        # A concurrent request may have added the mapping first.
+        winners = _os_mappings(librenms_os)
+        if not winners:
+            raise
+        return _existing_mapping_report(librenms_os, winners, platform, actor)
+    return added
+
+
+def _existing_mapping_report(librenms_os, mappings, platform, actor):
+    if len(mappings) > 1:
+        ambiguous = PlatformAssessment(
+            PlatformState.BLOCKED, PlatformReason.OS_MAPPING_AMBIGUOUS, PlatformFacts(librenms_os, ""), False
+        )
+        return _mapping_not_created(librenms_os, reason_text(ambiguous.reason, ambiguous, actor))
+    mapping = mappings[0]
+    if mapping.netbox_platform_id == platform.pk:
+        return Report(message_levels.INFO, f"Platform mapping for '{librenms_os}' already exists; not modified.")
+    target = platform_label(mapping.netbox_platform, actor)
+    return _mapping_not_created(librenms_os, f"a mapping already points to {target}.")
+
+
+def _mapping_not_created(librenms_os, reason):
+    return Report(message_levels.WARNING, f"Platform mapping for '{librenms_os}' not created: {reason}")
 
 
 def platform_reports(outcome, model, viewer, *, named=False):
