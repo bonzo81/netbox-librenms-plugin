@@ -4009,6 +4009,9 @@ class MergeNetBoxDevicesView(
 class SaveUserPrefView(LibreNMSPermissionMixin, View):
     """Save a user preference via POST. Used by JS toggle handlers."""
 
+    # A fetch() caller reads the answer, so the middleware answers with a JSON error.
+    answers_json = True
+
     ALLOWED_PREFS = {
         "import_columns": IMPORT_CONTEXT_COLUMNS_PREFERENCE,
         "use_sysname": "plugins.netbox_librenms_plugin.use_sysname",
