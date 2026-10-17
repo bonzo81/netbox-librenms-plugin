@@ -2842,67 +2842,6 @@ def parse_location_for_import(location_string: str) -> dict:
     return parsed
 
 
-def find_matching_platform(librenms_os: str) -> dict:
-    """
-    Find matching NetBox platform for a LibreNMS OS.
-
-    Tries exact case-insensitive name match first, then falls back to
-    PlatformMapping for when the platform name differs from the LibreNMS OS string.
-
-    Args:
-        librenms_os (str): OS string from LibreNMS (e.g., 'ios', 'linux', 'junos')
-
-    Returns:
-        dict: Dictionary containing:
-            - found (bool): Whether a match was found
-            - platform (Platform|None): The matched Platform object
-            - match_type (str|None): 'mapping', 'exact', 'ambiguous', or None.
-              'ambiguous' means multiple PlatformMapping entries matched, or
-              multiple Platform objects share the same name, and a single
-              Platform could not be determined.
-
-    """
-    from dcim.models import Platform
-
-    if not librenms_os or librenms_os == "-":
-        return {"found": False, "platform": None, "match_type": None}
-
-    # Try case-insensitive exact name match first.  We defer the "ambiguous"
-    # short-circuit so that an explicit PlatformMapping can still disambiguate
-    # the LibreNMS OS in exactly the case where multiple Platform rows share
-    # the name and the user added a mapping to break the tie.
-    platform_ambiguous = False
-    try:
-        platform = Platform.objects.get(name__iexact=librenms_os)
-        return {"found": True, "platform": platform, "match_type": "exact"}
-    except Platform.DoesNotExist:
-        pass
-    except Platform.MultipleObjectsReturned:
-        platform_ambiguous = True
-
-    # Fall back to PlatformMapping for when the platform name differs from the LibreNMS OS string
-    try:
-        from netbox_librenms_plugin.models import PlatformMapping as _PlatformMapping
-
-        _has_platform_mapping = True
-    except ImportError:
-        _has_platform_mapping = False
-
-    if _has_platform_mapping:
-        try:
-            mapping = _PlatformMapping.objects.get(librenms_os__iexact=librenms_os)
-            return {"found": True, "platform": mapping.netbox_platform, "match_type": "mapping"}
-        except _PlatformMapping.DoesNotExist:
-            pass
-        except _PlatformMapping.MultipleObjectsReturned:
-            return {"found": False, "platform": None, "match_type": "ambiguous", "ambiguity_source": "mapping"}
-
-    if platform_ambiguous:
-        return {"found": False, "platform": None, "match_type": "ambiguous", "ambiguity_source": "platform"}
-
-    return {"found": False, "platform": None, "match_type": None}
-
-
 def get_vlan_sync_css_class(exists_in_netbox: bool, name_matches: bool = True) -> str:
     """
     Determine CSS class for a VLAN row on the VLAN sync tab.
