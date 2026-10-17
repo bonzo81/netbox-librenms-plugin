@@ -485,34 +485,6 @@ class TestCreateAndSyncChecksTheFormAgainstNetBoxAndLibreNMS:
         assert Platform.objects.count() == count
         assert any("now matches LibreNMS OS 'junos'" in text for text in message_texts(response.wsgi_request, "error"))
 
-    def test_a_lock_conflict_on_the_mapping_keeps_the_committed_assignment(self, client, librenms_server):
-        from netbox_librenms_plugin.models import PlatformMapping
-        from netbox_librenms_plugin.tests.lock_conflict_helpers import failing_statement
-        from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
-
-        _tracking(False)
-        device = make_device("create-mapping-conflict")
-        client.force_login(make_superuser("create-mapping-conflict-su"))
-
-        with failing_statement(
-            lambda sql, params: sql.startswith('INSERT INTO "netbox_librenms_plugin_platformmapping"'), "55P03"
-        ) as failed:
-            response = _post(
-                client,
-                "create_and_assign_platform",
-                device,
-                {"platform_name": "Juniper Junos", "librenms_os": "junos", "create_mapping": "on"},
-            )
-
-        assert failed
-        device.refresh_from_db()
-        assert response.status_code == 302
-        assert device.platform.name == "Juniper Junos"
-        assert not PlatformMapping.objects.filter(librenms_os="junos").exists()
-        assert f"Platform assigned; OS mapping not created: {TRY_AGAIN_MESSAGE}" in message_texts(
-            response.wsgi_request, "warning"
-        )
-
 
 class TestCreateAndSyncReadsOnlyThePostedServer:
     @pytest.mark.parametrize("subject", ["device", "virtualmachine"])
@@ -544,3 +516,88 @@ class TestCreateAndSyncReadsOnlyThePostedServer:
         assert Platform.objects.count() == count
         assert list(librenms_server.requests) == []
         assert "Selected LibreNMS server is no longer configured." in message_texts(response.wsgi_request, "error")
+
+
+def _after_the_assignment(prefix, table):
+    """Match the first statement that starts with *prefix* and names *table*, after the subject's platform UPDATE."""
+    state = {"assigned": False, "matched": False}
+
+    def matches(sql, _params):
+        if sql.startswith('UPDATE "dcim_device"'):
+            state["assigned"] = True
+        elif state["assigned"] and not state["matched"] and sql.startswith(prefix) and table in sql:
+            state["matched"] = True
+            return True
+        return False
+
+    return matches
+
+
+class TestTheMappingFollowUpKeepsTheCommittedAssignment:
+    @pytest.mark.parametrize("statement", ["SELECT", "INSERT"], ids=["first-select", "insert"])
+    def test_a_lock_conflict_on_a_mapping_query_is_reported_after_the_assignment(
+        self, client, librenms_server, statement
+    ):
+        from netbox_librenms_plugin.models import PlatformMapping
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import failing_statement
+        from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
+
+        _tracking(False)
+        device = make_device(f"mapping-follow-up-{statement.lower()}")
+        client.force_login(make_superuser(f"mapping-follow-up-{statement.lower()}-su"))
+        table = "netbox_librenms_plugin_platformmapping"
+        prefix = "SELECT" if statement == "SELECT" else f'INSERT INTO "{table}"'
+        matches = _after_the_assignment(prefix, table)
+
+        with failing_statement(matches, "55P03") as failed:
+            response = _post(
+                client,
+                "create_and_assign_platform",
+                device,
+                {"platform_name": "Juniper Junos", "librenms_os": "junos", "create_mapping": "on"},
+            )
+
+        assert failed
+        device.refresh_from_db()
+        assert response.status_code == 302
+        assert device.platform.name == "Juniper Junos"
+        assert not PlatformMapping.objects.filter(librenms_os="junos").exists()
+        assert message_texts(response.wsgi_request, "warning") == [
+            f"Platform assigned; OS mapping not created: {TRY_AGAIN_MESSAGE}"
+        ]
+
+    def test_a_lock_conflict_on_the_recovery_select_is_still_reported(self, client, librenms_server):
+        from django.db import connection
+
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import wrapped_database_error
+        from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
+
+        _tracking(False)
+        device = make_device("mapping-follow-up-recovery")
+        client.force_login(make_superuser("mapping-follow-up-recovery-su"))
+        table = "netbox_librenms_plugin_platformmapping"
+        insert_failed, select_failed = [], []
+
+        def fail(execute, sql, params, many, context):
+            if table in sql and sql.startswith(f'INSERT INTO "{table}"') and not insert_failed:
+                insert_failed.append(sql)
+                raise wrapped_database_error("23505")
+            if table in sql and sql.startswith("SELECT") and insert_failed and not select_failed:
+                select_failed.append(sql)
+                raise wrapped_database_error("55P03")
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(fail):
+            response = _post(
+                client,
+                "create_and_assign_platform",
+                device,
+                {"platform_name": "Juniper Junos", "librenms_os": "junos", "create_mapping": "on"},
+            )
+
+        device.refresh_from_db()
+        assert insert_failed and select_failed
+        assert device.platform.name == "Juniper Junos"
+        assert message_texts(response.wsgi_request, "warning") == [
+            f"Platform assigned; OS mapping not created: {TRY_AGAIN_MESSAGE}"
+        ]
