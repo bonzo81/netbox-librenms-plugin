@@ -36,9 +36,11 @@ ACTION_MISMATCH_PREVIEW = "mismatch_preview"
 ACTION_VERIFY_MODULE = "verify_module"
 
 # The batch rows each action signs: a branch entry is [index, target]; a manifest entry adds "selectable".
+# A verify entry is [index] of a row the page table shows in the verified row's subtree.
 _ROW_SHAPES = {
     ACTION_INSTALL_BRANCH: (int, int),
     ACTION_INSTALL_SELECTED: (int, int, bool),
+    ACTION_VERIFY_MODULE: (int,),
 }
 # The actions that act on no single row and so sign no index.
 _INDEXLESS_ACTIONS = frozenset({ACTION_INSTALL_SELECTED})
