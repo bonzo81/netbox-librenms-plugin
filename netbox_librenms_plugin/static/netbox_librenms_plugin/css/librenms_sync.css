@@ -108,7 +108,7 @@
 
 /* At phone width, the sync tables wrap their cell content, so that they fit their card without a scroll wrapper. */
 @media (max-width: 575.98px) {
-    .device-info-sync-table .d-flex,
+    .librenms-info-sync-table .d-flex,
     #librenms-cable-table .d-flex,
     #librenms-cable-table-vc .d-flex,
     #librenms-ipaddress-table .d-flex,
@@ -134,12 +134,12 @@
         padding-inline: 0.25rem;
     }
 
-    .device-info-sync-table .ms-3,
-    .device-info-sync-table .ms-2 {
+    .librenms-info-sync-table .ms-3,
+    .librenms-info-sync-table .ms-2 {
         margin-inline-start: 0 !important;
     }
 
-    .device-info-sync-table :is(td, .btn, .badge),
+    .librenms-info-sync-table :is(td, .btn, .badge),
     #librenms-cable-table :is(td, .btn, .badge),
     #librenms-cable-table-vc :is(td, .btn, .badge),
     #librenms-ipaddress-table :is(td, .btn, .badge),
@@ -148,11 +148,11 @@
         overflow-wrap: anywhere;
     }
 
-    .device-info-sync-table td:first-child {
+    .librenms-info-sync-table td:first-child {
         overflow-wrap: normal;
     }
 
-    .device-info-sync-table th,
+    .librenms-info-sync-table th,
     #librenms-cable-table th,
     #librenms-cable-table-vc th,
     #librenms-ipaddress-table th,
@@ -200,4 +200,9 @@
         width: 0;
         min-width: 0;
     }
+}
+
+/* A long value breaks so the information sync table fits a phone-width card; the field names keep their words. */
+.librenms-info-sync-table td + td {
+    overflow-wrap: anywhere;
 }

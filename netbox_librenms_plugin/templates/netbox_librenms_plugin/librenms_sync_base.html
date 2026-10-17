@@ -496,7 +496,7 @@
         <div class="card">
             <h5 class="card-header">Device Information Sync</h5>
             <div class="card-body p-0">
-                <table class="table table-sm table-hover mb-0 device-info-sync-table">
+                <table class="table table-sm table-hover mb-0 librenms-info-sync-table">
                     <thead>
                         <tr>
                             <th style="width: 20%; padding-left: 1rem;">Field</th>
@@ -516,9 +516,9 @@
                                    style="cursor: help;"></i>
                             </td>
                             <td>
-                                <div class="d-flex align-items-center">
+                                <div class="d-flex flex-wrap align-items-center column-gap-3 row-gap-1">
                                     <div>{{ object.name }}</div>
-                                    <div class="ms-3">
+                                    <div>
                                         {% if resolved_name and resolved_name != object.name %}
                                         <form method="post"
                                               action="{% url 'plugins:netbox_librenms_plugin:update_device_name' pk=object.pk %}"
@@ -549,7 +549,7 @@
                         <tr>
                             <td style="padding-left: 1rem;">Device Type</td>
                             <td>
-                                <div class="d-flex align-items-center">
+                                <div class="d-flex flex-wrap align-items-center column-gap-3 row-gap-1">
                                     <div>
                                         {% if object.device_type %}
                                             <a href="{{ object.device_type.get_absolute_url }}">{{ object.device_type }}</a>
@@ -557,7 +557,7 @@
                                             <span class="text-muted">Not set</span>
                                         {% endif %}
                                     </div>
-                                    <div class="ms-3">
+                                    <div>
                                         {% if librenms_device_hardware_match.matched %}
                                             {% if not object.device_type or object.device_type.pk != librenms_device_hardware_match.device_type.pk %}
                                             <form method="post"
@@ -580,13 +580,15 @@
                                 </div>
                             </td>
                             <td>
-                                {{ librenms_device_hardware }}
-                                {% if not librenms_device_hardware_match.matched and librenms_device_hardware != "-" %}
-                                    <a href="{% url 'dcim:devicetype_list' %}" class="btn btn-sm btn-outline-secondary ms-2"
-                                       title="View DeviceTypes to create matching type" target="_blank">
-                                        <i class="mdi mdi-open-in-new"></i> DeviceTypes
-                                    </a>
-                                {% endif %}
+                                <div class="d-flex flex-wrap align-items-center column-gap-2 row-gap-1">
+                                    <div>{{ librenms_device_hardware }}</div>
+                                    {% if not librenms_device_hardware_match.matched and librenms_device_hardware != "-" %}
+                                        <a href="{% url 'dcim:devicetype_list' %}" class="btn btn-sm btn-outline-secondary"
+                                           title="View DeviceTypes to create matching type" target="_blank">
+                                            <i class="mdi mdi-open-in-new"></i> DeviceTypes
+                                        </a>
+                                    {% endif %}
+                                </div>
                             </td>
                         </tr>
 
@@ -596,7 +598,7 @@
                                 Serial Number
                             </td>
                             <td>
-                                <div class="d-flex align-items-center">
+                                <div class="d-flex flex-wrap align-items-center column-gap-3 row-gap-1">
                                     <div>
                                         {% if object.serial %}
                                             {{ object.serial }}
@@ -604,7 +606,7 @@
                                             <span class="text-muted">Not set</span>
                                         {% endif %}
                                     </div>
-                                    <div class="ms-3">
+                                    <div>
                                         {% if object.virtual_chassis and vc_inventory_serials %}
                                             <button type="button" class="btn btn-sm btn-outline-info"
                                                     data-bs-toggle="modal" data-bs-target="#vc-serials-modal"
@@ -647,9 +649,9 @@
                             <td style="padding-left: 1rem;">Location</td>
                             <td>{{ object.site.name }}</td>
                             <td>
-                                <div class="d-flex align-items-center">
+                                <div class="d-flex flex-wrap align-items-center column-gap-3 row-gap-1">
                                     <div>{{ librenms_device_location }}</div>
-                                    <div class="ms-3">
+                                    <div>
                                         {% if librenms_device_location != object.site.name %}
                                         <form method="post"
                                               action="{% url 'plugins:netbox_librenms_plugin:update_device_location' pk=object.pk %}"
@@ -684,7 +686,7 @@
         <div class="card">
             <h5 class="card-header">Virtual Machine Information Sync</h5>
             <div class="card-body p-0">
-                <table class="table table-sm table-hover mb-0">
+                <table class="table table-sm table-hover mb-0 librenms-info-sync-table">
                     <thead>
                         <tr>
                             <th style="width: 20%; padding-left: 1rem;">Field</th>
