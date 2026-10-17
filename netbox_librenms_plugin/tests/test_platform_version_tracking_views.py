@@ -512,3 +512,35 @@ class TestCreateAndSyncChecksTheFormAgainstNetBoxAndLibreNMS:
         assert f"Platform assigned; OS mapping not created: {TRY_AGAIN_MESSAGE}" in message_texts(
             response.wsgi_request, "warning"
         )
+
+
+class TestCreateAndSyncReadsOnlyThePostedServer:
+    @pytest.mark.parametrize("subject", ["device", "virtualmachine"])
+    def test_a_removed_server_key_refuses_the_create_without_a_fallback_read(self, client, librenms_server, subject):
+        from dcim.models import Platform
+
+        _tracking(True)
+        if subject == "device":
+            obj, view_name = _linked("create-removed-key", librenms_server, 7361), "create_and_assign_platform"
+        else:
+            obj, view_name = _linked_vm("create-removed-key-vm", librenms_server, 7362), "create_and_assign_vm_platform"
+        librenms_server.requests.clear()
+        client.force_login(make_superuser(f"create-removed-key-{subject}-su"))
+        count = Platform.objects.count()
+
+        url = reverse(f"plugins:netbox_librenms_plugin:{view_name}", kwargs={"pk": obj.pk})
+        response = client.post(
+            url,
+            {
+                "server_key": "removed",
+                "platform_name": "Juniper Junos",
+                "librenms_os": "junos",
+                "librenms_version": VERSION,
+            },
+        )
+
+        obj.refresh_from_db()
+        assert obj.platform is None
+        assert Platform.objects.count() == count
+        assert list(librenms_server.requests) == []
+        assert "Selected LibreNMS server is no longer configured." in message_texts(response.wsgi_request, "error")
