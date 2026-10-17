@@ -388,7 +388,8 @@ class TestConcurrentCreate:
                 connections.close_all()
 
         def insert_after_the_winner(execute, sql, params, many, context):
-            if sql.startswith('INSERT INTO "dcim_platform"') and not winners:
+            # Before NetBox 4.7, the MPTT tree UPDATE (indented SQL) comes first and locks the tree rows.
+            if sql.lstrip().startswith(('UPDATE "dcim_platform"', 'INSERT INTO "dcim_platform"')) and not winners:
                 with bounded_executor(1) as executor:
                     executor.submit(create_winner).result(timeout=10)
             return execute(sql, params, many, context)
