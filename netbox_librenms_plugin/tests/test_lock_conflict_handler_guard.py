@@ -84,7 +84,6 @@ ALLOWED = [
         (path, function, caught, _NOT_LTREE)
         for path, function, caught in (
             ("views/imports/actions.py", "_save_device", "ValidationError"),
-            ("views/imports/actions.py", "CreatePlatformFromImportView._create_platform_attempt", "ValidationError"),
             ("views/imports/actions.py", "AddAsOOBView.post", "ValidationError"),
             ("views/imports/actions.py", "AddAsOOBView._resolve_oob_interface", "DataError, ValidationError"),
             ("views/settings_views.py", "LibreNMSSettingsView.post", "ValidationError"),
