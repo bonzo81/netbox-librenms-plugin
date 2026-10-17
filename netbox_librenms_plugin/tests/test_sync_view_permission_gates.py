@@ -25,9 +25,11 @@ def pytest_generate_tests(metafunc):
             variants = [("device", {})]
             if name in {
                 "SyncInterfacesView",
+                "RebindInterfacePortView",
                 "DeleteNetBoxInterfacesView",
                 "SyncInterfaceParentView",
                 "SyncIPAddressesView",
+                "CreateVRFFromIPRowView",
                 "AddDeviceToLibreNMSView",
                 "RemoveServerMappingView",
                 "SetPreferredServerView",

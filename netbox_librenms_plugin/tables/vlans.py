@@ -5,7 +5,16 @@ from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
 
 from netbox_librenms_plugin.constants import LIBRENMS_VLAN_STATE_ACTIVE
-from netbox_librenms_plugin.utils import get_table_paginate_count, get_vlan_sync_css_class
+from netbox_librenms_plugin.utils import get_table_paginate_count, get_vlan_sync_css_class, render_vlan_sync_action
+
+
+class _VLANSelectionColumn(ToggleColumn):
+    """Render a selection control only for rows with a usable VLAN identity."""
+
+    def render(self, value, bound_column, record):
+        if record.get("vid_error"):
+            return ""
+        return super().render(value, bound_column, record)
 
 
 class LibreNMSVLANTable(tables.Table):
@@ -24,21 +33,24 @@ class LibreNMSVLANTable(tables.Table):
             "vlan_group_selection",
             "type",
             "state",
+            "status",
         ]
         attrs = {
             "class": "table table-hover object-list",
             "id": "librenms-vlan-table",
         }
         row_attrs = {
-            "data-vlan-id": lambda record: record.get("vlan_id"),
+            "data-vlan-id": lambda record: None if record.get("vid_error") else record.get("vlan_id"),
         }
 
     def __init__(self, *args, vlan_groups=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.prefix = "vlans_"
         self.vlan_groups = vlan_groups or []
+        # Donor "migrated mode" renders no form, so per-row submit buttons must become status text.
+        self.migrated_to_marker = False
 
-    selection = ToggleColumn(
+    selection = _VLANSelectionColumn(
         orderable=False,
         visible=True,
         attrs={"td": {"data-col": "selection"}, "input": {"name": "select"}},
@@ -49,6 +61,7 @@ class LibreNMSVLANTable(tables.Table):
         accessor="vlan_id",
         verbose_name="VLAN ID",
         attrs={"td": {"data-col": "vlan_id"}},
+        empty_values=(),
     )
 
     name = tables.Column(
@@ -76,8 +89,26 @@ class LibreNMSVLANTable(tables.Table):
         attrs={"td": {"data-col": "state"}},
     )
 
+    status = tables.Column(
+        verbose_name="Status",
+        attrs={"td": {"data-col": "status"}},
+        empty_values=(),
+        orderable=False,
+    )
+
     def render_vlan_id(self, value, record):
         """Render VLAN ID with color based on sync status."""
+        if vid_error := record.get("vid_error"):
+            raw_vid = record.get("raw_vlan_id")
+            if raw_vid is None:
+                raw_vid = "Missing"
+            elif raw_vid == "":
+                raw_vid = "Empty"
+            return format_html(
+                '<span class="text-danger">{} <span class="badge text-bg-danger">{}</span></span>',
+                raw_vid,
+                vid_error,
+            )
         css_class = get_vlan_sync_css_class(
             record.get("exists_in_netbox", False),
             record.get("name_matches", True),
@@ -113,6 +144,8 @@ class LibreNMSVLANTable(tables.Table):
         2. Unique VID match (if VID exists in exactly one group)
         3. No selection (with warning icon if ambiguous)
         """
+        if record.get("vid_error"):
+            return ""
         vlan_id = record.get("vlan_id")
 
         # Determine which group to auto-select
@@ -174,6 +207,17 @@ class LibreNMSVLANTable(tables.Table):
         if value == LIBRENMS_VLAN_STATE_ACTIVE or value == "active":
             return mark_safe('<span class="text-success">Active</span>')
         return mark_safe('<span class="text-muted">Inactive</span>')
+
+    def render_status(self, value, record):
+        """Render the action or state for one VLAN synchronization row."""
+        if record.get("vid_error"):
+            return ""
+        return render_vlan_sync_action(
+            record.get("vlan_id"),
+            record.get("exists_in_netbox", False),
+            record.get("name_matches", True),
+            actions_enabled=not self.migrated_to_marker,
+        )
 
     def configure(self, request):
         """Configure the table with pagination."""

@@ -286,6 +286,14 @@ class MockLibreNMSServer:
                 }
             ]
         self.register(f"/api/v0/devices/{device_id}/ports", {"status": "ok", "ports": ports})
+        # An interface refresh reads the port stack alongside the ports. A real LibreNMS answers
+        # 200 with an empty mappings list for a device that has no stack rows, so serve that
+        # unless the test registered its own rows first.
+        # register() keys a method-less route by its bare path, so check both forms: a test that
+        # registered its own rows either way must keep them.
+        stack_route = f"/api/v0/devices/{device_id}/port_stack"
+        if not any(key in self.routes for key in (stack_route, f"GET {stack_route}")):
+            self.register(stack_route, {"status": "ok", "mappings": []}, method="GET")
 
     def auth_error_response(self, path="/api/v0/devices"):
         self.register(path, {"status": "error", "message": "Authentication failed"}, status=401)
@@ -403,13 +411,6 @@ def _split_recording_key(key):
     return method, path, query
 
 
-def _unwrap_recorded_response(value):
-    """Return the JSON body from a recording response value."""
-    if isinstance(value, list) and len(value) == 2 and isinstance(value[0], int):
-        return value[1]
-    return unwrap_response(value)[1]
-
-
 class LibreNMSStubServer(MockLibreNMSServer):
     """Serve recorded LibreNMS data shapes, derive instance endpoints, and keep device and location writes in memory."""
 
@@ -455,7 +456,7 @@ class LibreNMSStubServer(MockLibreNMSServer):
         for key, value in recording.get("responses", {}).items():
             _, request_route, _ = _split_recording_key(key)
             if request_route == route:
-                return _unwrap_recorded_response(value)
+                return unwrap_response(value)[1]
         return None
 
     @staticmethod
@@ -546,7 +547,7 @@ class LibreNMSStubServer(MockLibreNMSServer):
             _, route, _ = _split_recording_key(key)
             if route not in (f"/api/v0/inventory/{device_id}", f"/api/v0/inventory/{device_id}/all"):
                 continue
-            body = _unwrap_recorded_response(value)
+            body = unwrap_response(value)[1]
             items = body.get("inventory") if isinstance(body, dict) else None
             for item in items if isinstance(items, list) else []:
                 if not isinstance(item, dict):

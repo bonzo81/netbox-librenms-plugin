@@ -6,6 +6,7 @@ row before applying the disclosed rename.
 """
 
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from threading import Barrier, BrokenBarrierError, Event
 
 import pytest
@@ -14,7 +15,7 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.db import close_old_connections, connection
 
-from netbox_librenms_plugin.tests.conftest import make_device
+from netbox_librenms_plugin.tests.conftest import make_device, run_in_threads
 from netbox_librenms_plugin.tests.view_test_helpers import (
     assert_locked_before_update,
     make_request,
@@ -90,7 +91,12 @@ def _sync_global_vlan(device, user, vid, lookup_wrapper):
             cursor.execute("SET statement_timeout = '5s'")
 
         request = make_request(
-            data={"action": "create_vlans", "select": [str(vid)], "server_key": "default"},
+            data={
+                "action": "create_vlans",
+                "select": [str(vid)],
+                f"vlan_group_{vid}": "",
+                "server_key": "default",
+            },
             user=user,
             path="/sync/vlans/",
         )
@@ -125,13 +131,14 @@ def test_concurrent_global_vlan_sync_creates_one_vlan():
     lookup_barrier = Barrier(2)
     lookup_wrappers = [_GlobalVLANLookupBarrier(lookup_barrier) for _device in devices]
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [
-            executor.submit(_sync_global_vlan, device, user, 321, lookup_wrapper)
+    run_in_threads(
+        *(
+            partial(_sync_global_vlan, device, user, 321, lookup_wrapper)
             for device, lookup_wrapper in zip(devices, lookup_wrappers, strict=True)
-        ]
-        for future in futures:
-            future.result(timeout=10)
+        ),
+        barriers=(lookup_barrier,),
+        timeout=10,
+    )
 
     assert all(wrapper.lookup_seen for wrapper in lookup_wrappers)
     assert VLAN.objects.filter(vid=321, group__isnull=True).count() == 1

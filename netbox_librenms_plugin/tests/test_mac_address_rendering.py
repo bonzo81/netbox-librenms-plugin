@@ -11,18 +11,24 @@ field through utils.format_mac_address, which assumed a string.
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, stamp_rule_decision
 
 
 def _record(mac, *, netbox_interface=None):
     """Build one LibreNMS port row carrying *mac* as its ifPhysAddress."""
-    return {
-        "port_id": 7,
-        "ifName": "Ethernet1",
-        "ifPhysAddress": mac,
-        "exists_in_netbox": netbox_interface is not None,
-        "netbox_interface": netbox_interface,
-    }
+    return stamp_rule_decision(
+        {
+            "port_id": 7,
+            "ifName": "Ethernet1",
+            "ifDescr": None,
+            "ifType": None,
+            "ifSpeed": None,
+            "synced_name": "Ethernet1",
+            "ifPhysAddress": mac,
+            "exists_in_netbox": netbox_interface is not None,
+            "netbox_interface": netbox_interface,
+        }
+    )
 
 
 def _table(device, record):

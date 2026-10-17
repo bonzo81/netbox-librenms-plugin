@@ -1,17 +1,25 @@
+import json
 import logging
-import re
+from types import SimpleNamespace
 
 from django.contrib import messages
 from django.core.cache import cache
 from django.utils import timezone
 from django.views import View
 
-from netbox_librenms_plugin.constants import MAIN_INVENTORY_SOURCE, OOB_INVENTORY_SOURCE
+from netbox_librenms_plugin.constants import (
+    HOST_NAME_COLLISION_REASON,
+    MAIN_INVENTORY_SOURCE,
+    OOB_INVENTORY_SOURCE,
+    REPORTED_NAME_PORT_COLLISION_REASON,
+)
 from netbox_librenms_plugin.interface_diff import interface_enabled_from_port
+from netbox_librenms_plugin.interface_rules import RuleDecisionKind, decision_reason, interface_rules_for_request
 from netbox_librenms_plugin.interface_relationships import (
     RelationshipResolutionContext,
     build_relationship_maps,
     filter_interface_index,
+    relationship_diagnostics_report,
     resolve_relationship_row,
 )
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
@@ -24,13 +32,13 @@ from netbox_librenms_plugin.utils import (
     get_interface_port_identity_sets,
     get_librenms_oob,
     get_librenms_sync_device,
-    host_owned_interface_names,
     is_list_of_dicts,
     is_valid_ports_payload,
     normalize_librenms_port_id,
     normalize_relationship_maps,
+    reported_name_owners,
     resolve_interface_row_device,
-    syncable_interface_name,
+    synced_interface_names,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -155,7 +163,7 @@ class BaseInterfaceTableView(
             return None
         return normalize_librenms_port_id(librenms_id)
 
-    def _build_interface_lookup_maps(self, obj):
+    def _build_interface_lookup_maps(self, obj, *, metadata_only=False):
         """
         Build name and LibreNMS ID indexes, dropping conflicting IDs entirely.
 
@@ -164,6 +172,7 @@ class BaseInterfaceTableView(
 
         Args:
             obj: The NetBox device (or VM) whose interfaces are indexed.
+            metadata_only: Read identity fields without constructing interface models or related objects.
 
         Returns:
             dict: Name and LibreNMS ID indexes plus the number of interfaces carrying each ID.
@@ -180,12 +189,17 @@ class BaseInterfaceTableView(
         # assignment and MAC addresses); without this each rendered interface row issues its own
         # queries for these. Also select related relationship FKs that render_parent dereferences.
         related_field = self.get_select_related_field(obj)
-        extra_related = ["parent", "bridge"] if related_field == "virtual_machine" else ["lag", "parent", "bridge"]
-        interfaces = (
-            self.get_interfaces(obj)
-            .select_related(related_field, "untagged_vlan", *extra_related)
-            .prefetch_related("tagged_vlans", "tagged_vlans__group", "mac_addresses")
-        )
+        queryset = self.get_interfaces(obj)
+        if metadata_only:
+            interfaces = (
+                SimpleNamespace(_meta=queryset.model._meta, **row)
+                for row in queryset.values("pk", "name", f"{related_field}_id", "custom_field_data")
+            )
+        else:
+            extra_related = ["parent", "bridge"] if related_field == "virtual_machine" else ["lag", "parent", "bridge"]
+            interfaces = queryset.select_related(related_field, "untagged_vlan", *extra_related).prefetch_related(
+                "tagged_vlans", "tagged_vlans__group", "mac_addresses"
+            )
         for interface in interfaces:
             by_name[interface.name] = interface
             librenms_id = self._get_object_librenms_id(interface)
@@ -456,77 +470,58 @@ class BaseInterfaceTableView(
         return self.render_sync_partial(request, obj, _server_key, context)
 
     def _enrich_port_stack_relationships(self, request, librenms_data, host_ports, interface_name_field):
-        """Fetch and resolve host port relationships when the snapshot has a relevant signal."""
+        """Fetch and resolve the host port relationships LibreNMS reports for this device."""
         from netbox_librenms_plugin.models import PortStackLagPattern
 
-        # One pass over the ports feeds all three signal checks below.
-        names_per_port = self._relationship_port_names(host_ports, interface_name_field)
-        structural_signal = self._has_structural_relationship_signals(host_ports, interface_name_field, names_per_port)
-        unscoped_patterns = PortStackLagPattern.compiled_patterns_for_os(None)
-        unscoped_bridge_patterns = PortStackLagPattern.compiled_bridge_patterns_for_os(None)
-        name_signal = self._has_relationship_name_signals(
-            host_ports,
-            interface_name_field,
-            [*unscoped_patterns, *unscoped_bridge_patterns],
-            names_per_port,
-        )
-
-        # The OS scopes the LAG name patterns AND the SAP colon skip in
-        # resolve_port_relationships, so resolve it for a structural snapshot too. Leaving it
-        # unknown there made every Junos breakout port read as a Nokia SAP. get_device_info is
-        # cached per server/device, so the sync-tab header render usually already paid for this.
+        # This used to skip the fetch unless a port name matched a LAG/bridge pattern or a port
+        # was structurally an aggregate or a sub-unit. That gate was only ever sound while every
+        # relationship needed such a signal. A port_stack pair no rule classifies is now carried
+        # as an untyped stacking, and nothing in the ports payload predicts one, so the gate would
+        # hide exactly the devices it was added for. get_device_info is cached per server and
+        # device and the tab header already pays for it; get_port_stack is one request, and a far
+        # smaller one than the get_ports this refresh has already made.
         device_os = ""
         device_os_known = False
-        scoped_patterns = []
-        scoped_bridge_patterns = []
-        if structural_signal or name_signal:
-            info_success, device_info = self.librenms_api.get_device_info(self.librenms_id)
-            if info_success and isinstance(device_info, dict):
-                raw_device_os = device_info.get("os")
-                if isinstance(raw_device_os, str) and raw_device_os.strip():
-                    device_os = raw_device_os.strip()
-                    device_os_known = True
-        if name_signal:
-            scoped_patterns = PortStackLagPattern.compiled_patterns_for_os(device_os)
-            scoped_bridge_patterns = PortStackLagPattern.compiled_bridge_patterns_for_os(device_os)
-        # Read the OS's SAP rule here too, so the resolver does not repeat the query per call.
+        info_success, device_info = self.librenms_api.get_device_info(self.librenms_id)
+        if info_success and isinstance(device_info, dict):
+            raw_device_os = device_info.get("os")
+            if isinstance(raw_device_os, str) and raw_device_os.strip():
+                device_os = raw_device_os.strip()
+                device_os_known = True
+
+        # Read every OS-scoped rule here, so the resolver does not repeat the query per call. A
+        # blank OS scopes to no pattern at all: an unknown OS must not apply every vendor's regex.
+        scoped_patterns = PortStackLagPattern.compiled_patterns_for_os(device_os)
+        scoped_bridge_patterns = PortStackLagPattern.compiled_bridge_patterns_for_os(device_os)
         scoped_sap_patterns = PortStackLagPattern.compiled_sap_patterns_for_os(device_os)
 
-        scoped_name_signal = self._has_relationship_name_signals(
-            host_ports,
-            interface_name_field,
-            [*scoped_patterns, *scoped_bridge_patterns],
-            names_per_port,
-        )
-        relationship_fetch_failed = False
-        if structural_signal or scoped_name_signal:
-            ps_success, ps_data = self.librenms_api.get_port_stack(self.librenms_id)
-            if ps_success:
-                librenms_data["port_stack_relationships"] = self.librenms_api.resolve_port_relationships(
-                    host_ports,
-                    ps_data,
-                    device_os=device_os,
-                    interface_name_field=interface_name_field,
-                    compiled_lag_patterns=scoped_patterns,
-                    compiled_sap_patterns=scoped_sap_patterns,
-                    compiled_bridge_patterns=scoped_bridge_patterns,
-                )
-            else:
-                relationship_fetch_failed = True
-                logger.warning("port_stack fetch failed for device %s: %s", self.librenms_id, ps_data)
-                librenms_data["relationship_data_incomplete"] = True
-                messages.warning(
-                    request,
-                    "Interfaces refreshed, but relationship data could not be fetched from LibreNMS. "
-                    "The Relationships column may be incomplete. "
-                    "See server logs for details.",
-                )
+        ps_success, ps_data = self.librenms_api.get_port_stack(self.librenms_id)
+        if not ps_success:
+            logger.warning("port_stack fetch failed for device %s: %s", self.librenms_id, ps_data)
+            librenms_data["relationship_data_incomplete"] = True
+            messages.warning(
+                request,
+                "Interfaces refreshed, but relationship data could not be fetched from LibreNMS. "
+                "The Relationships column may be incomplete. "
+                "See server logs for details.",
+            )
+            return
 
-        # A structural signal still gives a useful partial snapshot when the OS lookup fails.
-        # Mark it incomplete because OS-scoped name patterns could describe additional edges, and
-        # because the SAP rule is OS-scoped too: an unknown OS applies every vendor's rule, which
-        # can suppress a relationship this device really has.
-        if (structural_signal or name_signal) and not device_os_known and not relationship_fetch_failed:
+        relationships = self.librenms_api.resolve_port_relationships(
+            host_ports,
+            ps_data,
+            device_os=device_os,
+            interface_name_field=interface_name_field,
+            compiled_lag_patterns=scoped_patterns,
+            compiled_sap_patterns=scoped_sap_patterns,
+            compiled_bridge_patterns=scoped_bridge_patterns,
+        )
+        librenms_data["port_stack_relationships"] = relationships
+
+        # Mark the answer incomplete because OS-scoped name patterns could describe additional
+        # edges, and because the SAP rule is OS-scoped too. Only a device that reported pairs can
+        # have an incomplete answer, so a device with no port_stack at all raises nothing.
+        if not device_os_known and relationships["diagnostics"]["pairs_seen"]:
             logger.warning("Could not determine the LibreNMS device OS for device %s", self.librenms_id)
             librenms_data["relationship_data_incomplete"] = True
             messages.warning(
@@ -559,6 +554,76 @@ class BaseInterfaceTableView(
             port.update(parsed)
             enriched.append(port)
         return enriched
+
+    @staticmethod
+    def enrich_interface_name_metadata(
+        ports_data,
+        interface_name_field,
+        interface_model,
+        interfaces_by_device,
+        target_device_ids,
+        viewable_interface_ids,
+        changeable_interface_ids,
+        *,
+        snapshot_complete,
+    ):
+        """Set derived names and permission-scoped holder metadata; return names claimed by host rows."""
+        reserved_name_port_ids = {}
+        for device_id, interface_maps in interfaces_by_device.items():
+            for port_id, interfaces in interface_maps["by_librenms_id_matches"].items():
+                for interface in interfaces:
+                    reserved_name_port_ids.setdefault(device_id, {}).setdefault(interface.name, set()).add(port_id)
+        synced_names, rejected_names = synced_interface_names(
+            ports_data,
+            interface_name_field,
+            interface_model,
+            target_device_ids=target_device_ids,
+            reserved_name_port_ids_by_device=reserved_name_port_ids,
+        )
+        name_owners = reported_name_owners(
+            ports_data,
+            interface_name_field,
+            synced_names,
+            rejected_names,
+            target_device_ids=target_device_ids,
+            reserved_name_port_ids_by_device=reserved_name_port_ids,
+            snapshot_complete=snapshot_complete,
+            model=interface_model,
+        )
+        claimable_names_by_device = {}
+        for port in ports_data:
+            if port.get("_source") == OOB_INVENTORY_SOURCE:
+                continue
+            port_id = normalize_librenms_port_id(port.get("port_id"))
+            if port.get("_dedup_conflict") or port_id in rejected_names:
+                continue
+            synced_name = synced_names.get(port_id)
+            device_id = target_device_ids.get(port_id)
+            if synced_name is not None and device_id is not None:
+                claimable_names_by_device.setdefault(device_id, set()).add(synced_name)
+
+        for port in ports_data:
+            port_id = normalize_librenms_port_id(port.get("port_id"))
+            synced_name = synced_names.get(port_id)
+            rejection_reason = rejected_names.get(port_id)
+            port["synced_name"] = synced_name
+            port["synced_name_is_derived"] = synced_name is not None and synced_name != port.get(interface_name_field)
+            port["synced_name_contested"] = rejection_reason in (
+                HOST_NAME_COLLISION_REASON,
+                REPORTED_NAME_PORT_COLLISION_REASON,
+            )
+            port["synced_name_rejection_reason"] = rejection_reason
+            # Name the holder only when its interface is in the caller's view scope.
+            name_owner = name_owners.get(port_id)
+            owner_interface = (
+                interfaces_by_device.get(target_device_ids.get(port_id), {}).get("by_name", {}).get(name_owner.name)
+                if name_owner is not None
+                else None
+            )
+            owner_visible = owner_interface is not None and owner_interface.pk in viewable_interface_ids
+            port["reported_name_owner"] = name_owner if owner_visible else None
+            port["reported_name_owner_changeable"] = owner_visible and owner_interface.pk in changeable_interface_ids
+        return claimable_names_by_device
 
     def get_context_data(self, request, obj, interface_name_field, server_key=None, fresh_data=None, sync_device=None):  # noqa: C901
         """
@@ -593,6 +658,9 @@ class BaseInterfaceTableView(
         ports_data = []
         table = None
         netbox_only_interfaces = []
+        ignored_count = 0
+        blocked_port_ids = []
+        show_ignored = "1" in (request.GET.get("interfaces_show_ignored"), request.POST.get("interfaces_show_ignored"))
 
         if interface_name_field is None:
             interface_name_field = get_interface_name_field(request, obj)
@@ -652,6 +720,10 @@ class BaseInterfaceTableView(
         relationship_data_incomplete = (
             bool(cached_data.get("relationship_data_incomplete")) if isinstance(cached_data, dict) else False
         )
+
+        # What the device's port_stack held and what each rule made of it. Read from the same
+        # snapshot the table renders, so the report cannot describe rows the table is not showing.
+        relationship_diagnostics = relationship_diagnostics_report(cached_data, interface_name_field)
 
         virtual_chassis_members = []
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
@@ -801,11 +873,17 @@ class BaseInterfaceTableView(
                 can_write=can_write_relationships,
             )
 
+            rules = interface_rules_for_request(request)
+            # A row with no resolved member is decided for any member: on their shared platform, else global rules only.
+            member_platform_ids = {member.platform_id for member in virtual_chassis_members}
+            any_member_platform_id = member_platform_ids.pop() if len(member_platform_ids) == 1 else None
+            target_device_ids = {}
             for port in ports_data:
-                port["enabled"] = interface_enabled_from_port(port)
-
+                port_id = normalize_librenms_port_id(port.get("port_id"))
+                if port_id is None:
+                    continue
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                    chassis_member = resolve_interface_row_device(
+                    target_device = resolve_interface_row_device(
                         obj,
                         port,
                         interface_name_field,
@@ -814,7 +892,44 @@ class BaseInterfaceTableView(
                         members_by_id=members_by_id,
                     )
                 else:
-                    chassis_member = obj
+                    target_device = obj
+                target_device_ids[port_id] = target_device.pk
+            claimable_names_by_device = self.enrich_interface_name_metadata(
+                ports_data,
+                interface_name_field,
+                interface_model,
+                interfaces_by_device,
+                target_device_ids,
+                viewable_interface_ids,
+                changeable_interface_ids,
+                snapshot_complete=not oob_incomplete,
+            )
+
+            for port in ports_data:
+                port_id = normalize_librenms_port_id(port.get("port_id"))
+                port["enabled"] = interface_enabled_from_port(port)
+
+                if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+                    # The rules read the owner's platform. An OOB row belongs to the page device, as the writer holds.
+                    rule_owner = resolve_interface_row_device(
+                        obj,
+                        port,
+                        interface_name_field,
+                        interfaces_by_port_id=interfaces_by_port_id,
+                        members_by_position=members_by_position,
+                        members_by_id=members_by_id,
+                        return_device_on_failure=False,
+                    ) or (obj if port.get("_source") == OOB_INVENTORY_SOURCE else None)
+                    chassis_member = rule_owner or obj
+                else:
+                    rule_owner = chassis_member = obj
+                # The writer's own check, so a row never offers a sync the writer refuses.
+                if rule_owner is not None:
+                    port["rule_decision"] = rules.check_interface_write(port, platform_id=rule_owner.platform_id)
+                else:
+                    # Ignored only when the writer refuses every member the user can pick; else it asks for one.
+                    any_member = rules.check_interface_write(port, platform_id=any_member_platform_id)
+                    port["rule_decision"] = any_member if any_member.kind is RuleDecisionKind.IGNORE else None
 
                 netbox_interface = resolve_relationship_row(
                     relationship_context,
@@ -853,15 +968,25 @@ class BaseInterfaceTableView(
                 # Add missing VLANs info for warning display
                 self._add_missing_vlans_info(port, row_lookup_maps)
 
-            host_owned_names = host_owned_interface_names(
-                ports_data, interface_name_field, lambda port: port.get("selected_object_id")
+            # Every port above fed the matching and naming. Only now are ignored rows left out, and
+            # before pagination, so the page counts only the rows it shows.
+            ignored = [
+                port["rule_decision"] is not None and port["rule_decision"].kind is RuleDecisionKind.IGNORE
+                for port in ports_data
+            ]
+            ignored_count = sum(ignored)
+            table_rows = (
+                ports_data
+                if show_ignored
+                else [port for port, is_ignored in zip(ports_data, ignored, strict=True) if not is_ignored]
             )
-            for port in ports_data:
-                if port.get("_source") == OOB_INVENTORY_SOURCE:
-                    owner_names = host_owned_names.get(port.get("selected_object_id"), set())
-                    port["host_name_collision"] = syncable_interface_name(port, interface_name_field) in owner_names
-
-            table = self.get_table(ports_data, obj, interface_name_field, vlan_groups=vlan_groups)
+            # Every row the write check refuses, or that has no owner: the browser walk skips them.
+            blocked_port_ids = [
+                normalize_librenms_port_id(port.get("port_id"))
+                for port in ports_data
+                if port["rule_decision"] is None or decision_reason(port["rule_decision"]) is not None
+            ]
+            table = self.get_table(table_rows, obj, interface_name_field, vlan_groups=vlan_groups)
             table.allowed_vc_member_ids = actionable_owner_ids
             # Propagate donor "migrated mode" so the table suppresses per-row relationship sync
             # buttons (the bulk form is already hidden by the template; the row buttons POST
@@ -876,10 +1001,7 @@ class BaseInterfaceTableView(
                 for interface_name, interface in device_interface_maps["by_name"].items():
                     if interface.id not in viewable_interface_ids or interface.id in matched_interface_ids:
                         continue
-                    # Host ownership is per device, so an OOB row's name cannot suppress
-                    # netbox-only detection here. It also drops names too long for NetBox to
-                    # store, which no NetBox interface name can equal anyway.
-                    if interface_name not in host_owned_names.get(device_id, set()):
+                    if interface_name not in claimable_names_by_device.get(device_id, set()):
                         # Get device name for the interface (reuse the pre-indexed members — the
                         # device_id keys come from interfaces_by_device, which was built from them —
                         # instead of a members.get(id=...) query per netbox-only interface).
@@ -930,36 +1052,11 @@ class BaseInterfaceTableView(
             "server_key": server_key,
             "oob_incomplete": oob_incomplete,
             "relationship_data_incomplete": relationship_data_incomplete,
+            "relationship_diagnostics": relationship_diagnostics,
             "hidden_ipam_permissions": hidden_ipam_permissions,
             "vlan_scope_incomplete": vlan_scope_incomplete,
+            "show_ignored": show_ignored,
+            "ignored_count": ignored_count,
+            # The browser's related-row walk skips these, on this page and on every other.
+            "blocked_port_ids_json": json.dumps([str(port_id) for port_id in blocked_port_ids if port_id is not None]),
         }
-
-    @staticmethod
-    def _relationship_port_names(ports, interface_name_field):
-        """Return each port's distinct string names from the active and canonical fields."""
-        name_fields = {"ifName", "ifDescr", interface_name_field}
-        return [[name for field in name_fields if isinstance(name := port.get(field), str) and name] for port in ports]
-
-    def _has_structural_relationship_signals(self, ports, interface_name_field="ifName", names_per_port=None):
-        """Return true for an explicit LAG type or a child name whose parent also exists."""
-        if names_per_port is None:
-            names_per_port = self._relationship_port_names(ports, interface_name_field)
-        port_names = {name for names in names_per_port for name in names}
-        sub_iface_re = re.compile(r"^(.+)\.\d+$")
-        return any(
-            port.get("ifType", "") == "ieee8023adLag"
-            or any((match := sub_iface_re.match(name)) and match.group(1) in port_names for name in names)
-            for port, names in zip(ports, names_per_port, strict=True)
-        )
-
-    def _has_relationship_name_signals(
-        self,
-        ports,
-        interface_name_field,
-        relationship_patterns,
-        names_per_port=None,
-    ):
-        """Return true when an interface name matches one of the supplied OS-scoped patterns."""
-        if names_per_port is None:
-            names_per_port = self._relationship_port_names(ports, interface_name_field)
-        return any(pat.search(name) for names in names_per_port for pat in relationship_patterns for name in names)

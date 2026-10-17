@@ -8,12 +8,14 @@ from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.utils import (
-    build_librenms_id_qs,
+    build_librenms_ids_qs,
     get_librenms_device_id,
     interface_name_fallback_matches_port,
+    invert_relationship_edges,
     is_list_of_dicts,
     normalize_librenms_port_id,
     normalize_relationship_maps,
+    normalize_stacked_ports,
 )
 
 RELATIONSHIP_CANDIDATE_BATCH_SIZE = 64
@@ -27,6 +29,23 @@ class RelationshipMaps:
     sub_interfaces: dict
     ports_by_id: dict
     bridge_members: dict = field(default_factory=dict)
+    # Ports LibreNMS reports as stacked that no rule classified. Symmetric and directionless, so
+    # it needs no inversion and the relationship writer never reads it.
+    stacked_ports: dict = field(default_factory=dict)
+    # The downward view of each edge map, derived here so every construction site gets it and a
+    # per-row read stays a dict lookup rather than a scan of the device's whole port_stack.
+    lag_members_by_aggregate: dict = field(init=False)
+    sub_interfaces_by_parent: dict = field(init=False)
+    bridge_members_by_bridge: dict = field(init=False)
+
+    def __post_init__(self):
+        """Derive the three downward views once per snapshot."""
+        for source, derived in (
+            ("lag_members", "lag_members_by_aggregate"),
+            ("sub_interfaces", "sub_interfaces_by_parent"),
+            ("bridge_members", "bridge_members_by_bridge"),
+        ):
+            object.__setattr__(self, derived, invert_relationship_edges(getattr(self, source)))
 
 
 @dataclass(frozen=True)
@@ -70,16 +89,10 @@ def interface_queryset_for_object(obj):
 
 def relationship_candidate_q(server_key, port_ids, names):
     """Build one query for stable IDs and safe name hints."""
-    candidate_q = Q(pk__in=[])
-    unique_port_ids = {
-        (type(port_id).__name__, str(port_id)): port_id
-        for port_id in port_ids
-        if normalize_librenms_port_id(port_id) is not None
-    }
-    for marker in sorted(unique_port_ids):
-        port_id = unique_port_ids[marker]
-        host_q, oob_q = build_librenms_id_qs(server_key, port_id)
-        candidate_q |= host_q | oob_q
+    host_q, oob_q = build_librenms_ids_qs(
+        server_key, [port_id for port_id in port_ids if normalize_librenms_port_id(port_id) is not None]
+    )
+    candidate_q = host_q | oob_q
     unique_names = sorted({name for name in names if isinstance(name, str) and name})
     if unique_names:
         candidate_q |= Q(name__in=unique_names)
@@ -240,9 +253,9 @@ def _resolve_interface_by_name_hint(obj, name_hint, index=None, expected_owner=N
 
 def build_relationship_maps(cached_data):
     """Normalize relationship maps and index host ports by stable ID."""
-    lag_members, sub_interfaces, bridge_members = normalize_relationship_maps(
-        cached_data.get("port_stack_relationships")
-    )
+    relationships = cached_data.get("port_stack_relationships")
+    lag_members, sub_interfaces, bridge_members = normalize_relationship_maps(relationships)
+    stacked_ports = normalize_stacked_ports(relationships)
     ports = cached_data.get("ports", [])
     if not is_list_of_dicts(ports):
         ports = []
@@ -253,7 +266,122 @@ def build_relationship_maps(cached_data):
         port_id = normalize_librenms_port_id(port.get("port_id"))
         if port_id is not None:
             ports_by_id[port_id] = port
-    return RelationshipMaps(lag_members, sub_interfaces, ports_by_id, bridge_members)
+    return RelationshipMaps(lag_members, sub_interfaces, ports_by_id, bridge_members, stacked_ports)
+
+
+# How many unclassified pairs the report names before it stops listing them.
+UNCLASSIFIED_PAIR_LIMIT = 25
+
+# Presentation labels for the typed relationship kinds, keyed as the resolver reports them.
+_KIND_LABELS = {
+    "sub_interfaces": "Sub-interface",
+    "bridge_members": "Bridge",
+    "lag_members": "LAG",
+}
+
+
+def _diagnostics_verdict(diagnostics):
+    """Return the one sentence that says which of the empty cases this device is in."""
+    # A snapshot cached by an older release can be missing a counter the report now reads.
+    diagnostics = {
+        key: diagnostics.get(key, 0)
+        for key in (
+            "pairs_seen",
+            "pairs_usable",
+            "pairs_unclassified",
+            "pairs_skipped_sap",
+            "pairs_unresolved_end",
+            "pairs_malformed",
+        )
+    }
+    if not diagnostics["pairs_seen"]:
+        return (
+            "LibreNMS reports no port_stack rows for this device, so it has no interface "
+            "relationship data to read. No name pattern can add one."
+        )
+    if not diagnostics["pairs_usable"]:
+        if diagnostics["pairs_skipped_sap"] == diagnostics["pairs_seen"]:
+            return (
+                "Every row LibreNMS reported names a service access point, which describes a "
+                "service rather than an interface relationship. Check this OS's SAP name pattern."
+            )
+        if diagnostics["pairs_unresolved_end"] == diagnostics["pairs_seen"]:
+            return (
+                "Every row LibreNMS reported names a port it does not poll, so neither end can be "
+                "resolved. The relationships exist on the device but not in LibreNMS's port list."
+            )
+        return "LibreNMS reported stack rows, but none could be used. See the rejection counts below."
+    if diagnostics["pairs_unclassified"]:
+        return (
+            "LibreNMS reports these ports as stacked, but no rule says what kind of relationship "
+            "it is. Naming the composite side in this OS's bridge or LAG name pattern classifies "
+            "them; until then they are shown untyped."
+        )
+    return "Every usable pair LibreNMS reported was classified."
+
+
+def relationship_diagnostics_report(cached_data, interface_name_field="ifName"):
+    """
+    Summarize what this device's port_stack contained and what each rule made of it.
+
+    "The name pattern is wrong" and "LibreNMS has no data for this device" both render as an empty
+    Relationships column, and telling them apart used to need the server log (issue #179 item 10).
+    The counts come from the cached snapshot rather than a fresh resolve, so the report describes
+    exactly the rows the table is showing and cannot drift from them.
+
+    Args:
+        cached_data (dict): The cached LibreNMS ports snapshot.
+        interface_name_field (str): The field the tab names interfaces by.
+
+    Returns:
+        dict | None: The template-ready report, or None when the snapshot predates it.
+
+    """
+    if not isinstance(cached_data, dict):
+        return None
+    relationships = cached_data.get("port_stack_relationships")
+    if not isinstance(relationships, dict):
+        return None
+    diagnostics = relationships.get("diagnostics")
+    if not isinstance(diagnostics, dict) or "pairs_seen" not in diagnostics:
+        return None
+
+    ports = cached_data.get("ports", [])
+    names_by_id = {}
+    if is_list_of_dicts(ports):
+        for port in ports:
+            port_id = normalize_librenms_port_id(port.get("port_id"))
+            name = port.get(interface_name_field)
+            if port_id is not None and isinstance(name, str) and name:
+                names_by_id[port_id] = name
+
+    # Rebuild the pairs from the symmetric adjacency, keeping each one once.
+    stacked_ports = normalize_stacked_ports(relationships)
+    pairs = sorted(
+        {
+            (min(port_id, partner_id), max(port_id, partner_id))
+            for port_id, partners in stacked_ports.items()
+            for partner_id in partners
+        }
+    )
+    named_pairs = [
+        (names_by_id.get(first_id, f"port {first_id}"), names_by_id.get(second_id, f"port {second_id}"))
+        for first_id, second_id in pairs[:UNCLASSIFIED_PAIR_LIMIT]
+    ]
+
+    cached_kinds = diagnostics.get("kinds")
+    kinds = [
+        {**kind, "label": _KIND_LABELS.get(kind.get("key"), kind.get("key"))}
+        for kind in (cached_kinds if isinstance(cached_kinds, list) else [])
+        if isinstance(kind, dict)
+    ]
+    return {
+        **{key: value for key, value in diagnostics.items() if key != "kinds"},
+        "kinds": kinds,
+        "unclassified_pairs": named_pairs,
+        "unclassified_truncated": max(len(pairs) - UNCLASSIFIED_PAIR_LIMIT, 0),
+        "verdict": _diagnostics_verdict(diagnostics),
+    }
 
 
 def build_candidate_relationship_context(obj, server_key, user, can_write, port_ids, names):
@@ -353,6 +481,25 @@ def enrich_port_relationships(
     port["librenms_bridge_name"] = bridge_name
     port["librenms_bridge_port_id"] = bridge_port_id
     port["bridge_sync_status"] = bridge_status
+
+    def member_names(members_by_aggregate):
+        """Name every member LibreNMS attaches to this row, in the inversion's order."""
+        names = []
+        for member_id in members_by_aggregate.get(port_id, ()) if port_id else ():
+            member_port = relationship_maps.ports_by_id.get(member_id)
+            member_name = member_port.get(interface_name_field) if member_port else None
+            # Only a str is a name: LibreNMS copies ifName unvalidated, and joining an int would
+            # 500 the table. A trimmed snapshot must not shrink the count, so the slot is kept.
+            if not isinstance(member_name, str) or not member_name:
+                member_name = f"port {member_id}"
+            names.append(member_name)
+        return names
+
+    port["librenms_lag_member_names"] = member_names(relationship_maps.lag_members_by_aggregate)
+    port["librenms_sub_interface_names"] = member_names(relationship_maps.sub_interfaces_by_parent)
+    port["librenms_bridge_member_names"] = member_names(relationship_maps.bridge_members_by_bridge)
+    # The untyped view reads the same way, because the adjacency is already the downward one.
+    port["librenms_stacked_port_names"] = member_names(relationship_maps.stacked_ports)
 
 
 def _row_relationship_source_is_actionable(

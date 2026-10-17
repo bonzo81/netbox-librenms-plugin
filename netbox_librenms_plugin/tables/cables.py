@@ -12,6 +12,7 @@ from netbox_librenms_plugin.utils import (
     oob_badge_html,
     remote_port_html,
     render_vc_member_options,
+    rule_block_html,
 )
 
 # Static trusted markup for the "Serial" console-port badge. The leading space is intentional.
@@ -149,6 +150,13 @@ class LibreNMSCableTable(tables.Table):
         """Render remote port name as a link if URL is available; flag a manually picked remote."""
         # The one definition of this cell: the cable-verify formatter renders it too.
         return remote_port_html(value, record)
+
+    def render_actions(self, column, record, table, value, bound_column, bound_row):
+        """Render the row actions, led by the rule badge when the interface rules refuse the cable."""
+        actions = column.render(record=record, table=table, value=value, bound_column=bound_column, bound_row=bound_row)
+        if not record.get("rule_block"):
+            return actions
+        return format_html("{}{}", rule_block_html(record["rule_block"]), actions)
 
     def render_cable_status(self, value, record):
         """Render cable status as a link if cable URL is available."""

@@ -21,12 +21,16 @@ class TestUpdateInterfaceAttributes:
     def test_updates_fields_and_stable_port_identity(self, view):
         from netbox_librenms_plugin.utils import get_librenms_device_id
 
+        from netbox_librenms_plugin.models import InterfaceTypeMapping
+
         interface = make_interface(make_device("interface-fields"), "old-name")
+        InterfaceTypeMapping.objects.create(librenms_type="ethernetCsmacd", netbox_type="1000base-t")
 
         view.update_interface_attributes(
             interface,
             {
                 "ifName": "eth0",
+                "ifDescr": "eth0",
                 "ifType": "ethernetCsmacd",
                 "ifSpeed": 1_000_000_000,
                 "ifAlias": "uplink",
@@ -34,9 +38,10 @@ class TestUpdateInterfaceAttributes:
                 "ifAdminStatus": "down",
                 "port_id": 77,
             },
-            "1000base-t",
             set(),
             "ifName",
+            "eth0",
+            created=False,
         )
 
         interface.refresh_from_db()
@@ -62,6 +67,7 @@ class TestUpdateInterfaceAttributes:
             interface,
             {
                 "ifName": "new-name",
+                "ifDescr": "new-name",
                 "ifType": "ethernetCsmacd",
                 "ifSpeed": 1_000_000_000,
                 "ifAlias": "new-description",
@@ -69,9 +75,10 @@ class TestUpdateInterfaceAttributes:
                 "ifAdminStatus": "down",
                 "ifPhysAddress": "aa:bb:cc:dd:ee:ff",
             },
-            "other",
             {"name", "type", "speed", "description", "mtu", "enabled", "mac_address"},
             "ifName",
+            "new-name",
+            created=False,
         )
 
         interface.refresh_from_db()
@@ -248,15 +255,25 @@ def test_interface_delete_counts_only_committed_savepoints(client):
 def test_interface_update_ignores_non_string_mac(mac):
     """Malformed MAC data must not prevent the remaining interface update."""
     from dcim.models import MACAddress
+    from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
     from netbox_librenms_plugin.interface_sync import update_interface_from_port
 
     interface = make_interface(make_device("malformed-mac"), "eth0")
     update_interface_from_port(
         interface,
-        {"ifName": "eth0", "ifAlias": "updated description", "ifPhysAddress": mac},
+        {
+            "ifName": "eth0",
+            "ifDescr": "eth0",
+            "ifType": "ethernetCsmacd",
+            "ifSpeed": None,
+            "ifAlias": "updated description",
+            "ifPhysAddress": mac,
+        },
+        rules=InterfaceRuleMatcher.load(),
+        synced_name="eth0",
         server_key="default",
         interface_name_field="ifName",
-        netbox_type="other",
+        created=False,
     )
     interface.refresh_from_db()
     assert interface.description == "updated description"

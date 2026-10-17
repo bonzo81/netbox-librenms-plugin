@@ -1,0 +1,134 @@
+{% comment %}
+What the device's port_stack held and what each rule made of it (issue #179 item 10).
+
+An empty Relationships column meant either "LibreNMS has no data for this device" or "the name
+pattern rejected it", and nothing on the page told the two apart. The counts come from the same
+cached snapshot the table renders, so this cannot describe rows the table is not showing.
+
+Context: diagnostics (relationship_diagnostics_report output), or nothing to render.
+{% endcomment %}
+{% if diagnostics %}
+<div class="mb-2 noprint">
+  <button type="button" class="btn btn-link btn-sm p-0 text-muted text-decoration-none"
+          onclick="showModal(document.getElementById('relationshipDiagnosticsModal'))">
+    <i class="mdi mdi-information-outline me-1"></i>Relationship data: {{ diagnostics.pairs_usable }} of {{ diagnostics.pairs_seen }} stack row{{ diagnostics.pairs_seen|pluralize }} usable{% if diagnostics.pairs_unclassified %}, {{ diagnostics.pairs_unclassified }} unclassified{% endif %}
+  </button>
+</div>
+
+<div class="modal fade" id="relationshipDiagnosticsModal" tabindex="-1" aria-labelledby="relationshipDiagnosticsLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="relationshipDiagnosticsLabel">
+          <i class="mdi mdi-sitemap me-1"></i>Interface relationship data
+        </h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="small mb-3">{{ diagnostics.verdict }}</p>
+
+        <h6 class="text-uppercase text-muted small">What LibreNMS reported</h6>
+        <table class="table table-sm small mb-3">
+          <tbody>
+            <tr>
+              <td class="w-25"><strong>{{ diagnostics.ports_seen }}</strong></td>
+              <td>ports polled, named by <code>{{ diagnostics.name_field }}</code></td>
+            </tr>
+            <tr>
+              <td><strong>{{ diagnostics.pairs_seen }}</strong></td>
+              <td><code>port_stack</code> row{{ diagnostics.pairs_seen|pluralize }}, each naming two stacked ports</td>
+            </tr>
+            {% if diagnostics.pairs_unresolved_end %}
+            <tr class="text-muted">
+              <td>&minus; {{ diagnostics.pairs_unresolved_end }}</td>
+              <td>dropped: an end names a port LibreNMS does not poll</td>
+            </tr>
+            {% endif %}
+            {% if diagnostics.pairs_skipped_sap %}
+            <tr class="text-muted">
+              <td>&minus; {{ diagnostics.pairs_skipped_sap }}</td>
+              <td>skipped: a name matches this OS's service access point pattern</td>
+            </tr>
+            {% endif %}
+            {% if diagnostics.pairs_malformed %}
+            <tr class="text-muted">
+              <td>&minus; {{ diagnostics.pairs_malformed }}</td>
+              <td>dropped: the row shape was not recognised</td>
+            </tr>
+            {% endif %}
+            <tr>
+              <td><strong>{{ diagnostics.pairs_usable }}</strong></td>
+              <td>pairs reached the rules</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <h6 class="text-uppercase text-muted small">What each rule claimed</h6>
+        <table class="table table-sm small mb-3">
+          <thead><tr><th>Rule</th><th>Pairs claimed</th><th>Relationships shown</th></tr></thead>
+          <tbody>
+            {% for kind in diagnostics.kinds %}
+            <tr>
+              <td>{{ kind.label }}</td>
+              <td>{{ kind.claimed }}</td>
+              <td>
+                {{ kind.edges }}
+                {% if kind.conflicted %}
+                  <span class="badge bg-warning text-dark ms-1"
+                        title="A port was claimed by two different composites, so the plugin recorded neither.">{{ kind.conflicted }} conflicting</span>
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+            <tr>
+              <td>Unclassified</td>
+              <td>{{ diagnostics.pairs_unclassified }}</td>
+              <td class="text-muted">shown untyped, on both ports</td>
+            </tr>
+          </tbody>
+        </table>
+
+        {% if diagnostics.unclassified_pairs %}
+        <h6 class="text-uppercase text-muted small">Pairs no rule classified</h6>
+        <p class="small text-muted mb-2">
+          LibreNMS says these ports are stacked but not how, and its row order does not say which
+          side is the composite. Naming the composite in this OS's bridge or LAG pattern types them.
+        </p>
+        <ul class="list-inline small mb-3">
+          {% for first, second in diagnostics.unclassified_pairs %}
+          <li class="list-inline-item me-3"><code>{{ first }}</code> &harr; <code>{{ second }}</code></li>
+          {% endfor %}
+          {% if diagnostics.unclassified_truncated %}
+          <li class="list-inline-item text-muted">and {{ diagnostics.unclassified_truncated }} more</li>
+          {% endif %}
+        </ul>
+        {% endif %}
+
+        <h6 class="text-uppercase text-muted small">Name patterns in effect</h6>
+        <table class="table table-sm small mb-0">
+          <tbody>
+            <tr>
+              <td class="w-25">LAG</td>
+              <td>{% for pattern in diagnostics.patterns.lag %}<code>{{ pattern }}</code> {% empty %}<span class="text-muted">none</span>{% endfor %}</td>
+            </tr>
+            <tr>
+              <td>Bridge</td>
+              <td>{% for pattern in diagnostics.patterns.bridge %}<code>{{ pattern }}</code> {% empty %}<span class="text-muted">none</span>{% endfor %}</td>
+            </tr>
+            <tr>
+              <td>Service access point</td>
+              <td>{% for pattern in diagnostics.patterns.sap %}<code>{{ pattern }}</code> {% empty %}<span class="text-muted">none</span>{% endfor %}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="modal-footer">
+        <a href="{% url 'plugins:netbox_librenms_plugin:portstacklagpattern_list' %}" class="btn btn-sm btn-outline-primary">
+          Edit name patterns
+        </a>
+        <button type="button" class="btn btn-sm btn-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}

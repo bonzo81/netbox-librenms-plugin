@@ -15,7 +15,7 @@ from dcim.models import (
     Site,
 )
 from django import forms
-from django.core.exceptions import MultipleObjectsReturned
+from django.core.exceptions import NON_FIELD_ERRORS, MultipleObjectsReturned, ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import Case, IntegerField, Q, Value, When
 from django.http import QueryDict
@@ -481,43 +481,108 @@ class LibreNMSSettingsForm(ServerConfigForm):
     pass
 
 
-class InterfaceTypeMappingForm(NetBoxModelForm):
-    """
-    Create and edit interface type mappings between LibreNMS and NetBox.
+_INTERFACE_RULE_FIELDS = [
+    "action",
+    "platform",
+    "name_pattern",
+    "librenms_type",
+    "librenms_speed",
+    "netbox_type",
+    "description",
+]
 
-    Map LibreNMS interface types and speeds to NetBox interface types.
-    """
 
-    class Meta:
-        model = InterfaceTypeMapping
-        fields = ["librenms_type", "librenms_speed", "netbox_type", "description"]
+class _VerbatimNamePatternMixin:
+    """Keep ``name_pattern`` as typed: whitespace is part of a regex."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["name_pattern"].strip = False
 
 
-class InterfaceTypeMappingImportForm(NetBoxModelImportForm):
-    """
-    Import interface type mappings from CSV, JSON, or YAML.
+class InterfaceTypeMappingForm(_VerbatimNamePatternMixin, NetBoxModelForm):
+    """Create and edit interface rules: set a NetBox type for matching LibreNMS ports, or ignore them."""
 
-    Import LibreNMS interface type and speed mappings to NetBox interface types.
-    """
-
-    netbox_type = CSVChoiceField(
-        label=_("NetBox Type"),
-        choices=InterfaceTypeChoices,
-        help_text=_("NetBox interface type"),
+    platform = DynamicModelChoiceField(
+        queryset=Platform.objects.all(),
+        required=False,
+        help_text="Leave blank to apply the rule to every platform.",
     )
 
     class Meta:
         model = InterfaceTypeMapping
-        fields = ["librenms_type", "librenms_speed", "netbox_type", "description"]
+        fields = _INTERFACE_RULE_FIELDS
+
+
+class InterfaceTypeMappingImportForm(_VerbatimNamePatternMixin, NetBoxModelImportForm):
+    """Import interface rules from CSV, JSON, or YAML."""
+
+    action = CSVChoiceField(
+        label=_("Action"),
+        choices=InterfaceTypeMapping.ACTION_CHOICES,
+        required=False,
+        help_text=_("set_type (the default) or ignore"),
+    )
+    platform = CSVModelChoiceField(
+        queryset=Platform.objects.all(),
+        to_field_name="slug",
+        required=False,
+        help_text=_("Platform slug. Leave blank to apply the rule to every platform."),
+    )
+    netbox_type = CSVChoiceField(
+        label=_("NetBox Type"),
+        choices=InterfaceTypeChoices,
+        required=False,
+        help_text=_("NetBox interface type. Leave blank on an Ignore rule."),
+    )
+
+    class Meta:
+        model = InterfaceTypeMapping
+        fields = _INTERFACE_RULE_FIELDS
+
+    def clean_action(self):
+        """Read a blank action as the rule's current one (set_type for a new rule) on every NetBox version."""
+        return self.cleaned_data["action"] or self.instance.action
+
+    def add_error(self, field, error):
+        """Report a model error on a field that an update row omits as a row error that names the field."""
+        if field is None and hasattr(error, "error_dict"):
+            remapped = {}
+            for name, errors in error.error_dict.items():
+                if name == NON_FIELD_ERRORS or name in self.fields:
+                    remapped.setdefault(name, []).extend(errors)
+                else:
+                    remapped.setdefault(NON_FIELD_ERRORS, []).extend(
+                        f"{name}: {message}" for item in errors for message in item.messages
+                    )
+            error = ValidationError(remapped)
+        super().add_error(field, error)
 
 
 class InterfaceTypeMappingFilterForm(NetBoxModelFilterSetForm):
-    """
-    Filter interface type mappings by LibreNMS and NetBox attributes.
+    """Filter interface rules by action, platform, selectors and NetBox type."""
 
-    Filter by LibreNMS type, speed, and NetBox type.
-    """
-
+    action = forms.ChoiceField(
+        required=False,
+        label="Action",
+        choices=[("", "---------"), *InterfaceTypeMapping.ACTION_CHOICES],
+    )
+    platform_id = DynamicModelChoiceField(
+        queryset=Platform.objects.all(),
+        required=False,
+        label="Platform",
+    )
+    platform__isnull = forms.NullBooleanField(
+        required=False,
+        widget=forms.Select(choices=[("", "---------"), ("true", "Yes"), ("false", "No")]),
+        label="All platforms",
+        help_text="Yes lists only rules that apply to every platform",
+    )
+    name_pattern = forms.CharField(
+        required=False,
+        label="Name pattern",
+        help_text="Filter by pattern text (partial match)",
+    )
     librenms_type = forms.CharField(required=False, label="LibreNMS Type")
     librenms_speed = forms.IntegerField(
         required=False,

@@ -5,6 +5,26 @@ import importlib
 import pytest
 
 
+def test_interface_rule_migration_state_carries_the_model_help_text():
+    """Every InterfaceTypeMapping field in the final migration state has the model's help_text (NetBox's makemigrations ignores help_text, so only this test sees the drift)."""
+    from django.db.migrations.loader import MigrationLoader
+
+    from netbox_librenms_plugin.models import InterfaceTypeMapping
+
+    loader = MigrationLoader(None, ignore_no_migrations=True)
+    (leaf,) = (node for node in loader.graph.leaf_nodes() if node[0] == "netbox_librenms_plugin")
+    state_fields = (
+        loader.project_state(leaf, at_end=True).models[("netbox_librenms_plugin", "interfacetypemapping")].fields
+    )
+
+    drifted = {
+        field.name: (state_fields[field.name].help_text, field.help_text)
+        for field in InterfaceTypeMapping._meta.get_fields()
+        if field.concrete and state_fields[field.name].help_text != field.help_text
+    }
+    assert not drifted, f"migration help_text drifted from the model: {drifted}"
+
+
 def test_migration_0013_field_help_text_matches_model():
     """Migration 0013's PortStackLagPattern fields must carry the same help_text as the model (else the migration state drifts and makemigrations tracks a phantom AlterField)."""
     from netbox_librenms_plugin.models import PortStackLagPattern
@@ -64,6 +84,7 @@ def test_reverse_bridge_seed_preserves_operator_data(operator_edit):
     from netbox_librenms_plugin.models import PortStackLagPattern
 
     mod = importlib.import_module("netbox_librenms_plugin.migrations.0019_portstacklagpattern_bridge_name_pattern")
+    widened = importlib.import_module("netbox_librenms_plugin.migrations.0021_widen_linux_bridge_pattern")
     row = PortStackLagPattern.objects.get(librenms_os=mod.BRIDGE_OS)
     if operator_edit == "custom-data":
         PortStackLagPattern.objects.filter(pk=row.pk).update(custom_field_data={"operator-note": "keep"})
@@ -76,6 +97,9 @@ def test_reverse_bridge_seed_preserves_operator_data(operator_edit):
         .apps
     )
     with connection.schema_editor() as editor:
+        # 0021 widened what 0019 seeded, so a rollback reverses it first and 0019's reverse then
+        # sees its own value. Skipping that step would make this assert nothing.
+        widened.restore_bridge_pattern(historical_apps, editor)
         mod.clear_bridge_pattern(historical_apps, editor)
 
     row.refresh_from_db()
@@ -96,6 +120,7 @@ def test_reverse_bridge_seed_without_content_type():
     from netbox_librenms_plugin.models import PortStackLagPattern
 
     mod = importlib.import_module("netbox_librenms_plugin.migrations.0019_portstacklagpattern_bridge_name_pattern")
+    widened = importlib.import_module("netbox_librenms_plugin.migrations.0021_widen_linux_bridge_pattern")
     row = PortStackLagPattern.objects.get(librenms_os=mod.BRIDGE_OS)
     ContentType.objects.filter(
         app_label="netbox_librenms_plugin",
@@ -108,6 +133,7 @@ def test_reverse_bridge_seed_without_content_type():
     )
 
     with connection.schema_editor() as editor:
+        widened.restore_bridge_pattern(historical_apps, editor)
         mod.clear_bridge_pattern(historical_apps, editor)
 
     assert not PortStackLagPattern.objects.filter(pk=row.pk).exists()
@@ -363,3 +389,40 @@ def test_the_seeded_ignore_rules_are_present_before_a_test_body_runs():
     from netbox_librenms_plugin.models import InventoryIgnoreRule
 
     assert InventoryIgnoreRule.objects.count() == _seeded_ignore_rule_count()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize(
+    "librenms_type, netbox_type, error",
+    [
+        ("legacy-test", "", "empty NetBox type"),
+        ("", "1000base-t", "empty LibreNMS type"),
+        ("legacy-test", "1000base-t", None),
+    ],
+)
+def test_interface_rules_validate_legacy_output_before_schema_changes(librenms_type, netbox_type, error):
+    from django.db import connection, migrations
+    from django.db.migrations.loader import MigrationLoader
+
+    loader = MigrationLoader(connection)
+    state = loader.project_state(("netbox_librenms_plugin", "0021_widen_linux_bridge_pattern"))
+    model = state.apps.get_model("netbox_librenms_plugin", "InterfaceTypeMapping")
+    model._meta.db_table = "test_legacy_interface_type_mapping"
+    module = importlib.import_module("netbox_librenms_plugin.migrations.0022_interface_rules")
+    operation = module.Migration.operations[0]
+    assert isinstance(operation, migrations.RunPython)
+    with connection.schema_editor() as editor:
+        editor.create_model(model)
+    try:
+        row = model.objects.create(librenms_type=librenms_type, netbox_type=netbox_type)
+        with connection.schema_editor() as editor:
+            if error:
+                with pytest.raises(RuntimeError, match=error):
+                    operation.code(state.apps, editor)
+            else:
+                operation.code(state.apps, editor)
+        row.refresh_from_db()
+        assert row.netbox_type == netbox_type
+    finally:
+        with connection.schema_editor() as editor:
+            editor.delete_model(model)

@@ -26,6 +26,46 @@ def _add_page_scripts(page):
     page.add_script_tag(path=str(SCRIPT_PATH))
 
 
+def test_relationship_diagnostics_modal_opens_without_bootstrap(page):
+    from django.template import Context, Engine, Library
+
+    urls = Library()
+
+    @urls.simple_tag(name="url")
+    def url(name):
+        return "/patterns/"
+
+    engine = Engine()
+    engine.template_builtins.append(urls)
+    template = TEMPLATE_DIR / "inc" / "_relationship_diagnostics.html"
+    diagnostics = {
+        "pairs_seen": 1,
+        "pairs_usable": 1,
+        "pairs_unclassified": 0,
+        "ports_seen": 2,
+        "name_field": "ifName",
+        "verdict": "Every usable pair was classified.",
+        "kinds": [],
+        "patterns": {"lag": [], "bridge": [], "sap": []},
+    }
+    fragment = engine.from_string(template.read_text(encoding="utf-8")).render(
+        Context({"diagnostics": diagnostics}, use_l10n=False)
+    )
+    page.set_content(f"<style>.modal {{ display: none; }} .modal.show {{ display: block; }}</style>{fragment}")
+    _add_page_scripts(page)
+
+    assert page.evaluate("typeof bootstrap") == "undefined"
+    modal = page.locator("#relationshipDiagnosticsModal")
+    assert not modal.is_visible()
+    page.get_by_role("button", name=re.compile("Relationship data:")).click()
+    assert modal.is_visible()
+    assert modal.get_attribute("aria-modal") == "true"
+
+    modal.locator(".modal-footer button[data-bs-dismiss='modal']").click()
+    assert not modal.is_visible()
+    assert page.locator(".modal-backdrop").count() == 0
+
+
 # ===========================================================================
 # Interface selection: the requirement cascade and cross-page state
 # ===========================================================================
@@ -68,10 +108,17 @@ def _selection_row_markup(row):
     )
     # A port id is not always usable as a DOM id, so a row can name its own checkbox.
     dom_id = row.get("dom_id", row["port_id"])
+    # The table renders an ignored row without a checkbox.
+    checkbox = (
+        ""
+        if row.get("ignored")
+        else f'<input type="checkbox" name="select" value="{esc(row["port_id"])}" id="cb-{esc(dom_id)}">'
+    )
+    if row.get("ignored"):
+        attrs.append('data-rule-state="ignored"')
     return (
         f"<tr {' '.join(attrs)}>"
-        f'<td data-col="selection"><input type="checkbox" name="select" value="{esc(row["port_id"])}"'
-        f' id="cb-{esc(dom_id)}"></td>'
+        f'<td data-col="selection">{checkbox}</td>'
         f"<td>{row['name']}{companion}{hidden_fields}</td></tr>"
     )
 
@@ -82,13 +129,15 @@ def _selection_page_html(
     auto_select=True,
     table_id="librenms-interface-table",
     selection_snapshot="",
+    blocked_port_ids=(),
 ):
     checked = "checked" if auto_select else ""
     body = "".join(_selection_row_markup(row) for row in rows)
     snapshot_attr = f' data-selection-snapshot="{escape(selection_snapshot)}"' if selection_snapshot else ""
+    blocked_attr = escape(json.dumps(list(blocked_port_ids)))
     return f"""<!doctype html><html><body>
         <input type="checkbox" id="autoSelectLagMembers" {checked}>
-        <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit">
+        <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit" data-blocked-port-ids="{blocked_attr}">
           <input type="hidden" name="server_key" value="production">
           <table id="{escape(table_id)}"{snapshot_attr}>
             <thead><tr><th><input type="checkbox" class="toggle"></th><th>Name</th></tr></thead>
@@ -107,6 +156,7 @@ def _load_selection_page(
     auto_select=True,
     table_id="librenms-interface-table",
     selection_snapshot="",
+    blocked_port_ids=(),
 ):
     """Serve the fixture page from a real origin so sessionStorage behaves as it does in NetBox."""
     html = _selection_page_html(
@@ -114,6 +164,7 @@ def _load_selection_page(
         auto_select=auto_select,
         table_id=table_id,
         selection_snapshot=selection_snapshot,
+        blocked_port_ids=blocked_port_ids,
     )
     page.route(
         f"{SELECTION_PAGE_URL}**",
@@ -128,6 +179,404 @@ def _checked_values(page):
     return set(page.evaluate("Array.from(document.querySelectorAll('input[name=select]:checked')).map(cb => cb.value)"))
 
 
+VERIFY_CELLS = (
+    "name",
+    "type",
+    "speed",
+    "mac_address",
+    "mtu",
+    "enabled",
+    "description",
+    "vlans",
+    "librenms_id",
+    "parent",
+)
+
+
+def _checkbox_markup(port_id):
+    """The selection cell's checkbox, as the table renders it for a row a sync may write."""
+    return f'<input type="checkbox" name="select" value="{escape(port_id)}" id="cb-{escape(port_id)}">'
+
+
+def _verify_row_markup(row):
+    esc = escape
+    rule_state = row.get("rule_state", "ignored" if row.get("ignored") else "")
+    attrs = [f'data-port-id="{esc(row["port_id"])}"', f'data-rule-state="{rule_state}"']
+    for key, data_attr in (("parent", "data-parent-port-id"), ("lag", "data-member-of-lag")):
+        if row.get(key):
+            attrs.append(f'{data_attr}="{esc(row[key])}"')
+    options = "".join(
+        f'<option value="{member}"{" selected" if member == row["member"] else ""}>m{member}</option>'
+        for member in ("1", "2")
+    )
+    cells = "".join(f'<td data-col="{col}"></td>' for col in VERIFY_CELLS)
+    # The table renders no checkbox on a row the write check refuses; an unresolved owner keeps one.
+    checkbox = "" if rule_state in ("ignored", "ambiguous", "incomplete") else _checkbox_markup(row["port_id"])
+    return (
+        f"<tr {' '.join(attrs)}>"
+        f'<td data-col="selection">{checkbox}</td>'
+        f'<td><select name="device_selection_{esc(row["port_id"])}" class="vc-member-select"'
+        f' data-interface="{esc(row["name"])}">{options}</select></td>{cells}</tr>'
+    )
+
+
+def _serve_verify(page, formatted_rows):
+    """Answer the verify endpoint per posted port ID with that row's repaint."""
+
+    def _answer(route):
+        port_id = str(json.loads(route.request.post_data)["port_id"])
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"status": "success", "formatted_row": formatted_rows[port_id]}),
+        )
+
+    page.route("**/plugins/librenms_plugin/verify-interface/", _answer)
+
+
+def _verify_form_markup(rows):
+    """Render the interface tab's sync form around *rows*, as the server renders it."""
+    body = "".join(_verify_row_markup(row) for row in rows)
+    blocked = escape(json.dumps([row["port_id"] for row in rows if row.get("ignored") or row.get("rule_state")]))
+    return f"""<form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit"
+              data-interface-origin-device-id="1" data-blocked-port-ids="{blocked}">
+          <input type="hidden" name="csrfmiddlewaretoken" value="test-token">
+          <input type="hidden" name="server_key" value="production">
+          <table id="librenms-interface-table"><tbody>{body}</tbody></table>
+          <button type="submit" id="do-sync">Sync</button>
+        </form>"""
+
+
+def _load_verify_page(page, rows, *, url=SELECTION_PAGE_URL, verify=None, bulk=False):
+    """Serve a chassis interface tab whose rows the verify endpoint can repaint."""
+    bulk_markup = (
+        '<select id="bulk-vc-member-select"><option value="2">m2</option></select>'
+        '<button type="button" id="apply-bulk-vc-member">Apply</button>'
+        if bulk
+        else ""
+    )
+    html = f"""<!doctype html><html><body>
+        <input type="checkbox" id="autoSelectLagMembers" checked>
+        <input type="radio" name="interface_name_field" value="ifName" checked>
+        {bulk_markup}
+        <div id="interface-sync-content">{_verify_form_markup(rows)}</div>
+        </body></html>"""
+    page.route(
+        f"{SELECTION_PAGE_URL}**",
+        lambda route: route.fulfill(status=200, content_type="text/html", body=html),
+    )
+    if verify is not None:
+        _serve_verify(page, verify)
+    page.goto(url)
+    _add_page_scripts(page)
+    if bulk:
+        # NetBox wraps the member selects in TomSelect; this stands in for its setValue contract.
+        page.evaluate(
+            """() => document.querySelectorAll('.vc-member-select').forEach((select) => {
+                select.tomselect = {setValue(value, silent) {
+                    select.value = value;
+                    if (!silent) handleInterfaceChange(select, value);
+                }};
+            })"""
+        )
+        page.evaluate("initializeBulkEditApply()")
+    page.evaluate("initializeCheckboxes()")
+
+
+def _verified_row(*, rule_state, selection, lag=None, parent=None):
+    """Return the verify endpoint's repaint for one row."""
+    row = {col: "" for col in VERIFY_CELLS}
+    row.update(
+        {
+            "selection": selection,
+            "rule_state": rule_state,
+            "librenms_lag_port_id": lag,
+            "librenms_lag_name": None,
+            "librenms_parent_port_id": parent,
+            "librenms_parent_name": None,
+            "librenms_bridge_port_id": None,
+            "librenms_bridge_name": None,
+        }
+    )
+    return row
+
+
+def _wait_for_verified_member(page, port_id, member):
+    """Wait until the row's verify has settled on *member*."""
+    page.wait_for_function(
+        """([portId, member]) => {
+            const select = document.querySelector(`tr[data-port-id="${portId}"] .vc-member-select`);
+            return select && select._lastVerifiedMember === member;
+        }""",
+        arg=[port_id, member],
+    )
+
+
+def _verify_row(page, port_id, member, formatted_row):
+    """Switch one row to another chassis member and wait for the verify repaint."""
+    _serve_verify(page, {port_id: formatted_row})
+    page.evaluate(
+        """([portId, member]) => {
+            const select = document.querySelector(`tr[data-port-id="${portId}"] .vc-member-select`);
+            select.value = member;
+            handleInterfaceChange(select, member);
+        }""",
+        [port_id, member],
+    )
+    _wait_for_verified_member(page, port_id, member)
+
+
+def _submitted_selects(page):
+    """Submit the sync form and return the posted row selections."""
+    with page.expect_request(f"{SELECTION_PAGE_URL}/submit") as request_info:
+        page.click("#do-sync")
+    return sorted(value for key, value in _selection_form_pairs(request_info.value.post_data) if key == "select")
+
+
+# A (10) is an aggregate, I (20) is its member, and C (30) is a unit of I.
+CHAIN_ROWS = [
+    {"port_id": "10", "name": "ae0", "member": "1"},
+    {"port_id": "20", "name": "et-0/0/0", "member": "1", "lag": "10"},
+    {"port_id": "30", "name": "et-0/0/0.0", "member": "1", "parent": "20"},
+]
+OTHER_PAGE_ROWS = [{"port_id": "40", "name": "et-0/0/9", "member": "1"}]
+
+
+class TestTheWalkSkipsEveryBlockedRow:
+    """The browser walk reads one blocked set: every row the writer's check refuses."""
+
+    @pytest.mark.parametrize("rule_state", ["ambiguous", "incomplete", "owner_unresolved"])
+    def test_a_blocked_middle_row_is_neither_selected_nor_walked_through(self, page, rule_state):
+        rows = [dict(row, rule_state=rule_state) if row["port_id"] == "20" else row for row in CHAIN_ROWS]
+        _load_verify_page(page, rows)
+
+        page.check("#cb-30")
+
+        assert _checked_values(page) == {"30"}
+
+    def test_an_aggregate_never_pulls_in_a_blocked_member(self, page):
+        rows = [
+            {"port_id": "10", "name": "ae0", "member": "1"},
+            {"port_id": "20", "name": "et-0/0/0", "member": "1", "lag": "10", "rule_state": "owner_unresolved"},
+            {"port_id": "30", "name": "et-0/0/1", "member": "1", "lag": "10"},
+        ]
+        _load_verify_page(page, rows)
+
+        page.check("#cb-10")
+
+        # The unresolved-owner member keeps its checkbox for the bulk member action, yet no cascade selects it.
+        assert _checked_values(page) == {"10", "30"}
+
+    def test_a_blocked_aggregate_never_pulls_in_its_members(self, page):
+        rows = [
+            {"port_id": "10", "name": "ae0", "member": "1", "rule_state": "owner_unresolved"},
+            {"port_id": "20", "name": "Gi1/0/1", "member": "1", "lag": "10"},
+        ]
+        _load_verify_page(page, rows)
+        errors = []
+        page.on("pageerror", lambda error: errors.append(error))
+
+        page.check("#cb-10")
+
+        # The server refuses the aggregate and expands nothing from it, so the browser starts no cascade from it.
+        assert _checked_values(page) == {"10"}
+        assert "20" not in _stored_selection(page)
+
+        page.uncheck("#cb-10")
+
+        assert _checked_values(page) == set()
+        assert _stored_selection(page) == {}
+        assert errors == []
+
+    def test_a_member_pulled_in_before_the_aggregate_was_blocked_is_released(self, page):
+        rows = [
+            {"port_id": "10", "name": "ae0", "member": "1"},
+            {"port_id": "20", "name": "Gi1/0/1", "member": "1", "lag": "10"},
+        ]
+        _load_verify_page(page, rows)
+        page.check("#cb-10")
+        _verify_row(page, "10", "2", _verified_row(rule_state="owner_unresolved", selection=_checkbox_markup("10")))
+        assert page.evaluate("() => _blockedPortIds().has('10')")
+
+        page.uncheck("#cb-10")
+
+        assert _checked_values(page) == set()
+        assert _stored_selection(page) == {}
+
+    def test_a_row_the_verify_makes_ambiguous_joins_the_blocked_set(self, page):
+        _load_verify_page(page, CHAIN_ROWS)
+
+        _verify_row(page, "20", "2", _verified_row(rule_state="ambiguous", selection="", lag="10"))
+        page.check("#cb-30")
+
+        assert _checked_values(page) == {"30"}
+
+
+def _store_member_choice(page, port_id, member):
+    """Leave a stored selection of one row on another member, as an earlier visit does."""
+    page.evaluate(
+        """([portId, member]) => writeStoredSelection(
+            document.getElementById('librenms-interface-table'),
+            {[portId]: {inputs: {[`device_selection_${portId}`]: member}, auto: ''}},
+        )""",
+        [port_id, member],
+    )
+
+
+def _hold_verify(page):
+    """Hold every verify request until the test answers it; return the held routes."""
+    held = []
+
+    def _hold(route):
+        held.append(route)
+
+    page.route("**/plugins/librenms_plugin/verify-interface/", _hold)
+    return held
+
+
+def _answer(route, formatted_row):
+    route.fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps({"status": "success", "formatted_row": formatted_row}),
+    )
+
+
+def _stored_selection(page):
+    """Return the interface table's stored selection."""
+    return page.evaluate("() => readStoredSelection(document.getElementById('librenms-interface-table'))")
+
+
+class TestAMovedMemberIsNotRestored:
+    """A stored selection for another member than the page renders is cleared, never verified or restored."""
+
+    ROW = [{"port_id": "10", "name": "et-0/0/0", "member": "1"}]
+
+    def _restore(self, page, member):
+        verify_requests = []
+        page.on("request", lambda request: "verify-interface" in request.url and verify_requests.append(request))
+        _load_verify_page(page, OTHER_PAGE_ROWS)
+        _store_member_choice(page, "10", member)
+        _load_verify_page(page, self.ROW)
+        return verify_requests
+
+    def test_a_differing_member_is_cleared_with_a_notice_and_no_verify(self, page):
+        verify_requests = self._restore(page, "2")
+
+        expect(page.locator("#librenms-interface-table-cleared-selections")).to_have_text(
+            "1 saved selection(s) on another Virtual Chassis member were cleared; select them again."
+        )
+        assert verify_requests == []
+        assert _checked_values(page) == set()
+        assert page.locator("tr[data-port-id='10'] .vc-member-select").input_value() == "1"
+        assert "10" not in _stored_selection(page)
+        with page.expect_request(f"{SELECTION_PAGE_URL}/submit") as request_info:
+            page.click("#do-sync")
+        pairs = _selection_form_pairs(request_info.value.post_data)
+        assert ("select", "10") not in pairs
+        assert [value for key, value in pairs if key == "device_selection_10"] == ["1"]
+
+    def test_an_equal_member_restores(self, page):
+        verify_requests = self._restore(page, "1")
+
+        assert verify_requests == []
+        assert _checked_values(page) == {"10"}
+        assert page.locator("#librenms-interface-table-cleared-selections").count() == 0
+
+    def test_an_off_page_selection_still_submits_with_its_member(self, page):
+        _load_verify_page(page, OTHER_PAGE_ROWS)
+        _store_member_choice(page, "10", "2")
+        _load_verify_page(page, OTHER_PAGE_ROWS, url=f"{SELECTION_PAGE_URL}?page=2")
+
+        with page.expect_request(f"{SELECTION_PAGE_URL}/submit") as request_info:
+            page.click("#do-sync")
+        pairs = _selection_form_pairs(request_info.value.post_data)
+
+        assert ("select", "10") in pairs
+        assert ("device_selection_10", "2") in pairs
+
+
+class TestADetachedVerifyChangesNothing:
+    """A verify answer for a row the tab swap replaced must not touch the new page or storage."""
+
+    def test_an_old_answer_after_a_tab_swap_changes_neither_storage_nor_the_blocked_set(self, page):
+        rows = [
+            {"port_id": "10", "name": "et-0/0/0", "member": "1"},
+            {"port_id": "20", "name": "et-0/0/1", "member": "1"},
+        ]
+        _load_verify_page(page, rows)
+        page.check("#cb-20")
+        held = _hold_verify(page)
+        page.evaluate(
+            """() => {
+                const select = document.querySelector('tr[data-port-id="10"] .vc-member-select');
+                select.value = '2';
+                handleInterfaceChange(select, '2');
+            }"""
+        )
+        expect(page.locator("tr[data-port-id='10'] .vc-member-select")).to_have_value("2")
+
+        # The sync swaps the tab in, and the user then clears the row the swap restored.
+        page.evaluate(
+            """(markup) => {
+                document.getElementById('interface-sync-content').innerHTML = markup;
+                initializeCheckboxes();
+            }""",
+            _verify_form_markup(rows),
+        )
+        page.uncheck("#cb-20")
+        _answer(held[0], _verified_row(rule_state="ignored", selection=""))
+        page.wait_for_timeout(300)
+
+        assert _stored_selection(page) == {}
+        assert page.evaluate("() => document.querySelector('[data-blocked-port-ids]').dataset.blockedPortIds") == "[]"
+
+
+class TestTheOrderedSelectionCommit:
+    """A member, eligibility or checkbox change ends in one order: eligibility, closure, then storage."""
+
+    def test_a_row_the_verify_ignores_releases_its_chain_in_storage_too(self, page):
+        _load_verify_page(page, CHAIN_ROWS)
+        page.check("#cb-30")
+        assert _checked_values(page) == {"10", "20", "30"}
+
+        _verify_row(page, "20", "2", _verified_row(rule_state="ignored", selection="", lag="10"))
+        assert _checked_values(page) == {"30"}
+        _load_verify_page(page, OTHER_PAGE_ROWS, url=f"{SELECTION_PAGE_URL}?page=2")
+
+        # A was held only for I, so once I is ignored the stored selection must not submit it.
+        assert _submitted_selects(page) == ["30"]
+
+    def test_a_member_switch_keeps_the_row_a_requirement(self, page):
+        rows = [{"port_id": "10", "name": "et-0/0/0", "member": "1"}, CHAIN_ROWS[2] | {"parent": "10"}]
+        _load_verify_page(page, rows)
+        page.check("#cb-30")
+        assert _checked_values(page) == {"10", "30"}
+
+        _verify_row(page, "10", "2", _verified_row(rule_state="", selection=_checkbox_markup("10")))
+        page.uncheck("#cb-30")
+
+        # The row was held for C, so it is released with C, not kept as a choice of the user's.
+        assert _checked_values(page) == set()
+
+    def test_the_bulk_member_apply_commits_every_verified_row(self, page):
+        verify = {
+            "10": _verified_row(rule_state="", selection=_checkbox_markup("10")),
+            "20": _verified_row(rule_state="ignored", selection="", lag="10"),
+            "30": _verified_row(rule_state="", selection=_checkbox_markup("30"), parent="20"),
+        }
+        _load_verify_page(page, CHAIN_ROWS, verify=verify, bulk=True)
+        page.check("#cb-30")
+
+        page.click("#apply-bulk-vc-member")
+        for port_id in ("10", "30"):
+            _wait_for_verified_member(page, port_id, "2")
+        expect(page.locator("tr[data-port-id='20']")).to_have_attribute("data-rule-state", "ignored")
+        _load_verify_page(page, OTHER_PAGE_ROWS, url=f"{SELECTION_PAGE_URL}?page=2")
+
+        assert _submitted_selects(page) == ["30"]
+
+
 class TestRequirementCascade:
     """Selecting a row must select everything that row depends on, all the way up."""
 
@@ -139,6 +588,50 @@ class TestRequirementCascade:
         # et-0/0/6.0 needs et-0/0/6, which needs ae2. Stopping at the parent leaves the
         # aggregate unsynced, and the LAG assignment is then silently dropped.
         assert _checked_values(page) == {"4302", "4301", "4303"}
+
+    def test_an_ignored_parent_is_neither_selected_nor_walked_through(self, page):
+        rows = [dict(row, ignored=True) if row["port_id"] == "4301" else row for row in JUNOS_ROWS]
+        _load_selection_page(page, rows, blocked_port_ids=["4301"])
+
+        page.check("#cb-4302")
+
+        # et-0/0/6 is ignored, so neither it nor ae2 behind it is selected.
+        assert _checked_values(page) == {"4302"}
+
+    def test_an_ignored_parent_on_another_page_raises_no_notice(self, page):
+        _load_selection_page(page, [JUNOS_ROWS[3]], blocked_port_ids=["4301"])
+
+        page.check("#cb-4302")
+
+        assert _checked_values(page) == {"4302"}
+        assert page.locator("#parent-cross-page-notices").count() == 0
+
+    def test_a_row_the_verify_makes_ignored_leaves_the_selection_and_its_member_choice(self, page):
+        _load_verify_page(page, [{"port_id": "10", "name": "Vlan10", "member": "1"}])
+        page.check("#cb-10")
+
+        _verify_row(page, "10", "2", _verified_row(rule_state="ignored", selection=""))
+        with page.expect_request(f"{SELECTION_PAGE_URL}/submit") as request_info:
+            page.click("#do-sync")
+        pairs = _selection_form_pairs(request_info.value.post_data)
+
+        # The ignored row is not submitted, and member 1 never follows member 2's visible choice.
+        assert ("select", "10") not in pairs
+        assert [value for key, value in pairs if key == "device_selection_10"] == ["2"]
+
+    def test_a_parent_the_verify_makes_ignored_is_not_walked_through(self, page):
+        # C (30) is a unit of I (20), and I is a member of A (10).
+        rows = [
+            {"port_id": "10", "name": "ae0", "member": "1"},
+            {"port_id": "20", "name": "et-0/0/0", "member": "1", "lag": "10"},
+            {"port_id": "30", "name": "et-0/0/0.0", "member": "1", "parent": "20"},
+        ]
+        _load_verify_page(page, rows)
+
+        _verify_row(page, "20", "2", _verified_row(rule_state="ignored", selection="", lag="10"))
+        page.check("#cb-30")
+
+        assert _checked_values(page) == {"30"}
 
     def test_aggregate_unit_pulls_in_its_aggregate(self, page):
         _load_selection_page(page, JUNOS_ROWS)
@@ -632,6 +1125,533 @@ class TestCrossPageSelection:
         assert page.locator('[name="device_selection_4303"]').input_value() == "9"
         for name, expected in new_row["hidden_fields"].items():
             assert page.locator(f'[name="{name}"]').input_value() == expected
+
+
+def test_vlan_row_submit_keeps_another_page_selection_and_group(page):
+    """A per-row VLAN action must not consume the bulk selection stored on another page."""
+    page_one = f"""
+        <input name="server_key" value="production">
+        <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit">
+          <table id="librenms-vlan-table"><tbody><tr>
+            <td><input id="vlan-101" type="checkbox" name="select" value="101"></td>
+            <td><select name="vlan_group_101">
+              <option value="1">Group A</option><option value="2">Group B</option>
+            </select></td>
+          </tr></tbody></table>
+        </form>
+    """
+    page_two = f"""
+        <input name="server_key" value="production">
+        <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit">
+          <table id="librenms-vlan-table"><tbody><tr>
+            <td><input type="checkbox" name="select" value="201"></td>
+            <td><button id="sync-one" type="submit" name="sync_one" value="201">Create</button></td>
+          </tr></tbody></table>
+        </form>
+    """
+
+    def serve_page(route):
+        body = page_two if "page=2" in route.request.url else page_one
+        route.fulfill(status=200, content_type="text/html", body=body)
+
+    page.route(f"{SELECTION_PAGE_URL}**", serve_page)
+    page.goto(f"{SELECTION_PAGE_URL}?page=1")
+    _add_page_scripts(page)
+    page.select_option('[name="vlan_group_101"]', "2")
+    page.check("#vlan-101")
+
+    page.goto(f"{SELECTION_PAGE_URL}?page=2")
+    _add_page_scripts(page)
+    page.locator("#sync-form").evaluate("form => form.addEventListener('submit', event => event.preventDefault())")
+    page.click("#sync-one")
+
+    posted = page.locator("#sync-form").evaluate(
+        """form => Array.from(new FormData(form, document.getElementById('sync-one')).entries())"""
+    )
+    stored = page.evaluate("readStoredSelection(document.getElementById('librenms-vlan-table'))")
+    assert [pair for pair in posted if pair[0] == "sync_one"] == [["sync_one", "201"]]
+    assert [pair for pair in posted if pair == ["select", "101"]] == []
+    assert stored["101"]["inputs"]["vlan_group_101"] == "2"
+
+
+# Tabler's modal layout: the open modal covers the viewport, so a click beside the dialog hits the modal itself.
+MODAL_CSS = (
+    "<style>.modal { display: none; position: fixed; inset: 0; z-index: 1055; } .modal.show { display: block; }"
+    " .modal-dialog { width: 400px; margin: 100px auto; background: #fff; }"
+    " .modal-backdrop { position: fixed; inset: 0; z-index: 1050; background: rgba(0, 0, 0, .5); }</style>"
+)
+CONFIRM_MODAL = "#librenms-confirm-modal"
+
+
+def _spy_on_window_confirm(page):
+    """Record every window.confirm call; the plugin must ask through its own modal instead."""
+    page.evaluate(
+        "() => { window.confirmCalls = []; window.confirm = (m) => { window.confirmCalls.push(m); return true; }; }"
+    )
+
+
+def _rebind_form_page(page, message="Move the binding?"):
+    page.set_content(
+        MODAL_CSS
+        + f"""
+        <form id="sync-form" method="post" action="/sync">
+          <table id="librenms-interface-table"><tbody><tr>
+            <td><input type="checkbox" name="select" value="201"></td>
+            <td><input type="hidden" name="rebind_expected_port_201" value="8679">
+                <button id="rebind" type="submit" name="rebind_one" value="201"
+                formaction="/rebind?interface_name_field=ifName" data-confirm="{escape(message)}">Rebind</button></td>
+          </tr></tbody></table>
+        </form>
+        """
+    )
+    _add_page_scripts(page)
+    _spy_on_window_confirm(page)
+    page.evaluate(
+        """() => {
+            writeStoredSelection(document.querySelector('table'), {'101': {inputs: {}, auto: ''}});
+            window.submitted = [];
+            document.getElementById('sync-form').addEventListener('submit', event => {
+                event.preventDefault();
+                window.submitted.push([event.submitter.formAction, Array.from(new FormData(event.target, event.submitter).entries())]);
+            });
+        }"""
+    )
+
+
+@pytest.mark.parametrize("dismiss", ["cancel", "escape", "backdrop", "close"])
+def test_rebind_asks_in_the_plugin_modal_and_a_dismissal_submits_nothing(page, dismiss):
+    _rebind_form_page(page)
+
+    page.click("#rebind")
+
+    modal = page.locator(CONFIRM_MODAL)
+    expect(modal).to_be_visible()
+    expect(modal.locator("[data-confirm-message]")).to_have_text("Move the binding?")
+    if dismiss == "cancel":
+        modal.get_by_role("button", name="Cancel").click()
+    elif dismiss == "escape":
+        page.keyboard.press("Escape")
+    elif dismiss == "close":
+        modal.get_by_role("button", name="Close").click()
+    else:
+        page.mouse.click(5, 5)
+    expect(modal).to_be_hidden()
+    assert page.evaluate("window.submitted") == []
+    assert page.evaluate("window.confirmCalls") == []
+    assert list(page.evaluate("readStoredSelection(document.querySelector('table'))")) == ["101"]
+
+
+def test_rebind_confirmed_in_the_modal_submits_once_with_its_submitter(page):
+    """Rebind submits only after the confirmation, to its own action, and leaves the bulk selection alone."""
+    _rebind_form_page(page)
+
+    page.click("#rebind")
+    page.locator(CONFIRM_MODAL).get_by_role("button", name="Confirm").click()
+
+    expect(page.locator(CONFIRM_MODAL)).to_be_hidden()
+    [(action, pairs)] = page.evaluate("window.submitted")
+    assert action.endswith("/rebind?interface_name_field=ifName")
+    assert ["rebind_one", "201"] in pairs
+    assert ["rebind_expected_port_201", "8679"] in pairs
+    assert ["select", "101"] not in pairs
+    assert page.evaluate("window.confirmCalls") == []
+    assert list(page.evaluate("readStoredSelection(document.querySelector('table'))")) == ["101"]
+
+
+def test_the_confirm_modal_shows_markup_in_the_message_as_text(page):
+    _rebind_form_page(page, message="Create NetBox VRF '<b>red</b>'?")
+
+    page.click("#rebind")
+
+    message = page.locator(f"{CONFIRM_MODAL} [data-confirm-message]")
+    expect(message).to_have_text("Create NetBox VRF '<b>red</b>'?")
+    assert message.locator("b").count() == 0
+
+
+def test_a_confirmed_htmx_row_action_posts_its_submitter_and_formaction(page):
+    """An htmx form reads the submitter it last saw, so the resubmit must keep the clicked button."""
+    requests = []
+
+    def answer(route):
+        requests.append((route.request.url, route.request.post_data))
+        route.fulfill(status=200, content_type="text/html", body='<span id="swapped">Done</span>')
+
+    page.route(f"{HTMX_SYNC_URL}**", answer)
+    page.set_content(
+        MODAL_CSS
+        + f"""
+        <div id="tab-content">
+          <form id="sync-form" method="post" action="{HTMX_SYNC_URL}" hx-post="{HTMX_SYNC_URL}"
+                hx-target="#tab-content" hx-swap="innerHTML">
+            <table id="librenms-ipaddress-table"><tbody><tr>
+              <td><button id="create-vrf" type="submit" name="create_vrf" value="row-7"
+                   formaction="{HTMX_SYNC_URL}/vrf" data-confirm="Create NetBox VRF 'red'?">VRF</button></td>
+            </tr></tbody></table>
+          </form>
+        </div>
+        """
+    )
+    _add_page_scripts(page)
+    _spy_on_window_confirm(page)
+
+    page.click("#create-vrf")
+    expect(page.locator(f"{CONFIRM_MODAL} [data-confirm-message]")).to_have_text("Create NetBox VRF 'red'?")
+    assert requests == []
+    page.locator(CONFIRM_MODAL).get_by_role("button", name="Confirm").click()
+    page.locator("#swapped").wait_for()
+
+    [(url, body)] = requests
+    assert url == f"{HTMX_SYNC_URL}/vrf"
+    assert "create_vrf=row-7" in body
+    assert page.evaluate("window.confirmCalls") == []
+
+
+@pytest.mark.parametrize("accept", [False, True], ids=["cancelled", "confirmed"])
+def test_an_hx_confirm_question_asks_in_the_plugin_modal(page, accept):
+    requests = []
+
+    def answer(route):
+        requests.append(route.request.url)
+        route.fulfill(status=200, content_type="text/html", body="")
+
+    page.route(f"{HTMX_SYNC_URL}**", answer)
+    page.set_content(
+        MODAL_CSS
+        + f"""
+        <button id="transfer" type="button" hx-post="{HTMX_SYNC_URL}/transfer" hx-swap="none"
+                hx-confirm="Transfer primary IPv4 (192.0.2.1/24) to <b>winner</b>?">Transfer</button>
+        """
+    )
+    _add_page_scripts(page)
+    _spy_on_window_confirm(page)
+
+    page.click("#transfer")
+    modal = page.locator(CONFIRM_MODAL)
+    expect(modal.locator("[data-confirm-message]")).to_have_text(
+        "Transfer primary IPv4 (192.0.2.1/24) to <b>winner</b>?"
+    )
+    if accept:
+        with page.expect_response(f"{HTMX_SYNC_URL}/transfer"):
+            modal.get_by_role("button", name="Confirm").click()
+    else:
+        modal.get_by_role("button", name="Cancel").click()
+    expect(modal).to_be_hidden()
+
+    assert requests == ([f"{HTMX_SYNC_URL}/transfer"] if accept else [])
+    assert page.evaluate("window.confirmCalls") == []
+
+
+def _modal_state(page):
+    """Return which modals are open, how many backdrops exist, and whether the page scroll is locked."""
+    return page.evaluate(
+        """() => ({
+            open: Array.from(document.querySelectorAll('.modal.show')).map((modal) => modal.id),
+            backdrops: document.querySelectorAll('.modal-backdrop').length,
+            locked: document.body.classList.contains('modal-open'),
+        })"""
+    )
+
+
+def _nested_confirm_page(page, requests):
+    def answer(route):
+        requests.append(route.request.url)
+        route.fulfill(status=200, content_type="text/html", body="")
+
+    page.route(f"{HTMX_SYNC_URL}**", answer)
+    page.set_content(
+        MODAL_CSS
+        + f"""
+        <div class="modal" id="parent-modal" tabindex="-1"><div class="modal-dialog"><div class="modal-content">
+          <div class="modal-body">
+            <button id="move" type="button" hx-post="{HTMX_SYNC_URL}/move" hx-swap="none"
+                    hx-confirm="Move interface 'eth0' to winner?">Move</button>
+          </div>
+          <div class="modal-footer"><button type="button" data-bs-dismiss="modal">Close parent</button></div>
+        </div></div></div>
+        """
+    )
+    _add_page_scripts(page)
+    page.evaluate("showModal(document.getElementById('parent-modal'))")
+    assert _modal_state(page) == {"open": ["parent-modal"], "backdrops": 1, "locked": True}
+    page.click("#move")
+    confirm = page.locator(CONFIRM_MODAL)
+    expect(confirm).to_be_visible()
+    # The confirmation sits on top: the point under its buttons belongs to the confirm modal.
+    box = confirm.get_by_role("button", name="Confirm").bounding_box()
+    on_top = page.evaluate(
+        "([x, y]) => !!document.elementFromPoint(x, y)?.closest('#librenms-confirm-modal')",
+        [box["x"] + box["width"] / 2, box["y"] + box["height"] / 2],
+    )
+    assert on_top
+    return confirm
+
+
+@pytest.mark.parametrize("dismiss", ["cancel", "escape", "close", "backdrop"])
+def test_a_confirmation_over_an_open_modal_leaves_the_parent_open_when_dismissed(page, dismiss):
+    requests = []
+    confirm = _nested_confirm_page(page, requests)
+
+    if dismiss == "cancel":
+        confirm.get_by_role("button", name="Cancel").click()
+    elif dismiss == "escape":
+        page.keyboard.press("Escape")
+    elif dismiss == "close":
+        confirm.get_by_role("button", name="Close").click()
+    else:
+        page.mouse.click(5, 5)
+    expect(confirm).to_be_hidden()
+
+    assert requests == []
+    assert _modal_state(page) == {"open": ["parent-modal"], "backdrops": 1, "locked": True}
+    # Focus returns into the parent, so its own Escape and focus trap keep working.
+    assert page.evaluate("document.activeElement.id") == "move"
+
+
+def test_a_confirmation_over_an_open_modal_sends_once_and_leaves_the_parent_open(page):
+    requests = []
+    confirm = _nested_confirm_page(page, requests)
+
+    with page.expect_response(f"{HTMX_SYNC_URL}/move"):
+        confirm.get_by_role("button", name="Confirm").click()
+    expect(confirm).to_be_hidden()
+
+    assert requests == [f"{HTMX_SYNC_URL}/move"]
+    assert _modal_state(page) == {"open": ["parent-modal"], "backdrops": 1, "locked": True}
+    # Closing the parent afterwards removes the last backdrop and the scroll lock.
+    page.get_by_role("button", name="Close parent").click()
+    assert _modal_state(page) == {"open": [], "backdrops": 0, "locked": False}
+
+
+def test_a_standalone_confirmation_leaves_no_backdrop_or_scroll_lock(page):
+    _rebind_form_page(page)
+
+    page.click("#rebind")
+    assert _modal_state(page) == {"open": ["librenms-confirm-modal"], "backdrops": 1, "locked": True}
+    page.locator(CONFIRM_MODAL).get_by_role("button", name="Cancel").click()
+
+    assert _modal_state(page) == {"open": [], "backdrops": 0, "locked": False}
+
+
+@pytest.mark.parametrize(
+    "table_id",
+    ["librenms-interface-table", "librenms-ipaddress-table", "librenms-cable-table"],
+)
+def test_bulk_submit_still_consumes_off_page_selection_for_other_row_action_tabs(page, table_id):
+    """Bulk actions still submit and clear off-page rows for every other row-action tab."""
+    page.set_content(
+        f"""
+        <input name="server_key" value="production">
+        <form id="sync-form" method="post" action="/bulk">
+          <table id="{table_id}"><tbody><tr>
+            <td><input type="checkbox" name="select" value="201"></td>
+          </tr></tbody></table>
+          <button id="bulk-submit" type="submit">Sync selected</button>
+        </form>
+        """
+    )
+    _add_page_scripts(page)
+    page.evaluate(
+        """() => {
+            const table = document.querySelector('table');
+            writeStoredSelection(table, {'101': {inputs: {}, auto: ''}});
+            document.getElementById('sync-form').addEventListener('submit', event => event.preventDefault());
+        }"""
+    )
+
+    page.click("#bulk-submit")
+
+    posted = page.locator("#sync-form").evaluate("form => Array.from(new FormData(form).entries())")
+    stored = page.evaluate("readStoredSelection(document.querySelector('table'))")
+    assert ["select", "101"] in posted
+    assert stored == {}
+
+
+HTMX_SYNC_URL = "https://plugin.example.com/htmx-sync"
+
+
+def _htmx_sync_form(table_id="librenms-interface-table"):
+    return f"""
+        <div id="tab-content">
+          <form id="sync-form" method="post" action="{HTMX_SYNC_URL}"
+                hx-post="{HTMX_SYNC_URL}" hx-target="#tab-content" hx-swap="innerHTML"
+                hx-sync="#tab-content:drop">
+            <table id="{table_id}"><tbody><tr>
+              <td><input type="checkbox" name="select" value="201" checked></td>
+              <td><button id="row-sync" type="submit" name="sync_one" value="201">Sync</button></td>
+            </tr></tbody></table>
+            <button id="bulk-submit" type="submit">
+              <span class="spinner spinner-border d-none" id="sync-spinner"></span>Sync selected
+            </button>
+          </form>
+        </div>
+        """
+
+
+@pytest.mark.parametrize("table_id", ["librenms-interface-table", "librenms-cable-table"])
+def test_an_htmx_submit_carries_the_off_page_selection(page, table_id):
+    """The off-page rows are in the form before htmx serializes it in the form's own submit listener."""
+    bodies = []
+
+    def answer(route):
+        bodies.append(route.request.post_data)
+        route.fulfill(status=200, content_type="text/html", body='<span id="swapped">Synced</span>')
+
+    page.route(HTMX_SYNC_URL, answer)
+    page.set_content(_htmx_sync_form(table_id))
+    _add_page_scripts(page)
+    page.evaluate("writeStoredSelection(document.querySelector('table'), {'101': {inputs: {}, auto: ''}})")
+
+    page.click("#bulk-submit")
+    page.locator("#swapped").wait_for()
+
+    assert sorted(value for key, value in _selection_form_pairs(bodies[0]) if key == "select") == ["101", "201"]
+
+
+@pytest.mark.parametrize("failure", ["status", "transport"])
+def test_a_failed_htmx_submit_gives_the_button_back(page, failure):
+    """A failed htmx submit swaps nothing, so a button left disabled would look dead."""
+
+    def answer(route):
+        if failure == "status":
+            route.fulfill(status=500, content_type="text/html", body="Server error")
+        else:
+            route.abort()
+
+    page.route(HTMX_SYNC_URL, answer)
+    page.set_content(_htmx_sync_form())
+    _add_page_scripts(page)
+    page.evaluate("initializeSyncFormSpinners()")
+
+    page.click("#bulk-submit")
+
+    expect(page.locator("#bulk-submit")).to_be_enabled()
+    expect(page.locator("#sync-spinner")).to_have_class(re.compile(r"\bd-none\b"))
+    assert page.locator("#sync-form").count() == 1
+
+
+def test_a_retry_after_a_failed_htmx_submit_still_carries_the_off_page_selection(page):
+    """A failed submit gives the off-page rows back, so the notice shows them and a retry posts them."""
+    bodies = []
+
+    def answer(route):
+        bodies.append(route.request.post_data)
+        if len(bodies) == 1:
+            route.fulfill(status=500, content_type="text/html", body="Server error")
+        else:
+            route.fulfill(status=200, content_type="text/html", body='<span id="swapped">Synced</span>')
+
+    page.route(HTMX_SYNC_URL, answer)
+    page.set_content(_htmx_sync_form())
+    _add_page_scripts(page)
+    page.evaluate("initializeSyncFormSpinners()")
+    page.evaluate(
+        "writeStoredSelection(document.querySelector('table'), {'101': {inputs: {expected_local_id_101: '7'}, auto: ''}})"
+    )
+
+    page.click("#bulk-submit")
+    expect(page.locator("#librenms-interface-table-offpage-selection")).to_contain_text("1 more row")
+    page.click("#bulk-submit")
+    page.locator("#swapped").wait_for()
+
+    first, retry = (_selection_form_pairs(body) for body in bodies)
+    assert sorted(first) == sorted(retry) == [("expected_local_id_101", "7"), ("select", "101"), ("select", "201")]
+
+
+def test_a_dropped_row_submit_keeps_the_pending_bulk_submit_recoverable(page):
+    """A row submit that htmx drops behind a pending bulk submit must not lose that submit's off-page rows."""
+    held = []
+    bodies = []
+
+    def answer(route):
+        bodies.append(route.request.post_data)
+        if len(bodies) == 1:
+            held.append(route)
+        else:
+            route.fulfill(status=200, content_type="text/html", body='<span id="swapped">Synced</span>')
+
+    page.route(HTMX_SYNC_URL, answer)
+    page.set_content(_htmx_sync_form())
+    _add_page_scripts(page)
+    page.evaluate("writeStoredSelection(document.querySelector('table'), {'101': {inputs: {}, auto: ''}})")
+
+    with page.expect_request(HTMX_SYNC_URL):
+        page.click("#bulk-submit")
+    page.click("#row-sync")
+    held[0].fulfill(status=500, content_type="text/html", body="Server error")
+    expect(page.locator("#librenms-interface-table-offpage-selection")).to_contain_text("1 more row")
+    page.click("#bulk-submit")
+    page.locator("#swapped").wait_for()
+
+    first, retry = (_selection_form_pairs(body) for body in bodies)
+    assert sorted(first) == sorted(retry) == [("select", "101"), ("select", "201")]
+
+
+def test_a_successful_htmx_redirect_does_not_give_the_off_page_selection_back(page):
+    """An HX-Redirect success leaves htmx's `successful` unset, and it must not read as a failure."""
+    fixture_url = page.url
+    page.route(
+        HTMX_SYNC_URL,
+        lambda route: route.fulfill(status=200, headers={"HX-Redirect": fixture_url}, body=""),
+    )
+    page.set_content(_htmx_sync_form())
+    _add_page_scripts(page)
+    storage_key = page.evaluate(
+        """() => {
+            const table = document.querySelector('table');
+            writeStoredSelection(table, {'101': {inputs: {}, auto: ''}});
+            return _selectionStorageKey(table);
+        }"""
+    )
+
+    # The redirect reloads the same path, so the new document reads the same selection store.
+    with page.expect_navigation():
+        page.click("#bulk-submit")
+
+    assert page.evaluate("key => window.sessionStorage.getItem(key)", storage_key) is None
+
+
+def test_a_retry_after_a_failed_module_install_still_carries_the_off_page_selection(page):
+    """The module table sits outside its form, and its off-page rows come back after a failure too."""
+    bodies = []
+
+    def answer(route):
+        bodies.append(route.request.post_data)
+        if len(bodies) == 1:
+            route.fulfill(status=500, content_type="text/html", body="Server error")
+        else:
+            route.fulfill(status=200, content_type="text/html", body='<span id="swapped">Installed</span>')
+
+    page.route(HTMX_SYNC_URL, answer)
+    page.set_content(
+        f"""
+        <div id="module-sync-content">
+          <form id="install-selected-form" method="post" action="{HTMX_SYNC_URL}"
+                hx-post="{HTMX_SYNC_URL}" hx-target="#module-sync-content" hx-swap="innerHTML">
+            <button id="install-submit" type="submit">Install Selected</button>
+          </form>
+          <table id="librenms-module-table"><tbody><tr>
+            <td><input type="checkbox" name="select" value="201" checked>
+                <select id="device_selection_201"><option value="7" selected>m7</option></select></td>
+          </tr></tbody></table>
+        </div>
+        """
+    )
+    _add_page_scripts(page)
+    # The page script wires its htmx:configRequest injector on DOMContentLoaded, which already fired here.
+    page.evaluate("document.dispatchEvent(new Event('DOMContentLoaded'))")
+    page.evaluate(
+        "writeStoredSelection(document.getElementById('librenms-module-table'),"
+        " {'101': {inputs: {device_selection_101: '9'}, auto: ''}})"
+    )
+
+    page.click("#install-submit")
+    expect(page.locator("#librenms-module-table-offpage-selection")).to_contain_text("1 more row")
+    page.click("#install-submit")
+    page.locator("#swapped").wait_for()
+
+    first, retry = (sorted(_selection_form_pairs(body)) for body in bodies)
+    expected = [("device_selection_101", "9"), ("device_selection_201", "7"), ("select", "101"), ("select", "201")]
+    assert first == retry == expected
 
 
 def _selection_form_pairs(post_data):
@@ -1698,6 +2718,229 @@ def test_vlan_filters_hide_nonmatching_vlan_rows(page):
     page.locator("#filter-vlan-group").fill("campus")
     assert page.locator("#users-vlan").evaluate("row => row.style.display") == ""
     assert page.locator("#guests-vlan").evaluate("row => row.style.display") == "none"
+
+
+def test_vlan_group_verification_ignores_a_late_response_for_an_old_selection(page):
+    """A late group response must not replace the selected group's row state."""
+    page.set_content(
+        """
+        <input name="csrfmiddlewaretoken" value="test-token">
+        <form>
+          <table id="librenms-vlan-table"><tbody><tr>
+            <td data-col="vlan_id"><span class="text-danger">501</span></td>
+            <td data-col="name"><span class="text-danger">Users</span></td>
+            <td data-col="vlan_group_selection">
+              <select class="vlan-sync-group-select" name="vlan_group_501"
+                      data-vlan-id="501" data-vlan-name="Users">
+                <option value="" selected>Global</option>
+                <option value="1">Group A</option>
+                <option value="2">Group B</option>
+              </select>
+            </td>
+            <td data-col="status">Not in NetBox</td>
+          </tr></tbody></table>
+        </form>
+        """
+    )
+    held_routes = {}
+
+    def hold_verification(route):
+        group_id = json.loads(route.request.post_data)["vlan_group_id"]
+        held_routes[str(group_id)] = route
+
+    page.route("**/plugins/librenms_plugin/verify-vlan-sync-group/", hold_verification)
+    _add_page_scripts(page)
+    page.evaluate("initializeVlanSyncGroupSelects()")
+
+    with page.expect_request("**/plugins/librenms_plugin/verify-vlan-sync-group/"):
+        page.locator(".vlan-sync-group-select").select_option("1")
+    with page.expect_request("**/plugins/librenms_plugin/verify-vlan-sync-group/"):
+        page.locator(".vlan-sync-group-select").select_option("2")
+    for _attempt in range(40):
+        if held_routes.keys() >= {"1", "2"}:
+            break
+        page.wait_for_timeout(25)
+    assert held_routes.keys() >= {"1", "2"}
+
+    held_routes["2"].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            {
+                "status": "success",
+                "css_class": "text-warning",
+                "exists_in_netbox": True,
+                "name_matches": False,
+                "netbox_vlan_name": "Group B name",
+                "status_html": '<button id="group-b-action">Update B</button>',
+            }
+        ),
+    )
+    page.locator("#group-b-action").wait_for()
+    held_routes["1"].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(
+            {
+                "status": "success",
+                "css_class": "text-success",
+                "exists_in_netbox": True,
+                "name_matches": True,
+                "netbox_vlan_name": "Users",
+                "status_html": '<span id="group-a-status">Synced A</span>',
+            }
+        ),
+    )
+    page.wait_for_timeout(100)
+
+    assert page.locator(".vlan-sync-group-select").input_value() == "2"
+    assert page.locator("#group-a-status").count() == 0
+    assert page.locator('td[data-col="status"]').inner_text() == "Update B"
+    assert page.locator('td[data-col="vlan_id"] span').get_attribute("class") == "text-warning"
+
+
+def test_vlan_modal_group_verification_ignores_a_late_response_for_an_old_selection(page):
+    """A late modal response must not replace the selected group's saved row state."""
+    page.set_content(
+        """
+        <input name="csrfmiddlewaretoken" value="test-token">
+        <button id="saveVlanGroups">Save</button>
+        <div id="vlanDetailModal" data-current-row-key="port-1">
+          <table><tbody><tr id="modal-vlan-row">
+            <td><span class="text-danger">501</span></td>
+            <td><select id="modal-vlan-group" data-interface="Ethernet1">
+              <option value="" selected>Global</option>
+              <option value="1">Group A</option>
+              <option value="2">Group B</option>
+            </select></td>
+          </tr></tbody></table>
+        </div>
+        <button class="vlan-edit-btn" data-row-key="port-1"
+                data-vlans='[{"vid": 501, "css": "text-danger", "missing": true}]'>Edit</button>
+        """
+    )
+    held_routes = {}
+
+    def hold_verification(route):
+        group_id = json.loads(route.request.post_data)["vlan_group_id"]
+        held_routes[str(group_id)] = route
+
+    page.route("**/plugins/librenms_plugin/verify-vlan-group/", hold_verification)
+    _add_page_scripts(page)
+    select = page.locator("#modal-vlan-group")
+
+    select.select_option("1")
+    page.evaluate("verifyVlanInGroup(document.getElementById('modal-vlan-group'), '7', 501, 'T', '1')")
+    select.select_option("2")
+    page.evaluate("verifyVlanInGroup(document.getElementById('modal-vlan-group'), '7', 501, 'T', '2')")
+    for _attempt in range(40):
+        if held_routes.keys() >= {"1", "2"}:
+            break
+        page.wait_for_timeout(25)
+    assert held_routes.keys() >= {"1", "2"}
+
+    held_routes["2"].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps({"status": "success", "css_class": "text-warning", "is_missing": True}),
+    )
+    page.wait_for_function("document.getElementById('modal-vlan-row').dataset.resolvedCss === 'text-warning'")
+    held_routes["1"].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps({"status": "success", "css_class": "text-success", "is_missing": False}),
+    )
+    page.wait_for_timeout(100)
+
+    row = page.locator("#modal-vlan-row")
+    button_vlans = json.loads(page.locator('.vlan-edit-btn[data-row-key="port-1"]').get_attribute("data-vlans"))
+    assert select.input_value() == "2"
+    assert row.get_attribute("data-resolved-css") == "text-warning"
+    assert row.locator("td:first-child span").get_attribute("class") == "text-warning"
+    assert button_vlans == [{"vid": 501, "css": "text-warning", "missing": True}]
+    assert not page.locator("#saveVlanGroups").is_disabled()
+
+
+def test_restored_vlan_group_selection_reverifies_only_a_changed_group(page):
+    """A restored group must repaint its row without rechecking an unchanged row."""
+    page.set_content(
+        """
+        <input name="csrfmiddlewaretoken" value="test-token">
+        <input name="server_key" value="default">
+        <form>
+          <table id="librenms-vlan-table"><tbody>
+            <tr>
+              <td data-col="selection"><input type="checkbox" name="select" value="501"></td>
+              <td data-col="vlan_id"><span class="text-success">501</span></td>
+              <td data-col="name"><span class="text-success">Users</span></td>
+              <td data-col="vlan_group_selection">
+                <select class="vlan-sync-group-select" name="vlan_group_501"
+                        data-vlan-id="501" data-vlan-name="Users">
+                  <option value="1" selected>Group A</option>
+                  <option value="2">Group B</option>
+                </select>
+              </td>
+              <td data-col="status">Synced in A</td>
+            </tr>
+            <tr>
+              <td data-col="selection"><input type="checkbox" name="select" value="502"></td>
+              <td data-col="vlan_id"><span class="text-success">502</span></td>
+              <td data-col="name"><span class="text-success">Servers</span></td>
+              <td data-col="vlan_group_selection">
+                <select class="vlan-sync-group-select" name="vlan_group_502"
+                        data-vlan-id="502" data-vlan-name="Servers">
+                  <option value="1" selected>Group A</option>
+                  <option value="2">Group B</option>
+                </select>
+              </td>
+              <td data-col="status">Synced in A</td>
+            </tr>
+          </tbody></table>
+        </form>
+        """
+    )
+    requests = []
+
+    def answer_verification(route):
+        payload = json.loads(route.request.post_data)
+        requests.append((payload["vid"], str(payload["vlan_group_id"])))
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "status": "success",
+                    "css_class": "text-danger",
+                    "exists_in_netbox": False,
+                    "name_matches": False,
+                    "status_html": '<button id="restored-group-action">Create in B</button>',
+                }
+            ),
+        )
+
+    page.route("**/plugins/librenms_plugin/verify-vlan-sync-group/", answer_verification)
+    _add_page_scripts(page)
+    page.evaluate(
+        """() => {
+            const table = document.getElementById('librenms-vlan-table');
+            writeStoredSelection(table, {
+                '501': {inputs: {vlan_group_501: '2'}, auto: ''},
+                '502': {inputs: {vlan_group_502: '1'}, auto: ''}
+            });
+            restoreTableSelection(table);
+        }"""
+    )
+    for _attempt in range(40):
+        if requests:
+            break
+        page.wait_for_timeout(25)
+
+    assert requests == [("501", "2")]
+    page.locator("#restored-group-action").wait_for()
+    assert page.locator('[name="vlan_group_501"]').input_value() == "2"
+    assert page.locator('[name="vlan_group_502"]').input_value() == "1"
+    assert page.locator('tr:has([name="vlan_group_501"]) td[data-col="status"]').inner_text() == "Create in B"
+    assert page.locator('tr:has([name="vlan_group_502"]) td[data-col="status"]').inner_text() == "Synced in A"
 
 
 def test_filter_disclosure_state_survives_fragment_replacement(page):
@@ -3113,3 +4356,216 @@ def test_refreshed_cable_picker_uses_the_persistent_htmx_loader(page):
     assert request.headers.get("x-csrftoken") == "token"
     page.wait_for_selector("#htmx-modal-content .modal-title")
     expect(page.locator("#htmx-modal")).to_have_class(re.compile(r"(?:^|\s)show(?:\s|$)"))
+
+
+@pytest.mark.parametrize("action", ["sync_one", "rebind_one", "create_vrf"])
+def test_programmatic_single_row_submit_keeps_off_page_selection(page, action):
+    """A real HTMX request with a row action needs no SubmitEvent to preserve bulk rows."""
+    bodies = []
+
+    def answer(route):
+        bodies.append(route.request.post_data)
+        route.fulfill(status=204)
+
+    page.route(HTMX_SYNC_URL, answer)
+    page.set_content(_htmx_sync_form())
+    _add_page_scripts(page)
+    page.evaluate("writeStoredSelection(document.querySelector('table'), {'101': {inputs: {}, auto: ''}})")
+    page.evaluate(
+        """action => htmxTest.ajax('POST', document.getElementById('sync-form').action, {
+            source: document.getElementById('sync-form'),
+            target: '#tab-content',
+            values: {[action]: '201'}
+        })""",
+        action,
+    )
+
+    assert (action, "201") in _selection_form_pairs(bodies[0])
+    assert ("select", "101") not in _selection_form_pairs(bodies[0])
+    assert list(page.evaluate("readStoredSelection(document.querySelector('table'))")) == ["101"]
+
+
+# ===========================================================================
+# Table fit: a sync table must fit its card without a scroll wrapper
+# ===========================================================================
+# The netbox.css rules that set how wide a sync table can shrink.
+NETBOX_TABLE_CSS = """
+body { margin: 0; font: 14px/1.4 sans-serif; }
+.table { width: 100%; border-collapse: collapse; }
+.table th, .table td { padding: .5rem; vertical-align: top; }
+.table thead th { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
+.badge { display: inline-flex; gap: .25rem; padding: .25em .5em; font-size: .857em; white-space: nowrap; }
+.btn { display: inline-flex; padding: .25rem .5rem; white-space: nowrap; }
+.d-none { display: none !important; }
+.d-inline-block { display: inline-block !important; }
+.text-wrap { white-space: normal !important; }
+.text-break { word-wrap: break-word !important; word-break: break-word !important; }
+.text-start { text-align: left !important; }
+"""
+
+# Cell markup in the shape the interface and module tables render, with the widest values seen live.
+FIT_TABLES = {
+    "librenms-interface-table": {
+        "headers": [
+            ("selection", ""),
+            ("device_selection", "Virtual Chassis member"),
+            ("name", "Name"),
+            ("type", "Interface Type"),
+            ("speed", "Speed"),
+            ("vlans", "VLANs"),
+            ("mac_address", "MAC Address"),
+            ("mtu", "MTU"),
+            ("enabled", "Enabled"),
+            ("description", "Description"),
+            ("librenms_id", "LibreNMS ID"),
+            ("parent", "Relationships"),
+            ("actions", ""),
+        ],
+        "cells": {
+            "selection": '<input type="checkbox" name="select">',
+            "device_selection": '<select class="form-select" style="width: 100%"><option>Select a member</option></select>',
+            "name": '<span class="text-danger">2/x1/1/c36/1</span>',
+            "type": '<span>softwareLoopback <i class="mdi mdi-help-circle-outline"></i></span>',
+            "speed": "<span>100 Gbps</span>",
+            "vlans": "<span>2759(T) <i class='mdi mdi-alert'></i></span>",
+            "mac_address": "<span>02:00:00:CD:9F:07</span>",
+            "mtu": "<span>9208</span>",
+            "enabled": "<span>Disabled</span>",
+            "description": "<span>uplink to core router</span>",
+            "librenms_id": "<span>2005606206</span>",
+            "parent": (
+                '<div class="lh-sm"><span class="badge text-wrap text-start">1 stacked port</span></div>'
+                '<div class="lh-sm"><span class="badge text-wrap text-start">LAG lag-2</span>'
+                ' <button type="button" class="btn btn-sm">Sync</button></div>'
+            ),
+            "actions": '<div class="lh-sm"><span class="badge text-wrap text-start">Select\u00a0member</span></div>',
+        },
+        "keep": ["device_selection", "name", "parent", "actions"],
+    },
+    "librenms-module-table": {
+        "headers": [
+            ("selection", ""),
+            ("device_selection", "Virtual Chassis Member"),
+            ("name", "Name"),
+            ("model", "Model"),
+            ("serial", "Serial"),
+            ("description", "Description"),
+            ("item_class", "Class"),
+            ("module_bay", "Module Bay"),
+            ("module_type", "Module Type"),
+            ("status", "Status"),
+            ("actions", "Actions"),
+        ],
+        "cells": {
+            "selection": '<input type="checkbox" name="select">',
+            "device_selection": '<select class="form-select" style="width: 100%"><option>nokia1</option></select>',
+            "name": '<span class="d-inline-block" style="padding-left:40px">└─ entity-c0151e 2/x1/1</span>',
+            "model": "CFP2/QSFP28",
+            "serial": "SN-7890dd",
+            "description": "CFP2/QSFP28",
+            "item_class": '<i class="mdi mdi-power-plug me-1"></i> powerSupply',
+            "module_bay": '<span class="text-danger">No matching bay</span>',
+            "module_type": '<span class="text-warning">No matching type</span>',
+            "status": '<span class="badge text-wrap text-start">Integrated in entity-6d234b 2/x1</span>',
+            "actions": '<button type="button" class="btn btn-sm">Install</button>',
+        },
+        "keep": ["device_selection", "name", "status", "actions"],
+    },
+}
+
+
+def _render_fit_table(page, table_id, card_width):
+    """Render one sync table inside a card of the given width, with the page script initialized."""
+    spec = FIT_TABLES[table_id]
+    # The VC member column width comes from the interface template's style block.
+    vc_width = "width: 13rem; min-width: 13rem;"
+    head = "".join(f'<th class="text-wrap" data-col="{col}">{label}</th>' for col, label in spec["headers"])
+    row = "".join(
+        f'<td data-col="{col}" style="{vc_width if col == "device_selection" else ""}">{spec["cells"][col]}</td>'
+        for col, _label in spec["headers"]
+    )
+    page.set_content(
+        f"<style>{NETBOX_TABLE_CSS}</style>"
+        f'<div id="frame" style="width: {card_width}px"><div class="card">'
+        f'<table class="table" id="{table_id}"><thead><tr>{head}</tr></thead>'
+        f"<tbody>{f'<tr>{row}</tr>' * 3}</tbody></table></div></div>"
+    )
+    _add_page_scripts(page)
+    page.evaluate("initializeScripts()")
+
+
+def _fit_state(page, table_id):
+    """Return the table's overflow, the visible columns, and the fit note text."""
+    return page.evaluate(
+        """(tableId) => {
+            const table = document.getElementById(tableId);
+            const visible = (cell) => getComputedStyle(cell).display !== 'none';
+            const note = table.parentElement.querySelector('[data-table-fit-note]');
+            return {
+                scrollWidth: table.scrollWidth,
+                clientWidth: table.parentElement.clientWidth,
+                headers: Array.from(table.tHead.rows[0].cells).filter(visible).map((th) => th.dataset.col),
+                cells: Array.from(table.tBodies[0].rows[0].cells).filter(visible).map((td) => td.dataset.col),
+                note: note && !note.hidden ? note.textContent : '',
+            };
+        }""",
+        table_id,
+    )
+
+
+@pytest.mark.parametrize("table_id", sorted(FIT_TABLES))
+@pytest.mark.parametrize("card_width", [943, 750, 687])
+def test_sync_table_fits_its_card_at_narrow_widths(page, table_id, card_width):
+    """The card widths are the live ones at 1280 px and 1024 px with the sidebar, and at 768 px without it."""
+    _render_fit_table(page, table_id, card_width)
+
+    state = _fit_state(page, table_id)
+    assert state["scrollWidth"] <= state["clientWidth"] + 1, state
+    assert state["headers"] == state["cells"], "a hidden header must hide its cells too"
+    assert set(FIT_TABLES[table_id]["keep"]) <= set(state["cells"])
+    hidden = [col for col, _label in FIT_TABLES[table_id]["headers"] if col not in state["cells"]]
+    labels = dict(FIT_TABLES[table_id]["headers"])
+    noted = re.fullmatch(r"Hidden to fit the window: (.+)\. Widen the window to show them\.", state["note"])
+    assert sorted(noted.group(1).split(", ") if noted else []) == sorted(labels[col] for col in hidden)
+
+
+@pytest.mark.parametrize("table_id", sorted(FIT_TABLES))
+def test_sync_table_keeps_one_fit_note_when_a_notice_lands_before_the_table(page, table_id):
+    _render_fit_table(page, table_id, 687)
+    # The off-page selection notice and the cross-page notices are inserted directly before the table.
+    page.evaluate(
+        "(id) => { const n = document.createElement('div'); n.className = 'off-page-notice';"
+        " document.getElementById(id).before(n); }",
+        table_id,
+    )
+
+    page.evaluate("document.getElementById('frame').style.width = '2400px'")
+    page.wait_for_function(
+        "(n) => document.querySelectorAll('#frame tbody tr:first-child td:not(.d-none)').length === n",
+        arg=len(FIT_TABLES[table_id]["headers"]),
+    )
+    assert page.evaluate("document.querySelectorAll('#frame [data-table-fit-note]:not([hidden])').length") == 0
+
+    page.evaluate("document.getElementById('frame').style.width = '687px'")
+    page.wait_for_function("() => !!document.querySelector('#frame [data-table-fit-note]:not([hidden])')")
+    assert page.evaluate("document.querySelectorAll('#frame [data-table-fit-note]').length") == 1
+
+
+@pytest.mark.parametrize("table_id", sorted(FIT_TABLES))
+def test_sync_table_shows_hidden_columns_again_when_the_card_widens(page, table_id):
+    _render_fit_table(page, table_id, 687)
+    narrow = _fit_state(page, table_id)
+    assert len(narrow["cells"]) < len(FIT_TABLES[table_id]["headers"])
+
+    page.evaluate("document.getElementById('frame').style.width = '2400px'")
+    page.wait_for_function(
+        "(n) => document.querySelectorAll('#frame tbody tr:first-child td:not(.d-none)').length === n",
+        arg=len(FIT_TABLES[table_id]["headers"]),
+    )
+    assert _fit_state(page, table_id)["note"] == ""
+
+    page.evaluate("document.getElementById('frame').style.width = '687px'")
+    page.wait_for_function("() => !!document.querySelector('#frame [data-table-fit-note]:not([hidden])')")
+    state = _fit_state(page, table_id)
+    assert state["cells"] == narrow["cells"]
+    assert state["scrollWidth"] <= state["clientWidth"] + 1

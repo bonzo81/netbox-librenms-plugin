@@ -41,17 +41,15 @@ proposed_name, proposed_type, type_is_unmapped, existing_interface, post_url.
       <dd class="col-sm-8">
         <code>{{ proposed_type }}</code>
         {% if type_is_unmapped %}
-          <span class="badge bg-warning text-dark ms-1">no mapping</span>
+          <span class="badge bg-warning text-dark ms-1">no interface rule</span>
         {% endif %}
       </dd>
 
-      {% if librenms_port %}
-        <dt class="col-sm-4">Reported by LibreNMS as</dt>
-        <dd class="col-sm-8 text-muted">
-          {{ librenms_port.ifType|default:"no ifType" }}{% if librenms_port.ifSpeed %},
-          {{ librenms_port.ifSpeed }} bit/s{% endif %}
-        </dd>
-      {% endif %}
+      <dt class="col-sm-4">Reported by LibreNMS as</dt>
+      <dd class="col-sm-8 text-muted">
+        {{ librenms_port.ifType|default:"no ifType" }}{% if librenms_port.ifSpeed %},
+        {{ librenms_port.ifSpeed }} bit/s{% endif %}
+      </dd>
 
       <dt class="col-sm-4">Cable</dt>
       <dd class="col-sm-8">
@@ -70,18 +68,12 @@ proposed_name, proposed_type, type_is_unmapped, existing_interface, post_url.
       </div>
     {% elif type_is_unmapped %}
       <div class="alert alert-warning py-2 mt-3 mb-0 small">
-        <i class="mdi mdi-alert me-1"></i>No InterfaceTypeMapping matches
-        <code>{{ librenms_port.ifType|default:"this port" }}</code> at this speed, so the interface
-        is created as <code>other</code>. Add a mapping first if you want the real type.
+        <i class="mdi mdi-alert me-1"></i>No interface rule sets a type for
+        <code>{{ librenms_port.ifType|default:"this port" }}</code> on this device, so the interface
+        is created as <code>other</code>. Add an interface rule first if you want the real type.
       </div>
     {% endif %}
 
-    {% if not librenms_port %}
-      <div class="alert alert-warning py-2 mt-3 mb-0 small">
-        <i class="mdi mdi-alert me-1"></i>LibreNMS did not answer for this port, so the name comes
-        from the neighbour advertisement and the type cannot be derived.
-      </div>
-    {% endif %}
   </div>
   <div class="modal-footer">
     <button type="button" class="btn btn-secondary" onclick="closeHtmxModal()">Cancel</button>

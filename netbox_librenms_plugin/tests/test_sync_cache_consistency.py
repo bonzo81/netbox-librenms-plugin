@@ -29,6 +29,7 @@ from netbox_librenms_plugin.sync_cache import (
     sync_subject_key,
 )
 from netbox_librenms_plugin.tests.conftest import (
+    _PORT_KEYS_UNSET,
     make_module_bay,
     make_module_type,
     configure_librenms_servers,
@@ -491,6 +492,7 @@ def test_an_attribute_only_interface_change_schedules_the_cache_transition(
         {
             "ports": [
                 {
+                    **_PORT_KEYS_UNSET,
                     "port_id": 7009,
                     "ifName": "Ethernet1/9",
                     "ifDescr": "Ethernet1/9",
@@ -546,6 +548,7 @@ def test_committed_interface_sync_invalidates_only_mapped_page_and_shared_snapsh
     source_payload = {
         "ports": [
             {
+                **_PORT_KEYS_UNSET,
                 "port_id": 7001,
                 "ifName": "Ethernet1/1",
                 "ifDescr": "Ethernet1/1",
@@ -670,6 +673,7 @@ def test_a_sibling_refresh_clears_the_shared_tab_block_on_every_member(
     ports_payload = {
         "ports": [
             {
+                **_PORT_KEYS_UNSET,
                 "port_id": 7481,
                 "ifName": local.name,
                 "ifDescr": local.name,
@@ -946,8 +950,8 @@ def test_htmx_mutation_does_not_repeat_cache_notice_on_next_navigation(client, s
     child.save(update_fields=["custom_field_data"])
     ports_payload = {
         "ports": [
-            {"port_id": 7111, "ifName": parent.name},
-            {"port_id": 7112, "ifName": child.name},
+            {**_PORT_KEYS_UNSET, "port_id": 7111, "ifName": parent.name},
+            {**_PORT_KEYS_UNSET, "port_id": 7112, "ifName": child.name},
         ],
         "port_stack_relationships": {
             "lag_members": {},
@@ -1083,7 +1087,7 @@ def test_vlan_sync_invalidates_other_tabs_after_creating_a_vlan(
     with django_capture_on_commit_callbacks(execute=True):
         response = client.post(
             url,
-            {"server_key": "primary", "action": "create_vlans", "select": "3062"},
+            {"server_key": "primary", "action": "create_vlans", "select": "3062", "vlan_group_3062": ""},
         )
 
     assert response.status_code == 302
@@ -1753,8 +1757,8 @@ def test_inline_relationship_noop_preserves_other_snapshots(
     child.save(update_fields=["custom_field_data", "parent"])
     ports_payload = {
         "ports": [
-            {"port_id": 7441, "ifName": parent.name},
-            {"port_id": 7442, "ifName": child.name},
+            {**_PORT_KEYS_UNSET, "port_id": 7441, "ifName": parent.name},
+            {**_PORT_KEYS_UNSET, "port_id": 7442, "ifName": child.name},
         ],
         "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {7442: 7441}},
     }
@@ -2721,6 +2725,7 @@ def test_source_snapshot_expiry_before_commit_callback_is_not_reversed(
     ports_payload = {
         "ports": [
             {
+                **_PORT_KEYS_UNSET,
                 "port_id": 7361,
                 "ifName": "Ethernet1",
                 "ifDescr": "Ethernet1",
@@ -2853,6 +2858,7 @@ def test_cache_mutation_resolves_the_shared_owner_once_per_server(
         # reaches the post-commit cleanup this test counts.
         "ports": [
             {
+                **_PORT_KEYS_UNSET,
                 "port_id": 7101,
                 "ifName": interface.name,
                 "ifDescr": interface.name,

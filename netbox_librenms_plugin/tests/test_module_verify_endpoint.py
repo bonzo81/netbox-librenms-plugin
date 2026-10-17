@@ -7,6 +7,7 @@ device first. The primary home for both is ``test_verify_views.py``; these cases
 own file because higher branches of the PR stack grow that file's tail.
 """
 
+import html
 import json
 
 import pytest
@@ -195,7 +196,8 @@ class TestSingleModuleVerifyRow:
 
         assert response.status_code == 200
         actions = response.json()["formatted_row"]["actions"]
-        assert "Install Verify Carrier into &#39;Carrier Bay&#39;" in actions
+        assert 'data-action="install-carrier"' in actions
+        assert "Install Verify Carrier into 'Carrier Bay'" in html.unescape(actions)
 
     def test_a_manual_chassis_member_selection_overrides_inventory_position(self, client, librenms_server):
         """Row verification must bind actions to the member selected in the row dropdown."""

@@ -9,6 +9,7 @@ import pytest
 from django.test import RequestFactory
 from django.urls import reverse
 
+from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
 from netbox_librenms_plugin.tests.conftest import (
     make_cluster,
     make_device,
@@ -16,6 +17,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis,
     make_vm,
+    stamp_rule_decision,
 )
 
 
@@ -49,7 +51,9 @@ def _port(port_id=42, **overrides):
         "vlan_group_map": {},
     }
     record.update(overrides)
-    return record
+    record.setdefault("synced_name", record["ifName"])
+    # No rule matches unless a test stamps the record again after it stores rules.
+    return stamp_rule_decision(record, rules=InterfaceRuleMatcher(()))
 
 
 def _interface_table(device=None, *, data=None, server_key="default", interface_name_field="ifName"):
@@ -896,7 +900,7 @@ class TestInterfaceTableFields:
             librenms_speed=1_000_000,
             netbox_type="1000base-t",
         )
-        record = _port(exists_in_netbox=True, netbox_interface=interface)
+        record = stamp_rule_decision(_port(exists_in_netbox=True, netbox_interface=interface))
         table = _interface_table(device)
 
         assert "text-success" in str(table.render_name(record["ifName"], record))
@@ -932,7 +936,7 @@ class TestInterfaceTableFields:
     @pytest.mark.parametrize("value", ["up", "UP", True, None])
     def test_enabled_values_normalize_to_enabled(self, value):
         """An absent ifAdminStatus reads as enabled: that is the value a sync writes."""
-        record = {"exists_in_netbox": False, "ifAdminStatus": value}
+        record = _port(exists_in_netbox=False, ifAdminStatus=value)
         html = str(_interface_table().render_enabled(value, record))
 
         assert "Enabled" in html
@@ -940,7 +944,7 @@ class TestInterfaceTableFields:
 
     @pytest.mark.parametrize("value", ["down", False])
     def test_disabled_values_normalize_to_disabled(self, value):
-        record = {"exists_in_netbox": False, "ifAdminStatus": value}
+        record = _port(exists_in_netbox=False, ifAdminStatus=value)
         html = str(_interface_table().render_enabled(value, record))
 
         assert "Disabled" in html
@@ -983,9 +987,8 @@ class TestInterfaceTableFields:
         assert "From OOB controller" in relationships_html
         assert "Shared LOM" in relationships_html
 
-    def test_a_name_collision_row_is_reported_in_the_relationships_column(self):
-        """A collided OOB row is skipped on sync, so the column has to say why."""
-        device = make_device("collision-pill-device")
+    def test_a_derived_oob_name_is_reported_in_the_relationships_column(self):
+        device = make_device("derived-name-pill-device")
         table = _interface_table(device)
         html = str(
             table.render_parent(
@@ -995,16 +998,80 @@ class TestInterfaceTableFields:
                     port_id=9301,
                     exists_in_netbox=False,
                     _source="oob",
-                    host_name_collision=True,
+                    synced_name="eth0-oob",
+                    synced_name_is_derived=True,
+                    synced_name_contested=False,
                     selected_object_id=device.pk,
                     selected_object_type="device",
                 ),
             )
         )
 
+        assert "Will sync as eth0-oob" in html
+        assert "Name conflict" not in html
+        assert "<button" not in html, "the informational pill does not offer an action"
+
+    def test_a_contested_derived_name_is_reported_as_not_synced(self):
+        table = _interface_table(make_device("contested-name-pill-device"))
+        reason = "derived interface name is already used by another row"
+        html = str(
+            table.render_parent(
+                None,
+                _port(
+                    ifName="eth0",
+                    port_id=9302,
+                    exists_in_netbox=False,
+                    _source="oob",
+                    synced_name="eth0-oob",
+                    synced_name_is_derived=True,
+                    synced_name_contested=True,
+                    synced_name_rejection_reason=reason,
+                ),
+            )
+        )
+
         assert "Name conflict" in html
-        assert "the OOB port is not synced" in html
-        assert "<button" not in html, "the pill reports the skip; it does not offer an action"
+        assert reason in html
+        assert "not synced" in html
+
+    def test_a_derived_oob_name_is_escaped_in_the_pill(self):
+        table = _interface_table(make_device("escaped-derived-name-pill-device"))
+        html = str(
+            table.render_parent(
+                None,
+                _port(
+                    ifName="eth0",
+                    port_id=9304,
+                    exists_in_netbox=False,
+                    _source="oob",
+                    synced_name='<img src=x onerror="alert(1)">-oob',
+                    synced_name_is_derived=True,
+                    synced_name_contested=False,
+                ),
+            )
+        )
+
+        assert "<img" not in html
+        assert "&lt;img" in html
+
+    def test_a_derived_name_that_matches_netbox_is_in_sync(self):
+        from netbox_librenms_plugin.interface_diff import MATCHES
+
+        device = make_device("derived-name-in-sync-device")
+        interface = make_interface(device, "eth0-oob")
+        record = _port(
+            ifName="eth0",
+            exists_in_netbox=True,
+            netbox_interface=interface,
+            _source="oob",
+            synced_name="eth0-oob",
+            synced_name_is_derived=True,
+            synced_name_contested=False,
+        )
+
+        state = _interface_table(device).row_sync_state(record)
+
+        assert state.verdict("name") == MATCHES
 
     def test_a_host_row_never_shows_a_name_collision(self):
         """The host owns the name, so it is never the row that has to move."""
@@ -1030,7 +1097,7 @@ class TestInterfaceTableFields:
         assert "bg-purple-lt" in html, "the OOB pill keeps the purple the rest of the plugin uses"
         assert "bg-warning-lt" in html
         assert "bg-purple text-white" not in html, "the solid name-column fill must not follow it over"
-        assert html.count('<div class="text-nowrap lh-sm">') == 2, "each marker stacks like a relationship pill"
+        assert html.count('<div class="lh-sm">') == 2, "each marker stacks like a relationship pill"
 
     def test_real_librenms_id_states(self):
         from netbox_librenms_plugin.utils import set_librenms_device_id
@@ -1041,7 +1108,7 @@ class TestInterfaceTableFields:
 
         def _row(iface):
             # port_id is the column accessor, so the rendered value and the row carry the same id.
-            return {"port_id": 42, "exists_in_netbox": True, "netbox_interface": iface}
+            return _port(port_id=42, exists_in_netbox=True, netbox_interface=iface, synced_name="Ethernet1")
 
         missing = str(table.render_librenms_id(42, _row(interface)))
         set_librenms_device_id(interface, 99, "default")
@@ -1063,23 +1130,23 @@ class TestInterfaceTypeMappings:
     def test_exact_mapping_wins_over_type_only_fallback(self):
         from netbox_librenms_plugin.models import InterfaceTypeMapping
 
-        fallback = InterfaceTypeMapping.objects.create(
-            librenms_type="ethernetCsmacd",
-            librenms_speed=None,
-            netbox_type="virtual",
-        )
-        exact = InterfaceTypeMapping.objects.create(
+        InterfaceTypeMapping.objects.create(librenms_type="ethernetCsmacd", librenms_speed=None, netbox_type="virtual")
+        InterfaceTypeMapping.objects.create(
             librenms_type="ethernetCsmacd",
             librenms_speed=1_000_000,
             netbox_type="1000base-t",
         )
         table = _interface_table()
 
-        assert table.get_interface_mapping("ethernetCsmacd", 1_000_000) == exact
-        assert table.get_interface_mapping("ethernetCsmacd", 10_000) == fallback
-        assert table.get_interface_mapping("other", 1_000_000) is None
+        def _type_cell(**port):
+            record = stamp_rule_decision(_port(exists_in_netbox=False, **port))
+            return str(table.render_type(record["ifType"], record))
 
-    def test_mapping_rows_are_snapshotted_once(self, django_assert_num_queries):
+        assert "1000base-t" in _type_cell(ifSpeed=1_000_000_000)
+        assert "virtual" in _type_cell(ifSpeed=10_000_000)
+        assert "mdi-link-variant-off" in _type_cell(ifType="other", ifSpeed=1_000_000_000)
+
+    def test_the_type_column_reads_the_stamped_decision_and_queries_nothing(self, django_assert_num_queries):
         from netbox_librenms_plugin.models import InterfaceTypeMapping
 
         InterfaceTypeMapping.objects.create(
@@ -1088,10 +1155,12 @@ class TestInterfaceTypeMappings:
             netbox_type="virtual",
         )
         table = _interface_table()
+        rules = InterfaceRuleMatcher.load()
+        records = [stamp_rule_decision(_port(ifSpeed=speed), rules=rules) for speed in range(5)]
 
-        with django_assert_num_queries(1):
-            for speed in range(5):
-                table.get_interface_mapping("ethernetCsmacd", speed)
+        with django_assert_num_queries(0):
+            for record in records:
+                table.render_type(record["ifType"], record)
 
     def test_mapping_tooltips_use_real_mapping_data(self):
         from netbox_librenms_plugin.models import InterfaceTypeMapping
@@ -1102,14 +1171,17 @@ class TestInterfaceTypeMappings:
             netbox_type="1000base-t",
         )
         table = _interface_table()
+        mapped = stamp_rule_decision(_port(ifSpeed=1000))
+        unmapped = stamp_rule_decision(_port(ifType="other", ifSpeed=1000))
 
-        display, linked_icon = table.render_mapping_tooltip("ethernetCsmacd", 1000, mapping)
-        raw_display, unlinked_icon = table.render_mapping_tooltip("other", 1000, None)
+        linked = str(table.render_type(mapped["ifType"], mapped))
+        unlinked = str(table.render_type(unmapped["ifType"], unmapped))
 
-        assert display == "1000base-t"
-        assert "mdi-link-variant" in str(linked_icon)
-        assert raw_display == "other"
-        assert "mdi-link-variant-off" in str(unlinked_icon)
+        assert "1000base-t" in linked
+        assert "mdi-link-variant" in linked
+        assert f"Set by interface rule {mapping.pk} ({mapping})" in unescape(linked)
+        assert "mdi-link-variant-off" in unlinked
+        assert "No interface rule sets a type for ifType other" in unlinked
 
 
 @pytest.mark.django_db
@@ -1404,6 +1476,8 @@ class TestInterfaceFormatting:
         assert oob["netbox_interface"] is None
         assert oob["exists_in_netbox"] is False
         assert set(main_result) == {
+            "selection",
+            "rule_state",
             "name",
             "type",
             "speed",
@@ -1469,6 +1543,20 @@ class TestVirtualChassisInterfaceTable:
         second = make_device(f"{tag}-2")
         make_virtual_chassis(f"{tag}-vc", first, second)
         return first, second
+
+    def test_each_header_names_its_column_for_the_table_fit_script(self):
+        from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
+
+        first, _second = self._members("vc-fit-headers")
+        table = VCInterfaceTable(data=[], device=first, interface_name_field="ifName")
+
+        headers = {column.name: column.attrs["th"] for column in table.columns}
+
+        assert "device_selection" in headers
+        assert {name: th.get("data-col") for name, th in headers.items()} == {
+            column.name: column.attrs["td"]["data-col"] for column in table.columns
+        }
+        assert all("text-wrap" in th["class"].split() for th in headers.values())
 
     def test_physical_rows_select_the_named_member_and_logical_rows_use_the_viewed_member(self):
         from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable

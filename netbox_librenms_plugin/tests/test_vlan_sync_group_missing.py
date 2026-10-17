@@ -90,7 +90,12 @@ class TestVlanSyncGroupMissing:
         view = SyncVLANsView()
         request = RequestFactory().post(
             "/sync/vlans/",
-            data={"action": "create_vlans", "select": ["20"], "server_key": "default"},
+            data={
+                "action": "create_vlans",
+                "select": ["20"],
+                "vlan_group_20": "",
+                "server_key": "default",
+            },
         )
         request.user = get_user_model().objects.create_user(username="vlm-user2", password="x", is_superuser=True)
         request.session = {}

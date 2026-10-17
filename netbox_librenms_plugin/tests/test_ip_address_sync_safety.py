@@ -2,9 +2,9 @@
 
 import json
 
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from copy import deepcopy
+from functools import partial
 from threading import Barrier, BrokenBarrierError
 from unittest.mock import patch
 
@@ -23,12 +23,14 @@ from ipam.models import IPAddress, VRF
 from netbox_librenms_plugin.constants import INTERFACE_NAME_FIELDS
 from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncCacheConsistency, SyncTab, sync_snapshot_key
 from netbox_librenms_plugin.tests.conftest import (
+    _PORT_KEYS_UNSET,
     make_device,
     make_interface,
     make_ip,
     make_superuser,
     make_virtual_chassis_members,
     make_vm,
+    run_in_threads,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms, make_view
 
@@ -47,7 +49,8 @@ class TestCachedInterfaceUrlFallback:
     def _view():
         from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
 
-        return object.__new__(BaseIPAddressTableView)
+        # The VRF dropdown is scoped to the request user, so the bare view needs a request.
+        return make_view(BaseIPAddressTableView, librenms_api=False)
 
     def test_prefetch_returns_the_by_pk_index(self):
         """The map is built either way; the bug was that the view never handed it on."""
@@ -278,6 +281,7 @@ def _serve_librenms_ip_rows(server, rows, *, device_name, management_ip="198.18.
             continue
         registered_ports.add(row["port_id"])
         port = {
+            **_PORT_KEYS_UNSET,
             "port_id": row["port_id"],
             "ifName": row["interface"],
             "ifDescr": row["interface"],
@@ -506,12 +510,14 @@ def test_concurrent_global_ip_sync_creates_one_address(settings):
 
     lookup_barrier = Barrier(2)
     lookup_wrappers = [_IPHostLookupBarrier(lookup_barrier) for _device in devices]
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [
-            executor.submit(_sync_cached_ip, device.pk, user.pk, row_id, wrapper)
+    statuses = run_in_threads(
+        *(
+            partial(_sync_cached_ip, device.pk, user.pk, row_id, wrapper)
             for device, wrapper in zip(devices, lookup_wrappers, strict=True)
-        ]
-        statuses = [future.result(timeout=60) for future in futures]
+        ),
+        barriers=(lookup_barrier,),
+        timeout=60,
+    )
 
     assert sorted(statuses) == [200, 302]
     assert all(wrapper.lookup_seen for wrapper in lookup_wrappers)
@@ -567,12 +573,14 @@ def test_concurrent_bulk_ip_sync_orders_host_locks_before_interface_scope(settin
     barrier = Barrier(2)
     wrappers = [_FirstHostAdvisoryBarrier(barrier) for _ in range(2)]
     row_ids = [row["ip_with_mask"] for row in rows]
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [
-            executor.submit(_sync_cached_ips, device.pk, user.pk, selected, wrapper)
+    outcomes = run_in_threads(
+        *(
+            partial(_sync_cached_ips, device.pk, user.pk, selected, wrapper)
             for selected, wrapper in zip((row_ids, list(reversed(row_ids))), wrappers, strict=True)
-        ]
-        outcomes = [future.result(timeout=60) for future in futures]
+        ),
+        barriers=(barrier,),
+        timeout=60,
+    )
 
     assert [status for status, _messages in outcomes] == [302, 302]
     assert all(not any("Failed to sync" in message for message in messages) for _, messages in outcomes)
@@ -1258,6 +1266,7 @@ def test_failed_create_missing_row_does_not_leak_interface_catalog(settings):
     ]
     cached_ports = {
         "7023": {
+            **_PORT_KEYS_UNSET,
             "port_id": 7023,
             "ifName": "Ethernet23",
             "ifDescr": "Ethernet23",
@@ -1546,6 +1555,7 @@ def test_interface_sync_keeps_its_source_snapshot_and_clears_the_ip_snapshot(
             "status": "ok",
             "ports": [
                 {
+                    **_PORT_KEYS_UNSET,
                     "port_id": 7016,
                     "ifName": "Ethernet1",
                     "ifDescr": "Ethernet1",
@@ -1634,6 +1644,7 @@ def test_create_missing_interfaces_does_not_adopt_a_hidden_existing_interface(cl
             "mgmt_ip": "",
             "ports_by_id": {
                 7018: {
+                    **_PORT_KEYS_UNSET,
                     "port_id": 7018,
                     "ifName": "Ethernet1",
                     "ifDescr": "Ethernet1",
@@ -2607,6 +2618,7 @@ def test_create_missing_interfaces_is_refused_without_add_and_change_grants(clie
             "mgmt_ip": "",
             "ports_by_id": {
                 7032: {
+                    **_PORT_KEYS_UNSET,
                     "port_id": 7032,
                     "ifName": "Ethernet1",
                     "ifDescr": "Ethernet1",

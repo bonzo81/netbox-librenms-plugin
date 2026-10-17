@@ -68,25 +68,39 @@ function showModal(el) {
     }
 
     // Fallback: manual DOM manipulation
+    const openBelow = Array.from(document.querySelectorAll('.modal.show')).filter((modal) => modal !== el);
+    // Focus goes back to the opener on close, so a key such as Escape reaches the modal below again.
+    el._syncReturnFocus = document.activeElement;
     el.classList.add('show');
     el.style.display = 'block';
     el.setAttribute('aria-modal', 'true');
     el.removeAttribute('aria-hidden');
+    document.body.classList.add('modal-open');
+    if (openBelow.length) {
+        // A modal over an open modal gets its own backdrop, and both stack above the modal below.
+        const top = Math.max(...openBelow.map((modal) => Number(getComputedStyle(modal).zIndex) || 1055));
+        const stacked = document.createElement('div');
+        stacked.className = 'modal-backdrop fade show';
+        stacked.style.zIndex = String(top + 5);
+        el.style.zIndex = String(top + 10);
+        el.before(stacked);
+        el._syncStackedBackdrop = stacked;
+        return;
+    }
     let backdrop = document.querySelector('.modal-backdrop');
     if (!backdrop) {
         backdrop = document.createElement('div');
         backdrop.className = 'modal-backdrop fade show';
         document.body.appendChild(backdrop);
     }
-    document.body.classList.add('modal-open');
 
     // Backdrop element click → close (only needed in manual fallback).
     // Bind once per backdrop so repeated showModal() calls do not stack handlers.
     if (!backdrop._syncBackdropClickBound) {
         backdrop.addEventListener('click', function () {
-            const activeModal = document.querySelector('.modal.show');
-            if (activeModal) {
-                hideModal(activeModal);
+            const openModals = document.querySelectorAll('.modal.show');
+            if (openModals.length) {
+                hideModal(openModals[openModals.length - 1]);
             }
         });
         backdrop._syncBackdropClickBound = true;
@@ -115,6 +129,13 @@ function hideModal(el) {
     el.style.display = 'none';
     el.setAttribute('aria-hidden', 'true');
     el.removeAttribute('aria-modal');
+    el.style.removeProperty('z-index');
+    el._syncStackedBackdrop?.remove();
+    el._syncStackedBackdrop = null;
+    if (el.contains(document.activeElement) && el._syncReturnFocus?.isConnected) el._syncReturnFocus.focus();
+    el._syncReturnFocus = null;
+    // A modal still open below keeps its backdrop and the scroll lock.
+    if (document.querySelector('.modal.show')) return;
     document.querySelectorAll('.modal-backdrop').forEach((backdrop) => backdrop.remove());
     document.body.classList.remove('modal-open');
     document.body.style.removeProperty('padding-right');
@@ -1109,9 +1130,7 @@ function initializeTableCheckboxes(tableId) {
             });
             // Recompute once for the whole page rather than per row: select-all still has to pull
             // in an off-page parent or aggregate, but the closure is the same for every seed.
-            refreshRequiredSelections();
-            persistTableSelection(table);
-            updateBulkActionButton();
+            commitSelectionChange(table);
         });
     }
 
@@ -1139,9 +1158,7 @@ function initializeTableCheckboxes(tableId) {
                         cb.checked = anchor.checked;
                         applyRowSelection(cb, membersByLag, changed);
                     });
-                    refreshRequiredSelections();
-                    persistTableSelection(table);
-                    updateBulkActionButton();
+                    commitSelectionChange(table);
                 }
             }
 
@@ -1208,6 +1225,67 @@ function _rowsByPortId() {
 }
 
 /**
+ * Return the port ids no sync may write, across the whole snapshot and not only this page.
+ *
+ * The server renders every row its interface write check refuses (ignored, ambiguous, an
+ * incomplete record, or no owner), and ``applyRowEligibility`` keeps the set current.
+ *
+ * @returns {Set<string>} The blocked port ids.
+ */
+function _blockedPortIds() {
+    const holder = document.querySelector('[data-blocked-port-ids]');
+    if (!holder || !holder.dataset.blockedPortIds) return new Set();
+    return new Set(JSON.parse(holder.dataset.blockedPortIds));
+}
+
+/**
+ * Repaint a row's sync eligibility after the verify repaint decided it for another member.
+ *
+ * It sets the row's rule state and the blocked-port set the related-row walk reads. Storage is
+ * left to the persist step of ``commitSelectionChange``, which runs after the closure.
+ *
+ * @param {HTMLTableRowElement} row - The repainted row.
+ * @param {string} ruleState - The row's blocked state, or an empty string.
+ * @returns {void}
+ */
+function applyRowEligibility(row, ruleState) {
+    row.dataset.ruleState = ruleState || '';
+    const portId = row.dataset.portId;
+    const holder = document.querySelector('[data-blocked-port-ids]');
+    if (holder && portId) {
+        const blocked = _blockedPortIds();
+        if (ruleState) {
+            blocked.add(portId);
+        } else {
+            blocked.delete(portId);
+        }
+        holder.dataset.blockedPortIds = JSON.stringify(Array.from(blocked));
+    }
+}
+
+/**
+ * Finish every change to a row's member, eligibility or checkbox, always in the same order.
+ *
+ * (a) Repaint the eligibility of the rows that changed, (b) recompute the dependency closure,
+ * (c) store the selection from the final page state. Nothing is stored before (b), so a row the
+ * closure releases is never kept in storage.
+ *
+ * @param {HTMLElement|null} table - The table whose selection changed.
+ * @param {{row: HTMLTableRowElement, ruleState: string}[]} [eligibility] - Rows with a new rule state.
+ * @returns {void}
+ */
+function commitSelectionChange(table, eligibility) {
+    (eligibility || []).forEach(function (change) {
+        applyRowEligibility(change.row, change.ruleState);
+    });
+    refreshRequiredSelections();
+    if (table && SELECTABLE_TABLE_IDS.includes(table.id)) {
+        persistTableSelection(table);
+    }
+    updateBulkActionButton();
+}
+
+/**
  * Return the port ids a row depends on.
  *
  * @param {HTMLTableRowElement} row - The row to read.
@@ -1259,6 +1337,8 @@ function refreshRequiredSelections() {
     const rows = _rowsByPortId();
     const required = new Set();
     const offPage = new Map();
+    // A blocked port is never selected, and the walk never starts from or goes through one.
+    const blocked = _blockedPortIds();
 
     if (enabled) {
         // Seeds are the rows selected on their own account: a user click, a select-all, or a
@@ -1267,7 +1347,7 @@ function refreshRequiredSelections() {
         const pending = [];
         rows.forEach(function (row) {
             const checkbox = _selectableCheckbox(row);
-            if (checkbox && checkbox.checked && !checkbox.dataset[REQUIRED_MARKER]) {
+            if (checkbox && checkbox.checked && !checkbox.dataset[REQUIRED_MARKER] && !blocked.has(row.dataset.portId)) {
                 pending.push(row);
             }
         });
@@ -1275,7 +1355,7 @@ function refreshRequiredSelections() {
         while (pending.length) {
             const row = pending.pop();
             _requiredPortIds(row).forEach(function (portId) {
-                if (required.has(portId)) return;
+                if (required.has(portId) || blocked.has(portId)) return;
                 required.add(portId);
                 const requiredRow = rows.get(portId);
                 if (requiredRow) {
@@ -1340,10 +1420,14 @@ function _propagateToLagMembers(row, checked, membersByLag) {
     const portId = row.dataset.portId;
     if (!portId) return false;
     let changed = false;
+    // A blocked row (an unresolved owner keeps its checkbox) never starts a cascade and is never pulled in.
+    const blocked = _blockedPortIds();
+    if (checked && blocked.has(portId)) return false;
     (membersByLag.get(portId) || []).forEach(function (memberRow) {
         const checkbox = _selectableCheckbox(memberRow);
         if (!checkbox) return;
         if (checked) {
+            if (blocked.has(memberRow.dataset.portId)) return;
             if (!checkbox.checked) {
                 checkbox.checked = true;
                 checkbox.dataset[MEMBER_MARKER] = 'true';
@@ -1395,10 +1479,8 @@ document.addEventListener('change', function (e) {
     const checkbox = e.target;
     if (!checkbox.matches('input[name="select"]') || checkbox.disabled) return;
 
-    const changed = applyRowSelection(checkbox, _membersByLag(), true);
-    if (refreshRequiredSelections() || changed) {
-        updateBulkActionButton();
-    }
+    applyRowSelection(checkbox, _membersByLag(), true);
+    commitSelectionChange(checkbox.closest('table'));
 });
 
 // Keep the cascade in step with #autoSelectLagMembers: turning it off releases every row this
@@ -1407,25 +1489,17 @@ document.addEventListener('change', function (e) {
     const toggle = e.target;
     if (!toggle.matches('#autoSelectLagMembers')) return;
 
-    let changed = false;
     if (!toggle.checked) {
         // One rule in both directions: turning the cascade off gives back exactly the rows it
         // added, so the selection left behind is the one the user made themselves.
         document.querySelectorAll('input[name="select"][data-auto-member]').forEach(function (checkbox) {
             delete checkbox.dataset[MEMBER_MARKER];
-            if (checkbox.checked) {
-                checkbox.checked = false;
-                changed = true;
-            }
+            checkbox.checked = false;
         });
     }
-    if (refreshRequiredSelections() || changed) {
-        const table =
-            document.getElementById('librenms-interface-table') ||
-            document.getElementById('librenms-interface-table-vm');
-        if (table) persistTableSelection(table);
-        updateBulkActionButton();
-    }
+    commitSelectionChange(
+        document.getElementById('librenms-interface-table') || document.getElementById('librenms-interface-table-vm')
+    );
 
     if (!toggle.checked) {
         const noticeContainer = document.getElementById('parent-cross-page-notices');
@@ -1452,6 +1526,27 @@ document.addEventListener('change', function (e) {
  * Per-row companion inputs (a VC member dropdown, a module's target device) are stored with the
  * row and re-submitted alongside it.
  */
+
+/** The htmx events that mean a request got no usable answer. */
+const HTMX_FAILURE_EVENTS = ['htmx:responseError', 'htmx:sendError', 'htmx:timeout'];
+
+/** The off-page rows each form's last submit consumed, by table id, so a failed submit can give them back. */
+const consumedOffPageSelections = new WeakMap();
+
+/**
+ * Return the stored records of a table's off-page rows.
+ *
+ * @param {HTMLElement} table - The table element.
+ * @param {Object} selection - The table's stored selection.
+ * @returns {Object} The off-page records by row key.
+ */
+function offPageRecords(table, selection) {
+    const records = {};
+    offPageSelectionKeys(table).forEach(function (rowKey) {
+        records[rowKey] = selection[rowKey];
+    });
+    return records;
+}
 
 /** Tables whose selection survives pagination, and the tab each belongs to. */
 const SELECTABLE_TABLE_IDS = [
@@ -1522,6 +1617,7 @@ function readStoredSelection(table) {
                 typeof parsed.rows !== 'object' ||
                 Array.isArray(parsed.rows)
             ) {
+                // Lifecycle write, no closure: a selection from another snapshot names no current row.
                 window.sessionStorage.removeItem(storageKey);
                 return store;
             }
@@ -1628,6 +1724,12 @@ function persistTableSelection(table) {
             delete selection[checkbox.value];
         }
     });
+    // A rendered row the rules block has no checkbox and cannot be submitted.
+    table.querySelectorAll('tr[data-rule-state][data-port-id]').forEach(function (row) {
+        if (!row.querySelector('input[name="select"]')) {
+            delete selection[row.dataset.portId];
+        }
+    });
     writeStoredSelection(table, selection);
     updateOffPageSelectionNotice(table);
 }
@@ -1641,40 +1743,92 @@ function persistTableSelection(table) {
 function restoreTableSelection(table) {
     if (!table || !table.id) return;
     const selection = readStoredSelection(table);
-    let restored = false;
+    const blocked = _blockedPortIds();
+    let cleared = 0;
     table.querySelectorAll('td input[name="select"]:not(:disabled)').forEach(function (checkbox) {
         const entry = selection[checkbox.value];
-        if (!entry) return;
         const row = checkbox.closest('tr');
+        if (!entry || !row) return;
         const companionInputs = (entry && entry.inputs) || {};
-        if (row) {
-            row.querySelectorAll('select[name], input[type="hidden"][name]').forEach(function (input) {
-                if (!_isSelectionCompanionName(input.name)) return;
-                if (!Object.hasOwn(companionInputs, input.name)) return;
-                if (input.tomselect) {
-                    input.tomselect.setValue(companionInputs[input.name], true);
-                } else {
-                    input.value = companionInputs[input.name];
-                }
-            });
+        // A choice made for another member than the page renders is not restored: the row was decided
+        // for this member. The commit below drops it from storage, with its member value.
+        const member = table.id === 'librenms-interface-table' ? row.querySelector('select.vc-member-select') : null;
+        if (member && Object.hasOwn(companionInputs, member.name) && companionInputs[member.name] !== member.value) {
+            cleared += 1;
+            return;
         }
-        if (!checkbox.checked) {
-            checkbox.checked = true;
-            restored = true;
-        }
-        // Restore how the row got there: a row the cascade added must still be released when
-        // the row that needed it is cleared, rather than becoming a choice of the user's.
-        if (entry.auto === 'required') {
-            checkbox.dataset[REQUIRED_MARKER] = 'true';
-        } else if (entry.auto === 'member') {
-            checkbox.dataset[MEMBER_MARKER] = 'true';
-        }
+        // A row the cascade added is re-derived by the closure; it is never restored onto a blocked row.
+        if (entry.auto && blocked.has(row.dataset.portId)) return;
+        row.querySelectorAll('select[name], input[type="hidden"][name]').forEach(function (input) {
+            if (!_isSelectionCompanionName(input.name)) return;
+            if (!Object.hasOwn(companionInputs, input.name)) return;
+            const renderedValue = input.value;
+            if (input.tomselect) {
+                input.tomselect.setValue(companionInputs[input.name], true);
+            } else {
+                input.value = companionInputs[input.name];
+            }
+            if (input.matches('select.vlan-sync-group-select') && input.value !== renderedValue) {
+                verifyVlanSyncGroup(input, input.dataset.vlanId, input.dataset.vlanName, input.value);
+            }
+        });
+        checkbox.checked = true;
+        _applySelectionMarker(checkbox, entry.auto);
     });
-    if (restored) {
-        refreshRequiredSelections();
-        updateBulkActionButton();
+    commitSelectionChange(table);
+    _showClearedSelectionNotice(table, cleared);
+}
+
+/**
+ * Say how many saved selections a restore pass cleared because they named another member.
+ *
+ * @param {HTMLElement} table - The table the restore pass read.
+ * @param {number} count - The cleared rows.
+ * @returns {void}
+ */
+function _showClearedSelectionNotice(table, count) {
+    const noticeId = table.id + '-cleared-selections';
+    let notice = document.getElementById(noticeId);
+    if (!count) {
+        if (notice) notice.remove();
+        return;
     }
-    updateOffPageSelectionNotice(table);
+    if (!notice) {
+        notice = document.createElement('div');
+        notice.id = noticeId;
+        notice.className = 'alert alert-warning py-1 px-2 small mb-1';
+        table.parentNode.insertBefore(notice, table);
+    }
+    notice.textContent =
+        count + ' saved selection(s) on another Virtual Chassis member were cleared; select them again.';
+}
+
+/**
+ * Return whether a row is still part of the live page, so a late verify answer may change it.
+ *
+ * A tab swap replaces the rows, and an answer for a replaced row must not touch the new page,
+ * the blocked set or the stored selection.
+ *
+ * @param {HTMLTableRowElement|null} row - The row a verify request was sent for.
+ * @returns {boolean}
+ */
+function _isLiveRow(row) {
+    return Boolean(row && row.isConnected);
+}
+
+/**
+ * Record how a restored row got selected, so the closure still releases a row it added.
+ *
+ * @param {HTMLInputElement} checkbox - The row checkbox.
+ * @param {string} auto - The stored standing: 'required', 'member', or anything else for the user's.
+ * @returns {void}
+ */
+function _applySelectionMarker(checkbox, auto) {
+    if (auto === 'required') {
+        checkbox.dataset[REQUIRED_MARKER] = 'true';
+    } else if (auto === 'member') {
+        checkbox.dataset[MEMBER_MARKER] = 'true';
+    }
 }
 
 /**
@@ -1688,6 +1842,10 @@ function offPageSelectionKeys(table) {
     const visible = new Set();
     table.querySelectorAll('td input[name="select"]').forEach(function (checkbox) {
         visible.add(checkbox.value);
+    });
+    // An interface row the rules block has no checkbox, but it is on this page, not another one.
+    table.querySelectorAll('tr[data-rule-state][data-port-id]').forEach(function (row) {
+        visible.add(row.dataset.portId);
     });
     return Object.keys(selection).filter(function (key) {
         return !visible.has(key);
@@ -1729,6 +1887,7 @@ function updateOffPageSelectionNotice(table) {
             // The notice counts only the rows on other pages, so Clear drops only those. Wiping
             // the store and the visible checkboxes would discard a selection the user can see and
             // did not ask to lose.
+            // Lifecycle write, no closure: it drops only rows on other pages, so no row here changes.
             const selection = readStoredSelection(table);
             offPageSelectionKeys(table).forEach(function (key) {
                 delete selection[key];
@@ -1752,6 +1911,7 @@ function updateOffPageSelectionNotice(table) {
  * @returns {void}
  */
 function clearStoredSelection(table) {
+    // Lifecycle write, no closure: a submit consumed the selection, and it changes no row on the page.
     writeStoredSelection(table, {});
     updateOffPageSelectionNotice(table);
 }
@@ -1800,21 +1960,160 @@ function injectOffPageSelections(form) {
     });
 }
 
-// Persist on every selection change, whoever made it: a click, a select-all, or the requirement
-// cascade pulling in a parent. The listener is registered once for the document, so a table
-// swapped in by HTMX is covered without re-binding.
-document.addEventListener('change', function (e) {
-    if (!e.target.matches || !e.target.matches('input[name="select"]')) return;
-    const table = e.target.closest('table');
-    if (table && SELECTABLE_TABLE_IDS.includes(table.id)) {
-        persistTableSelection(table);
-    }
+// A single-row action submits one row, so it must not consume the stored bulk selection.
+const SINGLE_ROW_SUBMITTERS = ['sync_one', 'rebind_one', 'create_vrf'];
+
+/**
+ * Give the off-page rows of a failed submit back to their tables' stores.
+ *
+ * The submit consumed the store, and a retry drops the rows injected by the failed one, so without
+ * this a retry silently syncs fewer rows than the user selected.
+ *
+ * @param {HTMLFormElement} form - The form whose submit failed.
+ * @returns {void}
+ */
+function restoreOffPageSelections(form) {
+    const consumed = consumedOffPageSelections.get(form) || {};
+    consumedOffPageSelections.delete(form);
+    Object.keys(consumed).forEach(function (tableId) {
+        const table = document.getElementById(tableId);
+        if (!table) return;
+        // Lifecycle write, no closure: it gives back off-page rows a failed submit consumed, as they were.
+        writeStoredSelection(table, Object.assign(readStoredSelection(table), consumed[tableId]));
+        updateOffPageSelectionNotice(table);
+    });
+}
+
+// Only the error events mean failure: htmx leaves `successful` unset on an HX-Redirect success too.
+HTMX_FAILURE_EVENTS.forEach(function (eventName) {
+    document.addEventListener(eventName, function (e) {
+        if (e.detail.elt instanceof HTMLFormElement) {
+            restoreOffPageSelections(e.detail.elt);
+        }
+    });
+});
+
+/**
+ * Move the off-page rows of some tables into an htmx request's parameters, and consume them.
+ *
+ * @param {HTMLElement[]} tables - The tables whose stored rows the request submits.
+ * @param {FormData} params - The request parameters.
+ * @returns {Object} The consumed records by table id and row key.
+ */
+function consumeOffPageSelections(tables, params) {
+    const consumed = {};
+    tables.forEach(function (table) {
+        const records = offPageRecords(table, readStoredSelection(table));
+        Object.keys(records).forEach(function (rowKey) {
+            params.append('select', rowKey);
+            const companions = (records[rowKey] && records[rowKey].inputs) || {};
+            Object.keys(companions)
+                .filter(_isSelectionCompanionName)
+                .forEach(function (name) { params.append(name, companions[name]); });
+        });
+        consumed[table.id] = records;
+        clearStoredSelection(table);
+    });
+    return consumed;
+}
+
+// An htmx form takes its off-page rows here: configRequest fires only for a request htmx sends, after it serialized the form.
+document.addEventListener('htmx:configRequest', function (e) {
+    const form = e.detail.elt;
+    if (!(form instanceof HTMLFormElement)) return;
+    // The module table sits OUTSIDE its form and has its own configRequest injector.
+    const tables = SELECTABLE_TABLE_IDS
+        .map(function (tableId) { return document.getElementById(tableId); })
+        .filter(function (table) { return table && form.contains(table); });
+    if (!tables.length) return;
+    const consumed = SINGLE_ROW_SUBMITTERS.some(name => e.detail.parameters.has(name))
+        ? {}
+        : consumeOffPageSelections(tables, e.detail.parameters);
+    consumedOffPageSelections.set(form, consumed);
 });
 
 document.addEventListener('submit', function (e) {
-    if (e.target instanceof HTMLFormElement) {
+    // An htmx form never navigates, and the configRequest listener above handles it.
+    if (!(e.target instanceof HTMLFormElement) || e.target.hasAttribute('hx-post')) return;
+    if (!SINGLE_ROW_SUBMITTERS.includes(e.submitter?.name)) {
         injectOffPageSelections(e.target);
     }
+});
+
+let pendingSyncConfirmAction = null;
+
+function syncConfirmModal() {
+    let modal = document.getElementById('librenms-confirm-modal');
+    if (modal) return modal;
+    modal = document.createElement('div');
+    modal.id = 'librenms-confirm-modal';
+    modal.className = 'modal fade';
+    modal.tabIndex = -1;
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-hidden', 'true');
+    modal.setAttribute('aria-labelledby', 'librenms-confirm-modal-title');
+    modal.innerHTML = `
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="librenms-confirm-modal-title">Confirm</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body" data-confirm-message></div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" data-confirm-accept>Confirm</button>
+                </div>
+            </div>
+        </div>`;
+    modal.querySelector('[data-confirm-accept]').addEventListener('click', () => {
+        const action = pendingSyncConfirmAction;
+        pendingSyncConfirmAction = null;
+        hideModal(modal);
+        action?.();
+    });
+    modal.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') hideModal(modal);
+        e.stopPropagation();
+    });
+    // A click or key inside the confirmation must not reach a modal below, which would close on it.
+    modal.addEventListener('click', (e) => e.stopPropagation());
+    document.body.appendChild(modal);
+    return modal;
+}
+
+/**
+ * Ask in the plugin's confirm modal, and run *action* only when the user confirms.
+ * The message comes from LibreNMS data, so it is set as text only.
+ */
+function confirmSyncAction(message, action) {
+    const modal = syncConfirmModal();
+    // Inside the top open modal, that modal's focus trap lets the confirmation take focus.
+    const below = Array.from(document.querySelectorAll('.modal.show')).filter((open) => open !== modal).pop();
+    (below || document.body).appendChild(modal);
+    modal.querySelector('[data-confirm-message]').textContent = message;
+    pendingSyncConfirmAction = action;
+    showModal(modal);
+    modal.querySelector('[data-confirm-accept]').focus();
+}
+
+// A row action that changes durable state asks first; only a confirmation submits it.
+document.addEventListener('click', function (e) {
+    const button = e.target instanceof Element ? e.target.closest('button[data-confirm]') : null;
+    if (!button?.form) return;
+    e.preventDefault();
+    confirmSyncAction(button.dataset.confirm, () => {
+        // htmx posts the submitter it last saw focused, so focus the button before the resubmit.
+        button.focus();
+        button.form.requestSubmit(button);
+    });
+});
+
+// An hx-confirm question asks in the same modal instead of the browser dialog.
+document.addEventListener('htmx:confirm', function (e) {
+    if (!e.detail.question) return;
+    e.preventDefault();
+    confirmSyncAction(e.detail.question, () => e.detail.issueRequest(true));
 });
 
 /**
@@ -2169,6 +2468,7 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
             return response.json();
         })
         .then(data => {
+            if (select.value !== groupId) return;
             if (data.status === 'success') {
                 const newCss = data.css_class || 'text-danger';
                 const isMissing = data.is_missing;
@@ -2431,7 +2731,8 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
         body: JSON.stringify({
             vid: String(vid),
             name: vlanName,
-            vlan_group_id: groupId || null
+            vlan_group_id: groupId || null,
+            sync_actions: !!select.closest('form')
         })
     })
         .then(response => {
@@ -2442,6 +2743,7 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
         })
         .then(data => {
             if (data.status !== 'success') return;
+            if (select.value !== groupId) return;
 
             const row = select.closest('tr');
             if (!row) return;
@@ -2465,6 +2767,11 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
                 } else {
                     nameCell.title = '';
                 }
+            }
+
+            const statusCell = row.querySelector('td[data-col="status"]');
+            if (statusCell && data.status_html) {
+                statusCell.innerHTML = data.status_html;
             }
         })
         .catch(error => {
@@ -2617,6 +2924,7 @@ function handleInterfaceChange(select, value) {
             }
             reenableRelationshipButtons();
         }
+        if (row) commitSelectionChange(row.closest('table'));
     };
 
     fetch('/plugins/librenms_plugin/verify-interface/', {
@@ -2645,10 +2953,20 @@ function handleInterfaceChange(select, value) {
             return response.json();
         })
         .then(data => {
+            // A tab swap replaced this row: the answer belongs to a page that no longer exists.
+            if (!_isLiveRow(row)) return;
             // Reuse the row resolved above so the response patches the row the user changed,
             // not the first same-named row on the page.
             if (data.status === 'success' && row) {
                 const formattedRow = data.formatted_row;
+                // The member's platform decides the interface rules, so the checkbox follows it. A
+                // checkbox that stays is kept as it is, with its checked state and selection markers.
+                const selectionCell = row.querySelector('td[data-col="selection"]');
+                if (selectionCell && typeof formattedRow.selection !== 'undefined') {
+                    const hadCheckbox = Boolean(selectionCell.querySelector('input[name="select"]'));
+                    const hasCheckbox = formattedRow.selection.includes('name="select"');
+                    if (hadCheckbox !== hasCheckbox) selectionCell.innerHTML = formattedRow.selection;
+                }
                 row.querySelector('td[data-col="name"]').innerHTML = formattedRow.name;
                 row.querySelector('td[data-col="type"]').innerHTML = formattedRow.type;
                 row.querySelector('td[data-col="speed"]').innerHTML = formattedRow.speed;
@@ -2691,11 +3009,12 @@ function handleInterfaceChange(select, value) {
                 });
                 initializeVlanGroupSelects();
                 initializeFilters();
-                refreshRequiredSelections();
+                initializeCheckboxListeners();
                 // This member is now server-confirmed: record it as the rollback target and
                 // re-enable the relationship controls (the row HTML now matches this member).
                 select._lastVerifiedMember = value;
                 reenableRelationshipButtons();
+                commitSelectionChange(row.closest('table'), [{row: row, ruleState: formattedRow.rule_state}]);
             } else {
                 // 2xx with data.status !== 'success' (application-level failure/conflict): the
                 // row was not repainted, so the verify-locked relationship buttons still carry
@@ -2709,7 +3028,7 @@ function handleInterfaceChange(select, value) {
             // A superseded request was aborted on purpose — not an error to surface. Leave the
             // buttons disabled: the newer handleInterfaceChange call already re-disabled them and
             // owns re-enabling once its own verify settles.
-            if (error.name === 'AbortError') return;
+            if (error.name === 'AbortError' || !_isLiveRow(row)) return;
             // A genuine verify failure (HTTP error / network) means the row was NOT repainted for
             // the newly-selected member. Roll the dropdown back to the last confirmed member so
             // the visible selection matches the unchanged row, then re-enable — rather than
@@ -2773,6 +3092,7 @@ function handleCableChange(select, value) {
             }
         }
         restoreControls();
+        commitSelectionChange(row.closest('table'));
     };
 
     fetch(verifyUrl, {
@@ -2796,6 +3116,7 @@ function handleCableChange(select, value) {
             return response.json();
         })
         .then(data => {
+            if (!_isLiveRow(row)) return;
             if (data.status === 'success' && row) {
                 const formattedRow = data.formatted_row;
                 // Replace each cell content if present. A missing cell must not throw here: the
@@ -2837,21 +3158,17 @@ function handleCableChange(select, value) {
                         }
                         expectedInput.value = expectedValue || '';
                     });
-                    const table = row.closest('table');
-                    if (table && SELECTABLE_TABLE_IDS.includes(table.id)) {
-                        persistTableSelection(table);
-                    }
-                    updateBulkActionButton();
                 }
                 select._lastVerifiedMember = value;
                 restoreControls();
+                commitSelectionChange(row.closest('table'));
             } else {
                 console.error('Cable verification rejected:', data.error || data.message || 'Unknown error');
                 rollbackToLastVerified();
             }
         })
         .catch(error => {
-            if (error.name === 'AbortError') return;
+            if (error.name === 'AbortError' || !_isLiveRow(row)) return;
             console.error('Error verifying cable:', error.message);
             rollbackToLastVerified();
         });
@@ -2918,7 +3235,7 @@ function handleModuleChange(select, value) {
             return response.json();
         })
         .then(data => {
-            if (!row || data.status !== 'success' || !data.formatted_row) return;
+            if (!_isLiveRow(row) || data.status !== 'success' || !data.formatted_row) return;
 
             const formattedRow = data.formatted_row;
             const deviceSelCell = row.querySelector('td[data-col="device_selection"]');
@@ -2950,6 +3267,8 @@ function handleModuleChange(select, value) {
             // Re-bind listeners because row controls (select/buttons/forms) were replaced.
             initializeVCMemberSelect();
             initializeVCReportButtons();
+            // The member select was replaced, so the stored selection takes its value again.
+            commitSelectionChange(row.closest('table'));
         })
         .catch(error => {
             if (error.name === 'AbortError') return;
@@ -2979,10 +3298,14 @@ function initializeBulkEditApply() {
             selectedCheckboxes.forEach(checkbox => {
                 const row = checkbox.closest('tr');
                 const vcMemberSelect = row.querySelector('.vc-member-select');
-                if (vcMemberSelect && vcMemberSelect.tomselect) {
-                    vcMemberSelect.tomselect.setValue(selectedVcMemberId);
-                    // TomSelect handles the change event internally
+                if (!vcMemberSelect || vcMemberSelect.value === selectedVcMemberId) return;
+                // Set the member silently and run the one verify handler, which ends in the commit.
+                if (vcMemberSelect.tomselect) {
+                    vcMemberSelect.tomselect.setValue(selectedVcMemberId, true);
+                } else {
+                    vcMemberSelect.value = selectedVcMemberId;
                 }
+                handleInterfaceChange(vcMemberSelect, selectedVcMemberId);
             });
 
             // Close the modal on 'Apply'
@@ -3220,6 +3543,104 @@ function initializeFilters() {
             'vlan-state': { name: 'state' }
         }
     );
+}
+
+// ============================================
+// TABLE FIT
+// ============================================
+
+// Columns a sync table hides, lowest value first, when its wrapped cells are still wider than the card.
+const SYNC_TABLE_FIT_HIDE_ORDER = {
+    'librenms-interface-table': ['librenms_id', 'description', 'mtu', 'speed', 'enabled', 'vlans', 'mac_address', 'type'],
+    'librenms-interface-table-vm': ['librenms_id', 'description', 'mtu', 'enabled', 'vlans', 'mac_address'],
+    'librenms-module-table': ['description', 'item_class', 'model', 'serial', 'module_type', 'module_bay'],
+};
+const syncTableFitWidths = new WeakMap();
+const pendingSyncTableFits = new Set();
+const syncTableFitObserver = typeof ResizeObserver === 'undefined'
+    ? null
+    : new ResizeObserver((entries) => {
+        entries.forEach((entry) => {
+            const target = entry.target;
+            const table = target.matches('table') ? target : target.querySelector(':scope > table');
+            if (table) pendingSyncTableFits.add(table);
+        });
+        // Refit in the next frame: a refit inside the callback would resize the observed card again.
+        requestAnimationFrame(() => {
+            pendingSyncTableFits.forEach((table) => table.isConnected && fitSyncTable(table));
+            pendingSyncTableFits.clear();
+        });
+    });
+
+function _syncTableOverflows(table) {
+    return table.scrollWidth > table.parentElement.clientWidth + 1;
+}
+
+function _syncTableHeader(table, col) {
+    return Array.from(table.tHead?.rows[0]?.cells || []).find((th) => th.dataset.col === col);
+}
+
+function _hideSyncTableColumn(table, col) {
+    const header = _syncTableHeader(table, col);
+    if (!header) return false;
+    const width = header.parentElement.cells.length;
+    Array.from(table.rows).forEach((row) => {
+        // A full-width row (the empty-table message) has no cell per column.
+        if (row.cells.length !== width) return;
+        row.cells[header.cellIndex].classList.add('d-none');
+        row.cells[header.cellIndex].dataset.fitHidden = '';
+    });
+    return true;
+}
+
+function _showSyncTableFitNote(table, hiddenCols) {
+    // Other notices are also inserted before the table, so find the note by its owner, not by position.
+    let note = Array.from(table.parentElement.querySelectorAll(':scope > [data-table-fit-note]'))
+        .find((el) => el.dataset.tableFitNote === table.id);
+    if (!note) {
+        if (!hiddenCols.length) return;
+        note = document.createElement('div');
+        note.className = 'small text-muted px-2 pb-2';
+        note.setAttribute('data-table-fit-note', table.id);
+        table.before(note);
+    }
+    const labels = hiddenCols.map((col) => _syncTableHeader(table, col).textContent.trim());
+    note.textContent = `Hidden to fit the window: ${labels.join(', ')}. Widen the window to show them.`;
+    note.hidden = !hiddenCols.length;
+}
+
+/**
+ * Fit a sync table into its card: cells wrap first, then low-value columns hide, then words break.
+ * The table gets no horizontal scroll wrapper, because a wrapper clips the in-table dropdown menus.
+ */
+function fitSyncTable(table) {
+    const width = table.parentElement?.clientWidth || 0;
+    if (!width) return;
+    if (syncTableFitWidths.get(table) === width && !_syncTableOverflows(table)) return;
+    table.querySelectorAll('[data-fit-hidden]').forEach((cell) => {
+        cell.classList.remove('d-none');
+        delete cell.dataset.fitHidden;
+    });
+    table.classList.remove('text-break');
+    const hiddenCols = [];
+    for (const col of SYNC_TABLE_FIT_HIDE_ORDER[table.id] || []) {
+        if (!_syncTableOverflows(table)) break;
+        if (_hideSyncTableColumn(table, col)) hiddenCols.push(col);
+    }
+    if (_syncTableOverflows(table)) table.classList.add('text-break');
+    _showSyncTableFitNote(table, hiddenCols);
+    syncTableFitWidths.set(table, width);
+}
+
+function initializeSyncTableFit() {
+    Object.keys(SYNC_TABLE_FIT_HIDE_ORDER).forEach((tableId) => {
+        const table = document.getElementById(tableId);
+        if (!table?.parentElement) return;
+        fitSyncTable(table);
+        // The card resizes with the window and on a tab switch; the table resizes when a cell grows.
+        syncTableFitObserver?.observe(table.parentElement);
+        syncTableFitObserver?.observe(table);
+    });
 }
 
 // ============================================
@@ -3490,6 +3911,13 @@ function initializeSyncFormSpinners() {
             spinner.style.width = '1rem';
             spinner.style.height = '1rem';
             button.disabled = true;
+        });
+        // A failed htmx submit swaps nothing, so the form stays and its button must work again.
+        HTMX_FAILURE_EVENTS.forEach(function (eventName) {
+            form.addEventListener(eventName, function () {
+                spinner.classList.add('d-none');
+                button.disabled = false;
+            });
         });
     });
 
@@ -3780,6 +4208,7 @@ function initializeScripts() {
     initializeInstallSelectedForm();
     initializeVCReportButtons();
     initializeSyncCacheConsistency();
+    initializeSyncTableFit();
 }
 
 
@@ -3828,15 +4257,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 });
                 // Modules the user selected on another page of this table: the rows are gone
                 // from the DOM, so their target device travels with them out of the store.
-                const stored = readStoredSelection(table);
-                offPageSelectionKeys(table).forEach((rowKey) => {
-                    params.append('select', rowKey);
-                    const companions = (stored[rowKey] && stored[rowKey].inputs) || {};
-                    Object.keys(companions)
-                        .filter(_isSelectionCompanionName)
-                        .forEach((name) => params.append(name, companions[name]));
-                });
-                clearStoredSelection(table);
+                consumedOffPageSelections.set(event.detail.elt, consumeOffPageSelections([table], params));
             }
         }
     });

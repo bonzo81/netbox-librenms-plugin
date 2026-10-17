@@ -2,9 +2,16 @@
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+from netbox_librenms_plugin.tests.conftest import (
+    _PORT_KEYS_UNSET,
+    make_device,
+    make_interface,
+    stamp_rule_decision,
+    typed_maps,
+)
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
-from netbox_librenms_plugin.utils import normalize_relationship_maps
+from netbox_librenms_plugin.utils import _get_netbox_version_tuple, normalize_relationship_maps
+
 
 pytestmark = pytest.mark.django_db
 
@@ -31,11 +38,12 @@ def test_bridge_members_are_independent_from_parent_relationships(mock_librenms_
         compiled_sap_patterns=[],
     )
 
-    assert relationships == {
+    assert typed_maps(relationships) == {
         "lag_members": {},
         "sub_interfaces": {102: 101},
         "bridge_members": {102: 100, 103: 100},
     }
+    assert relationships["stacked_ports"] == {}, "every pair here is classified"
 
 
 def test_bridge_pair_is_not_reclassified_as_lag_by_name_field_fallback(mock_librenms_api):
@@ -61,11 +69,12 @@ def test_bridge_pair_is_not_reclassified_as_lag_by_name_field_fallback(mock_libr
         compiled_sap_patterns=[],
     )
 
-    assert relationships == {
+    assert typed_maps(relationships) == {
         "lag_members": {},
         "sub_interfaces": {},
         "bridge_members": {101: 100},
     }
+    assert relationships["stacked_ports"] == {}, "every pair here is classified"
 
 
 def test_name_field_fallback_does_not_reclassify_a_sub_interface_pair_as_bridge(mock_librenms_api):
@@ -92,11 +101,12 @@ def test_name_field_fallback_does_not_reclassify_a_sub_interface_pair_as_bridge(
         compiled_sap_patterns=[],
     )
 
-    assert relationships == {
+    assert typed_maps(relationships) == {
         "lag_members": {},
         "sub_interfaces": {100: 101},
         "bridge_members": {},
     }
+    assert relationships["stacked_ports"] == {}, "every pair here is classified"
 
 
 def test_bridge_pattern_is_stored_with_the_existing_port_stack_mapping():
@@ -151,8 +161,8 @@ def test_inline_parent_sync_promotes_a_physical_child_to_virtual():
         view.get_cache_key(device, "ports", "default"),
         {
             "ports": [
-                {"port_id": 102, "ifName": child.name},
-                {"port_id": 101, "ifName": parent.name},
+                {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": child.name},
+                {**_PORT_KEYS_UNSET, "port_id": 101, "ifName": parent.name},
             ],
             "port_stack_relationships": {
                 "lag_members": {},
@@ -249,9 +259,9 @@ def test_inline_lag_sync_does_not_replace_a_parent_child_role():
         parent_view.get_cache_key(device, "ports", "default"),
         {
             "ports": [
-                {"port_id": 100, "ifName": target.name},
-                {"port_id": 101, "ifName": parent.name},
-                {"port_id": 102, "ifName": member.name},
+                {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": target.name},
+                {**_PORT_KEYS_UNSET, "port_id": 101, "ifName": parent.name},
+                {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": member.name},
             ],
             "port_stack_relationships": {
                 "lag_members": {102: 100},
@@ -316,8 +326,8 @@ def test_inline_lag_sync_rejects_cross_member_parent_on_netbox_44(monkeypatch):
         view.get_cache_key(parent_device, "ports", "default"),
         {
             "ports": [
-                {"port_id": 100, "ifName": target.name},
-                {"port_id": 102, "ifName": member.name},
+                {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": target.name},
+                {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": member.name},
             ],
             "port_stack_relationships": {
                 "lag_members": {102: 100},
@@ -394,8 +404,8 @@ def test_inline_bridge_sync_sets_the_bridge_relationship():
         view.get_cache_key(device, "ports", "default"),
         {
             "ports": [
-                {"port_id": 103, "ifName": member.name},
-                {"port_id": 100, "ifName": bridge.name},
+                {**_PORT_KEYS_UNSET, "port_id": 103, "ifName": member.name},
+                {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": bridge.name},
             ],
             "port_stack_relationships": {
                 "lag_members": {},
@@ -441,9 +451,9 @@ def test_inline_bridge_sync_accepts_cross_member_parent_on_netbox_44(monkeypatch
         view.get_cache_key(parent_device, "ports", "default"),
         {
             "ports": [
-                {"port_id": 101, "ifName": parent.name},
-                {"port_id": 102, "ifName": child.name},
-                {"port_id": 100, "ifName": bridge.name},
+                {**_PORT_KEYS_UNSET, "port_id": 101, "ifName": parent.name},
+                {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": child.name},
+                {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": bridge.name},
             ],
             "port_stack_relationships": {
                 "lag_members": {},
@@ -486,6 +496,126 @@ def test_inline_bridge_sync_accepts_cross_member_parent_on_netbox_44(monkeypatch
     assert child.bridge_id == bridge.pk
 
 
+def test_inline_bridge_sync_refuses_a_parent_on_another_chassis_on_netbox_44(monkeypatch, caplog):
+    """The 4.4.0 fault stands in for the refusal NetBox means, so the edge gets that refusal, not a crash."""
+    import logging
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from dcim.models import Interface
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin import utils
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+    from netbox_librenms_plugin.utils import set_librenms_device_id
+    from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceBridgeView
+
+    child_chassis, (child_device, _member) = make_virtual_chassis_members("bridge-other-chassis-child")
+    _parent_chassis, (parent_device,) = make_virtual_chassis_members("bridge-other-chassis-parent", count=1)
+    parent = make_interface(parent_device, "bond0", iface_type="lag")
+    child = make_interface(child_device, "bond0.110", iface_type="virtual")
+    child.parent = parent
+    child.save(update_fields=["parent"])
+    bridge = make_interface(child_device, "vmbr0", iface_type="virtual")
+    for interface, port_id in ((child, 102), (bridge, 100)):
+        set_librenms_device_id(interface, port_id, "default")
+        interface.save()
+
+    view = SyncInterfaceBridgeView()
+    view._librenms_api = SimpleNamespace(server_key="default")
+    cache.set(
+        view.get_cache_key(child_device, "ports", "default"),
+        {
+            "ports": [
+                {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": child.name},
+                {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": bridge.name},
+            ],
+            "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {}, "bridge_members": {102: 100}},
+        },
+    )
+
+    original_clean = Interface.clean
+
+    def netbox_44_clean(interface):
+        if interface.parent_id is not None and interface.parent.device_id != interface.device_id:
+            raise AttributeError("'Interface' object has no attribute 'virtual_chassis'", name="virtual_chassis")
+        return original_clean(interface)
+
+    monkeypatch.setattr(Interface, "clean", netbox_44_clean)
+
+    with (
+        patch.object(utils, "_get_netbox_version_tuple", return_value=(4, 4, 0)),
+        caplog.at_level(logging.WARNING, logger="netbox_librenms_plugin.views.sync.interfaces"),
+    ):
+        response = post(
+            view,
+            make_request("post", {"port_id": "102", "bridge_port_id": "100", "interface_name_field": "ifName"}),
+            object_type="device",
+            object_id=child_device.pk,
+        )
+
+    assert response.status_code == 409, response.content
+    child.refresh_from_db()
+    assert (child.parent_id, child.bridge_id) == (parent.pk, None)
+    assert any(
+        f"belongs to {parent_device}, which is not part of virtual chassis {child_chassis}" in record.getMessage()
+        for record in caplog.records
+    ), [record.getMessage() for record in caplog.records]
+
+
+@pytest.mark.skipif(
+    _get_netbox_version_tuple() != (4, 4, 0),
+    reason="runs NetBox 4.4.0's own Interface.clean(), which reads parent.virtual_chassis; CI has a v4.4.0 leg",
+)
+class TestNetBox440ParentChassisFault:
+    """The type check on the real 4.4.0 clean(): the fault never raises, and the retry keeps the later rules."""
+
+    @staticmethod
+    def _child_of(parent_chassis_tag, *, same_chassis, with_lag=False):
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+
+        chassis, (child_device, member) = make_virtual_chassis_members(parent_chassis_tag)
+        if same_chassis:
+            parent_device = member
+        else:
+            _other, (parent_device,) = make_virtual_chassis_members(f"{parent_chassis_tag}-other", count=1)
+        parent = make_interface(parent_device, "bond0", iface_type="1000base-t")
+        # Stored without clean(): a physical child, so the planned virtual type is a real type change.
+        child = make_interface(child_device, "bond0.110", iface_type="other")
+        child.parent = parent
+        if with_lag:
+            child.lag = make_interface(child_device, "Port-Channel1", iface_type="lag")
+        child.save()
+        return chassis, parent_device, child
+
+    def test_a_parent_on_the_same_chassis_accepts_the_type(self):
+        from netbox_librenms_plugin.interface_diff import type_change_refusal
+
+        _chassis, _parent_device, child = self._child_of("nb440-same", same_chassis=True)
+
+        assert type_change_refusal(child, "virtual") is None
+
+    def test_a_parent_on_another_chassis_refuses_with_the_message_netbox_means(self):
+        from netbox_librenms_plugin.interface_diff import type_change_refusal
+
+        chassis, parent_device, child = self._child_of("nb440-other", same_chassis=False)
+
+        refusal = type_change_refusal(child, "virtual")
+
+        assert refusal.message == (
+            f"The selected parent interface (bond0) belongs to {parent_device}, which is not part of virtual "
+            f"chassis {chassis}."
+        )
+        assert refusal.field == "parent"
+
+    def test_the_retry_without_the_parent_still_refuses_a_virtual_lag_member(self):
+        from netbox_librenms_plugin.interface_diff import type_change_refusal
+
+        _chassis, _parent_device, child = self._child_of("nb440-lag", same_chassis=True, with_lag=True)
+
+        assert type_change_refusal(child, "virtual").message == "Virtual interfaces cannot have a parent LAG interface."
+
+
 def test_inline_lag_sync_rejects_cross_member_parented_member_on_netbox_44(monkeypatch):
     """Run the remaining validation after bypassing NetBox 4.4's parent defect."""
     from types import SimpleNamespace
@@ -515,9 +645,9 @@ def test_inline_lag_sync_rejects_cross_member_parented_member_on_netbox_44(monke
         view.get_cache_key(parent_device, "ports", "default"),
         {
             "ports": [
-                {"port_id": 101, "ifName": parent.name},
-                {"port_id": 102, "ifName": child.name},
-                {"port_id": 100, "ifName": aggregate.name},
+                {**_PORT_KEYS_UNSET, "port_id": 101, "ifName": parent.name},
+                {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": child.name},
+                {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": aggregate.name},
             ],
             "port_stack_relationships": {
                 "lag_members": {102: 100},
@@ -574,9 +704,9 @@ def test_bulk_sync_applies_parent_and_bridge_to_the_same_interface():
         set_librenms_device_id(interface, port_id, "default")
         interface.save()
     ports = [
-        {"port_id": 102, "ifName": child.name},
-        {"port_id": 101, "ifName": parent.name},
-        {"port_id": 100, "ifName": bridge.name},
+        {**_PORT_KEYS_UNSET, "port_id": 102, "ifName": child.name},
+        {**_PORT_KEYS_UNSET, "port_id": 101, "ifName": parent.name},
+        {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": bridge.name},
     ]
     view = object.__new__(SyncInterfacesView)
     view.interface_name_field = "ifName"
@@ -636,13 +766,17 @@ def test_relationship_column_renders_bridge_in_the_existing_column():
     html = str(
         table.render_parent(
             None,
-            {
-                "port_id": 103,
-                "netbox_interface": member,
-                "bridge_sync_status": "missing_nb",
-                "librenms_bridge_name": "vmbr0",
-                "librenms_bridge_port_id": 100,
-            },
+            stamp_rule_decision(
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 103,
+                    "ifName": member.name,
+                    "netbox_interface": member,
+                    "bridge_sync_status": "missing_nb",
+                    "librenms_bridge_name": "vmbr0",
+                    "librenms_bridge_port_id": 100,
+                }
+            ),
         )
     )
 
@@ -676,8 +810,8 @@ def test_inline_bridge_sync_supports_virtual_machine_interfaces():
         view.get_cache_key(vm, "ports", "default"),
         {
             "ports": [
-                {"port_id": 103, "ifName": member.name},
-                {"port_id": 100, "ifName": bridge.name},
+                {**_PORT_KEYS_UNSET, "port_id": 103, "ifName": member.name},
+                {**_PORT_KEYS_UNSET, "port_id": 100, "ifName": bridge.name},
             ],
             "port_stack_relationships": {
                 "lag_members": {},
@@ -701,7 +835,12 @@ def test_default_linux_bridge_pattern_is_seeded():
     mapping = PortStackLagPattern.objects.get(librenms_os="linux")
 
     assert mapping.lag_name_pattern == r"^bond\d+$"
-    assert mapping.bridge_name_pattern == r"^(vmbr|br|bridge)\d+$"
+    # Widened by 0021: the 0019 form rejected br-lan, virbr0, docker0, pnet0 and vmbr0v5, and a
+    # rejected bridge name is the whole reason its members never appeared (issue #179 item 10).
+    assert (
+        mapping.bridge_name_pattern
+        == r"^(?:vmbr\d+(?:v\d+)?|br\d+|br-[\w.-]+|bridge\d+|virbr\d+|docker\d+|pnet\d+|nat\d+)$"
+    )
 
 
 def test_interface_selection_and_inline_action_include_bridge_dependencies():

@@ -8,7 +8,8 @@ runs the real writer against every row shape and asserts the row state predicted
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, stamp_rule_decision
 
 SERVER_KEY = "default"
 
@@ -68,21 +69,21 @@ def _synced_interface(tag, **overrides):
 def _row(interface=None, **overrides):
     """Return a table row bound to *interface* (or to nothing, for a NetBox-absent row)."""
     row = _port(**overrides)
+    row.setdefault("synced_name", row["ifName"])
     row["netbox_interface"] = interface
     row["exists_in_netbox"] = interface is not None
-    return row
+    return stamp_rule_decision(row)
 
 
 def _state(row, *, vlan_context=None):
     """Compute one row's sync state the way the table does."""
     from netbox_librenms_plugin.interface_diff import compute_row_sync_state
-    from netbox_librenms_plugin.interface_sync import get_netbox_interface_type
 
     return compute_row_sync_state(
         row,
         interface_name_field="ifName",
         server_key=SERVER_KEY,
-        netbox_type=get_netbox_interface_type(row),
+        decision=row["rule_decision"],
         vlan_context=vlan_context,
     )
 
@@ -132,7 +133,7 @@ class TestTheDiffMatchesTheWriter:
     )
     def test_the_row_state_predicts_whether_a_sync_writes(self, label, port_overrides, interface_overrides, writes):
         from netbox_librenms_plugin.interface_diff import ROW_DIFFERS
-        from netbox_librenms_plugin.interface_sync import get_netbox_interface_type, update_interface_from_port
+        from netbox_librenms_plugin.interface_sync import update_interface_from_port
 
         slug = label.replace(" ", "-")[:40]
         _device, interface = _synced_interface(f"diff-{abs(hash(slug)) % 10000}", **interface_overrides)
@@ -144,9 +145,11 @@ class TestTheDiffMatchesTheWriter:
         changed = update_interface_from_port(
             interface,
             row,
+            synced_name=row["ifName"],
             server_key=SERVER_KEY,
             interface_name_field="ifName",
-            netbox_type=get_netbox_interface_type(row),
+            created=False,
+            rules=InterfaceRuleMatcher.load(),
         )
 
         assert predicted == changed == writes, f"{label}: predicted={predicted} actual={changed}"
@@ -191,6 +194,31 @@ class TestTheDiffMatchesTheWriter:
         assert state.verdict("speed") == MATCHES
         assert "type" not in state.differing_fields
         assert "speed" not in state.differing_fields
+
+    def test_a_row_whose_type_matches_is_compared_with_no_query(self, django_assert_num_queries):
+        """Only a type change asks NetBox's clean() and the LAG members, so a matching row stays query-free."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.interface_diff import ROW_IN_SYNC
+
+        _device, interface = _synced_interface("diff-type-no-query")
+        row = _row(Interface.objects.prefetch_related("mac_addresses").get(pk=interface.pk))
+
+        with django_assert_num_queries(0):
+            state = _state(row)
+
+        assert state.state == ROW_IN_SYNC
+
+    def test_the_type_check_keeps_field_validation(self):
+        """The type is validated as a field too, so a value NetBox has no choice for is refused."""
+        from netbox_librenms_plugin.interface_diff import TypeRefusal, type_change_refusal
+
+        _device, interface = _synced_interface("diff-type-choice")
+
+        assert type_change_refusal(interface, "no-such-type") == TypeRefusal(
+            "Value 'no-such-type' is not a valid choice.", "type"
+        )
+        assert type_change_refusal(interface, "virtual") is None
 
     def test_an_interface_with_no_stored_id_differs_on_librenms_id(self):
         _device, interface = _synced_interface("diff-no-id")

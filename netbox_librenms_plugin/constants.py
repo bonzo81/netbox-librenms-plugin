@@ -40,6 +40,12 @@ LIBRENMS_EMPTY_MESSAGES = (
     LIBRENMS_NO_SENSORS_MESSAGE,
 )
 
+# The typed relationships the resolver derives from a LibreNMS port_stack pair, in the order the
+# rules are applied. The resolver, the cached-snapshot reader and the diagnostics report all walk
+# this tuple, so a kind cannot be added to one and missed by another. A pair no kind claims is
+# carried untyped as "stacked_ports" instead of being dropped.
+RELATIONSHIP_KINDS = ("sub_interfaces", "bridge_members", "lag_members")
+
 
 def is_supported_interface_name_field(value):
     """
@@ -95,16 +101,26 @@ OOB_TYPES = ("idrac", "ilo", "ipmi", "bmc", "drac", "cimc", "oob")
 OOB_INVENTORY_SOURCE = "oob"
 MAIN_INVENTORY_SOURCE = "main"
 SERIAL_INVENTORY_SOURCE = "serial"
+# Changing this value renames every derived OOB interface on its next sync.
+OOB_NAME_SUFFIX = "-oob"
 
 # Shared "From OOB controller" badge markup (the bare <span>; callers add any leading space).
 # Centralised so a restyle (color/title/text) happens in one place instead of drifting across the
 # cable/module/interface tables and the cable-verify render that each hand-copied it.
 OOB_BADGE_HTML = '<span class="badge bg-purple text-white ms-1" title="From OOB controller">OOB</span>'
 
-# A host and its OOB controller share one NetBox device, so one interface name cannot serve both.
-# The host owns it. Shared by the sync writer (the skip reason) and the interface table (the pill
-# tooltip) so the two cannot describe the same condition differently.
-HOST_NAME_COLLISION_REASON = "name already owned by the host interface"
+# A derived OOB name can still collide with another host or OOB row. The sync writer and table
+# use one reason so they cannot describe the same condition differently.
+HOST_NAME_COLLISION_REASON = "derived interface name is already used by another row"
+# A host row cannot claim a name that the active server maps to another port.
+REPORTED_NAME_PORT_COLLISION_REASON = "reported name belongs to a different LibreNMS port"
+# Mixed sources for one normalized port ID make its identity ambiguous.
+PORT_ID_SOURCE_COLLISION_REASON = "LibreNMS port ID is claimed by both host and OOB rows"
+# Who holds a reported name: a snapshot row, a port the complete snapshot no longer reports, or
+# a port that may sit in the missing OOB inventory.
+NAME_OWNER_LIVE = "live"
+NAME_OWNER_STALE = "stale"
+NAME_OWNER_UNKNOWN = "unknown"
 
 
 def normalize_oob_type(os_str: str, hardware_str: str = "") -> str | None:

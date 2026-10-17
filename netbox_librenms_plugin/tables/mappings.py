@@ -20,6 +20,9 @@ from netbox_librenms_plugin.models import (
 class InterfaceTypeMappingTable(NetBoxTable):
     """Table for displaying InterfaceTypeMapping data."""
 
+    action = tables.Column(verbose_name="Action")
+    platform = tables.Column(verbose_name="Platform", linkify=True, default="All")
+    name_pattern = tables.Column(verbose_name="Name Pattern")
     librenms_type = tables.Column(verbose_name="LibreNMS Type")
     librenms_speed = tables.Column(verbose_name="LibreNMS Speed (Kbps)")
     netbox_type = tables.Column(verbose_name="NetBox Type")
@@ -33,6 +36,9 @@ class InterfaceTypeMappingTable(NetBoxTable):
         fields = (
             "pk",
             "id",
+            "action",
+            "platform",
+            "name_pattern",
             "librenms_type",
             "librenms_speed",
             "netbox_type",
@@ -42,6 +48,9 @@ class InterfaceTypeMappingTable(NetBoxTable):
         default_columns = (
             "pk",
             "id",
+            "action",
+            "platform",
+            "name_pattern",
             "librenms_type",
             "librenms_speed",
             "netbox_type",

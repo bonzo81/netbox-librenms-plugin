@@ -1,13 +1,20 @@
-# Interface Type Mappings
+# Interface Type Mappings (interface rules)
 #
-# Maps LibreNMS interface types (and optional speeds) to NetBox interface types.
-# Import via: LibreNMS Plugin > Interface Mappings > Import
+# Maps LibreNMS ports to NetBox interface types, or ignores them.
+# Import via: LibreNMS Plugin > Interface Mappings > Import (YAML or JSON; CSV is refused
+# for rules with a name_pattern because CSV removes spaces around each cell).
 #
 # Fields:
-#   librenms_type  — IANA ifType string from LibreNMS (e.g. ethernetCsmacd)
-#   librenms_speed — Speed in Kbps (optional, null matches any speed)
-#   netbox_type    — NetBox InterfaceTypeChoices slug
-#   description    — Optional note
+#   action        : set_type (default) or ignore; ignore keeps matching ports out of the sync
+#   platform      : NetBox platform slug of the interface owner (optional, blank = every platform)
+#   name_pattern  : Python regex searched in ifName and ifDescr (optional, case-sensitive)
+#   librenms_type : IANA ifType string from LibreNMS (e.g. ethernetCsmacd)
+#   librenms_speed: Minimum speed in Kbps (optional, needs librenms_type, not on ignore)
+#   netbox_type   : NetBox InterfaceTypeChoices slug (set_type only)
+#   description   : Optional note
+#
+# An ignore rule always wins. Among set_type rules the most specific wins: platform, then
+# name_pattern, then librenms_type, then the highest speed. See docs/configuration/mappings.md.
 #
 # Common NetBox interface type slugs:
 #   1000base-t, 10gbase-t, 10gbase-x-sfpp, 25gbase-x-sfp28,
@@ -17,7 +24,7 @@
 # WARNING: Speed-only matching cannot distinguish copper from fiber optics.
 # For example, 1G ethernetCsmacd could be 1000base-t (copper), 1000base-x-sfp (fiber),
 # or other media types. Review and adjust these mappings for your environment before
-# importing — incorrect mappings will mislabel ports.
+# importing. Incorrect mappings will mislabel ports.
 
 - librenms_type: ethernetCsmacd
   librenms_speed: 1000000
@@ -73,3 +80,17 @@
   librenms_speed:
   netbox_type: virtual
   description: "VLAN interface"
+
+# Example rules that use a platform and a name pattern. Change the platform slugs to your own
+# before you import them.
+#
+# - action: ignore
+#   platform: arista-eos
+#   name_pattern: "^Vlan"
+#   description: "EOS SVIs"
+#
+# - action: set_type
+#   platform: cisco-ios
+#   name_pattern: "^Te"
+#   netbox_type: 10gbase-x-sfpp
+#   description: "IOS 10G ports are SFP+"

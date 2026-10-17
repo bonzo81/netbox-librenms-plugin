@@ -1,14 +1,16 @@
 import copy
 
-from dcim.models import Device
+from dcim.models import Device, Interface
 from django.core.cache import cache
 from django.http import JsonResponse
 from django.urls import reverse
 from django.views import View
 from ipam.models import VLAN, VLANGroup
+from utilities.permissions import get_permission_for_model
 from utilities.views import ViewTab, register_model_view
 
 from netbox_librenms_plugin.constants import PERM_VIEW_PLUGIN, is_supported_interface_name_field
+from netbox_librenms_plugin.interface_rules import interface_rules_for_request
 from netbox_librenms_plugin.interface_relationships import (
     build_candidate_relationship_context,
     build_relationship_maps,
@@ -36,6 +38,9 @@ from netbox_librenms_plugin.utils import (
     get_vlan_sync_css_class,
     is_valid_ports_payload,
     normalize_librenms_port_id,
+    normalize_vlan_vid,
+    render_vlan_sync_action,
+    resolve_interface_row_device,
 )
 
 from ..base.cables_view import BaseCableTableView
@@ -117,6 +122,7 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
                 interface_name_field=interface_name_field,
                 vlan_groups=vlan_groups,
                 server_key=server_key,
+                user=self.request.user,
             )
         else:
             table = LibreNMSInterfaceTable(
@@ -125,6 +131,7 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
                 interface_name_field=interface_name_field,
                 vlan_groups=vlan_groups,
                 server_key=server_key,
+                user=self.request.user,
             )
         table.htmx_url = f"{self.request.path}?tab=interfaces" + (f"&server_key={server_key}" if server_key else "")
         return table
@@ -277,6 +284,7 @@ class SingleInterfaceVerifyView(
                     interface_name_field=interface_name_field,
                     vlan_groups=vlan_groups,
                     server_key=server_key,
+                    user=request.user,
                 )
                 # Mirror the main table render: a migrated donor's verify response must not
                 # re-introduce a per-row relationship sync button (which posts directly).
@@ -319,10 +327,83 @@ class SingleInterfaceVerifyView(
                     unambiguous_name_port_ids,
                     relationship_maps,
                 )
+                self._enrich_interface_names(
+                    request,
+                    origin_device,
+                    selected_device,
+                    ports,
+                    posted_port_id,
+                    interface_name_field,
+                    server_key,
+                    snapshot_complete=not cached_data.get("oob_incomplete"),
+                )
+                # The selected member owns the row now, so the rules read its platform.
+                port_data["rule_decision"] = interface_rules_for_request(request).check_interface_write(
+                    port_data, platform_id=selected_device.platform_id
+                )
                 formatted_row = table.format_interface_data(port_data, selected_device)
                 return JsonResponse({"status": "success", "formatted_row": formatted_row})
 
         return JsonResponse({"status": "error", "message": "Interface data not found"}, status=404)
+
+    def _enrich_interface_names(
+        self,
+        request,
+        origin_device,
+        selected_device,
+        ports,
+        posted_port_id,
+        interface_name_field,
+        server_key,
+        *,
+        snapshot_complete,
+    ):
+        """Use the table naming computation with this row's explicitly selected member."""
+        view = DeviceInterfaceTableView()
+        view.setup(request, pk=origin_device.pk)
+        view.rebind_api_for_server(server_key)
+        members = (
+            list(origin_device.virtual_chassis.members.all()) if origin_device.virtual_chassis_id else [origin_device]
+        )
+        interfaces_by_device = {
+            member.pk: view._build_interface_lookup_maps(member, metadata_only=True) for member in members
+        }
+        interfaces_by_port_id = {}
+        for interface_maps in interfaces_by_device.values():
+            for port_id, interface in interface_maps["by_librenms_id"].items():
+                interfaces_by_port_id.setdefault(port_id, []).append(interface)
+        members_by_position = {member.vc_position: member for member in members}
+        members_by_id = {member.pk: member for member in members}
+        target_device_ids = {}
+        for port in ports:
+            port_id = normalize_librenms_port_id(port.get("port_id"))
+            if port_id is None:
+                continue
+            target = (
+                resolve_interface_row_device(
+                    origin_device,
+                    port,
+                    interface_name_field,
+                    interfaces_by_port_id=interfaces_by_port_id,
+                    members_by_position=members_by_position,
+                    members_by_id=members_by_id,
+                )
+                if origin_device.virtual_chassis_id
+                else origin_device
+            )
+            target_device_ids[port_id] = target.pk
+        target_device_ids[posted_port_id] = selected_device.pk
+        interfaces = Interface.objects.filter(device_id__in=interfaces_by_device)
+        view.enrich_interface_name_metadata(
+            ports,
+            interface_name_field,
+            Interface,
+            interfaces_by_device,
+            target_device_ids,
+            set(interfaces.restrict(request.user, "view").values_list("pk", flat=True)),
+            set(interfaces.restrict(request.user, "change").values_list("pk", flat=True)),
+            snapshot_complete=snapshot_complete,
+        )
 
 
 class SingleModuleVerifyView(
@@ -600,12 +681,11 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         vid_str = data.get("vid", "")
         librenms_name = data.get("name", "")
 
-        if not vid_str:
+        if vid_str is None or vid_str == "":
             return JsonResponse({"status": "error", "message": "No VID provided"}, status=400)
 
-        try:
-            vid = int(vid_str)
-        except (ValueError, TypeError):
+        vid = normalize_vlan_vid(vid_str)
+        if vid is None:
             return JsonResponse({"status": "error", "message": "Invalid VID"}, status=400)
 
         selected_gid = coerce_model_pk(vlan_group_id)
@@ -624,6 +704,13 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         exists_in_netbox = bool(netbox_vlan)
         name_matches = netbox_vlan.name == librenms_name if netbox_vlan else False
         css_class = get_vlan_sync_css_class(exists_in_netbox, name_matches)
+        sync_actions = data.get("sync_actions", True)
+        status_html = render_vlan_sync_action(
+            vid,
+            exists_in_netbox,
+            name_matches,
+            actions_enabled=sync_actions if isinstance(sync_actions, bool) else True,
+        )
 
         return JsonResponse(
             {
@@ -632,6 +719,7 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                 "name_matches": name_matches,
                 "css_class": css_class,
                 "netbox_vlan_name": netbox_vlan.name if netbox_vlan else None,
+                "status_html": status_html,
             }
         )
 
@@ -730,6 +818,8 @@ class DeviceModuleTableView(BaseModuleTableView):
 
     def get_table(self, data, obj):
         """Return the module sync table."""
+        from ..sync.modules import module_interface_type_preview_permissions
+
         user = self.request.user
         has_write_permission = self.has_write_permission()
         server_key = getattr(self, "_active_server_key", None) or self.librenms_api.server_key
@@ -742,6 +832,14 @@ class DeviceModuleTableView(BaseModuleTableView):
             can_add_module=has_write_permission and user.has_perm("dcim.add_module"),
             can_change_module=has_write_permission and user.has_perm("dcim.change_module"),
             can_change_interface=has_write_permission and user.has_perm("dcim.change_interface"),
+            can_review_interface_types=(
+                has_write_permission
+                and user.has_perm("dcim.change_interface")
+                and all(
+                    user.has_perm(get_permission_for_model(model, action))
+                    for action, model in module_interface_type_preview_permissions()
+                )
+            ),
             can_delete_module=has_write_permission and user.has_perm("dcim.delete_module"),
             can_add_module_bay_template=(has_write_permission and user.has_perm("dcim.add_modulebaytemplate")),
             can_add_module_type=(has_write_permission and user.has_perm("dcim.add_moduletype")),

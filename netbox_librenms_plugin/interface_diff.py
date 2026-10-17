@@ -9,12 +9,16 @@ reuses the writer's own normalisers, so a row cannot be painted green against a 
 still write, or amber against one that would not.
 """
 
+import copy
 from typing import NamedTuple
 
+from dcim.choices import InterfaceTypeChoices
 from dcim.fields import MACAddressField
-from django.core.exceptions import ValidationError
+from dcim.models import Interface
+from django.core.exceptions import FieldDoesNotExist, ValidationError
 
 from netbox_librenms_plugin.constants import INTERFACE_SYNC_EXTRA_FIELDS, INTERFACE_SYNC_FIELD_PAIRS
+from netbox_librenms_plugin.interface_rules import RuleDecisionKind, rule_names
 from netbox_librenms_plugin.utils import (
     bounded_interface_text,
     check_vlan_group_matches,
@@ -22,18 +26,32 @@ from netbox_librenms_plugin.utils import (
     convert_speed_to_kbps,
     effective_vlan_mode,
     get_librenms_device_id,
+    netbox_interface_clean,
     normalize_librenms_port_id,
 )
 
-# Per-field verdicts.
+# Per-field verdicts. NOT_SYNCED marks every field of a row that no sync may write.
 ABSENT = "absent"
 DIFFERS = "differs"
 MATCHES = "matches"
+NOT_SYNCED = "not_synced"
 
 # Row states.
 ROW_ABSENT = "absent"
 ROW_DIFFERS = "differs"
 ROW_IN_SYNC = "in_sync"
+ROW_IGNORED = "ignored"
+ROW_AMBIGUOUS = "ambiguous"
+ROW_OWNER_UNRESOLVED = "owner_unresolved"
+ROW_INCOMPLETE = "incomplete"
+
+# Rows that offer no sync action: the interface write check or the missing owner blocks every write.
+BLOCKED_ROW_STATES = frozenset({ROW_IGNORED, ROW_AMBIGUOUS, ROW_INCOMPLETE, ROW_OWNER_UNRESOLVED})
+_BLOCKED_ROW_STATE_BY_KIND = {
+    RuleDecisionKind.IGNORE: ROW_IGNORED,
+    RuleDecisionKind.AMBIGUOUS: ROW_AMBIGUOUS,
+    RuleDecisionKind.INCOMPLETE: ROW_INCOMPLETE,
+}
 
 # Every field one sync writes, in the order the table shows them.
 SYNC_FIELDS = tuple(netbox_field for _, netbox_field in INTERFACE_SYNC_FIELD_PAIRS) + INTERFACE_SYNC_EXTRA_FIELDS
@@ -63,10 +81,11 @@ class DiffContext(NamedTuple):
 
 
 class RowSyncState(NamedTuple):
-    """One row's sync verdict: the row state, and the verdict for each field a sync writes."""
+    """One row's sync verdict: the row state, the verdict for each field a sync writes, and the kept type change."""
 
     state: str
     fields: dict
+    type_kept: "KeptType | None" = None
 
     @property
     def differing_fields(self):
@@ -145,21 +164,147 @@ def syncable_mac_address(mac_address):
     return mac_address
 
 
+class TypeRefusal(NamedTuple):
+    """Why a saved interface cannot take a type: the first message, and the Interface field it refuses."""
+
+    message: str
+    # A concrete Interface field name, or None when the error names no such field.
+    field: str | None
+    # The plugin's own rule has fixed text that names no object, so every viewer gets it.
+    plugin_rule: bool = False
+
+    def text_for(self, user):
+        """Return the message for the plugin's rule or a superuser, else a reason that names no object."""
+        # NetBox's message (and an admin validator's or another plugin's) can name any object.
+        if self.plugin_rule or (
+            getattr(user, "is_authenticated", False)
+            and getattr(user, "is_active", False)
+            and getattr(user, "is_superuser", False)
+        ):
+            return self.message
+        subject = "the interface" if self.field is None else f"the {self.field} field"
+        return f"NetBox refuses {subject} (only a superuser sees the message)"
+
+
+class KeptType(NamedTuple):
+    """A type change that a sync holds: the names of the rules that set the type, the type, and the refusal."""
+
+    rules: str
+    new_type: str
+    refusal: TypeRefusal
+
+    def note_for(self, user):
+        """Return the note a page shows *user*."""
+        return self._note(self.refusal.text_for(user))
+
+    @property
+    def log_note(self):
+        """Return the note with the full refusal message, for the server log."""
+        return self._note(self.refusal.message)
+
+    def _note(self, refusal_text):
+        return f"type kept: interface {self.rules} sets {self.new_type}: {refusal_text}"
+
+
+class PlannedType(NamedTuple):
+    """The type a sync writes to one interface, and the kept change (None when the sync does not keep the type)."""
+
+    value: str | None
+    kept: KeptType | None
+
+
+def _refused_field(key):
+    """Return the concrete Interface field that a ValidationError key names, or None for any other key."""
+    # A validator or a post_clean receiver can key an error by any text, such as an object's name.
+    try:
+        field = Interface._meta.get_field(key)
+    except FieldDoesNotExist:
+        return None
+    return field.name if field.concrete else None
+
+
+def _first_refusal(exc):
+    """Return the first message of NetBox's *exc*, with the Interface field it refuses."""
+    if not hasattr(exc, "error_dict"):
+        return TypeRefusal(exc.messages[0], None)
+    key, messages = next(iter(exc.message_dict.items()))
+    return TypeRefusal(messages[0], _refused_field(key))
+
+
+def type_change_refusal(interface, new_type):
+    """
+    Return why a persisted interface cannot take *new_type*, or None when it can.
+
+    NetBox judges an in-memory copy that has the new type. The plugin adds one rule NetBox does
+    not have: an aggregate with LAG members stays ``lag``. The first failure is the reason. NetBox's
+    message can name any object, so a page shows it through ``TypeRefusal.text_for``.
+
+    Args:
+        interface (Interface): The saved interface, with its current links.
+        new_type (str): The type to check.
+
+    Returns:
+        TypeRefusal | None: The first refusal, or None.
+
+    """
+    candidate = copy.copy(interface)
+    candidate.type = new_type
+    try:
+        candidate.clean_fields(exclude=[field.name for field in candidate._meta.fields if field.name != "type"])
+    except ValidationError as exc:
+        return _first_refusal(exc)
+    if new_type != InterfaceTypeChoices.TYPE_LAG and Interface.objects.filter(lag=interface).exists():
+        return TypeRefusal("An interface with LAG members must keep type lag.", "type", plugin_rule=True)
+    try:
+        netbox_interface_clean(candidate)
+    except ValidationError as exc:
+        return _first_refusal(exc)
+    return None
+
+
+def planned_interface_type(interface, decision, *, created):
+    """
+    Return the type a sync writes to *interface* for a write *decision*.
+
+    An unmapped port has no opinion: it keeps the current type, or fills ``other`` on a type-less
+    interface. An interface this sync just created, or an unchanged type, takes the decision's
+    type with no query. Any other type change is checked by ``type_change_refusal``; a refusal
+    keeps the current type.
+
+    Args:
+        interface (Interface | VMInterface): The interface the port syncs onto.
+        decision (RuleDecision): The UNMAPPED or SET_TYPE decision for the port.
+        created (bool): Whether this sync created the interface.
+
+    Returns:
+        PlannedType: The type to write (None for a VMInterface, which has no type), and the kept change.
+
+    """
+    if not isinstance(interface, Interface):
+        return PlannedType(None, None)
+    new_type = decision.netbox_type
+    if new_type is None:
+        return PlannedType(interface.type or InterfaceTypeChoices.TYPE_OTHER, None)
+    if created or new_type == interface.type:
+        return PlannedType(new_type, None)
+    refusal = type_change_refusal(interface, new_type)
+    if refusal is None:
+        return PlannedType(new_type, None)
+    return PlannedType(interface.type, KeptType(rule_names(decision.rules), new_type, refusal))
+
+
 def parse_vlan_group_id(group_id_str):
     """Normalise a VLAN group ID from the row's selection map to int or None."""
     return int(group_id_str) if group_id_str else None
 
 
 def _name_differs(port, interface, context):
-    return port.get(context.interface_name_field) != interface.name
+    expected_name = port["synced_name"]
+    return expected_name is not None and expected_name != interface.name
 
 
 def _type_differs(port, interface, context):
-    # The writer's rule: an unmapped ifType is no opinion, so it only fills a type-less interface.
-    current = getattr(interface, "type", None)
-    if context.netbox_type is not None:
-        return current != context.netbox_type
-    return not current
+    return interface.type != context.netbox_type
 
 
 def _speed_differs(port, interface, context):
@@ -252,7 +397,7 @@ _RULES = {
 }
 
 
-def compute_row_sync_state(port, *, interface_name_field, server_key, netbox_type=None, vlan_context=None):
+def compute_row_sync_state(port, *, interface_name_field, server_key, decision, vlan_context=None):
     """
     Return the sync state of one LibreNMS row against the NetBox interface it resolved to.
 
@@ -260,8 +405,9 @@ def compute_row_sync_state(port, *, interface_name_field, server_key, netbox_typ
         port (dict): The interface table row, carrying ``netbox_interface`` and ``exists_in_netbox``.
         interface_name_field (str): The LibreNMS port field currently acting as the interface name.
         server_key (str): The LibreNMS server the row's port_id belongs to.
-        netbox_type (str | None): The NetBox type the sync would write, or None when the row's
-            ifType has no mapping and the sync therefore holds no opinion.
+        decision (RuleDecision | None): The interface write check for the row's owner
+            (``check_interface_write``), or None when the row's owner is unresolved. The writer
+            writes the type ``planned_interface_type`` plans from it.
         vlan_context: The row's VLAN evidence bundled with the NetBox assignment it is compared
             against, or None to leave VLANs out of the comparison.
 
@@ -269,14 +415,20 @@ def compute_row_sync_state(port, *, interface_name_field, server_key, netbox_typ
         RowSyncState: The row state and each field's verdict.
 
     """
+    # A blocked row is decided before absence: no sync may create it either.
+    blocked_state = ROW_OWNER_UNRESOLVED if decision is None else _BLOCKED_ROW_STATE_BY_KIND.get(decision.kind)
+    if blocked_state is not None:
+        return RowSyncState(blocked_state, dict.fromkeys(SYNC_FIELDS, NOT_SYNCED))
+
     interface = port.get("netbox_interface")
     if not port.get("exists_in_netbox") or interface is None:
         return RowSyncState(ROW_ABSENT, dict.fromkeys(SYNC_FIELDS, ABSENT))
 
+    planned_type = planned_interface_type(interface, decision, created=False)
     context = DiffContext(
         interface_name_field=interface_name_field,
         server_key=server_key,
-        netbox_type=netbox_type,
+        netbox_type=planned_type.value,
         vlan_context=vlan_context,
     )
     fields = {}
@@ -286,4 +438,4 @@ def compute_row_sync_state(port, *, interface_name_field, server_key, netbox_typ
             continue
         fields[field] = DIFFERS if _RULES[field](port, interface, context) else MATCHES
     state = ROW_DIFFERS if DIFFERS in fields.values() else ROW_IN_SYNC
-    return RowSyncState(state, fields)
+    return RowSyncState(state, fields, planned_type.kept)

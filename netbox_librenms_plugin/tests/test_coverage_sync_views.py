@@ -315,7 +315,7 @@ class TestVLANSynchronization:
 
         created = client.post(
             url,
-            {"server_key": SERVER_KEY, "action": "create_vlans", "select": "3091"},
+            {"server_key": SERVER_KEY, "action": "create_vlans", "select": "3091", "vlan_group_3091": ""},
         )
 
         assert created.status_code == 302
@@ -335,7 +335,7 @@ class TestVLANSynchronization:
         _seed_snapshot(view, device, "vlans", [{"vlan_vlan": 3093, "vlan_name": "Application Servers"}])
         updated = client.post(
             url,
-            {"server_key": SERVER_KEY, "action": "create_vlans", "select": "3093"},
+            {"server_key": SERVER_KEY, "action": "create_vlans", "select": "3093", "vlan_group_3093": ""},
         )
 
         assert updated.status_code == 200
@@ -370,7 +370,7 @@ class TestVLANSynchronization:
                 "plugins:netbox_librenms_plugin:sync_selected_vlans",
                 kwargs={"object_type": "device", "object_id": device.pk},
             ),
-            {"server_key": SERVER_KEY, "action": "create_vlans", "select": "3092"},
+            {"server_key": SERVER_KEY, "action": "create_vlans", "select": "3092", "vlan_group_3092": ""},
         )
 
         assert response.status_code == 302
