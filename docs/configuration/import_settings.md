@@ -150,7 +150,7 @@ The sync page and import block the change, with the reason, when:
 
 Creating a version platform needs the NetBox `add` permission on Platform. On the sync page, a user without it sees the reason instead of the **Sync** button. Import then assigns the OS platform and shows the missing version platform as a warning.
 
-The sync page of a device and of a virtual machine both show the platform row. With tracking on, **Create & Sync** reads the current version from LibreNMS. If it differs from the version on the page, or if a platform or Platform Mapping now matches the OS, nothing changes and the page asks you to refresh. A Platform Mapping that cannot be added after the platform is assigned is reported as a warning; the assignment stays.
+The sync page of a device and of a virtual machine both show the platform row. **Create & Sync** reads the current OS and version from LibreNMS, never from the page. With tracking on, if the version differs from the version on the page, or if a platform or Platform Mapping now matches the OS, nothing changes and the page asks you to refresh. A Platform Mapping that cannot be added after the platform is assigned is reported as a warning; the assignment stays.
 
 The **Create Platform** modal on the import page follows the same rules. A platform with the name you enter is used as it is, when you may view it. When the assignment to the matched device or virtual machine is refused, the new platform is not kept either. The Platform Mapping uses the OS that LibreNMS reports for the device. Without a matched object, the modal creates only the OS platform; the import creates the version platform.
 

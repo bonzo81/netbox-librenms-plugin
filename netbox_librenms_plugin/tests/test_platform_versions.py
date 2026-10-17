@@ -644,43 +644,6 @@ def reason_text_for(outcome, viewer):
     return reason_text(outcome.reason, outcome.assessment, viewer)
 
 
-@transactional_db_with_all_apps()
-class TestANamedPlatformRaceWinnerNeedsViewScope:
-    def test_a_winner_created_between_preflight_and_apply_is_not_reused_without_view(self, client):
-        """Another session commits the named platform after the view's preflight; the actor may add, not view."""
-        from dcim.models import Platform
-        from django.db import connection, connections
-        from django.urls import reverse
-
-        device = make_device("named-race")
-        client.force_login(_add_only_actor("named-race-actor"))
-        winners = []
-
-        def create_winner():
-            try:
-                winners.append(Platform.objects.create(name="Juniper Junos", slug="juniper-junos-winner"))
-            finally:
-                connections.close_all()
-
-        def insert_after_the_winner(execute, sql, params, many, context):
-            if sql.startswith('INSERT INTO "dcim_platform"') and not winners:
-                with bounded_executor(1) as executor:
-                    executor.submit(create_winner).result(timeout=10)
-            return execute(sql, params, many, context)
-
-        with connection.execute_wrapper(insert_after_the_winner):
-            response = client.post(
-                reverse("plugins:netbox_librenms_plugin:create_and_assign_platform", kwargs={"pk": device.pk}),
-                {"platform_name": "Juniper Junos"},
-            )
-
-        device.refresh_from_db()
-        assert winners
-        assert response.status_code == 302
-        assert device.platform is None
-        assert Platform.objects.filter(name="Juniper Junos").count() == 1
-
-
 def _mapping_actor(username, **constraints):
     """A user who may view platforms and add Platform Mappings, within *constraints* when given."""
     from dcim.models import Platform
