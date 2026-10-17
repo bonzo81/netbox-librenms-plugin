@@ -282,6 +282,8 @@ def _write_os_mapping(librenms_os, platform, viewer):
         return existing_text(existing)
     if not viewer.has_perm(get_permission_for_model(PlatformMapping, "add")):
         return messages.WARNING, _mapping_not_created("you lack permission to add mappings.")
+    # Read the label before the insert, so a failed query cannot follow a committed mapping.
+    added = f"Platform mapping '{librenms_os}' to {platform_label(platform, viewer)} added"
     try:
         with transaction.atomic():
             mapping = PlatformMapping(librenms_os=librenms_os, netbox_platform=platform)
@@ -293,7 +295,7 @@ def _write_os_mapping(librenms_os, platform, viewer):
         if winner is None:
             raise
         return existing_text(winner)
-    return messages.SUCCESS, f"Platform mapping '{librenms_os}' to {platform_label(platform, viewer)} added"
+    return messages.SUCCESS, added
 
 
 class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):

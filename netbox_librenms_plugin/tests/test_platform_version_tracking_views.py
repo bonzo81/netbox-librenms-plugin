@@ -601,3 +601,30 @@ class TestTheMappingFollowUpKeepsTheCommittedAssignment:
         assert message_texts(response.wsgi_request, "warning") == [
             f"Platform assigned; OS mapping not created: {TRY_AGAIN_MESSAGE}"
         ]
+
+    def test_a_platform_query_failing_after_the_mapping_insert_still_reports_it_added(self, client, librenms_server):
+        from netbox_librenms_plugin.models import PlatformMapping
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import failing_statement
+
+        _tracking(False)
+        device = make_device("mapping-follow-up-label")
+        client.force_login(make_superuser("mapping-follow-up-label-su"))
+        state = {"inserted": False}
+
+        def matches(sql, _params):
+            if sql.startswith('INSERT INTO "netbox_librenms_plugin_platformmapping"'):
+                state["inserted"] = True
+                return False
+            return state["inserted"] and sql.startswith("SELECT") and '"dcim_platform"' in sql
+
+        with failing_statement(matches, "55P03"):
+            response = _post(
+                client,
+                "create_and_assign_platform",
+                device,
+                {"platform_name": "Juniper Junos", "librenms_os": "junos", "create_mapping": "on"},
+            )
+
+        assert PlatformMapping.objects.filter(librenms_os="junos").exists()
+        assert message_texts(response.wsgi_request, "warning") == []
+        assert "Platform mapping 'junos' to 'Juniper Junos' added" in message_texts(response.wsgi_request, "success")
