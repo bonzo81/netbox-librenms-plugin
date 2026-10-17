@@ -133,6 +133,12 @@ class LibreNMSSettings(models.Model):
         help_text="Remember each user's ifName or ifDescr choice separately for each device platform",
     )
 
+    platform_version_tracking = models.BooleanField(
+        default=False,
+        help_text="Give each device and virtual machine the version platform of its LibreNMS OS version: "
+        "a child of the OS platform, created when it is missing",
+    )
+
     # Cable-sync provenance settings. DB/UI-managed (Settings page) rather than PLUGINS_CONFIG,
     # so changing them needs no NetBox restart. This uses the same split as the
     # SerialSensorTypePattern rows.
