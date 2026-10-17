@@ -4715,7 +4715,7 @@ class TestCreatePlatformAssignmentIndependence:
         self.librenms_server.vc_inventory_callable(device_id, [], {})
         return device
 
-    def _post(self, device, platform_name, manufacturer_id):
+    def _post(self, device, platform_name, manufacturer_id, **extra):
         from netbox_librenms_plugin.views.imports.actions import CreatePlatformFromImportView
 
         request = make_view_request(
@@ -4725,6 +4725,7 @@ class TestCreatePlatformAssignmentIndependence:
                 "platform_name": platform_name,
                 "manufacturer": str(manufacturer_id),
                 "device_pk": str(device.pk),
+                **extra,
             },
             user=make_superuser(),
             HTTP_HX_REQUEST="true",
@@ -4732,8 +4733,10 @@ class TestCreatePlatformAssignmentIndependence:
         with change_logging(request):
             return post_view(CreatePlatformFromImportView(), request, device_id=42)
 
-    def test_platform_persists_and_error_is_surfaced_when_legacy_target_is_invalid(self):
-        """A failed optional assignment keeps the platform and returns an error instead of a success swap."""
+    def test_an_invalid_legacy_target_rolls_back_the_platform_and_reports_the_refusal(self):
+        """A refused assignment rolls the new platform back with it and returns an error instead of a success swap."""
+        from html import unescape
+
         from dcim.models import Device, Platform
 
         target = self._mapped_device("platform-legacy-target")
@@ -4742,10 +4745,10 @@ class TestCreatePlatformAssignmentIndependence:
 
         response = self._post(target, "Legacy Target OS", manufacturer.pk)
 
-        assert Platform.objects.filter(name="Legacy Target OS").exists()
+        assert not Platform.objects.filter(name="Legacy Target OS").exists()
         target.refresh_from_db()
         assert target.platform is None
-        assert b"could not be assigned" in response.content
+        assert "assign platform 'Legacy Target OS' to the device" in unescape(response.content.decode())
         assert b"htmx-modal-content" not in response.content
 
     def test_invalid_manufacturer_id_is_rejected(self):
@@ -4758,19 +4761,6 @@ class TestCreatePlatformAssignmentIndependence:
 
         assert b"Selected manufacturer not found" in response.content
         assert not Platform.objects.filter(name="Missing Manufacturer OS").exists()
-
-    def test_device_platform_manufacturer_mismatch_is_surfaced_and_platform_is_kept(self):
-        from dcim.models import Manufacturer, Platform
-
-        target = self._mapped_device("platform-manufacturer-mismatch-target")
-        other_manufacturer = Manufacturer.objects.create(name="Other Platform Manufacturer", slug="other-platform-mfr")
-
-        response = self._post(target, "Mismatch OS", other_manufacturer.pk)
-
-        assert Platform.objects.filter(name="Mismatch OS", manufacturer=other_manufacturer).exists()
-        target.refresh_from_db()
-        assert target.platform is None
-        assert b"could not be assigned" in response.content
 
     def test_device_platform_manufacturer_match_assigns_and_renders_updates(self):
         from dcim.models import Platform
@@ -4804,7 +4794,7 @@ class TestCreatePlatformAssignmentIndependence:
             version="17.3.1",
         )
 
-        self._post(target, "Tracked OS", target.device_type.manufacturer_id)
+        self._post(target, "Tracked OS", target.device_type.manufacturer_id, librenms_version="17.3.1")
 
         os_platform = Platform.objects.get(name="Tracked OS")
         target.refresh_from_db()
@@ -4852,28 +4842,26 @@ class TestCreatePlatformAssignmentIndependence:
 
     @transactional_db_with_all_apps()
     def test_a_lock_conflict_on_the_assignment_retries_and_assigns_the_platform(self, client):
-        """The conflict rolls back the platform with the assignment, so the second attempt creates it again."""
+        """The first attempt meets the subject's row lock; the second attempt creates the platform and assigns it."""
         from dcim.models import Device, Platform
-        from django.db.models.signals import pre_save
+        from django.db import connection
 
         target = self._mapped_device("platform-lock-retry-target")
-        attempts = []
+        locks = []
         with second_connection() as other:
             lock_row(other, Device, target.pk)
 
-            def count_attempt(sender, instance, **kwargs):
-                attempts.append(instance.name)
-                if len(attempts) == 2:
-                    other.rollback()
+            def release_before_the_second_lock(execute, sql, params, many, context):
+                if sql.startswith("SELECT") and '"dcim_device"' in sql and "FOR UPDATE" in sql:
+                    locks.append(sql)
+                    if len(locks) == 2:
+                        other.rollback()
+                return execute(sql, params, many, context)
 
-            pre_save.connect(count_attempt, sender=Platform, weak=False)
-            try:
-                with lock_timeout(200):
-                    response = self._client_post(client, target, "Retried OS")
-            finally:
-                pre_save.disconnect(count_attempt, sender=Platform)
+            with connection.execute_wrapper(release_before_the_second_lock), lock_timeout(200):
+                response = self._client_post(client, target, "Retried OS")
 
-        assert attempts == ["Retried OS", "Retried OS"]
+        assert len(locks) == 2
         platform = Platform.objects.get(name="Retried OS")
         target.refresh_from_db()
         assert target.platform_id == platform.pk

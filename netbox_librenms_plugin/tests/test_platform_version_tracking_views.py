@@ -14,6 +14,7 @@ from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.view_test_helpers import (
     assert_update_logged,
+    grant,
     make_user_with_perms,
     message_texts,
 )
@@ -628,3 +629,187 @@ class TestTheMappingFollowUpKeepsTheCommittedAssignment:
         assert PlatformMapping.objects.filter(librenms_os="junos").exists()
         assert message_texts(response.wsgi_request, "warning") == []
         assert "Platform mapping 'junos' to 'Juniper Junos' added" in message_texts(response.wsgi_request, "success")
+
+
+def _import_linked(name, server, device_id, *, os="junos", version=VERSION):
+    """A device that the import page matches to LibreNMS device *device_id*."""
+    device = make_device(name, librenms_cf={SERVER_KEY: device_id})
+    server.device_info_response(
+        device_id=device_id, hostname=name, hardware=device.device_type.model, os=os, version=version, ip=""
+    )
+    server.vc_inventory_callable(device_id, [], {})
+    return device
+
+
+def _import_post(client, device, device_id, data):
+    url = reverse("plugins:netbox_librenms_plugin:create_platform_from_import", kwargs={"device_id": device_id})
+    return client.post(url, {"server_key": SERVER_KEY, "device_pk": str(device.pk), **data}, HTTP_HX_REQUEST="true")
+
+
+def _import_error(response):
+    from html import unescape
+
+    assert response.status_code == 200
+    assert response.headers.get("HX-Reswap") == "none", response.content.decode()
+    return unescape(response.content.decode())
+
+
+def _import_actor(username, *grants):
+    """A user who may change and view devices, with *grants* as ``(action, model, constraints)``."""
+    from dcim.models import Device
+
+    actor = make_user_with_perms(username, [("view", Device), ("change", Device)])
+    for action, model, constraints in grants:
+        actor = grant(actor, action, model, constraints=constraints)
+    return actor
+
+
+class TestImportCreatePlatformModal:
+    def test_a_slug_taken_for_the_manufacturer_gets_the_next_free_suffix(self, client, librenms_server):
+        from dcim.models import Platform
+
+        _tracking(False)
+        device = _import_linked("import-slug", librenms_server, 7401)
+        manufacturer = device.device_type.manufacturer
+        Platform.objects.create(name="Juniper Other", slug="juniper-junos", manufacturer=manufacturer)
+        client.force_login(make_superuser("import-slug-su"))
+
+        _import_post(client, device, 7401, {"platform_name": "Juniper Junos", "manufacturer": str(manufacturer.pk)})
+
+        created = Platform.objects.get(name="Juniper Junos")
+        device.refresh_from_db()
+        assert created.slug == "juniper-junos-2"
+        assert device.platform == created
+
+    def test_a_constrained_add_grant_that_excludes_the_new_platform_creates_nothing(self, client, librenms_server):
+        from dcim.models import Platform
+
+        _tracking(False)
+        device = _import_linked("import-constrained", librenms_server, 7402)
+        client.force_login(
+            _import_actor(
+                "import-constrained", ("view", Platform, None), ("add", Platform, {"name": "some other platform"})
+            )
+        )
+
+        response = _import_post(client, device, 7402, {"platform_name": "Juniper Junos"})
+
+        device.refresh_from_db()
+        assert "You do not have permission to add platforms, so 'Juniper Junos' cannot be created." in _import_error(
+            response
+        )
+        assert device.platform is None
+        assert not Platform.objects.filter(name="Juniper Junos").exists()
+
+    def test_an_existing_visible_platform_with_the_name_is_reused(self, client, librenms_server):
+        from dcim.models import Platform
+
+        _tracking(False)
+        device = _import_linked("import-reuse", librenms_server, 7403)
+        existing = Platform.objects.create(name="Juniper Junos", slug="juniper-junos")
+        client.force_login(_import_actor("import-reuse", ("view", Platform, None)))
+
+        response = _import_post(client, device, 7403, {"platform_name": "juniper junos"})
+
+        device.refresh_from_db()
+        assert response.status_code == 200
+        assert device.platform == existing
+        assert Platform.objects.filter(name__iexact="juniper junos").count() == 1
+        assert "Platform 'Juniper Junos' already existed and was used as it is" in message_texts(
+            response.wsgi_request, "success"
+        )
+
+    def test_the_mapping_uses_the_librenms_os_of_the_validated_device(self, client, librenms_server):
+        from netbox_librenms_plugin.models import PlatformMapping
+
+        _tracking(False)
+        device = _import_linked("import-tampered-os", librenms_server, 7404)
+        client.force_login(make_superuser("import-tampered-os-su"))
+
+        _import_post(
+            client, device, 7404, {"platform_name": "Juniper Junos", "librenms_os": "eos", "create_mapping": "1"}
+        )
+
+        assert PlatformMapping.objects.get(librenms_os="junos").netbox_platform.name == "Juniper Junos"
+        assert not PlatformMapping.objects.filter(librenms_os="eos").exists()
+
+    def test_a_refused_assignment_rolls_back_the_new_platform(self, client, librenms_server):
+        from dcim.models import Manufacturer, Platform
+
+        _tracking(False)
+        device = _import_linked("import-refused", librenms_server, 7405)
+        other = Manufacturer.objects.create(name="Import other vendor", slug="import-other-vendor")
+        client.force_login(make_superuser("import-refused-su"))
+
+        response = _import_post(client, device, 7405, {"platform_name": "Juniper Junos", "manufacturer": str(other.pk)})
+
+        device.refresh_from_db()
+        assert "Failed to assign platform 'Juniper Junos' to the device: " in _import_error(response)
+        assert device.platform is None
+        assert not Platform.objects.filter(name="Juniper Junos").exists()
+
+    def test_a_version_that_changed_since_the_modal_was_rendered_creates_nothing(self, client, librenms_server):
+        from dcim.models import Platform
+
+        _tracking(True)
+        device = _import_linked("import-stale", librenms_server, 7406, version="22.1R1")
+        client.force_login(make_superuser("import-stale-su"))
+        count = Platform.objects.count()
+
+        response = _import_post(client, device, 7406, {"platform_name": "Juniper Junos", "librenms_version": VERSION})
+
+        device.refresh_from_db()
+        assert "now reports version '22.1R1'" in _import_error(response)
+        assert device.platform is None
+        assert Platform.objects.count() == count
+
+
+def _mapping_added(_username):
+    return make_superuser("mapping-outcome-su")
+
+
+def _mapping_not_granted(username):
+    from dcim.models import Platform
+
+    return _import_actor(username, ("view", Platform, None), ("add", Platform, None))
+
+
+def _mapping_constrained(username):
+    from dcim.models import Platform
+
+    from netbox_librenms_plugin.models import PlatformMapping
+
+    return _import_actor(
+        username, ("view", Platform, None), ("add", Platform, None), ("add", PlatformMapping, {"librenms_os": "eos"})
+    )
+
+
+_DENIED = ("warning", "Platform mapping for 'junos' not created: you lack permission to add mappings.")
+# outcome: (actor factory, expected level, expected text, mapping created)
+_MAPPING_OUTCOMES = {
+    "added": (_mapping_added, "success", "Platform mapping 'junos' to 'Juniper Junos' added", True),
+    "not-granted": (_mapping_not_granted, *_DENIED, False),
+    "constrained-grant": (_mapping_constrained, *_DENIED, False),
+}
+
+
+@pytest.mark.parametrize("endpoint", ["sync", "import"])
+@pytest.mark.parametrize("outcome", list(_MAPPING_OUTCOMES))
+def test_both_create_platform_modals_report_the_mapping_alike(client, librenms_server, endpoint, outcome):
+    from netbox_librenms_plugin.models import PlatformMapping
+
+    _tracking(False)
+    actor_factory, level, text, created = _MAPPING_OUTCOMES[outcome]
+    device = _import_linked(f"mapping-{endpoint}-{outcome}", librenms_server, 7410)
+    client.force_login(actor_factory(f"mapping-{endpoint}-{outcome}"))
+    data = {"platform_name": "Juniper Junos", "librenms_os": "junos", "create_mapping": "1"}
+
+    if endpoint == "sync":
+        response = _post(client, "create_and_assign_platform", device, data)
+    else:
+        response = _import_post(client, device, 7410, data)
+
+    device.refresh_from_db()
+    assert device.platform.name == "Juniper Junos"
+    assert text in message_texts(response.wsgi_request, level)
+    assert PlatformMapping.objects.filter(librenms_os="junos").exists() is created

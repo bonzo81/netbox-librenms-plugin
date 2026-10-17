@@ -11,6 +11,7 @@ from netbox_librenms_plugin.platform_versions import (
     PlatformState,
     apply_platform,
     assess_platform,
+    create_os_platform,
     import_platform,
     map_os_platform,
     platform_version_tracking_enabled,
@@ -585,20 +586,6 @@ class TestStaleNamedCreate:
         assert device.platform is None
         assert Platform.objects.count() == count
 
-    def test_a_known_os_platform_is_used_without_the_named_create_recheck(self):
-        from dcim.models import Device
-
-        os_platform = _platform("junos")
-        device = make_device("known-os")
-
-        outcome = apply_platform(
-            Device, device.pk, _facts(), tracking=True, actor=make_superuser("known-os-su"), os_platform=os_platform
-        )
-
-        device.refresh_from_db()
-        assert outcome.status is OutcomeStatus.APPLIED
-        assert device.platform.parent == os_platform
-
 
 def _add_only_actor(username):
     """A user who may change devices and add platforms, but may not view platforms."""
@@ -828,3 +815,96 @@ class TestMapOSPlatformRace:
             "Platform mapping for 'junos' not created: a mapping already points to 'Other Junos'.",
         )
         assert PlatformMapping.objects.get().netbox_platform == other
+
+
+@pytest.mark.django_db
+class TestCreateOSPlatform:
+    def test_the_named_platform_is_created_without_its_version_platform(self):
+        from dcim.models import Manufacturer, Platform
+
+        manufacturer = Manufacturer.objects.get_or_create(name="TestMfr", slug="test-mfr")[0]
+
+        outcome = create_os_platform(
+            NewOSPlatform("Juniper Junos", manufacturer, reported_version="21.2R3-S4.8"),
+            _facts(),
+            tracking=True,
+            actor=make_superuser("create-os-su"),
+        )
+
+        created = Platform.objects.get(name="Juniper Junos")
+        assert outcome.status is OutcomeStatus.APPLIED
+        assert outcome.created == (created,)
+        assert outcome.assessment.os_platform == created
+        assert (created.slug, created.manufacturer) == ("juniper-junos", manufacturer)
+        assert not Platform.objects.filter(parent=created).exists()
+
+    def test_a_visible_platform_with_the_name_is_reused(self):
+        from dcim.models import Platform
+
+        existing = _platform("Juniper Junos")
+        actor = grant(make_user_with_perms("create-os-reuse", []), "view", Platform)
+
+        outcome = create_os_platform(NewOSPlatform("juniper junos"), _facts(), tracking=False, actor=actor)
+
+        assert outcome.status is OutcomeStatus.UNCHANGED
+        assert outcome.created == ()
+        assert outcome.assessment.os_platform == existing
+        assert Platform.objects.filter(name__iexact="juniper junos").count() == 1
+
+    def test_a_changed_version_creates_nothing(self):
+        from dcim.models import Platform
+
+        count = Platform.objects.count()
+
+        outcome = create_os_platform(
+            NewOSPlatform("Juniper Junos", reported_version="21.2R3-S4.8"),
+            _facts(version="22.1R1"),
+            tracking=True,
+            actor=make_superuser("create-os-stale-su"),
+        )
+
+        assert (outcome.status, outcome.reason) == (OutcomeStatus.STALE, PlatformReason.VERSION_CHANGED)
+        assert Platform.objects.count() == count
+
+    def test_an_os_platform_that_resolves_since_the_form_was_rendered_creates_nothing(self):
+        from dcim.models import Platform
+
+        from netbox_librenms_plugin.models import PlatformMapping
+
+        PlatformMapping.objects.create(librenms_os="junos", netbox_platform=_platform("Mapped Junos"))
+        count = Platform.objects.count()
+
+        outcome = create_os_platform(
+            NewOSPlatform("Juniper Junos"), _facts(), tracking=False, actor=make_superuser("create-os-resolved-su")
+        )
+
+        assert (outcome.status, outcome.reason) == (OutcomeStatus.STALE, PlatformReason.OS_PLATFORM_RESOLVED)
+        assert Platform.objects.count() == count
+
+    def test_a_constrained_add_grant_that_excludes_the_platform_creates_nothing(self):
+        from dcim.models import Platform
+
+        actor = grant(make_user_with_perms("create-os-denied", []), "add", Platform, constraints={"name": "other"})
+
+        outcome = create_os_platform(NewOSPlatform("Juniper Junos"), _facts(), tracking=False, actor=actor)
+
+        assert (outcome.status, outcome.reason) == (OutcomeStatus.BLOCKED, PlatformReason.ADD_PLATFORM_DENIED)
+        assert not Platform.objects.filter(name="Juniper Junos").exists()
+
+    def test_a_refused_platform_is_a_failure(self, settings):
+        from dcim.models import Platform
+        from extras.validators import CustomValidator
+
+        class Refuses(CustomValidator):
+            def validate(self, instance, request):
+                self.fail("Refused.")
+
+        settings.CUSTOM_VALIDATORS = {"dcim.platform": [Refuses()]}
+
+        outcome = create_os_platform(
+            NewOSPlatform("Juniper Junos"), _facts(), tracking=False, actor=make_superuser("create-os-invalid-su")
+        )
+
+        assert (outcome.status, outcome.reason) == (OutcomeStatus.FAILED, PlatformReason.PLATFORM_INVALID)
+        assert outcome.error_model is Platform
+        assert not Platform.objects.filter(name="Juniper Junos").exists()
