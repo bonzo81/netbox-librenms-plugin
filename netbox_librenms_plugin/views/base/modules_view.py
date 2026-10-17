@@ -1029,11 +1029,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
     def get_verify_context_data(self, request, page_device, member, server_key=None):
         """
-        Return the page table and the table pinned to *member*, built from one snapshot and one policy load.
+        Return the context of the table pinned to *member*; its table is None when no table could be built.
 
-        Returns:
-            tuple: ``(page context, pinned context)``; the pinned context is None when no table could be built.
-
+        The page table is not built again: the verify grant carries what it showed for the row.
         """
         from dcim.models import Device
 
@@ -1041,7 +1039,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         scoped_server, sync_device, inventory, empty = self._read_render_inventory(request, page_device, server_key)
         if empty is not None:
-            return empty, None
+            return empty
         try:
             policy = load_inventory_policy(page_device.pk)
         except Device.DoesNotExist:
@@ -1058,22 +1056,18 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 "object": page_device,
                 "server_key": scoped_server,
                 "inventory_rule_error": exc,
-            }, None
+            }
         if policy.member(member.pk) is None:
-            return {"table": None, "object": page_device, "server_key": scoped_server}, None
-        contexts = [
-            self._build_context(
-                request,
-                page_device,
-                inventory,
-                server_key=scoped_server,
-                sync_device=sync_device,
-                policy=policy,
-                pin_to=pin_to,
-            )
-            for pin_to in (None, member)
-        ]
-        return contexts[0], contexts[1]
+            return {"table": None, "object": page_device, "server_key": scoped_server}
+        return self._build_context(
+            request,
+            page_device,
+            inventory,
+            server_key=scoped_server,
+            sync_device=sync_device,
+            policy=policy,
+            pin_to=member,
+        )
 
     def _build_context(
         self,
@@ -1215,6 +1209,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # Bulk-detect serial conflicts for rows that can be replaced/installed
         self._detect_serial_conflicts(table_data, index_map, obj=owner)
         self._mark_grant_rows(table_data, grants_enabled=not index_ambiguous)
+        if pin_to is None:
+            self._mark_verify_rows(table_data)
 
         table = self.get_table(table_data, obj)
         table.server_key = self._active_server_key
@@ -1287,6 +1283,21 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 branch = row["branch_rows"] = []
             if branch is not None and row["selectable"]:
                 branch.append([index, row["selected_device_id"]])
+
+    @staticmethod
+    def _mark_verify_rows(table_data):
+        """Give each row of the page table the indices of itself and of the rows below it, in table order."""
+        open_rows = []
+        for row in table_data:
+            depth = row.get("depth", 0)
+            while open_rows and open_rows[-1].get("depth", 0) >= depth:
+                open_rows.pop()
+            open_rows.append(row)
+            row["verify_rows"] = []
+            index = coerce_positive_int(row.get("ent_physical_index"))
+            if index is not None:
+                for owner in open_rows:
+                    owner["verify_rows"].append(index)
 
     def _selection_manifest(self, table, table_data):
         """Return the signed list of every rendered row a selected install may name, or None without grants."""

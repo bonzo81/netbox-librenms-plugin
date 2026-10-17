@@ -1314,8 +1314,13 @@ class VCModuleTable(LibreNMSModuleTable):
     def render_device_selection(self, value, record):
         selected_device_id = record.get("selected_device_id") or self.device.id
         ent_index = record.get("ent_physical_index", "")
-        # The verify request proves the row was rendered; the grant field carries a verified retarget.
-        verify_binding = self.grant(ACTION_VERIFY_MODULE, record) if self.grant_index(record) else ""
+        # The verify grant signs the page table's rows of this subtree; the grant field carries a verified retarget.
+        verify_rows = record.get("verify_rows")
+        verify_binding = (
+            self.grant(ACTION_VERIFY_MODULE, record, rows=[[index] for index in dict.fromkeys(verify_rows)])
+            if self.grant_index(record) and verify_rows is not None
+            else ""
+        )
         selection_grant = (
             format_html(
                 '<input type="hidden" name="selection_grant_{}" value="{}">',

@@ -460,21 +460,19 @@ class SingleModuleVerifyView(
         # request.POST without affecting this request object.
         module_table_view.request = copy.copy(request)
         module_table_view.cache_only = True
-        page_context, pinned_context = module_table_view.get_verify_context_data(
+        context = module_table_view.get_verify_context_data(
             module_table_view.request,
             page_device,
             selected_device,
             server_key=server_key,
         )
-        if page_context.get("inventory_rule_error") is not None:
+        if context.get("inventory_rule_error") is not None:
             return JsonResponse({"status": "error", "message": GrantRefusal.RULE_ERROR.message}, status=409)
-        if pinned_context is None or pinned_context.get("table") is None:
+        if context.get("table") is None:
             return JsonResponse({"status": "error", "message": "No cached inventory data"}, status=404)
-        if page_context.get("inventory_index_ambiguous"):
+        if context.get("inventory_index_ambiguous"):
             return JsonResponse({"status": "error", "message": GrantRefusal.AMBIGUOUS_INDEX.message}, status=409)
-        return self._verified_row_response(
-            data, page_context, pinned_context, page_device, selected_device, ent_physical_index, row_depth
-        )
+        return self._verified_row_response(data, context, page_device, selected_device, ent_physical_index, row_depth)
 
     @staticmethod
     def _parse_request(data):
@@ -500,34 +498,37 @@ class SingleModuleVerifyView(
             row_depth = 0
         return selected_device_id, page_device_id, ent_physical_index, row_depth
 
-    def _verified_row_response(
-        self, data, page_context, pinned_context, page_device, selected_device, ent_physical_index, row_depth
-    ):
+    def _verified_row_response(self, data, context, page_device, selected_device, ent_physical_index, row_depth):
         """Return the pinned row with its grants when the verify grant holds and both renders show the row."""
-        page_table, table = page_context["table"], pinned_context["table"]
+        table = context["table"]
         try:
             grant = read_module_grant(
                 data.get("verify_binding"),
                 action=ACTION_VERIFY_MODULE,
                 page_device_id=page_device.pk,
-                server_key=page_context["server_key"],
+                server_key=context["server_key"],
             ).require(ent_index=ent_physical_index)
         except GrantRefused as exc:
             return JsonResponse({"status": "error", "message": exc.refusal.message}, status=409)
-        if grant.inventory_digest != page_table.inventory_snapshot_digest:
+        # The pinned table reads the same snapshot and policy load that a page table would.
+        if grant.inventory_digest != table.inventory_snapshot_digest:
             return JsonResponse({"status": "error", "message": GrantRefusal.SNAPSHOT.message}, status=409)
-        if grant.policy_fingerprint != page_table.policy_fingerprint:
+        if grant.policy_fingerprint != table.policy_fingerprint:
             return JsonResponse({"status": "error", "message": GrantRefusal.POLICY.message}, status=409)
 
-        # A grant needs both renders: the page table shows the row, and the table pinned to the member shows it.
-        page_indices = {candidate.get("ent_physical_index") for candidate in page_table.data}
+        # A grant needs both renders: the signed page rows show the row, and the table pinned to the member shows it.
+        page_rows = [index for (index,) in grant.rows]
         row = self._pinned_row(table.data, selected_device.pk, ent_physical_index, row_depth)
-        if row is None or ent_physical_index not in page_indices:
+        if row is None or ent_physical_index not in page_rows:
             return JsonResponse(
                 {"status": "error", "message": "This inventory row is not available for the selected member"},
                 status=404,
             )
-        row = {**row, "branch_rows": [entry for entry in row.get("branch_rows", []) if entry[0] in page_indices]}
+        row = {
+            **row,
+            "branch_rows": [entry for entry in row.get("branch_rows", []) if entry[0] in page_rows],
+            "verify_rows": page_rows,
+        }
         if not any(index != ent_physical_index for index, _target in row["branch_rows"]):
             row["has_installable_children"] = False
         if row.get("selectable") and table.selection_allowed:

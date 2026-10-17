@@ -585,6 +585,54 @@ def test_verify_issues_no_grant_for_a_row_the_member_table_hides(ui, vc_grants):
     assert "inventory_binding" not in response.content.decode()
 
 
+def test_verify_builds_one_table_per_request(ui, vc_grants, monkeypatch):
+    """The page table signed the verify grant, so verify builds only the table pinned to the member."""
+    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+    page, member = vc_grants()
+    content = render(ui, page)
+    build = BaseModuleTableView._build_context
+    pinned_to = []
+
+    def counted_build(self, *args, pin_to=None, **kwargs):
+        pinned_to.append(getattr(pin_to, "pk", None))
+        return build(self, *args, pin_to=pin_to, **kwargs)
+
+    monkeypatch.setattr(BaseModuleTableView, "_build_context", counted_build)
+
+    response = verify(ui, content, page, member, CARRIER)
+
+    assert response.status_code == 200, response.content
+    assert pinned_to == [member.pk]
+
+
+def test_a_second_verify_keeps_the_rows_the_page_table_hides_out_of_the_branch(ui, vc_grants):
+    """The verified row signs the page rows again, so a second member change still leaves Optic 2 out."""
+    page, member = vc_grants()
+    _rule("Page vendor hides optic 2", "Optic 2", page.device_type.manufacturer)
+    first = verify(ui, render(ui, page), page, member, CARRIER).json()["formatted_row"]
+
+    response = verify(ui, first["device_selection"], page, member, CARRIER)
+
+    assert response.status_code == 200, response.content
+    action, fields = rendered_module_form(response.json()["formatted_row"]["actions"], "install-branch", CARRIER)
+    post(ui, action, fields)
+    assert _installed(member) == {("Carrier Slot", "GR-CARRIER"), ("Cage 1", "GR-OPTIC")}
+
+
+def test_verify_refuses_a_grant_of_another_snapshot(ui, vc_grants):
+    from netbox_librenms_plugin.module_grants import GrantRefusal
+
+    page, member = vc_grants()
+    content = render(ui, page)
+    edit_cached_row(page, OPTIC_2, entPhysicalSerialNum="SN-O2-REPLACED")
+
+    response = verify(ui, content, page, member, CARRIER)
+
+    assert response.status_code == 409
+    assert response.json()["message"] == GrantRefusal.SNAPSHOT.message
+
+
 def test_a_selected_install_onto_another_member_needs_the_verified_override(ui, vc_grants):
     page, member = vc_grants()
     content = render(ui, page)
