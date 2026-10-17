@@ -66,6 +66,49 @@ def test_relationship_diagnostics_modal_opens_without_bootstrap(page):
     assert page.locator(".modal-backdrop").count() == 0
 
 
+def test_the_platform_row_opens_the_create_platform_modal_without_bootstrap(page):
+    """The device and VM sync pages share the platform row; its Create & Sync button opens the real modal form."""
+    from types import SimpleNamespace
+
+    from django.template import Context, Engine
+
+    engine = Engine(dirs=[str(TEMPLATE_DIR.parent)])
+    assessment = SimpleNamespace(
+        reason="os_platform_missing", state="proposed", operation="create_os_platform", tracks_version=False
+    )
+    row = engine.get_template("netbox_librenms_plugin/inc/_platform_sync_row.html").render(
+        Context(
+            {"object": SimpleNamespace(platform=None), "platform_info": {"assessment": assessment}, "csrf_token": "t"},
+            use_l10n=False,
+        )
+    )
+    form = engine.get_template("netbox_librenms_plugin/htmx/create_platform_modal.html").render(
+        Context(
+            {"librenms_os": "junos", "platform_name": "junos", "form_action": "/c/", "device_pk": 1, "csrf_token": "t"},
+            use_l10n=False,
+        )
+    )
+    page.set_content(
+        "<style>.modal { display: none; } .modal.show { display: block; }</style>"
+        f"<table><tbody>{row}</tbody></table>"
+        '<div class="modal fade" id="create-platform-modal" tabindex="-1" aria-hidden="true">'
+        f'<div class="modal-dialog"><div class="modal-content">{form}</div></div></div>'
+    )
+    _add_page_scripts(page)
+
+    assert page.evaluate("typeof bootstrap") == "undefined"
+    modal = page.locator("#create-platform-modal")
+    assert not modal.is_visible()
+    page.get_by_role("button", name="Create & Sync").click()
+    assert modal.is_visible()
+    assert modal.get_attribute("aria-modal") == "true"
+    assert modal.locator("input[name=librenms_os]").get_attribute("value") == "junos"
+
+    modal.get_by_role("button", name="Cancel").click()
+    assert not modal.is_visible()
+    assert page.locator(".modal-backdrop").count() == 0
+
+
 # ===========================================================================
 # Interface selection: the requirement cascade and cross-page state
 # ===========================================================================
