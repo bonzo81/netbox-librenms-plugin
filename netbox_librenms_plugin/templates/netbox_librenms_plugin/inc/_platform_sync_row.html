@@ -5,8 +5,8 @@ Requires: object, platform_info, update_url (the subject's platform sync endpoin
 <tr>
     <td style="padding-left: 1rem;">Platform</td>
     <td>
-        <div class="d-flex align-items-center">
-            <div class="text-nowrap">
+        <div class="d-flex flex-wrap align-items-center column-gap-3 row-gap-1">
+            <div>
                 {% if object.platform %}
                     <a href="{{ object.platform.get_absolute_url }}">
                         {{ object.platform }}
@@ -15,7 +15,7 @@ Requires: object, platform_info, update_url (the subject's platform sync endpoin
                     <span class="text-muted">Not set</span>
                 {% endif %}
             </div>
-            <div class="ms-3">
+            <div>
                 {% with assessment=platform_info.assessment %}
                 {% if assessment and assessment.reason != "no_os" %}
                     {% if assessment.state == "current" %}
@@ -50,10 +50,10 @@ Requires: object, platform_info, update_url (the subject's platform sync endpoin
         </div>
     </td>
     <td>
-        <div class="d-flex align-items-center">
+        <div class="d-flex flex-wrap align-items-center column-gap-2 row-gap-1">
             <span>{{ platform_info.librenms_os }}{% if platform_info.assessment.tracks_version %} {{ platform_info.librenms_version }}{% endif %}</span>
             {% if platform_info.assessment.reason == "os_platform_missing" %}
-                <span class="badge bg-warning bg-opacity-75 text-dark ms-2" style="font-size: 0.7rem;" title="Platform doesn't exist in NetBox">
+                <span class="badge bg-warning bg-opacity-75 text-dark" style="font-size: 0.7rem;" title="Platform doesn't exist in NetBox">
                     <i class="mdi mdi-alert"></i> Not in NetBox
                 </span>
             {% endif %}
