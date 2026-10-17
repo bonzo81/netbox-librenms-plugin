@@ -541,6 +541,28 @@ class TestAMovedMemberIsNotRestored:
         assert ("device_selection_10", "2") in pairs
 
 
+def test_a_refused_member_check_shows_the_server_reason_and_keeps_the_member(page):
+    """The middleware answers a broken rule with a 409 JSON error, and the operator must see its text."""
+    reason = 'Interface type mapping "Gi" (ID 7) stores an invalid name_pattern: (. Fix the rule, then try again.'
+    _load_verify_page(page, OTHER_PAGE_ROWS)
+    page.evaluate("document.body.insertAdjacentHTML('afterbegin', '<div id=\"django-messages\"></div>')")
+    page.route(
+        "**/plugins/librenms_plugin/verify-interface/",
+        lambda route: route.fulfill(status=409, content_type="application/json", body=json.dumps({"error": reason})),
+    )
+
+    page.evaluate(
+        """() => {
+            const select = document.querySelector('tr[data-port-id="40"] .vc-member-select');
+            select.value = '2';
+            handleInterfaceChange(select, '2');
+        }"""
+    )
+
+    expect(page.locator("#django-messages .toast-body")).to_have_text(f"{reason} The row keeps its previous member.")
+    expect(page.locator('tr[data-port-id="40"] .vc-member-select')).to_have_value("1")
+
+
 CABLE_VERIFY_URL = "https://plugin.example.com/verify-cable/"
 
 
