@@ -1,0 +1,10 @@
+{% load helpers %}
+<div class="alert alert-danger" role="alert" id="{{ alert_id|default:'rule-configuration-error' }}">
+    <i class="mdi mdi-alert-circle me-2"></i>
+    <div>
+        {{ rule_error.rule_kind|bettertitle }}
+        <a href="{{ rule_error.rule_url }}">{{ rule_error.rule_name }}</a>
+        (ID {{ rule_error.rule_pk }}) stores an invalid <code>{{ rule_error.field }}</code>:
+        <code>{{ rule_error.value }}</code>. {{ consequence }}
+    </div>
+</div>
