@@ -818,3 +818,47 @@ def test_anonymized_recording_replays_declared_outcomes(recording, recording_ser
     assert len(original_ids) == len(anonymous_ids)
     assert set(original_ids).isdisjoint(anonymous_ids)
     assert [type(value) for value in original_ids] == [type(value) for value in anonymous_ids]
+
+
+@pytest.mark.django_db
+def test_timos_refresh_and_sync_put_each_ip_interface_under_its_port(client, settings, recording_server):
+    """A refresh of the TiMOS recording and a sync write one LAG member and parent the L3 interfaces."""
+    from django.urls import reverse
+    from dcim.models import Interface
+
+    from netbox_librenms_plugin.models import PortStackLagPattern
+    from netbox_librenms_plugin.tests.conftest import bind_librenms_server, make_device
+    from netbox_librenms_plugin.tests.interface_sync_post_helpers import SERVER_KEY, post_interface_sync
+    from netbox_librenms_plugin.tests.recordings import load_recording
+    from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
+
+    recording = load_recording("nokia-timos-transceivers")
+    server, _api = recording_server(recording)
+    bind_librenms_server(settings, server, server_key=SERVER_KEY)
+    device_os = recording["meta"]["os"]
+    PortStackLagPattern.objects.update_or_create(
+        librenms_os=device_os,
+        defaults={
+            "lag_name_pattern": recording["lag_patterns"][device_os],
+            "sap_name_pattern": recording["sap_patterns"][device_os],
+        },
+    )
+    device = make_device("timos-ip-interfaces", librenms_cf={SERVER_KEY: {"id": recording["device_id"]}})
+    client.force_login(make_superuser("timos-ip-interfaces-user"))
+    refresh_url = reverse("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": device.pk})
+    assert client.post(refresh_url, {"server_key": SERVER_KEY, "interface_name_field": "ifName"}).status_code == 200
+
+    # lag-2 with members 2/x1/1/c12/1 and 2/x1/1/c36/1 and L3 interface lag2; L3 interface iface-91ad81 on 1/1/c9/1.
+    port_ids = [711982042, 1775758580, 1901702767, 627424630, 1461496686, 1354216783]
+    post_interface_sync(client, device, port_ids, htmx=False)
+
+    interfaces = {interface.name: interface for interface in Interface.objects.filter(device=device)}
+    lag = interfaces["lag-2"]
+    assert lag.type == "lag"
+    assert {name for name, interface in interfaces.items() if interface.lag_id == lag.pk} == {
+        "2/x1/1/c12/1",
+        "2/x1/1/c36/1",
+    }
+    assert (interfaces["lag2"].parent_id, interfaces["lag2"].type) == (lag.pk, "virtual")
+    assert interfaces["lag2"].lag_id is None
+    assert interfaces["iface-91ad81"].parent_id == interfaces["1/1/c9/1"].pk

@@ -146,6 +146,8 @@ class TestInterfaceRelationshipRefresh:
         view._enrich_port_stack_relationships(request, snapshot, ports, "ifName")
 
         assert snapshot["port_stack_relationships"]["lag_members"] == {101: 102}
+        # lag1:0 is ipForward, which never joins a LAG, so only the skip count proves the SAP rule fired.
+        assert snapshot["port_stack_relationships"]["diagnostics"]["pairs_skipped_sap"] == 1
         # The user is told the column may be incomplete rather than being shown a wrong edge.
         assert snapshot["relationship_data_incomplete"] is True
         assert any("device OS could not be determined" in str(message) for message in get_messages(request))
@@ -178,6 +180,7 @@ class TestInterfaceRelationshipRefresh:
         view._enrich_port_stack_relationships(_message_request(), snapshot, ports, "ifName")
 
         assert snapshot["port_stack_relationships"]["lag_members"] == {101: 102}
+        assert snapshot["port_stack_relationships"]["diagnostics"]["pairs_skipped_sap"] == 1
 
     def test_nokia_sap_rows_stay_excluded_through_the_refresh(self, mock_librenms_api):
         """A Nokia device keeps the SAP skip that the Junos fix scoped away from everyone else."""
@@ -205,6 +208,7 @@ class TestInterfaceRelationshipRefresh:
         view._enrich_port_stack_relationships(_message_request(), snapshot, ports, "ifName")
 
         assert snapshot["port_stack_relationships"]["lag_members"] == {101: 102}
+        assert snapshot["port_stack_relationships"]["diagnostics"]["pairs_skipped_sap"] == 1
 
     def test_mixed_structural_and_name_signals_warn_when_os_is_unknown(self, mock_librenms_api):
         # "ios" is one of the rows migration 0013 seeds, so take the existing pattern.
