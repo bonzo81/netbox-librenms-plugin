@@ -756,6 +756,32 @@ class TestImportCreatePlatformModal:
         assert Platform.objects.count() == count
 
 
+class TestImportPlatformSyncAction:
+    def test_the_row_response_confirms_the_created_and_assigned_platform(self, client, librenms_server):
+        """The import page's Sync platform action is an HTMX row swap; its confirmations arrive as toasts."""
+        from html import unescape
+
+        _tracking(True)
+        _platform("junos")
+        device = _import_linked("import-sync-platform", librenms_server, 7420)
+        client.force_login(make_superuser("import-sync-platform-su"))
+        url = reverse("plugins:netbox_librenms_plugin:device_conflict_action", kwargs={"device_id": 7420})
+
+        response = client.post(
+            url,
+            {"server_key": SERVER_KEY, "action": "sync_platform", "existing_device_id": device.pk},
+            HTTP_HX_REQUEST="true",
+        )
+
+        device.refresh_from_db()
+        content = unescape(response.content.decode())
+        assert device.platform.name == f"junos {VERSION}"
+        assert response.headers.get("HX-Reswap") != "none", content
+        assert 'id="django-messages"' in content
+        assert f"Created platform 'junos {VERSION}'" in content
+        assert f"Device platform set to 'junos {VERSION}'" in content
+
+
 def _mapping_added(_username):
     return make_superuser("mapping-outcome-su")
 
