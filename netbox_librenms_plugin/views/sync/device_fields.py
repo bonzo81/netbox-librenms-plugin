@@ -614,8 +614,8 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 return self._sync_redirect(request, pk, self._active_key())
 
         subject = self.restrict_object_or_404(self.subject_model, "change", pk=pk)
-        # Rebinding keeps the redirect on the active server.
-        self.rebind_api_for_posted_server(request.POST)
+        # Rebinding keeps the redirect on the active server and binds the live read below.
+        server_key = self.rebind_api_for_posted_server(request.POST)
 
         if not platform_name:
             messages.error(request, "Platform name is required")
@@ -634,7 +634,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         reported_version = facts.version
         if tracking:
             # A version platform is named from LibreNMS, never from the posted form alone.
-            facts, lookup_failure = _live_platform_facts(self, subject)
+            facts, lookup_failure = self._bound_live_facts(subject, server_key)
             if lookup_failure:
                 messages.error(request, lookup_failure)
                 return self._sync_redirect(request, pk, self._active_key())
@@ -660,6 +660,12 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
     def _active_key(self):
         return getattr(getattr(self, "_librenms_api", None), "server_key", None)
+
+    def _bound_live_facts(self, subject, server_key):
+        """Return the subject's live facts from the posted server, or why they cannot be read; never another server."""
+        if server_key is None:
+            return None, "Selected LibreNMS server is no longer configured."
+        return _live_platform_facts(self, subject)
 
     def _sync_redirect(self, request, pk, fallback_server_key=None):
         """
