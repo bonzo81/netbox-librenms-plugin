@@ -164,41 +164,96 @@ class LibreNMSSettings(models.Model):
         return reverse("plugins:netbox_librenms_plugin:settings")
 
 
-class InterfaceTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
-    """Map LibreNMS interface types and speeds to NetBox interface types."""
+_INTERFACE_RULE_SET_TYPE = "set_type"
+_INTERFACE_RULE_IGNORE = "ignore"
+_INTERFACE_RULE_EXISTS = "A rule with the same platform, LibreNMS type, name pattern and speed already exists."
 
-    librenms_type = models.CharField(max_length=100)
-    netbox_type = models.CharField(
+
+class InterfaceTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
+    """
+    One interface rule: set a NetBox interface type for matching LibreNMS ports, or ignore them.
+
+    ``interface_rules.InterfaceRuleMatcher`` is the one reader that applies these rules.
+    """
+
+    ACTION_SET_TYPE = _INTERFACE_RULE_SET_TYPE
+    ACTION_IGNORE = _INTERFACE_RULE_IGNORE
+    ACTION_CHOICES = [
+        (ACTION_SET_TYPE, "Set type"),
+        (ACTION_IGNORE, "Ignore"),
+    ]
+
+    action = models.CharField(
+        max_length=10,
+        choices=ACTION_CHOICES,
+        default=ACTION_SET_TYPE,
+        help_text="Set type gives matching ports a NetBox type. Ignore keeps them out of interface sync.",
+    )
+    platform = models.ForeignKey(
+        Platform,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="librenms_interface_type_mappings",
+        help_text="Apply only to interfaces of objects on this platform. Leave blank for every platform.",
+    )
+    name_pattern = models.CharField(
+        max_length=200,
+        blank=True,
+        default="",
+        help_text=(
+            "Python regular expression, searched in ifName and in ifDescr (either match counts). "
+            "Case-sensitive; use (?i) to ignore case. Leave blank for any name."
+        ),
+    )
+    librenms_type = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",
+        help_text="LibreNMS ifType, matched exactly. Leave blank for any type.",
+    )
+    # NULL means "no output type": an Ignore rule sets none.
+    netbox_type = models.CharField(  # noqa: DJ001
         max_length=50,
         choices=InterfaceTypeChoices,
-        default=InterfaceTypeChoices.TYPE_OTHER,
+        null=True,
+        blank=True,
+        help_text="The NetBox interface type a Set type rule writes. Leave blank on an Ignore rule.",
     )
-    librenms_speed = models.BigIntegerField(null=True, blank=True)
+    librenms_speed = models.BigIntegerField(
+        null=True,
+        blank=True,
+        help_text="Minimum port speed in Kbps. Needs a LibreNMS type; not used on an Ignore rule.",
+    )
     description = models.TextField(
         blank=True,
         help_text="Optional description or notes about this interface type mapping",
     )
 
     def clean(self):
-        """Enforce uniqueness for NULL-speed rows (SQL UNIQUE does not cover NULL = NULL)."""
-        from django.core.exceptions import ValidationError
-
+        """Normalize the selectors and check the action, type and speed rules."""
         super().clean()
-        normalized_type = (self.librenms_type or "").strip()
-        if not normalized_type:
-            raise ValidationError({"librenms_type": "LibreNMS type must not be blank or whitespace-only."})
-        self.librenms_type = normalized_type
-        if self.librenms_speed is None:
-            qs = InterfaceTypeMapping.objects.filter(
-                librenms_type=normalized_type,
-                librenms_speed__isnull=True,
-            )
-            if self.pk:
-                qs = qs.exclude(pk=self.pk)
-            if qs.exists():
-                raise ValidationError(
-                    {"librenms_type": ("A wildcard (speed = any) mapping for this interface type already exists.")}
-                )
+        self.librenms_type = (self.librenms_type or "").strip()
+        # Whitespace can be part of a regex, so the pattern is kept verbatim.
+        self.name_pattern = self.name_pattern or ""
+        self.netbox_type = self.netbox_type or None
+        errors = {}
+        if self.name_pattern:
+            try:
+                validate_regex_field(self.name_pattern, "name_pattern")
+            except ValidationError as exc:
+                errors.update(exc.message_dict)
+        if self.action == self.ACTION_SET_TYPE and self.netbox_type is None:
+            errors["netbox_type"] = "A Set type rule needs a NetBox type."
+        elif self.action == self.ACTION_IGNORE and self.netbox_type is not None:
+            errors["netbox_type"] = "An Ignore rule sets no NetBox type. Leave this field blank."
+        if self.librenms_speed is not None:
+            if self.action == self.ACTION_IGNORE:
+                errors["librenms_speed"] = "An Ignore rule takes no speed."
+            elif not self.librenms_type:
+                errors["librenms_speed"] = "A speed needs a LibreNMS type."
+        if errors:
+            raise ValidationError(errors)
 
     def get_absolute_url(self):
         """Return the URL for this mapping's detail page."""
@@ -207,25 +262,66 @@ class InterfaceTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
     class Meta:
         """Meta options for InterfaceTypeMapping."""
 
+        # One rule per selector set, whatever its action: an Ignore always wins, so a Set rule with
+        # the same selectors could never apply. NULL is never equal in SQL, so each partition names
+        # only its non-NULL columns (nulls_distinct=False needs PostgreSQL 15).
         constraints = [
             models.UniqueConstraint(
-                fields=["librenms_type", "librenms_speed"],
-                condition=models.Q(librenms_speed__isnull=False),
-                name="unique_interface_type_mapping",
+                fields=["platform", "librenms_type", "name_pattern", "librenms_speed"],
+                condition=Q(platform__isnull=False, librenms_speed__isnull=False),
+                name="unique_interface_type_mapping_platform_speed",
+                violation_error_message=_INTERFACE_RULE_EXISTS,
             ),
             models.UniqueConstraint(
-                fields=["librenms_type"],
-                condition=models.Q(librenms_speed__isnull=True),
-                name="unique_interface_type_mapping_wildcard",
+                fields=["platform", "librenms_type", "name_pattern"],
+                condition=Q(platform__isnull=False, librenms_speed__isnull=True),
+                name="unique_interface_type_mapping_platform",
+                violation_error_message=_INTERFACE_RULE_EXISTS,
+            ),
+            models.UniqueConstraint(
+                fields=["librenms_type", "name_pattern", "librenms_speed"],
+                condition=Q(platform__isnull=True, librenms_speed__isnull=False),
+                name="unique_interface_type_mapping_speed",
+                violation_error_message=_INTERFACE_RULE_EXISTS,
+            ),
+            models.UniqueConstraint(
+                fields=["librenms_type", "name_pattern"],
+                condition=Q(platform__isnull=True, librenms_speed__isnull=True),
+                name="unique_interface_type_mapping_global",
+                violation_error_message=_INTERFACE_RULE_EXISTS,
+            ),
+            models.CheckConstraint(
+                condition=(Q(action=_INTERFACE_RULE_SET_TYPE, netbox_type__isnull=False) & ~Q(netbox_type=""))
+                | Q(action=_INTERFACE_RULE_IGNORE, netbox_type__isnull=True),
+                name="interface_type_mapping_action_output",
+                violation_error_message="A Set type rule needs a NetBox type, and an Ignore rule has none.",
+            ),
+            models.CheckConstraint(
+                condition=Q(platform__isnull=False) | ~Q(librenms_type="") | ~Q(name_pattern=""),
+                name="interface_type_mapping_has_selector",
+                violation_error_message="Give at least one of platform, LibreNMS type or name pattern.",
             ),
         ]
         ordering = ["librenms_type", "librenms_speed"]
 
     def __str__(self):
-        return f"{self.librenms_type} + {self.librenms_speed} -> {self.netbox_type}"
+        selectors = []
+        if self.platform_id:
+            selectors.append(f"platform {self.platform.slug}")
+        if self.name_pattern:
+            selectors.append(f"name /{self.name_pattern}/")
+        if self.librenms_type:
+            selectors.append(self.librenms_type)
+        if self.librenms_speed is not None:
+            selectors.append(f">= {self.librenms_speed} Kbps")
+        outcome = "ignore" if self.action == self.ACTION_IGNORE else self.netbox_type
+        return f"{', '.join(selectors)} -> {outcome}"
 
     def to_yaml(self):
         data = {
+            "action": self.action,
+            "platform": self.platform.slug if self.platform_id else "",
+            "name_pattern": self.name_pattern,
             "librenms_type": self.librenms_type,
             "librenms_speed": self.librenms_speed,
             "netbox_type": self.netbox_type,

@@ -4,6 +4,7 @@ import logging
 import re
 import threading
 from copy import deepcopy
+from dataclasses import dataclass
 from typing import Optional
 
 import netaddr
@@ -22,8 +23,15 @@ from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 
 from netbox_librenms_plugin.constants import (
     DEFAULT_INTERFACE_NAME_FIELD,
+    HOST_NAME_COLLISION_REASON,
+    NAME_OWNER_LIVE,
+    NAME_OWNER_STALE,
+    NAME_OWNER_UNKNOWN,
     OOB_BADGE_HTML,
     OOB_INVENTORY_SOURCE,
+    OOB_NAME_SUFFIX,
+    PORT_ID_SOURCE_COLLISION_REASON,
+    REPORTED_NAME_PORT_COLLISION_REASON,
     is_module_model_placeholder,
     is_supported_interface_name_field,
 )
@@ -225,6 +233,15 @@ def apply_cable_manual_picks(cache_backend, snapshot_key, cached_payload, user_i
     return result, applied
 
 
+def advisory_lock_key(lock_identity: str) -> int:
+    """Return the signed 64-bit PostgreSQL advisory lock key for *lock_identity*."""
+    return int.from_bytes(
+        hashlib.blake2b(lock_identity.encode(), digest_size=8).digest(),
+        byteorder="big",
+        signed=True,
+    )
+
+
 def acquire_advisory_transaction_lock(lock_identity: str, *, using: str | None = None) -> None:
     """
     Acquire one stable PostgreSQL advisory lock for the current transaction.
@@ -245,13 +262,31 @@ def acquire_advisory_transaction_lock(lock_identity: str, *, using: str | None =
 
     if not connection.in_atomic_block:
         raise RuntimeError("acquire_advisory_transaction_lock() requires an open transaction")
-    lock_key = int.from_bytes(
-        hashlib.blake2b(lock_identity.encode(), digest_size=8).digest(),
-        byteorder="big",
-        signed=True,
-    )
     with connection.cursor() as cursor:
-        cursor.execute("SELECT pg_advisory_xact_lock(%s)", [lock_key])
+        cursor.execute("SELECT pg_advisory_xact_lock(%s)", [advisory_lock_key(lock_identity)])
+
+
+class LibreNMSPortBindingConflict(ValueError):
+    """A port cannot be claimed safely by this transaction."""
+
+
+def claim_librenms_port_binding(port_id, server_key, *, using=None):
+    """Claim one cross-model port identity until commit, or refuse without waiting."""
+    from django.db import DEFAULT_DB_ALIAS, connections
+
+    server_key = require_server_key(server_key)
+    port_id = normalize_librenms_port_id(port_id)
+    if port_id is None:
+        raise ValueError("The LibreNMS port ID is missing or invalid.")
+    connection = connections[using or DEFAULT_DB_ALIAS]
+    if not connection.in_atomic_block:
+        raise RuntimeError("claim_librenms_port_binding() requires an open transaction")
+    identity = json.dumps(["librenms-port-binding", server_key, port_id], separators=(",", ":"))
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_try_advisory_xact_lock(%s)", [advisory_lock_key(identity)])
+        acquired = cursor.fetchone()[0]
+    if not acquired:
+        raise LibreNMSPortBindingConflict("Another operation is binding this LibreNMS port. Refresh and retry.")
 
 
 def is_list_of_dicts(value) -> bool:
@@ -352,6 +387,25 @@ def format_mac_address(mac_address: object) -> str:
 def normalize_librenms_port_id(value) -> int | None:
     """Normalize a LibreNMS port_id to a positive integer, or None."""
     return coerce_librenms_id(value)
+
+
+def index_ip_port_records(ports_by_id):
+    """Index cached records once by canonical ID, with None for an ambiguous ID."""
+    index = {}
+    if isinstance(ports_by_id, dict):
+        for raw_id, port in ports_by_id.items():
+            port_id = normalize_librenms_port_id(raw_id)
+            if port_id is not None and isinstance(port, dict):
+                index[port_id] = None if port_id in index else port
+    return index
+
+
+def ip_row_port_record(ports_by_id, port_id):
+    """Read one port from the canonical uniqueness index, or None when it is absent or ambiguous."""
+    normalized_id = normalize_librenms_port_id(port_id)
+    if normalized_id is None or not isinstance(ports_by_id, dict):
+        return None
+    return ports_by_id.get(normalized_id)
 
 
 def index_ip_source_interfaces(interfaces, server_key, obj_device_id=None):
@@ -507,6 +561,10 @@ def get_interface_port_identity_sets(ports, interface_name_field) -> tuple[set[i
     return unique_port_ids, unambiguous_name_port_ids
 
 
+# re.compile raises OverflowError, not re.error, for a repeat count such as a{4294967295}.
+REGEX_COMPILE_ERRORS = (re.error, OverflowError)
+
+
 def validate_regex_field(value, field_name):
     """
     Compile ``value`` as a regex, raising a field-scoped ValidationError on failure.
@@ -537,7 +595,7 @@ def validate_regex_field(value, field_name):
     """
     try:
         return re.compile(value)
-    except re.error as exc:
+    except REGEX_COMPILE_ERRORS as exc:
         raise ValidationError({field_name: f"Invalid regex: {exc}"}) from exc
 
 
@@ -595,6 +653,76 @@ def normalize_relationship_maps(relationships) -> tuple[dict, dict, dict]:
     sub_interfaces = _normalize_edges(sub_interfaces_raw)
     bridge_members = _normalize_edges(bridge_members_raw)
     return lag_members, sub_interfaces, bridge_members
+
+
+def normalize_stacked_ports(relationships) -> dict[int, list[int]]:
+    """
+    Normalize the cached ``stacked_ports`` adjacency into an int-keyed map.
+
+    LibreNMS reports a port_stack pair without saying what kind of relationship it is or which
+    side is the composite. A pair that matches no rule is carried here rather than dropped, so a
+    row can still say which ports it is stacked with. The map is symmetric and states no
+    direction, which is why the relationship writer never reads it: there is nothing to write.
+
+    Fails soft against a corrupt or format-migrated cache, like
+    :func:`normalize_relationship_maps`: a non-dict value, a non-list partner list, an unusable
+    port id or a self-edge is dropped rather than raising.
+
+    Args:
+        relationships (object): Cached ``port_stack_relationships`` mapping.
+
+    Returns:
+        dict[int, list[int]]: Each port's partner port ids, deduplicated and sorted.
+
+    """
+    if not isinstance(relationships, dict):
+        return {}
+    raw_adjacency = relationships.get("stacked_ports")
+    if not isinstance(raw_adjacency, dict):
+        return {}
+    normalized: dict[int, list[int]] = {}
+    for raw_port_id, raw_partners in raw_adjacency.items():
+        port_id = normalize_librenms_port_id(raw_port_id)
+        if port_id is None or not isinstance(raw_partners, list):
+            continue
+        partners = {
+            partner_id
+            for raw_partner in raw_partners
+            if (partner_id := normalize_librenms_port_id(raw_partner)) is not None and partner_id != port_id
+        }
+        if partners:
+            normalized[port_id] = sorted(partners)
+    return normalized
+
+
+def invert_relationship_edges(edges) -> dict[int, list[int]]:
+    """
+    Invert one ``member -> aggregate`` edge map into ``aggregate -> [member, ...]``.
+
+    The three maps :func:`normalize_relationship_maps` returns all point upward, so a row can
+    name what it is attached to but an aggregate cannot name what is attached to it. This is the
+    one place the direction flips, shared by the LAG, sub-interface and bridge views.
+
+    Members are ordered by port id so two renders of one snapshot cannot disagree. A self-edge is
+    dropped: a port is not its own member, so counting one would badge an aggregate that has none.
+    The resolver cannot emit one, but a cached map can hold one, and the writer relies on NetBox's
+    own ``clean()`` to refuse it rather than on the map being filtered.
+
+    Args:
+        edges (dict[int, int]): A normalized ``member -> aggregate`` map.
+
+    Returns:
+        dict[int, list[int]]: Members grouped under their aggregate, each list sorted.
+
+    """
+    inverted: dict[int, list[int]] = {}
+    for member_id, aggregate_id in edges.items():
+        if member_id == aggregate_id:
+            continue
+        inverted.setdefault(aggregate_id, []).append(member_id)
+    for members in inverted.values():
+        members.sort()
+    return inverted
 
 
 def get_cable_sync_settings(*, lock=False):
@@ -1188,8 +1316,8 @@ def rewrite_interface_name_for_vc_member(
     return f"{match.group('prefix')}{vc_position}{match.group('suffix')}"
 
 
-def get_module_template_interface_names(device: Device, module) -> list[str]:
-    """Return unique instantiated interface-template names, rewritten for VC members when needed."""
+def _instantiate_module_template_interface_specs(device: Device, module) -> list[tuple[str, str]]:
+    """Return instantiated template names and types after VC rewriting."""
     if device is None:
         return []
 
@@ -1203,7 +1331,8 @@ def get_module_template_interface_names(device: Device, module) -> list[str]:
     if isinstance(vc_position, int) and vc_position > 0 and isinstance(vc_id, int):
         member_positions = get_vc_member_positions(device)
 
-    template_names = []
+    template_specs = []
+    name_indexes = {}
     for template in template_manager.all():
         try:
             instance = template.instantiate(device=device, module=module)
@@ -1228,11 +1357,44 @@ def get_module_template_interface_names(device: Device, module) -> list[str]:
             if rewritten_name:
                 name = rewritten_name
 
-        if name not in template_names:
-            template_names.append(name)
+        if name in name_indexes:
+            template_specs[name_indexes[name]] = (name, "")
+        else:
+            name_indexes[name] = len(template_specs)
+            template_specs.append((name, getattr(template, "type", "") or ""))
+
+    return template_specs
+
+
+def get_module_template_interface_specs(device: Device, module) -> list[tuple[str, str]]:
+    """Return unique instantiated interface-template names and their attributable types."""
+    template_specs = _instantiate_module_template_interface_specs(device, module)
+    names = [name for name, _template_type in template_specs]
+    # One send answers the common case. Only a receiver that actually renames costs one send per
+    # template, because a batch answer cannot prove which input each returned name came from.
+    if predict_module_interface_rename(device, module, names) == names:
+        return template_specs
+
+    predicted_specs = []
+    name_indexes = {}
+    for name, template_type in template_specs:
+        predicted_name = predict_module_interface_rename(device, module, [name])[0]
+        if predicted_name in name_indexes:
+            predicted_specs[name_indexes[predicted_name]] = (predicted_name, "")
+        else:
+            name_indexes[predicted_name] = len(predicted_specs)
+            predicted_specs.append((predicted_name, template_type))
+
+    return predicted_specs
+
+
+def get_module_template_interface_names(device: Device, module) -> list[str]:
+    """Return unique instantiated interface-template names, rewritten for VC members when needed."""
+    template_names = [name for name, _template_type in _instantiate_module_template_interface_specs(device, module)]
 
     from netbox_librenms_plugin.signals import predict_module_interface_names
 
+    # Adoption accepts a receiver's whole-list answer, while typed specs require one result per template.
     # send_robust (not send): this is a public extension point, so a buggy third-party
     # receiver must not break the module-adoption flow. send_robust isolates each receiver
     # and returns the Exception in place of its result; we log and skip those, preserving
@@ -1907,39 +2069,285 @@ def interface_name_rejection_reason(port, interface_name_field, model=None):
     return None
 
 
-def host_owned_interface_names(ports, interface_name_field, owner_id_for_port, model=None) -> dict[int, set[str]]:
+def synced_interface_name(
+    port,
+    interface_name_field,
+    host_owned_names,
+    reserved_name_port_ids=None,
+    model=None,
+):
     """
-    Return host-owned interface names by target NetBox device.
-
-    A host and its OOB controller are two LibreNMS devices but one NetBox device, so both sides
-    can write into the same ``(device, name)`` namespace. The host owns a name only on its
-    target device. A virtual chassis member can use the same name on another member.
-
-    Derived from the rows on read rather than tagged onto the cached snapshot, so a snapshot
-    written before this existed cannot fail open, and the sync writer and the table reader
-    cannot drift apart on what "the host owns this name" means.
+    Return the name one LibreNMS port will use in NetBox, or ``None``.
 
     Args:
-        ports (list): The merged host + OOB port rows.
+        port (dict): LibreNMS port row.
         interface_name_field (str): Port field that contains the selected interface name.
-        owner_id_for_port (callable): Resolve the target NetBox device ID for a port row.
+        host_owned_names (set[str]): Names owned by host rows in the same snapshot.
+        reserved_name_port_ids (dict[str, set[int]] | None): Active-server port IDs bound to
+            each existing NetBox interface name on the target device.
         model (type | None): Concrete interface model. Defaults to ``Interface``.
 
     Returns:
-        dict[int, set[str]]: Host names keyed by target device ID.
+        str | None: The name to sync, or ``None`` when NetBox cannot store it.
+
+    """
+    name = syncable_interface_name(port, interface_name_field, model)
+    port_id = normalize_librenms_port_id(port.get("port_id"))
+    reserved_name_port_ids = reserved_name_port_ids or {}
+    name_is_reserved = bool(reserved_name_port_ids.get(name)) and port_id not in reserved_name_port_ids[name]
+    if (
+        name is None
+        or port.get("_source") != OOB_INVENTORY_SOURCE
+        or (name not in host_owned_names and not name_is_reserved)
+    ):
+        if name_is_reserved:
+            return None
+        return name
+    derived_name = f"{name}{OOB_NAME_SUFFIX}"
+    if len(derived_name) > interface_field_limit("name", model):
+        return None
+    if reserved_name_port_ids.get(derived_name) and port_id not in reserved_name_port_ids[derived_name]:
+        return None
+    return derived_name
+
+
+def _cross_source_interface_port_ids(ports):
+    """Return normalized port IDs claimed by both host and OOB rows."""
+    port_sources = {}
+    for port in ports:
+        port_id = normalize_librenms_port_id(port.get("port_id"))
+        if port_id is not None:
+            port_sources.setdefault(port_id, set()).add(port.get("_source") == OOB_INVENTORY_SOURCE)
+    return {port_id for port_id, sources in port_sources.items() if len(sources) > 1}
+
+
+def _host_interface_names_by_device(ports, interface_name_field, target_device_ids, model):
+    """Return valid host-row names grouped by target device ID."""
+    host_names = {}
+    for port in ports:
+        if port.get("_source") == OOB_INVENTORY_SOURCE:
+            continue
+        port_id = normalize_librenms_port_id(port.get("port_id"))
+        name = syncable_interface_name(port, interface_name_field, model)
+        if port_id is not None and name is not None:
+            host_names.setdefault(target_device_ids.get(port_id), set()).add(name)
+    return host_names
+
+
+def _synced_interface_name_rejection_reason(port, interface_name_field, model):
+    """Return why the resolved sync name is unavailable."""
+    reason = interface_name_rejection_reason(port, interface_name_field, model)
+    if reason is not None:
+        return reason
+    if port.get("_source") == OOB_INVENTORY_SOURCE:
+        raw_name = syncable_interface_name(port, interface_name_field, model)
+        derived_name = f"{raw_name}{OOB_NAME_SUFFIX}"
+        limit = interface_field_limit("name", model)
+        if len(derived_name) > limit:
+            return f"derived interface name is longer than the {limit} characters NetBox stores"
+    return HOST_NAME_COLLISION_REASON
+
+
+def _oob_name_collision_rejections(
+    ports,
+    names,
+    host_names_by_device,
+    target_device_ids,
+    interface_name_field,
+    model,
+):
+    """Return OOB port IDs whose candidate names conflict with other snapshot rows."""
+    rejected = {}
+    oob_claims = {}
+    for port in ports:
+        if port.get("_source") != OOB_INVENTORY_SOURCE:
+            continue
+        port_id = normalize_librenms_port_id(port.get("port_id"))
+        device_id = target_device_ids.get(port_id)
+        synced_name = names.get(port_id)
+        raw_name = syncable_interface_name(port, interface_name_field, model)
+        if synced_name is not None and synced_name != raw_name:
+            if synced_name in host_names_by_device.get(device_id, set()):
+                rejected[port_id] = HOST_NAME_COLLISION_REASON
+        if synced_name is not None and not port.get("_dedup_conflict"):
+            oob_claims.setdefault((device_id, synced_name), []).append(port_id)
+    for port_ids in oob_claims.values():
+        if len(port_ids) > 1:
+            rejected.update(dict.fromkeys(port_ids, HOST_NAME_COLLISION_REASON))
+    return rejected
+
+
+def synced_interface_names(
+    ports,
+    interface_name_field,
+    model=None,
+    *,
+    target_device_ids=None,
+    reserved_name_port_ids_by_device=None,
+):
+    """
+    Resolve snapshot interface names by normalized LibreNMS port ID.
+
+    Args:
+        ports (list): The merged host and OOB port rows.
+        interface_name_field (str): Port field that contains the selected interface name.
+        model (type | None): Concrete interface model. Defaults to ``Interface``.
+        target_device_ids (dict[int, int] | None): Target device ID by normalized port ID.
+        reserved_name_port_ids_by_device (dict[int, dict[str, set[int]]] | None): Active-server
+            port IDs bound to each existing name, grouped by target device ID.
+
+    Returns:
+        tuple[dict[int, str], dict[int, str]]: Candidate names and rejection reasons by port ID.
+
+    """
+    if not is_list_of_dicts(ports):
+        return {}, {}
+    target_device_ids = target_device_ids or {}
+    reserved_name_port_ids_by_device = reserved_name_port_ids_by_device or {}
+    cross_source_port_ids = _cross_source_interface_port_ids(ports)
+    host_owned_names_by_device = _host_interface_names_by_device(
+        ports,
+        interface_name_field,
+        target_device_ids,
+        model,
+    )
+    names = {}
+    rejected = {}
+    for port in ports:
+        port_id = normalize_librenms_port_id(port.get("port_id"))
+        if port_id is None:
+            continue
+        if port_id in cross_source_port_ids:
+            names.pop(port_id, None)
+            rejected[port_id] = PORT_ID_SOURCE_COLLISION_REASON
+            continue
+        device_id = target_device_ids.get(port_id)
+        host_owned_names = host_owned_names_by_device.get(device_id, set())
+        reserved_name_port_ids = reserved_name_port_ids_by_device.get(device_id, {})
+        name = synced_interface_name(
+            port,
+            interface_name_field,
+            host_owned_names,
+            reserved_name_port_ids,
+            model,
+        )
+        if name is not None:
+            names[port_id] = name
+            continue
+        reported_name = syncable_interface_name(port, interface_name_field, model)
+        reserved_port_ids = reserved_name_port_ids.get(reported_name, set())
+        if port.get("_source") != OOB_INVENTORY_SOURCE and reserved_port_ids and port_id not in reserved_port_ids:
+            rejected[port_id] = REPORTED_NAME_PORT_COLLISION_REASON
+        else:
+            rejected[port_id] = _synced_interface_name_rejection_reason(port, interface_name_field, model)
+    rejected.update(
+        _oob_name_collision_rejections(
+            ports,
+            names,
+            host_owned_names_by_device,
+            target_device_ids,
+            interface_name_field,
+            model,
+        )
+    )
+    return names, rejected
+
+
+@dataclass(frozen=True)
+class ReportedNameOwner:
+    """The LibreNMS port bound to the NetBox interface that holds a host row's reported name."""
+
+    name: str
+    port_id: int
+    status: str
+    owner_row_name: str | None = None
+    owner_row_is_oob: bool = False
+    owner_synced_name: str | None = None
+
+    def explanation(self):
+        """Return the operator-facing text for this owner."""
+        if self.status == NAME_OWNER_LIVE:
+            source = "OOB" if self.owner_row_is_oob else "host"
+            held = (
+                f"NetBox interface '{self.name}' is bound to LibreNMS port {self.port_id}, "
+                f"the {source} row '{self.owner_row_name}'."
+            )
+            if self.owner_synced_name is None:
+                return f"{held} That row cannot sync either, so it cannot release the name."
+            return f"{held} Sync that row first; it syncs as '{self.owner_synced_name}'. Then sync this row."
+        if self.status == NAME_OWNER_STALE:
+            return (
+                f"NetBox interface '{self.name}' is bound to LibreNMS port {self.port_id}, which this device "
+                "no longer reports. Rebind keeps the interface, its IP addresses and cables, and moves only "
+                "the LibreNMS binding to this row's port."
+            )
+        return (
+            f"NetBox interface '{self.name}' is bound to LibreNMS port {self.port_id}. The OOB inventory "
+            "is incomplete, so that port can still exist. Refresh the data."
+        )
+
+
+def reported_name_owners(
+    ports,
+    interface_name_field,
+    synced_names,
+    rejected_names,
+    *,
+    target_device_ids,
+    reserved_name_port_ids_by_device,
+    snapshot_complete,
+    model=None,
+):
+    """
+    Classify who holds the reported name of each host row rejected for a name bound to another port.
+
+    Args:
+        ports (list): The merged host and OOB port rows.
+        interface_name_field (str): Port field that contains the selected interface name.
+        synced_names (dict[int, str]): Candidate names by port ID, from ``synced_interface_names``.
+        rejected_names (dict[int, str]): Rejection reasons by port ID, from ``synced_interface_names``.
+        target_device_ids (dict[int, int]): Target device ID by normalized port ID.
+        reserved_name_port_ids_by_device (dict[int, dict[str, set[int]]]): Active-server port IDs
+            bound to each existing name, grouped by target device ID.
+        snapshot_complete (bool): False when the snapshot is tagged ``oob_incomplete``.
+        model (type | None): Concrete interface model. Defaults to ``Interface``.
+
+    Returns:
+        dict[int, ReportedNameOwner]: The owner by the rejected row's normalized port ID.
 
     """
     if not is_list_of_dicts(ports):
         return {}
-    names_by_device = {}
+    rows_by_port_id = {}
     for port in ports:
-        if port.get("_source") == OOB_INVENTORY_SOURCE:
+        port_id = normalize_librenms_port_id(port.get("port_id"))
+        if port_id is not None:
+            rows_by_port_id.setdefault(port_id, port)
+    owners = {}
+    for port_id, port in rows_by_port_id.items():
+        if rejected_names.get(port_id) != REPORTED_NAME_PORT_COLLISION_REASON:
             continue
         name = syncable_interface_name(port, interface_name_field, model)
-        owner_id = owner_id_for_port(port)
-        if name is not None and owner_id is not None:
-            names_by_device.setdefault(owner_id, set()).add(name)
-    return names_by_device
+        reserved = reserved_name_port_ids_by_device.get(target_device_ids.get(port_id), {}).get(name, set())
+        holders = set(reserved) - {port_id}
+        if len(holders) != 1:
+            continue
+        holder = holders.pop()
+        owner_row = rows_by_port_id.get(holder)
+        if owner_row is None:
+            status = NAME_OWNER_STALE if snapshot_complete else NAME_OWNER_UNKNOWN
+            owners[port_id] = ReportedNameOwner(name=name, port_id=holder, status=status)
+            continue
+        owner_can_sync = holder not in rejected_names and not owner_row.get("_dedup_conflict")
+        owners[port_id] = ReportedNameOwner(
+            name=name,
+            port_id=holder,
+            status=NAME_OWNER_LIVE,
+            owner_row_name=owner_row.get(interface_name_field),
+            owner_row_is_oob=owner_row.get("_source") == OOB_INVENTORY_SOURCE,
+            owner_synced_name=synced_names.get(holder) if owner_can_sync else None,
+        )
+    return owners
 
 
 def bounded_interface_text(field_name, value, model=None):
@@ -2571,6 +2979,40 @@ def get_vlan_sync_css_class(exists_in_netbox: bool, name_matches: bool = True) -
     return "text-warning"
 
 
+def render_vlan_sync_action(vid, exists_in_netbox, name_matches, *, actions_enabled=True):
+    """
+    Return the VLAN row's status cell: the button that syncs this one row, or its state.
+
+    Shared by the table renderer and the verify endpoint so the row action always matches
+    the current VLAN synchronization state.
+    """
+    canonical_vid = normalize_vlan_vid(vid)
+    can_submit = actions_enabled and canonical_vid is not None
+    css_class = get_vlan_sync_css_class(exists_in_netbox, name_matches)
+    if not exists_in_netbox:
+        if not can_submit:
+            return format_html('<span class="{}">Not in NetBox</span>', css_class)
+        return format_html(
+            '<button type="submit" class="btn btn-sm btn-primary" name="sync_one" value="{}"'
+            ' title="Create this VLAN in NetBox"><i class="mdi mdi-plus-thick" aria-hidden="true"></i>'
+            " Create</button>",
+            canonical_vid,
+        )
+    if not name_matches:
+        if not can_submit:
+            return format_html('<span class="{}">Name differs</span>', css_class)
+        return format_html(
+            '<button type="submit" class="btn btn-sm btn-warning" name="sync_one" value="{}"'
+            ' title="Update this VLAN\'s name in NetBox"><i class="mdi mdi-pencil" aria-hidden="true"></i>'
+            " Update</button>",
+            canonical_vid,
+        )
+    return format_html(
+        '<span class="{}"><i class="mdi mdi-check-circle"></i> Synced</span>',
+        css_class,
+    )
+
+
 # ============================================
 # Interface VLAN CSS helpers
 # ============================================
@@ -2821,6 +3263,42 @@ def coerce_librenms_id(value) -> int | None:
     return None
 
 
+def normalize_vlan_vid(value) -> int | None:
+    """Return one valid NetBox VLAN VID, or None when the source value is unusable."""
+    from ipam.models import VLAN
+
+    vid = coerce_librenms_id(value)
+    if vid is None:
+        return None
+    try:
+        return VLAN._meta.get_field("vid").clean(vid, None)
+    except ValidationError:
+        return None
+
+
+def index_vlan_source_rows(rows):
+    """Index unique source rows by canonical VID and return every unusable row separately."""
+    candidate_counts = {}
+    for row in rows:
+        vid = normalize_vlan_vid(row.get("vlan_vlan"))
+        if vid is not None:
+            candidate_counts[vid] = candidate_counts.get(vid, 0) + 1
+
+    rows_by_vid = {}
+    invalid_rows = []
+    for row in rows:
+        vid = normalize_vlan_vid(row.get("vlan_vlan"))
+        if vid is not None and candidate_counts[vid] == 1:
+            rows_by_vid[vid] = row
+        else:
+            invalid_rows.append(row)
+    return rows_by_vid, invalid_rows
+
+
+# Header attributes for the sync tables: a header may wrap, and librenms_sync.js finds a column by its data-col.
+SYNC_TABLE_HEADER_ATTRS = {"class": "text-wrap", "data-col": lambda bound_column: bound_column.name}
+
+
 def render_vc_member_options(members, selected_id):
     """
     Build the ``<option>`` list for a Virtual Chassis member dropdown.
@@ -2872,6 +3350,36 @@ def oob_badge_html(record, leading_space=False):
     # args and raises TypeError when given a bare string).
     # Static trusted markup, no interpolation.
     return mark_safe((" " if leading_space else "") + OOB_BADGE_HTML)
+
+
+def rule_block_html(rule_block):
+    """
+    Return the pill that says why the interface rules refuse a row's write.
+
+    Shared by the IP and cable tables and the cable-verify formatter. It uses the badge language
+    of the interfaces table's rule pill.
+
+    Args:
+        rule_block (dict): The row data from ``interface_rules.row_rule_block``.
+
+    Returns:
+        SafeString: The pill markup.
+
+    """
+    from netbox_librenms_plugin.interface_rules import RuleDecisionKind  # interface_rules imports utils
+
+    if rule_block["kind"] == RuleDecisionKind.IGNORE.value:
+        color, icon, label = "secondary", "mdi-eye-off", "Ignored"
+    else:
+        color, icon, label = "warning", "mdi-refresh", "Refresh needed"
+    return format_html(
+        '<span class="badge bg-{}-lt fw-normal d-inline-flex align-items-center gap-1" title="Not synced: {}">'
+        '<i class="mdi {}"></i>{}</span>',
+        color,
+        rule_block["reason"],
+        icon,
+        label,
+    )
 
 
 def remote_port_html(value, record):
@@ -3269,14 +3777,20 @@ class AmbiguousLibreNMSIdError(LookupError):
     """
 
 
-def librenms_id_text_pattern(value: int) -> str:
-    """Return the SQL regex for the stored text forms of a coerce_librenms_id() result that it also reads."""
-    return rf"^{_ID_TEXT_SPACE}{_ID_TEXT_SIGN}0{{0,{_ID_TEXT_MAX_DIGITS - len(str(value))}}}{value}{_ID_TEXT_SPACE}$"
+def librenms_id_text_pattern(*values: int) -> str:
+    """Return one SQL regex for the stored text forms of these coerce_librenms_id() results that it also reads."""
+    forms = "|".join(f"0{{0,{_ID_TEXT_MAX_DIGITS - len(str(value))}}}{value}" for value in values)
+    return rf"^{_ID_TEXT_SPACE}{_ID_TEXT_SIGN}(?:{forms}){_ID_TEXT_SPACE}$"
 
 
 def build_librenms_id_qs(server_key, value):
+    """Build ``(host_q, oob_q)`` for one librenms_id; see :func:`build_librenms_ids_qs`."""
+    return build_librenms_ids_qs(server_key, [value])
+
+
+def build_librenms_ids_qs(server_key, values):
     """
-    Build ``(host_q, oob_q)`` Q objects matching every stored form of a librenms_id under server_key.
+    Build ``(host_q, oob_q)`` Q objects matching every stored form of any of these librenms_ids under server_key.
 
     Single source of truth for the librenms_id JSON-path coverage shared by
     :func:`find_by_librenms_id` and ``cables_view._librenms_id_q``, so the two can't drift on
@@ -3286,13 +3800,13 @@ def build_librenms_id_qs(server_key, value):
     text form by :func:`librenms_id_text_pattern`, so it finds exactly what coerce_librenms_id() reads.
 
     Fails closed on an invalid server key or value (bool / None / zero / negative / non-numeric
-    string): it returns match-nothing predicates rather than building a lookup that could hit a
-    corrupt legacy row. Callers may still pre-validate for their own control flow, but no longer
+    string): it drops an invalid value, and returns match-nothing predicates when no valid value is
+    left, rather than building a lookup that could hit a corrupt legacy row. Callers may still pre-validate for their own control flow, but no longer
     have to for safety.
 
     Args:
         server_key (str): The LibreNMS server key whose JSON sub-key is matched.
-        value (int | str): The already-validated LibreNMS id.
+        values (Iterable[int | str]): The already-validated LibreNMS ids.
 
     Returns:
         tuple[Q, Q]: ``(host_q, oob_q)`` — host-identity predicates (scalar / ``__id`` / legacy
@@ -3310,12 +3824,13 @@ def build_librenms_id_qs(server_key, value):
     # that could match a corrupt legacy row (e.g. ``custom_field_data__librenms_id="abc"``). Callers
     # still validate for their own reasons, but this makes the shared builder the last line of
     # defence.
-    normalized_value = coerce_librenms_id(value)
-    if normalized_value is None:
+    normalized_values = sorted({coerce_librenms_id(value) for value in values} - {None})
+    if not normalized_values:
         match_none = Q(pk__in=[])
         return match_none, match_none
     # Text regex only: jsonb equality would also find a float 42.0 that the decoder rejects.
-    numeric_pattern = librenms_id_text_pattern(normalized_value)
+    # One alternation per JSON path: N values must not cost N predicates per path.
+    numeric_pattern = librenms_id_text_pattern(*normalized_values)
     host_q = (
         Q(**{f"custom_field_data__librenms_id__{server_key}__regex": numeric_pattern})
         | Q(**{f"custom_field_data__librenms_id__{server_key}__id__regex": numeric_pattern})
@@ -3463,6 +3978,123 @@ def find_by_librenms_id(model, librenms_id, server_key: str = "default", *, sele
         )
     # Host identity wins when both resolve to the same row (or only one matched).
     return host_match or oob_match
+
+
+def find_interface_by_librenms_port_id(port_id, server_key: str):
+    """
+    Return the one Interface or VMInterface bound to a LibreNMS port on this server, or None.
+
+    A LibreNMS port ID names one port, so a holder on either model is the only owner. Every
+    writer that binds a port ID reads this, so no writer can add a second owner on the other model.
+
+    Args:
+        port_id (int | str): The LibreNMS port ID.
+        server_key (str): The LibreNMS server key.
+
+    Returns:
+        Interface | VMInterface | None: The interface that holds the port.
+
+    Raises:
+        AmbiguousLibreNMSIdError: When more than one interface, on either model, holds the port.
+
+    """
+    from virtualization.models import VMInterface
+
+    owners = [
+        owner
+        for model in (Interface, VMInterface)
+        if (owner := find_by_librenms_id(model, port_id, server_key)) is not None
+    ]
+    if len(owners) > 1:
+        raise AmbiguousLibreNMSIdError(
+            f"LibreNMS port {port_id!r} is bound to both an Interface and a VMInterface on server {server_key!r}"
+        )
+    return owners[0] if owners else None
+
+
+class PortDisclosure:
+    """
+    The one rule that decides whether a refusal or a pill may name a LibreNMS port.
+
+    A port's id, name and refusing rule may be shown only when the port's owner is in the user's
+    view scope. When an interface is bound to the port on this server, that interface and its own
+    owner (read from the binding) must be in view scope, and the owner a caller passes does not
+    count. For an unbound port the caller's owner counts; None is never visible. An ambiguous
+    binding is never visible.
+
+    A table calls :meth:`preload` once with every ``(port_id, owner)`` it may ask about, so the
+    rule costs a fixed number of queries per render. A writer may ask one port at a time. The
+    cable and IP tables and writers all use it.
+    """
+
+    def __init__(self, user, server_key: str):
+        """Bind the rule to one user and one LibreNMS server; nothing is read yet."""
+        self._user = user
+        self._server_key = server_key
+        self._bindings = {}
+        self._visible = {}
+
+    def preload(self, ports) -> None:
+        """
+        Read the bindings and the view scope for these ``(port_id, owner)`` pairs.
+
+        It costs one query per interface model for the bindings, and one per model for the view
+        scope, whatever the number of ports.
+        """
+        from virtualization.models import VMInterface
+
+        ports = list(ports)
+        new_ids = {port_id for port_id, _owner in ports if port_id not in self._bindings}
+        if new_ids:
+            host_q, oob_q = build_librenms_ids_qs(self._server_key, new_ids)
+            for model in (Interface, VMInterface):
+                for interface in model.objects.filter(host_q | oob_q):
+                    port_id = get_librenms_device_id(interface, self._server_key, auto_save=False)
+                    if port_id in new_ids:
+                        self._bindings.setdefault(port_id, []).append(interface)
+            for port_id in new_ids:
+                self._bindings.setdefault(port_id, [])
+        wanted = {}
+        for port_id, owner in ports:
+            for model, pk in self._evidence(port_id, owner):
+                wanted.setdefault(model, set()).add(pk)
+        for model, pks in wanted.items():
+            pks -= {pk for (known_model, pk) in self._visible if known_model is model}
+            if not pks:
+                continue
+            visible = self._visible_pks(model, pks)
+            self._visible.update({(model, pk): pk in visible for pk in pks})
+
+    def __call__(self, port_id, owner) -> bool:
+        """Return whether a refusal may name *port_id*; reads what :meth:`preload` did not."""
+        self.preload([(port_id, owner)])
+        evidence = self._evidence(port_id, owner)
+        return bool(evidence) and all(self._visible[key] for key in evidence)
+
+    def _evidence(self, port_id, owner) -> list:
+        """Return the ``(model, pk)`` objects that must be visible, or ``[]`` when none can be."""
+        from virtualization.models import VirtualMachine, VMInterface
+
+        bound = self._bindings.get(port_id, [])
+        if len(bound) > 1:
+            return []
+        if bound:
+            interface = bound[0]
+            if isinstance(interface, VMInterface):
+                return [(VMInterface, interface.pk), (VirtualMachine, interface.virtual_machine_id)]
+            return [(Interface, interface.pk), (Device, interface.device_id)]
+        return [] if owner is None else [(type(owner), owner.pk)]
+
+    def _visible_pks(self, model, pks) -> set:
+        """Return the subset of *pks* the user may view, with the same checks as :func:`_object_is_visible`."""
+        user = self._user
+        if user is None or not getattr(user, "is_authenticated", False):
+            return set()
+        if getattr(user, "is_superuser", False):
+            return set(pks)
+        if not user.has_perm(f"{model._meta.app_label}.view_{model._meta.model_name}"):
+            return set()
+        return set(model.objects.restrict(user, "view").filter(pk__in=pks).values_list("pk", flat=True))
 
 
 def lock_librenms_id_assignment(librenms_id, server_key: str, *, owner_queryset=None, owner_pk=None):
@@ -3810,6 +4442,59 @@ def netbox_clean_reads_parent_virtual_chassis():
     if version is None:
         return True
     return version == _PARENT_CHASSIS_CLEAN_BUG_VERSION
+
+
+def netbox_interface_clean(interface):
+    """
+    Run NetBox's ``clean()`` on an interface, with the 4.4.0 parent-chassis defect handled.
+
+    NetBox 4.4.0 reads ``self.parent.virtual_chassis`` for a parent on another device, so the
+    chassis check it means to run raises AttributeError. Its type rule for a parent runs before
+    that check. On the same chassis the parent is valid, so validation runs again without it and
+    the later rules still apply. On another chassis (or none), the error NetBox means is raised.
+
+    Args:
+        interface: The Interface or VMInterface to validate.
+
+    Raises:
+        ValidationError: NetBox refuses the interface.
+        AttributeError: Any failure that is not the 4.4.0 parent-chassis defect.
+
+    """
+    try:
+        interface.clean()
+    except AttributeError as exc:
+        parent = getattr(interface, "parent", None)
+        source_chassis = getattr(getattr(interface, "device", None), "virtual_chassis_id", None)
+        if not (
+            # exc.name is the attribute the failed access asked for, so this matches the one dereference.
+            getattr(exc, "name", None) == "virtual_chassis"
+            and parent is not None
+            and getattr(interface, "device_id", None) != getattr(parent, "device_id", None)
+            and source_chassis is not None
+            and netbox_clean_reads_parent_virtual_chassis()
+        ):
+            raise
+        if parent.device.virtual_chassis_id != source_chassis:
+            raise ValidationError(
+                {
+                    "parent": (
+                        f"The selected parent interface ({parent}) belongs to {parent.device}, which is not part "
+                        f"of virtual chassis {interface.device.virtual_chassis}."
+                    )
+                }
+            ) from exc
+        interface.parent_id = None
+        try:
+            interface.clean()
+        finally:
+            interface.parent = parent
+        logger.debug(
+            "Interface %s: this NetBox cannot validate its parent on another chassis member; both interfaces "
+            "belong to virtual chassis %s, so the parent is accepted.",
+            interface.name,
+            source_chassis,
+        )
 
 
 def netbox_allows_standalone_vm_host():
@@ -5142,35 +5827,6 @@ def load_bay_mappings() -> tuple:
     exact = [m for m in all_mappings if not m.is_regex]
     regex = [m for m in all_mappings if m.is_regex]
     return exact, regex
-
-
-def select_interface_type_mapping(mappings, speed):
-    """
-    Return the InterfaceTypeMapping one LibreNMS speed resolves to.
-
-    The sync writer and the interface table must agree about which mapping applies, otherwise
-    the row reports a gap the writer does not see (or hides one it does). Both call this with
-    the rows for a single ``librenms_type``.
-
-    Args:
-        mappings: InterfaceTypeMapping rows for one LibreNMS interface type.
-        speed (int | None): The port speed in kilobits per second, if known.
-
-    Returns:
-        InterfaceTypeMapping | None: The highest speed row at or below *speed*, else the
-        speed-agnostic row for that type, else None.
-
-    """
-    wildcard = None
-    best = None
-    for mapping in mappings:
-        if mapping.librenms_speed is None:
-            if wildcard is None:
-                wildcard = mapping
-        elif speed is not None and mapping.librenms_speed <= speed:
-            if best is None or mapping.librenms_speed > best.librenms_speed:
-                best = mapping
-    return best or wildcard
 
 
 def effective_vlan_mode(vlan_data):

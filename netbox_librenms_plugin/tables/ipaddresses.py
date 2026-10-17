@@ -3,7 +3,7 @@ from django.utils.html import format_html, mark_safe
 from netbox.tables.columns import ToggleColumn
 from utilities.paginator import EnhancedPaginator
 
-from netbox_librenms_plugin.utils import get_table_paginate_count, identify_ip_sync_rows
+from netbox_librenms_plugin.utils import get_table_paginate_count, identify_ip_sync_rows, rule_block_html
 
 
 class IPAddressTable(tables.Table):
@@ -93,6 +93,13 @@ class IPAddressTable(tables.Table):
                    title="Suggested from LibreNMS VRF {{ record.vrf_suggested_from.name }} by {{ record.vrf_suggested_from.matched_by }} match"
                    aria-label="Suggested from LibreNMS VRF {{ record.vrf_suggested_from.name }} by {{ record.vrf_suggested_from.matched_by }} match"></i>
             {% endif %}
+            {% if record.vrf_create_url %}
+                <button type="submit" class="btn btn-sm btn-outline-primary text-nowrap" name="create_vrf" value="{{ record.row_id }}"
+                        formaction="{{ record.vrf_create_url }}"
+                        data-confirm="Create NetBox VRF '{{ record.librenms_vrf.name }}' with {% if record.librenms_vrf.rd %}route distinguisher {{ record.librenms_vrf.rd }}{% else %}no route distinguisher{% endif %}? The IP address is not synced."
+                        title="LibreNMS VRF {{ record.librenms_vrf.name }} is not in NetBox. Create it."
+                        aria-label="Create NetBox VRF {{ record.librenms_vrf.name }}"><i class="mdi mdi-plus-thick" aria-hidden="true"></i> VRF</button>
+            {% endif %}
         </div>
         """,
         attrs={"td": {"data-col": "vrf"}},
@@ -108,6 +115,8 @@ class IPAddressTable(tables.Table):
         row_id = record.get("row_id", record.get("ip_with_mask"))
         if row_id is None:
             return "Ambiguous source row"
+        if record.get("rule_block") and value != "matched":
+            return rule_block_html(record["rule_block"])
         if value == "update":
             return format_html(
                 '<button type="submit" class="btn btn-sm btn-warning" name="sync_one" value="{}">'

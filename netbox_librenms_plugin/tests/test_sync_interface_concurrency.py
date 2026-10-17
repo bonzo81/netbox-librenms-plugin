@@ -2,16 +2,20 @@
 
 import os
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from threading import Event
 
 import pytest
 from django.apps import apps
 
 from netbox_librenms_plugin.tests.conftest import (
+    _PORT_KEYS_UNSET,
     configure_default_librenms_server,
     configured_server_key,
     make_virtual_chassis_members,
+    run_in_threads,
 )
+
 
 # Window a competing thread must NOT get through while the row lock is held. A negative wait
 # proves only that nothing happened inside it, so keep the four sites on one name and raise it
@@ -56,6 +60,7 @@ def test_selected_vc_target_is_locked_through_interface_sync():
     release_sync = Event()
 
     port = {
+        **_PORT_KEYS_UNSET,
         "ifName": "Gi0/1",
         "ifType": "ethernetCsmacd",
         "ifSpeed": 1_000_000_000,
@@ -266,6 +271,7 @@ def test_auto_selected_owner_is_revalidated_after_vc_position_changes():
         count=3,
     )
     port = {
+        **_PORT_KEYS_UNSET,
         "port_id": 10,
         "ifName": "Ethernet2/1",
         "ifType": "ethernetCsmacd",
@@ -479,6 +485,7 @@ def test_vm_sync_serializes_duplicate_display_name_resolution():
 
             view._resolve_vm_interface = pause_after_resolution
             port = {
+                **_PORT_KEYS_UNSET,
                 "port_id": port_id,
                 "ifName": f"Ethernet{port_id}",
                 "ifDescr": "Ethernet",
@@ -541,8 +548,8 @@ def test_relationship_write_locks_virtual_chassis_members_through_validation():
         cache_key,
         {
             "ports": [
-                {"port_id": 10, "ifName": member.name},
-                {"port_id": 20, "ifName": aggregate.name},
+                {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": member.name},
+                {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": aggregate.name},
             ],
             "port_stack_relationships": {"lag_members": {10: 20}, "sub_interfaces": {}},
         },
@@ -735,8 +742,8 @@ def test_inline_relationship_does_not_lock_unrelated_interfaces():
         cache_key,
         {
             "ports": [
-                {"port_id": 10, "ifName": child.name},
-                {"port_id": 20, "ifName": parent.name},
+                {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": child.name},
+                {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": parent.name},
             ],
             "port_stack_relationships": {"lag_members": {}, "sub_interfaces": {10: 20}},
         },
@@ -882,9 +889,9 @@ def test_bulk_relationship_pass_does_not_lock_unrelated_interfaces():
     user = make_superuser("bulk-targeted-edge-user")
     relationship_finished = Event()
     ports = [
-        {"port_id": 10, "ifName": child.name},
-        {"port_id": 20, "ifName": parent.name},
-        {"port_id": 30, "ifName": unrelated.name},
+        {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": child.name},
+        {**_PORT_KEYS_UNSET, "port_id": 20, "ifName": parent.name},
+        {**_PORT_KEYS_UNSET, "port_id": 30, "ifName": unrelated.name},
     ]
 
     def apply_relationships():
@@ -975,3 +982,258 @@ def test_relationship_scope_lock_blocks_new_virtual_chassis_members():
         join_future.result(timeout=10)
 
     assert not joined_while_scope_locked
+
+
+@pytest.mark.parametrize(
+    "winner_kind,loser_path", [("device", "sync"), ("virtualmachine", "sync"), ("virtualmachine", "module")]
+)
+def test_concurrent_cross_model_port_claim_refuses_without_partial_writes(settings, winner_kind, loser_path):
+    """An uncommitted binding excludes another owner before it can create or update a row."""
+    from dcim.models import Interface
+    from django.db import close_old_connections, connections, transaction
+    from django.test import Client
+    from virtualization.models import VMInterface
+
+    from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
+    from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
+    from netbox_librenms_plugin.tests.conftest import make_cluster, make_device, make_interface, make_superuser, make_vm
+    from netbox_librenms_plugin.tests.test_interface_port_binding_cross_model import _port, _sync
+    from netbox_librenms_plugin.utils import get_librenms_device_id
+    from netbox_librenms_plugin.views.sync.modules import _bind_interface_librenms_id
+
+    server_key = configure_default_librenms_server(settings)
+    device = make_device("claim-device", librenms_cf={server_key: {"id": 71}})
+    vm = make_vm("claim-vm", make_cluster("claim-cluster"))
+    winner, loser = (device, vm) if winner_kind == "device" else (vm, device)
+    winner_model = Interface if winner_kind == "device" else VMInterface
+    loser_model = VMInterface if winner_kind == "device" else Interface
+    user = make_superuser("claim-user")
+    loser_interface = make_interface(device, "eth0") if loser_path == "module" else None
+    client = Client()
+    client.force_login(user)
+
+    def competing_write():
+        close_old_connections()
+        try:
+            if loser_path == "module":
+                return _bind_interface_librenms_id(
+                    device,
+                    {"_librenms_port_id": "009301", "_librenms_ifname": "eth0"},
+                    None,
+                    server_key,
+                    Interface.objects.all(),
+                )
+            return _sync(client, loser, "virtualmachine" if winner_kind == "device" else "device", "009301")
+        finally:
+            connections.close_all()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with transaction.atomic():
+            held = resolve_or_create_interface_from_port(
+                winner,
+                _port(9301, "eth0"),
+                rules=InterfaceRuleMatcher(()),
+                server_key=server_key,
+                interface_name_field="ifName",
+                changeable_queryset=winner_model.objects.all(),
+                viewable_queryset=winner_model.objects.all(),
+            )
+            response = executor.submit(competing_write).result(timeout=10)
+            if loser_path == "module":
+                assert response["status"] == "conflict"
+                assert "retry" in response["reason"].lower()
+                loser_interface.refresh_from_db()
+                assert get_librenms_device_id(loser_interface, server_key, auto_save=False) is None
+            else:
+                from django.contrib.messages import get_messages
+
+                assert any("retry" in str(message).lower() for message in get_messages(response.wsgi_request))
+                owner_filter = {"virtual_machine": loser} if winner_kind == "device" else {"device": loser}
+                assert not loser_model.objects.filter(**owner_filter).exists()
+        held.refresh_from_db()
+        assert get_librenms_device_id(held, server_key, auto_save=False) == 9301
+
+
+def test_port_claims_are_reentrant_isolated_by_server_and_released_on_rollback():
+    """Real PostgreSQL claims canonicalize IDs and do not block opposite-order batches."""
+    from django.db import close_old_connections, connections, transaction
+    from netbox_librenms_plugin.utils import LibreNMSPortBindingConflict, claim_librenms_port_binding
+
+    def compete():
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                claim_librenms_port_binding(9301, "other")
+                claim_librenms_port_binding(9302, "default")
+                with pytest.raises(LibreNMSPortBindingConflict, match="retry"):
+                    claim_librenms_port_binding("009301", "default")
+                return True
+        finally:
+            connections.close_all()
+
+    with pytest.raises(RuntimeError, match="open transaction"):
+        claim_librenms_port_binding(9301, "default")
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with transaction.atomic():
+            claim_librenms_port_binding(9301, "default")
+            claim_librenms_port_binding("009301", "default")
+            assert executor.submit(compete).result(timeout=5)
+            transaction.set_rollback(True)
+
+        # A different connection can now claim the released identity.
+        def after_rollback():
+            close_old_connections()
+            try:
+                with transaction.atomic():
+                    claim_librenms_port_binding(9301, "default")
+            finally:
+                connections.close_all()
+
+        executor.submit(after_rollback).result(timeout=5)
+
+
+@pytest.mark.parametrize("action", ["rebind", "cable"])
+@pytest.mark.parametrize("htmx", [False, True])
+def test_direct_actions_refuse_a_concurrent_port_claim_without_leftovers(settings, librenms_server, action, htmx):
+    """Both browser response paths deliver the retry message without partial writes."""
+    from dcim.models import Interface
+    from django.db import close_old_connections, connections, transaction
+    from django.test import Client
+    from django.urls import reverse
+    from netbox_librenms_plugin.tests.conftest import bind_librenms_server, make_superuser
+    from netbox_librenms_plugin.tests.test_interface_name_owner_rebind import (
+        HOST_PORT,
+        STALE_PORT,
+        _binding,
+        _bound_interface,
+        _device,
+        _port,
+        _seed,
+    )
+    from netbox_librenms_plugin.tests.test_interface_port_binding_cross_model import _cable_scenario
+    from netbox_librenms_plugin.utils import claim_librenms_port_binding
+
+    server_key = configure_default_librenms_server(settings)
+    bind_librenms_server(settings, librenms_server, server_key=server_key)
+    client = Client()
+    client.force_login(make_superuser("claim-response-user"))
+    if action == "rebind":
+        owner = _device("claim-rebind")
+        existing = _bound_interface(owner, "eth0", STALE_PORT)
+        _seed(owner, [_port(HOST_PORT, "eth0")])
+        port_id = HOST_PORT
+        url = reverse(
+            "plugins:netbox_librenms_plugin:rebind_interface_port",
+            kwargs={"object_type": "device", "object_id": owner.pk},
+        )
+        data = {
+            "server_key": server_key,
+            "interface_name_field": "ifName",
+            "rebind_one": str(port_id),
+            f"rebind_expected_port_{port_id}": str(STALE_PORT),
+        }
+    else:
+        server_key, owner, existing, remote, row_id = _cable_scenario(librenms_server, settings, "claim-cable")
+        port_id = 500
+        url = reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[owner.pk])
+        data = {"expected_local_id": existing.pk, "row_id": row_id, "server_key": server_key}
+
+    def compete():
+        close_old_connections()
+        try:
+            return client.post(url, data, follow=not htmx, HTTP_HX_REQUEST="true" if htmx else "false")
+        finally:
+            connections.close_all()
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with transaction.atomic():
+            claim_librenms_port_binding(port_id, server_key)
+            response = executor.submit(compete).result(timeout=10)
+            assert response.status_code == 200
+            assert "Another operation is binding this LibreNMS port. Refresh and retry." in response.content.decode()
+            if not htmx:
+                assert len(response.redirect_chain) == 1
+                destination, status = response.redirect_chain[0]
+                assert status == 302
+                assert f"tab={'interfaces' if action == 'rebind' else 'cables'}" in destination
+                assert f"server_key={server_key}" in destination
+    if action == "rebind":
+        assert _binding(existing) == STALE_PORT
+    else:
+        assert not Interface.objects.filter(device=remote).exists()
+        existing.refresh_from_db()
+        assert existing.cable is None
+
+
+def test_run_in_threads_raises_the_failure_that_broke_the_barrier_at_once():
+    """A peer at the barrier fails at once, and the error of the failed call is raised, not BrokenBarrierError."""
+    from threading import Barrier
+    from time import monotonic
+
+    barrier = Barrier(2)
+
+    def fail():
+        raise ValueError("the real failure")
+
+    started = monotonic()
+    with pytest.raises(ValueError, match="the real failure"):
+        run_in_threads(partial(barrier.wait, timeout=5), fail, barriers=(barrier,), timeout=10)
+    assert monotonic() - started < 2
+
+
+def test_run_in_threads_fails_a_hung_call_within_its_timeout():
+    """A hung call fails the run at the deadline, and a peer at the barrier is released at once."""
+    from threading import Barrier, BrokenBarrierError, Timer
+    from time import monotonic
+
+    barrier = Barrier(2)
+    hung = Event()
+    # Release the hung thread later, so a helper that waits for it ends instead of hanging the session.
+    release = Timer(3, hung.set)
+    release.start()
+    peer_released = Event()
+
+    def peer():
+        try:
+            barrier.wait(timeout=30)
+        except BrokenBarrierError:
+            peer_released.set()
+
+    started = monotonic()
+    try:
+        with pytest.raises(TimeoutError):
+            run_in_threads(hung.wait, peer, barriers=(barrier,), timeout=0.5)
+        assert monotonic() - started < 2
+    finally:
+        hung.set()
+        release.cancel()
+    assert peer_released.wait(timeout=2)
+
+
+def test_opposite_order_port_claims_refuse_without_deadlock():
+    from threading import Barrier
+    from django.db import close_old_connections, connections, transaction
+    from netbox_librenms_plugin.utils import LibreNMSPortBindingConflict, claim_librenms_port_binding
+
+    first_claims_ready = Barrier(2)
+    second_claims_done = Barrier(2)
+
+    def claim_in_order(first, second):
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                claim_librenms_port_binding(first, "default")
+                first_claims_ready.wait(timeout=5)
+                with pytest.raises(LibreNMSPortBindingConflict, match="retry"):
+                    claim_librenms_port_binding(second, "default")
+                # Both transactions retain their first claim until both try the second.
+                second_claims_done.wait(timeout=5)
+        finally:
+            connections.close_all()
+
+    run_in_threads(
+        partial(claim_in_order, 9301, 9302),
+        partial(claim_in_order, 9302, 9301),
+        barriers=(first_claims_ready, second_claims_done),
+        timeout=10,
+    )

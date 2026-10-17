@@ -2,8 +2,10 @@
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor, wait
 from copy import deepcopy
 from itertools import chain
+from threading import BrokenBarrierError
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -198,12 +200,16 @@ def _seeded_rule_rows():
         rules.SERIAL_RULE,
     )
     bridge = importlib.import_module("netbox_librenms_plugin.migrations.0019_portstacklagpattern_bridge_name_pattern")
+    # 0021 widened the bridge pattern 0019 seeded, so the restore takes that field from there.
+    # Restoring 0019's value would silently undo the later migration for every test after the
+    # first transactional one.
+    widened = importlib.import_module("netbox_librenms_plugin.migrations.0021_widen_linux_bridge_pattern")
     yield (
         PortStackLagPattern,
         {"librenms_os": bridge.BRIDGE_OS},
         {
             "lag_name_pattern": bridge.LAG_PATTERN,
-            "bridge_name_pattern": bridge.BRIDGE_PATTERN,
+            "bridge_name_pattern": widened.NEW_PATTERN,
             "description": bridge.SEEDED_DESCRIPTION,
         },
     )
@@ -410,6 +416,18 @@ def _reseed_after_transactional_flush(django_db_setup, django_db_blocker):
 # row set per test transaction, and everything is rolled back between tests.
 
 
+def typed_maps(relationships):
+    """Return only the typed relationship maps from a resolver result.
+
+    ``resolve_port_relationships`` also reports the untyped ``stacked_ports`` map and a
+    ``diagnostics`` block, so a whole-dict comparison would assert those by accident. A test that
+    cares about the untyped map asserts it by name.
+    """
+    from netbox_librenms_plugin.constants import RELATIONSHIP_KINDS
+
+    return {kind: relationships[kind] for kind in RELATIONSHIP_KINDS}
+
+
 def _shared_infra():
     """get_or_create the shared Site / Manufacturer / DeviceType / DeviceRole."""
     from dcim.models import DeviceRole, DeviceType, Manufacturer, Site
@@ -543,6 +561,35 @@ def make_interface(device, name, *, iface_type="other"):
     from dcim.models import Interface
 
     return Interface.objects.create(device=device, name=name, type=iface_type)
+
+
+def make_required_interface_custom_field(name):
+    """Create a required text custom field on Interface, so NetBox's clean() refuses an interface without it."""
+    from core.models import ObjectType
+    from dcim.models import Interface
+    from extras.models import CustomField
+
+    custom_field = CustomField.objects.create(name=name, type="text", required=True)
+    custom_field.object_types.set([ObjectType.objects.get_for_model(Interface)])
+    return custom_field
+
+
+# Optional port values in fixtures that provide their own ifName.
+_PORT_KEYS_UNSET = {"ifDescr": None, "ifType": None, "ifSpeed": None}
+
+
+def stamp_rule_decision(record, *, platform_id=None, rules=None):
+    """
+    Give a hand-built interface row the rule decision the interfaces tab view stamps on it.
+
+    ``rules`` is an ``InterfaceRuleMatcher``; without it the stored rules are loaded, which needs
+    the database. Pass ``InterfaceRuleMatcher(())`` for a row that no rule matches.
+    """
+    from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
+
+    matcher = InterfaceRuleMatcher.load() if rules is None else rules
+    record["rule_decision"] = matcher.check_interface_write(record, platform_id=platform_id)
+    return record
 
 
 def make_ip(address, *, assigned_object=None, status="active"):
@@ -715,6 +762,40 @@ def ip_on(device, address, ifname, *, iface_type="1000base-t"):
 def delete_keeping_pk(obj):
     """Delete the row via the queryset so the in-memory instance keeps its pk."""
     type(obj).objects.filter(pk=obj.pk).delete()
+
+
+def run_in_threads(*calls, barriers, timeout):
+    """
+    Run each zero-argument call in its own thread and return the results in call order.
+
+    A call that fails aborts *barriers*, so a peer that waits at one fails at once and does not wait
+    for its timeout. The failure is raised, not the BrokenBarrierError of a peer.
+    """
+
+    def run(call):
+        try:
+            return call()
+        except BaseException:
+            for barrier in barriers:
+                barrier.abort()
+            raise
+
+    executor = ThreadPoolExecutor(max_workers=len(calls))
+    try:
+        futures = [executor.submit(run, call) for call in calls]
+        # One deadline for all calls; a hung call must fail the run, not block the executor exit.
+        _done, pending = wait(futures, timeout=timeout)
+        if pending:
+            for barrier in barriers:
+                barrier.abort()
+            raise TimeoutError(f"{len(pending)} of {len(calls)} threaded calls did not finish in {timeout}s")
+        failures = [error for future in futures if (error := future.exception()) is not None]
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+    failures.sort(key=lambda error: isinstance(error, BrokenBarrierError))
+    if failures:
+        raise failures[0]
+    return [future.result() for future in futures]
 
 
 def make_superuser(username="review-su"):

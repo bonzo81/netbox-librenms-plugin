@@ -7,7 +7,9 @@ from dcim.models import Device, Interface, VirtualChassis
 from django.contrib import messages
 from django.core import signing
 from django.core.cache import cache
-from django.db import transaction
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError, transaction
+from django.db.models import Q
 from django.http import Http404, HttpResponse
 from django.shortcuts import redirect, render
 from django.urls import reverse
@@ -16,6 +18,7 @@ from ipam.models import VRF, IPAddress
 from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE, is_supported_interface_name_field
+from netbox_librenms_plugin.interface_rules import PortSyncBlocked, interface_rules_for_request
 from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix
 from netbox_librenms_plugin.librenms_api import LibreNMSIDConflictError
@@ -27,14 +30,17 @@ from netbox_librenms_plugin.sync_cache import (
 )
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
+    build_migrated_context,
     get_librenms_device_id,
     get_migrated_to_marker,
-    get_virtual_chassis_members,
     index_ip_source_interfaces,
     index_ip_sync_rows,
     ip_family,
+    index_ip_port_records,
+    ip_row_port_record,
     normalize_ip_sync_row_id,
     normalize_librenms_port_id,
+    PortDisclosure,
     resolve_create_missing_interfaces,
     resolve_interface_row_device,
     resolve_ip_source_interface,
@@ -42,6 +48,7 @@ from netbox_librenms_plugin.utils import (
     same_host,
     syncable_interface_name,
 )
+from netbox_librenms_plugin.views.base.ip_addresses_view import ip_assignment_ports, ip_interface_scope
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -63,6 +70,11 @@ def _ip_host_lock_identity(parsed, vrf) -> str:
 def _acquire_ip_host_lock(parsed, vrf) -> None:
     """Serialize writes for one canonical host and VRF."""
     acquire_advisory_transaction_lock(_ip_host_lock_identity(parsed, vrf))
+
+
+def vrf_create_lock_identity(name):
+    """Return the advisory lock identity that serializes creating a VRF with *name*."""
+    return f"netbox-librenms-plugin:vrf-create:{name}"
 
 
 class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -265,6 +277,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 object_type,
                 force_intents=force_intents,
                 cached_ports_by_id=cached_snapshot.get("ports_by_id") or {},
+                bound_ports_by_id=cached_snapshot.get("bound_ports_by_id") or {},
                 interface_name_field=cached_snapshot.get("interface_name_field"),
             )
         except LibreNMSIDConflictError as exc:
@@ -428,16 +441,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 cached ``interface_url`` (which survives a rename) can still resolve the target.
 
         """
-        if isinstance(obj, Device):
-            # Route member expansion through the shared helper (returns [obj] when not in a VC)
-            # so this can't drift from the VC member set used by the interface-sync path.
-            member_devices = get_virtual_chassis_members(obj)
-            interfaces = list(self.restricted_queryset(Interface).filter(device__in=member_devices))
-            obj_device_id = obj.pk
-        else:
-            interfaces = list(self.restricted_queryset(VMInterface).filter(virtual_machine=obj))
-            obj_device_id = None
-        return index_ip_source_interfaces(interfaces, server_key, obj_device_id)
+        _owners, interfaces = ip_interface_scope(self, obj)
+        return index_ip_source_interfaces(interfaces, server_key, obj.pk if isinstance(obj, Device) else None)
 
     @staticmethod
     def _match_interface(ip_data, by_librenms_id, by_name, by_pk=None):
@@ -521,19 +526,6 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     state["interfaces_by_port_id"].setdefault(bound_id, []).append(interface)
         return state
 
-    @staticmethod
-    def _cached_port(cached_ports_by_id, port_id):
-        """Return one cached port whose canonical ID matches the IP row."""
-        normalized_id = normalize_librenms_port_id(port_id)
-        if normalized_id is None or not isinstance(cached_ports_by_id, dict):
-            return None
-        matches = [
-            port
-            for raw_id, port in cached_ports_by_id.items()
-            if normalize_librenms_port_id(raw_id) == normalized_id and isinstance(port, dict)
-        ]
-        return matches[0] if len(matches) == 1 else None
-
     def _create_interface_for_ip(
         self,
         obj,
@@ -547,7 +539,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         """Create one missing interface from the cached port that owns an IP row."""
         if not is_supported_interface_name_field(interface_name_field):
             raise ValueError("The cached interface naming field is missing or invalid. Refresh the IP data.")
-        port = self._cached_port(cached_ports_by_id, ip_data.get("port_id"))
+        port = ip_row_port_record(cached_ports_by_id, ip_data.get("port_id"))
         if port is None or port.get("_source") == OOB_INVENTORY_SOURCE:
             raise ValueError("The cached LibreNMS port is missing or ambiguous. Refresh the IP data.")
         if normalize_librenms_port_id(port.get("port_id")) != normalize_librenms_port_id(ip_data.get("port_id")):
@@ -587,9 +579,11 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             owner = locked_obj
             interface_model = VMInterface
 
+        # Raises PortSyncBlocked before any write when the rules refuse the port for this owner.
         interface = resolve_or_create_interface_from_port(
             owner,
             port,
+            rules=interface_rules_for_request(self.request),
             server_key=server_key,
             interface_name_field=interface_name_field,
             changeable_queryset=self.restricted_queryset(interface_model, "change"),
@@ -603,17 +597,24 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         return interface, interface_creation_state
 
     def _lock_target_interface(self, obj, interface, interface_creation_state=None):
-        """Lock and recheck the current interface owner before an IP assignment."""
+        """
+        Lock and recheck the current interface owner before an IP assignment.
+
+        Returns:
+            tuple: ``(locked_interface, locked_owner)``, or ``(None, None)`` when the interface
+                left the owner scope.
+
+        """
         if interface_creation_state is None:
             locked_obj, locked_owners = self._lock_interface_owner_scope(obj)
         else:
             locked_obj = interface_creation_state["locked_obj"]
             locked_owners = interface_creation_state["locked_members"]
         if locked_obj is None:
-            return None
+            return None, None
         if isinstance(locked_obj, Device):
             if not isinstance(interface, Interface):
-                return None
+                return None, None
             allowed_owner_ids = {owner.pk for owner in locked_owners}
             locked_interface = (
                 self.restricted_queryset(Interface, "view")
@@ -622,16 +623,14 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 .first()
             )
             if locked_interface is None or locked_interface.device_id not in allowed_owner_ids:
-                return None
-            owner_by_id = {owner.pk: owner for owner in locked_owners}
+                return None, None
+            owner = {owner.pk: owner for owner in locked_owners}[locked_interface.device_id]
             server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
-            if get_migrated_to_marker(locked_obj, server_key) or get_migrated_to_marker(
-                owner_by_id[locked_interface.device_id], server_key
-            ):
+            if get_migrated_to_marker(locked_obj, server_key) or get_migrated_to_marker(owner, server_key):
                 raise ValueError("The interface owner is read-only because it was migrated.")
-            return locked_interface
+            return locked_interface, owner
         if not isinstance(interface, VMInterface):
-            return None
+            return None, None
         locked_interface = (
             self.restricted_queryset(VMInterface, "view")
             .select_for_update(of=("self",))
@@ -639,8 +638,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             .first()
         )
         if locked_interface is None or locked_interface.virtual_machine_id != locked_obj.pk:
-            return None
-        return locked_interface
+            return None, None
+        return locked_interface, locked_obj
 
     @staticmethod
     def _set_primary_ip(obj, ip_obj):
@@ -1004,6 +1003,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         force_intents=None,
         cached_ports_by_id=None,
         interface_name_field=None,
+        bound_ports_by_id=None,
     ):
         """Sync selected IP rows in one transaction with per-row savepoints."""
         with transaction.atomic():
@@ -1016,6 +1016,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 force_intents=force_intents,
                 cached_ports_by_id=cached_ports_by_id,
                 interface_name_field=interface_name_field,
+                bound_ports_by_id=bound_ports_by_id,
             )
 
     def _process_ip_sync(  # noqa: C901
@@ -1028,6 +1029,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         force_intents=None,
         cached_ports_by_id=None,
         interface_name_field=None,
+        bound_ports_by_id=None,
     ):
         """
         Create or update IP addresses in NetBox from cached LibreNMS data.
@@ -1045,6 +1047,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             force_intents (dict[str, dict] | None): Confirmed IP changes indexed by canonical row identifier.
             cached_ports_by_id (dict[str, dict] | None): Cached LibreNMS ports indexed by stable port ID.
             interface_name_field (str | None): The configured LibreNMS interface name field.
+            bound_ports_by_id (dict[str, dict] | None): Cached records of the ports bound to
+                interfaces in scope; evidence for the interface rules only.
 
         Returns:
             dict: The per-outcome row lists, errors, conflicts, and batch mutation state.
@@ -1059,6 +1063,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             "primary_no_interface": [],
             "primary_interface_not_eligible": [],
             "skipped_no_interface": [],
+            "skipped_by_rule": [],
             "errors": {},
             "conflicts": [],
             "mutated": False,
@@ -1082,7 +1087,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         cached_index, duplicate_cached_rows = self._cached_ip_index(cached_ips)
         force_intents = force_intents or {}
         create_missing_interfaces = self._create_missing_interfaces(request)
-        cached_ports_by_id = cached_ports_by_id or {}
+        cached_ports_by_id = index_ip_port_records(cached_ports_by_id)
+        bound_ports_by_id = index_ip_port_records(bound_ports_by_id)
         interface_creation_state = None
         prelocked_host_locks = self._prelock_ip_hosts(
             request,
@@ -1153,13 +1159,27 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         row_mutations.add(row_id)
 
                     if interface is not None:
-                        locked_interface = self._lock_target_interface(obj, interface, interface_creation_state)
+                        locked_interface, owner = self._lock_target_interface(obj, interface, interface_creation_state)
                         if locked_interface is None:
                             raise ValueError(
                                 "The matched NetBox interface is no longer available in your view scope. "
                                 "Refresh the IP data and try again."
                             )
                         interface = locked_interface
+                        # The binding and the owner's platform are read under the lock.
+                        blocked = interface_rules_for_request(request).first_blocked_port(
+                            ip_assignment_ports(
+                                cached_ports_by_id,
+                                bound_ports_by_id or {},
+                                ip_data.get("port_id"),
+                                locked_interface,
+                                server_key,
+                                owner,
+                            ),
+                            PortDisclosure(request.user, server_key),
+                        )
+                        if blocked is not None:
+                            raise PortSyncBlocked(*blocked)
 
                     # This row ends in obj.save() (primary_ip) when it matches the management
                     # address, so it takes BOTH an ipam_ipaddress and a dcim_device row lock.
@@ -1270,9 +1290,14 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         )
                 # The row's savepoint rolled back, so drop only this row's keys.
                 row_mutations.clear()
-                logger.warning("IP sync failed for %s: %s", row_id, exc, exc_info=True)
-                results["failed"].append(display_address)
-                results["errors"][display_address] = str(exc) or exc.__class__.__name__
+                if isinstance(exc, PortSyncBlocked):
+                    # The interface rules refused the create: an expected outcome, not an error.
+                    logger.info("IP sync skipped %s: %s", row_id, exc)
+                    results["skipped_by_rule"].append(f"{display_address} ({exc})")
+                else:
+                    logger.warning("IP sync failed for %s: %s", row_id, exc, exc_info=True)
+                    results["failed"].append(display_address)
+                    results["errors"][display_address] = str(exc) or exc.__class__.__name__
             finally:
                 # `finally`, not `else`: the conflict and no-interface paths leave the row with
                 # `continue`, which skips an `else` clause but keeps their committed writes.
@@ -1303,6 +1328,11 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 f"{', '.join(results['primary_interface_not_eligible'])} — the matched interface is not eligible "
                 "(it is outside this virtual chassis or is a management-only interface).",
             )
+        if results.get("skipped_by_rule"):
+            messages.warning(
+                request,
+                f"Skipped (the interface rules refuse the interface): {', '.join(results['skipped_by_rule'])}.",
+            )
         if results.get("skipped_no_interface"):
             messages.warning(
                 request,
@@ -1318,3 +1348,163 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             errors = results.get("errors", {})
             detail = ", ".join(f"{ip} ({errors[ip]})" if errors.get(ip) else ip for ip in results["failed"])
             messages.error(request, f"Failed to sync IP addresses: {detail}")
+
+
+class _VRFCreateRefusedError(Exception):
+    """A Create VRF precondition failed; the message is safe to show the caller."""
+
+
+def _vrf_collision_refusal(user, name, rd, *, collided=False):
+    """
+    Return the refusal for a VRF that holds *name* or *rd*, or ``None`` when none does.
+
+    Only a user who may view every colliding VRF is told about it. *collided* means NetBox's
+    unique check reported a collision, so a VRF that is gone again by the re-read still refuses.
+    """
+    clash = VRF.objects.filter(Q(name=name) | Q(rd=rd)) if rd is not None else VRF.objects.filter(name=name)
+    clash_pks = set(clash.values_list("pk", flat=True))
+    if not clash_pks and not collided:
+        return None
+    visible_pks = set(VRF.objects.restrict(user, "view").filter(pk__in=clash_pks).values_list("pk", flat=True))
+    if not clash_pks or visible_pks != clash_pks:
+        return _VRFCreateRefusedError("NetBox cannot create this VRF. Refresh the IP data and try again.")
+    return _VRFCreateRefusedError(
+        f"NetBox already has a VRF named '{name}' or with that route distinguisher. Refresh the IP data and try again."
+    )
+
+
+class CreateVRFFromIPRowView(SyncIPAddressesView):
+    """
+    Create the NetBox VRF that one IP row's LibreNMS VRF names, when NetBox has none.
+
+    Only the row ID comes from the POST. The row and its LibreNMS VRF identity are re-derived from
+    the cached snapshot through the same enrichment the table renders, and a row that does not
+    carry ``vrf_create_url`` is refused, so the button and this endpoint cannot disagree. The
+    action creates the VRF only: the row's normal suggestion then preselects it for the IP sync.
+    """
+
+    def _required_permissions(self, object_type):
+        """Return the POST permissions for the owner model this request targets."""
+        if object_type == "device":
+            owner_model = Device
+        elif object_type == "virtualmachine":
+            owner_model = VirtualMachine
+        else:
+            raise Http404("Invalid object type.")
+        return {"POST": [("view", owner_model), ("add", VRF)]}
+
+    def post(self, request, object_type, pk):
+        """Create one missing NetBox VRF from a cached IP row's LibreNMS VRF identity."""
+        self.required_object_permissions = self._required_permissions(object_type)
+        if error := self.require_all_permissions("POST"):
+            return error
+        obj = self.get_object(object_type, pk)
+        server_key = self.rebind_api_for_posted_server(request.POST)
+        if server_key is None:
+            messages.error(request, "Selected LibreNMS server is no longer configured.")
+            return self.redirect_to_ip_tab(request, obj)
+        self._post_server_key = server_key
+        if isinstance(obj, Device) and build_migrated_context(obj, server_key).get("migrated_to_marker"):
+            messages.error(request, "This LibreNMS source has been migrated and is read-only.")
+            return self.redirect_to_ip_tab(request, obj)
+        snapshot = self.get_cached_ip_snapshot(obj)
+        if snapshot is None:
+            messages.error(request, "Cache has expired. Please refresh the IP data.")
+            return self.redirect_to_ip_tab(request, obj)
+        try:
+            identity = self._creatable_vrf_identity(obj, snapshot, request.POST.get("create_vrf"), server_key)
+            with transaction.atomic():
+                vrf = self._create_vrf(request, identity)
+        except _VRFCreateRefusedError as refusal:
+            messages.error(request, str(refusal))
+            return self.redirect_to_ip_tab(request, obj)
+        rd_text = f"route distinguisher {vrf.rd}" if vrf.rd else "no route distinguisher"
+        messages.success(
+            request,
+            f"Created NetBox VRF '{vrf.name}' with {rd_text}. The IP rows on this VRF now select it; "
+            "sync them to assign the addresses.",
+        )
+        return self.redirect_to_ip_tab(request, obj)
+
+    def _creatable_vrf_identity(self, obj, snapshot, raw_row_id, server_key):
+        """
+        Re-derive the posted row from the cached snapshot and return its LibreNMS VRF identity.
+
+        Args:
+            obj (Device | VirtualMachine): The page object.
+            snapshot (dict): The cached IP snapshot.
+            raw_row_id (str | None): The posted row ID.
+            server_key (str): The active LibreNMS server key.
+
+        Returns:
+            dict: The row's ``{"name", "rd"}`` LibreNMS VRF identity.
+
+        Raises:
+            _VRFCreateRefusedError: When the row does not carry the Create VRF action.
+
+        """
+        from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
+
+        try:
+            row_id = normalize_ip_sync_row_id(raw_row_id)
+        except ValueError:
+            raise _VRFCreateRefusedError("The Create VRF request names no valid IP row.") from None
+        # The table's own enrichment, against current NetBox state; the cached pipeline never reads LibreNMS.
+        table_view = BaseIPAddressTableView()
+        table_view.setup(self.request)
+        rows = table_view.enrich_ip_data(
+            snapshot["ip_addresses"],
+            obj,
+            snapshot.get("interface_name_field"),
+            server_key=server_key,
+            port_data_cache=dict(snapshot.get("ports_by_id") or {}),
+            fetch_vrf_identities=False,
+        )
+        index, duplicates = index_ip_sync_rows(rows)
+        row = index.get(row_id) if row_id not in duplicates else None
+        if row is None or not row.get("vrf_create_url"):
+            raise _VRFCreateRefusedError(
+                f"IP row {row_id} has no LibreNMS VRF that NetBox lacks. Refresh the IP data and try again."
+            )
+        return row["librenms_vrf"]
+
+    @staticmethod
+    def _create_vrf(request, identity):
+        """
+        Create the VRF, refusing a name or route distinguisher that NetBox now holds.
+
+        Args:
+            request (HttpRequest): The current request (for the acting user).
+            identity (dict): The LibreNMS VRF ``{"name", "rd"}`` identity.
+
+        Returns:
+            VRF: The created VRF.
+
+        Raises:
+            _VRFCreateRefusedError: When the VRF exists now, is invalid, or is outside the add grant.
+
+        """
+        name = identity["name"]
+        rd = identity["rd"] or None
+        # Serializes two creates of one name; NetBox's unique RD constraint settles the RD race.
+        acquire_advisory_transaction_lock(vrf_create_lock_identity(name))
+        if (refusal := _vrf_collision_refusal(request.user, name, rd)) is not None:
+            raise refusal
+        vrf = VRF(name=name, rd=rd)
+        try:
+            with transaction.atomic():
+                vrf.full_clean()
+                vrf.save()
+        except (ValidationError, IntegrityError) as exc:
+            # A VRF with this RD can commit after the check. Only an IntegrityError that a VRF explains is refused.
+            collided = any(error.code == "unique" for error in getattr(exc, "error_dict", {}).get("rd", []))
+            if (refusal := _vrf_collision_refusal(request.user, name, rd, collided=collided)) is not None:
+                raise refusal from exc
+            if isinstance(exc, IntegrityError):
+                raise
+            detail = "; ".join(exc.messages)
+            raise _VRFCreateRefusedError(f"NetBox does not accept the LibreNMS VRF '{name}': {detail}") from exc
+        # The model-level grant says nothing about WHICH VRFs the user may add; a constrained grant rolls back.
+        if not VRF.objects.restrict(request.user, "add").filter(pk=vrf.pk).exists():
+            raise _VRFCreateRefusedError(f"You may not add the NetBox VRF '{name}'.")
+        return vrf

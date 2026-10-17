@@ -7,8 +7,11 @@ from netbox_librenms_plugin.constants import LIBRENMS_VLAN_STATE_ACTIVE
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
 from netbox_librenms_plugin.utils import (
+    build_migrated_context,
     cache_remaining_ttl,
+    index_vlan_source_rows,
     is_list_of_dicts,
+    normalize_vlan_vid,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -264,6 +267,7 @@ class BaseVLANTableView(
             compared_vlans = self.compare_vlans(cached_vlans, lookup_maps, device=obj)
 
             vlan_table = LibreNMSVLANTable(compared_vlans, vlan_groups=vlan_groups)
+            vlan_table.migrated_to_marker = bool(build_migrated_context(obj, server_key).get("migrated_to_marker"))
             vlan_table.configure(request)
 
         # Calculate cache TTL
@@ -358,9 +362,18 @@ class BaseVLANTableView(
         vid_to_groups = lookup_maps.get("vid_to_groups", {})
         vid_to_vlans = lookup_maps.get("vid_to_vlans", {})
 
+        rows_by_vid, _invalid_rows = index_vlan_source_rows(librenms_vlans)
         compared = []
         for vlan in librenms_vlans:
-            vid = vlan.get("vlan_vlan")
+            raw_vid = vlan.get("vlan_vlan")
+            canonical_vid = normalize_vlan_vid(raw_vid)
+            if canonical_vid is None:
+                vid_error = "Invalid VID"
+            elif canonical_vid not in rows_by_vid:
+                vid_error = "Duplicate VID"
+            else:
+                vid_error = None
+            vid = canonical_vid if vid_error is None else None
             name = vlan.get("vlan_name", "")
 
             # Auto-selection logic for VLAN group dropdown
@@ -404,6 +417,8 @@ class BaseVLANTableView(
             compared.append(
                 {
                     "vlan_id": vid,
+                    "raw_vlan_id": raw_vid,
+                    "vid_error": vid_error,
                     "name": name,
                     "type": vlan.get("vlan_type", "ethernet"),
                     "state": vlan.get("vlan_state", LIBRENMS_VLAN_STATE_ACTIVE),

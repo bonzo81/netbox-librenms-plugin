@@ -20,6 +20,7 @@ from .views import (
     AddDeviceToLibreNMSView,
     AddDeviceTypeMappingView,
     AddPlatformMappingView,
+    ApplyModuleInterfaceTypesView,
     AssignVCSerialView,
     BulkImportConfirmView,
     BulkImportDevicesView,
@@ -103,6 +104,7 @@ from .views import (
     ModuleBayMappingEditView,
     ModuleBayMappingListView,
     ModuleBayMappingView,
+    ModuleInterfaceTypePreviewView,
     ModuleMismatchPreviewView,
     ModuleTypeMappingBulkDeleteView,
     ModuleTypeMappingBulkExportYAMLView,
@@ -144,6 +146,7 @@ from .views import (
     PortStackLagPatternListView,
     PortStackLagPatternView,
     PromoteToHostView,
+    RebindInterfacePortView,
     RemoveServerMappingView,
     ReplaceModuleView,
     SaveUserPrefView,
@@ -164,6 +167,7 @@ from .views import (
     SingleModuleVerifyView,
     SingleVlanGroupVerifyView,
     CableRemoteCreateView,
+    CreateVRFFromIPRowView,
     SyncCablesView,
     SyncCacheFragmentView,
     SyncCacheStatusView,
@@ -257,6 +261,16 @@ urlpatterns = [
         "devices/<int:pk>/module-mismatch-preview/",
         ModuleMismatchPreviewView.as_view(),
         name="module_mismatch_preview",
+    ),
+    path(
+        "devices/<int:pk>/module-interface-type-preview/",
+        ModuleInterfaceTypePreviewView.as_view(),
+        name="module_interface_type_preview",
+    ),
+    path(
+        "devices/<int:pk>/apply-module-interface-types/",
+        ApplyModuleInterfaceTypesView.as_view(),
+        name="apply_module_interface_types",
     ),
     path(
         "devices/<int:pk>/vc-normalization-report/",
@@ -363,6 +377,12 @@ urlpatterns = [
         SyncInterfaceBridgeView.as_view(),
         name="sync_interface_bridge",
     ),
+    # Rebind a stale LibreNMS port binding to an interface row URL
+    path(
+        "<str:object_type>/<int:object_id>/rebind-interface-port/",
+        RebindInterfacePortView.as_view(),
+        name="rebind_interface_port",
+    ),
     # Delete NetBox-only interfaces URL
     path(
         "<str:object_type>/<int:object_id>/delete-netbox-interfaces/",
@@ -392,6 +412,12 @@ urlpatterns = [
         "<str:object_type>/<int:pk>/sync-ip-addresses/",
         SyncIPAddressesView.as_view(),
         name="sync_device_ip_addresses",
+    ),
+    # Create the NetBox VRF that one IP row's LibreNMS VRF names
+    path(
+        "<str:object_type>/<int:pk>/ip-row-vrf/",
+        CreateVRFFromIPRowView.as_view(),
+        name="create_ip_row_vrf",
     ),
     # VLAN sync URLs
     path(

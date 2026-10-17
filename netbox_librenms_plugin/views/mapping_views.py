@@ -1,3 +1,4 @@
+from django.core.exceptions import ValidationError
 from django.http import HttpResponse, HttpResponseBadRequest
 from django.views import View
 from netbox.views import generic
@@ -88,7 +89,7 @@ from netbox_librenms_plugin.views.mixins import (
 class InterfaceTypeMappingListView(LibreNMSGenericPermissionMixin, generic.ObjectListView):
     """Provides a view for listing all `InterfaceTypeMapping` objects."""
 
-    queryset = InterfaceTypeMapping.objects.all()
+    queryset = InterfaceTypeMapping.objects.select_related("platform")
     table = InterfaceTypeMappingTable
     filterset = InterfaceTypeMappingFilterSet
     filterset_form = InterfaceTypeMappingFilterForm
@@ -112,6 +113,16 @@ class InterfaceTypeMappingBulkImportView(LibreNMSGenericWritePermissionMixin, ge
 
     queryset = InterfaceTypeMapping.objects.all()
     model_form = InterfaceTypeMappingImportForm
+
+    def create_and_update_objects(self, form, request):
+        """Refuse a CSV import with a name_pattern column: NetBox's CSV parser strips every cell."""
+        # NetBox sets _csv_headers (normalized, so "name_pattern.x" is "name_pattern") only for CSV input.
+        if "name_pattern" in getattr(form, "_csv_headers", {}):
+            raise ValidationError(
+                "CSV import strips spaces at the start and end of each cell, and spaces are part of a regex, "
+                "so rules with a name_pattern column must be imported as YAML or JSON."
+            )
+        return super().create_and_update_objects(form, request)
 
 
 class InterfaceTypeMappingView(LibreNMSGenericPermissionMixin, generic.ObjectView):
@@ -479,7 +490,7 @@ class BulkExportYAMLView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
 
 
 class InterfaceTypeMappingBulkExportYAMLView(BulkExportYAMLView):
-    queryset = InterfaceTypeMapping.objects.all()
+    queryset = InterfaceTypeMapping.objects.select_related("platform")
 
 
 class DeviceTypeMappingBulkExportYAMLView(BulkExportYAMLView):

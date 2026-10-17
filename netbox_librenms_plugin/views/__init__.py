@@ -169,12 +169,13 @@ from .sync.device_fields import (
 from .sync.devices import AddDeviceToLibreNMSView, UpdateDeviceLocationView
 from .sync.interfaces import (
     DeleteNetBoxInterfacesView,
+    RebindInterfacePortView,
     SyncInterfaceBridgeView,
     SyncInterfaceLagView,
     SyncInterfaceParentView,
     SyncInterfacesView,
 )
-from .sync.ip_addresses import SyncIPAddressesView
+from .sync.ip_addresses import CreateVRFFromIPRowView, SyncIPAddressesView
 from .sync.locations import SyncSiteLocationView
 from .sync.migrate import (
     MoveInterfaceToWinnerView,
@@ -183,9 +184,11 @@ from .sync.migrate import (
 )
 from .sync.modules import (
     AddBayTemplateView,
+    ApplyModuleInterfaceTypesView,
     InstallBranchView,
     InstallModuleView,
     InstallSelectedView,
+    ModuleInterfaceTypePreviewView,
     ModuleMismatchPreviewView,
     MoveModuleView,
     ReplaceModuleView,

@@ -30,6 +30,11 @@ pytestmark = pytest.mark.django_db
 # ---------------------------------------------------------------------------
 
 
+def _record(**port):
+    """A LibreNMS port record with every key an interface write reads."""
+    return {"ifDescr": port["ifName"], "ifType": "ethernetCsmacd", "ifSpeed": None, **port}
+
+
 def _make_iv(request=None):
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
@@ -136,7 +141,7 @@ class TestSyncInterface:
         dev = make_device("sync-novc")
         v = self._v()
 
-        v.sync_interface(dev, {"ifName": "eth0"}, [], "ifName")
+        v.sync_interface(dev, _record(ifName="eth0"), [], "ifName", "eth0")
 
         assert Interface.objects.filter(device=dev, name="eth0").exists()
 
@@ -148,7 +153,7 @@ class TestSyncInterface:
         req = make_request("post", {"device_selection_10": str(sibling.pk)})
         v = self._v(req)
 
-        v.sync_interface(host, {"ifName": "eth0", "port_id": 10}, [], "ifName")
+        v.sync_interface(host, _record(ifName="eth0", port_id=10), [], "ifName", "eth0")
 
         assert Interface.objects.filter(device=sibling, name="eth0").exists()
         assert not Interface.objects.filter(device=host, name="eth0").exists()
@@ -162,7 +167,7 @@ class TestSyncInterface:
         req = make_request("post", {"device_selection_10": str(outsider.pk)})
         v = self._v(req)
 
-        v.sync_interface(host, {"ifName": "eth0", "port_id": 10}, [], "ifName")
+        v.sync_interface(host, _record(ifName="eth0", port_id=10), [], "ifName", "eth0")
 
         assert not Interface.objects.filter(device=host, name="eth0").exists()
         assert not Interface.objects.filter(device=outsider, name="eth0").exists()
@@ -176,7 +181,7 @@ class TestSyncInterface:
         req = make_request("post", {"device_selection_10": str(other.pk)})
         v = self._v(req)
 
-        v.sync_interface(dev, {"ifName": "eth0", "port_id": 10}, [], "ifName")
+        v.sync_interface(dev, _record(ifName="eth0", port_id=10), [], "ifName", "eth0")
 
         assert not Interface.objects.filter(device=dev, name="eth0").exists()
         assert not Interface.objects.filter(device=other, name="eth0").exists()
@@ -190,7 +195,7 @@ class TestSyncInterface:
         req = make_request("post", {"device_selection_10": str(absent_pk)})
         v = self._v(req)
 
-        v.sync_interface(dev, {"ifName": "eth0", "port_id": 10}, [], "ifName")
+        v.sync_interface(dev, _record(ifName="eth0", port_id=10), [], "ifName", "eth0")
 
         assert not Interface.objects.filter(device=dev, name="eth0").exists()
         assert v._skipped_conflicts == ["eth0 (selected target unavailable)"]
@@ -204,7 +209,7 @@ class TestSyncInterface:
         req = make_request("post", {"device_selection_10": str(sibling.pk)}, user=user)
         v = self._v(req)
 
-        v.sync_interface(host, {"ifName": "eth0", "port_id": 10}, [], "ifName")
+        v.sync_interface(host, _record(ifName="eth0", port_id=10), [], "ifName", "eth0")
 
         assert not Interface.objects.filter(device=host, name="eth0").exists()
         assert not Interface.objects.filter(device=sibling, name="eth0").exists()
@@ -225,7 +230,7 @@ class TestSyncInterface:
         request = make_request("post", user=user)
         view = self._v(request)
 
-        view.sync_interface(device, {"ifName": hidden.name}, [], "ifName")
+        view.sync_interface(device, _record(ifName=hidden.name), [], "ifName", hidden.name)
 
         assert view._skipped_conflicts == ["eth0 (port already mapped elsewhere or ambiguous)"]
 
@@ -243,7 +248,7 @@ class TestSyncInterface:
         request = make_request("post", user=user)
         view = self._v(request)
 
-        view.sync_interface(device, {"ifName": existing.name}, [], "ifName")
+        view.sync_interface(device, _record(ifName=existing.name), [], "ifName", existing.name)
 
         assert view._skipped_conflicts == []
 
@@ -253,7 +258,7 @@ class TestSyncInterface:
         vm = make_vm("sync-vm")
         v = self._v()
 
-        v.sync_interface(vm, {"ifName": "eth0"}, [], "ifName")
+        v.sync_interface(vm, _record(ifName="eth0"), [], "ifName", "eth0")
 
         assert VMInterface.objects.filter(virtual_machine=vm, name="eth0").exists()
 
@@ -265,6 +270,12 @@ class TestSyncInterface:
 
 class TestGetNetboxInterfaceType:
     """Type selection driven by real InterfaceTypeMapping rows and the real speed filters."""
+
+    @staticmethod
+    def _decided_type(port):
+        from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
+
+        return InterfaceRuleMatcher.load().decide(port, platform_id=None).netbox_type
 
     @staticmethod
     def _mapping(librenms_type, netbox_type, speed=None):
@@ -281,7 +292,7 @@ class TestGetNetboxInterfaceType:
         self._mapping("ethernetCsmacd", "1000base-t", speed=1000000)
         self._mapping("ethernetCsmacd", "10gbase-x-sfpp", speed=10000000)  # above the port speed
 
-        result = _make_iv().get_netbox_interface_type({"ifType": "ethernetCsmacd", "ifSpeed": 1000000000})
+        result = self._decided_type({"ifType": "ethernetCsmacd", "ifSpeed": 1000000000})
 
         assert result == "1000base-t"
 
@@ -290,14 +301,14 @@ class TestGetNetboxInterfaceType:
         self._mapping("ethernetCsmacd", "virtual")
         self._mapping("ethernetCsmacd", "10gbase-x-sfpp", speed=10000000)
 
-        result = _make_iv().get_netbox_interface_type({"ifType": "ethernetCsmacd", "ifSpeed": 1000000})
+        result = self._decided_type({"ifType": "ethernetCsmacd", "ifSpeed": 1000000})
 
         assert result == "virtual"
 
     def test_no_speed_uses_null_mapping(self):
         self._mapping("softwareLoopback", "virtual")
 
-        result = _make_iv().get_netbox_interface_type({"ifType": "softwareLoopback", "ifSpeed": None})
+        result = self._decided_type({"ifType": "softwareLoopback", "ifSpeed": None})
 
         assert result == "virtual"
 
@@ -305,7 +316,7 @@ class TestGetNetboxInterfaceType:
         """None, not "other": the writer must not flatten a correct type it cannot map."""
         self._mapping("ethernetCsmacd", "virtual")  # a mapping exists, but not for this type
 
-        result = _make_iv().get_netbox_interface_type({"ifType": "unknown", "ifSpeed": None})
+        result = self._decided_type({"ifType": "unknown", "ifSpeed": None})
 
         assert result is None
 

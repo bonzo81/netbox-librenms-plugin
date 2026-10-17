@@ -2334,7 +2334,7 @@ def test_unmatched_inventory_offers_existing_bay_mapping_on_the_sync_page(client
     )
     assert response.status_code == 200
     assert b"Routing Engine 0" in response.content
-    assert b"Map Existing Bay" in response.content
+    assert b'data-action="map-existing-bay"' in response.content
     assert b"Nested Optic" in response.content
     mapping_rows = [
         row.record["name"]
@@ -2550,7 +2550,9 @@ def test_the_map_existing_bay_button_needs_the_modals_view_permissions(client, s
         )
         client.force_login(allowed)
         assert client.get(modal_url, modal_inputs).status_code == 200
-        assert b"Map Existing Bay" in client.get(page_url, {"tab": "modules", "server_key": "prod"}).content
+        assert (
+            b'data-action="map-existing-bay"' in client.get(page_url, {"tab": "modules", "server_key": "prod"}).content
+        )
 
         # view_modulebay is the permission the button gate missed.
         denied = make_user_with_perms("map-existing-denied", [("view", Device), ("add", ModuleBayMapping)])
@@ -2558,7 +2560,10 @@ def test_the_map_existing_bay_button_needs_the_modals_view_permissions(client, s
         # Precondition: the modal really does refuse this user.
         assert client.get(modal_url, modal_inputs).status_code == 302
         # Effect: so the row must not render a button that leads there.
-        assert b"Map Existing Bay" not in client.get(page_url, {"tab": "modules", "server_key": "prod"}).content
+        assert (
+            b'data-action="map-existing-bay"'
+            not in client.get(page_url, {"tab": "modules", "server_key": "prod"}).content
+        )
     finally:
         cache.delete(snapshot_key)
         cache.delete(device_info_key)
@@ -2785,7 +2790,7 @@ def test_replace_action_requires_a_source_inventory_index(index):
     html = str(
         table.render_actions(None, {"can_replace": True, "installed_module_id": 55, "ent_physical_index": index})
     )
-    assert ("Replace" in html) is (index == 200)
+    assert ('data-action="replace"' in html) is (index == 200)
 
 
 def test_integrated_module_badge_tracks_the_active_theme():

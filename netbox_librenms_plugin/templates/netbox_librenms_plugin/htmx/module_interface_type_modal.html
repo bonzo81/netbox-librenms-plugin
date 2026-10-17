@@ -1,0 +1,71 @@
+{# Modal-content fragment for reviewing module interface type differences. #}
+<div class="modal-header">
+    <h5 class="modal-title">
+        <i class="mdi mdi-swap-vertical me-1"></i>Interface Type Differences
+    </h5>
+    <button type="button" class="btn-close" onclick="closeHtmxModal()" aria-label="Close"></button>
+</div>
+<div class="modal-body">
+    <p class="text-muted small mb-3">
+        Select the interfaces whose NetBox type should match the interface template on
+        <strong>{{ module.module_type.model }}</strong>.
+    </p>
+
+    {% if mismatches %}
+    <form method="post"
+          action="{% url 'plugins:netbox_librenms_plugin:apply_module_interface_types' pk=device_pk %}"
+          hx-post="{% url 'plugins:netbox_librenms_plugin:apply_module_interface_types' pk=device_pk %}"
+          hx-target="#module-sync-content"
+          hx-swap="innerHTML"
+          hx-sync="#module-sync-content:drop"
+          hx-disabled-elt="#htmx-modal-content button[type=submit]">
+        {% csrf_token %}
+        <input type="hidden" name="server_key" value="{{ server_key }}">
+        <input type="hidden" name="selected_device_id" value="{{ selected_device_id }}">
+        <input type="hidden" name="module_id" value="{{ module.pk }}">
+
+        <table class="table table-bordered table-sm mb-3">
+            <thead>
+                <tr>
+                    <th class="text-center" aria-label="Apply"></th>
+                    <th>Interface</th>
+                    <th>Currently in NetBox</th>
+                    <th>From Interface Template</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for mismatch in mismatches %}
+                <tr>
+                    <td class="text-center">
+                        <input class="form-check-input" type="checkbox"
+                               name="interface_id" value="{{ mismatch.interface.pk }}" checked
+                               aria-label="Apply template type to {{ mismatch.interface.name }}">
+                        <input type="hidden" name="current_type_{{ mismatch.interface.pk }}"
+                               value="{{ mismatch.interface.type }}">
+                        <input type="hidden" name="template_type_{{ mismatch.interface.pk }}"
+                               value="{{ mismatch.template_type }}">
+                    </td>
+                    <td>{{ mismatch.interface.name }}</td>
+                    <td>{{ mismatch.interface.get_type_display }}</td>
+                    <td>{{ mismatch.template_type_label }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+        <div class="d-flex gap-2 justify-content-end">
+            <button type="button" class="btn btn-secondary" onclick="closeHtmxModal()">Cancel</button>
+            <button type="submit" class="btn btn-warning">
+                <i class="mdi mdi-check me-1"></i>Apply Selected Types
+            </button>
+        </div>
+    </form>
+    {% else %}
+    <div class="alert alert-success mb-3">
+        <i class="mdi mdi-check-circle me-1"></i>No interface type differences remain for this module.
+    </div>
+    <div class="d-flex justify-content-end">
+        <button type="button" class="btn btn-secondary" onclick="closeHtmxModal()">Close</button>
+    </div>
+    {% endif %}
+</div>

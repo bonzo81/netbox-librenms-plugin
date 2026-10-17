@@ -1431,7 +1431,9 @@ class TestSingleInterfaceVerifyView:
         source.save()
         parent.save()
         for index in range(40):
-            make_interface(device, f"unrelated-{index}")
+            unrelated = make_interface(device, f"unrelated-{index}")
+            set_librenms_device_id(unrelated, 1000 + index, "default")
+            unrelated.save()
         snapshot = {
             "ports": [
                 {
@@ -1486,6 +1488,7 @@ class TestSingleInterfaceVerifyView:
 
         assert response.status_code == 200
         assert len(materialized_interface_ids) <= 10
+        assert set(materialized_interface_ids) <= {source.pk, parent.pk}
 
 
 # ---------------------------------------------------------------------------

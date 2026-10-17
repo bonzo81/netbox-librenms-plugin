@@ -25,8 +25,21 @@ class InterfaceTypeMappingSerializer(NetBoxModelSerializer):
         """Meta options for InterfaceTypeMappingSerializer."""
 
         model = InterfaceTypeMapping
-        fields = ["id", "url", "display", "librenms_type", "librenms_speed", "netbox_type", "description"]
-        brief_fields = ("id", "url", "display", "librenms_type", "netbox_type", "description")
+        fields = [
+            "id",
+            "url",
+            "display",
+            "action",
+            "platform",
+            "name_pattern",
+            "librenms_type",
+            "librenms_speed",
+            "netbox_type",
+            "description",
+        ]
+        brief_fields = ("id", "url", "display", "action", "platform", "librenms_type", "netbox_type", "description")
+        # Whitespace is part of a regex.
+        extra_kwargs = {"name_pattern": {"trim_whitespace": False}}
 
 
 @extend_schema_serializer(component_name="LibreNMSDeviceTypeMapping")

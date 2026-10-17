@@ -16,6 +16,7 @@ from netbox_librenms_plugin.constants import (
     LIBRENMS_NO_SENSORS_MESSAGE,
     LIBRENMS_NO_VRFS_MESSAGE,
     LIBRENMS_PORTS_COLUMNS,
+    RELATIONSHIP_KINDS,
 )
 
 # HTTP request timeout constants (in seconds)
@@ -33,6 +34,43 @@ DEVICE_INFO_CACHE_TIMEOUT = 60
 HTTP_NOT_FOUND = 404
 
 logger = logging.getLogger(__name__)
+
+
+def normalized_pair_key(first_port, second_port):
+    """Return one order-independent key for a port pair, or None when it names a single port."""
+    from netbox_librenms_plugin.utils import normalize_librenms_port_id
+
+    first_id = normalize_librenms_port_id(first_port.get("port_id"))
+    second_id = normalize_librenms_port_id(second_port.get("port_id"))
+    if first_id is None or second_id is None or first_id == second_id:
+        return None
+    return frozenset((first_id, second_id))
+
+
+def undirected_adjacency(pair_keys) -> dict[int, list[int]]:
+    """
+    Expand order-independent port pairs into a symmetric ``port -> [partner, ...]`` map.
+
+    An unclassified stack pair has no direction: LibreNMS reports that two ports are stacked and
+    nothing that says which one is the composite. ifStack position does not answer it either, since
+    a sub-unit sits on the low side on Junos and a LAG aggregate on either side on SR OS. So both
+    ports name the other and neither claims to be the parent.
+
+    Args:
+        pair_keys (Iterable[frozenset[int]]): Two-element port-id pairs.
+
+    Returns:
+        dict[int, list[int]]: Each port's partners, sorted so two renders cannot disagree.
+
+    """
+    adjacency: dict[int, list[int]] = {}
+    for pair_key in pair_keys:
+        first_id, second_id = sorted(pair_key)
+        adjacency.setdefault(first_id, []).append(second_id)
+        adjacency.setdefault(second_id, []).append(first_id)
+    for partners in adjacency.values():
+        partners.sort()
+    return adjacency
 
 
 def _validate_api_url(url):
@@ -934,6 +972,11 @@ class LibreNMSAPI:
                 'lag_members':    {member_port_id: aggregate_port_id}
                 'sub_interfaces': {child_port_id: parent_port_id}
                 'bridge_members': {member_port_id: bridge_port_id}
+                'stacked_ports':  {port_id: [partner_port_id, ...]} for each pair no rule
+                                  classified (symmetric, no direction, partners sorted)
+                'diagnostics':    pair counts (pairs_seen, _malformed, _unresolved_end,
+                                  _skipped_sap, _usable, _unclassified), per-kind claimed,
+                                  edges, conflicted and from_fallback, and the patterns in use
 
         """
         from netbox_librenms_plugin.constants import DEFAULT_INTERFACE_NAME_FIELD, INTERFACE_NAME_FIELDS
@@ -1030,28 +1073,37 @@ class LibreNMSAPI:
             )
             return any(_matches_name_patterns(name, compiled_sap_patterns) for name in names)
 
-        # Validate and remove SAP rows once so fallback cannot reconsider them.
+        # Validate and remove SAP rows once so fallback cannot reconsider them. Each drop reason is
+        # counted, because this loop is the only place a reported pair disappears before any rule
+        # sees it, and "LibreNMS reported nothing" and "we dropped it" looked identical (#179/10).
+        pair_counts = dict.fromkeys(("seen", "malformed", "unresolved_end", "sap"), 0)
         filtered_port_pairs = []
         for entry in port_stack:
+            pair_counts["seen"] += 1
             if not isinstance(entry, dict):
+                pair_counts["malformed"] += 1
                 continue
             # Rows carry the ports_stack columns high_port_id/low_port_id; the documented port_id_high spelling is never sent.
             if "high_port_id" not in entry and "low_port_id" not in entry:
                 logger.warning("Unrecognized port_stack entry shape, keys: %s", sorted(entry))
+                pair_counts["malformed"] += 1
                 continue
             high_id = normalize_librenms_port_id(entry.get("high_port_id"))
             low_id = normalize_librenms_port_id(entry.get("low_port_id"))
             if high_id is None or low_id is None:
+                pair_counts["unresolved_end"] += 1
                 continue
             high_port = by_id.get(high_id)
             low_port = by_id.get(low_id)
             if not high_port or not low_port:
+                pair_counts["unresolved_end"] += 1
                 continue
             if _has_sap_name(high_port, low_port):
+                pair_counts["sap"] += 1
                 continue
             filtered_port_pairs.append((high_port, low_port))
 
-        def _resolve_with(field: str, excluded_pairs=None) -> tuple[dict, dict, dict, set]:  # noqa: C901
+        def _resolve_with(field: str, excluded_pairs=None) -> dict:  # noqa: C901
             excluded_pairs = excluded_pairs or set()
             by_name: dict[str, dict] = {}
             ambiguous_names: set[str] = set()
@@ -1075,14 +1127,14 @@ class LibreNMSAPI:
             conflicted_sub_interfaces: set = set()
             conflicted_bridge_members: set = set()
             claimed_pairs: set[frozenset[int]] = set()
+            # Which rule claimed each pair, so a map taken from the other name field cannot let a
+            # pair count as claimed by a pass whose answer was thrown away.
+            claimed_by_kind: dict[str, set] = {kind: set() for kind in RELATIONSHIP_KINDS}
 
-            def _pair_key(first_port: dict, second_port: dict) -> frozenset[int] | None:
-                """Return one order-independent normalized port pair."""
-                first_id = normalize_librenms_port_id(first_port.get("port_id"))
-                second_id = normalize_librenms_port_id(second_port.get("port_id"))
-                if first_id is None or second_id is None:
-                    return None
-                return frozenset((first_id, second_id))
+            def _claim(kind: str, pair_key: frozenset) -> None:
+                """Record that one rule accounted for this pair."""
+                claimed_pairs.add(pair_key)
+                claimed_by_kind[kind].add(pair_key)
 
             def _is_lag_aggregate(port: dict) -> bool:
                 if port.get("ifType") == "ieee8023adLag":
@@ -1139,17 +1191,17 @@ class LibreNMSAPI:
                 return child_name.startswith(parent_name + ".") and child_name[len(parent_name) + 1 :].isdigit()
 
             for high_port, low_port in filtered_port_pairs:
-                pair_key = _pair_key(high_port, low_port)
+                pair_key = normalized_pair_key(high_port, low_port)
                 if pair_key is None or pair_key in excluded_pairs:
                     continue
                 # ifStack ordering does not determine which side is the child.
                 if _is_sub_unit_of(low_port, high_port):
                     _relate(sub_interfaces, conflicted_sub_interfaces, low_port, high_port)
-                    claimed_pairs.add(pair_key)
+                    _claim("sub_interfaces", pair_key)
                     continue
                 if _is_sub_unit_of(high_port, low_port):
                     _relate(sub_interfaces, conflicted_sub_interfaces, high_port, low_port)
-                    claimed_pairs.add(pair_key)
+                    _claim("sub_interfaces", pair_key)
                     continue
 
                 low_is_bridge = _is_bridge(low_port)
@@ -1159,7 +1211,7 @@ class LibreNMSAPI:
                         _relate(bridge_members, conflicted_bridge_members, high_port, low_port)
                     else:
                         _relate(bridge_members, conflicted_bridge_members, low_port, high_port)
-                    claimed_pairs.add(pair_key)
+                    _claim("bridge_members", pair_key)
                     continue
 
                 high_phys = _resolve_physical_port(high_port)
@@ -1177,16 +1229,16 @@ class LibreNMSAPI:
                     high_struct = high_phys.get("ifType") == "ieee8023adLag"
                     if low_struct and not high_struct:
                         _relate(lag_members, conflicted_lag_members, high_phys, low_phys)
-                        claimed_pairs.add(pair_key)
+                        _claim("lag_members", pair_key)
                     elif high_struct and not low_struct:
                         _relate(lag_members, conflicted_lag_members, low_phys, high_phys)
-                        claimed_pairs.add(pair_key)
+                        _claim("lag_members", pair_key)
                 elif low_is_agg:
                     _relate(lag_members, conflicted_lag_members, high_phys, low_phys)
-                    claimed_pairs.add(pair_key)
+                    _claim("lag_members", pair_key)
                 elif high_is_agg:
                     _relate(lag_members, conflicted_lag_members, low_phys, high_phys)
-                    claimed_pairs.add(pair_key)
+                    _claim("lag_members", pair_key)
 
             # Every sub-interface edge shortens the active-field name, so the graph cannot contain a cycle.
             for port in ports_with_id:
@@ -1196,52 +1248,93 @@ class LibreNMSAPI:
                 parent_port = _name_derived_parent(port)
                 if parent_port is None or normalize_librenms_port_id(parent_port.get("port_id")) is None:
                     continue
-                pair_key = _pair_key(port, parent_port)
+                pair_key = normalized_pair_key(port, parent_port)
                 if pair_key is None or pair_key in excluded_pairs or pair_key in claimed_pairs:
                     continue
                 # This loop walks ports_with_id, not filtered_port_pairs, so rule 2 is reapplied here.
                 if _has_sap_name(port, parent_port):
                     continue
                 _relate(sub_interfaces, conflicted_sub_interfaces, port, parent_port)
-                claimed_pairs.add(pair_key)
+                _claim("sub_interfaces", pair_key)
 
-            return lag_members, sub_interfaces, bridge_members, claimed_pairs
+            return {
+                "lag_members": lag_members,
+                "sub_interfaces": sub_interfaces,
+                "bridge_members": bridge_members,
+                "claimed_pairs": claimed_pairs,
+                "claimed_by_kind": claimed_by_kind,
+                "conflicted": {
+                    "lag_members": len(conflicted_lag_members),
+                    "sub_interfaces": len(conflicted_sub_interfaces),
+                    "bridge_members": len(conflicted_bridge_members),
+                },
+            }
 
         if not isinstance(interface_name_field, str) or interface_name_field not in INTERFACE_NAME_FIELDS:
             interface_name_field = DEFAULT_INTERFACE_NAME_FIELD
-        lag_members, sub_interfaces, bridge_members, claimed_pairs = _resolve_with(interface_name_field)
+        active = _resolve_with(interface_name_field)
+        resolved = {kind: active[kind] for kind in RELATIONSHIP_KINDS}
+        claims = {kind: active["claimed_by_kind"][kind] for kind in RELATIONSHIP_KINDS}
+        conflicted = dict(active["conflicted"])
+        from_fallback = dict.fromkeys(RELATIONSHIP_KINDS, False)
+
         # Take each empty map from the other field without mixing fields within a map.
-        if not lag_members or not sub_interfaces or not bridge_members:
+        if not all(resolved.values()):
             fallback_field = next(field for field in INTERFACE_NAME_FIELDS if field != interface_name_field)
-            fallback_lag_members, fallback_sub_interfaces, fallback_bridge_members, _ = _resolve_with(
-                fallback_field,
-                claimed_pairs,
-            )
-            if not lag_members:
+            fallback = _resolve_with(fallback_field, active["claimed_pairs"])
+            for kind in RELATIONSHIP_KINDS:
+                if resolved[kind] or claims[kind] or conflicted[kind]:
+                    continue
                 logger.debug(
-                    "The lag_members map from %s is empty. The resolver uses %s alone.",
+                    "The %s map from %s is empty. The resolver uses %s alone.",
+                    kind,
                     interface_name_field,
                     fallback_field,
                 )
-                lag_members = fallback_lag_members
-            if not sub_interfaces:
-                logger.debug(
-                    "The sub_interfaces map from %s is empty. The resolver uses %s alone.",
-                    interface_name_field,
-                    fallback_field,
-                )
-                sub_interfaces = fallback_sub_interfaces
-            if not bridge_members:
-                logger.debug(
-                    "The bridge_members map from %s is empty. The resolver uses %s alone.",
-                    interface_name_field,
-                    fallback_field,
-                )
-                bridge_members = fallback_bridge_members
+                resolved[kind] = fallback[kind]
+                # The active pass produced no surviving edge of this kind, so its claims must not
+                # mask a pair the pass that was actually adopted left unclassified.
+                claims[kind] = fallback["claimed_by_kind"][kind]
+                conflicted[kind] = fallback["conflicted"][kind]
+                from_fallback[kind] = True
+
+        all_pairs = {
+            pair_key
+            for high_port, low_port in filtered_port_pairs
+            if (pair_key := normalized_pair_key(high_port, low_port)) is not None
+        }
+        unclassified_pairs = all_pairs.difference(*claims.values())
         return {
-            "lag_members": lag_members,
-            "sub_interfaces": sub_interfaces,
-            "bridge_members": bridge_members,
+            **resolved,
+            # A pair LibreNMS reported that no rule claimed is still a relationship: only its kind
+            # and its direction are unknown. It used to be dropped here, which made a Linux bridge
+            # look exactly like a device LibreNMS has no port_stack for (#179 item 10).
+            "stacked_ports": undirected_adjacency(unclassified_pairs),
+            "diagnostics": {
+                "name_field": interface_name_field,
+                "ports_seen": len(ports_with_id),
+                "pairs_seen": pair_counts["seen"],
+                "pairs_malformed": pair_counts["malformed"],
+                "pairs_unresolved_end": pair_counts["unresolved_end"],
+                "pairs_skipped_sap": pair_counts["sap"],
+                "pairs_usable": len(filtered_port_pairs),
+                "pairs_unclassified": len(unclassified_pairs),
+                "kinds": [
+                    {
+                        "key": kind,
+                        "claimed": len(claims[kind]),
+                        "edges": len(resolved[kind]),
+                        "conflicted": conflicted[kind],
+                        "from_fallback": from_fallback[kind],
+                    }
+                    for kind in RELATIONSHIP_KINDS
+                ],
+                "patterns": {
+                    "lag": [getattr(pattern, "pattern", "") for pattern in compiled_patterns],
+                    "bridge": [getattr(pattern, "pattern", "") for pattern in compiled_bridge_patterns],
+                    "sap": [getattr(pattern, "pattern", "") for pattern in compiled_sap_patterns],
+                },
+            },
         }
 
     def add_device(self, data):
