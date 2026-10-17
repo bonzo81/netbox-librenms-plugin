@@ -644,49 +644,53 @@
                             <td style="padding-left: 1rem;">Platform</td>
                             <td>
                                 <div class="d-flex align-items-center">
-                                    <div>
-                                        {% if platform_info.netbox_platform %}
-                                            <a href="{{ platform_info.netbox_platform.get_absolute_url }}">
-                                                {{ platform_info.netbox_platform }}
+                                    <div class="text-nowrap">
+                                        {% if object.platform %}
+                                            <a href="{{ object.platform.get_absolute_url }}">
+                                                {{ object.platform }}
                                             </a>
                                         {% else %}
                                             <span class="text-muted">Not set</span>
                                         {% endif %}
                                     </div>
                                     <div class="ms-3">
-                                        {% if platform_info.librenms_os and platform_info.librenms_os != "-" %}
-                                            {% if platform_info.platform_exists %}
-                                                {% if not platform_info.netbox_platform or platform_info.netbox_platform.pk != platform_info.matching_platform.pk %}
+                                        {% with assessment=platform_info.assessment %}
+                                        {% if assessment and assessment.reason != "no_os" %}
+                                            {% if assessment.state == "current" %}
+                                                <span class="text-success" title="Synced with LibreNMS">
+                                                    <i class="mdi mdi-check-circle"></i>
+                                                </span>
+                                            {% elif assessment.operation == "create_os_platform" %}
+                                                <button type="button" class="btn btn-sm btn-warning"
+                                                        data-bs-toggle="modal" data-bs-target="#create-platform-modal"
+                                                        title="Platform doesn't exist - create and sync">
+                                                    <i class="mdi mdi-plus"></i> Create & Sync
+                                                </button>
+                                            {% elif assessment.state == "proposed" %}
                                                 <form method="post"
                                                       action="{% url 'plugins:netbox_librenms_plugin:update_device_platform' pk=object.pk %}"
                                                       style="display: inline;">
                                                     {% csrf_token %}
                                                     {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
                                                     <button type="submit" class="btn btn-sm btn-outline-primary"
-                                                            title="Set platform to {{ platform_info.matching_platform }}">
+                                                            title="{% if assessment.operation == 'create_version_platform' %}Create version platform {{ assessment.target_name }} and set it{% else %}Set platform to {{ assessment.target_name }}{% endif %}">
                                                         <i class="mdi mdi-sync"></i> Sync to NetBox
                                                     </button>
                                                 </form>
-                                                {% else %}
-                                                <span class="text-success" title="Synced with LibreNMS">
-                                                    <i class="mdi mdi-check-circle"></i>
-                                                </span>
-                                                {% endif %}
                                             {% else %}
-                                                <button type="button" class="btn btn-sm btn-warning"
-                                                        data-bs-toggle="modal" data-bs-target="#create-platform-modal"
-                                                        title="Platform doesn't exist - create and sync">
-                                                    <i class="mdi mdi-plus"></i> Create & Sync
-                                                </button>
+                                                <span class="text-danger small" data-platform-blocked="{{ assessment.reason }}">
+                                                    <i class="mdi mdi-alert-circle"></i> {{ platform_info.reason_text }}
+                                                </span>
                                             {% endif %}
                                         {% endif %}
+                                        {% endwith %}
                                     </div>
                                 </div>
                             </td>
                             <td>
                                 <div class="d-flex align-items-center">
-                                    <span>{{ platform_info.librenms_os }}</span>
-                                    {% if not platform_info.platform_exists and platform_info.librenms_os and platform_info.librenms_os != "-" %}
+                                    <span>{{ platform_info.librenms_os }}{% if platform_info.assessment.tracks_version %} {{ platform_info.librenms_version }}{% endif %}</span>
+                                    {% if platform_info.assessment.reason == "os_platform_missing" %}
                                         <span class="badge bg-warning bg-opacity-75 text-dark ms-2" style="font-size: 0.7rem;" title="Platform doesn't exist in NetBox">
                                             <i class="mdi mdi-alert"></i> Not in NetBox
                                         </span>
@@ -1248,13 +1252,13 @@ that may well be correct.
 </div>
 {% endif %}
 
-{% if object_model_name == "device" and not platform_info.platform_exists and platform_info.platform_name and found_in_librenms %}
+{% if object_model_name == "device" and platform_info.assessment.operation == "create_os_platform" and found_in_librenms %}
 <!-- Create Platform Modal -->
 <div class="modal fade" id="create-platform-modal" tabindex="-1" aria-labelledby="createPlatformModalLabel" aria-hidden="true">
     <div class="modal-dialog">
         <div class="modal-content">
             {% url 'plugins:netbox_librenms_plugin:create_and_assign_platform' pk=object.pk as create_platform_url %}
-            {% include "netbox_librenms_plugin/htmx/create_platform_modal.html" with librenms_os=platform_info.librenms_os platform_name=platform_info.platform_name form_action=create_platform_url device_pk=object.pk selected_manufacturer_pk=object.device_type.manufacturer_id %}
+            {% include "netbox_librenms_plugin/htmx/create_platform_modal.html" with librenms_os=platform_info.librenms_os platform_name=platform_info.librenms_os form_action=create_platform_url device_pk=object.pk selected_manufacturer_pk=object.device_type.manufacturer_id tracked_version=platform_info.assessment.tracks_version librenms_version=platform_info.librenms_version %}
         </div>
     </div>
 </div>
