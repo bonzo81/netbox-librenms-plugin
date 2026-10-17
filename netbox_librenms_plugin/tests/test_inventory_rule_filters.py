@@ -531,7 +531,12 @@ class TestSingleInstall:
 
         if ancestor_action is None:
             # The positive control: the same rendered action installs while the module stays transparent.
+            from dcim.models import Module
+
             assert written_state(device)["modules"] != before["modules"]
+            assert Module.objects.filter(
+                device=device, module_bay_id=int(form["module_bay_id"]), module_type_id=int(form["module_type_id"])
+            ).exists()
             return
         assert IGNORED_INVENTORY_ROW_MESSAGE in messages_of(response)
         assert written_state(device) == before
