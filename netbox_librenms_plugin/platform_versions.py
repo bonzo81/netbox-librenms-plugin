@@ -20,6 +20,7 @@ from netbox_librenms_plugin.models import LibreNMSSettings, PlatformMapping
 from netbox_librenms_plugin.transactions import classify_conflict, update_existing_row
 
 _ADD_PLATFORM = "dcim.add_platform"
+_SLUG_MAX_LENGTH = 100
 
 
 class PlatformState(StrEnum):
@@ -170,8 +171,21 @@ def version_platform_name(os_platform, version):
 
 
 def version_platform_slug(name):
-    """Return the slug of a new version platform; dots become dashes so ``21.2.1`` and ``2.12.1`` differ."""
+    """Return the base slug of a new version platform; dots become dashes so ``21.2.1`` and ``2.12.1`` differ."""
     return slugify(name.replace(".", "-"))
+
+
+def _free_slug(base, manufacturer):
+    """Return *base*, or *base* with the first free ``-2``, ``-3``, ... suffix for *manufacturer*."""
+    if not base:
+        return base
+    taken = Platform.objects.filter(manufacturer=manufacturer)
+    candidate, number = base[:_SLUG_MAX_LENGTH], 1
+    while taken.filter(slug=candidate).exists():
+        number += 1
+        suffix = f"-{number}"
+        candidate = f"{base[: _SLUG_MAX_LENGTH - len(suffix)]}{suffix}"
+    return candidate
 
 
 def _version_platforms(os_platform, version):
@@ -344,7 +358,7 @@ def _named_os_platform(new_os_platform, actor, named):
         named,
         lambda: Platform.objects.filter(name__iexact=new_os_platform.name).first(),
         name=new_os_platform.name,
-        slug=slugify(new_os_platform.name),
+        slug=_free_slug(slugify(new_os_platform.name), new_os_platform.manufacturer),
         manufacturer=new_os_platform.manufacturer,
     )
     return platform, platform if created else None
@@ -365,7 +379,7 @@ def _create_version_platform(assessment, actor):
         assessment,
         winner,
         name=assessment.target_name,
-        slug=version_platform_slug(assessment.target_name),
+        slug=_free_slug(version_platform_slug(assessment.target_name), os_platform.manufacturer),
         parent=os_platform,
         manufacturer=os_platform.manufacturer,
     )
