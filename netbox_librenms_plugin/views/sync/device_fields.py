@@ -246,45 +246,54 @@ def _report_os_mapping(request, librenms_os, platform):
     """
     Add a Platform Mapping from *librenms_os* to the OS *platform* when none exists, and report it.
 
-    The platform assignment has committed, so no failure here reaches the request's retry answer.
+    The platform assignment has committed, so no failure of the follow-up reaches the request's
+    retry answer, and the report needs no further query.
+    """
+    viewer = request.user
+    try:
+        level, text = _write_os_mapping(librenms_os, platform, viewer)
+    except (ValidationError, DatabaseError) as exc:
+        level, text = messages.WARNING, _mapping_not_created(exception_text_for(exc, PlatformMapping, viewer))
+    messages.add_message(request, level, text)
+
+
+def _mapping_not_created(reason):
+    return f"Platform assigned; OS mapping not created: {reason}"
+
+
+def _write_os_mapping(librenms_os, platform, viewer):
+    """
+    Add the mapping when none exists and return ``(message level, text)``.
+
+    Raises:
+        ValidationError | DatabaseError: A query or the insert failed; the caller reports it.
+
     """
     from utilities.permissions import get_permission_for_model
 
-    viewer = request.user
-
-    def not_created(reason):
-        messages.warning(request, f"Platform assigned; OS mapping not created: {reason}")
-
-    def points_elsewhere(mapping):
-        not_created(
-            f"a mapping for '{librenms_os}' already points to {platform_label(mapping.netbox_platform, viewer)}."
-        )
+    def existing_text(mapping):
+        if mapping.netbox_platform_id == platform.pk:
+            return messages.INFO, f"Platform mapping for '{librenms_os}' already exists; not modified."
+        target = platform_label(mapping.netbox_platform, viewer)
+        return messages.WARNING, _mapping_not_created(f"a mapping for '{librenms_os}' already points to {target}.")
 
     existing = PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).first()
     if existing is not None:
-        if existing.netbox_platform_id == platform.pk:
-            messages.info(request, f"Platform mapping for '{librenms_os}' already exists; not modified.")
-        else:
-            points_elsewhere(existing)
-        return
+        return existing_text(existing)
     if not viewer.has_perm(get_permission_for_model(PlatformMapping, "add")):
-        not_created("you lack permission to add mappings.")
-        return
+        return messages.WARNING, _mapping_not_created("you lack permission to add mappings.")
     try:
         with transaction.atomic():
             mapping = PlatformMapping(librenms_os=librenms_os, netbox_platform=platform)
             mapping.full_clean()
             mapping.save()
-    except (ValidationError, DatabaseError) as exc:
+    except IntegrityError:
+        # A concurrent request may have added the mapping first.
         winner = PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).first()
         if winner is None:
-            not_created(exception_text_for(exc, PlatformMapping, viewer))
-        elif winner.netbox_platform_id == platform.pk:
-            messages.info(request, f"Platform mapping for '{librenms_os}' already exists; not modified.")
-        else:
-            points_elsewhere(winner)
-        return
-    messages.success(request, f"Platform mapping '{librenms_os}' to {platform_label(platform, viewer)} added")
+            raise
+        return existing_text(winner)
+    return messages.SUCCESS, f"Platform mapping '{librenms_os}' to {platform_label(platform, viewer)} added"
 
 
 class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
