@@ -19,12 +19,20 @@ from ..import_validation_helpers import (
 from ..ip_addressing import parse_host_address
 from ..librenms_api import LibreNMSAPI, librenms_id_owned_message
 from ..librenms_ids import coerce_librenms_id
+from ..platform_versions import (
+    PlatformFacts,
+    PlatformReason,
+    PlatformState,
+    assess_platform,
+    import_platform,
+    platform_version_tracking_enabled,
+    reason_text,
+)
 from ..utils import (
     cached_row_matches,
     exception_text_for,
     find_devices_by_serial,
     find_matching_location,
-    find_matching_platform,
     find_matching_site,
     is_vc_position,
     match_librenms_hardware_to_device_type,
@@ -667,9 +675,9 @@ def validate_device_for_import(  # noqa: C901
                     'host_device': Device or None
                 },
                 'platform': {
-                    'found': bool,
-                    'platform': Platform or None,
-                    'match_type': str  # 'exact' or None
+                    'platform': Platform or None,  # assigned without a create: the target or the OS platform
+                    'assessment': PlatformAssessment or None,
+                    'reason_text': str,  # the words of the assessment reason
                 },
                 'rack': {  # Only for devices
                     'found': bool,
@@ -755,7 +763,7 @@ def validate_device_for_import(  # noqa: C901
             "found": False,
             "host_device": None,
         },
-        "platform": {"found": False, "platform": None, "match_type": None},
+        "platform": {"platform": None, "assessment": None, "reason_text": ""},
         "rack": {
             "found": False,
             "rack": None,
@@ -1573,23 +1581,19 @@ def validate_device_for_import(  # noqa: C901
             result["cluster"]["found"] = True  # Not required for devices
 
         # 5. Match Platform (optional - same for both devices and VMs)
-        os = libre_device.get("os", "")
-        platform_match = find_matching_platform(os)
-        result["platform"] = platform_match
-
-        if not platform_match["found"] and os:
-            if platform_match.get("match_type") == "ambiguous":
-                ambiguity_source = platform_match.get("ambiguity_source", "mapping")
-                if ambiguity_source == "platform":
-                    result["warnings"].append(
-                        f"Multiple Platforms match OS: '{os}' — resolve the duplicate Platform names in NetBox"
-                    )
-                else:
-                    result["warnings"].append(
-                        f"Multiple platform mappings found for OS: '{os}' — resolve the conflict in Platform Mappings"
-                    )
-            else:
-                result["warnings"].append(f"No matching platform found for OS: '{os}'")
+        platform_assessment = assess_platform(
+            None,
+            PlatformFacts.from_librenms(libre_device.get("os"), libre_device.get("version")),
+            tracking=platform_version_tracking_enabled(),
+        )
+        result["platform"] = {
+            "platform": platform_assessment.target or platform_assessment.os_platform,
+            "assessment": platform_assessment,
+            "reason_text": reason_text(platform_assessment.reason, platform_assessment),
+        }
+        if platform_assessment.state is PlatformState.BLOCKED or platform_assessment.os_platform is None:
+            if platform_assessment.reason is not PlatformReason.NO_OS:
+                result["warnings"].append(result["platform"]["reason_text"])
 
         # 6. Additional validations
         if not hostname:
@@ -1694,6 +1698,29 @@ def _validate_and_insert(row, _mapping_fields=frozenset()):
     return row
 
 
+def import_platform_warnings(label, plan, text_viewer):
+    """
+    Return the warning for an imported object that did not get its version platform.
+
+    Args:
+        label (str): Names the imported object, e.g. ``device 12``.
+        plan (ImportPlatform): The platform the import assigned.
+        text_viewer: The user who reads the text, or None for saved text.
+
+    Returns:
+        list[str]: One warning, or none when the object got the platform the rule calls for.
+
+    """
+    if plan.reason is None:
+        return []
+    from dcim.models import Platform
+
+    detail = reason_text(plan.reason, plan.assessment)
+    if plan.error is not None:
+        detail = f"{detail} {exception_text_for(plan.error, Platform, text_viewer)}"
+    return [f"Imported {label} with OS platform '{plan.platform}': {detail}"]
+
+
 def import_single_device(  # noqa: C901
     device_id: int,
     server_key: str = None,
@@ -1715,7 +1742,6 @@ def import_single_device(  # noqa: C901
             - site_id: NetBox Site ID
             - device_type_id: NetBox DeviceType ID
             - device_role_id: NetBox DeviceRole ID
-            - platform_id: NetBox Platform ID (optional)
             - rack_id: NetBox Rack ID (optional)
         sync_options: Sync options (optional):
             - sync_interfaces: bool (default True)
@@ -1739,6 +1765,7 @@ def import_single_device(  # noqa: C901
                     'cables': int,
                     'ip_addresses': int
                 },
+                'warnings': List[str],  # only on success: the version platform the device did not get
             }
 
     """
@@ -1826,7 +1853,6 @@ def import_single_device(  # noqa: C901
         site = validation["site"].get("site")
         device_type = validation["device_type"].get("device_type")
         device_role = validation["device_role"].get("role")
-        platform = validation["platform"].get("platform")
         rack = None
         rack_explicitly_selected = False
 
@@ -1837,12 +1863,6 @@ def import_single_device(  # noqa: C901
         if manual_mappings:
             site = Site.objects.filter(id=manual_mappings.get("site_id")).first() or site
             device_role = DeviceRole.objects.filter(id=manual_mappings.get("device_role_id")).first() or device_role
-
-            platform_id = manual_mappings.get("platform_id")
-            if platform_id:
-                from dcim.models import Platform
-
-                platform = Platform.objects.filter(id=platform_id).first() or platform
 
             rack_id = manual_mappings.get("rack_id")
             if rack_id:
@@ -1927,9 +1947,14 @@ def import_single_device(  # noqa: C901
                 "comments": f"Imported from LibreNMS by netbox-librenms-plugin on {import_time}",
             }
 
-            # Add optional fields
-            if platform:
-                device_data["platform"] = platform
+            # A version platform created here rolls back with a failed import.
+            platform_plan = import_platform(
+                PlatformFacts.from_librenms(libre_device.get("os"), libre_device.get("version")),
+                tracking=platform_version_tracking_enabled(),
+                actor=user,
+            )
+            if platform_plan.platform is not None:
+                device_data["platform"] = platform_plan.platform
 
             # Persist the canonical serial used by the exact indexed match lookups.
             serial = normalize_serial(libre_device.get("serial"))
@@ -1997,6 +2022,7 @@ def import_single_device(  # noqa: C901
             "message": f"Successfully imported device: {device.name}",
             "error": None,
             "synced": synced,
+            "warnings": import_platform_warnings(f"device {device_id}", platform_plan, text_viewer),
         }
 
     except Exception as e:

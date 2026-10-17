@@ -1,4 +1,4 @@
-"""Platform version tracking through the real sync page and its writer views."""
+"""Platform version tracking through the real sync page, its writer views, and the import paths."""
 
 from copy import deepcopy
 
@@ -215,3 +215,64 @@ class TestCreateAndAssignPlatformView:
         assert device.platform.name == f"Juniper Junos {VERSION}"
         assert device.platform.parent == os_platform
         assert PlatformMapping.objects.get(librenms_os="junos").netbox_platform == os_platform
+
+
+class TestImportDetailsPlatformCell:
+    def _render(self, *, can_add_platform):
+        from django.contrib.auth.models import AnonymousUser
+        from django.template.loader import render_to_string
+
+        from netbox_librenms_plugin.platform_versions import PlatformFacts, assess_platform
+
+        _tracking(True)
+        os_platform = _platform("junos")
+        assessment = assess_platform(None, PlatformFacts.from_librenms("junos", VERSION), tracking=True)
+        request = RequestFactory().get("/")
+        request.user = AnonymousUser()
+        return render_to_string(
+            "netbox_librenms_plugin/htmx/device_validation_details.html",
+            {
+                "validation": {
+                    "can_import": True,
+                    "issues": [],
+                    "warnings": [],
+                    "existing_device": None,
+                    "site": {},
+                    "device_type": {},
+                    "device_role": {},
+                    "platform": {"platform": os_platform, "assessment": assessment, "reason_text": ""},
+                },
+                "libre_device": {
+                    "device_id": 9,
+                    "sysName": "details",
+                    "hostname": "details",
+                    "serial": "",
+                    "hardware": "Test Router",
+                    "os": "junos",
+                    "version": VERSION,
+                    "ip": "198.18.7.9",
+                    "location": "Lab",
+                    "status": True,
+                },
+                "server_key": SERVER_KEY,
+                "existing_device_model_name": None,
+                "sync_info": {},
+                "existing_id_servers": [],
+                "use_sysname": True,
+                "strip_domain": False,
+                "can_add_platform": can_add_platform,
+            },
+            request=request,
+        )
+
+    def test_the_version_platform_is_created_on_import_for_an_actor_who_may_add_it(self):
+        html = self._render(can_add_platform=True)
+
+        assert 'data-version-platform="create"' in html
+        assert f"junos {VERSION}" in html
+
+    def test_the_missing_version_platform_is_shown_for_an_actor_who_may_not_add_it(self):
+        html = self._render(can_add_platform=False)
+
+        assert 'data-version-platform="missing"' in html
+        assert f"junos {VERSION} missing" in html

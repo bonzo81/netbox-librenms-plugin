@@ -15,6 +15,7 @@ from ..import_validation_helpers import (
     vm_host_placement_issue,
 )
 from ..librenms_api import LibreNMSAPI, librenms_id_owned_message
+from ..platform_versions import PlatformFacts, import_platform, platform_version_tracking_enabled
 from ..server_mappings import (
     IDENTITY_BUSY_MESSAGE,
     IdentityBusy,
@@ -28,6 +29,7 @@ from .device_operations import (
     _determine_device_name,
     _validate_and_insert,
     fetch_device_with_cache,
+    import_platform_warnings,
     validate_device_for_import,
 )
 from .permissions import require_permissions
@@ -83,6 +85,8 @@ def create_vm_from_librenms(
     use_sysname: bool = True,
     strip_domain: bool = False,
     role=None,
+    actor=None,
+    text_viewer=None,
 ):
     """
     Create a NetBox VirtualMachine from LibreNMS device data.
@@ -95,9 +99,11 @@ def create_vm_from_librenms(
         server_key: LibreNMS server key used to store the ``librenms_id`` custom field.
         strip_domain: If True, remove the domain suffix from the VM name.
         role: Optional NetBox device role. The validated role is used when this is None.
+        actor: The synchronization actor; a missing version platform is created when they may add platforms.
+        text_viewer: The user who reads the warning text, or None for saved text.
 
     Returns:
-        The created VirtualMachine instance.
+        tuple: The created VirtualMachine, and the warnings of its platform (a list of str).
 
     Raises:
         ValueError: If the VM cannot be created from the validated data.
@@ -122,7 +128,6 @@ def create_vm_from_librenms(
     else:
         site = None
     cluster = validation.get("cluster", {}).get("cluster") if placement_method != VMPlacementMethod.SITE else None
-    platform = validation["platform"].get("platform")
     role = role if role is not None else validation.get("device_role", {}).get("role")
 
     # Determine VM name - use pre-computed name if available (handles strip_domain),
@@ -161,20 +166,25 @@ def create_vm_from_librenms(
             # who may see the owner. Naming it here would disclose an object outside the caller's
             # scope; the permission-checked callers name it through _visible_conflict_label().
             raise ValueError(f"VM cannot be imported: {librenms_id_owned_message(librenms_device_id)}")
+        platform_plan = import_platform(
+            PlatformFacts.from_librenms(libre_device.get("os"), libre_device.get("version")),
+            tracking=platform_version_tracking_enabled(),
+            actor=actor,
+        )
         vm = VirtualMachine(
             name=vm_name,
             site=site,
             cluster=cluster,
             device=host_device,
             role=role,
-            platform=platform,
+            platform=platform_plan.platform,
             comments=f"Imported from LibreNMS (device_id={librenms_device_id}) by netbox-librenms-plugin on {import_time}",
         )
         # The mapping goes on before the one save: a second save would log an update without a before-state.
         persist_mapping(vm, assign_own(vm, server_key, librenms_device_id), write=_validate_and_insert)
 
     logger.info(f"Created VM {vm.name} (ID: {vm.pk}) from LibreNMS device {libre_device['device_id']}")
-    return vm
+    return vm, import_platform_warnings(f"VM {librenms_device_id}", platform_plan, text_viewer)
 
 
 def bulk_import_vms(
@@ -210,6 +220,7 @@ def bulk_import_vms(
             - success: List of {"device_id": int, "device": VM, "message": str}
             - failed: List of {"device_id": int, "error": str}
             - skipped: List of {"device_id": int, "reason": str}
+            - warnings: List of str, for imported VMs that did not get their version platform
 
     Raises:
         PermissionDenied: If the user lacks required permissions.
@@ -235,7 +246,7 @@ def bulk_import_vms(
     # Check permissions at start of bulk operation
     require_permissions(user, ["virtualization.add_virtualmachine"], "import VMs")
 
-    result = {"success": [], "failed": [], "skipped": []}
+    result = {"success": [], "failed": [], "skipped": [], "warnings": []}
     vm_ids = list(vm_imports.keys())
 
     # Use job logger if available, otherwise standard logger
@@ -319,13 +330,18 @@ def bulk_import_vms(
             libre_device["_computed_name"] = vm_name
 
             # Create VM
-            vm = create_vm_from_librenms(
+            vm, platform_warnings = create_vm_from_librenms(
                 libre_device,
                 validation,
                 use_sysname=use_sysname_opt,
                 strip_domain=strip_domain_opt,
                 server_key=api.server_key,
+                actor=user,
+                text_viewer=text_viewer,
             )
+            for warn_msg in platform_warnings:
+                result["warnings"].append(warn_msg)
+                log.warning(warn_msg)
 
             result["success"].append(
                 {

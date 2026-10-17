@@ -546,7 +546,7 @@ class TestDeviceValidation:
             include_vc_detection=False,
         )
 
-        assert result[result_key]["found"] is False
+        assert result[result_key][result_key] is None
 
     def test_unknown_prerequisites_report_real_validation_results(self):
         from netbox_librenms_plugin.import_utils import validate_device_for_import
@@ -563,7 +563,7 @@ class TestDeviceValidation:
         )
 
         assert result["site"]["found"] is False
-        assert result["platform"]["found"] is False
+        assert result["platform"]["platform"] is None
         assert result["device_type"]["found"] is False
         assert any("site" in issue.lower() for issue in result["issues"])
         assert any("device type" in issue.lower() for issue in result["issues"])
@@ -1170,6 +1170,7 @@ class TestBuildSyncInfo:
         result = DeviceValidationDetailsView._build_sync_info(
             {"serial": existing.serial, "os": platform.name, "hardware": existing.device_type.model},
             existing,
+            None,
         )
 
         assert result["all_synced"] is True
@@ -1185,6 +1186,7 @@ class TestBuildSyncInfo:
         result = DeviceValidationDetailsView._build_sync_info(
             {"serial": "NEW456", "os": "-", "hardware": "-"},
             existing,
+            None,
         )
 
         assert result["serial_synced"] is False
@@ -1202,6 +1204,7 @@ class TestBuildSyncInfo:
         result = DeviceValidationDetailsView._build_sync_info(
             {"serial": existing.serial, "os": new_platform.name, "hardware": "-"},
             existing,
+            None,
         )
 
         assert result["platform_synced"] is False
@@ -1219,6 +1222,7 @@ class TestBuildSyncInfo:
         result = DeviceValidationDetailsView._build_sync_info(
             {"serial": existing.serial, "os": os_name, "hardware": "-"},
             existing,
+            None,
         )
 
         assert result["platform_synced"] is False
@@ -1232,6 +1236,7 @@ class TestBuildSyncInfo:
         result = DeviceValidationDetailsView._build_sync_info(
             {"serial": existing.serial, "os": "-", "hardware": "Unknown Hardware"},
             existing,
+            None,
         )
 
         assert result["device_type_synced"] is False

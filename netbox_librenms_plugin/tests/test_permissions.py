@@ -506,6 +506,7 @@ class TestBulkImportPermissions:
             "success": [],
             "failed": [],
             "skipped": [],
+            "warnings": [],
         }
 
     def test_vm_import_rejects_a_user_without_the_add_grant(self, librenms_server):
