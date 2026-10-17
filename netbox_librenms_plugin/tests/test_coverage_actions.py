@@ -1418,7 +1418,7 @@ class TestDeviceImportHelperMixin:
     @staticmethod
     def _view(settings, server, server_key):
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.imports.actions import DeviceRoleUpdateView
+        from netbox_librenms_plugin.views.imports.actions import DeviceImportPlanUpdateView
 
         configure_test_servers(
             settings,
@@ -1430,7 +1430,7 @@ class TestDeviceImportHelperMixin:
                 }
             },
         )
-        view = DeviceRoleUpdateView()
+        view = DeviceImportPlanUpdateView()
         view._librenms_api = LibreNMSAPI(server_key=server_key)
         return view
 
@@ -1465,11 +1465,11 @@ class TestDeviceImportHelperMixin:
 
     def test_post_commit_refresh_fallback_renders_real_messages(self):
         from django.contrib import messages
-        from netbox_librenms_plugin.views.imports.actions import DeviceRoleUpdateView
+        from netbox_librenms_plugin.views.imports.actions import DeviceImportPlanUpdateView
 
         request = make_view_request("post")
 
-        response = DeviceRoleUpdateView().post_commit_refresh_fallback(
+        response = DeviceImportPlanUpdateView().post_commit_refresh_fallback(
             request,
             "closeModal",
             deferred_messages=[(messages.INFO, "OOB attached")],
@@ -1847,10 +1847,8 @@ class TestBuildIdServerInfo:
 
 
 @pytest.mark.django_db
-class TestRowUpdateViews:
-    """Exercise role, cluster, and rack row updates through real server rebinding."""
-
-    VIEWS = ["DeviceRoleUpdateView", "DeviceClusterUpdateView", "DeviceRackUpdateView"]
+class TestImportPlanUpdateView:
+    """Exercise the import-row refresh through real server rebinding."""
 
     @pytest.fixture
     def librenms_server(self, monkeypatch):
@@ -1860,10 +1858,10 @@ class TestRowUpdateViews:
             yield server
 
     @staticmethod
-    def _view(view_name):
-        from netbox_librenms_plugin.views.imports import actions
+    def _view():
+        from netbox_librenms_plugin.views.imports.actions import DeviceImportPlanUpdateView
 
-        return getattr(actions, view_name)()
+        return DeviceImportPlanUpdateView()
 
     @staticmethod
     def _configure(settings, server, server_key):
@@ -1878,22 +1876,20 @@ class TestRowUpdateViews:
             },
         )
 
-    @pytest.mark.parametrize("view_name", VIEWS)
-    def test_stale_server_key_fails_closed_without_http(self, settings, librenms_server, view_name):
+    def test_stale_server_key_fails_closed_without_http(self, settings, librenms_server):
         self._configure(settings, librenms_server, "row-active")
         request = make_view_request("post", {"server_key": "ghost"})
 
-        result = post_view(self._view(view_name), request, device_id=42)
+        result = post_view(self._view(), request, device_id=42)
 
         assert result.headers.get("HX-Reswap") == "none"
         assert b"no longer configured" in result.content
         assert librenms_server.requests == []
 
-    @pytest.mark.parametrize("view_name", VIEWS)
-    def test_rebinds_before_real_missing_device_lookup(self, settings, librenms_server, view_name):
-        server_key = f"row-{view_name.lower()}"
+    def test_rebinds_before_real_missing_device_lookup(self, settings, librenms_server):
+        server_key = "row-plan-update"
         self._configure(settings, librenms_server, server_key)
-        view = self._view(view_name)
+        view = self._view()
         request = make_view_request("post", {"server_key": server_key})
 
         result = post_view(view, request, device_id=42)
@@ -1905,7 +1901,6 @@ class TestRowUpdateViews:
         assert [(item["method"], item["path"]) for item in librenms_server.requests] == [("GET", "/api/v0/devices/42")]
 
 
-@pytest.mark.django_db
 @pytest.mark.django_db
 class TestDeviceConflictActionView:
     """DeviceConflictActionView.post — input guards + real-DB lookup paths."""
