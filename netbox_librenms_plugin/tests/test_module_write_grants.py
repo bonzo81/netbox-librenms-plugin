@@ -633,6 +633,24 @@ def test_verify_refuses_a_grant_of_another_snapshot(ui, vc_grants):
     assert response.json()["message"] == GrantRefusal.SNAPSHOT.message
 
 
+def test_a_verify_grant_checks_its_state_like_every_other_grant(ui, vc_grants):
+    """A verify row carries an index and no target, so the state check must not read a target from it."""
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+    from netbox_librenms_plugin.module_grants import ACTION_VERIFY_MODULE, read_module_grant
+
+    page, _member = vc_grants()
+    content = render(ui, page)
+    (select,) = [attrs for attrs in module_tab_forms(content).selects if attrs.get("data-module") == str(CARRIER)]
+    grant = read_module_grant(
+        select["data-verify-binding"], action=ACTION_VERIFY_MODULE, page_device_id=page.pk, server_key=SERVER_KEY
+    )
+    assert grant.rows
+
+    assert grant.check_state(cache.get(cache_key(page))["inventory"], load_inventory_policy(page.pk)) is grant
+
+
 def test_a_selected_install_onto_another_member_needs_the_verified_override(ui, vc_grants):
     page, member = vc_grants()
     content = render(ui, page)
