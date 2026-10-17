@@ -168,7 +168,7 @@ def test_the_import_row_does_not_link_an_out_of_scope_match(client, librenms_ser
     client.force_login(_viewer_scoped_to("disclosure-row-viewer", elsewhere))
 
     response = client.post(
-        reverse("plugins:netbox_librenms_plugin:device_role_update", args=[IMPORT_DEVICE_ID]),
+        reverse("plugins:netbox_librenms_plugin:device_import_plan_update", args=[IMPORT_DEVICE_ID]),
         {"server_key": server_key},
         headers={"HX-Request": "true"},
     )
@@ -187,7 +187,7 @@ def test_the_import_row_still_links_a_visible_match(client, librenms_server, set
     client.force_login(_viewer_scoped_to("disclosure-row-visible-viewer", match))
 
     response = client.post(
-        reverse("plugins:netbox_librenms_plugin:device_role_update", args=[IMPORT_DEVICE_ID]),
+        reverse("plugins:netbox_librenms_plugin:device_import_plan_update", args=[IMPORT_DEVICE_ID]),
         {"server_key": server_key},
         headers={"HX-Request": "true"},
     )
