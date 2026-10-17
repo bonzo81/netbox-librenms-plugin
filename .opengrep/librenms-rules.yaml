@@ -534,7 +534,7 @@ rules:
       This code reads a caught error that can be a ValidationError, a database error or an
       AbortRequest. NetBox's clean() messages and admin validators can name objects outside the
       viewer's scope, and PostgreSQL's error text can hold key values. Give the error to
-      exception_text_for, log it through the module logger, or raise it. Every other read is a
+      exception_text_for or write_failure_message, log it through the module logger, or raise it. Every other read is a
       finding, also the call of a helper. A reviewed exception gets a nosemgrep comment with a reason.
     metadata:
       category: security
@@ -783,6 +783,8 @@ rules:
                   - pattern: exception_text_for($ERROR, ...)
                   - pattern-not: exception_text_for(..., exc=$OTHER, ...)
               - pattern: exception_text_for(..., exc=$ERROR, ...)
+              # The keys of the error choose only its wording; exception_text_for gives its detail.
+              - pattern: write_failure_message($ERROR, ...)
               - pattern: classify_conflict($ERROR)
               - pattern: database_error_sqlstate($ERROR)
               - pattern: isinstance($ERROR, $TYPES)
@@ -820,6 +822,7 @@ rules:
           - pattern-not: logger.critical(...)
           - pattern-not: logger.log(...)
           - pattern-not: exception_text_for(...)
+          - pattern-not: write_failure_message($ERROR, ...)
           - pattern-not: classify_conflict($ERROR)
           - pattern-not: database_error_sqlstate($ERROR)
           - pattern-not: isinstance($ERROR, $TYPES)
@@ -868,8 +871,8 @@ rules:
     severity: ERROR
     message: >-
       This code hides a caught error or a trusted name from caught-error-text. That rule trusts
-      exception_text_for, classify_conflict, database_error_sqlstate, validation_error_detail,
-      _first_refusal, TypeRefusal, isinstance, hasattr, type and the module logger by name, and it knows a risky error class by
+      exception_text_for, write_failure_message, classify_conflict, database_error_sqlstate,
+      validation_error_detail, _first_refusal, TypeRefusal, isinstance, hasattr, type and the module logger by name, and it knows a risky error class by
       its name. Do not bind those names again, change the logging setup, keep a risky class under
       another name, or use except*, which opengrep cannot parse. In a try statement with a named
       handler, do not use a lambda default (use functools.partial), a decorator or a match
@@ -908,25 +911,25 @@ rules:
               - pattern: setattr($OWNER, "$NAME", ...)
           - metavariable-regex:
               metavariable: $NAME
-              regex: ^(exception_text_for|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|logger)$
+              regex: ^(exception_text_for|write_failure_message|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|logger)$
       # An assignment to a trusted name, also as one target of several.
       - patterns:
           - pattern: $TARGETS = $VALUE
           - metavariable-regex:
               metavariable: $TARGETS
-              regex: (?:^|[\s,(\[*])(?:exception_text_for|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|logger)(?:[\s,)\]]|$)
+              regex: (?:^|[\s,(\[*])(?:exception_text_for|write_failure_message|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|logger)(?:[\s,)\]]|$)
           - pattern-not: logger = logging.getLogger(__name__)
       # A loop or comprehension target, an as or case target, or a walrus. A target holds only names,
       # dots, commas, brackets and stars; it spans lines only in brackets, so prose rarely matches.
       - pattern-regex: >-
-          \bfor[ \t]+(?:(?!\bin\b)[\w \t,()\[\]*.])*?\b(?:exception_text_for|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\b(?:(?!\bin\b)[\w \t,()\[\]*.])*?[ \t]+in\b
+          \bfor[ \t]+(?:(?!\bin\b)[\w \t,()\[\]*.])*?\b(?:exception_text_for|write_failure_message|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\b(?:(?!\bin\b)[\w \t,()\[\]*.])*?[ \t]+in\b
       - pattern-regex: >-
-          \bfor[ \t]*[(\[](?:(?!\bin\b)[\w\s,()\[\]*.])*?\b(?:exception_text_for|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\b(?:(?!\bin\b)[\w\s,()\[\]*.])*?[)\]][ \t]*in\b
-      - pattern-regex: \bas\s+\(?(?:[\w\s,]*,\s*)?(?:exception_text_for|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\b
-      - pattern-regex: (?m)^[ \t]*case\b[^\n]*\b(?:exception_text_for|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\b
+          \bfor[ \t]*[(\[](?:(?!\bin\b)[\w\s,()\[\]*.])*?\b(?:exception_text_for|write_failure_message|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\b(?:(?!\bin\b)[\w\s,()\[\]*.])*?[)\]][ \t]*in\b
+      - pattern-regex: \bas\s+\(?(?:[\w\s,]*,\s*)?(?:exception_text_for|write_failure_message|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\b
+      - pattern-regex: (?m)^[ \t]*case\b[^\n]*\b(?:exception_text_for|write_failure_message|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\b
       - pattern-regex: >-
-          \bcase[ \t]*[(\[](?:[\w\s,()\[\]*.|])*?\b(?:exception_text_for|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\b
-      - pattern-regex: \b(?:exception_text_for|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\s*:=
+          \bcase[ \t]*[(\[](?:[\w\s,()\[\]*.|])*?\b(?:exception_text_for|write_failure_message|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\b
+      - pattern-regex: \b(?:exception_text_for|write_failure_message|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\s*:=
       # A trusted builtin that a function, a parameter or an import binds again.
       - patterns:
           - pattern-either:
@@ -964,7 +967,7 @@ rules:
               metavariable: $TARGETS
               regex: (?:^|[\s,(\[*])(?:isinstance|hasattr|type)(?:[\s,)\]]|$)
       - pattern-regex: >-
-          \blambda\b(?:[^:"'{]|"[^"\n]*"|'[^'\n]*'|\{[^{}]*\})*\b(?:exception_text_for|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\b(?:[^:"'{]|"[^"\n]*"|'[^'\n]*'|\{[^{}]*\})*:
+          \blambda\b(?:[^:"'{]|"[^"\n]*"|'[^'\n]*'|\{[^{}]*\})*\b(?:exception_text_for|write_failure_message|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\b(?:[^:"'{]|"[^"\n]*"|'[^'\n]*'|\{[^{}]*\})*:
       # A lambda default that calls a function, anywhere: taint analysis does not read it.
       - pattern-regex: \blambda\b(?:[^:"'{]|"[^"\n]*"|'[^'\n]*'|\{[^{}]*\})*=(?:[^:"'{]|"[^"\n]*"|'[^'\n]*'|\{[^{}]*\})*(?:\(|\{[^{}]*\()
       # A lambda default, a decorator or a match statement in a try statement with a named handler:
@@ -1008,7 +1011,7 @@ rules:
           - pattern: from $MODULE import $NAME
           - metavariable-regex:
               metavariable: $NAME
-              regex: ^(exception_text_for|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|logger)$
+              regex: ^(exception_text_for|write_failure_message|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|logger)$
           - metavariable-regex:
               metavariable: $MODULE
               regex: ^(?!(netbox_librenms_plugin\.|\.+)(utils|transactions|interface_diff)$)

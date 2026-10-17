@@ -44,7 +44,7 @@ unchecked until that review.
 | --- | --- | --- |
 | `import-disclosure` | error | A `warnings`/`issues` message that names a NetBox object no `restrict()` call filtered. |
 | `import-disclosure-sanitizer-shadow` | error | A local definition that impersonates a permission API trusted by `import-disclosure`. |
-| `caught-error-text` | error | A read of a caught error that can be a ValidationError, a database error or an `AbortRequest`, other than through `exception_text_for`, the module logger or a `raise`. |
+| `caught-error-text` | error | A read of a caught error that can be a ValidationError, a database error or an `AbortRequest`, other than through `exception_text_for` or `write_failure_message`, the module logger or a `raise`. |
 | `caught-error-text-shadow` | error | A binding of a name that `caught-error-text` trusts, a logging change, a risky error class under another name, or `except*`. |
 | `no-requests-outside-http-client` | error | Selected imported requests HTTP calls outside the package HTTP client and tests. |
 | `ipaddress-address-needs-netaddr` | error | An ipam `IPAddress` gets an address that is not a `netaddr.IPNetwork(...)` call, or a `**` expansion. |
@@ -161,7 +161,7 @@ also counts. A chained error (`__cause__`, `__context__`, a group's `exceptions`
 returns the current exception (`sys.exc_info()`, `traceback.format_exc()`, `locals()` and others)
 are sources in any function. Each argument or receiver of a call, and each store, return, yield,
 loop or assert message, is a finding. The exceptions are the log methods of the module `logger`, a `raise`,
-and the trusted calls: `exception_text_for`, `classify_conflict`, `database_error_sqlstate`,
+and the trusted calls: `exception_text_for`, `write_failure_message`, `classify_conflict`, `database_error_sqlstate`,
 `isinstance`, `hasattr`, `type`, `validation_error_detail`, and a `TypeRefusal` that the reviewed
 factory `_first_refusal` builds. A trusted call hides the arguments that it gets. A call of a
 helper is a finding at the call, and intrafile analysis also reports the reads inside a helper of
