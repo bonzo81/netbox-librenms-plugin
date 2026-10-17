@@ -3,7 +3,7 @@ from urllib.parse import urlencode
 
 from dcim.models import Device, Manufacturer, Platform
 from django.contrib import messages
-from django.core.exceptions import NON_FIELD_ERRORS, ValidationError
+from django.core.exceptions import ValidationError
 from django.db import DatabaseError, IntegrityError, transaction
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect
@@ -45,8 +45,9 @@ from netbox_librenms_plugin.utils import (
     match_librenms_hardware_to_device_type,
     normalize_serial,
     resolve_naming_preferences,
-    validation_error_detail,
     exception_text_for,
+    validation_error_detail,
+    write_failure_message,
 )
 from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
@@ -111,22 +112,6 @@ def _server_mapping_redirect(object_type, pk, active_server_key=None, active_syn
     return redirect(url)
 
 
-def _write_failure_message(exc, action, written_field, model, user):
-    """Describe a failed single-field write to *user*, and say when the failure is on another field."""
-    detail = exception_text_for(exc, model, user)
-    # full_clean() validates the whole object, so the failure can sit on a field this write never
-    # touched. Whether the write caused the failure is not knowable from the error keys alone:
-    # a custom validator can add any key, so the wording states what failed, never when it broke.
-    # The keys only choose the wording; the text comes from exception_text_for.
-    # nosemgrep: caught-error-text  # noqa: ERA001
-    keys = exc.error_dict if hasattr(exc, "error_dict") else ()
-    # nosemgrep: caught-error-text  # noqa: ERA001
-    elsewhere = [key for key in keys if key not in (written_field, NON_FIELD_ERRORS)]
-    if elsewhere and len(elsewhere) == len(keys):
-        return f"Cannot {action}: another field fails validation. {detail.rstrip('.')}. Resolve that, then retry."
-    return f"Failed to {action}: {detail}"
-
-
 def _device_sync_redirect(request, pk, server_key):
     """
     Redirect to the device sync tab, carrying the already-resolved ``server_key``.
@@ -181,10 +166,7 @@ def _write_device_field(view, request, pk, server_key, field, value, action):
     except (ValidationError, IntegrityError) as e:
         if classify_conflict(e):
             raise
-        # The keys only choose the wording; the text comes from exception_text_for.
-        # nosemgrep: caught-error-text  # noqa: ERA001
-        failure = _write_failure_message(e, action, field, Device, request.user)
-        messages.error(request, failure)
+        messages.error(request, write_failure_message(e, action, field, Device, request.user))
         return None, _device_sync_redirect(request, pk, server_key)
     return old_values[0], None
 
@@ -219,7 +201,7 @@ def _report_platform_outcome(request, outcome, model):
             messages.error(request, f"Platform {target} could not be created: {detail}")
             return
         action = f"assign platform {attempted_label(outcome.platform, viewer)} to the {model._meta.verbose_name}"
-        messages.error(request, _write_failure_message(outcome.error, action, "platform", model, viewer))
+        messages.error(request, write_failure_message(outcome.error, action, "platform", model, viewer))
         return
     if outcome.reason is PlatformReason.SUBJECT_UNAVAILABLE:
         messages.error(request, f"{subject} no longer exists.")
@@ -790,9 +772,7 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
         except _WriteRefused as exc:
             return str(exc)
         except (ValidationError, IntegrityError) as e:
-            # The keys only choose the wording; the text comes from exception_text_for.
-            # nosemgrep: caught-error-text  # noqa: ERA001
-            return _write_failure_message(e, f"set serial on {locked[0].name}", "serial", Device, self.request.user)
+            return write_failure_message(e, f"set serial on {locked[0].name}", "serial", Device, self.request.user)
         return None
 
 
@@ -1119,15 +1099,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         except ValidationError as exc:
             if classify_conflict(exc):
                 raise
-            failure = _write_failure_message(
-                # The keys only choose the wording; the text comes from exception_text_for.
-                # nosemgrep: caught-error-text  # noqa: ERA001
-                exc,
-                "save converted librenms_id",
-                "custom_field_data",
-                model,
-                request.user,
-            )
+            failure = write_failure_message(exc, "save converted librenms_id", "custom_field_data", model, request.user)
             messages.error(request, failure)
             return self._sync_url(object_type, pk)
         except IntegrityError as exc:
