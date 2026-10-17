@@ -175,6 +175,30 @@ class TestSyncPageRouting:
         assert response.context["librenms_sync_device"] == linked
         assert response.context["sync_device_has_librenms_id"] is True
 
+    @pytest.mark.parametrize(
+        ("viewed_mapping", "delegation_shown"),
+        [(None, True), (0, True), ({"_preferred_server": SERVER_KEY}, False), ({"retired": "abc"}, False)],
+        ids=repr,
+    )
+    def test_the_delegation_notice_follows_the_viewed_members_own_mapping(
+        self, logged_in_client, librenms_server, viewed_mapping, delegation_shown
+    ):
+        _vc, members = make_virtual_chassis_members(f"sync-vc-notice-{delegation_shown}", count=2)
+        linked, viewed = members
+        linked.custom_field_data["librenms_id"] = {SERVER_KEY: 6609}
+        linked.save()
+        viewed.custom_field_data["librenms_id"] = viewed_mapping
+        viewed.save()
+        _register_device(librenms_server, 6609, linked.name)
+
+        response = logged_in_client.get(_sync_url(viewed))
+
+        assert response.status_code == 200
+        assert response.context["librenms_sync_device"] == linked
+        assert response.context["object_has_recorded_mapping"] is not delegation_shown
+        notice = "LibreNMS sync for this virtual chassis is managed by"
+        assert (notice in response.content.decode()) is delegation_shown
+
     def test_vc_member_with_own_mapping_remains_the_lookup_device(self, logged_in_client, librenms_server):
         _vc, members = make_virtual_chassis_members("sync-vc-own", count=2)
         viewed = members[1]

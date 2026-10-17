@@ -88,6 +88,24 @@ class TestEnsureLibreNMSIdCustomField:
 
         assert set(custom_field.object_types.values_list("pk", flat=True)) == _required_content_type_ids()
 
+    def test_an_added_object_type_is_recorded_with_the_field_before_the_add(self):
+        from dcim.models import Device
+        from django.contrib.contenttypes.models import ContentType
+        from extras.models import CustomField
+
+        from netbox_librenms_plugin import _ensure_librenms_id_custom_field
+        from netbox_librenms_plugin.tests.view_test_helpers import assert_update_logged, change_logging, make_request
+
+        custom_field = CustomField.objects.get(name="librenms_id")
+        device_type = ContentType.objects.get_for_model(Device)
+        custom_field.object_types.remove(device_type)
+        before = sorted(custom_field.object_types.values_list("pk", flat=True))
+
+        with change_logging(make_request()):
+            _ensure_librenms_id_custom_field(sender=None)
+
+        assert_update_logged(custom_field, "object_types", before, sorted(_required_content_type_ids()))
+
     def test_database_failure_is_logged_and_can_be_retried(self, caplog):
         from netbox_librenms_plugin import _ensure_librenms_id_custom_field
 
@@ -110,15 +128,17 @@ class TestEnsureLibreNMSIdCustomField:
         from extras.models import CustomField
 
         from netbox_librenms_plugin import _ensure_librenms_id_custom_field
+        from netbox_librenms_plugin.tests.view_test_helpers import assert_update_logged, change_logging, make_request
 
         custom_field = CustomField.objects.get(name="librenms_id")
         custom_field.type = "integer"
         custom_field.save(update_fields=["type"])
 
-        with caplog.at_level(logging.INFO, logger="netbox_librenms_plugin"):
+        with caplog.at_level(logging.INFO, logger="netbox_librenms_plugin"), change_logging(make_request()):
             _ensure_librenms_id_custom_field(sender=None, using="default")
 
         custom_field.refresh_from_db()
         assert custom_field.type == "json"
         assert "Migrated 'librenms_id' custom field type from integer to json" in caplog.text
         assert "default" in _ensure_librenms_id_custom_field._executed_aliases
+        assert_update_logged(custom_field, "type", "integer", "json")

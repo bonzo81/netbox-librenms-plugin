@@ -9,6 +9,7 @@ from copy import deepcopy
 
 import pytest
 
+from netbox_librenms_plugin.server_mappings import decode_stored_mapping
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 
@@ -1115,11 +1116,11 @@ class TestLegacyLibreNMSIdMigration:
     def test_migration_gate_and_writer_agree(self):
         from types import SimpleNamespace
 
-        from netbox_librenms_plugin.utils import is_legacy_librenms_id, migrate_legacy_librenms_id
+        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
 
         obj = SimpleNamespace(custom_field_data={"librenms_id": " 42 "})
 
-        assert is_legacy_librenms_id(obj.custom_field_data["librenms_id"]) is True
+        assert decode_stored_mapping(obj.custom_field_data["librenms_id"]).legacy.is_legacy is True
         assert migrate_legacy_librenms_id(obj, "primary") is True
         assert obj.custom_field_data["librenms_id"] == {"primary": 42}
 
@@ -1784,13 +1785,14 @@ class TestSyncModuleBayCounter:
         assert device.module_bay_count == 2
 
 
+@pytest.mark.django_db
 class TestBuildIdServerInfo:
-    """Test DeviceValidationDetailsView._build_id_server_info method."""
+    """Test DeviceValidationDetailsView._build_id_server_info method on real Device rows."""
 
     def _make_device(self, librenms_id_value):
-        from types import SimpleNamespace
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        return SimpleNamespace(custom_field_data={"librenms_id": librenms_id_value})
+        return make_device("build-id-server-info", librenms_cf=librenms_id_value)
 
     def test_returns_none_for_legacy_int(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView

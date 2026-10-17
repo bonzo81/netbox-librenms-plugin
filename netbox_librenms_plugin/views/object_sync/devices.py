@@ -16,6 +16,7 @@ from netbox_librenms_plugin.interface_relationships import (
     build_relationship_maps,
     resolve_relationship_row,
 )
+from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.tables.cables import (
     LibreNMSCableTable,
     VCCableTable,
@@ -37,7 +38,6 @@ from netbox_librenms_plugin.utils import (
     get_untagged_vlan_css_class,
     get_vlan_sync_css_class,
     is_valid_ports_payload,
-    normalize_librenms_port_id,
     normalize_vlan_vid,
     render_vlan_sync_action,
     resolve_interface_row_device,

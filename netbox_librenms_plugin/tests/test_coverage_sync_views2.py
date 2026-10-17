@@ -573,7 +573,7 @@ def test_match_interface_stops_on_ambiguous_port_id():
     dev = make_device("ipres-ambig-name")
     named = make_interface(dev, "eth0")
     result = SyncIPAddressesView()._match_interface(
-        {"port_id": 7, "interface_name": "eth0"}, {"7": None}, {"eth0": named}
+        {"port_id": 7, "interface_name": "eth0"}, {"7": None}, {"eth0": named}, server_key="default"
     )
     assert result is None
 

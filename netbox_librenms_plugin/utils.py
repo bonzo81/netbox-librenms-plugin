@@ -7,13 +7,12 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Optional
 
-import netaddr
 import psycopg
 from dcim.models import Device, Interface
 from django.core import signing
 from django.core.exceptions import FieldDoesNotExist, ObjectDoesNotExist, ValidationError
 from django.db import DatabaseError, IntegrityError
-from django.db.models import Count, Max, Q
+from django.db.models import Count, Max
 from django.http import HttpRequest
 from django.utils.functional import SimpleLazyObject
 from django.utils.html import escape, format_html
@@ -38,12 +37,21 @@ from netbox_librenms_plugin.constants import (
     is_supported_interface_name_field,
 )
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_host_address
+from netbox_librenms_plugin.librenms_ids import coerce_librenms_id, normalize_librenms_port_id
 from netbox_librenms_plugin.server_mappings import (
     PREFERRED_SERVER_FIELD,
+    AmbiguousLibreNMSIdError,
+    ContainerStatus,
+    MappingRole,
     SameServerIdentityConflict,
     StaleIdentityReplacement,
+    decode_stored_mapping,
+    find_mapping,
+    identity_q,
     is_server_key,
-    iter_server_mapping_entries,
+    name_match_may_be_port,
+    read_mapping,
+    readable_legacy_id,
     require_server_key,
 )
 from netbox_librenms_plugin.transactions import (
@@ -56,14 +64,6 @@ from netbox_librenms_plugin.transactions import (
 
 logger = logging.getLogger(__name__)
 
-# Bounded at 19 digits, the width of a PostgreSQL bigint. Without the bound an oversized string is
-# rejected only by CPython's int_max_str_digits limit, which a host may raise or disable.
-_ID_TEXT_SPACE = r"[ \t\r\n\f\v]*"
-_ID_TEXT_SIGN = r"\+?"
-_ID_TEXT_MAX_DIGITS = 19
-_ASCII_POSITIVE_INTEGER_RE = re.compile(
-    rf"^{_ID_TEXT_SPACE}{_ID_TEXT_SIGN}[0-9]{{1,{_ID_TEXT_MAX_DIGITS}}}{_ID_TEXT_SPACE}$"
-)
 _MODULE_INVENTORY_BINDING_SALT = "netbox_librenms_plugin.module_inventory_binding"
 
 
@@ -413,11 +413,6 @@ def format_mac_address(mac_address: object) -> str:
     return formatted_mac.upper()
 
 
-def normalize_librenms_port_id(value) -> int | None:
-    """Normalize a LibreNMS port_id to a positive integer, or None."""
-    return coerce_librenms_id(value)
-
-
 def index_ip_port_records(ports_by_id):
     """Index cached records once by canonical ID, with None for an ambiguous ID."""
     index = {}
@@ -447,7 +442,7 @@ def index_ip_source_interfaces(interfaces, server_key, obj_device_id=None):
         # this object's (and its VC members') interfaces, so a stale URL can never bind the
         # address to an unrelated device's interface — stricter than the old direct .get(id=).
         by_pk[str(iface.pk)] = iface
-        lib_id = get_librenms_device_id(iface, server_key, auto_save=False)
+        lib_id = read_mapping(iface).own_id(server_key)
         if lib_id is not None:
             key = str(lib_id)
             if key in by_librenms_id:
@@ -472,18 +467,23 @@ def index_ip_source_interfaces(interfaces, server_key, obj_device_id=None):
     return by_librenms_id, by_name, by_pk
 
 
-def resolve_ip_source_interface(row, by_librenms_id, by_name, by_pk=None):
-    """Resolve a source interface without falling through an ambiguous identity."""
+def resolve_ip_source_interface(row, by_librenms_id, by_name, by_pk=None, *, server_key):
+    """Resolve a source interface without falling through an ambiguous or contradicted identity."""
     port_id = normalize_librenms_port_id(row.get("port_id"))
     if port_id is not None and str(port_id) in by_librenms_id:
         return by_librenms_id[str(port_id)]
     name = row.get("interface_name")
-    if isinstance(name, str) and name in by_name:
-        return by_name[name]
     interface_url = row.get("interface_url")
-    if isinstance(interface_url, str) and by_pk:
-        return by_pk.get(interface_url.rstrip("/").rsplit("/", 1)[-1])
-    return None
+    if isinstance(name, str) and name in by_name:
+        candidate = by_name[name]
+    elif isinstance(interface_url, str) and by_pk:
+        candidate = by_pk.get(interface_url.rstrip("/").rsplit("/", 1)[-1])
+    else:
+        return None
+    # A name or a cached URL never wins over a binding to a different port on this server.
+    if candidate is None or not name_match_may_be_port(candidate, server=server_key, port_id=row.get("port_id")):
+        return None
+    return candidate
 
 
 def normalize_ip_sync_row_id(value):
@@ -539,23 +539,6 @@ def index_ip_sync_rows(rows):
         else:
             index[row_id] = row
     return index, duplicates
-
-
-def interface_name_fallback_matches_port(interface, port_id, server_key) -> bool:
-    """Return true when a same-name interface is unbound or owns the requested port ID."""
-    requested_id = normalize_librenms_port_id(port_id)
-    if requested_id is None:
-        return False
-
-    raw_mapping = interface.custom_field_data.get("librenms_id")
-    # Only the "no binding recorded" rules stay local; get_librenms_device_id owns every
-    # stored shape, so the two readers cannot drift on which ones resolve.
-    if raw_mapping is None:
-        return True
-    if isinstance(raw_mapping, dict) and server_key not in raw_mapping:
-        return True
-
-    return get_librenms_device_id(interface, server_key, auto_save=False) == requested_id
 
 
 def get_interface_port_identity_sets(ports, interface_name_field) -> tuple[set[int], set[int]]:
@@ -1691,61 +1674,38 @@ def get_librenms_sync_device(device: Device, server_key: str = None) -> Optional
 
     vc = device.virtual_chassis
     all_members = vc.members.all()
-
-    def _host_id_valid(val):
-        # A real host-side LibreNMS id: a bare int/string-digit, or the "id" of a per-server
-        # dict ({"id": 42, ...}). coerce_librenms_id mirrors the int/string rules (rejects
-        # bools and floats like 1.0).
-        if val is None or isinstance(val, bool):
-            return False
-        if isinstance(val, dict):
-            return coerce_librenms_id(val.get("id")) is not None
-        return coerce_librenms_id(val) is not None
-
-    def _oob_id_valid(val):
-        # An OOB-only linkage: a per-server dict carrying {"oob": {"id": 7, ...}}. set_librenms_oob()
-        # can persist this before a host id exists; it's a real linkage but weaker than a host id.
-        if not isinstance(val, dict):
-            return False
-        oob = val.get("oob")
-        return isinstance(oob, dict) and coerce_librenms_id(oob.get("id")) is not None
+    mappings = [(member, read_mapping(member)) for member in all_members]
 
     if server_key is not None:
-        # Priority 1: a member with a real host id for server_key (a migrated dict mapping is
-        # preferred over a legacy bare-int below).
-        for member in all_members:
-            raw_cf = member.cf.get("librenms_id")
-            if isinstance(raw_cf, dict) and _host_id_valid(raw_cf.get(server_key)):
+        # Priority 1: a member with a real host id for server_key (a scoped mapping is
+        # preferred over a legacy bare value below).
+        for member, mapping in mappings:
+            entry = mapping.server(server_key)
+            if entry is not None and entry.own_id is not None:
                 return member
 
         # Priority 1b (legacy fallback): any member whose host id resolves for this server
-        # (includes bare-int legacy IDs that are a universal fallback).
-        for member in all_members:
-            if get_librenms_device_id(member, server_key, auto_save=False):
+        # (includes bare legacy IDs that are a universal fallback).
+        for member, mapping in mappings:
+            if mapping.own_id(server_key):
                 return member
 
         # Priority 1c: OOB-only mapping for this server — a member linked only as an OOB
         # controller. Evaluated LAST so a member holding the real host id always wins; without
         # this pass an OOB-only member would fall through to the master/primary-IP fallback.
-        for member in all_members:
-            raw_cf = member.cf.get("librenms_id")
-            if isinstance(raw_cf, dict) and _oob_id_valid(raw_cf.get(server_key)):
+        for member, mapping in mappings:
+            entry = mapping.server(server_key)
+            if entry is not None and entry.oob_id is not None:
                 return member
     else:
         # server_key is None (e.g. table columns without an active server): prefer a member
-        # with any host id on any server, then fall back to any OOB-only linkage.
-        for member in all_members:
-            raw_cf = member.cf.get("librenms_id")
-            if isinstance(raw_cf, dict):
-                if any(_host_id_valid(value) for _key, value in iter_server_mapping_entries(raw_cf)):
-                    return member
-            elif _host_id_valid(raw_cf):
+        # with any host id on any server, then fall back to any OOB-only linkage. A bare legacy
+        # value counts only under the strict rule here.
+        for member, mapping in mappings:
+            if mapping.legacy.queryable_id is not None or any(entry.own_id is not None for entry in mapping.servers):
                 return member
-        for member in all_members:
-            raw_cf = member.cf.get("librenms_id")
-            if isinstance(raw_cf, dict) and any(
-                _oob_id_valid(value) for _key, value in iter_server_mapping_entries(raw_cf)
-            ):
+        for member, mapping in mappings:
+            if any(entry.oob_id is not None for entry in mapping.servers):
                 return member
 
     # Priority 2: Use master device if it has primary IP
@@ -2421,20 +2381,8 @@ def coerce_interface_mtu(value) -> int | None:
     """
     from dcim.constants import INTERFACE_MTU_MAX, INTERFACE_MTU_MIN
 
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        mtu = value
-    elif isinstance(value, str):
-        if not _ASCII_POSITIVE_INTEGER_RE.fullmatch(value):
-            return None
-        try:
-            mtu = int(value)
-        except ValueError:
-            return None
-    else:
-        return None
-    return mtu if INTERFACE_MTU_MIN <= mtu <= INTERFACE_MTU_MAX else None
+    mtu = coerce_positive_int(value)
+    return mtu if mtu is not None and INTERFACE_MTU_MIN <= mtu <= INTERFACE_MTU_MAX else None
 
 
 def coerce_model_pk(value) -> int | None:
@@ -3260,38 +3208,6 @@ def normalize_inventory_serial(value, manufacturer=None, preloaded_rules=None) -
     ).strip()
 
 
-def coerce_librenms_id(value) -> int | None:
-    """
-    Coerce a raw LibreNMS ID value (int or string-digit) to int, or None.
-
-    Accepts only ``int`` and ``str`` — other types (None, dicts, MagicMocks, etc.)
-    return None. Booleans are rejected because ``bool`` is a subclass of ``int`` in
-    Python, so ``int(True)`` silently becomes ``1`` — a valid-looking device ID. Zero
-    and negative values are also rejected since LibreNMS IDs are strictly positive
-    integers. An int wider than 19 digits is rejected like its text form.
-
-    Args:
-        value: The raw LibreNMS id value to coerce.
-
-    Returns:
-        int | None: The positive integer id, or None if it can't be coerced.
-
-    """
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value if 0 < value < 10**_ID_TEXT_MAX_DIGITS else None
-    if isinstance(value, str):
-        if not _ASCII_POSITIVE_INTEGER_RE.fullmatch(value):
-            return None
-        try:
-            coerced = int(value)
-        except ValueError:
-            return None
-        return coerced if coerced > 0 else None
-    return None
-
-
 def normalize_vlan_vid(value) -> int | None:
     """Return one valid NetBox VLAN VID, or None when the source value is unusable."""
     from ipam.models import VLAN
@@ -3474,39 +3390,6 @@ def is_valid_ports_payload(payload) -> bool:
     )
 
 
-def resolve_server_mapping_display_id(entry) -> tuple[int | None, bool]:
-    """
-    Resolve the display LibreNMS id for one per-server ``librenms_id`` custom-field entry.
-
-    *entry* is the value stored for a single server key: either a scalar (a legacy bare id) or
-    the migrated dict form ``{"id": N, "oob": {"id": M}}``. The host id wins; when it is
-    absent/invalid the nested OOB controller id is used instead, because an OOB-only linkage is
-    still a real link to that server (the user must be able to see and remove it). All coercion
-    goes through :func:`coerce_librenms_id`, so booleans, non-numeric strings and non-positive
-    ids are rejected uniformly.
-
-    Args:
-        entry: The per-server value from the ``librenms_id`` custom field.
-
-    Returns:
-        tuple[int | None, bool]: ``(display_id, is_oob_only)`` — the coerced id to display (or
-            None when neither a host nor an OOB id is valid), and whether it came from the OOB
-            fallback (host id absent/invalid but ``oob.id`` valid).
-
-    """
-    if isinstance(entry, dict):
-        host_id = coerce_librenms_id(entry.get("id"))
-        if host_id is not None:
-            return host_id, False
-        oob = entry.get("oob")
-        if isinstance(oob, dict):
-            oob_id = coerce_librenms_id(oob.get("id"))
-            if oob_id is not None:
-                return oob_id, True
-        return None, False
-    return coerce_librenms_id(entry), False
-
-
 def coerce_positive_int(value) -> int | None:
     """
     Coerce a value to a strictly-positive ``int``, or ``None`` when invalid.
@@ -3581,92 +3464,6 @@ def row_identity_matches(row, device_id) -> bool:
     return row_id == requested_id
 
 
-def get_librenms_device_id(obj, server_key: str = "default", *, auto_save: bool = True):
-    """
-    Get the LibreNMS device/port ID for a specific server from the JSON custom field.
-
-    Supports both the legacy integer format and the new multi-server JSON format::
-
-        Legacy:  librenms_id = 42          → returns 42 for any server_key (universal fallback)
-        New:     librenms_id = {"primary": 42}  → returns 42 only for server_key="primary"
-
-    If the stored value (or the dict entry for server_key) is a string it is
-    normalised to ``int``.  When *auto_save* is ``True`` (the default) the
-    normalised value is written back so that subsequent DB queries can use a
-    plain integer without defensive ``str()`` casting.  Pass ``auto_save=False``
-    in read-only contexts (e.g. table renderers) to avoid triggering unintended
-    DB writes or signals.
-
-    Args:
-        obj: NetBox object with a ``librenms_id`` custom field.
-        server_key: LibreNMS server key (from plugin ``servers`` config).
-        auto_save: When True (default), persist any normalised value back to the DB.
-
-    Returns:
-        int or None
-
-    """
-    server_key = require_server_key(server_key)
-    # Read the stored JSON directly. NetBox's ``obj.cf`` accessor resolves custom-field
-    # definitions through ContentType on first access for every model instance, which turns
-    # bulk interface resolution into two extra queries per row. This helper reads one known
-    # stored field and already owns its normalization/default semantics, so the raw mapping is
-    # the authoritative and query-free source here.
-    custom_field_data = getattr(obj, "custom_field_data", None)
-    cf_value = (
-        custom_field_data.get("librenms_id") if isinstance(custom_field_data, dict) else obj.cf.get("librenms_id")
-    )
-    if cf_value is None:
-        return None
-    if isinstance(cf_value, int) and not isinstance(cf_value, bool):
-        # Legacy bare integer — universal fallback for any server to ensure
-        # devices imported before multi-server support remain discoverable.
-        return cf_value if cf_value > 0 else None
-    if isinstance(cf_value, str):
-        # Someone stored a bare string (e.g., via NetBox UI/API) — normalise to int.
-        # Treat as a legacy universal fallback.
-        try:
-            int_id = int(cf_value)
-        except (ValueError, TypeError):
-            return None
-        if int_id <= 0:
-            return None
-        if auto_save:
-            obj.snapshot()
-            obj.custom_field_data["librenms_id"] = int_id
-            obj.save(update_fields=["custom_field_data", "last_updated"])
-        return int_id
-    if isinstance(cf_value, dict):
-        value = cf_value.get(server_key)
-        if isinstance(value, dict):
-            # New form: {"id": 42, "oob": {...}} — extract the main device id.
-            # coerce_librenms_id centralizes the bool/int/str/positive checks.
-            inner = value.get("id")
-            int_id = coerce_librenms_id(inner)
-            if int_id is None:
-                return None
-            # Normalise a string-stored id ("42" → 42) back to the DB.
-            if auto_save and isinstance(inner, str):
-                obj.snapshot()
-                value["id"] = int_id
-                obj.custom_field_data["librenms_id"] = cf_value
-                obj.save(update_fields=["custom_field_data", "last_updated"])
-            return int_id
-        # Bare scalar entry ({"primary": 42} / {"primary": "42"}): coerce_librenms_id
-        # rejects bools, non-positive, and non-numeric strings in one place.
-        int_id = coerce_librenms_id(value)
-        if int_id is None:
-            return None
-        # Normalise a string-stored id back to the DB so later queries use a plain int.
-        if auto_save and isinstance(value, str):
-            obj.snapshot()
-            cf_value[server_key] = int_id
-            obj.custom_field_data["librenms_id"] = cf_value
-            obj.save(update_fields=["custom_field_data", "last_updated"])
-        return int_id
-    return None
-
-
 def set_librenms_device_id(obj, device_id, server_key: str = "default"):
     """
     Set the LibreNMS device/port ID for a specific server on the JSON custom field.
@@ -3690,7 +3487,7 @@ def set_librenms_device_id(obj, device_id, server_key: str = "default"):
         )
         return
     cf_value = obj.custom_field_data.get("librenms_id") or {}
-    if is_legacy_librenms_id(cf_value):
+    if readable_legacy_id(cf_value) is not None:
         # Legacy bare int OR its numeric-string form — skip the write so we don't silently migrate.
         logger.warning(
             "librenms_id on %r has legacy bare integer %r; skipping write to prevent "
@@ -3700,7 +3497,7 @@ def set_librenms_device_id(obj, device_id, server_key: str = "default"):
         )
         return
     elif isinstance(cf_value, str):
-        # A non-numeric string is corrupt (is_legacy_librenms_id already excluded numeric ones).
+        # A non-numeric string is corrupt (readable_legacy_id already excluded numeric ones).
         logger.warning(
             "librenms_id custom field has unexpected string %r on %r; resetting to empty dict.",
             cf_value,
@@ -3762,18 +3559,14 @@ def add_librenms_server_mapping(
     normalized_device_id = coerce_librenms_id(device_id)
     if normalized_device_id is None:
         raise ValueError("LibreNMS device ID must be a positive integer.")
-    current_value = obj.custom_field_data.get("librenms_id")
-    if is_legacy_librenms_id(current_value):
+    current = decode_stored_mapping(obj.custom_field_data.get("librenms_id"))
+    if current.container is ContainerStatus.LEGACY:
         raise ValueError("Convert the legacy LibreNMS mapping before adding another server.")
-    if current_value is not None and not isinstance(current_value, dict):
+    if current.container is ContainerStatus.INVALID:
         raise ValueError("The existing LibreNMS mapping has an invalid format.")
 
-    current_mapping = current_value or {}
-    existing_entry = current_mapping.get(server_key)
-    if isinstance(existing_entry, dict):
-        existing_host_id = coerce_librenms_id(existing_entry.get("id"))
-    else:
-        existing_host_id = coerce_librenms_id(existing_entry)
+    existing_entry = current.server(server_key)
+    existing_host_id = existing_entry.own_id if existing_entry is not None else None
     # The confirmation carries the host ID the user was shown, so comparing it against the locked
     # row rejects a replay and any change made after the confirmation was issued.
     if confirmed_replacement_of is not None:
@@ -3784,9 +3577,7 @@ def add_librenms_server_mapping(
 
     configured_keys = set(configured_server_keys)
     previous_usable_keys = [
-        mapped_key
-        for mapped_key, entry in iter_server_mapping_entries(current_mapping)
-        if mapped_key in configured_keys and resolve_server_mapping_display_id(entry)[0] is not None
+        entry.server for entry in current.servers if entry.server in configured_keys and entry.display_id is not None
     ]
     adds_usable_mapping = server_key not in previous_usable_keys
 
@@ -3795,253 +3586,6 @@ def add_librenms_server_mapping(
     if adds_usable_mapping and len(previous_usable_keys) == 1 and PREFERRED_SERVER_FIELD not in updated_mapping:
         updated_mapping[PREFERRED_SERVER_FIELD] = previous_usable_keys[0]
         obj.custom_field_data["librenms_id"] = updated_mapping
-
-
-class AmbiguousLibreNMSIdError(LookupError):
-    """
-    Raised when a librenms_id resolves to more than one NetBox object.
-
-    Distinguishes a genuine ambiguity (a data-integrity violation — e.g. two devices
-    sharing the same host id, or a host id and a *different* OOB id) from a clean
-    miss. Returning ``None`` for both would let callers treat an ambiguous link as
-    "not found" and proceed (importing/binding), so :func:`find_by_librenms_id` raises
-    this instead and callers fail closed.
-    """
-
-
-def librenms_id_text_pattern(*values: int) -> str:
-    """Return one SQL regex for the stored text forms of these coerce_librenms_id() results that it also reads."""
-    forms = "|".join(f"0{{0,{_ID_TEXT_MAX_DIGITS - len(str(value))}}}{value}" for value in values)
-    return rf"^{_ID_TEXT_SPACE}{_ID_TEXT_SIGN}(?:{forms}){_ID_TEXT_SPACE}$"
-
-
-def build_librenms_id_qs(server_key, value):
-    """Build ``(host_q, oob_q)`` for one librenms_id; see :func:`build_librenms_ids_qs`."""
-    return build_librenms_ids_qs(server_key, [value])
-
-
-def build_librenms_ids_qs(server_key, values):
-    """
-    Build ``(host_q, oob_q)`` Q objects matching every stored form of any of these librenms_ids under server_key.
-
-    Single source of truth for the librenms_id JSON-path coverage shared by
-    :func:`find_by_librenms_id` and ``cables_view._librenms_id_q``, so the two can't drift on
-    which stored shapes resolve. Matches the namespaced scalar (``{server_key: 42}``), the
-    dict-with-id form (``{server_key: {"id": 42}}``), the legacy bare int/str (pre multi-server),
-    and the OOB sub-key (``{server_key: {"oob": {"id": 42}}}``). Each predicate matches the stored
-    text form by :func:`librenms_id_text_pattern`, so it finds exactly what coerce_librenms_id() reads.
-
-    Fails closed on an invalid server key or value (bool / None / zero / negative / non-numeric
-    string): it drops an invalid value, and returns match-nothing predicates when no valid value is
-    left, rather than building a lookup that could hit a corrupt legacy row. Callers may still pre-validate for their own control flow, but no longer
-    have to for safety.
-
-    Args:
-        server_key (str): The LibreNMS server key whose JSON sub-key is matched.
-        values (Iterable[int | str]): The already-validated LibreNMS ids.
-
-    Returns:
-        tuple[Q, Q]: ``(host_q, oob_q)`` — host-identity predicates (scalar / ``__id`` / legacy
-            bare) and the OOB-controller predicate (``__oob__id``), kept separate so callers can
-            fail closed on a host-vs-OOB cross-row collision.
-
-    """
-    try:
-        server_key = require_server_key(server_key)
-    except ValueError:
-        match_none = Q(pk__in=[])
-        return match_none, match_none
-    # Fail closed centrally so every caller is safe: a value that isn't a valid librenms_id
-    # (bool / None / zero / negative / non-numeric string like "abc") must never build a predicate
-    # that could match a corrupt legacy row (e.g. ``custom_field_data__librenms_id="abc"``). Callers
-    # still validate for their own reasons, but this makes the shared builder the last line of
-    # defence.
-    normalized_values = sorted({coerce_librenms_id(value) for value in values} - {None})
-    if not normalized_values:
-        match_none = Q(pk__in=[])
-        return match_none, match_none
-    # Text regex only: jsonb equality would also find a float 42.0 that the decoder rejects.
-    # One alternation per JSON path: N values must not cost N predicates per path.
-    numeric_pattern = librenms_id_text_pattern(*normalized_values)
-    host_q = (
-        Q(**{f"custom_field_data__librenms_id__{server_key}__regex": numeric_pattern})
-        | Q(**{f"custom_field_data__librenms_id__{server_key}__id__regex": numeric_pattern})
-        | Q(custom_field_data__librenms_id__regex=numeric_pattern)
-    )
-    oob_q = Q(**{f"custom_field_data__librenms_id__{server_key}__oob__id__regex": numeric_pattern})
-    return host_q, oob_q
-
-
-def resolve_interface_on_device(device, server_key, port_id, name_candidates):
-    """Resolve one Interface by stable LibreNMS ID, then by name, on one Device."""
-    interfaces = device.interfaces.all()
-    normalized_port_id = coerce_librenms_id(port_id)
-    if normalized_port_id is not None:
-        host_q, _oob_q = build_librenms_id_qs(server_key, normalized_port_id)
-        matches = list(interfaces.filter(host_q).order_by("pk")[:2])
-        if matches:
-            return matches[0] if len(matches) == 1 else None
-
-    names = {name for name in name_candidates if isinstance(name, str) and name}
-    if not names:
-        return None
-    matches = list(interfaces.filter(name__in=names).order_by("pk")[:2])
-    return matches[0] if len(matches) == 1 else None
-
-
-def find_by_librenms_id(model, librenms_id, server_key: str = "default", *, select_for_update: bool = False):
-    """
-    Return the first object whose ``librenms_id`` contains the specified ID and server key.
-
-    Raises :class:`AmbiguousLibreNMSIdError` when the id resolves to more than one
-    distinct object (duplicate host-only, duplicate OOB-only, or host vs. a different
-    OOB match); callers must fail closed rather than treating it as a miss.
-
-    Also matches legacy records stored as a bare ``librenms_id`` integer or string
-    in ``custom_field_data``—these predate multi-server support and act as a
-    universal fallback for any *server_key*.
-
-    Args:
-        model: A Django model class (Device, VirtualMachine, Interface, …).
-        librenms_id: The LibreNMS device/port ID to look up.
-        server_key: LibreNMS server key (from plugin ``servers`` config).
-        select_for_update (bool): When True, lock the matched row(s) with
-            ``SELECT … FOR UPDATE`` so a concurrent conflict check serializes against
-            an existing owner. Must be called inside a transaction; best-effort like
-            the serial guard (a row that does not yet exist cannot be locked).
-
-    Returns:
-        Model instance or None
-
-    """
-    if librenms_id is None:
-        return None
-    if isinstance(librenms_id, bool):
-        return None
-    # Reject floats and arbitrary non-scalar objects before they reach _id_variants()
-    # and the ORM predicates: only int/str representations honour the int-only contract
-    # enforced by coerce_librenms_id() (which a positive float would otherwise bypass).
-    if not isinstance(librenms_id, (int, str)):
-        return None
-    if isinstance(librenms_id, int) and librenms_id <= 0:
-        return None
-    if isinstance(librenms_id, str):
-        cleaned = librenms_id.strip()
-        if cleaned == "":
-            return None
-        try:
-            if int(cleaned) <= 0:
-                return None
-        except ValueError:
-            return None
-
-    # Build host-identity and OOB-identity predicates SEPARATELY (via the shared path builder, so
-    # this and cables_view._librenms_id_q can't drift on the stored shapes they match). Folding
-    # both into one OR + .first() can silently bind to the wrong NetBox object when one row matches
-    # by host id and a *different* row matches by OOB id; query each set and fail closed on a
-    # cross-row collision rather than trusting model ordering to pick "the" row.
-    host_q, oob_q = build_librenms_id_qs(server_key, librenms_id)
-
-    # Lock the matched rows when asked so a concurrent conflict check serializes against an
-    # existing owner (best-effort: a not-yet-created row can't be locked). Caller must hold a txn.
-    manager = model.objects.select_for_update() if select_for_update else model.objects
-
-    # Fast path: a single combined query covers the common case (0 or 1 match). One matching row is
-    # unambiguous by definition — it can't collide host-vs-OOB or duplicate within a set — so return
-    # it without a second query (this runs per-port during sync). Only when ≥2 rows match do we
-    # re-run the separate host/OOB predicates (two rows per side) to classify and fail closed on the
-    # precise ambiguity.
-    combined = list(manager.filter(host_q | oob_q)[:2])
-    if not combined:
-        return None
-    if len(combined) == 1:
-        return combined[0]
-
-    host_matches = list(manager.filter(host_q)[:2])
-    oob_matches = list(manager.filter(oob_q)[:2])
-
-    # Fail closed on intra-set ambiguity: two distinct rows sharing the same host (or
-    # OOB) librenms_id is a data-integrity violation — binding to whichever sorts first
-    # would silently attach sync/migration work to the wrong object.
-    if len(host_matches) > 1:
-        logger.warning(
-            "Ambiguous librenms_id %r for %s on server %r: multiple host matches (pk=%s, pk=%s) "
-            "— refusing to bind (fail closed).",
-            librenms_id,
-            model.__name__,
-            server_key,
-            host_matches[0].pk,
-            host_matches[1].pk,
-        )
-        raise AmbiguousLibreNMSIdError(
-            f"librenms_id {librenms_id!r} matches multiple {model.__name__} host records "
-            f"(pk={host_matches[0].pk}, pk={host_matches[1].pk}) on server {server_key!r}"
-        )
-    if len(oob_matches) > 1:
-        logger.warning(
-            "Ambiguous librenms_id %r for %s on server %r: multiple OOB matches (pk=%s, pk=%s) "
-            "— refusing to bind (fail closed).",
-            librenms_id,
-            model.__name__,
-            server_key,
-            oob_matches[0].pk,
-            oob_matches[1].pk,
-        )
-        raise AmbiguousLibreNMSIdError(
-            f"librenms_id {librenms_id!r} matches multiple {model.__name__} OOB records "
-            f"(pk={oob_matches[0].pk}, pk={oob_matches[1].pk}) on server {server_key!r}"
-        )
-
-    host_match = host_matches[0] if host_matches else None
-    oob_match = oob_matches[0] if oob_matches else None
-    if host_match is not None and oob_match is not None and host_match.pk != oob_match.pk:
-        logger.warning(
-            "Ambiguous librenms_id %r for %s on server %r: host match pk=%s but OOB match "
-            "pk=%s — refusing to bind to either (fail closed).",
-            librenms_id,
-            model.__name__,
-            server_key,
-            host_match.pk,
-            oob_match.pk,
-        )
-        raise AmbiguousLibreNMSIdError(
-            f"librenms_id {librenms_id!r} matches {model.__name__} host pk={host_match.pk} but a "
-            f"different OOB pk={oob_match.pk} on server {server_key!r}"
-        )
-    # Host identity wins when both resolve to the same row (or only one matched).
-    return host_match or oob_match
-
-
-def find_interface_by_librenms_port_id(port_id, server_key: str):
-    """
-    Return the one Interface or VMInterface bound to a LibreNMS port on this server, or None.
-
-    A LibreNMS port ID names one port, so a holder on either model is the only owner. Every
-    writer that binds a port ID reads this, so no writer can add a second owner on the other model.
-
-    Args:
-        port_id (int | str): The LibreNMS port ID.
-        server_key (str): The LibreNMS server key.
-
-    Returns:
-        Interface | VMInterface | None: The interface that holds the port.
-
-    Raises:
-        AmbiguousLibreNMSIdError: When more than one interface, on either model, holds the port.
-
-    """
-    from virtualization.models import VMInterface
-
-    owners = [
-        owner
-        for model in (Interface, VMInterface)
-        if (owner := find_by_librenms_id(model, port_id, server_key)) is not None
-    ]
-    if len(owners) > 1:
-        raise AmbiguousLibreNMSIdError(
-            f"LibreNMS port {port_id!r} is bound to both an Interface and a VMInterface on server {server_key!r}"
-        )
-    return owners[0] if owners else None
 
 
 class PortDisclosure:
@@ -4078,10 +3622,15 @@ class PortDisclosure:
         ports = list(ports)
         new_ids = {port_id for port_id, _owner in ports if port_id not in self._bindings}
         if new_ids:
-            host_q, oob_q = build_librenms_ids_qs(self._server_key, new_ids)
             for model in (Interface, VMInterface):
-                for interface in model.objects.filter(host_q | oob_q):
-                    port_id = get_librenms_device_id(interface, self._server_key, auto_save=False)
+                match = identity_q(
+                    model,
+                    server=self._server_key,
+                    identities=new_ids,
+                    roles=(MappingRole.OWN, MappingRole.OOB),
+                )
+                for interface in model.objects.filter(match):
+                    port_id = read_mapping(interface).own_id(self._server_key)
                     if port_id in new_ids:
                         self._bindings.setdefault(port_id, []).append(interface)
             for port_id in new_ids:
@@ -4169,44 +3718,18 @@ def lock_librenms_id_assignment(librenms_id, server_key: str, *, owner_queryset=
         locked_owner = owner_queryset.select_for_update(of=("self",)).get(pk=owner_pk)
 
     for model in (Device, VirtualMachine):
-        conflict = find_by_librenms_id(model, normalized_id, normalized_server_key)
+        conflict = find_mapping(
+            model.objects.all(),
+            server=normalized_server_key,
+            identity=normalized_id,
+            roles=(MappingRole.OWN, MappingRole.OOB),
+        )
         if conflict is None:
             continue
         if model is owner_model and conflict.pk == owner_pk:
             continue
         return locked_owner, conflict
     return locked_owner, None
-
-
-def get_librenms_oob(obj, server_key: str = "default") -> dict | None:
-    """
-    Return the OOB sub-object from the ``librenms_id`` JSON custom field, or ``None``.
-
-    Read-only — never triggers a DB write.  Returns the raw ``oob`` dict verbatim so
-    callers can inspect ``id``, ``type``, ``version``, and ``ip`` without additional helpers.
-
-    Returns ``None`` when:
-    - the field is absent, a legacy bare integer, or not a dict;
-    - the server-key entry is a bare integer (no OOB attached);
-    - the ``oob`` key is missing or not a dict.
-
-    Args:
-        obj: NetBox object with a ``librenms_id`` custom field.
-        server_key: LibreNMS server key (from plugin ``servers`` config).
-
-    Returns:
-        dict or None
-
-    """
-    server_key = require_server_key(server_key)
-    cf_value = obj.cf.get("librenms_id")
-    if not isinstance(cf_value, dict):
-        return None
-    entry = cf_value.get(server_key)
-    if not isinstance(entry, dict):
-        return None
-    oob = entry.get("oob")
-    return oob if isinstance(oob, dict) else None
 
 
 def set_librenms_oob(
@@ -4298,7 +3821,7 @@ def set_librenms_oob(
     elif isinstance(entry, dict):
         entry = dict(entry)  # shallow copy so we don't mutate the stored dict in-place
         # Fail closed on a corrupt dict-form host id too (e.g. {"id": "abc"}): otherwise
-        # the OOB block is attached over a broken host mapping that get_librenms_device_id()
+        # the OOB block is attached over a broken host mapping that the reader
         # then reads as missing. Absent/empty id stays lenient (mirrors the string branch).
         host_id = entry.get("id")
         if host_id is not None and coerce_librenms_id(host_id) is None and str(host_id).strip():
@@ -4341,39 +3864,6 @@ def clear_librenms_oob(obj, server_key: str = "default") -> None:
     obj.custom_field_data["librenms_id"] = cf_value
 
 
-def is_legacy_librenms_id(value) -> bool:
-    """
-    Return ``True`` when a ``librenms_id`` custom-field value is the legacy bare-integer form.
-
-    Legacy = a bare integer (created before the multi-server JSON refactor) or a string that
-    parses as an integer, i.e. NOT the per-server dict form and not absent. Uses ``int()``
-    coercion (so a whitespace-padded ``" 42 "`` is legacy too), matching
-    :func:`get_librenms_device_id`, which resolves a top-level string with the same bare
-    ``int()``. NOTE: this is deliberately WIDER than :func:`coerce_librenms_id` and the
-    ``build_librenms_id_qs`` lookup predicates, which require ASCII digits. Narrowing it to
-    match them would make ``set_librenms_device_id`` treat a reader-resolvable value as
-    corrupt and reset the field to ``{}``, destroying the legacy link.
-
-    Args:
-        value: The raw ``custom_field_data["librenms_id"]`` value.
-
-    Returns:
-        bool: ``True`` for a *positive* bare int (non-bool) or a positive int-parseable string;
-            ``False`` for ``None``, ``0``/negative, the dict form, a bool, or a non-numeric string.
-
-    """
-    if isinstance(value, bool):
-        return False
-    if isinstance(value, int):
-        return value > 0
-    if isinstance(value, str):
-        try:
-            return int(value) > 0
-        except (TypeError, ValueError):
-            return False
-    return False
-
-
 def migrate_legacy_librenms_id(obj, server_key: str = "default") -> bool:
     """
     Migrate a legacy bare-integer ``librenms_id`` custom field to the scoped JSON format.
@@ -4395,26 +3885,9 @@ def migrate_legacy_librenms_id(obj, server_key: str = "default") -> bool:
     """
     server_key = require_server_key(server_key)
     cf_value = obj.custom_field_data.get("librenms_id")
-    if isinstance(cf_value, bool):
-        return False
-    if isinstance(cf_value, int):
-        int_value = cf_value
-    elif isinstance(cf_value, str):
-        # Coerce with int() (not str.isdigit()) so this writer accepts exactly what the
-        # is_legacy_librenms_id() gate — and coerce_librenms_id / get_librenms_device_id — accept:
-        # a whitespace-padded " 42 " or signed "+42" is legacy everywhere else, so gating the
-        # migration on the stricter isdigit() would offer the Convert-ID button, pass every
-        # precondition, then dead-end here with "could not be converted" (issue #99).
-        try:
-            int_value = int(cf_value)
-        except (TypeError, ValueError):
-            return False
-    else:
-        return False
-    if int_value <= 0:
-        # Keep the migration aligned with the positive-ID invariant (is_legacy_librenms_id /
-        # get_librenms_device_id treat <= 0 as no valid ID): never canonicalise 0 or a negative
-        # into the per-server JSON form.
+    # The reader's wide rule, so every value the Convert-ID button offers converts here.
+    int_value = readable_legacy_id(cf_value)
+    if int_value is None:
         return False
     obj.custom_field_data["librenms_id"] = {server_key: int_value}
     logger.info(
@@ -4644,27 +4117,6 @@ def netbox_resolves_module_token_per_leaf():
     if version is None:
         return True
     return version >= _MODULE_TOKEN_LEAF_FIX_VERSION
-
-
-def ip_family(ip):
-    """
-    Return the IP family (4 or 6) of an IPAddress, or None when it has no address.
-
-    Mirrors NetBox >= 4.5's ``IPAddress.family``. NetBox 4.4's property lacks the
-    str-tolerant branch, and a freshly constructed ``IPAddress(address="...")``
-    keeps the plain str in memory even after ``save()`` — so reading ``.family``
-    on 4.4 raises AttributeError for exactly the objects the sync flows create.
-
-    Args:
-        ip: The IPAddress whose family to read.
-
-    """
-    address = ip.address
-    if not address:
-        return None
-    if isinstance(address, str):
-        return netaddr.IPNetwork(address).version
-    return address.version
 
 
 def _normalize_merge_entry(entry, *, owner_label, owner_name, server_key, copy_dict):
@@ -5121,9 +4573,7 @@ def set_device_ip_fk(device, field, ip, *, save=True):
         # NetBox's Device.clean() requires primary_ip4 to be IPv4 and primary_ip6 to be IPv6;
         # update_fields skips full_clean(), so enforce the family here too (oob_ip is family-
         # agnostic). Otherwise an IPv6 address could be silently stored as primary_ip4.
-        # ip_family(), not ip.family: NetBox 4.4's property raises on in-memory str addresses,
-        # and getattr's default would turn that crash into a bogus refusal of a valid address.
-        family = ip_family(ip)
+        family = ip.family
         if field == "primary_ip4" and family != 4:
             raise ValueError(f"set_device_ip_fk: refusing to set primary_ip4 to non-IPv4 address {ip}")
         if field == "primary_ip6" and family != 6:
@@ -5142,7 +4592,7 @@ def mark_librenms_migrated(donor, winner_pk: int, server_key: str = "default", a
 
     Removes any active ``id`` / ``oob`` keys from ``donor.custom_field_data
     ['librenms_id'][server_key]`` (so the device is no longer matched by
-    ``find_by_librenms_id``) and writes a ``_migrated_to`` sub-key with the
+    ``find_mapping``) and writes a ``_migrated_to`` sub-key with the
     target device pk, server key, and ISO-8601 UTC timestamp.
 
     Does **not** call ``donor.save()`` — caller is responsible for persisting.
@@ -5162,7 +4612,7 @@ def mark_librenms_migrated(donor, winner_pk: int, server_key: str = "default", a
     # ids so a malformed marker can never target the wrong device.
     if isinstance(winner_pk, bool) or not isinstance(winner_pk, int) or winner_pk <= 0:
         raise ValueError(f"winner_pk must be a positive integer, got {winner_pk!r}")
-    # Keep the writer's key normalization paired with get_migrated_to_marker()'s.
+    # Keep the writer's key normalization paired with the marker reader's.
     server_key = require_server_key(server_key or "default")
 
     cf_value = donor.custom_field_data.get("librenms_id")
@@ -5171,7 +4621,7 @@ def mark_librenms_migrated(donor, winner_pk: int, server_key: str = "default", a
     elif not isinstance(cf_value, dict):
         # Fail closed on a legacy bare-int/bare-string or corrupt top-level librenms_id rather
         # than silently collapsing it to {} and stamping the marker: that drops the donor's
-        # still-resolvable mapping (find_by_librenms_id can no longer locate the old owner),
+        # still-resolvable mapping (find_mapping can no longer locate the old owner),
         # converting recoverable state into data loss. The caller must migrate the legacy form
         # first — mirrors merge_librenms_links(), which rejects the same shapes.
         raise ValueError(
@@ -5249,59 +4699,6 @@ def mark_librenms_migrated(donor, winner_pk: int, server_key: str = "default", a
     donor.custom_field_data["librenms_id"] = cf_value
 
 
-def get_migrated_to_marker(device, server_key: str = "default") -> dict | None:
-    """
-    Read the ``_migrated_to`` marker (Stage 2b) from a device's librenms_id block.
-
-    Used by the librenms-sync UI to switch a donor device into "migrated mode":
-    disable sync actions and surface per-row "Move to winner" buttons. A live host or
-    OOB link takes precedence over a stale marker.
-
-    Args:
-        device: The donor device whose ``librenms_id[server_key]`` sub-block is read.
-        server_key (str): The LibreNMS server key the marker is namespaced under.
-
-    Returns:
-        dict | None: The marker dict ``{device_id, server_key, at}`` when the donor
-            was previously merged via :func:`mark_librenms_migrated`, or None when no
-            valid marker is present (missing, malformed, or superseded by a live link).
-
-    """
-    server_key = require_server_key(server_key or "default")
-    if device is None:
-        return None
-    cf_value = device.cf.get("librenms_id") if hasattr(device, "cf") else None
-    if not isinstance(cf_value, dict):
-        return None
-    entry = cf_value.get(server_key)
-    if not isinstance(entry, dict):
-        return None
-    # A live host or OOB link takes precedence over a stale _migrated_to marker: if the
-    # same entry still resolves via find_by_librenms_id(), leaving the donor in migrated
-    # mode is a contradictory state. Treat the marker as obsolete when an active id/oob
-    # link exists on the entry.
-    if coerce_librenms_id(entry.get("id")) is not None:
-        return None
-    oob = entry.get("oob")
-    if isinstance(oob, dict) and coerce_librenms_id(oob.get("id")) is not None:
-        return None
-    marker = entry.get("_migrated_to")
-    if not isinstance(marker, dict):
-        return None
-    # The marker is namespaced under cf[server_key] and mark_librenms_migrated() always
-    # stamps its own server_key. Reject a marker whose stamped server_key doesn't match the
-    # entry it lives under (malformed or copied across server sub-blocks) so a stray marker
-    # can't force the donor into migrated mode for the wrong server.
-    if marker.get("server_key") != server_key:
-        return None
-    device_id = marker.get("device_id")
-    # bool is a subclass of int; reject it and non-positive ids so migrated-mode
-    # logic never targets a bogus device from a malformed marker.
-    if isinstance(device_id, bool) or not isinstance(device_id, int) or device_id <= 0:
-        return None
-    return marker
-
-
 def build_migrated_context(obj, server_key: str = "default") -> dict:
     """
     Build the donor "migrated mode" template context.
@@ -5334,20 +4731,20 @@ def build_migrated_context(obj, server_key: str = "default") -> dict:
     # of letting the marker reader raise on it.
     if not is_server_key(server_key or "default"):
         return {"migrated_to_marker": None, "migrated_to_winner": None}
-    marker = get_migrated_to_marker(obj, server_key)
+    marker = read_mapping(obj).migrated_to(server_key or "default") if obj is not None else None
     # A self-pointing marker (winner == this donor) is corrupt: it would flip the donor's own sync
     # page into migrated mode resolving the "winner" to itself, hiding the ordinary sync controls.
     # Suppress it in memory (no Device fetch) — the donor always exists, so resolving device_id would
-    # only ever return obj. The marker is deliberately NOT rejected in get_migrated_to_marker(): the
-    # move views read it via _resolve_winner_for_donor() to report it as "stale/corrupt".
-    if not marker or marker.get("device_id") == getattr(obj, "pk", None):
+    # only ever return obj. The marker reader deliberately does NOT reject it: the move views read
+    # it via _resolve_winner_for_donor() to report it as "stale/corrupt".
+    if marker is None or marker.device_id == getattr(obj, "pk", None):
         return {"migrated_to_marker": None, "migrated_to_winner": None}
 
-    # device_id is guaranteed a positive int by get_migrated_to_marker(). Defer the row fetch until a
-    # template reads the winner (cable/module/VLAN never do), saving a query per HTMX refresh.
+    # Defer the row fetch until a template reads the winner (cable/module/VLAN never do), saving a
+    # query per HTMX refresh.
     return {
         "migrated_to_marker": marker,
-        "migrated_to_winner": SimpleLazyObject(lambda: Device.objects.filter(pk=marker["device_id"]).first()),
+        "migrated_to_winner": SimpleLazyObject(lambda: Device.objects.filter(pk=marker.device_id).first()),
     }
 
 

@@ -14,8 +14,8 @@ from virtualization.models import VirtualMachine
 from netbox_librenms_plugin.import_plan import ImportObjectType, VMPlacementMethod, import_row_hx_include
 from netbox_librenms_plugin.import_utils.disclosure import scope_validation_disclosures
 from netbox_librenms_plugin.import_utils.naming import import_name_variants
+from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.utils import (
-    coerce_librenms_id,
     get_librenms_sync_device,
     netbox_allows_standalone_vm_host,
 )
@@ -839,7 +839,7 @@ class DeviceImportTable(tables.Table):
             def _coerce_pair_id(value):
                 # Strict coercion (rejects booleans and floats, unlike int()) so malformed
                 # custom-field data can't make the host/OOB pair comparison hide or mislabel a
-                # pair. Matches the coercion used by the refresh path / find_by_librenms_id.
+                # pair. Matches the coercion used by the refresh path / find_mapping.
                 return coerce_librenms_id(value)
 
             # Coerce both pair ids once. A malformed id becomes None, so the host/OOB pair branches

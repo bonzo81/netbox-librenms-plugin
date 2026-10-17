@@ -12,7 +12,6 @@ the plugin-config lookup and the VC member-name pattern (a DB read) are stubbed,
 so these tests need no database.
 """
 
-from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
 import json
 from threading import Barrier
@@ -28,6 +27,7 @@ from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
 from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
 from netbox_librenms_plugin.data_shapes.ports import compile_lag_patterns, compile_sap_patterns
 
+from netbox_librenms_plugin.tests.conftest import run_in_threads
 from netbox_librenms_plugin.tests.recordings import iter_recording_paths, iter_recordings
 
 _RECORDINGS = iter_recordings()
@@ -524,10 +524,12 @@ def test_concurrent_manifest_rebuilds_do_not_share_a_temporary_file(monkeypatch,
 
     monkeypatch.setattr(type(manifest_path), "replace", synchronized_replace)
     monkeypatch.setattr(recordings_store, "MANIFEST_PATH", manifest_path)
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [executor.submit(Command(stdout=StringIO())._rebuild_manifest) for _ in range(2)]
-        for future in futures:
-            future.result(timeout=10)
+    run_in_threads(
+        Command(stdout=StringIO())._rebuild_manifest,
+        Command(stdout=StringIO())._rebuild_manifest,
+        barriers=(writers_ready,),
+        timeout=10,
+    )
 
     assert manifest_path.exists()
     assert len(synchronized_writes) == 2

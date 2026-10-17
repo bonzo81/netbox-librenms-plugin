@@ -10,6 +10,9 @@
 #                         — compare entPhysicalName
 #   serial_matches_device — compare entPhysicalSerialNum to the NetBox device's
 #                           own serial number (no pattern needed)
+#   model_matches_device_type
+#                         : compare entPhysicalModelName to the NetBox device
+#                           type's model or part number (no pattern needed)
 #
 # Import via: LibreNMS Plugin → Settings → Inventory Ignore Rules → Import
 #
@@ -27,7 +30,7 @@
 #   item's serial the rule fires. This handles multi-level hierarchies, e.g.
 #   Cisco IOS-XR: IDPROM → Mother Board [empty serial] → RP module.
 #
-# Both rules below are also created automatically by migration 0010. Import them
+# The first two rules below are also created automatically by migration 0010. Import them
 # only if you wiped the table or need to replicate settings across instances.
 
 # ─── Cisco IOS-XR — IDPROM entries (action=skip) ─────────────────────────────
@@ -92,3 +95,34 @@
     the RP row in the sync table while promoting its children (transceivers,
     fans, PSUs) to device-level bay matching. No pattern is needed — detection
     is purely serial-based.
+
+# --- Fixed-platform built-in units (action=transparent) ---
+# Fixed Cisco IOS XE platforms (e.g. C8500L-8S4X) report their built-in units
+# as chassis-level modules whose model is the chassis PID. "module R0" has its
+# own serial, so serial_matches_device does not catch it. On a modular ASR 1000
+# the same names are real FRUs with their own PIDs, so a name rule is unsafe.
+#
+# Hierarchy for a C8500L-8S4X (device type model = C8500L-8S4X):
+#   Chassis  (model C8500L-8S4X)
+#   +-- module 0   (model C8500L-8S4X)          <- TRANSPARENT
+#   |   +-- SPA subslot 0/0, 0/1                <- becomes device-level bay match
+#   +-- module R0  (model C8500L-8S4X, own SN)  <- TRANSPARENT
+#   +-- module F0  (model C8500L-8S4X)          <- TRANSPARENT
+#
+# Fixed Cisco NX-OS platforms (e.g. Nexus 93180YC-FX) put the built-in line card
+# in a slot container; the rule looks through containers to the chassis:
+#   Chassis  (model N9K-C93180YC-FX)
+#   +-- LinecardSlot-1  (container)
+#       +-- Module-1  (model N9K-C93180YC-FX)   <- TRANSPARENT
+
+- name: "Fixed-platform built-in units"
+  match_type: model_matches_device_type
+  pattern: ""
+  action: transparent
+  require_serial_match_parent: false
+  enabled: true
+  description: >
+    Fixed-form routers report built-in units as chassis-level modules whose
+    model equals the device type's model or part number. Marking them
+    transparent hides their rows and promotes their children to device-level
+    bay matching.

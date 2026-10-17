@@ -376,13 +376,13 @@ class TestConversionHelpers:
         assert result == ""
 
     def test_normalize_librenms_port_id_accepts_positive_int_and_str(self):
-        from netbox_librenms_plugin.utils import normalize_librenms_port_id
+        from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 
         assert normalize_librenms_port_id(42) == 42
         assert normalize_librenms_port_id("42") == 42
 
     def test_normalize_librenms_port_id_rejects_invalid_values(self):
-        from netbox_librenms_plugin.utils import normalize_librenms_port_id
+        from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 
         assert normalize_librenms_port_id(None) is None
         assert normalize_librenms_port_id(True) is None
@@ -400,7 +400,7 @@ class TestConversionHelpers:
         """The length cap must hold with CPython's int_max_str_digits limit disabled."""
         import sys
 
-        from netbox_librenms_plugin.utils import normalize_librenms_port_id
+        from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 
         previous = sys.get_int_max_str_digits()
         sys.set_int_max_str_digits(0)
@@ -1736,50 +1736,6 @@ class TestSetDeviceIpFkFamily:
         device.refresh_from_db()
         assert device.oob_ip_id == v6.pk
 
-    def test_families_accepted_with_netbox44_family_property(self, monkeypatch):
-        """The guard must not read IPAddress.family: on NetBox 4.4 the property raises on an in-memory str address and getattr's default turns that into a bogus refusal (forced)."""
-        from ipam.models import IPAddress
-
-        from netbox_librenms_plugin.tests.conftest import ip_on, make_device
-        from netbox_librenms_plugin.utils import set_device_ip_fk
-
-        device = make_device("fam-nb44dev")
-        v4 = ip_on(device, "10.0.0.4/24", "eth0")
-        v4.address = "10.0.0.4/24"  # in-memory str, as after IPAddress.objects.create()
-        # NetBox 4.4's family property verbatim — 4.5+ added a str-tolerant branch.
-        netbox44_family = property(lambda self: self.address.version if self.address else None)
-        monkeypatch.setattr(IPAddress, "family", netbox44_family)
-        set_device_ip_fk(device, "primary_ip4", v4)
-        device.refresh_from_db()
-        assert device.primary_ip4_id == v4.pk
-
-
-class TestIpFamily:
-    """ip_family(): family read that works on NetBox 4.4, whose IPAddress.family lacks the 4.5+ str-address branch."""
-
-    def test_str_address(self):
-        from ipam.models import IPAddress
-
-        from netbox_librenms_plugin.utils import ip_family
-
-        assert ip_family(IPAddress(address="10.0.0.1/24")) == 4
-        assert ip_family(IPAddress(address="2001:db8::1/64")) == 6
-
-    def test_ipnetwork_address(self):
-        import netaddr
-        from ipam.models import IPAddress
-
-        from netbox_librenms_plugin.utils import ip_family
-
-        assert ip_family(IPAddress(address=netaddr.IPNetwork("10.0.0.1/24"))) == 4
-
-    def test_empty_address_is_none(self):
-        from ipam.models import IPAddress
-
-        from netbox_librenms_plugin.utils import ip_family
-
-        assert ip_family(IPAddress()) is None
-
 
 class TestCoercePositiveInt:
     """coerce_positive_int accepts only positive int / int-string and rejects non-integer types (no float truncation)."""
@@ -1833,13 +1789,14 @@ class TestLibreNMSIdQueryMatchesDecoder:
         from dcim.models import Device
 
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.utils import coerce_librenms_id, find_by_librenms_id
+        from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+        from netbox_librenms_plugin.server_mappings import MappingRole, find_mapping
 
         dev = make_device(f"id-form-{len(stored)}-{namespaced}")
         dev.custom_field_data["librenms_id"] = {"default": stored} if namespaced else stored
         dev.save()
 
-        found = find_by_librenms_id(Device, 42, "default")
+        found = find_mapping(Device.objects.all(), server="default", identity=42, roles=tuple(MappingRole))
 
         assert (found == dev) == (coerce_librenms_id(stored) == 42)
 
@@ -1859,13 +1816,14 @@ class TestLibreNMSIdQueryMatchesDecoder:
         from dcim.models import Device
 
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.utils import coerce_librenms_id, find_by_librenms_id
+        from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+        from netbox_librenms_plugin.server_mappings import MappingRole, find_mapping
 
         dev = make_device(f"id-number-{stored!r}")
         dev.custom_field_data["librenms_id"] = shape(stored)
         dev.save()
 
-        found = find_by_librenms_id(Device, 42, "default")
+        found = find_mapping(Device.objects.all(), server="default", identity=42, roles=tuple(MappingRole))
 
         assert (found == dev) == (coerce_librenms_id(stored) == 42)
 
@@ -1875,7 +1833,8 @@ class TestLibreNMSIdQueryMatchesDecoder:
         from dcim.models import Device
 
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.utils import coerce_librenms_id, find_by_librenms_id
+        from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+        from netbox_librenms_plugin.server_mappings import MappingRole, find_mapping
 
         dev = make_device("id-form-wide")
         dev.custom_field_data["librenms_id"] = {"default": wide}
@@ -1883,7 +1842,7 @@ class TestLibreNMSIdQueryMatchesDecoder:
         dev.refresh_from_db()
 
         assert coerce_librenms_id(dev.custom_field_data["librenms_id"]["default"]) is None
-        assert find_by_librenms_id(Device, wide, "default") is None
+        assert find_mapping(Device.objects.all(), server="default", identity=wide, roles=tuple(MappingRole)) is None
 
 
 @pytest.mark.django_db

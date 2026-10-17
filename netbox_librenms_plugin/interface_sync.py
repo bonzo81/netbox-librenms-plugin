@@ -18,17 +18,19 @@ from netbox_librenms_plugin.interface_diff import (
     syncable_mac_address,
     synced_description,
 )
-from netbox_librenms_plugin.utils import (
+from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
+from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
+    find_port_owner,
+    name_match_may_be_port,
+    read_mapping,
+)
+from netbox_librenms_plugin.utils import (
     LibreNMSPortBindingConflict,
     claim_librenms_port_binding,
     coerce_interface_mtu,
     convert_speed_to_kbps,
-    find_interface_by_librenms_port_id,
-    get_librenms_device_id,
-    interface_name_fallback_matches_port,
     interface_name_rejection_reason,
-    normalize_librenms_port_id,
     set_librenms_device_id,
 )
 from netbox_librenms_plugin.transactions import first_at_version, row_changed, save_at_version
@@ -251,9 +253,9 @@ def write_interface_row(interface, apply, *, fresh_read_queryset, created=False)
     instance. With no changed column, nothing is locked, written or serialized. With a changed
     column, the change log's before-state is the state of the fresh read, and the row is saved only
     when no other operation changed it since the fresh read (``save_at_version``). A row that this
-    sync created is private to its transaction, so it is written without a fresh read. When the
-    write renames the row, the channel children that NetBox renames after the commit are recorded
-    for the final check of the interface sync.
+    sync created is private to its transaction, so it is written without a fresh read, and its
+    before-state is its state as created. When the write renames the row, the channel children
+    that NetBox renames after the commit are recorded for the final check of the interface sync.
 
     Args:
         interface (Interface | VMInterface): The interface as the caller read it.
@@ -284,11 +286,13 @@ def write_interface_row(interface, apply, *, fresh_read_queryset, created=False)
     changed_columns = {field.column for field in changed_fields(row, fresh)}
     if row.name != fresh.name:
         _record_renamed_channel_children(row, fresh.name)
-    if changed_columns and created:
-        row.save()
-    elif changed_columns:
+    if changed_columns:
+        # A created row gets this second save too: its MAC needs the row's pk, and the row needs the MAC's pk.
         keep_change_log_before_state(row, fresh)
-        save_at_version(row, version=version, changed_columns=changed_columns, name=interface.name)
+        if created:
+            row.save()
+        else:
+            save_at_version(row, version=version, changed_columns=changed_columns, name=interface.name)
     return InterfaceWrite(row, bool(changed_columns) or changed_elsewhere)
 
 
@@ -296,7 +300,7 @@ def _bound_interface_name_is_occupied(interface, synced_name, port_id, server_ke
     """Return whether a bound interface must keep its current name."""
     if synced_name == interface.name:
         return False
-    stored_port_id = normalize_librenms_port_id(get_librenms_device_id(interface, server_key, auto_save=False))
+    stored_port_id = normalize_librenms_port_id(read_mapping(interface).own_id(server_key))
     if port_id is None or stored_port_id != port_id:
         return False
     return (
@@ -330,11 +334,11 @@ def assign_interface_mac(interface, mac_address):
         logger.debug("LibreNMS reported no usable MAC for interface %s; skipping only the MAC.", interface.pk)
         return False
     mac_obj = interface.mac_addresses.filter(mac_address=mac_address).first()
-    # The lookup above is scoped to this interface, so a miss means add() attaches it.
+    # The lookup above is scoped to this interface, so a miss means a new MAC for it.
     changed = mac_obj is None
     if changed:
-        mac_obj = MACAddress.objects.create(mac_address=mac_address)
-        interface.mac_addresses.add(mac_obj)
+        # Assigned in the create: mac_addresses.add() is a bulk update that NetBox does not log.
+        mac_obj = MACAddress.objects.create(mac_address=mac_address, assigned_object=interface)
     changed = changed or interface.primary_mac_address_id != mac_obj.pk
     interface.primary_mac_address = mac_obj
     return changed
@@ -379,7 +383,7 @@ def update_interface_from_port(  # noqa: C901
     if port_id is not None:
         claim_librenms_port_binding(port_id, server_key)
         try:
-            existing_owner = find_interface_by_librenms_port_id(port_id, server_key)
+            existing_owner = find_port_owner(port_id, server=server_key)
         except AmbiguousLibreNMSIdError:
             raise LibreNMSPortBindingConflict("The LibreNMS port ID matches multiple NetBox interfaces.") from None
         if existing_owner is not None and existing_owner != interface:
@@ -484,7 +488,7 @@ def resolve_or_create_interface_from_port(  # noqa: C901
 
     claim_librenms_port_binding(port_id, server_key)
     try:
-        by_id = find_interface_by_librenms_port_id(port_id, server_key)
+        by_id = find_port_owner(port_id, server=server_key)
     except AmbiguousLibreNMSIdError:
         raise ValueError("The LibreNMS port ID matches multiple NetBox interfaces.") from None
 
@@ -501,10 +505,10 @@ def resolve_or_create_interface_from_port(  # noqa: C901
     else:
         existing_by_name = model.objects.filter(**owner_filter, name=interface_name).first()
         if existing_by_name is not None:
-            if not interface_name_fallback_matches_port(existing_by_name, port_id, server_key):
+            if not name_match_may_be_port(existing_by_name, server=server_key, port_id=port_id):
                 # Name the holding port only to a caller who may view the interface.
                 holder = (
-                    normalize_librenms_port_id(get_librenms_device_id(existing_by_name, server_key, auto_save=False))
+                    normalize_librenms_port_id(read_mapping(existing_by_name).own_id(server_key))
                     if viewable_queryset.filter(pk=existing_by_name.pk).exists()
                     else None
                 )
@@ -519,7 +523,7 @@ def resolve_or_create_interface_from_port(  # noqa: C901
         else:
             interface, created = model.objects.get_or_create(**owner_filter, name=interface_name)
             if not created:
-                if not interface_name_fallback_matches_port(interface, port_id, server_key):
+                if not name_match_may_be_port(interface, server=server_key, port_id=port_id):
                     raise ValueError("The interface name became bound to another LibreNMS port.")
                 if not viewable_queryset.filter(pk=interface.pk).exists():
                     raise ValueError("The matching NetBox interface is outside your view scope.")

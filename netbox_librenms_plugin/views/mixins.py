@@ -15,7 +15,8 @@ from utilities.permissions import get_permission_for_model
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
 from netbox_librenms_plugin.interface_sync import write_interface_row
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSIDConflictError, LibreNMSLookupError
-from netbox_librenms_plugin.utils import coerce_librenms_id, coerce_model_pk, effective_vlan_mode, is_list_of_dicts
+from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+from netbox_librenms_plugin.utils import coerce_model_pk, effective_vlan_mode, is_list_of_dicts
 
 logger = logging.getLogger(__name__)
 
@@ -1764,9 +1765,8 @@ class VlanAssignmentMixin:
         else:
             tagged_vlan_ids = set()
         if tagged_vlan_ids != prior_tagged_vlan_ids:
-            # An unsaved row has no change-log before-state yet, and its tagged VLANs are about to change.
-            if not fields_changed:
-                interface.snapshot()
+            # The change merges into the record of the row's save only inside a NetBox request.
+            interface.snapshot()
             if tagged_vids:
                 interface.tagged_vlans.set(tagged_set)
             else:

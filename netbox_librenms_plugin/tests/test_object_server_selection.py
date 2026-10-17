@@ -9,12 +9,14 @@ from django.core.cache import cache
 from django.urls import reverse
 
 from netbox_librenms_plugin.models import LibreNMSSettings
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.sync_cache import sync_snapshot_key
 from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_superuser,
     make_virtual_chassis_members,
     make_vm,
+    map_device_to_librenms,
 )
 from netbox_librenms_plugin.tests.import_server_helpers import selector_html
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
@@ -93,9 +95,7 @@ def test_single_non_default_mapping_redirects_before_query_and_then_uses_that_se
     from dcim.models import Device
 
     if object_kind == "virtualmachine":
-        obj = make_vm("one-mapped-vm")
-        obj.custom_field_data["librenms_id"] = {"secondary": {"id": 13402}}
-        obj.save(update_fields=["custom_field_data"])
+        obj = map_device_to_librenms(make_vm("one-mapped-vm"), 13402, server_key="secondary")
     else:
         obj = make_device("one-mapped-server", librenms_cf={"secondary": {"id": 13401}})
     assert Device.objects.filter(name="one-mapped-server").exists() is (object_kind == "device")
@@ -121,8 +121,7 @@ def test_single_non_default_mapping_redirects_before_query_and_then_uses_that_se
 @pytest.mark.django_db
 def test_virtual_chassis_member_uses_the_mapping_owners_server(client, servers):
     _virtual_chassis, (mapping_owner, viewed_member) = make_virtual_chassis_members("object-server", count=2)
-    mapping_owner.custom_field_data["librenms_id"] = {"secondary": {"id": 13403}}
-    mapping_owner.save(update_fields=["custom_field_data"])
+    map_device_to_librenms(mapping_owner, 13403, server_key="secondary")
     observed = []
     _register_device(servers.secondary, 13403, viewed_member.name, observed)
 
@@ -193,7 +192,7 @@ def test_configured_but_unmapped_server_fails_closed_without_discovery(client, s
     assert b"is not an available mapping for this object" in response.content
     assert b'id="add-device-modal"' not in response.content
     device.refresh_from_db()
-    assert device.custom_field_data["librenms_id"] == {"secondary": {"id": 13406}}
+    assert [(entry.server, entry.own_id) for entry in read_mapping(device).servers] == [("secondary", 13406)]
 
 
 @pytest.mark.django_db

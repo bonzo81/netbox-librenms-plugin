@@ -22,6 +22,13 @@ class B:
         result["warnings"].append(device.serial)
 
 
+# --- an unscoped mapping lookup is a source
+def preview_find_mapping(result, queryset, server_key, librenms_id, roles):
+    owner = find_mapping(queryset, server=server_key, identity=librenms_id, roles=roles)
+    # ruleid: import-disclosure
+    result["warnings"].append(f"linked to {owner.name}")
+
+
 # --- [exact] a nested helper captures an unrestricted object
 from dcim.models import Device
 def preview_exact01(result):

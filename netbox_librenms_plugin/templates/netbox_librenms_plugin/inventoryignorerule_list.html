@@ -18,6 +18,11 @@
             <li><strong>serial_matches_device</strong> — matches when the entity's serial number is identical to
                 the parent device's serial. Useful for suppressing EEPROM/IDPROM phantom entries that share the
                 device serial.</li>
+            <li><strong>model_matches_device_type</strong>: matches a chassis-level entity (directly below the
+                chassis or behind slot containers only) whose model name is
+                identical to the device type's model or part number. Use it with the Transparent action for the
+                built-in units of a fixed platform, such as Cisco IOS XE <code>module 0</code>,
+                <code>module R0</code> and <code>module F0</code>.</li>
         </ul>
         <p>When <strong>Require Serial Match</strong>
            is enabled (for name-based rules), the entry is only skipped if its serial number also matches the

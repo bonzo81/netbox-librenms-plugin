@@ -1,15 +1,16 @@
 """Concurrency coverage for interface target validation."""
 
 import os
-from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from threading import Event
 
 import pytest
 from django.apps import apps
 
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
     _PORT_KEYS_UNSET,
+    bounded_executor,
     configure_default_librenms_server,
     configured_server_key,
     make_virtual_chassis_members,
@@ -115,7 +116,7 @@ def test_selected_vc_target_is_locked_through_interface_sync(settings, monkeypat
         finally:
             close_old_connections()
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with bounded_executor(max_workers=2) as executor:
         sync_future = executor.submit(sync_interface)
         assert validation_done.wait(5), "interface sync did not reach target validation"
         move_future = executor.submit(move_target_out_of_chassis)
@@ -231,7 +232,7 @@ def _run_vlan_scope_sync(*, move_target, suffix, settings):
             close_old_connections()
 
     try:
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with bounded_executor(max_workers=2) as executor:
             sync_future = executor.submit(sync_interface)
             assert target_lock_reached.wait(20), "interface sync did not reach target locking"
             if move_target:
@@ -331,7 +332,7 @@ def test_inaccessible_selected_target_is_not_locked(settings):
         finally:
             close_old_connections()
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
+    with bounded_executor(max_workers=1) as executor:
         with transaction.atomic():
             Device.objects.select_for_update().get(pk=inaccessible_target.pk)
             future = executor.submit(sync_forged_target)
@@ -373,7 +374,7 @@ def test_viewable_outside_selected_target_is_not_locked(settings):
         finally:
             close_old_connections()
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
+    with bounded_executor(max_workers=1) as executor:
         with transaction.atomic():
             Device.objects.select_for_update().get(pk=outside_target.pk)
             future = executor.submit(sync_forged_target)
@@ -415,7 +416,6 @@ def test_vm_sync_serializes_duplicate_display_name_resolution(settings, monkeypa
 
     from netbox_librenms_plugin.tests.conftest import make_vm
     from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
-    from netbox_librenms_plugin.utils import get_librenms_device_id
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
     server_key = configure_default_librenms_server(settings)
@@ -469,7 +469,7 @@ def test_vm_sync_serializes_duplicate_display_name_resolution(settings, monkeypa
         finally:
             close_old_connections()
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with bounded_executor(max_workers=2) as executor:
         first_future = executor.submit(sync_port, 10)
         assert resolved[10].wait(5), "first VM sync did not resolve the interface"
         second_future = executor.submit(sync_port, 11)
@@ -481,7 +481,7 @@ def test_vm_sync_serializes_duplicate_display_name_resolution(settings, monkeypa
 
     interface = VMInterface.objects.get(virtual_machine=vm, name="Ethernet")
     assert not resolved_during_first
-    assert get_librenms_device_id(interface, server_key) == 10, (
+    assert read_mapping(interface).own_id(server_key) == 10, (
         interface.custom_field_data,
         first_texts,
         second_texts,
@@ -571,7 +571,7 @@ def test_relationship_write_locks_virtual_chassis_members_through_validation():
             close_old_connections()
 
     try:
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with bounded_executor(max_workers=2) as executor:
             relationship_future = executor.submit(write_relationship)
             if not validation_reached.wait(5):
                 release_relationship.set()
@@ -667,7 +667,7 @@ def test_inline_relationship_rechecks_migrated_donor_after_lock():
             close_old_connections()
 
     try:
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with bounded_executor(max_workers=2) as executor:
             migration_future = executor.submit(migrate_donor)
             assert donor_locked.wait(5), "migration did not lock the donor"
             relationship_future = executor.submit(write_relationship)
@@ -758,7 +758,7 @@ def test_inline_relationship_does_not_lock_unrelated_interfaces():
             close_old_connections()
 
     try:
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        with bounded_executor(max_workers=2) as executor:
             relationship_future = executor.submit(write_relationship)
             assert validation_reached.wait(5), "relationship sync did not reach validation"
             update_future = executor.submit(update_unrelated)
@@ -858,7 +858,7 @@ def test_bulk_relationship_pass_does_not_lock_unrelated_interfaces(settings):
         finally:
             close_old_connections()
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
+    with bounded_executor(max_workers=1) as executor:
         with transaction.atomic():
             type(unrelated).objects.select_for_update().get(pk=unrelated.pk)
             future = executor.submit(post_the_sync)
@@ -912,7 +912,7 @@ def test_relationship_scope_lock_blocks_new_virtual_chassis_members():
         finally:
             close_old_connections()
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with bounded_executor(max_workers=2) as executor:
         lock_future = executor.submit(lock_scope)
         assert scope_locked.wait(5), "relationship scope was not locked"
         join_future = executor.submit(join_scope)
@@ -938,7 +938,7 @@ def test_concurrent_cross_model_port_claim_refuses_without_partial_writes(settin
     from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
     from netbox_librenms_plugin.tests.conftest import make_cluster, make_device, make_interface, make_superuser, make_vm
     from netbox_librenms_plugin.tests.test_interface_port_binding_cross_model import _port, _sync
-    from netbox_librenms_plugin.utils import LibreNMSPortBindingBusy, get_librenms_device_id
+    from netbox_librenms_plugin.utils import LibreNMSPortBindingBusy
     from netbox_librenms_plugin.views.sync.modules import _bind_interface_librenms_id
 
     server_key = configure_default_librenms_server(settings)
@@ -967,7 +967,7 @@ def test_concurrent_cross_model_port_claim_refuses_without_partial_writes(settin
         finally:
             connections.close_all()
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
+    with bounded_executor(max_workers=1) as executor:
         with transaction.atomic():
             held = resolve_or_create_interface_from_port(
                 winner,
@@ -983,7 +983,7 @@ def test_concurrent_cross_model_port_claim_refuses_without_partial_writes(settin
                 with pytest.raises(LibreNMSPortBindingBusy):
                     executor.submit(competing_write).result(timeout=10)
                 loser_interface.refresh_from_db()
-                assert get_librenms_device_id(loser_interface, server_key, auto_save=False) is None
+                assert read_mapping(loser_interface).own_id(server_key) is None
             else:
                 from django.contrib.messages import get_messages
 
@@ -992,7 +992,7 @@ def test_concurrent_cross_model_port_claim_refuses_without_partial_writes(settin
                 owner_filter = {"virtual_machine": loser} if winner_kind == "device" else {"device": loser}
                 assert not loser_model.objects.filter(**owner_filter).exists()
         held.refresh_from_db()
-        assert get_librenms_device_id(held, server_key, auto_save=False) == 9301
+        assert read_mapping(held).own_id(server_key) == 9301
 
 
 def test_port_claims_are_reentrant_isolated_by_server_and_released_on_rollback():
@@ -1014,7 +1014,7 @@ def test_port_claims_are_reentrant_isolated_by_server_and_released_on_rollback()
 
     with pytest.raises(RuntimeError, match="open transaction"):
         claim_librenms_port_binding(9301, "default")
-    with ThreadPoolExecutor(max_workers=1) as executor:
+    with bounded_executor(max_workers=1) as executor:
         with transaction.atomic():
             claim_librenms_port_binding(9301, "default")
             claim_librenms_port_binding("009301", "default")
@@ -1091,7 +1091,7 @@ def test_direct_actions_refuse_a_concurrent_port_claim_without_leftovers(setting
         finally:
             connections.close_all()
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
+    with bounded_executor(max_workers=1) as executor:
         with transaction.atomic():
             claim_librenms_port_binding(port_id, server_key)
             response = executor.submit(compete).result(timeout=10)
@@ -1153,6 +1153,25 @@ def test_run_in_threads_fails_a_hung_call_within_its_timeout():
         hung.set()
         release.cancel()
     assert peer_released.wait(timeout=2)
+
+
+def test_bounded_executor_fails_a_hung_worker_within_its_timeout():
+    """A result timeout inside the block raises at once and does not wait for the hung worker."""
+    from threading import Timer
+    from time import monotonic
+
+    hung = Event()
+    # Release the hung worker later, so a helper that waits for it fails on time instead of hanging the session.
+    release = Timer(3, hung.set)
+    release.start()
+    started = monotonic()
+    try:
+        with pytest.raises(TimeoutError), bounded_executor(max_workers=1) as executor:
+            executor.submit(hung.wait).result(timeout=0.5)
+        assert monotonic() - started < 2
+    finally:
+        hung.set()
+        release.cancel()
 
 
 def test_opposite_order_port_claims_refuse_without_deadlock():

@@ -18,13 +18,16 @@ from virtualization.models import VirtualMachine, VMInterface
 from netbox_librenms_plugin.constants import LIBRENMS_GLOBAL_ROUTING_INSTANCE, is_supported_interface_name_field
 from netbox_librenms_plugin.interface_rules import interface_rules_for_request, row_rule_block
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_librenms_ip_entry
+from netbox_librenms_plugin.librenms_ids import (
+    coerce_librenms_id,
+    normalize_librenms_port_id,
+)
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
-    coerce_librenms_id,
     get_interface_name_field,
-    get_librenms_device_id,
     get_virtual_chassis_members,
     identify_ip_sync_rows,
     index_ip_source_interfaces,
@@ -32,7 +35,6 @@ from netbox_librenms_plugin.utils import (
     index_ip_port_records,
     ip_row_port_record,
     normalize_ip_sync_row_id,
-    normalize_librenms_port_id,
     PortDisclosure,
     resolve_create_missing_interfaces,
     resolve_ip_source_interface,
@@ -99,7 +101,7 @@ def ip_assignment_ports(ports_by_id, bound_ports_by_id, source_port_id, interfac
     """
     port_ids = {
         normalize_librenms_port_id(source_port_id),
-        get_librenms_device_id(interface, server_key, auto_save=False),
+        read_mapping(interface).own_id(server_key),
     } - {None}
     return [
         (
@@ -267,6 +269,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                     prefetched_data["interfaces_by_librenms_id"],
                     prefetched_data["interfaces_by_name"],
                     prefetched_data["interfaces_by_pk"],
+                    server_key=prefetched_data["server_key"],
                 )
                 ip_matches = [
                     ip for ip in ip_matches if source_interface is not None and ip.assigned_object == source_interface
@@ -407,6 +410,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             "interfaces_by_name": interfaces_by_name,
             # Carries the rename-safe interface_url fallback in resolve_ip_source_interface().
             "interfaces_by_pk": interfaces_by_pk,
+            "server_key": server_key,
             "all_interfaces": all_interfaces,
             "owner_by_id": {owner.pk: owner for owner in owners},
             "device": obj,
@@ -643,6 +647,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             prefetched_data["interfaces_by_librenms_id"],
             prefetched_data["interfaces_by_name"],
             prefetched_data["interfaces_by_pk"],
+            server_key=prefetched_data["server_key"],
         )
 
     def _enrich_existing_ip(self, enriched_ip, ip_address, port_id, librenms_interface_name, prefetched_data):
@@ -959,9 +964,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         from dcim.models import Device, Interface
         from django.contrib.contenttypes.models import ContentType
 
-        from netbox_librenms_plugin.utils import get_migrated_to_marker
-
-        if not isinstance(obj, Device) or not get_migrated_to_marker(obj, server_key or "default"):
+        if not isinstance(obj, Device) or not read_mapping(obj).migrated_to(server_key or "default"):
             return []
         name_by_id = {iface.pk: iface.name for iface in obj.interfaces.all()}
         if not name_by_id:

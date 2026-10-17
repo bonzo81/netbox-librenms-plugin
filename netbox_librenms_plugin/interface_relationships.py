@@ -7,13 +7,11 @@ from django.db.models import Q
 from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
+from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
+from netbox_librenms_plugin.server_mappings import MappingRole, identity_q, name_match_may_be_port, read_mapping
 from netbox_librenms_plugin.utils import (
-    build_librenms_ids_qs,
-    get_librenms_device_id,
-    interface_name_fallback_matches_port,
     invert_relationship_edges,
     is_list_of_dicts,
-    normalize_librenms_port_id,
     normalize_relationship_maps,
     normalize_stacked_ports,
 )
@@ -87,12 +85,19 @@ def interface_queryset_for_object(obj):
     return None
 
 
-def relationship_candidate_q(server_key, port_ids, names):
-    """Build one query for stable IDs and safe name hints."""
-    host_q, oob_q = build_librenms_ids_qs(
-        server_key, [port_id for port_id in port_ids if normalize_librenms_port_id(port_id) is not None]
+def relationship_candidate_q(model, server_key, port_ids, names):
+    """Build one query on the interface *model* for stable IDs and safe name hints."""
+    unique_port_ids = {
+        (type(port_id).__name__, str(port_id)): port_id
+        for port_id in port_ids
+        if normalize_librenms_port_id(port_id) is not None
+    }
+    candidate_q = identity_q(
+        model,
+        server=server_key,
+        identities=[unique_port_ids[marker] for marker in sorted(unique_port_ids)],
+        roles=(MappingRole.OWN, MappingRole.OOB),
     )
-    candidate_q = host_q | oob_q
     unique_names = sorted({name for name in names if isinstance(name, str) and name})
     if unique_names:
         candidate_q |= Q(name__in=unique_names)
@@ -111,7 +116,9 @@ def relationship_candidate_ids(obj, server_key, port_ids, names):
     for start in range(0, len(unique_port_ids), RELATIONSHIP_CANDIDATE_BATCH_SIZE):
         batch = unique_port_ids[start : start + RELATIONSHIP_CANDIDATE_BATCH_SIZE]
         candidate_ids.update(
-            interface_queryset.filter(relationship_candidate_q(server_key, batch, ())).values_list("pk", flat=True)
+            interface_queryset.filter(
+                relationship_candidate_q(interface_queryset.model, server_key, batch, ())
+            ).values_list("pk", flat=True)
         )
 
     for start in range(0, len(unique_names), RELATIONSHIP_CANDIDATE_BATCH_SIZE):
@@ -156,7 +163,7 @@ def build_interface_index(obj, server_key, user=None, action="change", *, lock=F
     by_librenms_id = {}
     by_name = {}
     for interface in interface_queryset:
-        stored_id = normalize_librenms_port_id(get_librenms_device_id(interface, server_key, auto_save=False))
+        stored_id = normalize_librenms_port_id(read_mapping(interface).own_id(server_key))
         if stored_id is not None:
             by_librenms_id.setdefault(stored_id, []).append(interface)
         by_name.setdefault(interface.name, []).append(interface)
@@ -210,8 +217,8 @@ def resolve_interface_by_port_id(
         if interface is not None:
             if expected_owner is not None and interface_owner(interface) != expected_owner:
                 return None, f"Interface name '{name_hint}' resolves to a different owner than the selected row"
-            if not interface_name_fallback_matches_port(interface, target_id, server_key):
-                stored_id = normalize_librenms_port_id(get_librenms_device_id(interface, server_key, auto_save=False))
+            if not name_match_may_be_port(interface, server=server_key, port_id=target_id):
+                stored_id = normalize_librenms_port_id(read_mapping(interface).own_id(server_key))
                 return None, f"Interface name '{name_hint}' is already bound to LibreNMS port_id {stored_id}"
             return interface, None
 
@@ -386,8 +393,9 @@ def relationship_diagnostics_report(cached_data, interface_name_field="ifName"):
 
 def build_candidate_relationship_context(obj, server_key, user, can_write, port_ids, names):
     """Build one permission-aware relationship context for a bounded row set."""
-    candidate_queryset = interface_queryset_for_object(obj).filter(
-        relationship_candidate_q(server_key, port_ids, names)
+    interface_queryset = interface_queryset_for_object(obj)
+    candidate_queryset = interface_queryset.filter(
+        relationship_candidate_q(interface_queryset.model, server_key, port_ids, names)
     )
     catalog_ids = set(candidate_queryset.values_list("pk", flat=True))
     catalog_index = build_interface_index(obj, server_key, allowed_ids=catalog_ids)
@@ -429,12 +437,13 @@ def enrich_port_relationships(
     def related_interface_matches(netbox_related, librenms_related):
         if netbox_related is None or librenms_related is None:
             return False
-        stored_id = normalize_librenms_port_id(
-            get_librenms_device_id(netbox_related, server_key or "default", auto_save=False)
-        )
+        server = server_key or "default"
         target_id = normalize_librenms_port_id(librenms_related.get("port_id"))
+        if not name_match_may_be_port(netbox_related, server=server, port_id=target_id):
+            return False
+        stored_id = normalize_librenms_port_id(read_mapping(netbox_related).own_id(server))
         if stored_id is not None and target_id is not None:
-            return stored_id == target_id
+            return True
         return netbox_related.name in (
             librenms_related.get("ifName"),
             librenms_related.get("ifDescr"),
@@ -574,7 +583,6 @@ def resolve_relationship_row(
             )
         port["netbox_interface"] = oob_interface
         port["exists_in_netbox"] = oob_interface is not None
-        port["name_fallback_allowed"] = False
         port["relationship_source_resolvable"] = False
         port["lag_target_resolvable"] = False
         port["parent_target_resolvable"] = False
@@ -596,7 +604,6 @@ def resolve_relationship_row(
         )
     port["netbox_interface"] = resolved_interface
     port["exists_in_netbox"] = resolved_interface is not None
-    port["name_fallback_allowed"] = name_fallback_allowed and resolved_interface is not None
 
     port["relationship_source_resolvable"] = _row_relationship_source_is_actionable(
         context,
