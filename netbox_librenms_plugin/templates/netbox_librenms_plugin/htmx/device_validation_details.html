@@ -376,53 +376,63 @@
               <tr>
                 <td style="padding-left: 0.75rem;">Platform</td>
                 <td>
-                  {% if validation.existing_device and validation.existing_device.platform %}
-                    {{ validation.existing_device.platform }}
-                    {% if sync_info and not sync_info.platform_synced %}
-                      {% if sync_info.platform_info.platform_exists %}
-                        <form style="display:inline" class="ms-1"
-                              hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
-                              hx-swap="none">
-                          {% csrf_token %}
-                          {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
-                          <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
-                          <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
-                          <input type="hidden" name="action" value="sync_platform">
-                          <button type="submit" class="btn btn-sm btn-outline-primary py-0 px-1" title="Sync platform" aria-label="Sync platform">
-                            <i class="mdi mdi-sync"></i>
-                          </button>
-                        </form>
-                      {% else %}
-                        <span class="text-muted ms-1" title="Platform '{{ sync_info.platform_info.librenms_os }}' not in NetBox">
-                          <i class="mdi mdi-alert-outline"></i>
-                        </span>
-                      {% endif %}
-                    {% elif sync_info and sync_info.platform_synced %}
-                      <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                  {% if validation.existing_device %}
+                    {% if validation.existing_device.platform %}
+                      {{ validation.existing_device.platform }}
+                    {% else %}
+                      <span class="text-muted">Not set</span>
                     {% endif %}
-                    {% include "netbox_librenms_plugin/htmx/_platform_manage_icon.html" %}
-                  {% elif validation.existing_device %}
-                    {# Existing device with no platform assigned #}
-                    <span class="text-muted">Not set</span>
-                    {% if validation.platform.platform or sync_info and sync_info.platform_info.platform_exists %}
-                    <form style="display:inline" class="ms-1"
-                          hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
-                          hx-swap="none">
-                      {% csrf_token %}
-                      {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
-                      <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
-                      <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
-                      <input type="hidden" name="action" value="sync_platform">
-                      <button type="submit" class="btn btn-sm btn-outline-primary py-0 px-1" title="Sync platform" aria-label="Sync platform">
-                        <i class="mdi mdi-sync"></i>
-                      </button>
-                    </form>
+                    {% with assessment=sync_info.platform_info.assessment %}
+                    {% if assessment.state == "current" %}
+                      {% if validation.existing_device.platform %}<span class="text-success"><i class="mdi mdi-check-circle"></i></span>{% endif %}
+                    {% elif assessment.state == "proposed" and assessment.operation != "create_os_platform" %}
+                      <form style="display:inline" class="ms-1"
+                            hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
+                            hx-swap="none">
+                        {% csrf_token %}
+                        {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
+                        <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
+                        <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
+                        <input type="hidden" name="action" value="sync_platform">
+                        <button type="submit" class="btn btn-sm btn-outline-primary py-0 px-1"
+                                title="{% if assessment.operation == 'create_version_platform' %}Create version platform {{ assessment.target_name }} and set it{% else %}Set platform to {{ assessment.target_name }}{% endif %}"
+                                aria-label="Sync platform">
+                          <i class="mdi mdi-sync"></i>
+                        </button>
+                      </form>
+                    {% elif assessment.reason == "os_platform_missing" %}
+                      <span class="text-muted ms-1" title="Platform '{{ sync_info.platform_info.librenms_os }}' not in NetBox">
+                        <i class="mdi mdi-alert-outline"></i>
+                      </span>
+                    {% elif assessment %}
+                      <span class="text-danger ms-1" title="{{ sync_info.platform_info.reason_text }}" data-platform-blocked="{{ assessment.reason }}">
+                        <i class="mdi mdi-alert-circle-outline"></i>
+                      </span>
                     {% endif %}
+                    {% endwith %}
                     {% include "netbox_librenms_plugin/htmx/_platform_manage_icon.html" %}
                   {% elif validation.platform.platform %}
-                    {# New import — platform will be assigned on import #}
-                    {{ validation.platform.platform.name }}
-                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                    {# New import: the platform is assigned on import #}
+                    {% with assessment=validation.platform.assessment %}
+                    {% if assessment.operation == "create_version_platform" and can_add_platform %}
+                      {{ assessment.target_name }}
+                      <span class="badge bg-info text-dark ms-1" data-version-platform="create">Created on import</span>
+                    {% elif assessment.operation == "create_version_platform" %}
+                      {{ validation.platform.platform.name }}
+                      <span class="text-warning ms-1" data-version-platform="missing"
+                            title="Version platform {{ assessment.target_name }} is missing, and you do not have permission to add platforms. The import assigns the OS platform.">
+                        <i class="mdi mdi-alert-outline"></i> {{ assessment.target_name }} missing
+                      </span>
+                    {% elif assessment.state == "blocked" %}
+                      {{ validation.platform.platform.name }}
+                      <span class="text-warning ms-1" title="{{ validation.platform.reason_text }} The import assigns the OS platform." data-platform-blocked="{{ assessment.reason }}">
+                        <i class="mdi mdi-alert-outline"></i>
+                      </span>
+                    {% else %}
+                      {{ validation.platform.platform.name }}
+                      <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                    {% endif %}
+                    {% endwith %}
                     {% include "netbox_librenms_plugin/htmx/_platform_manage_icon.html" %}
                   {% else %}
                     {% if not libre_device.os or libre_device.os == "-" %}
@@ -431,7 +441,7 @@
                     {% include "netbox_librenms_plugin/htmx/_platform_manage_icon.html" %}
                   {% endif %}
                 </td>
-                <td>{{ libre_device.os|default:"—" }}</td>
+                <td>{{ libre_device.os|default:"—" }}{% if validation.platform.assessment.tracks_version %} {{ libre_device.version }}{% endif %}</td>
               </tr>
 
               {% if validation.import_as_vm and not validation.existing_device or validation.existing_device and existing_device_model_name == "virtualmachine" %}

@@ -1624,7 +1624,7 @@ class TestBuildSyncInfo:
         libre_device = {"serial": "SN001", "os": "-", "hardware": "-"}
         existing = make_device("sync-info-serial-match", serial="SN001")
 
-        result = build_sync_info(libre_device, existing)
+        result = build_sync_info(libre_device, existing, None)
 
         assert result["serial_synced"] is True
 
@@ -1633,7 +1633,7 @@ class TestBuildSyncInfo:
         libre_device = {"serial": "SN_LIBRENMS", "os": "-", "hardware": "-"}
         existing = make_device("sync-info-serial-mismatch", serial="SN_NETBOX")
 
-        result = build_sync_info(libre_device, existing)
+        result = build_sync_info(libre_device, existing, None)
         assert result["serial_synced"] is False
 
     def test_padded_incoming_serial_counts_as_synced(self):
@@ -1642,7 +1642,7 @@ class TestBuildSyncInfo:
         libre_device = {"serial": " SN001 ", "os": "-", "hardware": "-"}
         existing = make_device("sync-info-padded-incoming", serial="SN001")
 
-        result = build_sync_info(libre_device, existing)
+        result = build_sync_info(libre_device, existing, None)
 
         assert result["serial_synced"] is True
 
@@ -1652,7 +1652,7 @@ class TestBuildSyncInfo:
         existing = make_device("sync-info-padded-serial", serial=" SN-STORED-1 ")
         libre_device = {"serial": "SN-STORED-1", "os": "-", "hardware": "-"}
 
-        result = build_sync_info(libre_device, existing)
+        result = build_sync_info(libre_device, existing, None)
 
         assert result["serial_synced"] is True, "padded stored serial reported as drift"
         assert result["all_synced"] is True
@@ -1667,17 +1667,17 @@ class TestBuildSyncInfo:
         existing.save(update_fields=["platform"])
         libre_device = {"serial": "-", "os": platform.name, "hardware": "-"}
 
-        result = build_sync_info(libre_device, existing)
+        result = build_sync_info(libre_device, existing, None)
 
         assert result["platform_synced"] is True
-        assert result["platform_info"]["matching_platform"] == platform
+        assert result["platform_info"]["assessment"].target == platform
 
     def test_device_type_synced_when_matched(self):
         build_sync_info = self._get_method()
         existing = make_device("sync-info-type-match")
         libre_device = {"serial": "-", "os": "-", "hardware": existing.device_type.model}
 
-        result = build_sync_info(libre_device, existing)
+        result = build_sync_info(libre_device, existing, None)
 
         assert result["device_type_synced"] is True
         assert result["librenms_device_type"] == existing.device_type
@@ -1694,7 +1694,7 @@ class TestBuildSyncInfo:
         )
         libre_device = {"serial": "-", "os": "-", "hardware": librenms_type.model}
 
-        result = build_sync_info(libre_device, existing)
+        result = build_sync_info(libre_device, existing, None)
 
         assert result["device_type_synced"] is False
         assert result["librenms_device_type"] == librenms_type
@@ -1706,6 +1706,7 @@ class TestBuildSyncInfo:
         result = build_sync_info(
             {"serial": "-", "os": "-", "hardware": "-"},
             existing,
+            None,
         )
 
         assert result["platform_synced"] is True
@@ -3847,6 +3848,40 @@ class TestDeviceConflictActionBranches:
         self._assert_success(response)
         assert Device.objects.get(pk=target.pk).platform_id == platform.pk
 
+    @pytest.mark.parametrize("may_add_platforms", [True, False], ids=["add-platform", "no-add-platform"])
+    def test_sync_platform_follows_platform_version_tracking(self, may_add_platforms):
+        from dcim.models import Device, Platform
+
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"platform_version_tracking": True})
+        view = self._make_view()
+        target = make_device(f"branches-sync-version-{may_add_platforms}")
+        os_platform = Platform.objects.create(name="branches-version-os", slug="branches-version-os")
+        Device.objects.filter(pk=target.pk).update(platform=os_platform)
+        self.librenms_server.device_info_response(
+            device_id=42,
+            hostname=target.name,
+            hardware="Branches unmatched chassis",
+            os=os_platform.name,
+            version="9.9",
+            serial="",
+            ip="",
+        )
+        self.librenms_server.vc_inventory_callable(42, [], {})
+        perms = [("change", Device)] + ([("add", Platform)] if may_add_platforms else [])
+        request = self._request("sync_platform", target, f"branches-sync-version-user-{may_add_platforms}", perms)
+
+        response = post_view(view, request, device_id=42)
+
+        target.refresh_from_db()
+        if may_add_platforms:
+            self._assert_success(response)
+            assert (target.platform.name, target.platform.parent) == ("branches-version-os 9.9", os_platform)
+        else:
+            self._assert_htmx_error(response, "You do not have permission to add platform 'branches-version-os 9.9'.")
+            assert target.platform == os_platform
+
     def test_sync_platform_reports_when_no_platform_matches(self):
         from dcim.models import Device
 
@@ -3868,7 +3903,7 @@ class TestDeviceConflictActionBranches:
 
         self._assert_htmx_error(
             response,
-            f"Platform '{librenms_os}' not found in NetBox",
+            f"No NetBox platform matches LibreNMS OS '{librenms_os}'.",
         )
         assert Device.objects.get(pk=target.pk).platform_id is None
 
@@ -3887,7 +3922,7 @@ class TestDeviceConflictActionBranches:
             slug="branches-sync-platform-ambiguous-upper",
         )
         # Platform names are unique case-sensitively. Both real rows therefore exist, while
-        # find_matching_platform uses name__iexact and reports the pair as ambiguous.
+        # the OS platform rule matches names case-insensitively and reports the pair as ambiguous.
         self._register_device(
             42,
             target.name,
@@ -3903,7 +3938,7 @@ class TestDeviceConflictActionBranches:
 
         self._assert_htmx_error(
             response,
-            f"Multiple Platforms match OS '{librenms_os}' — resolve the conflict in Platforms",
+            f"Multiple platforms match '{librenms_os}'. Resolve the ambiguity with a Platform Mapping.",
         )
         assert Device.objects.get(pk=target.pk).platform_id is None
 
@@ -4700,6 +4735,31 @@ class TestCreatePlatformAssignmentIndependence:
         assert response.status_code == 200
         assert b' id="htmx-modal-content"' in response.content
         assert b"hx-swap-oob" in response.content
+
+    def test_tracking_also_creates_the_version_platform_and_assigns_it(self):
+        from dcim.models import Platform
+
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"platform_version_tracking": True})
+        target = self._mapped_device("platform-tracked-target")
+        self.librenms_server.device_info_response(
+            device_id=42,
+            hostname=target.name,
+            hardware=target.device_type.model,
+            os="test-os",
+            serial=target.serial,
+            ip="198.18.0.42",
+            version="17.3.1",
+        )
+
+        self._post(target, "Tracked OS", target.device_type.manufacturer_id)
+
+        os_platform = Platform.objects.get(name="Tracked OS")
+        target.refresh_from_db()
+        assert target.platform.name == "Tracked OS 17.3.1"
+        assert target.platform.parent == os_platform
+        assert target.platform.manufacturer == os_platform.manufacturer
 
     def test_the_assignment_change_record_keeps_the_previous_platform(self, client):
         from core.models import ObjectChange
