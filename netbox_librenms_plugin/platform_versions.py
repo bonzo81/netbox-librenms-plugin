@@ -9,8 +9,10 @@ page, import, and a background job are adapters over this module.
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import NamedTuple
 
 from dcim.models import Platform
+from django.contrib.messages import constants as message_levels
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import Q
@@ -18,6 +20,7 @@ from django.utils.text import slugify
 
 from netbox_librenms_plugin.models import LibreNMSSettings, PlatformMapping
 from netbox_librenms_plugin.transactions import classify_conflict, update_existing_row
+from netbox_librenms_plugin.utils import exception_text_for, write_failure_message
 
 _ADD_PLATFORM = "dcim.add_platform"
 _SLUG_MAX_LENGTH = 100
@@ -161,6 +164,13 @@ class ImportPlatform:
     reason: PlatformReason | None = None
     created: Platform | None = None
     error: Exception | None = None
+
+
+class Report(NamedTuple):
+    """One message for the actor; an adapter adds it with ``messages.add_message(request, *report)``."""
+
+    level: int
+    text: str
 
 
 class _Stop(Exception):
@@ -667,3 +677,55 @@ def reason_text(reason, assessment, viewer):
         PlatformReason.NAMED_PLATFORM_UNAVAILABLE: lambda: f"Platform '{assessment.target_name}' is not available.",
     }
     return texts[reason]()
+
+
+def platform_reports(outcome, model, viewer, *, named=False):
+    """
+    Return the messages of *outcome* for *viewer*.
+
+    Args:
+        outcome (PlatformOutcome): The outcome of ``apply_platform`` or ``create_os_platform``.
+        model: Device or VirtualMachine, or None when the outcome has no subject.
+        viewer: The user who reads the messages; they name only platforms that the user may view.
+        named (bool): Whether the actor named the OS platform; then a reused platform is reported.
+
+    Returns:
+        tuple[Report, ...]: The messages, in order. A refused outcome gives one ERROR message.
+
+    """
+    if outcome.status is OutcomeStatus.FAILED:
+        if outcome.error_model is Platform:
+            detail = exception_text_for(outcome.error, Platform, viewer)
+            target = target_label(outcome.assessment, viewer)
+            return (Report(message_levels.ERROR, f"Platform {target} could not be created: {detail}"),)
+        action = f"assign platform {attempted_label(outcome.platform, viewer)} to the {model._meta.verbose_name}"
+        return (Report(message_levels.ERROR, write_failure_message(outcome.error, action, "platform", model, viewer)),)
+    if outcome.reason is PlatformReason.SUBJECT_UNAVAILABLE:
+        return (Report(message_levels.ERROR, f"{model._meta.verbose_name.capitalize()} no longer exists."),)
+    if outcome.status in (OutcomeStatus.BLOCKED, OutcomeStatus.STALE):
+        text = reason_text(outcome.reason, outcome.assessment, viewer)
+        if outcome.reason is PlatformReason.OS_PLATFORM_MISSING:
+            text = f"{text} Use the 'Create & Sync' button to create it first."
+        return (Report(message_levels.ERROR, text),)
+    reports = [
+        Report(message_levels.SUCCESS, f"Created platform {platform_label(platform, viewer)}")
+        for platform in outcome.created
+    ]
+    if model is not None:
+        reports.append(_assignment_report(outcome, model, viewer))
+    os_platform = outcome.assessment.os_platform
+    if named and os_platform not in outcome.created:
+        label = platform_label(os_platform, viewer)
+        reports.append(Report(message_levels.SUCCESS, f"Platform {label} already existed and was used as it is"))
+    return tuple(reports)
+
+
+def _assignment_report(outcome, model, viewer):
+    subject = model._meta.verbose_name.capitalize()
+    platform = platform_label(outcome.platform, viewer)
+    if outcome.status is OutcomeStatus.UNCHANGED:
+        return Report(message_levels.INFO, f"{subject} platform is already {platform}")
+    if outcome.previous is not None:
+        previous = platform_label(outcome.previous, viewer)
+        return Report(message_levels.SUCCESS, f"{subject} platform updated from {previous} to {platform}")
+    return Report(message_levels.SUCCESS, f"{subject} platform set to {platform}")

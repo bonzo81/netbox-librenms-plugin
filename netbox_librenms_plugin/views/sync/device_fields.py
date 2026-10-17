@@ -19,13 +19,10 @@ from netbox_librenms_plugin.platform_versions import (
     NewOSPlatform,
     OutcomeStatus,
     PlatformFacts,
-    PlatformReason,
     apply_platform,
-    attempted_label,
     platform_label,
+    platform_reports,
     platform_version_tracking_enabled,
-    reason_text,
-    target_label,
 )
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
@@ -190,38 +187,9 @@ def _live_platform_facts(view, subject):
     return PlatformFacts.from_librenms(device_info.get("os"), device_info.get("version")), None
 
 
-def _report_platform_outcome(request, outcome, model):
-    """Add the message of one platform application on a *model* subject to *request*."""
-    viewer = request.user
-    subject = model._meta.verbose_name.capitalize()
-    if outcome.status is OutcomeStatus.FAILED:
-        if outcome.error_model is Platform:
-            detail = exception_text_for(outcome.error, Platform, viewer)
-            target = target_label(outcome.assessment, viewer)
-            messages.error(request, f"Platform {target} could not be created: {detail}")
-            return
-        action = f"assign platform {attempted_label(outcome.platform, viewer)} to the {model._meta.verbose_name}"
-        messages.error(request, write_failure_message(outcome.error, action, "platform", model, viewer))
-        return
-    if outcome.reason is PlatformReason.SUBJECT_UNAVAILABLE:
-        messages.error(request, f"{subject} no longer exists.")
-        return
-    if outcome.status in (OutcomeStatus.BLOCKED, OutcomeStatus.STALE):
-        text = reason_text(outcome.reason, outcome.assessment, viewer)
-        if outcome.reason is PlatformReason.OS_PLATFORM_MISSING:
-            text = f"{text} Use the 'Create & Sync' button to create it first."
-        messages.error(request, text)
-        return
-    for platform in outcome.created:
-        messages.success(request, f"Created platform {platform_label(platform, viewer)}")
-    platform = platform_label(outcome.platform, viewer)
-    if outcome.status is OutcomeStatus.UNCHANGED:
-        messages.info(request, f"{subject} platform is already {platform}")
-    elif outcome.previous is not None:
-        previous = platform_label(outcome.previous, viewer)
-        messages.success(request, f"{subject} platform updated from {previous} to {platform}")
-    else:
-        messages.success(request, f"{subject} platform set to {platform}")
+def _add_reports(request, reports):
+    for report in reports:
+        messages.add_message(request, *report)
 
 
 def _report_os_mapping(request, librenms_os, platform):
@@ -544,7 +512,7 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
         outcome = apply_platform(
             self.subject_model, pk, facts, tracking=platform_version_tracking_enabled(), actor=request.user
         )
-        _report_platform_outcome(request, outcome, self.subject_model)
+        _add_reports(request, platform_reports(outcome, self.subject_model, request.user))
         return self._redirect(request, pk, server_key)
 
     def _redirect(self, request, pk, server_key):
@@ -640,13 +608,10 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             actor=request.user,
             new_os_platform=NewOSPlatform(platform_name, manufacturer, reported_version),
         )
-        _report_platform_outcome(request, outcome, self.subject_model)
+        _add_reports(request, platform_reports(outcome, self.subject_model, request.user, named=True))
         if outcome.status not in (OutcomeStatus.APPLIED, OutcomeStatus.UNCHANGED):
             return self._sync_redirect(request, pk, self._active_key())
         os_platform = outcome.assessment.os_platform
-        if os_platform not in outcome.created:
-            label = platform_label(os_platform, request.user)
-            messages.success(request, f"Platform {label} already existed and was used as it is")
         if create_mapping and facts.librenms_os:
             _report_os_mapping(request, facts.librenms_os.lower(), os_platform)
         return self._sync_redirect(request, pk, self._active_key())

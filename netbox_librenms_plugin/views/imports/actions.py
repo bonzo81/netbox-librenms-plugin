@@ -86,9 +86,9 @@ from netbox_librenms_plugin.platform_versions import (
     PlatformState,
     apply_platform,
     assess_platform,
-    attempted_label,
     import_platform,
     platform_label,
+    platform_reports,
     platform_version_tracking_enabled,
     platform_visible,
     reason_text,
@@ -2425,18 +2425,9 @@ class DeviceConflictActionView(
                 tracking=platform_version_tracking_enabled(),
                 actor=request.user,
             )
-            if outcome.status is OutcomeStatus.FAILED:
-                target = (
-                    attempted_label(outcome.platform, request.user)
-                    if outcome.platform is not None
-                    else target_label(outcome.assessment, request.user)
-                )
-                return _htmx_error_response(
-                    f"Could not set platform {target}: "
-                    f"{exception_text_for(outcome.error, outcome.error_model, request.user)}"
-                )
-            if outcome.status in (OutcomeStatus.BLOCKED, OutcomeStatus.STALE):
-                return _htmx_error_response(reason_text(outcome.reason, outcome.assessment, request.user))
+            reports = platform_reports(outcome, existing_model, request.user)
+            if refusal := next((report.text for report in reports if report.level == messages.ERROR), None):
+                return _htmx_error_response(refusal)
             logger.info(f"Synced platform on '{existing_device.name}' to {outcome.platform}")
 
         elif action == "sync_device_type":
