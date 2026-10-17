@@ -1,12 +1,11 @@
 """Concurrency coverage for OOB interface name reuse."""
 
-from concurrent.futures import ThreadPoolExecutor
 from threading import Event, get_ident
 
 import pytest
 from django.apps import apps
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+from netbox_librenms_plugin.tests.conftest import bounded_executor, make_device, make_interface
 
 pytestmark = pytest.mark.django_db(
     transaction=True,
@@ -69,7 +68,7 @@ def test_concurrent_hidden_interface_winner_is_not_reused(monkeypatch):
         finally:
             close_old_connections()
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
+    with bounded_executor(max_workers=1) as executor:
         future = executor.submit(resolve_interface)
         assert create_ready.wait(5), "OOB resolution did not reach the create race window"
         winner = Interface.objects.create(device=device, name="idrac0", type="other")
@@ -109,7 +108,7 @@ def test_an_interface_outside_the_view_scope_is_never_locked():
 
     request = make_request("post", {"oob_interface_id": "__new__", "oob_new_interface_name": "idrac0"}, user=user)
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
+    with bounded_executor(max_workers=1) as executor:
         holder = executor.submit(hold_the_row)
         assert holder_has_lock.wait(10), "helper thread never took the row lock"
         try:
@@ -172,7 +171,7 @@ def test_hidden_ip_row_is_not_locked_by_an_out_of_scope_caller():
         finally:
             close_old_connections()
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with bounded_executor(max_workers=2) as executor:
         holder = executor.submit(hold_hidden_row)
         assert row_locked.wait(10), "the hidden row was never locked"
         caller = executor.submit(attach_as_caller)

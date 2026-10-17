@@ -17,6 +17,7 @@ from django.test import RequestFactory
 from django_htmx.middleware import HtmxDetails
 
 from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 SERVER_KEY = "default"
 
@@ -57,7 +58,7 @@ def _seed(name, *, port_id_on_interface):
     iface = Interface.objects.create(device=device, name="Gi0/1", type="1000base-t", module=module)
     if port_id_on_interface is not None:
         # Pre-bind the port ID under the real server so the rebind is a genuine no-op.
-        iface.custom_field_data = {"librenms_id": {SERVER_KEY: port_id_on_interface}}
+        seed_mapping(iface, SERVER_KEY, own=port_id_on_interface, save=False)
         iface.save()
     return device, module, iface
 

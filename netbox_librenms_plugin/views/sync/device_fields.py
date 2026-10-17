@@ -17,22 +17,23 @@ from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
 from netbox_librenms_plugin.models import PlatformMapping
 from netbox_librenms_plugin.server_mappings import (
-    PREFERRED_SERVER_FIELD,
-    iter_server_mapping_entries,
+    AmbiguousLibreNMSIdError,
+    ContainerStatus,
+    IdentityOwned,
+    convert_legacy,
+    get_librenms_sync_device,
+    persist_mapping,
+    read_mapping,
+    release_server,
     require_server_key,
-    with_preferred_server,
-    without_server_mapping,
+    set_preference,
 )
 from netbox_librenms_plugin.server_selection import build_server_mappings
 from netbox_librenms_plugin.sync_cache import SyncTab
+from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, update_existing_row
 from netbox_librenms_plugin.utils import (
-    AmbiguousLibreNMSIdError,
-    find_by_librenms_id,
     find_matching_platform,
-    get_librenms_sync_device,
-    is_legacy_librenms_id,
     match_librenms_hardware_to_device_type,
-    migrate_legacy_librenms_id,
     normalize_serial,
     resolve_naming_preferences,
     validation_error_detail,
@@ -141,6 +142,44 @@ def _device_sync_redirect(request, pk, server_key):
     return redirect_with_server_key(request, url, server_key)
 
 
+class _WriteRefused(Exception):
+    """A check of the locked row refused the write; the message and its level are for the user."""
+
+    def __init__(self, message, level=messages.ERROR):
+        super().__init__(message)
+        self.level = level
+
+
+def _write_device_field(view, request, pk, server_key, field, value, action):
+    """
+    Write *value* to *field* of the locked device, and report a failure to *request*.
+
+    Returns:
+        tuple: ``(old_value, None)`` after the write, or ``(None, redirect)`` when the write failed.
+
+    """
+    old_values = []
+
+    def apply(row):
+        old_values.append(getattr(row, field))
+        setattr(row, field, value)
+
+    try:
+        update_existing_row(view.restricted_queryset(Device, "change").filter(pk=pk), apply)
+    except Device.DoesNotExist:
+        messages.error(request, "Device no longer exists.")
+        return None, _device_sync_redirect(request, pk, server_key)
+    except (ValidationError, IntegrityError) as e:
+        if classify_conflict(e):
+            raise
+        # The keys only choose the wording; the text comes from exception_text_for.
+        # nosemgrep: caught-error-text  # noqa: ERA001
+        failure = _write_failure_message(e, action, field, Device, request.user)
+        messages.error(request, failure)
+        return None, _device_sync_redirect(request, pk, server_key)
+    return old_values[0], None
+
+
 class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
     """Update NetBox device name from LibreNMS sysName."""
 
@@ -170,7 +209,7 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         # (which would rename the device from a different server's LibreNMS device).
         librenms_lookup_device = device
         if hasattr(device, "virtual_chassis") and device.virtual_chassis:
-            if not device.cf.get("librenms_id"):
+            if not read_mapping(device).has_recorded_state:
                 sync_device = get_librenms_sync_device(device, server_key=server_key)
                 if sync_device:
                     librenms_lookup_device = sync_device
@@ -223,24 +262,11 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             messages.warning(request, "No name could be determined from LibreNMS")
             return _device_sync_redirect(request, pk, server_key)
 
-        old_name = device.name
-        device.name = resolved_name
-        try:
-            device.full_clean()
-            device.save()
-        except (ValidationError, IntegrityError) as e:
-            device.name = old_name
-            failure = _write_failure_message(
-                # The keys only choose the wording; the text comes from exception_text_for.
-                # nosemgrep: caught-error-text  # noqa: ERA001
-                e,
-                f"update device name to '{resolved_name}'",
-                "name",
-                Device,
-                request.user,
-            )
-            messages.error(request, failure)
-            return _device_sync_redirect(request, pk, server_key)
+        old_name, failed = _write_device_field(
+            self, request, pk, server_key, "name", resolved_name, f"update device name to '{resolved_name}'"
+        )
+        if failed is not None:
+            return failed
 
         messages.success(request, f"Device name updated from '{old_name}' to '{resolved_name}'")
 
@@ -293,18 +319,11 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
             messages.warning(request, "No serial number available in LibreNMS")
             return _device_sync_redirect(request, pk, server_key)
 
-        old_serial = device.serial
-        device.serial = serial
-        try:
-            device.full_clean()
-            device.save()
-        except (ValidationError, IntegrityError) as e:
-            device.serial = old_serial
-            # The keys only choose the wording; the text comes from exception_text_for.
-            # nosemgrep: caught-error-text  # noqa: ERA001
-            failure = _write_failure_message(e, f"update serial to '{serial}'", "serial", Device, request.user)
-            messages.error(request, failure)
-            return _device_sync_redirect(request, pk, server_key)
+        old_serial, failed = _write_device_field(
+            self, request, pk, server_key, "serial", serial, f"update serial to '{serial}'"
+        )
+        if failed is not None:
+            return failed
 
         if old_serial:
             messages.success(
@@ -380,24 +399,11 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             return _device_sync_redirect(request, pk, server_key)
 
         device_type = match_result["device_type"]
-        old_device_type = device.device_type
-        device.device_type = device_type
-        try:
-            device.full_clean()
-            device.save()
-        except (ValidationError, IntegrityError) as e:
-            device.device_type = old_device_type
-            failure = _write_failure_message(
-                # The keys only choose the wording; the text comes from exception_text_for.
-                # nosemgrep: caught-error-text  # noqa: ERA001
-                e,
-                f"update device type to '{device_type}'",
-                "device_type",
-                Device,
-                request.user,
-            )
-            messages.error(request, failure)
-            return _device_sync_redirect(request, pk, server_key)
+        old_device_type, failed = _write_device_field(
+            self, request, pk, server_key, "device_type", device_type, f"update device type to '{device_type}'"
+        )
+        if failed is not None:
+            return failed
 
         messages.success(
             request,
@@ -470,19 +476,11 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
             return _device_sync_redirect(request, pk, server_key)
 
         platform = result["platform"]
-
-        old_platform = device.platform
-        device.platform = platform
-        try:
-            device.full_clean()
-            device.save()
-        except (ValidationError, IntegrityError) as e:
-            device.platform = old_platform
-            # The keys only choose the wording; the text comes from exception_text_for.
-            # nosemgrep: caught-error-text  # noqa: ERA001
-            failure = _write_failure_message(e, f"update platform to '{platform}'", "platform", Device, request.user)
-            messages.error(request, failure)
-            return _device_sync_redirect(request, pk, server_key)
+        old_platform, failed = _write_device_field(
+            self, request, pk, server_key, "platform", platform, f"update platform to '{platform}'"
+        )
+        if failed is not None:
+            return failed
 
         if old_platform:
             messages.success(
@@ -555,7 +553,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                     getattr(getattr(self, "_librenms_api", None), "server_key", None),
                 )
 
-        device = self.restrict_object_or_404(Device, "change", pk=pk)
+        self.restrict_object_or_404(Device, "change", pk=pk)
 
         # Rebind the API client to the POSTed server so the server_key fallback in _sync_redirect
         # below resolves to the active server instead of None (self._librenms_api would otherwise
@@ -599,6 +597,8 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                         platform.save()
                     platform_created = True
                 except ValidationError as e:
+                    if classify_conflict(e):
+                        raise
                     transaction.set_rollback(True)
                     logger.exception(
                         "ValidationError creating platform '%s' for device pk=%s: %s",
@@ -646,18 +646,19 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 platform = existing_platform
 
             try:
-                device = self.restricted_queryset(Device, "change").select_for_update(of=("self",)).get(pk=pk)
+                update_existing_row(
+                    self.restricted_queryset(Device, "change").filter(pk=pk),
+                    lambda row: setattr(row, "platform", platform),
+                )
             except Device.DoesNotExist:
                 transaction.set_rollback(True)
                 messages.error(request, "Device no longer exists.")
                 return self._sync_redirect(
                     request, pk, getattr(getattr(self, "_librenms_api", None), "server_key", None)
                 )
-
-            device.platform = platform
-            try:
-                device.full_clean()
             except ValidationError as e:
+                if classify_conflict(e):
+                    raise
                 transaction.set_rollback(True)
                 logger.exception("ValidationError validating device pk=%s: %s", pk, validation_error_detail(e))
                 failure = _write_failure_message(
@@ -673,8 +674,6 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 return self._sync_redirect(
                     request, pk, getattr(getattr(self, "_librenms_api", None), "server_key", None)
                 )
-            try:
-                device.save()
             except IntegrityError as e:
                 transaction.set_rollback(True)
                 logger.exception("IntegrityError saving device pk=%s after platform assignment", pk)
@@ -835,52 +834,8 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
             messages.error(request, "Device is not part of a virtual chassis")
             return _server_mapping_redirect("device", pk, active_server_key, active_sync_tab)
 
-        assignments_made = 0
-        errors = []
-
-        counter = 1
-        while f"serial_{counter}" in request.POST:
-            serial = normalize_serial(request.POST.get(f"serial_{counter}"))
-            member_id = request.POST.get(f"member_id_{counter}")
-
-            if not member_id:
-                counter += 1
-                continue
-
-            try:
-                # Scoped like the page device: the member's serial is overwritten below and its pk
-                # comes from the POST, so the same-VC check alone would let a constrained grant
-                # write a serial onto a member it does not cover.
-                member = self.restricted_queryset(Device, "change").get(pk=member_id)
-
-                if not member.virtual_chassis or member.virtual_chassis.pk != device.virtual_chassis.pk:
-                    errors.append(f"{member.name} is not part of the same virtual chassis")
-                    counter += 1
-                    continue
-
-                old_serial = member.serial
-                member.serial = serial
-                try:
-                    member.full_clean()
-                    member.save()
-                except (ValidationError, IntegrityError) as e:
-                    member.serial = old_serial
-                    # The keys only choose the wording; the text comes from exception_text_for.
-                    # nosemgrep: caught-error-text  # noqa: ERA001
-                    failure = _write_failure_message(e, f"set serial on {member.name}", "serial", Device, request.user)
-                    errors.append(failure)
-                    counter += 1
-                    continue
-
-                assignments_made += 1
-
-            except Device.DoesNotExist:
-                errors.append(f"Device with ID {member_id} not found")
-            except Exception as exc:  # pragma: no cover - defensive guard
-                detail = exception_text_for(exc, Device, request.user)
-                errors.append(f"Error assigning serial to member {member_id}: {detail}")
-
-            counter += 1
+        # One transaction for all members: a lock conflict rolls back every member, and the runner retries once.
+        assignments_made, errors = run_transaction(lambda: self._assign_serials(device, request.POST))
 
         if assignments_made > 0:
             messages.success(
@@ -897,6 +852,66 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
 
         return _server_mapping_redirect("device", pk, active_server_key, active_sync_tab)
 
+    def _assign_serials(self, device, data):
+        """Run one attempt: write each posted member serial; return the count of writes and the error texts."""
+        assignments_made = 0
+        errors = []
+        counter = 0
+        while f"serial_{counter + 1}" in data:
+            counter += 1
+            serial = normalize_serial(data.get(f"serial_{counter}"))
+            member_id = data.get(f"member_id_{counter}")
+            if not member_id:
+                continue
+            try:
+                member_pk = int(member_id)
+            except ValueError:
+                errors.append(f"Device with ID {member_id} not found")
+                continue
+            try:
+                error = self._assign_member_serial(device, member_pk, serial)
+            except Device.DoesNotExist:
+                errors.append(f"Device with ID {member_id} not found")
+                continue
+            if error:
+                errors.append(error)
+            else:
+                assignments_made += 1
+        return assignments_made, errors
+
+    def _assign_member_serial(self, device, member_id, serial):
+        """Write *serial* to the locked member *member_id* of the chassis of *device*; return the error text, or None."""
+        locked = []
+
+        def apply(member):
+            locked.append(member)
+            if member.virtual_chassis_id != device.virtual_chassis_id:
+                raise _WriteRefused(f"{member.name} is not part of the same virtual chassis")
+            member.serial = serial
+
+        try:
+            # Scoped like the page device: the member's pk comes from the POST, so the same-VC
+            # check alone would let a constrained grant write a serial onto a member it does not cover.
+            update_existing_row(self.restricted_queryset(Device, "change").filter(pk=member_id), apply)
+        except _WriteRefused as exc:
+            return str(exc)
+        except (ValidationError, IntegrityError) as e:
+            # The keys only choose the wording; the text comes from exception_text_for.
+            # nosemgrep: caught-error-text  # noqa: ERA001
+            return _write_failure_message(e, f"set serial on {locked[0].name}", "serial", Device, self.request.user)
+        return None
+
+
+def _has_removable_mapping(mapping, server_key):
+    """Return whether *server_key* has an entry, or a readable legacy value that ``default`` serves."""
+    return mapping.server(server_key) is not None or (server_key == "default" and mapping.legacy.is_legacy)
+
+
+def _save_mapping_fields(row, fields):
+    """Validate only the mapping storage that *fields* names, then save only it: other fields may be invalid."""
+    row.clean_fields(exclude={field.name for field in row._meta.fields if field.name not in fields})
+    row.save(update_fields=[*fields, "last_updated"])
+
 
 class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
     """Remove a single server entry from the device's (or VM's) librenms_id custom field dict."""
@@ -909,15 +924,6 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         """Return the Device or VirtualMachine for the given pk."""
         model = _sync_model(object_type)
         return self.restrict_object_or_404(model, "change", pk=pk), model
-
-    def _normalize_librenms_mapping(self, value):
-        if isinstance(value, bool):
-            return {}
-        if isinstance(value, int):
-            return {"default": value}
-        if isinstance(value, str) and value.isdigit():
-            return {"default": int(value)}
-        return value if isinstance(value, dict) else {}
 
     def post(self, request, pk):
         # Scope required permissions to the specific model being modified before checking.
@@ -945,8 +951,7 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             messages.error(request, str(exc))
             return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
 
-        cf_value = self._normalize_librenms_mapping(obj.custom_field_data.get("librenms_id"))
-        if not isinstance(cf_value, dict) or server_key not in cf_value:
+        if not _has_removable_mapping(read_mapping(obj), server_key):
             messages.warning(request, f"No mapping found for server '{server_key}'.")
             return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
 
@@ -978,24 +983,22 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             except model.DoesNotExist:
                 messages.error(request, f"{model.__name__} no longer exists.")
                 return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
-            cf = self._normalize_librenms_mapping(obj_locked.custom_field_data.get("librenms_id"))
             # Re-check after acquiring lock; mirror the pre-transaction protection logic
             _is_protected = server_key in configured_servers or (
                 legacy_url_configured and not configured_servers and server_key == "default"
             )
-            if isinstance(cf, dict) and server_key in cf and not _is_protected:
+            if _has_removable_mapping(read_mapping(obj_locked), server_key) and not _is_protected:
                 obj_locked.snapshot()
-                cf = without_server_mapping(cf, server_key)
-                obj_locked.custom_field_data["librenms_id"] = cf
-                usable_count = sum(mapping.is_selectable for mapping in build_server_mappings(obj_locked))
+                # A legacy value has no server entry, so removing it leaves an empty mapping.
+                change = release_server(obj_locked, server_key, clear_preference=False)
+                # The count reads the mapping after the removal, so a preference for the removed server goes.
+                usable_count = sum(
+                    mapping.is_selectable for mapping in build_server_mappings(obj_locked, mapping=change.after)
+                )
                 if usable_count <= 1:
-                    cf.pop(PREFERRED_SERVER_FIELD, None)
-                obj_locked.custom_field_data["librenms_id"] = cf if any(iter_server_mapping_entries(cf)) else None
+                    change = release_server(obj_locked, server_key, clear_preference=True)
                 try:
-                    obj_locked.clean_fields(
-                        exclude={field.name for field in obj_locked._meta.fields if field.name != "custom_field_data"}
-                    )
-                    obj_locked.save(update_fields=["custom_field_data", "last_updated"])
+                    persist_mapping(obj_locked, change, write=_save_mapping_fields)
                 except ValidationError as exc:
                     transaction.set_rollback(True)
                     logger.exception(
@@ -1008,18 +1011,15 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
                         f"Validation error removing LibreNMS mapping: {exception_text_for(exc, model, request.user)}",
                     )
                     return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
-                except Exception as exc:
-                    transaction.set_rollback(True)
-                    logger.exception("Unexpected error removing LibreNMS mapping for server %r", server_key)
-                    messages.error(
-                        request,
-                        f"Unexpected error removing LibreNMS mapping: {exception_text_for(exc, model, request.user)}",
-                    )
-                    return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
-                messages.success(request, f"Removed LibreNMS mapping for server '{server_key}'.")
+                removed = True
             else:
-                messages.warning(request, f"Mapping for server '{server_key}' was already removed.")
+                removed = False
 
+        # After the commit: a lock conflict at COMMIT must not leave a success message behind.
+        if removed:
+            messages.success(request, f"Removed LibreNMS mapping for server '{server_key}'.")
+        else:
+            messages.warning(request, f"Mapping for server '{server_key}' was already removed.")
         return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
 
 
@@ -1059,7 +1059,6 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
                 self.restricted_queryset(model, "change").select_for_update(of=("self",)),
                 pk=pk,
             )
-            raw_mapping = owner.custom_field_data.get("librenms_id")
             mappings = build_server_mappings(owner)
             selectable_keys = {mapping.server_key for mapping in mappings if mapping.is_selectable}
             active_server_key = submitted_active_key if submitted_active_key in selectable_keys else None
@@ -1071,12 +1070,8 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
                 return self._redirect(object_type, pk, active_server_key, active_sync_tab)
 
             owner.snapshot()
-            owner.custom_field_data["librenms_id"] = with_preferred_server(raw_mapping, requested_key)
             try:
-                owner.clean_fields(
-                    exclude={field.name for field in owner._meta.fields if field.name != "custom_field_data"}
-                )
-                owner.save(update_fields=["custom_field_data", "last_updated"])
+                persist_mapping(owner, set_preference(owner, requested_key), write=_save_mapping_fields)
             except ValidationError as exc:
                 transaction.set_rollback(True)
                 logger.warning(
@@ -1088,11 +1083,6 @@ class SetPreferredServerView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
                     request,
                     f"Validation error changing preferred server: {exception_text_for(exc, model, request.user)}",
                 )
-                return self._redirect(object_type, pk, active_server_key, active_sync_tab)
-            except Exception:
-                transaction.set_rollback(True)
-                logger.exception("Could not save the preferred LibreNMS server %r", requested_key)
-                messages.error(request, "Could not change the preferred LibreNMS server. Try again.")
                 return self._redirect(object_type, pk, active_server_key, active_sync_tab)
 
         messages.success(request, f"Preferred LibreNMS server changed to '{requested_key}'.")
@@ -1157,8 +1147,8 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
         model, obj = self._get_model_and_object(object_type, pk)
         # Rebind the API client to the POST-scoped server before any lookup/migration so the
-        # legacy-ID conversion is verified (get_device_info), conflict-checked
-        # (find_by_librenms_id) and written (migrate_legacy_librenms_id) under the same server
+        # legacy-ID conversion is verified (get_device_info), conflict-checked and written
+        # (convert_legacy and its persistence) under the same server
         # namespace the user is acting on — otherwise a multi-server page could check server A
         # while redirecting back to server B and write the mapping under the wrong key.
         server_key = self.rebind_api_for_posted_server(request.POST)
@@ -1166,21 +1156,16 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return self._sync_url(object_type, pk)
 
-        # Verify the device actually has a legacy bare-int librenms_id
-        cf_value = obj.custom_field_data.get("librenms_id")
-        if isinstance(cf_value, bool):
-            messages.error(request, "librenms_id has an invalid boolean value; cannot convert.")
-            return self._sync_url(object_type, pk)
-        if not isinstance(cf_value, (int, str)):
+        # Verify the device actually has a legacy bare-int librenms_id. The reader's wide rule
+        # accepts exactly the values the "Convert ID" badge shows, so " 42 " is no dead end.
+        mapping = read_mapping(obj)
+        if mapping.container in (ContainerStatus.SCOPED, ContainerStatus.ABSENT):
             messages.warning(request, "librenms_id is already in the server-scoped JSON format.")
             return self._sync_url(object_type, pk)
-        # Gate with is_legacy_librenms_id() (not str.isdigit()) so this handler accepts exactly the
-        # values the "Convert ID" badge shows — a whitespace-padded legacy int (" 42 ") is legacy
-        # via int() coercion, so it must not be a dead-end button (issue #99).
-        if not is_legacy_librenms_id(cf_value):
+        if not mapping.legacy.is_legacy:
             messages.error(request, "librenms_id is not a valid integer; cannot convert.")
             return self._sync_url(object_type, pk)
-        librenms_id = int(cf_value)
+        librenms_id = mapping.legacy.readable_id
 
         # Verify serial match before converting — get_live_device_info reads live (uncached): the
         # serial gate decides whether to rewrite the id, so it must not read a stale sync-tab snapshot.
@@ -1200,73 +1185,63 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             )
             return self._sync_url(object_type, pk)
 
-        with transaction.atomic():
-            try:
-                locked = self.restricted_queryset(model, "change").select_for_update(of=("self",)).get(pk=pk)
-            except model.DoesNotExist:
-                messages.error(request, f"{model.__name__} no longer exists.")
-                return self._sync_url(object_type, pk)
+        def convert(locked):
             # Re-check preconditions on the locked row (another admin may have
             # changed cf_value or serial between the initial read and the lock).
-            locked_cf = locked.custom_field_data.get("librenms_id")
-            if not isinstance(locked_cf, (int, str)) or isinstance(locked_cf, bool):
-                messages.warning(request, "librenms_id is already in the server-scoped JSON format.")
-                return self._sync_url(object_type, pk)
-            if not is_legacy_librenms_id(locked_cf):
-                messages.error(request, "librenms_id changed before lock was acquired; aborting.")
-                return self._sync_url(object_type, pk)
-            locked_id = int(locked_cf)
+            locked_mapping = read_mapping(locked)
+            if locked_mapping.container in (ContainerStatus.SCOPED, ContainerStatus.ABSENT):
+                raise _WriteRefused("librenms_id is already in the server-scoped JSON format.", messages.WARNING)
+            if not locked_mapping.legacy.is_legacy:
+                raise _WriteRefused("librenms_id changed before lock was acquired; aborting.")
+            locked_id = locked_mapping.legacy.readable_id
             locked_serial = (getattr(locked, "serial", None) or "").strip()
             if locked_id != librenms_id or locked_serial != netbox_serial:
-                messages.error(request, "Device data changed before lock was acquired; aborting conversion.")
-                return self._sync_url(object_type, pk)
-            # Check that no other object already owns this ID (server-scoped or legacy)
-            try:
-                match = find_by_librenms_id(model, librenms_id, server_key)
-            except AmbiguousLibreNMSIdError:
-                transaction.set_rollback(True)
-                messages.error(
-                    request,
-                    f"librenms_id {librenms_id} is ambiguous — it matches more than one "
-                    f"{model.__name__}; cannot convert. Resolve the duplicate assignment first.",
-                )
-                return self._sync_url(object_type, pk)
-            conflict = match is not None and match.pk != locked.pk
-            if conflict:
-                transaction.set_rollback(True)
-                messages.error(
-                    request,
-                    f"Another {model.__name__} already has librenms_id {librenms_id} "
-                    f"for server '{server_key}'; cannot convert.",
-                )
-                return self._sync_url(object_type, pk)
-            migrated = migrate_legacy_librenms_id(locked, server_key)
-            if not migrated:
-                messages.warning(request, "librenms_id is already in the server-scoped JSON format.")
-                return self._sync_url(object_type, pk)
-            try:
-                locked.full_clean()
-                locked.save()
-            except ValidationError as exc:
-                transaction.set_rollback(True)
-                failure = _write_failure_message(
-                    # The keys only choose the wording; the text comes from exception_text_for.
-                    # nosemgrep: caught-error-text  # noqa: ERA001
-                    exc,
-                    "save converted librenms_id",
-                    "custom_field_data",
-                    model,
-                    request.user,
-                )
-                messages.error(request, failure)
-                return self._sync_url(object_type, pk)
-            except Exception as exc:
-                transaction.set_rollback(True)
-                logger.exception("Failed saving converted librenms_id for %s/%s", object_type, pk)
-                messages.error(
-                    request, f"Failed to save converted librenms_id: {exception_text_for(exc, model, request.user)}"
-                )
-                return self._sync_url(object_type, pk)
+                raise _WriteRefused("Device data changed before lock was acquired; aborting conversion.")
+            change = convert_legacy(locked, server_key)
+            if not change.changed:
+                raise _WriteRefused("librenms_id is already in the server-scoped JSON format.", messages.WARNING)
+            # The save claims the ID and reads its owners on both models.
+            return change
+
+        try:
+            update_existing_row(self.restricted_queryset(model, "change").filter(pk=pk), convert)
+        except model.DoesNotExist:
+            messages.error(request, f"{model.__name__} no longer exists.")
+            return self._sync_url(object_type, pk)
+        except _WriteRefused as exc:
+            messages.add_message(request, exc.level, str(exc))
+            return self._sync_url(object_type, pk)
+        except IdentityOwned as exc:
+            # The owner comes from an unrestricted search, so the message names neither it nor its model.
+            messages.error(request, f"{exc} Cannot convert the legacy ID for server '{server_key}'.")
+            return self._sync_url(object_type, pk)
+        except AmbiguousLibreNMSIdError:
+            messages.error(
+                request,
+                f"librenms_id {librenms_id} is ambiguous — it matches more than one object; "
+                "cannot convert. Resolve the duplicate assignment first.",
+            )
+            return self._sync_url(object_type, pk)
+        except ValidationError as exc:
+            if classify_conflict(exc):
+                raise
+            failure = _write_failure_message(
+                # The keys only choose the wording; the text comes from exception_text_for.
+                # nosemgrep: caught-error-text  # noqa: ERA001
+                exc,
+                "save converted librenms_id",
+                "custom_field_data",
+                model,
+                request.user,
+            )
+            messages.error(request, failure)
+            return self._sync_url(object_type, pk)
+        except IntegrityError as exc:
+            logger.exception("Failed saving converted librenms_id for %s/%s", object_type, pk)
+            messages.error(
+                request, f"Failed to save converted librenms_id: {exception_text_for(exc, model, request.user)}"
+            )
+            return self._sync_url(object_type, pk)
 
         messages.success(
             request,

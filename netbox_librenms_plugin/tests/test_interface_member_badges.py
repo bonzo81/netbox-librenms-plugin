@@ -13,7 +13,7 @@ import json
 import pytest
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, stamp_rule_decision
-from netbox_librenms_plugin.utils import set_librenms_device_id
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 SERVER_KEY = "default"
 
@@ -310,9 +310,9 @@ class TestTheRealTabRendersIt:
 
         device = make_device("member-badge-e2e")
         interface = make_interface(device, "ae0", iface_type="lag")
-        set_librenms_device_id(interface, 10, SERVER_KEY)
+        seed_mapping(interface, SERVER_KEY, own=10, save=False)
         interface.save()
-        set_librenms_device_id(device, 4242, SERVER_KEY)
+        seed_mapping(device, SERVER_KEY, own=4242, save=False)
         device.save()
         cache.set(CacheMixin().get_cache_key(device, "ports", SERVER_KEY), _cached_data(), 300)
 
@@ -339,7 +339,7 @@ class TestTheVerifyPathAgrees:
 
         device = make_device("member-badge-verify")
         interface = make_interface(device, "ae0")
-        set_librenms_device_id(interface, 10, SERVER_KEY)
+        seed_mapping(interface, SERVER_KEY, own=10, save=False)
         interface.save()
 
         view = SingleInterfaceVerifyView()

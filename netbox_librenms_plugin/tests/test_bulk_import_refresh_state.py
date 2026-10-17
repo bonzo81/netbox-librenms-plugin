@@ -7,7 +7,7 @@ Companion to ``test_coverage_bulk_import.py``; see that file for the primary
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_vm
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_vm, map_device_to_librenms
 
 pytestmark = pytest.mark.django_db
 
@@ -51,9 +51,7 @@ def _refresh(validation, libre_device=None, server_key="default"):
 
 
 def _link(device, payload):
-    device.custom_field_data["librenms_id"] = {"default": payload}
-    device.save(update_fields=["custom_field_data"])
-    return device
+    return map_device_to_librenms(device, payload["id"], server_key="default", oob=payload.get("oob"))
 
 
 class TestLinkageRefresh:
@@ -237,9 +235,7 @@ class TestRefreshFreshLookup:
 
     def test_a_librenms_id_bound_to_both_a_device_and_a_vm_blocks_the_row(self):
         _link(make_device("collide-device"), {"id": 77})
-        vm = make_vm("collide-vm")
-        vm.custom_field_data["librenms_id"] = {"default": {"id": 77}}
-        vm.save(update_fields=["custom_field_data"])
+        map_device_to_librenms(make_vm("collide-vm"), 77, server_key="default")
         validation = self._unmatched("collide-device")
 
         _refresh(validation, {"device_id": 77, "hostname": "collide-device", "sysName": "collide-device"})

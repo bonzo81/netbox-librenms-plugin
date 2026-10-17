@@ -4,7 +4,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
+from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view, message_texts
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 
@@ -59,12 +61,16 @@ class TestSeedInventoryMatchesTheReaderContract:
         from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
 
         view, device = self._view_and_device("trusted-payload-cf", 11)
-        trusted_module_inventory_payload(device, [], server_key="default", librenms_id=11)
+        stale_cf = device.cf
+        trusted_module_inventory_payload(device, [], server_key="default", librenms_id=12)
 
         # cf is a cached_property over the APPLICABLE custom fields, not the raw column, so it
         # must recompute rather than be the same object the write went into.
+        assert device.cf is not stale_cf
         assert device.cf is not device.custom_field_data
-        assert device.cf["librenms_id"] == device.custom_field_data["librenms_id"]
+        # The contract is NetBox's cf cache itself, which no mapping helper reads.
+        cached = device.cf["librenms_id"]  # nosemgrep: no-stored-mapping-access
+        assert cached == stored_mapping_for_test(device) == {"default": 12}
 
     def test_the_helper_refuses_to_seed_without_a_librenms_id(self):
         """A defaulted id would cache an entry the reader always rejects, faking a cache miss."""
@@ -278,7 +284,7 @@ class TestTrustedPayloadMatchesTheDeviceMapping:
 
         device = make_device(f"trusted-payload-{case}", librenms_cf=librenms_cf)
 
-        with pytest.raises(AssertionError, match="declined the write"):
+        with pytest.raises(ValueError, match="skipped the seed"):
             trusted_module_inventory_payload(device, [], librenms_id=librenms_id)
 
     def test_a_written_mapping_still_returns_the_payload(self):
@@ -296,10 +302,9 @@ class TestTrustedPayloadMatchesTheDeviceMapping:
         """The helper must verify a write against current custom field data."""
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
-        from netbox_librenms_plugin.utils import get_librenms_device_id
 
         device = make_device("trusted-payload-cached")
-        assert get_librenms_device_id(device, auto_save=False) is None
+        assert read_mapping(device).own_id("default") is None
 
         payload = trusted_module_inventory_payload(device, [{"index": 1}], librenms_id=9)
 

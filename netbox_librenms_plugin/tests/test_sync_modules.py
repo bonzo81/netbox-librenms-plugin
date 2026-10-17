@@ -7,8 +7,10 @@ import pytest
 from django.core.cache import cache
 from django.db import OperationalError, transaction
 
+from netbox_librenms_plugin.server_mappings import LibreNMSPortBindingBusy, read_mapping
 from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
 from netbox_librenms_plugin.tests.conftest import (
+    bounded_executor,
     configure_librenms_servers,
     install_module,
     make_device,
@@ -19,6 +21,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis,
     transactional_db_with_all_apps,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
 from netbox_librenms_plugin.tests.lock_conflict_helpers import (
     aborting_statement,
     failing_statement,
@@ -36,8 +39,6 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
 )
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE, classify_conflict
 from netbox_librenms_plugin.utils import (
-    LibreNMSPortBindingBusy,
-    get_librenms_device_id,
     module_inventory_binding_token,
     module_inventory_row_digest,
     module_inventory_snapshot_digest,
@@ -460,7 +461,7 @@ class TestInventoryIdentityHelpers:
         ],
     )
     def test_port_identity_is_normalized_and_deduplicated(self, row, port_id, names):
-        from netbox_librenms_plugin.views.sync.modules import _get_item_port_identity
+        from netbox_librenms_plugin.views.base.modules_view import _get_item_port_identity
 
         assert _get_item_port_identity(row) == (port_id, names)
 
@@ -474,14 +475,14 @@ class TestInventoryIdentityHelpers:
         ],
     )
     def test_interface_coordinates_follow_real_labels(self, label, expected):
-        from netbox_librenms_plugin.views.sync.modules import _extract_interface_coordinates
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        assert _extract_interface_coordinates(label) == expected
+        assert BaseModuleTableView._extract_interface_numeric_coordinates(label) == expected
 
     def test_unique_coordinate_match_selects_the_real_module_interface(self):
         from dcim.models import Interface, Module
 
-        from netbox_librenms_plugin.views.sync.modules import _select_module_interface_by_coordinates
+        from netbox_librenms_plugin.views.base.modules_view import _select_module_interface_by_coordinates
 
         device = make_device("coordinate-device")
         bay = make_module_bay(device, "Coordinate Bay")
@@ -501,7 +502,7 @@ class TestInventoryIdentityHelpers:
     def test_tied_coordinate_match_fails_closed(self):
         from dcim.models import Interface, Module
 
-        from netbox_librenms_plugin.views.sync.modules import _select_module_interface_by_coordinates
+        from netbox_librenms_plugin.views.base.modules_view import _select_module_interface_by_coordinates
 
         device = make_device("coordinate-tie")
         bay = make_module_bay(device, "Coordinate Tie Bay")
@@ -520,6 +521,35 @@ class TestInventoryIdentityHelpers:
             is None
         )
 
+    @pytest.mark.parametrize(
+        ("in_second_member", "label"),
+        [(False, "Ethernet1/17"), (True, "Ethernet3/5")],
+        ids=["module-coordinate-only", "vc-position-only"],
+    )
+    def test_a_coordinate_match_needs_the_port_number(self, in_second_member, label):
+        """The module and member coordinates are the same for each port of the module, so alone they pick no port."""
+        from dcim.models import Interface, Module
+
+        from netbox_librenms_plugin.views.base.modules_view import _select_module_interface_by_coordinates
+
+        device = make_device(f"coordinate-port-number-{in_second_member}")
+        if in_second_member:
+            make_virtual_chassis(
+                f"coordinate-port-number-vc-{in_second_member}", make_device("coordinate-first"), device
+            )
+            device.refresh_from_db()
+        prefix = device.vc_position or 1
+        bay = make_module_bay(device, "Port Number Bay")
+        module_type = make_module_type(f"PORT-NUMBER-CARD-{in_second_member}")
+        module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, status="active")
+        Interface.objects.create(device=device, module=module, name=f"Ethernet{prefix}/1", type="other")
+        Interface.objects.create(device=device, module=module, name="mgmt", type="other")
+
+        assert (
+            _select_module_interface_by_coordinates(device, list(module.interfaces.all()), {"_librenms_ifname": label})
+            is None
+        )
+
 
 class TestInterfaceBinding:
     """Bind inventory port identities to real NetBox interfaces without reassignment."""
@@ -527,7 +557,6 @@ class TestInterfaceBinding:
     def test_name_match_binds_port_id_and_module(self):
         from dcim.models import Interface, Module
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.modules import _bind_interface_librenms_id
 
         device = make_device("bind-module-interface")
@@ -551,7 +580,7 @@ class TestInterfaceBinding:
         interface.refresh_from_db()
         assert result == {"status": "bound", "interface": interface.name, "port_id": 220, "changed": True}
         assert interface.module == module
-        assert get_librenms_device_id(interface, "default", auto_save=False) == 220
+        assert read_mapping(interface).own_id("default") == 220
 
     def test_existing_port_owner_on_another_device_is_a_conflict(self):
         from dcim.models import Interface
@@ -561,8 +590,7 @@ class TestInterfaceBinding:
         target = make_device("bind-target")
         owner_device = make_device("bind-existing-owner")
         owner = make_interface(owner_device, "Ethernet21")
-        owner.custom_field_data["librenms_id"] = {"default": 221}
-        owner.save(update_fields=["custom_field_data"])
+        seed_mapping(owner, "default", own=221)
 
         result = _bind_interface_librenms_id(
             target,
@@ -601,6 +629,172 @@ class TestInterfaceBinding:
 
         assert result["status"] == "skipped"
         assert "multiple module interfaces" in result["reason"]
+
+
+def _bind_paused_after(read, bind, concurrent):
+    """
+    Run *bind* on its own connection, pause it after its first query that *read* matches, and run *concurrent*.
+
+    *concurrent* runs and commits on the test's connection while the paused bind holds no row lock.
+    Return what *bind* returned.
+    """
+    from threading import Event
+
+    from django.db import close_old_connections, connection
+
+    paused = Event()
+    resume = Event()
+
+    def pause_after_the_read(execute, sql, params, many, context):
+        result = execute(sql, params, many, context)
+        if not paused.is_set() and read(sql):
+            paused.set()
+            assert resume.wait(timeout=10)
+        return result
+
+    def run():
+        close_old_connections()
+        try:
+            with connection.execute_wrapper(pause_after_the_read):
+                return bind()
+        finally:
+            connection.close()
+
+    with bounded_executor(max_workers=1) as executor:
+        future = executor.submit(run)
+        try:
+            for _ in range(100):
+                if paused.wait(timeout=0.1) or future.done():
+                    break
+            if not paused.is_set():
+                if future.done():
+                    raise AssertionError(f"bind finished before the paused read: {future.result()!r}")
+                raise AssertionError("bind never reached the paused read")
+            concurrent()
+        finally:
+            resume.set()
+        return future.result(timeout=30)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("raises", [False, True])
+def test_a_bind_worker_that_finishes_before_the_read_reports_its_outcome(raises):
+    """The pause helper must surface an early result or the original worker exception."""
+
+    def bind():
+        if raises:
+            raise RuntimeError("bind refused before its read")
+        return {"status": "skipped"}
+
+    exception = RuntimeError if raises else AssertionError
+    message = "bind refused before its read" if raises else "bind finished before the paused read"
+    with pytest.raises(exception, match=message):
+        _bind_paused_after(lambda sql: False, bind, lambda: pytest.fail("no read was paused"))
+
+
+def _candidate_read_by_name(sql):
+    return 'FROM "dcim_interface"' in sql and '"name" IN' in sql
+
+
+def _bind(device, port_id, name, server_key="default", module_pk=None):
+    from dcim.models import Interface
+
+    from netbox_librenms_plugin.views.sync.modules import _bind_interface_librenms_id
+
+    item = {"_librenms_port_id": port_id, "_librenms_ifname": name}
+    return _bind_interface_librenms_id(device, item, module_pk, server_key, Interface.objects.all())
+
+
+@transactional_db_with_all_apps()
+@pytest.mark.parametrize(
+    ("loser_server", "loser_port", "expected_status", "expected_mapping"),
+    [
+        ("secondary", 302, "bound", {"default": 301, "secondary": 302}),
+        ("default", 303, "conflict", {"default": 301}),
+    ],
+    ids=["another-server", "same-server"],
+)
+def test_a_bind_that_read_its_interface_before_a_concurrent_bind_keeps_the_winners_mapping(
+    loser_server, loser_port, expected_status, expected_mapping
+):
+    """Two module binds pick one unbound interface; the one that read it first must decide on the locked row."""
+    device = make_device(f"bind-race-{loser_server}")
+    interface = make_interface(device, "Ethernet30")
+    winner = {}
+
+    loser_result = _bind_paused_after(
+        _candidate_read_by_name,
+        lambda: _bind(device, loser_port, interface.name, loser_server),
+        lambda: winner.update(_bind(device, 301, interface.name)),
+    )
+
+    assert winner["status"] == "bound"
+    assert loser_result["status"] == expected_status
+    if expected_status == "conflict":
+        # The name chooses again under the lock, and the name now belongs to the winner's port.
+        assert loser_result["reason"] == "Ethernet30 is already bound to a different LibreNMS port; not overwriting"
+    interface.refresh_from_db()
+    assert stored_mapping_for_test(interface) == expected_mapping
+
+
+@transactional_db_with_all_apps()
+def test_a_bind_whose_interface_was_renamed_and_its_name_reused_binds_nothing():
+    """The name chose the interface, so the name must still choose it once the row is locked."""
+    from dcim.models import Interface
+
+    device = make_device("bind-renamed-by-name")
+    original = make_interface(device, "Ethernet30")
+    replacement = {}
+
+    def rename_and_reuse_the_name():
+        renamed = Interface.objects.get(pk=original.pk)
+        renamed.name = "Ethernet31"
+        renamed.save()
+        replacement["interface"] = make_interface(device, "Ethernet30")
+
+    result = _bind_paused_after(
+        _candidate_read_by_name, lambda: _bind(device, 304, "Ethernet30"), rename_and_reuse_the_name
+    )
+
+    assert result["status"] == "skipped"
+    assert "changed" in result["reason"]
+    for interface in (Interface.objects.get(pk=original.pk), replacement["interface"]):
+        interface.refresh_from_db()
+        assert read_mapping(interface).own_id("default") is None
+
+
+@transactional_db_with_all_apps()
+def test_a_bind_whose_bound_interface_was_renamed_still_binds_it():
+    """The port mapping chose the interface, so a rename after the choice does not matter."""
+    from dcim.models import Interface, Module
+
+    device = make_device("bind-renamed-by-mapping")
+    module = Module.objects.create(
+        device=device,
+        module_bay=make_module_bay(device, "Renamed Bay"),
+        module_type=make_module_type("RENAMED-CARD"),
+        status="active",
+    )
+    interface = make_interface(device, "Ethernet30")
+    seed_mapping(interface, "default", own=305, save=False)
+    interface.save()
+
+    def rename():
+        renamed = Interface.objects.get(pk=interface.pk)
+        renamed.name = "Ethernet31"
+        renamed.save()
+
+    # The port owner search reads the VM interfaces last, so the owner is chosen when that read returns.
+    result = _bind_paused_after(
+        lambda sql: 'FROM "virtualization_vminterface"' in sql,
+        lambda: _bind(device, 305, "Ethernet30", module_pk=module.pk),
+        rename,
+    )
+
+    assert result == {"status": "bound", "interface": "Ethernet31", "port_id": 305, "changed": True}
+    interface.refresh_from_db()
+    assert (interface.name, interface.module_id) == ("Ethernet31", module.pk)
+    assert stored_mapping_for_test(interface) == {"default": 305}
 
 
 class TestBranchCollection:
@@ -865,7 +1059,6 @@ class TestInstallAndUpdateViews:
         """An install reads its inventory metadata from the cache, never from the post."""
         from dcim.models import Module
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
         device = make_device("view-install-unresolved", librenms_cf={"default": 55})
@@ -901,7 +1094,7 @@ class TestInstallAndUpdateViews:
         interface.refresh_from_db()
         assert response.status_code == 302
         assert not Module.objects.filter(device=device).exists()
-        assert get_librenms_device_id(interface, "default", auto_save=False) is None
+        assert read_mapping(interface).own_id("default") is None
         assert interface.module_id is None
         assert "Inventory item not found in cache." in message_texts(request, "error")
 
@@ -1082,7 +1275,6 @@ class TestInstallAndUpdateViews:
         assert module.serial == "OLD-SN"
 
     def test_update_interface_binds_cached_inventory_identity(self, live_librenms):
-        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
         device = make_device("view-update-interface", librenms_cf={"default": 54})
@@ -1118,12 +1310,11 @@ class TestInstallAndUpdateViews:
         interface.refresh_from_db()
         assert response.status_code == 302
         assert interface.module == module
-        assert get_librenms_device_id(interface, "default", auto_save=False) == 5540
+        assert read_mapping(interface).own_id("default") == 5540
         assert any("Updated interface" in text for text in message_texts(request))
 
     def test_update_interface_refuses_a_reused_inventory_index(self, live_librenms):
         """A stale interface form must not bind identity from a replacement row."""
-        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
         device = make_device("view-interface-stale", librenms_cf={"default": 66})
@@ -1167,8 +1358,8 @@ class TestInstallAndUpdateViews:
         assert response.status_code == 302
         assert original.module_id is None
         assert replacement.module_id is None
-        assert get_librenms_device_id(original, "default", auto_save=False) is None
-        assert get_librenms_device_id(replacement, "default", auto_save=False) is None
+        assert read_mapping(original).own_id("default") is None
+        assert read_mapping(replacement).own_id("default") is None
         assert any(
             message.startswith("Inventory action is stale or does not match this row.")
             for message in message_texts(request, "error")
@@ -1177,7 +1368,6 @@ class TestInstallAndUpdateViews:
     def test_update_interface_rejects_a_row_bound_to_another_module(self, live_librenms):
         from dcim.models import Module
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
         device = make_device("view-interface-binding", librenms_cf={"default": 63})
@@ -1220,7 +1410,7 @@ class TestInstallAndUpdateViews:
         interface.refresh_from_db()
         assert response.status_code == 302
         assert interface.module_id is None
-        assert get_librenms_device_id(interface, "default", auto_save=False) is None
+        assert read_mapping(interface).own_id("default") is None
         assert any(
             message.startswith("Inventory action is stale or does not match this row.")
             for message in message_texts(request, "error")
@@ -1228,7 +1418,6 @@ class TestInstallAndUpdateViews:
 
     def test_update_module_interface_refuses_an_unresolved_ent_index(self, live_librenms):
         """Posted metadata carries no _source marker, so an unknown ent_index must not bind at all."""
-        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
         device = make_device("view-update-interface-unresolved", librenms_cf={"default": 61})
@@ -1260,7 +1449,7 @@ class TestInstallAndUpdateViews:
 
         interface.refresh_from_db()
         assert response.status_code == 302
-        assert get_librenms_device_id(interface, "default", auto_save=False) is None
+        assert read_mapping(interface).own_id("default") is None
         assert interface.module_id is None
         assert "Inventory item not found in cache." in message_texts(request, "error")
 
@@ -1269,7 +1458,6 @@ class TestInstallAndUpdateViews:
         from dcim.models import Device, Interface, Module
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
-        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
         device = make_device("view-update-interface-oob", librenms_cf={"default": 59})
@@ -1303,7 +1491,7 @@ class TestInstallAndUpdateViews:
         interface.refresh_from_db()
         assert response.status_code == 302
         assert "OOB controller inventory is read-only" in message_texts(request, "error")
-        assert get_librenms_device_id(interface, "default", auto_save=False) is None
+        assert read_mapping(interface).own_id("default") is None
         assert interface.module_id is None
 
     def test_ignore_rules_follow_the_resolved_target_manufacturer(self, live_librenms):
@@ -1328,8 +1516,7 @@ class TestInstallAndUpdateViews:
             device.virtual_chassis = vc
             device.vc_position = position
             device.save()
-        page.custom_field_data["librenms_id"] = {"default": {"id": 77}}
-        page.save(update_fields=["custom_field_data"])
+        seed_stored_mapping(page, {"default": {"id": 77}}, save=True)
         module_type = ModuleType.objects.create(manufacturer=member_mfr, model="TargetRulesModule")
         # Scoped to the MEMBER's manufacturer, so only a target-resolved lookup finds it.
         InventoryIgnoreRule.objects.create(
@@ -1563,7 +1750,6 @@ class TestInstallAndUpdateViews:
         from dcim.models import Device, Interface, Module
 
         from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
         device = make_device("module-interface-scope", librenms_cf={"default": 2})
@@ -1571,8 +1757,7 @@ class TestInstallAndUpdateViews:
         module = install_module(device, bay.name, "INTERFACE-SCOPE-CARD")
         hidden = make_interface(device, "Te1/1/1")
         allowed = make_interface(device, "Te1/1/2")
-        set_librenms_device_id(hidden, 42, "default")
-        hidden.save(update_fields=["custom_field_data"])
+        seed_mapping(hidden, own=42)
         user = make_user_with_perms("module-interface-scope", [("view", Device), ("view", Module)])
         user = grant(user, "change", Interface, constraints={"pk": allowed.pk})
         item = _inventory_item(
@@ -1666,7 +1851,7 @@ class TestModuleBindLockConflicts:
 
         interface.refresh_from_db()
         assert not Module.objects.filter(device=device, module_bay=bay).exists()
-        assert get_librenms_device_id(interface, "default", auto_save=False) is None
+        assert read_mapping(interface).own_id("default") is None
 
     def test_the_replace_rolls_back_when_the_bind_meets_a_busy_port_claim(self, live_librenms):
         from dcim.models import Module
@@ -1699,7 +1884,7 @@ class TestModuleBindLockConflicts:
 
         interface.refresh_from_db()
         assert list(Module.objects.filter(device=device, module_bay=bay)) == [installed]
-        assert get_librenms_device_id(interface, "default", auto_save=False) is None
+        assert read_mapping(interface).own_id("default") is None
 
     def test_the_interface_update_raises_a_busy_port_claim(self, live_librenms):
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
@@ -1727,7 +1912,7 @@ class TestModuleBindLockConflicts:
 
         interface.refresh_from_db()
         assert interface.module_id is None
-        assert get_librenms_device_id(interface, "default", auto_save=False) is None
+        assert read_mapping(interface).own_id("default") is None
 
     @transactional_db_with_all_apps()
     def test_a_lock_conflict_in_the_adoption_rolls_back_the_bind_too(self, live_librenms):
@@ -1763,7 +1948,7 @@ class TestModuleBindLockConflicts:
         standalone.refresh_from_db()
         assert classify_conflict(caught.value)
         assert (primary.module_id, standalone.module_id) == (None, None)
-        assert get_librenms_device_id(primary, "default", auto_save=False) is None
+        assert read_mapping(primary).own_id("default") is None
 
 
 class TestModulesRedirectResponse:
@@ -3092,11 +3277,13 @@ def test_refresh_drops_out_of_spec_oob_inventory(live_librenms, oob_index, oob_p
     """Negative OOB index fields prevent the refresh from caching an inventory snapshot."""
     from django.core.cache import cache
 
-    from netbox_librenms_plugin.utils import set_librenms_oob
+    from netbox_librenms_plugin.server_mappings import attach_oob
+
+    from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
     from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     device = make_device("signed-inventory", librenms_cf={"default": 777})
-    set_librenms_oob(device, 999, "default", oob_type="idrac9")
+    apply_mapping_change(device, attach_oob(device, "default", 999, oob_type="idrac9"))
     device.save(update_fields=["custom_field_data"])
     # RFC 2737 defines entPhysicalIndex as 1..2147483647.
     # The old offset would shift the negative OOB index onto main index 1500.
@@ -3276,7 +3463,6 @@ def test_branch_install_uses_each_members_destination_and_ignore_policy(client, 
 @pytest.mark.django_db(transaction=True)
 def test_branch_install_refreshes_page_serial_after_waiting_for_its_lock(client):
     """An edit before lock acquisition must reach the branch's ignore-policy planning."""
-    from concurrent.futures import ThreadPoolExecutor
     from dcim.models import Device, Module
     from django.core.cache import cache
     from django.db import close_old_connections, connection
@@ -3322,7 +3508,7 @@ def test_branch_install_refreshes_page_serial_after_waiting_for_its_lock(client)
 
     def edit_before_lock(execute, sql, params, many, context):
         if "pg_advisory_xact_lock" in sql and not changed:
-            with ThreadPoolExecutor(max_workers=1) as executor:
+            with bounded_executor(max_workers=1) as executor:
                 executor.submit(change_serial).result(timeout=5)
             changed.append(True)
         return execute(sql, params, many, context)
@@ -3667,7 +3853,6 @@ def test_module_advisory_lock_sections_do_not_render_responses():
 @pytest.mark.parametrize("selected_member, deleted", [(False, False), (True, False), (True, True)])
 def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(client, selected_member, deleted):
     """An edit before lock acquisition must reach the selected install's ignore-policy planning."""
-    from concurrent.futures import ThreadPoolExecutor
     from dcim.models import Device, Module
     from django.core.cache import cache
     from django.db import close_old_connections, connection
@@ -3722,7 +3907,7 @@ def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(cli
 
     def edit_before_lock(execute, sql, params, many, context):
         if "pg_advisory_xact_lock" in sql and not changed:
-            with ThreadPoolExecutor(max_workers=1) as executor:
+            with bounded_executor(max_workers=1) as executor:
                 executor.submit(change_serial).result(timeout=5)
             changed.append(True)
         return execute(sql, params, many, context)

@@ -9,6 +9,7 @@ from django.core.cache import cache
 from django.urls import reverse
 from virtualization.models import VMInterface
 
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
     make_device,
@@ -16,7 +17,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_vm,
 )
-from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
 SERVER_KEY = "default"
@@ -107,7 +108,7 @@ class TestHtmxSync:
         assert f'hx-post="{_url("sync_selected_interfaces", device, "device")}"' in html
         assert "Selected interfaces synced successfully." in html
         interface = Interface.objects.get(device=device, name="eth12")
-        assert get_librenms_device_id(interface, SERVER_KEY, auto_save=False) == synced_port
+        assert read_mapping(interface).own_id(SERVER_KEY) == synced_port
 
     def test_the_cache_transition_rides_on_the_fragment(self, client, django_capture_on_commit_callbacks):
         device = make_device("htmx-sync-transition", librenms_cf={SERVER_KEY: {"id": 82}})
@@ -176,7 +177,7 @@ def test_an_htmx_rebind_swaps_the_tab_in_place(client, settings, django_capture_
     configure_default_librenms_server(settings)
     device = make_device("htmx-rebind", librenms_cf={SERVER_KEY: {"id": 86}})
     interface = make_interface(device, "eth12")
-    set_librenms_device_id(interface, 8679, SERVER_KEY)
+    seed_mapping(interface, SERVER_KEY, own=8679, save=False)
     interface.save()
     _seed(device, _ports())
     client.force_login(make_superuser("htmx-rebind-user"))
@@ -201,5 +202,5 @@ def test_an_htmx_rebind_swaps_the_tab_in_place(client, settings, django_capture_
     assert f"is now bound to LibreNMS port {port_id}" in html
     assert 'name="rebind_one"' not in html
     interface.refresh_from_db()
-    assert get_librenms_device_id(interface, SERVER_KEY, auto_save=False) == port_id
+    assert read_mapping(interface).own_id(SERVER_KEY) == port_id
     assert json.loads(response["HX-Trigger"])["librenmsCacheChanged"]["source_tab"] == "interfaces"

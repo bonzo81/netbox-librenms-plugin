@@ -9,6 +9,7 @@ from copy import deepcopy
 
 import pytest
 
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 
@@ -601,8 +602,7 @@ class TestDeviceValidation:
         from netbox_librenms_plugin.tests.conftest import make_vm
 
         existing_vm = make_vm("existing-vm")
-        existing_vm.custom_field_data["librenms_id"] = {"default": 42}
-        existing_vm.save()
+        seed_mapping(existing_vm, "default", own=42)
 
         result = validate_device_for_import(
             {"device_id": 42, "hostname": existing_vm.name},
@@ -1017,7 +1017,7 @@ class TestNameMatchesWithNamingPreferences:
         expected_name = _generate_vc_member_name(resolved_master_name, existing.vc_position, serial="VC-NAMING")
         existing.name = expected_name if existing_name_matches else "wrong-name"
         existing.serial = "VC-NAMING"
-        existing.custom_field_data["librenms_id"] = {"default": {"id": 44}}
+        seed_stored_mapping(existing, {"default": {"id": 44}})
         existing.save()
 
         result = validate_device_for_import(
@@ -1102,26 +1102,26 @@ class TestLegacyLibreNMSIdMigration:
         ],
     )
     def test_migration_helper_updates_real_shape(self, stored_value, expected_changed, expected_value):
-        from types import SimpleNamespace
+        from netbox_librenms_plugin.server_mappings import convert_legacy
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
+        device = make_device("legacy-shape-device", librenms_cf=stored_value)
+        change = convert_legacy(device, "primary")
 
-        custom_field_data = {} if stored_value is None else {"librenms_id": stored_value}
-        obj = SimpleNamespace(custom_field_data=custom_field_data)
-
-        assert migrate_legacy_librenms_id(obj, "primary") is expected_changed
-        assert obj.custom_field_data.get("librenms_id") == expected_value
+        assert change.changed is expected_changed
+        assert stored_mapping_for_test(apply_mapping_change(device, change)) == expected_value
 
     def test_migration_gate_and_writer_agree(self):
-        from types import SimpleNamespace
+        from netbox_librenms_plugin.server_mappings import convert_legacy
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        from netbox_librenms_plugin.utils import is_legacy_librenms_id, migrate_legacy_librenms_id
+        device = make_device("legacy-gate-device", librenms_cf=" 42 ")
+        change = convert_legacy(device, "primary")
 
-        obj = SimpleNamespace(custom_field_data={"librenms_id": " 42 "})
-
-        assert is_legacy_librenms_id(obj.custom_field_data["librenms_id"]) is True
-        assert migrate_legacy_librenms_id(obj, "primary") is True
-        assert obj.custom_field_data["librenms_id"] == {"primary": 42}
+        assert change.before.legacy.is_legacy is True
+        assert change.changed is True
+        assert change.after.own_id("primary") == 42
 
 
 @pytest.mark.django_db
@@ -1784,13 +1784,14 @@ class TestSyncModuleBayCounter:
         assert device.module_bay_count == 2
 
 
+@pytest.mark.django_db
 class TestBuildIdServerInfo:
-    """Test DeviceValidationDetailsView._build_id_server_info method."""
+    """Test DeviceValidationDetailsView._build_id_server_info method on real Device rows."""
 
     def _make_device(self, librenms_id_value):
-        from types import SimpleNamespace
+        from netbox_librenms_plugin.tests.conftest import make_device
 
-        return SimpleNamespace(custom_field_data={"librenms_id": librenms_id_value})
+        return make_device("build-id-server-info", librenms_cf=librenms_id_value)
 
     def test_returns_none_for_legacy_int(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
@@ -1918,8 +1919,7 @@ class TestRefreshExistingDeviceCrossModelIdWins:
         libre_id = 778899
         # The id's true owner is a VirtualMachine (the cross model for a device import).
         vm = make_vm("b3-shared-name")
-        vm.custom_field_data["librenms_id"] = {"default": libre_id}
-        vm.save()
+        seed_mapping(vm, "default", own=libre_id)
         # A *different* Device shares the same name but holds no librenms_id link.
         device = make_device("b3-shared-name")
 
@@ -2363,6 +2363,44 @@ class TestDeviceValidationDetailsTemplate:
         )
 
 
+@pytest.mark.django_db
+def test_a_device_import_that_meets_a_held_claim_reports_the_fixed_busy_text(settings):
+    """The import result names no owner and no ID: it says only that another operation is assigning it."""
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+    from netbox_librenms_plugin.server_mappings import IDENTITY_BUSY_MESSAGE
+    from netbox_librenms_plugin.tests.claim_race_helpers import held_device_claim
+    from netbox_librenms_plugin.tests.conftest import _shared_infra
+    from netbox_librenms_plugin.tests.import_server_helpers import configure_servers
+
+    configure_servers(settings)
+    site, _manufacturer, device_type, role = _shared_infra()
+    validation = {
+        "existing_device": None,
+        "resolved_name": "held-claim-import-device",
+        "site": {"found": True, "site": site},
+        "device_type": {"matched": True, "device_type": device_type},
+        "device_role": {"found": True, "role": role},
+        "platform": {"found": False, "platform": None},
+        "rack": {"rack": None},
+    }
+    libre_device = {"device_id": 61004, "hostname": "held-claim-import-device", "serial": "-", "status": 1}
+
+    with held_device_claim("primary", 61004):
+        result = import_single_device(
+            61004,
+            server_key="primary",
+            validation=validation,
+            libre_device=libre_device,
+            sync_options={"sync_interfaces": False, "sync_cables": False},
+        )
+
+    assert result["success"] is False
+    assert result["error"] == IDENTITY_BUSY_MESSAGE
+    assert not Device.objects.filter(name="held-claim-import-device").exists()
+
+
 @pytest.mark.django_db(transaction=True)
 def test_device_and_vm_imports_serialize_one_librenms_id_claim(settings):
     """Concurrent Device and VM imports must leave one owner for a server-scoped ID."""
@@ -2371,6 +2409,7 @@ def test_device_and_vm_imports_serialize_one_librenms_id_claim(settings):
 
     from netbox_librenms_plugin.import_utils.device_operations import import_single_device
     from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
+    from netbox_librenms_plugin.server_mappings import IDENTITY_BUSY_MESSAGE, IdentityBusy
     from netbox_librenms_plugin.tests.claim_race_helpers import run_librenms_id_claim_race
     from netbox_librenms_plugin.tests.conftest import _shared_infra, make_cluster
     from netbox_librenms_plugin.tests.import_server_helpers import configure_servers
@@ -2407,6 +2446,8 @@ def test_device_and_vm_imports_serialize_one_librenms_id_claim(settings):
             libre_device=libre_device,
             sync_options={"sync_interfaces": False, "sync_cables": False},
         )
+        if not result["success"]:
+            refusals.append(result["error"])
         return result["success"]
 
     def import_vm():
@@ -2425,11 +2466,12 @@ def test_device_and_vm_imports_serialize_one_librenms_id_claim(settings):
                 validation,
                 server_key="primary",
             )
-        except ValueError as exc:
-            assert "already assigned" in str(exc)
+        except (ValueError, IdentityBusy) as exc:
+            refusals.append(str(exc))
             return False
         return True
 
+    refusals = []
     outcomes, claim_keys = run_librenms_id_claim_race(import_device, import_vm)
 
     owners = list(Device.objects.filter(name="claim-race-device")) + list(
@@ -2439,4 +2481,7 @@ def test_device_and_vm_imports_serialize_one_librenms_id_claim(settings):
     assert len(set(claim_keys)) == 1
     assert sorted(outcomes) == [False, True]
     assert len(owners) == 1
-    assert owners[0].custom_field_data["librenms_id"]["primary"] == librenms_id
+    assert stored_mapping_for_test(owners[0])["primary"] == librenms_id
+    # The claim does not wait: the loser is busy while the winner holds it, else it finds the owner.
+    assert len(refusals) == 1
+    assert refusals[0] == IDENTITY_BUSY_MESSAGE or "already assigned" in refusals[0]

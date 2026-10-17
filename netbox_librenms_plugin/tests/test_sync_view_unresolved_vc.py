@@ -24,7 +24,7 @@ from django.core.cache import cache
 from django.test import override_settings
 from django.urls import reverse
 
-from netbox_librenms_plugin.tests.conftest import make_device
+from netbox_librenms_plugin.tests.conftest import make_device, map_device_to_librenms
 
 
 VC_LIBRENMS_ID = 55
@@ -59,8 +59,8 @@ class TestUnresolvedServerKeyVCLeak:
         member = make_device(f"{name}-m1")
         member.virtual_chassis = vc
         member.vc_position = 1
-        member.custom_field_data["librenms_id"] = {"default": {"id": VC_LIBRENMS_ID}}
         member.save()
+        map_device_to_librenms(member, VC_LIBRENMS_ID, server_key="default")
         return member
 
     def _get(self, client, member, server_key, server):

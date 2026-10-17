@@ -15,6 +15,7 @@ from netbox_librenms_plugin.constants import (
     NAME_OWNER_UNKNOWN,
     REPORTED_NAME_PORT_COLLISION_REASON,
 )
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
     make_cluster,
@@ -24,12 +25,8 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_vm,
 )
-from netbox_librenms_plugin.utils import (
-    get_librenms_device_id,
-    reported_name_owners,
-    set_librenms_device_id,
-    synced_interface_names,
-)
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+from netbox_librenms_plugin.utils import reported_name_owners, synced_interface_names
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
 
@@ -67,14 +64,14 @@ def _bound_interface(owner, name, port_id):
         interface = make_interface(owner, name)
     else:
         interface = VMInterface.objects.create(virtual_machine=owner, name=name)
-    set_librenms_device_id(interface, port_id, SERVER_KEY)
+    seed_mapping(interface, SERVER_KEY, own=port_id, save=False)
     interface.save()
     return interface
 
 
 def _binding(interface):
     interface.refresh_from_db()
-    return get_librenms_device_id(interface, SERVER_KEY, auto_save=False)
+    return read_mapping(interface).own_id(SERVER_KEY)
 
 
 def _device(name):
@@ -355,8 +352,7 @@ class TestRebind:
         client.force_login(make_superuser("name-owner-rebind-changed-user"))
         row = _row_html(device, client, HOST_PORT)
         assert f'name="rebind_expected_port_{HOST_PORT}" value="{STALE_PORT}"' in row
-        interface.custom_field_data["librenms_id"] = {} if new_binding is None else {SERVER_KEY: new_binding}
-        interface.save()
+        seed_stored_mapping(interface, {} if new_binding is None else {SERVER_KEY: new_binding}, save=True)
 
         response = _rebind(client, device, HOST_PORT, expected=STALE_PORT)
 
@@ -413,14 +409,15 @@ class TestRebind:
 
     def test_rebind_is_refused_for_a_migrated_chassis_member(self, client, settings):
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
-        from netbox_librenms_plugin.utils import mark_librenms_migrated
+        from netbox_librenms_plugin.server_mappings import mark_migrated
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
 
         configure_default_librenms_server(settings)
         _chassis, (viewed_member, target_member) = make_virtual_chassis_members("name-owner-rebind-migrated")
-        set_librenms_device_id(viewed_member, 86, SERVER_KEY)
+        seed_mapping(viewed_member, SERVER_KEY, own=86, save=False)
         viewed_member.save()
         winner = make_device("name-owner-rebind-migrated-winner")
-        mark_librenms_migrated(target_member, winner.pk, SERVER_KEY)
+        apply_mapping_change(target_member, mark_migrated(target_member, winner.pk, SERVER_KEY))
         target_member.save()
         interface = _bound_interface(target_member, "eth0", STALE_PORT)
         _seed(viewed_member, [_port(HOST_PORT, "eth0")])

@@ -952,7 +952,7 @@ class InventoryIgnoreRuleImportForm(NetBoxModelImportForm):
 
     match_type = CSVChoiceField(
         choices=InventoryIgnoreRule.MATCH_TYPE_CHOICES,
-        help_text="Match type: ends_with, starts_with, contains, regex, or serial_matches_device",
+        help_text="Match type: " + ", ".join(value for value, _label in InventoryIgnoreRule.MATCH_TYPE_CHOICES),
     )
     action = CSVChoiceField(
         choices=InventoryIgnoreRule.ACTION_CHOICES,

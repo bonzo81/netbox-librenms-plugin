@@ -746,7 +746,7 @@
 <span class="fs-5 mt-2 text-muted">Last data updated: {{ last_fetched|date:"Y-m-d H:i" }}</span>
 {% endif %}
 
-{% if is_vc_member and not object.cf.librenms_id %}
+{% if is_vc_member and not object_has_recorded_mapping %}
 <!-- VC Member Message - Non-sync members redirect to the designated sync device -->
     {% if sync_device_has_librenms_id %}
     <!-- A VC member already has librenms_id configured -->

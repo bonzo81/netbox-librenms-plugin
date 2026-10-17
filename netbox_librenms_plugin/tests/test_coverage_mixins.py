@@ -15,6 +15,7 @@ import pytest
 from dcim.models import Interface
 
 from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, configure_no_librenms_servers
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
 
 
 def server_entry(key, *, display_name=None):
@@ -100,12 +101,13 @@ class TestRenderSyncPartial:
         from django.test import RequestFactory, override_settings
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
-        from netbox_librenms_plugin.utils import mark_librenms_migrated
+        from netbox_librenms_plugin.server_mappings import mark_migrated
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
         from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
         winner = make_device("rsp-winner")
         donor = make_device("rsp-donor")
-        mark_librenms_migrated(donor, winner.pk, "prod")  # real _migrated_to marker under "prod"
+        apply_mapping_change(donor, mark_migrated(donor, winner.pk, "prod"))  # real _migrated_to marker under "prod"
         donor.save()
 
         # Real sync views combine both mixins (BaseLibreNMSSyncView / BaseIPAddressTableView); build a
@@ -153,17 +155,19 @@ class TestBuildMigratedContextLazyWinner:
         from django.test.utils import CaptureQueriesContext
 
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.utils import build_migrated_context, mark_librenms_migrated
+        from netbox_librenms_plugin.utils import build_migrated_context
+        from netbox_librenms_plugin.server_mappings import mark_migrated
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
 
         winner = make_device("bmc-winner")
         donor = make_device("bmc-donor")
-        mark_librenms_migrated(donor, winner.pk, "default")
+        apply_mapping_change(donor, mark_migrated(donor, winner.pk, "default"))
         donor.save()
 
         # Building the context must NOT fetch the winner row (the boolean-only partials never read it).
         with CaptureQueriesContext(connection) as cap_build:
             ctx = build_migrated_context(donor, "default")
-        assert ctx["migrated_to_marker"]["device_id"] == winner.pk  # banner boolean present
+        assert ctx["migrated_to_marker"].device_id == winner.pk  # banner boolean present
         assert self._winner_lookups(cap_build, winner.pk) == []  # winner Device not fetched yet
 
         # Reading the proxy (the interface/IP partials do) resolves the real Device — one query.
@@ -181,10 +185,9 @@ class TestBuildMigratedContextLazyWinner:
         donor = make_device("bmc-self")
         # A self-pointing marker (device_id == donor.pk) is corrupt: it must not flip the donor into
         # migrated mode, and the suppression happens in memory — no winner Device fetch.
-        donor.custom_field_data["librenms_id"] = {
-            "default": {"_migrated_to": {"device_id": donor.pk, "server_key": "default", "at": "x"}}
-        }
-        donor.save()
+        seed_stored_mapping(
+            donor, {"default": {"_migrated_to": {"device_id": donor.pk, "server_key": "default", "at": "x"}}}, save=True
+        )
         with CaptureQueriesContext(connection) as cap:
             ctx = build_migrated_context(donor, "default")
         assert ctx["migrated_to_marker"] is None

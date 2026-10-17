@@ -18,6 +18,12 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
     make_vm,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import (
+    mapping_from_change_record,
+    seed_stored_mapping,
+    seed_stored_mapping_row,
+    stored_mapping_for_test,
+)
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
@@ -107,7 +113,7 @@ def test_preference_post_changes_only_preference_and_keeps_transient_server(clie
     assert response.status_code == 302
     assert response.url == f"{_sync_url(device)}?tab=modules&server_key=primary"
     device.refresh_from_db()
-    assert device.custom_field_data["librenms_id"] == {
+    assert stored_mapping_for_test(device) == {
         "primary": {"id": 13501},
         "secondary": {"id": 13502},
         "_preferred_server": "secondary",
@@ -134,8 +140,8 @@ def test_preference_post_records_the_mapping_change_with_its_before_state(client
     change = ObjectChange.objects.get(
         changed_object_type=ContentType.objects.get_for_model(Device), changed_object_id=device.pk, action="update"
     )
-    assert change.prechange_data["custom_fields"]["librenms_id"] == mapping
-    assert change.postchange_data["custom_fields"]["librenms_id"] == {**mapping, "_preferred_server": "secondary"}
+    assert mapping_from_change_record(change, before=True) == mapping
+    assert mapping_from_change_record(change, before=False) == {**mapping, "_preferred_server": "secondary"}
 
 
 @pytest.mark.django_db
@@ -161,7 +167,7 @@ def test_preference_post_keeps_the_active_server_when_the_key_is_rejected(client
     assert response.url == f"{_sync_url(device)}?tab=modules&server_key=primary"
     assert _message_texts(response) == ["LibreNMS server key must be a non-empty string."]
     device.refresh_from_db()
-    assert "_preferred_server" not in device.custom_field_data["librenms_id"]
+    assert "_preferred_server" not in stored_mapping_for_test(device)
 
 
 @pytest.mark.django_db
@@ -181,15 +187,14 @@ def test_preference_post_ignores_unrelated_legacy_validation_errors(client, serv
     assert response.status_code == 302
     assert _message_texts(response) == ["Preferred LibreNMS server changed to 'secondary'."]
     owner.refresh_from_db()
-    assert owner.custom_field_data["librenms_id"]["_preferred_server"] == "secondary"
+    assert stored_mapping_for_test(owner)["_preferred_server"] == "secondary"
     assert owner.face == "front"
 
 
 @pytest.mark.django_db
 def test_preference_post_supports_virtual_machines(client, servers):
     vm = make_vm("set-vm-preference")
-    vm.custom_field_data["librenms_id"] = {"primary": 13503, "secondary": 13504}
-    vm.save(update_fields=["custom_field_data"])
+    seed_stored_mapping(vm, {"primary": 13503, "secondary": 13504}, save=True)
     client.force_login(make_superuser("vm-preference-writer"))
 
     response = client.post(
@@ -204,7 +209,7 @@ def test_preference_post_supports_virtual_machines(client, servers):
     assert response.status_code == 302
     assert response.url == f"{_sync_url(vm)}?server_key=primary"
     vm.refresh_from_db()
-    assert vm.custom_field_data["librenms_id"]["_preferred_server"] == "secondary"
+    assert stored_mapping_for_test(vm)["_preferred_server"] == "secondary"
 
 
 @pytest.mark.django_db
@@ -228,7 +233,7 @@ def test_preference_post_requires_change_scope_on_mapping_owner(client, servers)
 
     assert response.status_code == 404
     owner.refresh_from_db()
-    assert "_preferred_server" not in owner.custom_field_data["librenms_id"]
+    assert "_preferred_server" not in stored_mapping_for_test(owner)
 
 
 @pytest.mark.django_db
@@ -252,7 +257,7 @@ def test_preference_post_requires_plugin_write_permission(client, servers):
     assert response.url == _sync_url(owner)
     assert _message_texts(response) == ["You do not have permission to perform this action."]
     owner.refresh_from_db()
-    assert "_preferred_server" not in owner.custom_field_data["librenms_id"]
+    assert "_preferred_server" not in stored_mapping_for_test(owner)
 
 
 @pytest.mark.django_db
@@ -269,7 +274,7 @@ def test_preference_post_revalidates_mapping_after_lock(client, servers):
         def __call__(self, execute, sql, params, many, context):
             if not self.fired and 'FROM "dcim_device"' in sql and "FOR UPDATE" in sql.upper():
                 self.fired = True
-                type(owner).objects.filter(pk=owner.pk).update(custom_field_data={"librenms_id": {"primary": 13507}})
+                seed_stored_mapping_row(owner, {"primary": 13507})
             return execute(sql, params, many, context)
 
     lock_hook = RemoveTargetBeforeLock()
@@ -283,7 +288,7 @@ def test_preference_post_revalidates_mapping_after_lock(client, servers):
     assert lock_hook.fired
     assert _message_texts(response) == ["A preferred server requires at least two usable object mappings."]
     owner.refresh_from_db()
-    assert owner.custom_field_data["librenms_id"] == {"primary": 13507}
+    assert stored_mapping_for_test(owner) == {"primary": 13507}
 
 
 @pytest.mark.django_db
@@ -299,7 +304,7 @@ def test_single_mapping_remains_implicit_without_stored_preference(client, serve
 
     assert _message_texts(response) == ["A preferred server requires at least two usable object mappings."]
     owner.refresh_from_db()
-    assert owner.custom_field_data["librenms_id"] == {"primary": 13509}
+    assert stored_mapping_for_test(owner) == {"primary": 13509}
 
     page = client.get(_sync_url(owner))
 
@@ -378,11 +383,7 @@ def test_view_only_user_sees_preference_but_not_star_controls(client, servers):
 @pytest.mark.django_db
 def test_vc_member_page_uses_mapping_owner_for_preference_form(client, servers):
     _chassis, (owner, viewed_member) = make_virtual_chassis_members("preference-owner", count=2)
-    owner.custom_field_data["librenms_id"] = {
-        "primary": {"id": 13514},
-        "secondary": {"id": 13515},
-    }
-    owner.save(update_fields=["custom_field_data"])
+    seed_stored_mapping(owner, {"primary": {"id": 13514}, "secondary": {"id": 13515}}, save=True)
     _register_device(servers.primary, 13514, viewed_member.name)
     servers.primary.register(
         "/api/v0/inventory/13514/all",
@@ -409,7 +410,7 @@ def test_invalid_or_missing_preference_warns_and_get_does_not_mutate(
     if stored_preference is not None:
         mapping["_preferred_server"] = stored_preference
     owner = make_device("invalid-preference-warning", librenms_cf=mapping)
-    original = deepcopy(owner.custom_field_data["librenms_id"])
+    original = stored_mapping_for_test(owner)
     _register_device(servers.primary, 13517, owner.name)
     client.force_login(make_superuser(f"invalid-preference-{stored_preference}-viewer"))
 
@@ -419,7 +420,7 @@ def test_invalid_or_missing_preference_warns_and_get_does_not_mutate(
     assert b'id="librenms-server-preference-warning"' in response.content
     assert b"Using installation default" in response.content
     owner.refresh_from_db()
-    assert owner.custom_field_data["librenms_id"] == original
+    assert stored_mapping_for_test(owner) == original
 
 
 @pytest.mark.django_db
@@ -440,7 +441,7 @@ def test_unconfigured_preferred_mapping_warns_and_falls_back_without_mutation(cl
     assert b"not configured or usable" in response.content
     assert b"Using installation default server &#x27;primary&#x27;" in response.content
     owner.refresh_from_db()
-    assert owner.custom_field_data["librenms_id"] == mapping
+    assert stored_mapping_for_test(owner) == mapping
 
 
 @pytest.mark.django_db
@@ -472,7 +473,7 @@ def test_an_unusable_configured_mapping_shows_where_to_repair_it(client, setting
     assert servers.primary.requests == []
     assert servers.secondary.requests == []
     owner.refresh_from_db()
-    assert owner.custom_field_data["librenms_id"] == mapping
+    assert stored_mapping_for_test(owner) == mapping
 
 
 @pytest.mark.django_db
@@ -487,8 +488,7 @@ def test_a_blocked_vc_member_links_to_the_sync_device_that_owns_the_mapping(clie
     }
     settings.PLUGINS_CONFIG = plugin_config
     _chassis, (owner, viewed_member) = make_virtual_chassis_members("blocked-vc-owner", count=2)
-    owner.custom_field_data["librenms_id"] = {"incomplete": {"id": 13541}}
-    owner.save(update_fields=["custom_field_data"])
+    seed_stored_mapping(owner, {"incomplete": {"id": 13541}}, save=True)
     client.force_login(make_superuser("blocked-vc-viewer"))
 
     response = client.get(_sync_url(viewed_member))
@@ -517,7 +517,7 @@ def test_a_preference_without_any_mapping_reports_the_installation_default(clien
     assert b"The installation default is not mapped, so select a server." not in body
     assert b"Select a LibreNMS server to continue." not in body
     owner.refresh_from_db()
-    assert owner.custom_field_data["librenms_id"] == mapping
+    assert stored_mapping_for_test(owner) == mapping
 
 
 @pytest.mark.django_db
@@ -535,7 +535,7 @@ def test_only_unusable_mapping_requires_selection_without_get_mutation(client, s
     assert b"The installation default is not mapped, so select a server." in response.content
     assert b"Select a LibreNMS server to continue." in response.content
     owner.refresh_from_db()
-    assert owner.custom_field_data["librenms_id"] == mapping
+    assert stored_mapping_for_test(owner) == mapping
 
 
 @pytest.mark.django_db
@@ -563,7 +563,7 @@ def test_removing_mapping_clears_preference_when_removed_or_only_one_mapping_rem
 
     assert response.status_code == 302
     owner.refresh_from_db()
-    assert owner.custom_field_data["librenms_id"] == {"primary": 13519}
+    assert stored_mapping_for_test(owner) == {"primary": 13519}
 
 
 @pytest.mark.django_db
@@ -580,4 +580,4 @@ def test_preference_without_mappings_does_not_block_default_server(client, serve
     assert selection.state == ServerSelectionState.RESOLVED
     assert selection.active_key == "primary"
     device.refresh_from_db()
-    assert device.custom_field_data["librenms_id"] == {"_preferred_server": stored_preference}
+    assert stored_mapping_for_test(device) == {"_preferred_server": stored_preference}
