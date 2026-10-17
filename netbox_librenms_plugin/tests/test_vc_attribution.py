@@ -127,7 +127,7 @@ class TestSerialEvidence:
 
 
 class TestUnrecognizedShape:
-    """An inventory that is no recognized stack keeps the position and name heuristic from 1."""
+    """An inventory that is not a recognized stack keeps the position and name heuristic from 1."""
 
     @pytest.mark.parametrize("field", ["entPhysicalName", "entPhysicalDescr"])
     def test_numeric_name_hints_do_not_crash(self, field):
