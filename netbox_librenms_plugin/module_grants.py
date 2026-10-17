@@ -38,9 +38,9 @@ ACTION_VERIFY_MODULE = "verify_module"
 # The batch rows each action signs: a branch entry is [index, target]; a manifest entry adds "selectable".
 # A verify entry is [index] of a row the page table shows in the verified row's subtree.
 _ROW_SHAPES = {
-    ACTION_INSTALL_BRANCH: (int, int),
-    ACTION_INSTALL_SELECTED: (int, int, bool),
-    ACTION_VERIFY_MODULE: (int,),
+    ACTION_INSTALL_BRANCH: (("index", int), ("target", int)),
+    ACTION_INSTALL_SELECTED: (("index", int), ("target", int), ("selectable", bool)),
+    ACTION_VERIFY_MODULE: (("index", int),),
 }
 # The actions that act on no single row and so sign no index.
 _INDEXLESS_ACTIONS = frozenset({ACTION_INSTALL_SELECTED})
@@ -146,6 +146,14 @@ class ModuleGrant:
             raise GrantRefused(GrantRefusal.STALE)
         return self
 
+    @property
+    def row_targets(self) -> tuple:
+        """Return the target device of each signed row; a row shape without a target column has none."""
+        columns = [name for name, _kind in _ROW_SHAPES.get(self.action, ())]
+        if "target" not in columns:
+            return ()
+        return tuple(row[columns.index("target")] for row in self.rows or ())
+
     def check_state(self, inventory, policy):
         """Raise a refusal unless the grant was signed for this snapshot, this policy and its current devices."""
         if module_inventory_snapshot_digest(inventory) != self.inventory_digest:
@@ -154,7 +162,7 @@ class ModuleGrant:
             raise GrantRefused(GrantRefusal.POLICY)
         if duplicate_inventory_indices(inventory):
             raise GrantRefused(GrantRefusal.AMBIGUOUS_INDEX)
-        targets = {self.device_id, *(row[1] for row in self.rows or ())}
+        targets = {self.device_id, *self.row_targets}
         if any(policy.member(target) is None for target in targets):
             raise GrantRefused(GrantRefusal.DESTINATION)
         return self
@@ -219,7 +227,7 @@ def sign_module_grant(
 def _valid_row(row, shape) -> bool:
     if not isinstance(row, list) or len(row) != len(shape):
         return False
-    for value, kind in zip(row, shape, strict=True):
+    for value, (_name, kind) in zip(row, shape, strict=True):
         if kind is bool:
             if not isinstance(value, bool):
                 return False
