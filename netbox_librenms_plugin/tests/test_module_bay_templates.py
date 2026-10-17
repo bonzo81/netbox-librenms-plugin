@@ -98,20 +98,24 @@ class TestExistingMappingLookup:
         assert AddBayTemplateView._existing_bay_mapping("", "powerSupply", None) is False
         assert AddBayTemplateView._existing_regex_mapping_covers("", "", None) is False
 
-    def test_regex_row_covering_the_name_is_found_and_a_broken_row_is_skipped(self):
+    def test_a_broken_regex_row_names_the_row(self):
+        from netbox_librenms_plugin.models import ModuleBayMapping, RuleConfigurationError
         from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
 
-        # A row saved before pattern validation existed still has to be walked past, not raise.
-        from netbox_librenms_plugin.models import ModuleBayMapping
-
-        ModuleBayMapping.objects.bulk_create(
-            [
-                ModuleBayMapping(librenms_name="PSU(", librenms_class="", netbox_bay_name="PS", is_regex=True),
-                ModuleBayMapping(
-                    librenms_name=r"^PSU (\d+)$", librenms_class="", netbox_bay_name=r"PS\1", is_regex=True
-                ),
-            ]
+        # A row saved before pattern validation existed: a skip would hide the row the new mapping duplicates.
+        (broken,) = ModuleBayMapping.objects.bulk_create(
+            [ModuleBayMapping(librenms_name="PSU(", librenms_class="", netbox_bay_name="PS", is_regex=True)]
         )
+
+        with pytest.raises(RuleConfigurationError) as excinfo:
+            AddBayTemplateView._existing_regex_mapping_covers("PSU 1", "", None)
+
+        assert (excinfo.value.rule_pk, excinfo.value.field) == (broken.pk, "librenms_name")
+
+    def test_regex_row_covering_the_name_is_found(self):
+        from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
+
+        _mapping(librenms_name=r"^PSU (\d+)$", librenms_class="", netbox_bay_name=r"PS\1", is_regex=True)
 
         assert AddBayTemplateView._existing_regex_mapping_covers("PSU 1", "", None) is True
         assert AddBayTemplateView._existing_regex_mapping_covers("FAN 1", "", None) is False

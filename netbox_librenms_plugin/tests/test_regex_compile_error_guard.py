@@ -38,12 +38,6 @@ ALLOWED = [
         "if compiled.sub(netbox_replacement, librenms_name) != netbox_name:\n    return None",
         TEMPLATE_ONLY,
     ),
-    (
-        "views/base/modules_view.py",
-        "BaseModuleTableView._lookup_regex_bay_mapping",
-        "resolved_bay = match.expand(mapping.netbox_bay_name)",
-        TEMPLATE_ONLY,
-    ),
 ]
 
 
