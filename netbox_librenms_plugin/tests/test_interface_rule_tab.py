@@ -25,7 +25,8 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
     make_vm,
 )
-from netbox_librenms_plugin.utils import get_librenms_sync_device, set_librenms_device_id
+from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
 SERVER_KEY = "default"
@@ -196,7 +197,7 @@ class TestIgnoredRowsInTheTab:
         InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform, name_pattern="^Vlan")
         device = _device("rule-tab-netbox-only", platform)
         bound = make_interface(device, "Vlan10", iface_type="virtual")
-        set_librenms_device_id(bound, 101, SERVER_KEY)
+        seed_mapping(bound, SERVER_KEY, own=101, save=False)
         bound.save()
         make_interface(device, "Vlan20", iface_type="virtual")
         make_interface(device, "stale0")
@@ -213,7 +214,7 @@ class TestIgnoredRowsInTheTab:
         InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform, name_pattern="^Vlan")
         vm = make_vm("rule-tab-vm")
         vm.platform = platform
-        vm.custom_field_data["librenms_id"] = {SERVER_KEY: {"id": 62}}
+        seed_stored_mapping(vm, {SERVER_KEY: {"id": 62}})
         vm.save()
         _seed(vm, _vlan_ports())
 
@@ -257,7 +258,7 @@ class TestVirtualChassisOwners:
         InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform_p, name_pattern="^Gi")
         _vc, (first, second) = make_virtual_chassis_members(tag)
         first.platform = platform_p
-        first.custom_field_data["librenms_id"] = {SERVER_KEY: {"id": 63}}
+        seed_stored_mapping(first, {SERVER_KEY: {"id": 63}})
         first.save()
         second.platform = platform_q
         second.save()
@@ -291,8 +292,7 @@ class TestVirtualChassisOwners:
         for member, platform in zip(members, platforms, strict=True):
             member.platform = platform
             member.save()
-        members[0].custom_field_data["librenms_id"] = {SERVER_KEY: {"id": 64}}
-        members[0].save()
+        seed_mapping(members[0], SERVER_KEY, own=64)
         return members[0]
 
     @pytest.mark.parametrize("scoped", [False, True], ids=["global-rule", "platform-rule"])
@@ -388,7 +388,7 @@ class TestAnIncompleteRecordIsBlocked:
 
     def test_the_verify_repaint_asks_for_a_refresh(self, superuser_client):
         _vc, (first, _second) = make_virtual_chassis_members("rule-tab-incomplete-verify")
-        first.custom_field_data["librenms_id"] = {SERVER_KEY: {"id": 68}}
+        seed_stored_mapping(first, {SERVER_KEY: {"id": 68}})
         first.save()
         _seed(first, [self._incomplete_port(801)])
 
@@ -451,7 +451,7 @@ class TestTheRulePillSitsInTheActionsCell:
 
     def test_an_unresolved_owner_pill_sits_in_the_actions_cell(self, superuser_client):
         _vc, (first, _second) = make_virtual_chassis_members("rule-tab-pill-owner")
-        first.custom_field_data["librenms_id"] = {SERVER_KEY: {"id": 69}}
+        seed_stored_mapping(first, {SERVER_KEY: {"id": 69}})
         first.save()
         _seed(first, [_port(30, "ae0", if_type="ieee8023adLag"), _port(31, "Vlan10")], _lag_of(31, 30))
 
@@ -468,7 +468,7 @@ class TestTheRulePillSitsInTheActionsCell:
         InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform, name_pattern="^Gi")
         _vc, (first, _second) = make_virtual_chassis_members("rule-tab-pill-verify")
         first.platform = platform
-        first.custom_field_data["librenms_id"] = {SERVER_KEY: {"id": 70}}
+        seed_stored_mapping(first, {SERVER_KEY: {"id": 70}})
         first.save()
         _seed(first, [_port(40, "ae0", if_type="ieee8023adLag"), _port(41, "Gi1/0/1")], _lag_of(41, 40))
 

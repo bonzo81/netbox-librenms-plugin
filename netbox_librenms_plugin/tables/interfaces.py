@@ -30,19 +30,18 @@ from netbox_librenms_plugin.interface_diff import (
     parse_vlan_group_id,
 )
 from netbox_librenms_plugin.interface_rules import RuleDecisionKind, decision_reason, rule_names
+from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.utils import (
     SYNC_TABLE_HEADER_ATTRS,
     check_vlan_group_matches,
     convert_speed_to_kbps,
     format_mac_address,
     get_interface_name_field,
-    get_librenms_device_id,
     get_missing_vlan_warning,
     get_table_paginate_count,
     get_tagged_vlan_css_class,
     get_untagged_vlan_css_class,
-    interface_name_fallback_matches_port,
-    normalize_librenms_port_id,
     render_vc_member_options,
     resolve_interface_row_device,
 )
@@ -147,7 +146,7 @@ class LibreNMSInterfaceTable(tables.Table):
         self.user = user
         self.interface_name_field = interface_name_field or get_interface_name_field()
         self.vlan_groups = vlan_groups or []
-        # Default the key so render_librenms_id's get_librenms_device_id(self.server_key) lookup
+        # Default the key so render_librenms_id's own_id(self.server_key) lookup
         # falls back to the "default" server entry; a None key would miss {"default": 42} values.
         self.server_key = server_key or "default"
         # Donor "migrated mode": when set, the bulk sync form is hidden and donors must
@@ -564,7 +563,7 @@ class LibreNMSInterfaceTable(tables.Table):
 
         # The verdict decides whether a sync would write the id; the stored value is read only to
         # name it in the tooltip, and to split "never stored" from "stored something else".
-        netbox_librenms_id = get_librenms_device_id(record["netbox_interface"], self.server_key, auto_save=False)
+        netbox_librenms_id = read_mapping(record["netbox_interface"]).own_id(self.server_key)
         if netbox_librenms_id is None:
             return format_html(
                 '<span class="text-danger" title="No librenms_id custom field value found">{}</span>', value
@@ -1128,35 +1127,8 @@ class LibreNMSInterfaceTable(tables.Table):
         return format_html('<span class="{}">{}</span>', self._field_css_class(record, "type"), display)
 
     def format_interface_data(self, port_data, device):
-        """Format single interface data using table rendering logic."""
-        # Add NetBox interface data
+        """Format one interface row whose netbox_interface the caller resolved by port_id."""
         interface_name = port_data.get(self.interface_name_field)
-
-        # OOB-controller rows live on a SEPARATE LibreNMS device, so they must never bind to a
-        # host interface BY NAME: a row-level re-render (the VC member dropdown via
-        # SingleInterfaceVerifyView) would flip an unmatched row to green "matched" against an
-        # unrelated host interface. A binding already resolved by the stable port_id is kept --
-        # an OOB port syncs onto this device, so it can legitimately own an interface here.
-        if port_data.get("_source") == OOB_INVENTORY_SOURCE:
-            port_data.setdefault("netbox_interface", None)
-        # Preserve a netbox_interface already resolved by the stable port_id (e.g. the single-
-        # interface verify view resolves by port_id first). Only fall back to the fragile name
-        # lookup when nothing has been resolved yet, so a display-name change or collision can't
-        # clobber the correct port-id match with the wrong (or no) name-matched interface.
-        elif not port_data.get("netbox_interface"):
-            candidate = device.interfaces.filter(name=interface_name).first()
-            port_data["netbox_interface"] = (
-                candidate
-                if candidate
-                and port_data.get("name_fallback_allowed", False)
-                and interface_name_fallback_matches_port(
-                    candidate,
-                    port_data.get("port_id"),
-                    self.server_key,
-                )
-                else None
-            )
-        port_data["exists_in_netbox"] = bool(port_data["netbox_interface"])
         # This row has just been re-resolved against a different member, so any verdict cached
         # from the previous render is stale.
         port_data.pop("_sync_state", None)

@@ -482,9 +482,7 @@ class TestProcessDeviceFiltersJobControl:
         )
         assert [item["device_id"] for item in first] == [351]
 
-        imported = make_device("cache-hit-excluded")
-        imported.custom_field_data["librenms_id"] = {"default": 351}
-        imported.save(update_fields=["custom_field_data"])
+        make_device("cache-hit-excluded", librenms_cf={"default": 351})
 
         second = process_device_filters(
             live_librenms.api,

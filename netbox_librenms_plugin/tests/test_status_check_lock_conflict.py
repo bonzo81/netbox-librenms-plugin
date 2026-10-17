@@ -17,6 +17,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     transactional_db_with_all_apps,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
 from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
 from netbox_librenms_plugin.tests.view_test_helpers import messages_on
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
@@ -55,7 +56,7 @@ def test_a_lock_conflict_in_the_discovery_write_leaves_the_status_unknown(client
     assert UNKNOWN in content
     assert NOT_FOUND not in content
     obj.refresh_from_db()
-    assert obj.custom_field_data.get("librenms_id") in (None, {})
+    assert stored_mapping_for_test(obj) in (None, {})
 
 
 @pytest.mark.django_db
@@ -71,7 +72,7 @@ def test_an_id_claimed_by_another_object_leaves_the_status_unknown(client, setti
         cluster = make_cluster("status-claimed-cluster")
         obj = make_vm("status-claimed-vm.example.net", cluster)
         owner = make_vm("status-claimed-owner-vm.example.net", cluster)
-        owner.custom_field_data["librenms_id"] = {"default": 4402}
+        seed_mapping(owner, "default", own=4402, save=False)
         owner.save()
         url, filters = "vm_status_list", {"cluster": obj.cluster_id}
     librenms_server.register(
@@ -86,4 +87,4 @@ def test_an_id_claimed_by_another_object_leaves_the_status_unknown(client, setti
     assert messages_on(response.wsgi_request) == [("error", DISCOVERY_CONFLICT_MESSAGE)]
     assert statuses[obj.pk] is None
     obj.refresh_from_db()
-    assert obj.custom_field_data.get("librenms_id") in (None, {})
+    assert stored_mapping_for_test(obj) in (None, {})

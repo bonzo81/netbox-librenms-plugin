@@ -36,6 +36,7 @@ class TestInterfaceSyncContentTemplateMigratedMode:
 
         from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
         from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.utils import interface_sync_options_menu
 
         device = make_device("iface-tmpl-dev")
         request = RequestFactory().get("/")
@@ -54,6 +55,7 @@ class TestInterfaceSyncContentTemplateMigratedMode:
             "cache_expiry": None,
             "oob_incomplete": False,
             "relationship_data_incomplete": relationship_incomplete,
+            "sync_options": interface_sync_options_menu(request),
         }
         ctx = {
             "interface_sync": interface_sync,
@@ -192,7 +194,9 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         html = self._render(migrated=None)
 
         assert re.search(r'id="autoSelectLagMembers"[^>]*data-default-checked="true"[^>]*checked', html)
-        assert re.search(r'name="exclude_columns" value="name" id="excludeName"[^>]*data-default-checked="false"', html)
+        assert re.search(
+            r'name="exclude_columns" value="name" id="exclude-name"[^>]*data-default-checked="false"', html
+        )
         assert len(re.findall(r'name="exclude_columns"[^>]*data-default-checked="false"', html)) == 8
 
     def test_interface_type_help_uses_the_shared_modal_helper(self):

@@ -288,7 +288,7 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
     # host's ports — and a device is not its own out-of-band controller. Compare COERCED ids: the
     # custom field can store the OOB id as a string ("123"), and "123" != 123 would bypass this
     # guard, re-record the host's own ports and falsely stamp the recording as an OOB topology.
-    from netbox_librenms_plugin.utils import coerce_librenms_id
+    from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 
     oob_id = coerce_librenms_id(oob_id)
     if oob_id is not None and oob_id != coerce_librenms_id(device_id):

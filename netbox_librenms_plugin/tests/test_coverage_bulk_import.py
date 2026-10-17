@@ -9,6 +9,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_vm,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
 
 
 class TestStackIdentity:
@@ -317,7 +318,7 @@ class TestBulkImportIntegration:
         assert len(result["success"]) == 1
         imported = Device.objects.get(name="bulk-new-device")
         assert imported.serial == "TEST-SERIAL-81"
-        assert imported.custom_field_data["librenms_id"]["default"] == 81
+        assert stored_mapping_for_test(imported)["default"] == 81
 
     def test_missing_live_device_is_reported_failed(self, live_librenms):
         from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices
@@ -361,8 +362,7 @@ class TestRefreshLibreNMSLinkage:
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_librenms_linkage
 
         device = make_device("refresh-host-link")
-        device.custom_field_data["librenms_id"] = {"default": {"id": 101}}
-        device.save(update_fields=["custom_field_data"])
+        seed_stored_mapping(device, {"default": {"id": 101}}, save=True)
         validation = _validation(device)
 
         _refresh_librenms_linkage(validation, device, {"device_id": 101}, "default")
@@ -374,8 +374,7 @@ class TestRefreshLibreNMSLinkage:
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_librenms_linkage
 
         device = make_device("refresh-oob-link")
-        device.custom_field_data["librenms_id"] = {"default": {"id": 101, "oob": {"id": 102, "type": "controller"}}}
-        device.save(update_fields=["custom_field_data"])
+        seed_stored_mapping(device, {"default": {"id": 101, "oob": {"id": 102, "type": "controller"}}}, save=True)
         validation = _validation(device)
 
         _refresh_librenms_linkage(validation, device, {"device_id": 102}, "default")
@@ -387,9 +386,7 @@ class TestRefreshLibreNMSLinkage:
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_librenms_linkage
 
         device = make_device("refresh-repointed-link")
-        _set_mapping = {"default": 103}
-        device.custom_field_data["librenms_id"] = _set_mapping
-        device.save(update_fields=["custom_field_data"])
+        seed_mapping(device, "default", own=103)
         validation = _validation(device)
         validation["existing_match_type"] = "librenms_id"
 
@@ -401,8 +398,7 @@ class TestRefreshLibreNMSLinkage:
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_librenms_linkage
 
         device = make_device("refresh-missing-scan-id")
-        device.custom_field_data["librenms_id"] = {"default": 105}
-        device.save(update_fields=["custom_field_data"])
+        seed_mapping(device, "default", own=105)
         validation = _validation(device)
         validation["existing_match_type"] = "librenms_id"
 
@@ -472,8 +468,7 @@ class TestRefreshExistingDevice:
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
 
         device = make_device("refresh-newly-imported")
-        device.custom_field_data["librenms_id"] = {"default": 121}
-        device.save(update_fields=["custom_field_data"])
+        seed_mapping(device, "default", own=121)
         validation = _validation()
 
         _refresh_existing_device(validation, _libre_device(121, "different-name"), "default")
@@ -555,8 +550,7 @@ class TestProcessDeviceFilters:
 
         live_librenms.api.cache_timeout = 300
         existing = make_device("filter-existing")
-        existing.custom_field_data["librenms_id"] = {"default": 131}
-        existing.save(update_fields=["custom_field_data"])
+        seed_mapping(existing, "default", own=131)
         row = _libre_device(
             131,
             existing.name,
@@ -614,8 +608,7 @@ class TestProcessDeviceFilters:
         from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
 
         existing = make_device("filter-excluded")
-        existing.custom_field_data["librenms_id"] = {"default": 151}
-        existing.save(update_fields=["custom_field_data"])
+        seed_mapping(existing, "default", own=151)
         row = _libre_device(
             151,
             existing.name,

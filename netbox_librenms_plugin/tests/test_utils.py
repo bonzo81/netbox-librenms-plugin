@@ -7,6 +7,8 @@ platform matching, and conversion helper functions.
 
 import pytest
 
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping, stored_mapping_for_test
+
 
 def _two_member_vc(name, cf_first, cf_second):
     """Create a real VirtualChassis with two members (vc_position 1 then 2), seeding each member's ``librenms_id`` custom field with *cf_first* / *cf_second* (use ``_UNSET`` / skip by passing None to leave it empty)."""
@@ -19,13 +21,13 @@ def _two_member_vc(name, cf_first, cf_second):
     first.virtual_chassis = vc
     first.vc_position = 1
     if cf_first is not None:
-        first.custom_field_data["librenms_id"] = cf_first
+        seed_stored_mapping(first, cf_first)
     first.save()
     second = make_device(f"{name}-m2")
     second.virtual_chassis = vc
     second.vc_position = 2
     if cf_second is not None:
-        second.custom_field_data["librenms_id"] = cf_second
+        seed_stored_mapping(second, cf_second)
     second.save()
     return first, second
 
@@ -376,13 +378,13 @@ class TestConversionHelpers:
         assert result == ""
 
     def test_normalize_librenms_port_id_accepts_positive_int_and_str(self):
-        from netbox_librenms_plugin.utils import normalize_librenms_port_id
+        from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 
         assert normalize_librenms_port_id(42) == 42
         assert normalize_librenms_port_id("42") == 42
 
     def test_normalize_librenms_port_id_rejects_invalid_values(self):
-        from netbox_librenms_plugin.utils import normalize_librenms_port_id
+        from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 
         assert normalize_librenms_port_id(None) is None
         assert normalize_librenms_port_id(True) is None
@@ -400,7 +402,7 @@ class TestConversionHelpers:
         """The length cap must hold with CPython's int_max_str_digits limit disabled."""
         import sys
 
-        from netbox_librenms_plugin.utils import normalize_librenms_port_id
+        from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 
         previous = sys.get_int_max_str_digits()
         sys.set_int_max_str_digits(0)
@@ -555,7 +557,7 @@ class TestVirtualChassisHelpers:
     def test_get_librenms_sync_device_no_vc(self):
         """Device without VC returns itself."""
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         device = make_device("utils-standalone-sync")
 
@@ -566,7 +568,7 @@ class TestVirtualChassisHelpers:
     @pytest.mark.django_db
     def test_get_librenms_sync_device_with_librenms_id(self):
         """VC member with librenms_id is returned (real VC; the member without one iterated first)."""
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         without_id, with_id = _two_member_vc("sync-withid", None, {"default": 123})
         assert get_librenms_sync_device(without_id) == with_id
@@ -574,7 +576,7 @@ class TestVirtualChassisHelpers:
     @pytest.mark.django_db
     def test_get_librenms_sync_device_dict_preferred_over_legacy_bare_int(self):
         """In a partially migrated VC, a per-server dict member is preferred over a legacy bare-int."""
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         # member_a (legacy bare-int) iterated first — the function should still prefer member_b (dict).
         member_a, member_b = _two_member_vc("sync-dictpref", 42, {"default": 42})
@@ -583,7 +585,7 @@ class TestVirtualChassisHelpers:
     @pytest.mark.django_db
     def test_get_librenms_sync_device_host_id_preferred_over_oob_only(self):
         """A member holding the real host id wins over an OOB-only member, even iterated first."""
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         member_a, member_b = _two_member_vc(
             "sync-hostpref",
@@ -595,7 +597,7 @@ class TestVirtualChassisHelpers:
     @pytest.mark.django_db
     def test_get_librenms_sync_device_oob_only_resolves_when_no_host_id(self):
         """When no member has a host id, an OOB-only mapping still resolves the sync device."""
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         member_a, member_b = _two_member_vc("sync-oobonly", None, {"default": {"oob": {"id": 7, "type": "drac"}}})
         assert get_librenms_sync_device(member_a, server_key="default") == member_b
@@ -603,7 +605,7 @@ class TestVirtualChassisHelpers:
     @pytest.mark.django_db
     def test_get_librenms_sync_device_legacy_fallback_when_no_dict(self):
         """When no member has a per-server dict, fall back to legacy bare-int."""
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         # member_b (no id) iterated first, member_a (legacy bare-int) second → member_a wins.
         member_b, member_a = _two_member_vc("sync-legacy", None, 42)
@@ -612,7 +614,7 @@ class TestVirtualChassisHelpers:
     @pytest.mark.django_db
     def test_get_librenms_sync_device_dict_for_different_server_falls_through(self):
         """Per-server dict with a different key does not match; legacy bare-int resolves instead."""
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         # member_a: legacy bare-int (universal); member_b: dict only for "production".
         member_a, member_b = _two_member_vc("sync-diffserver", 42, {"production": 99})
@@ -621,7 +623,7 @@ class TestVirtualChassisHelpers:
     def test_get_librenms_sync_device_fallback_to_member_with_ip(self):
         """Priority 3: no dict member, master has no IP, another member has primary IP → that member."""
         from netbox_librenms_plugin.tests.conftest import ip_on
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         master, member_with_ip = _two_member_vc("sync-primary-ip", None, None)
         address = ip_on(member_with_ip, "198.18.20.1/24", "management")
@@ -637,7 +639,7 @@ class TestVirtualChassisHelpers:
         from dcim.models import VirtualChassis
 
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         vc = VirtualChassis.objects.create(name="sync-lowest-position")
         members = {}
@@ -681,7 +683,7 @@ class TestVirtualChassisHelpers:
         LibreNMS uses MySQL auto-increment IDs starting at 1; device_id=0 cannot exist.
         A member whose resolved ID is 0 must be skipped so a real ID is preferred.
         """
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         member_zero, member_real = _two_member_vc("sync-zero-id", {"default": 0}, {"default": 5})
 
@@ -1736,50 +1738,6 @@ class TestSetDeviceIpFkFamily:
         device.refresh_from_db()
         assert device.oob_ip_id == v6.pk
 
-    def test_families_accepted_with_netbox44_family_property(self, monkeypatch):
-        """The guard must not read IPAddress.family: on NetBox 4.4 the property raises on an in-memory str address and getattr's default turns that into a bogus refusal (forced)."""
-        from ipam.models import IPAddress
-
-        from netbox_librenms_plugin.tests.conftest import ip_on, make_device
-        from netbox_librenms_plugin.utils import set_device_ip_fk
-
-        device = make_device("fam-nb44dev")
-        v4 = ip_on(device, "10.0.0.4/24", "eth0")
-        v4.address = "10.0.0.4/24"  # in-memory str, as after IPAddress.objects.create()
-        # NetBox 4.4's family property verbatim — 4.5+ added a str-tolerant branch.
-        netbox44_family = property(lambda self: self.address.version if self.address else None)
-        monkeypatch.setattr(IPAddress, "family", netbox44_family)
-        set_device_ip_fk(device, "primary_ip4", v4)
-        device.refresh_from_db()
-        assert device.primary_ip4_id == v4.pk
-
-
-class TestIpFamily:
-    """ip_family(): family read that works on NetBox 4.4, whose IPAddress.family lacks the 4.5+ str-address branch."""
-
-    def test_str_address(self):
-        from ipam.models import IPAddress
-
-        from netbox_librenms_plugin.utils import ip_family
-
-        assert ip_family(IPAddress(address="10.0.0.1/24")) == 4
-        assert ip_family(IPAddress(address="2001:db8::1/64")) == 6
-
-    def test_ipnetwork_address(self):
-        import netaddr
-        from ipam.models import IPAddress
-
-        from netbox_librenms_plugin.utils import ip_family
-
-        assert ip_family(IPAddress(address=netaddr.IPNetwork("10.0.0.1/24"))) == 4
-
-    def test_empty_address_is_none(self):
-        from ipam.models import IPAddress
-
-        from netbox_librenms_plugin.utils import ip_family
-
-        assert ip_family(IPAddress()) is None
-
 
 class TestCoercePositiveInt:
     """coerce_positive_int accepts only positive int / int-string and rejects non-integer types (no float truncation)."""
@@ -1833,13 +1791,14 @@ class TestLibreNMSIdQueryMatchesDecoder:
         from dcim.models import Device
 
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.utils import coerce_librenms_id, find_by_librenms_id
+        from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+        from netbox_librenms_plugin.server_mappings import MappingRole, find_mapping
 
         dev = make_device(f"id-form-{len(stored)}-{namespaced}")
-        dev.custom_field_data["librenms_id"] = {"default": stored} if namespaced else stored
+        seed_stored_mapping(dev, {"default": stored} if namespaced else stored)
         dev.save()
 
-        found = find_by_librenms_id(Device, 42, "default")
+        found = find_mapping(Device.objects.all(), server="default", identity=42, roles=tuple(MappingRole))
 
         assert (found == dev) == (coerce_librenms_id(stored) == 42)
 
@@ -1859,13 +1818,14 @@ class TestLibreNMSIdQueryMatchesDecoder:
         from dcim.models import Device
 
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.utils import coerce_librenms_id, find_by_librenms_id
+        from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+        from netbox_librenms_plugin.server_mappings import MappingRole, find_mapping
 
         dev = make_device(f"id-number-{stored!r}")
-        dev.custom_field_data["librenms_id"] = shape(stored)
+        seed_stored_mapping(dev, shape(stored))
         dev.save()
 
-        found = find_by_librenms_id(Device, 42, "default")
+        found = find_mapping(Device.objects.all(), server="default", identity=42, roles=tuple(MappingRole))
 
         assert (found == dev) == (coerce_librenms_id(stored) == 42)
 
@@ -1875,15 +1835,16 @@ class TestLibreNMSIdQueryMatchesDecoder:
         from dcim.models import Device
 
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.utils import coerce_librenms_id, find_by_librenms_id
+        from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+        from netbox_librenms_plugin.server_mappings import MappingRole, find_mapping
 
         dev = make_device("id-form-wide")
-        dev.custom_field_data["librenms_id"] = {"default": wide}
+        seed_stored_mapping(dev, {"default": wide})
         dev.save()
         dev.refresh_from_db()
 
-        assert coerce_librenms_id(dev.custom_field_data["librenms_id"]["default"]) is None
-        assert find_by_librenms_id(Device, wide, "default") is None
+        assert coerce_librenms_id(stored_mapping_for_test(dev)["default"]) is None
+        assert find_mapping(Device.objects.all(), server="default", identity=wide, roles=tuple(MappingRole)) is None
 
 
 @pytest.mark.django_db

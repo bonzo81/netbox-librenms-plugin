@@ -30,6 +30,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis,
     persist_test_server_mapping,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.test_serial_cables_view import _make_view
 
 SERVER_KEY = configured_server_key()
@@ -554,7 +555,8 @@ class TestRemotePickerEndpoint:
         from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.utils import mark_librenms_migrated, set_librenms_device_id
+        from netbox_librenms_plugin.server_mappings import mark_migrated
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("migrated-selected-member")
@@ -566,7 +568,7 @@ class TestRemotePickerEndpoint:
         remote_interface = make_interface(remote, "Ethernet9")
         winner = make_device("picker-migrated-selected-winner")
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        set_librenms_device_id(page, 42, server_key)
+        seed_mapping(page, server_key, own=42, save=False)
         page.save()
         row = {
             "local_port": local_interface.name,
@@ -581,7 +583,7 @@ class TestRemotePickerEndpoint:
             {"links": [row]},
             timeout=300,
         )
-        mark_librenms_migrated(selected, winner.pk, server_key)
+        apply_mapping_change(selected, mark_migrated(selected, winner.pk, server_key))
         selected.save()
 
         rendered = _render_cable_sync_page(client, page, server_key)
@@ -635,7 +637,8 @@ class TestRemotePickerEndpoint:
         from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.utils import mark_librenms_migrated
+        from netbox_librenms_plugin.server_mappings import mark_migrated
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("migrated-donor")
@@ -651,7 +654,7 @@ class TestRemotePickerEndpoint:
         rendered = _render_cable_sync_page(client, donor, server_key)
         record = next(iter(rendered.context["cable_sync"]["table"].rows)).record
         assert record["can_create_cable"] is True
-        mark_librenms_migrated(donor, winner.pk, server_key)
+        apply_mapping_change(donor, mark_migrated(donor, winner.pk, server_key))
         donor.save()
 
         response = client.post(
@@ -680,7 +683,8 @@ class TestRemotePickerEndpoint:
         from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.utils import mark_librenms_migrated, set_librenms_device_id
+        from netbox_librenms_plugin.server_mappings import mark_migrated
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("migrated-vc-origin")
@@ -692,7 +696,7 @@ class TestRemotePickerEndpoint:
         remote_interface = make_interface(remote, "Ethernet9")
         winner = make_device("picker-migrated-vc-winner")
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        set_librenms_device_id(donor, 42, server_key)
+        seed_mapping(donor, server_key, own=42, save=False)
         donor.save()
         row = {
             "local_port": member_interface.name,
@@ -704,7 +708,7 @@ class TestRemotePickerEndpoint:
         }
         cache_key = object.__new__(SyncCablesView).get_cache_key(donor, "links", server_key)
         cache.set(cache_key, {"links": [row]}, timeout=300)
-        mark_librenms_migrated(donor, winner.pk, server_key)
+        apply_mapping_change(donor, mark_migrated(donor, winner.pk, server_key))
         donor.save()
 
         rendered = client.get(
@@ -761,7 +765,8 @@ class TestRemotePickerEndpoint:
         from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.utils import mark_librenms_migrated, set_librenms_device_id
+        from netbox_librenms_plugin.server_mappings import mark_migrated
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("force-origin")
@@ -777,7 +782,7 @@ class TestRemotePickerEndpoint:
         existing_cable = cable_together(local_interface, occupied_interface)
         winner = make_device("picker-force-winner")
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        set_librenms_device_id(origin, 42, server_key)
+        seed_mapping(origin, server_key, own=42, save=False)
         origin.save()
         row = {
             "local_port": local_interface.name,
@@ -813,7 +818,7 @@ class TestRemotePickerEndpoint:
         assert f'name="origin_device_id" value="{origin.pk}"' in html
         intent_match = re.search(r'name="expected_cable_intent_10" value="([^"]+)"', html)
         assert intent_match is not None
-        mark_librenms_migrated(origin, winner.pk, server_key)
+        apply_mapping_change(origin, mark_migrated(origin, winner.pk, server_key))
         origin.save()
 
         forced = client.post(
@@ -846,7 +851,8 @@ class TestRemotePickerEndpoint:
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.conftest import make_ip
-        from netbox_librenms_plugin.utils import mark_librenms_migrated, set_librenms_device_id
+        from netbox_librenms_plugin.server_mappings import mark_migrated
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("migrated-cache-owner")
@@ -866,7 +872,7 @@ class TestRemotePickerEndpoint:
         remote_interface = make_interface(remote, "Ethernet9")
         winner = make_device("picker-cache-winner")
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        set_librenms_device_id(cache_owner, 42, server_key)
+        seed_mapping(cache_owner, server_key, own=42, save=False)
         cache_owner.save()
         row = {
             "local_port": "Ethernet1",
@@ -881,7 +887,7 @@ class TestRemotePickerEndpoint:
             {"links": [row]},
             timeout=300,
         )
-        mark_librenms_migrated(cache_owner, winner.pk, server_key)
+        apply_mapping_change(cache_owner, mark_migrated(cache_owner, winner.pk, server_key))
         cache_owner.save()
 
         verified = client.post(
@@ -1216,8 +1222,7 @@ class TestRemotePickerEndpoint:
 
         client = self._client("duplicate-link-rows")
         local_device = make_device("picker-duplicate-link-local")
-        local_device.custom_field_data["librenms_id"] = 10
-        local_device.save()
+        seed_stored_mapping(local_device, 10, save=True)
         local = make_interface(local_device, "Ethernet1")
         first_device = make_device("picker-duplicate-link-first")
         make_interface(first_device, "Ethernet1")
@@ -1749,8 +1754,7 @@ class TestRemotePickerEndpoint:
         first = make_device("picker-vc-topology-first")
         second = make_device("picker-vc-topology-second")
         make_virtual_chassis("picker-vc-topology", first, second)
-        first.custom_field_data["librenms_id"] = {SERVER_KEY: 600}
-        first.save()
+        seed_mapping(first, SERVER_KEY, own=600)
         first_local = make_interface(first, "Ethernet1")
         second_local = make_interface(second, "Ethernet1")
         remote_device = make_device("picker-vc-topology-remote")
@@ -1810,7 +1814,6 @@ class TestRemotePickerEndpoint:
         from django.urls import reverse
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("vc-verified-local")
@@ -1822,7 +1825,7 @@ class TestRemotePickerEndpoint:
         remote_device = make_device("picker-vc-verified-remote")
         remote = make_interface(remote_device, "Ethernet9")
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        set_librenms_device_id(first, 600, server_key)
+        seed_mapping(first, server_key, own=600, save=False)
         first.save()
         row = {
             "_source": "main",
@@ -2119,7 +2122,6 @@ class TestRemotePickerEndpoint:
         from django.core.cache import cache
         from django.urls import reverse
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         client = self._client("vc-collapse")
@@ -2133,7 +2135,7 @@ class TestRemotePickerEndpoint:
         remote_device = make_device("cable-vc-collapse-remote")
         first_remote = make_interface(remote_device, "R1")
         second_remote = make_interface(remote_device, "R2")
-        set_librenms_device_id(page, 700, SERVER_KEY)
+        seed_mapping(page, SERVER_KEY, own=700, save=False)
         page.save()
         rows = [
             {
@@ -2331,8 +2333,7 @@ class TestManualRepointOfExistingCable:
         client = self._client_e2e("expiry-post")
         acs, csp, _old, link, picker_url = self._seed_cabled("expiry-post")
         _t, _, (new_cp,) = make_serial_device("expiry-post-target", cp_names=["console"])
-        acs.custom_field_data["librenms_id"] = {SERVER_KEY: 13}
-        acs.save(update_fields=["custom_field_data"])
+        seed_mapping(acs, SERVER_KEY, own=13)
 
         clear_test_cache(cache)  # the snapshot expired between render and pick
 
@@ -2376,8 +2377,7 @@ class TestManualRepointOfExistingCable:
 
         client = self._client_e2e("expiry-get")
         acs, _csp, _old, link, picker_url = self._seed_cabled("expiry-get")
-        acs.custom_field_data["librenms_id"] = {SERVER_KEY: 13}
-        acs.save(update_fields=["custom_field_data"])
+        seed_mapping(acs, SERVER_KEY, own=13)
 
         clear_test_cache(cache)
 
@@ -2857,8 +2857,7 @@ class TestRemotePickerObjectScope:
         first = make_device("picker-verify-scope-first")
         second = make_device("picker-verify-scope-second")
         make_virtual_chassis("picker-verify-scope-vc", first, second)
-        first.custom_field_data["librenms_id"] = {SERVER_KEY: 500}
-        first.save()
+        seed_mapping(first, SERVER_KEY, own=500)
         first_local = make_interface(first, "Ethernet1")
         second_local = make_interface(second, "Ethernet1")
         remote_device = make_device("picker-verify-scope-remote")
@@ -3284,7 +3283,7 @@ class TestNormalCableLinkObjectScope:
         from users.models import ObjectPermission
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.utils import get_librenms_cable_tag, set_librenms_device_id
+        from netbox_librenms_plugin.utils import get_librenms_cable_tag
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         first = make_device("normal-writer-scope-first")
@@ -3296,9 +3295,9 @@ class TestNormalCableLinkObjectScope:
         remote_device = make_device("normal-writer-scope-remote")
         remote = make_interface(remote_device, "Ethernet9")
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
-        set_librenms_device_id(first_local, 10, server_key)
+        seed_mapping(first_local, server_key, own=10, save=False)
         first_local.save()
-        set_librenms_device_id(hidden_stable, 10, server_key)
+        seed_mapping(hidden_stable, server_key, own=10, save=False)
         hidden_stable.save()
         row = {
             "_source": "main",
@@ -3380,7 +3379,6 @@ class TestNormalCableLinkObjectScope:
         from dcim.models import Cable
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         local_device = make_device("normal-duplicate-id-local")
@@ -3390,9 +3388,9 @@ class TestNormalCableLinkObjectScope:
         remote = make_interface(remote_device, "Ethernet9")
         server_key = next(iter(LibreNMSAPI.get_available_servers()))
         for interface in (first, second):
-            set_librenms_device_id(interface, 10, server_key)
+            seed_mapping(interface, server_key, own=10, save=False)
             interface.save()
-        set_librenms_device_id(remote, 20, server_key)
+        seed_mapping(remote, server_key, own=20, save=False)
         remote.save()
         row = {
             "_source": "main",

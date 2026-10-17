@@ -17,9 +17,10 @@ from django.core.cache import cache
 from django.urls import reverse
 from ipam.models import IPAddress, VLAN
 
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts
-from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
 from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
@@ -44,8 +45,7 @@ def _response_messages(response, level=None):
 
 
 def _set_librenms_id(obj, value):
-    set_librenms_device_id(obj, value, SERVER_KEY)
-    obj.save(update_fields=["custom_field_data"])
+    seed_mapping(obj, SERVER_KEY, own=value)
 
 
 def _seed_snapshot(view, obj, data_type, payload):
@@ -183,7 +183,7 @@ class TestInterfaceSynchronization:
 
         assert response.status_code == 302
         interface = Interface.objects.get(device=device, name="Ethernet1/1")
-        assert get_librenms_device_id(interface, SERVER_KEY, auto_save=False) == 8101
+        assert read_mapping(interface).own_id(SERVER_KEY) == 8101
         assert interface.enabled is True
         assert interface.mtu == 1500
 

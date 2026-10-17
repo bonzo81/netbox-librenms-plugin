@@ -1,3 +1,6 @@
+# `pre-commit install` also installs the pre-push hooks (the opengrep gates below).
+default_install_hook_types: [pre-commit, pre-push]
+
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.15.4  # Use the latest version from https://github.com/astral-sh/ruff-pre-commit/releases
@@ -43,8 +46,8 @@ repos:
         always_run: true
         stages: [pre-push]
       - id: import-disclosure
-        name: import disclosure check (opengrep)
-        description: A warning names a NetBox object that no permission scope filtered.
+        name: opengrep scan
+        description: The package, its templates and its tests break no rule of the opengrep ruleset.
         entry: scripts/opengrep-scan.sh
         language: system
         pass_filenames: false

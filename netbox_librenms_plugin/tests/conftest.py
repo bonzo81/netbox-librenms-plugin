@@ -3,6 +3,7 @@
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from copy import deepcopy
 from itertools import chain
 from threading import BrokenBarrierError
@@ -12,6 +13,8 @@ from uuid import uuid4
 import pytest
 import requests
 
+from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.parallel import isolated_test_database_name
 
 _TEST_DATABASE_BASE_NAME = os.environ["TEST_DB_NAME"]
@@ -44,11 +47,8 @@ def configured_server_key():
 
 def persist_test_server_mapping(obj, server_key):
     """Persist the server mapping required by a real sync-page request."""
-    from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
-
-    if get_librenms_device_id(obj, server_key, auto_save=False) is None:
-        set_librenms_device_id(obj, obj.pk, server_key)
-        obj.save(update_fields=["custom_field_data"])
+    if read_mapping(obj).own_id(server_key) is None:
+        seed_mapping(obj, server_key, own=obj.pk)
 
 
 def _isolated_cache_config(caches_config):
@@ -66,6 +66,26 @@ def _isolate_test_cache(settings):
     """Give each test a unique namespace inside its pytest worker's cache database."""
     settings.CACHES = _isolated_cache_config(settings.CACHES)
     yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _install_before_state_guard():
+    """Watch every write of a change-logged row for the whole session."""
+    from netbox_librenms_plugin.tests import before_state_guard
+
+    with before_state_guard.installed():
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _fail_on_missing_before_state(_install_before_state_guard):
+    """Fail a test in which plugin code wrote a change-logged row without a fresh before-state."""
+    from netbox_librenms_plugin.tests import before_state_guard
+
+    before_state_guard.reset()
+    yield
+    if before_state_guard.violations:
+        pytest.fail(before_state_guard.report(), pytrace=False)
 
 
 @pytest.fixture(scope="session")
@@ -440,14 +460,13 @@ def _shared_infra():
 
 
 def make_device(name, *, serial="", librenms_cf=None):
-    """Create a real Device on the shared infra, optionally seeding its librenms_id CF."""
+    """Create a real Device on the shared infra, optionally seeding the raw stored mapping *librenms_cf*."""
     from dcim.models import Device
 
     site, _mfr, dtype, role = _shared_infra()
     dev = Device.objects.create(name=name, device_type=dtype, role=role, site=site, status="active", serial=serial)
     if librenms_cf is not None:
-        dev.custom_field_data["librenms_id"] = librenms_cf
-        dev.save()
+        seed_stored_mapping(dev, librenms_cf, save=True)
     return dev
 
 
@@ -644,9 +663,7 @@ def map_device_to_librenms(device, librenms_id=None, *, server_key, oob=None):
         entry["id"] = librenms_id
     if oob is not None:
         entry["oob"] = oob
-    device.custom_field_data["librenms_id"] = {server_key: entry}
-    device.save(update_fields=["custom_field_data"])
-    return device
+    return seed_stored_mapping(device, {server_key: entry}, save=True)
 
 
 @pytest.fixture
@@ -812,6 +829,18 @@ def run_in_threads(*calls, barriers, timeout):
     if failures:
         raise failures[0]
     return [future.result() for future in futures]
+
+
+@contextmanager
+def bounded_executor(max_workers):
+    """Yield a ThreadPoolExecutor that does not wait for a hung worker when the block raises."""
+    executor = ThreadPoolExecutor(max_workers=max_workers)
+    try:
+        yield executor
+    except BaseException:
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    executor.shutdown(wait=True)
 
 
 def make_superuser(username="review-su"):

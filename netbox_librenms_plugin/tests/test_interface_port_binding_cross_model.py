@@ -8,6 +8,11 @@ from django.urls import reverse
 from virtualization.models import VMInterface
 
 from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
+from netbox_librenms_plugin.server_mappings import (
+    AmbiguousLibreNMSIdError,
+    find_port_owner,
+    read_mapping,
+)
 from netbox_librenms_plugin.tests.conftest import (
     _PORT_KEYS_UNSET,
     configure_default_librenms_server,
@@ -17,11 +22,10 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_vm,
 )
-from netbox_librenms_plugin.utils import (
-    AmbiguousLibreNMSIdError,
-    find_interface_by_librenms_port_id,
-    get_librenms_device_id,
-    set_librenms_device_id,
+from netbox_librenms_plugin.tests.mapping_fixtures import (
+    custom_fields_without_mapping,
+    seed_mapping,
+    stored_mapping_for_test,
 )
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
@@ -30,6 +34,16 @@ SERVER_KEY = "default"
 PORT = 9301
 
 pytestmark = pytest.mark.django_db
+
+
+def _field_state(interface):
+    return (
+        interface.name,
+        interface.description,
+        interface.enabled,
+        stored_mapping_for_test(interface),
+        custom_fields_without_mapping(interface.custom_field_data),
+    )
 
 
 def _port(port_id, name):
@@ -47,14 +61,14 @@ def _port(port_id, name):
 
 
 def _bind(interface, port_id):
-    set_librenms_device_id(interface, port_id, SERVER_KEY)
+    seed_mapping(interface, SERVER_KEY, own=port_id, save=False)
     interface.save()
     return interface
 
 
 def _binding(interface):
     interface.refresh_from_db()
-    return get_librenms_device_id(interface, SERVER_KEY, auto_save=False)
+    return read_mapping(interface).own_id(SERVER_KEY)
 
 
 def _vm_interface(name, port_id):
@@ -92,14 +106,14 @@ class TestTheSharedLookup:
     def test_a_vm_interface_is_found_for_a_port_no_device_interface_holds(self):
         vm_interface = _vm_interface("lookup-vm", PORT)
 
-        assert find_interface_by_librenms_port_id(PORT, SERVER_KEY) == vm_interface
+        assert find_port_owner(PORT, server=SERVER_KEY) == vm_interface
 
     def test_a_holder_on_each_model_is_ambiguous(self):
         _vm_interface("lookup-both", PORT)
         _bind(make_interface(make_device("lookup-both-device"), "eth0"), PORT)
 
         with pytest.raises(AmbiguousLibreNMSIdError):
-            find_interface_by_librenms_port_id(PORT, SERVER_KEY)
+            find_port_owner(PORT, server=SERVER_KEY)
 
 
 class TestTheSyncWriter:
@@ -150,7 +164,7 @@ class TestTheSyncWriter:
         vm_interface = _vm_interface("writer", PORT)
         interface = make_interface(make_device("writer-device"), "eth0")
 
-        before = (interface.name, interface.description, interface.enabled, interface.custom_field_data.copy())
+        before = _field_state(interface)
         with pytest.raises(ValueError, match="already assigned"):
             update_interface_from_port(
                 interface,
@@ -162,9 +176,9 @@ class TestTheSyncWriter:
                 created=False,
                 fresh_read_queryset=Interface.objects.all(),
             )
-        assert (interface.name, interface.description, interface.enabled, interface.custom_field_data) == before
+        assert _field_state(interface) == before
         interface.refresh_from_db()
-        assert (interface.name, interface.description, interface.enabled, interface.custom_field_data) == before
+        assert _field_state(interface) == before
 
         assert _binding(interface) is None
         assert _binding(vm_interface) == PORT
@@ -238,7 +252,19 @@ def _cable_scenario(librenms_server, settings, name, *, holder=None):
     map_device_to_librenms(remote_device, 9, server_key=server_key)
     librenms_server.register(
         "/api/v0/ports/500",
-        {"status": "ok", "port": [{**_PORT_KEYS_UNSET, "port_id": 500, "ifName": "Gi0/1", "ifType": "ethernetCsmacd"}]},
+        {
+            "status": "ok",
+            "port": [
+                {
+                    **_PORT_KEYS_UNSET,
+                    "port_id": 500,
+                    "device_id": 9,
+                    "deleted": 0,
+                    "ifName": "Gi0/1",
+                    "ifType": "ethernetCsmacd",
+                }
+            ],
+        },
     )
     if holder is not None:
         _hold_cable_port(name, holder, server_key)
@@ -256,7 +282,7 @@ def _hold_cable_port(name, holder, server_key):
         held_by = VMInterface.objects.create(virtual_machine=vm, name="Gi0/1")
     else:
         held_by = make_interface(make_device(f"{name}-third"), "Gi0/1")
-    set_librenms_device_id(held_by, 500, server_key)
+    seed_mapping(held_by, server_key, own=500, save=False)
     held_by.save()
 
 

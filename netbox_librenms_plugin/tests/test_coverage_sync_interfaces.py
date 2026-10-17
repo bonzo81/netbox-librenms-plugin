@@ -12,6 +12,7 @@ from netbox_librenms_plugin.interface_relationships import (
     interface_owner_for_object,
     resolve_interface_by_port_id,
 )
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
     _PORT_KEYS_UNSET,
     configure_default_librenms_server,
@@ -21,6 +22,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
 )
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
 from netbox_librenms_plugin.tests.view_test_helpers import (
     grant,
     make_request,
@@ -29,9 +31,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     message_texts,
     missing_pk,
 )
-from netbox_librenms_plugin.tests.view_test_helpers import (
-    post as _post,
-)
+from netbox_librenms_plugin.tests.view_test_helpers import post as _post
 
 
 # The views here are built with real requests and real users, so the whole file needs the DB.
@@ -154,7 +154,7 @@ def _cache_relationship(view, obj, relation_field, source_id, related_id, source
     """Seed the real VC-scoped cache snapshot required by an inline relationship POST."""
     from django.core.cache import cache
 
-    from netbox_librenms_plugin.utils import get_librenms_sync_device
+    from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
     cache_obj = get_librenms_sync_device(obj, server_key="default") or obj
     cache_key = view.get_cache_key(cache_obj, "ports", "default")
@@ -216,14 +216,13 @@ class TestSyncInterfaceParentViewPermissions:
         from virtualization.models import VirtualMachine, VMInterface
 
         from netbox_librenms_plugin.tests.conftest import make_vm
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         vm = make_vm("parent-permissions-vm")
         child = VMInterface.objects.create(virtual_machine=vm, name="Ethernet1.100")
         parent = VMInterface.objects.create(virtual_machine=vm, name="Ethernet1")
-        set_librenms_device_id(child, 10, "default")
-        set_librenms_device_id(parent, 11, "default")
+        seed_mapping(child, own=10, save=False)
+        seed_mapping(parent, own=11, save=False)
         child.save()
         parent.save()
         user = make_user_with_perms(
@@ -708,7 +707,6 @@ class TestInterfaceContextOOBRows:
         from dcim.models import VirtualChassis
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         master = make_device("oob-collision-scope-master")
@@ -719,7 +717,7 @@ class TestInterfaceContextOOBRows:
             device.vc_position = position
             device.save()
         host_interface = make_interface(member, "eth0")
-        set_librenms_device_id(host_interface, 9401, "default")
+        seed_mapping(host_interface, own=9401, save=False)
         host_interface.save()
         snapshot = {
             "ports": [
@@ -850,14 +848,13 @@ class TestInterfaceContextOOBRows:
 
     def test_name_fallback_does_not_match_an_interface_bound_to_another_port(self):
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         device = make_device("table-conflicting-port-id")
         wrong_interface = make_interface(device, "Ethernet1")
         aggregate = make_interface(device, "Port-Channel1", iface_type="lag")
-        set_librenms_device_id(wrong_interface, 30, "default")
-        set_librenms_device_id(aggregate, 40, "default")
+        seed_mapping(wrong_interface, own=30, save=False)
+        seed_mapping(aggregate, own=40, save=False)
         wrong_interface.save()
         aggregate.save()
         snapshot = {
@@ -893,12 +890,11 @@ class TestInterfaceContextOOBRows:
 
     def test_relationship_button_is_hidden_when_related_interface_does_not_exist(self):
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         device = make_device("table-missing-related-interface")
         source = make_interface(device, "Ethernet1")
-        set_librenms_device_id(source, 10, "default")
+        seed_mapping(source, own=10, save=False)
         source.save()
         snapshot = {
             "ports": [
@@ -930,20 +926,49 @@ class TestInterfaceContextOOBRows:
         assert row["lag_sync_status"] == "missing_nb"
         assert "lag-sync-btn" not in str(context["table"].render_parent(None, row))
 
+    def test_a_related_interface_with_a_malformed_binding_is_not_a_name_match(self):
+        """A malformed binding is never unbound, so a same-name LAG cannot stand for the LibreNMS LAG port."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+        device = make_device("table-malformed-related-binding")
+        lag = make_interface(device, "Port-Channel1", iface_type="lag")
+        seed_stored_mapping(lag, {"default": {"id": "junk"}}, save=True)
+        source = make_interface(device, "Ethernet1")
+        seed_mapping(source, own=10, save=False)
+        source.lag = lag
+        source.save()
+        snapshot = {
+            "ports": [
+                {"port_id": 10, "ifName": "Ethernet1", "ifType": "ethernetCsmacd"},
+                {"port_id": 20, "ifName": "Port-Channel1", "ifType": "ieee8023adLag"},
+            ],
+            "port_stack_relationships": {"lag_members": {10: 20}, "sub_interfaces": {}},
+        }
+        request = _make_request()
+        view = DeviceInterfaceTableView()
+        api = object.__new__(LibreNMSAPI)
+        api.server_key = "default"
+        view._librenms_api = api
+        view.request = request
+
+        view.get_context_data(request, device, "ifName", "default", fresh_data=snapshot, sync_device=device)
+
+        assert snapshot["ports"][0]["lag_sync_status"] == "mismatch"
+
     def test_relationship_button_resolves_an_unbound_same_name_source(self):
         from types import SimpleNamespace
 
         from django.core.cache import cache
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         device = make_device("table-unbound-relationship-source")
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
-        set_librenms_device_id(parent, 20, "default")
+        seed_mapping(parent, own=20, save=False)
         parent.save()
         snapshot = {
             "ports": [
@@ -1008,7 +1033,6 @@ class TestInterfaceContextOOBRows:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
@@ -1016,7 +1040,7 @@ class TestInterfaceContextOOBRows:
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
         for interface, port_id in ((child, 10), (parent, 20)):
-            set_librenms_device_id(interface, port_id, "default")
+            seed_mapping(interface, own=port_id, save=False)
             interface.save()
         snapshot = {
             "ports": [
@@ -1074,7 +1098,6 @@ class TestInterfaceContextOOBRows:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
@@ -1082,8 +1105,8 @@ class TestInterfaceContextOOBRows:
         source = make_interface(device, "Ethernet", iface_type="virtual")
         first_parent = make_interface(device, "Parent1")
         second_parent = make_interface(device, "Parent2")
-        set_librenms_device_id(first_parent, 20, "default")
-        set_librenms_device_id(second_parent, 21, "default")
+        seed_mapping(first_parent, own=20, save=False)
+        seed_mapping(second_parent, own=21, save=False)
         first_parent.save()
         second_parent.save()
         snapshot = {
@@ -1143,7 +1166,6 @@ class TestInterfaceContextOOBRows:
 
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         device = make_device("stale-inline-parent")
@@ -1151,7 +1173,7 @@ class TestInterfaceContextOOBRows:
         old_parent = make_interface(device, "Ethernet1")
         current_parent = make_interface(device, "Ethernet2")
         for interface, port_id in ((child, 10), (old_parent, 20), (current_parent, 30)):
-            set_librenms_device_id(interface, port_id, "default")
+            seed_mapping(interface, own=port_id, save=False)
             interface.save()
         snapshot = {
             "ports": [
@@ -1189,7 +1211,6 @@ class TestInterfaceContextOOBRows:
 
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         device = make_device("conflicting-canonical-inline-edge")
@@ -1197,7 +1218,7 @@ class TestInterfaceContextOOBRows:
         first_parent = make_interface(device, "Ethernet1")
         second_parent = make_interface(device, "Ethernet2")
         for interface, port_id in ((child, 10), (first_parent, 20), (second_parent, 30)):
-            set_librenms_device_id(interface, port_id, "default")
+            seed_mapping(interface, own=port_id, save=False)
             interface.save()
         snapshot = {
             "ports": [
@@ -1237,7 +1258,6 @@ class TestInterfaceContextOOBRows:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
@@ -1245,7 +1265,7 @@ class TestInterfaceContextOOBRows:
         source = make_interface(member1, "Ethernet1")
         first_aggregate = make_interface(member1, "Port-Channel1")
         second_aggregate = make_interface(member2, "Port-Channel1")
-        set_librenms_device_id(source, 10, "default")
+        seed_mapping(source, own=10, save=False)
         source.save()
         snapshot = {
             "ports": [
@@ -1301,7 +1321,6 @@ class TestInterfaceContextOOBRows:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
@@ -1310,7 +1329,7 @@ class TestInterfaceContextOOBRows:
         first_aggregate = make_interface(member1, "Port-Channel1")
         second_aggregate = make_interface(member2, "Port-Channel2")
         for interface, port_id in ((source, 10), (first_aggregate, 20), (second_aggregate, 20)):
-            set_librenms_device_id(interface, port_id, "default")
+            seed_mapping(interface, own=port_id, save=False)
             interface.save()
         snapshot = {
             "ports": [
@@ -1362,15 +1381,14 @@ class TestInterfaceContextOOBRows:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         device = make_device("duplicate-cached-related-id")
         source = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
-        set_librenms_device_id(source, 10, "default")
-        set_librenms_device_id(parent, 20, "default")
+        seed_mapping(source, own=10, save=False)
+        seed_mapping(parent, own=20, save=False)
         source.save()
         parent.save()
         snapshot = {
@@ -1419,7 +1437,6 @@ class TestInterfaceContextOOBRows:
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.object_sync.devices import (
             DeviceInterfaceTableView,
             SingleInterfaceVerifyView,
@@ -1428,8 +1445,8 @@ class TestInterfaceContextOOBRows:
         device = make_device("duplicate-cached-source-id")
         source = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
-        set_librenms_device_id(source, 10, "default")
-        set_librenms_device_id(parent, 20, "default")
+        seed_mapping(source, own=10, save=False)
+        seed_mapping(parent, own=20, save=False)
         source.save()
         parent.save()
         snapshot = {
@@ -1551,7 +1568,6 @@ class TestInterfaceContextOOBRows:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
@@ -1560,7 +1576,7 @@ class TestInterfaceContextOOBRows:
         duplicate_source = make_interface(device, "Ethernet2")
         aggregate = make_interface(device, "Port-Channel1", iface_type="lag")
         for interface, port_id in ((source, 10), (duplicate_source, 10), (aggregate, 20)):
-            set_librenms_device_id(interface, port_id, "default")
+            seed_mapping(interface, own=port_id, save=False)
             interface.save()
         snapshot = {
             "ports": [
@@ -1615,15 +1631,14 @@ class TestInterfaceContextOOBRows:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         device = make_device("hidden-related-interface-action")
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
-        set_librenms_device_id(child, 10, "default")
-        set_librenms_device_id(parent, 20, "default")
+        seed_mapping(child, own=10, save=False)
+        seed_mapping(parent, own=20, save=False)
         child.save()
         parent.save()
         user = make_user_with_perms("hidden-related-interface-action", [("view", Device)])
@@ -1682,7 +1697,6 @@ class TestInterfaceContextOOBRows:
         from ipam.models import VLAN, VLANGroup
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
@@ -1703,8 +1717,8 @@ class TestInterfaceContextOOBRows:
         VLAN.objects.create(vid=100, name="Hidden Row Owner VLAN", group=hidden_group, status="active")
         source = make_interface(hidden_member, "Ethernet2.100", iface_type="virtual")
         parent = make_interface(page_device, "Ethernet1")
-        set_librenms_device_id(source, 10, "default")
-        set_librenms_device_id(parent, 20, "default")
+        seed_mapping(source, own=10, save=False)
+        seed_mapping(parent, own=20, save=False)
         source.save()
         parent.save()
         user = make_user_with_perms("hidden-row-owner-vc", [])
@@ -1872,7 +1886,6 @@ class TestInterfaceContextVirtualChassisOwner:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
@@ -1881,7 +1894,7 @@ class TestInterfaceContextVirtualChassisOwner:
         wrong = make_interface(other_member, "Vlan2", iface_type="virtual")
         correct.description = "original correct"
         wrong.description = "original other"
-        set_librenms_device_id(correct, 10, "default")
+        seed_mapping(correct, own=10, save=False)
         correct.save()
         wrong.save()
 
@@ -1991,7 +2004,6 @@ class TestInterfaceContextVirtualChassisOwner:
         from ipam.models import VLAN, VLANGroup
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         _virtual_chassis, (member1, member2) = make_virtual_chassis_members("row-vlan-owner")
@@ -2017,7 +2029,7 @@ class TestInterfaceContextVirtualChassisOwner:
         VLAN.objects.create(vid=100, name="Rack 1 VLAN", group=group1, status="active")
         VLAN.objects.create(vid=100, name="Rack 2 VLAN", group=group2, status="active")
         interface = make_interface(member2, "Ethernet2")
-        set_librenms_device_id(interface, 10, "default")
+        seed_mapping(interface, own=10, save=False)
         interface.save()
         port = {
             "port_id": 10,
@@ -2136,7 +2148,6 @@ class TestInterfaceContextVirtualChassisOwner:
         from ipam.models import VLAN, VLANGroup
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
@@ -2164,7 +2175,7 @@ class TestInterfaceContextVirtualChassisOwner:
         expected_vlan = VLAN.objects.create(vid=100, name="Target member VLAN", group=group2, status="active")
         VLAN.objects.create(vid=100, name="Global fallback VLAN", group=None, status="active")
         interface = make_interface(member2, "Ethernet2")
-        set_librenms_device_id(interface, 10, "default")
+        seed_mapping(interface, own=10, save=False)
         interface.save()
         snapshot = {
             "ports": [
@@ -2380,12 +2391,11 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Interface
         from django.db.models.signals import post_init
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _virtual_chassis, (page_device, target_device) = make_virtual_chassis_members("auto-owner-candidate-scope")
         target = make_interface(target_device, "Ethernet2")
-        set_librenms_device_id(target, 10, "default")
+        seed_mapping(target, own=10, save=False)
         target.save()
         for index in range(40):
             make_interface(page_device, f"unrelated-{index}")
@@ -2457,14 +2467,13 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("bulk-exclude-lag-type")
         member = make_interface(device, "Ethernet1")
         aggregate = make_interface(device, "Port-Channel1", iface_type="other")
         for interface, port_id in ((member, 10), (aggregate, 20)):
-            set_librenms_device_id(interface, port_id, "default")
+            seed_mapping(interface, own=port_id, save=False)
             interface.save()
         user = make_user_with_perms(
             "bulk-exclude-lag-type",
@@ -2519,14 +2528,13 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("bulk-lag-type-repair")
         member = make_interface(device, "Ethernet1")
         aggregate = make_interface(device, "Port-Channel1", iface_type="lag")
         for interface, port_id in ((member, 10), (aggregate, 20)):
-            set_librenms_device_id(interface, port_id, "default")
+            seed_mapping(interface, own=port_id, save=False)
             interface.save()
         member.lag = aggregate
         member.save()
@@ -2587,13 +2595,12 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("bulk-unbound-related-parent")
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
-        set_librenms_device_id(child, 11, "default")
+        seed_mapping(child, own=11, save=False)
         child.save()
         user = make_user_with_perms(
             "bulk-unbound-related-parent",
@@ -2644,7 +2651,7 @@ class TestSyncInterfacesViewPost:
         child.refresh_from_db()
         parent.refresh_from_db()
         assert child.parent_id == parent.pk
-        assert parent.custom_field_data.get("librenms_id") is None
+        assert stored_mapping_for_test(parent) is None
 
     def test_cross_page_parent_keeps_unsubmitted_vlan_group(self):
         from types import SimpleNamespace
@@ -2653,7 +2660,6 @@ class TestSyncInterfacesViewPost:
         from django.core.cache import cache
         from ipam.models import VLAN, VLANGroup
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("cross-page-parent-vlan")
@@ -2665,10 +2671,10 @@ class TestSyncInterfacesViewPost:
         parent = make_interface(device, "Ethernet1")
         parent.mode = "access"
         parent.untagged_vlan = kept_vlan
-        set_librenms_device_id(parent, 10, "default")
+        seed_mapping(parent, own=10, save=False)
         parent.save()
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
-        set_librenms_device_id(child, 11, "default")
+        seed_mapping(child, own=11, save=False)
         child.save()
 
         user = make_user_with_perms(
@@ -2736,14 +2742,13 @@ class TestSyncInterfacesViewPost:
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _virtual_chassis, (page_device, member_device) = make_virtual_chassis_members("cross-page-lag-member")
         aggregate = make_interface(page_device, "Port-Channel1", iface_type="lag")
         member = make_interface(member_device, "Ethernet2")
-        set_librenms_device_id(aggregate, 100, "default")
-        set_librenms_device_id(member, 10, "default")
+        seed_mapping(aggregate, own=100, save=False)
+        seed_mapping(member, own=10, save=False)
         aggregate.save()
         member.save()
         user = make_user_with_perms(
@@ -2819,12 +2824,11 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _virtual_chassis, (page_device, member_device) = make_virtual_chassis_members("ifdescr-cross-page-member")
         aggregate = make_interface(member_device, "Bundle", iface_type="lag")
-        set_librenms_device_id(aggregate, 100, "default")
+        seed_mapping(aggregate, own=100, save=False)
         aggregate.save()
         user = make_user_with_perms(
             "ifdescr-cross-page-member",
@@ -2887,14 +2891,13 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _virtual_chassis, (page_device, other_member) = make_virtual_chassis_members("cross-member-lag")
         aggregate = make_interface(page_device, "Port-Channel1", iface_type="lag")
         member = make_interface(other_member, "Ethernet2")
-        set_librenms_device_id(aggregate, 100, "default")
-        set_librenms_device_id(member, 10, "default")
+        seed_mapping(aggregate, own=100, save=False)
+        seed_mapping(member, own=10, save=False)
         aggregate.save()
         member.save()
         user = make_user_with_perms(
@@ -2958,14 +2961,13 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _virtual_chassis, (page_device, other_member) = make_virtual_chassis_members("cross-member-parent")
         parent = make_interface(page_device, "Ethernet1")
         child = make_interface(other_member, "Ethernet2.100", iface_type="virtual")
-        set_librenms_device_id(parent, 10, "default")
-        set_librenms_device_id(child, 11, "default")
+        seed_mapping(parent, own=10, save=False)
+        seed_mapping(child, own=11, save=False)
         parent.save()
         child.save()
         user = make_user_with_perms(
@@ -3029,15 +3031,14 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _virtual_chassis, (page_device, other_member) = make_virtual_chassis_members("invalid-parent-target")
         outside_device = make_device("invalid-parent-target-outside")
         child = make_interface(page_device, "Ethernet1.100", iface_type="virtual")
         existing_parent = make_interface(other_member, "Ethernet1")
-        set_librenms_device_id(child, 11, "default")
-        set_librenms_device_id(existing_parent, 10, "default")
+        seed_mapping(child, own=11, save=False)
+        seed_mapping(existing_parent, own=10, save=False)
         child.save()
         existing_parent.save()
         user = make_user_with_perms(
@@ -3097,14 +3098,13 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _virtual_chassis, (page_device, other_member) = make_virtual_chassis_members("view-only-parent-owner")
         child = make_interface(page_device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(other_member, "Ethernet1", iface_type="virtual")
-        set_librenms_device_id(child, 11, "default")
-        set_librenms_device_id(parent, 10, "default")
+        seed_mapping(child, own=11, save=False)
+        seed_mapping(parent, own=10, save=False)
         child.save()
         parent.save()
         user = make_user_with_perms(
@@ -3168,12 +3168,11 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _virtual_chassis, (page_device, child_member) = make_virtual_chassis_members("unbound-logical-parent-owner")
         child = make_interface(child_member, "Ethernet2.100", iface_type="virtual")
-        set_librenms_device_id(child, 11, "default")
+        seed_mapping(child, own=11, save=False)
         child.save()
         user = make_user_with_perms(
             "unbound-logical-parent-owner",
@@ -3305,14 +3304,13 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("blank-selected-interface-name")
         child = make_interface(device, "Ethernet2", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
-        set_librenms_device_id(child, 11, "default")
-        set_librenms_device_id(parent, 10, "default")
+        seed_mapping(child, own=11, save=False)
+        seed_mapping(parent, own=10, save=False)
         child.save()
         parent.save()
         user = make_user_with_perms(
@@ -3409,17 +3407,16 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         _virtual_chassis, (member1, member2) = make_virtual_chassis_members("stable-selection")
         selected_interface = make_interface(member1, "Ethernet")
         selected_interface.description = "old selected"
-        set_librenms_device_id(selected_interface, 10, "default")
+        seed_mapping(selected_interface, own=10, save=False)
         selected_interface.save()
         untouched_interface = make_interface(member2, "Ethernet")
         untouched_interface.description = "old untouched"
-        set_librenms_device_id(untouched_interface, 11, "default")
+        seed_mapping(untouched_interface, own=11, save=False)
         untouched_interface.save()
 
         user = make_user_with_perms(
@@ -3481,13 +3478,12 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("same-device-stable-selection")
         existing = make_interface(device, "Ethernet")
         existing.description = "original port"
-        set_librenms_device_id(existing, 10, "default")
+        seed_mapping(existing, own=10, save=False)
         existing.save()
 
         user = make_user_with_perms(
@@ -3535,7 +3531,7 @@ class TestSyncInterfacesViewPost:
 
         assert response.status_code == 302
         existing.refresh_from_db()
-        assert get_librenms_device_id(existing, "default") == 10
+        assert read_mapping(existing).own_id("default") == 10
         assert existing.description == "original port"
         assert Interface.objects.filter(device=device, name="Ethernet").count() == 1
 
@@ -3545,12 +3541,11 @@ class TestSyncInterfacesViewPost:
         from django.core.cache import cache
         from virtualization.models import VirtualMachine, VMInterface
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         vm = make_vm("same-vm-stable-selection")
         existing = VMInterface.objects.create(virtual_machine=vm, name="Ethernet", description="original port")
-        set_librenms_device_id(existing, 10, "default")
+        seed_mapping(existing, own=10, save=False)
         existing.save()
 
         user = make_user_with_perms(
@@ -3598,7 +3593,7 @@ class TestSyncInterfacesViewPost:
 
         assert response.status_code == 302
         existing.refresh_from_db()
-        assert get_librenms_device_id(existing, "default") == 10
+        assert read_mapping(existing).own_id("default") == 10
         assert existing.description == "original port"
         assert VMInterface.objects.filter(virtual_machine=vm, name="Ethernet").count() == 1
 
@@ -3619,7 +3614,6 @@ class TestSyncInterfacesViewPost:
         from django.core.cache import cache
         from virtualization.models import VirtualMachine, VMInterface
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         if object_type == "device":
@@ -3633,11 +3627,10 @@ class TestSyncInterfacesViewPost:
             owner_filter = {"virtual_machine": obj}
             permissions = [("view", VirtualMachine), ("add", VMInterface), ("change", VMInterface)]
 
-        existing = interface_model.objects.create(
-            **owner_filter,
-            name="Ethernet",
-            description="original description",
-            custom_field_data={"librenms_id": {"default": stored_entry}},
+        existing = seed_stored_mapping(
+            interface_model(**owner_filter, name="Ethernet", description="original description"),
+            {"default": stored_entry},
+            save=True,
         )
         user = make_user_with_perms(f"corrupt-name-fallback-{object_type}", permissions)
         request = _make_request(
@@ -3674,8 +3667,8 @@ class TestSyncInterfacesViewPost:
 
         assert response.status_code == 302
         existing.refresh_from_db()
-        assert existing.custom_field_data["librenms_id"] == {"default": stored_entry}
-        assert get_librenms_device_id(existing, "default", auto_save=False) is None
+        assert stored_mapping_for_test(existing) == {"default": stored_entry}
+        assert read_mapping(existing).own_id("default") is None
         assert existing.description == "original description"
         assert interface_model.objects.filter(**owner_filter, name="Ethernet").count() == 1
 
@@ -3757,7 +3750,6 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface, VirtualChassis
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         master = make_device("oob-sync-scope-master")
@@ -3768,7 +3760,7 @@ class TestSyncInterfacesViewPost:
             device.vc_position = position
             device.save()
         host_interface = make_interface(member, "eth0")
-        set_librenms_device_id(host_interface, 9401, "default")
+        seed_mapping(host_interface, own=9401, save=False)
         host_interface.save()
         user = make_user_with_perms(
             "oob-sync-scope",
@@ -3808,8 +3800,8 @@ class TestSyncInterfacesViewPost:
         assert response.status_code == 302
         master_interface = Interface.objects.get(device=master, name="eth0")
         member_interface = Interface.objects.get(device=member, name="eth0")
-        assert get_librenms_device_id(master_interface, "default", auto_save=False) == 9402
-        assert get_librenms_device_id(member_interface, "default", auto_save=False) == 9401
+        assert read_mapping(master_interface).own_id("default") == 9402
+        assert read_mapping(member_interface).own_id("default") == 9401
 
     @pytest.mark.parametrize(
         "case",
@@ -3822,7 +3814,6 @@ class TestSyncInterfacesViewPost:
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.view_test_helpers import grant
-        from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
@@ -3838,7 +3829,7 @@ class TestSyncInterfacesViewPost:
         bound = None
         if case in ("bound_page", "bound_member"):
             bound = make_interface(page if case == "bound_page" else member, "old-port-name")
-            set_librenms_device_id(bound, 9412, "default")
+            seed_mapping(bound, own=9412, save=False)
             bound.save()
         post_data = {
             "select": ["9411", "9412"] if case == "host_both" else ["9412"],
@@ -3873,15 +3864,15 @@ class TestSyncInterfacesViewPost:
         elif case in ("host_both", "host_unselected"):
             assert not Interface.objects.filter(device=page).exists()
             oob = Interface.objects.get(device=member, name=f"{name}-oob")
-            assert get_librenms_device_id(oob, "default", auto_save=False) == 9412
+            assert read_mapping(oob).own_id("default") == 9412
             assert Interface.objects.filter(device=member).count() == (2 if case == "host_both" else 1)
             if case == "host_both":
                 host = Interface.objects.get(device=member, name=name)
-                assert get_librenms_device_id(host, "default", auto_save=False) == 9411
+                assert read_mapping(host).own_id("default") == 9411
         else:
             owner = page if case in ("explicit_page", "bound_page") else member
             interface = Interface.objects.get(device=owner, name=name)
-            assert get_librenms_device_id(interface, "default", auto_save=False) == 9412
+            assert read_mapping(interface).own_id("default") == 9412
             if bound is not None:
                 assert interface.pk == bound.pk
             assert Interface.objects.filter(device__in=[page, member]).count() == 1
@@ -3898,11 +3889,10 @@ class TestSyncInterfacesViewPost:
             build_interface_index,
             resolve_relationship_row,
         )
-        from netbox_librenms_plugin.utils import set_librenms_device_id
 
         device = make_device("oob-matched-host")
         iface = make_interface(device, "iDRAC-NIC")
-        set_librenms_device_id(iface, 9401, "default")
+        seed_mapping(iface, own=9401, save=False)
         iface.save()
 
         # The real index the view builds, so resolution runs against real lookup structures.
@@ -3924,7 +3914,6 @@ class TestSyncInterfacesViewPost:
 
         assert resolved == iface, "the OOB row owns this interface by port_id"
         assert port["exists_in_netbox"] is True
-        assert port["name_fallback_allowed"] is False, "an OOB row must never match by name"
 
     @pytest.mark.parametrize("selected_port_id", ["98", "99"])
     def test_a_shared_lom_row_is_reported_only_when_selected(self, selected_port_id):
@@ -3994,7 +3983,6 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("oob-name-collision")
@@ -4040,7 +4028,7 @@ class TestSyncInterfacesViewPost:
         host_interface.refresh_from_db()
         assert response.status_code == 302
         assert host_interface.description == "host interface"
-        assert get_librenms_device_id(host_interface, "default", auto_save=False) is None
+        assert read_mapping(host_interface).own_id("default") is None
         assert Interface.objects.filter(device=device, name="lom0").count() == 1
         assert not Interface.objects.filter(device=device, name="lom0-oob").exists()
         assert ("host interface already uses this name" in " ".join(message_texts(request, "warning"))) is viewable
@@ -4058,7 +4046,6 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("oob-name-collision-host")
@@ -4095,7 +4082,7 @@ class TestSyncInterfacesViewPost:
 
         assert response.status_code == 302
         derived = Interface.objects.get(device=device, name="eth0-oob")
-        assert get_librenms_device_id(derived, "default", auto_save=False) == 8502
+        assert read_mapping(derived).own_id("default") == 8502
         assert not Interface.objects.filter(device=device, name="eth0").exists()
 
     def test_a_host_oob_name_collision_syncs_under_the_derived_name(self):
@@ -4105,7 +4092,6 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("oob-collision-reported")
@@ -4139,7 +4125,7 @@ class TestSyncInterfacesViewPost:
             cache.delete(cache_key)
 
         interface = Interface.objects.get(device=device, name="mgmt0-oob")
-        assert get_librenms_device_id(interface, "default", auto_save=False) == 8602
+        assert read_mapping(interface).own_id("default") == 8602
         assert message_texts(request, "warning") == []
 
     def test_the_host_row_can_still_sync_its_own_name_after_an_oob_collision(self):
@@ -4149,7 +4135,6 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("oob-collision-host-wins")
@@ -4185,11 +4170,9 @@ class TestSyncInterfacesViewPost:
 
         host_interface = Interface.objects.filter(device=device, name="eth1").first()
         assert host_interface is not None, "the host row must still be able to create its interface"
-        assert get_librenms_device_id(host_interface, "default", auto_save=False) == 8701, (
-            "eth1 belongs to the host port, not the OOB port"
-        )
+        assert read_mapping(host_interface).own_id("default") == 8701, "eth1 belongs to the host port, not the OOB port"
         oob_interface = Interface.objects.get(device=device, name="eth1-oob")
-        assert get_librenms_device_id(oob_interface, "default", auto_save=False) == 8702
+        assert read_mapping(oob_interface).own_id("default") == 8702
 
     def test_an_unselected_shared_lom_row_is_not_reported_as_skipped(self):
         """A skip warning must describe a row the operator asked to sync.
@@ -4255,16 +4238,15 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("oob-collision-host-gone")
         host_interface = make_interface(device, "eno1")
-        set_librenms_device_id(host_interface, 8901, "default")
+        seed_mapping(host_interface, own=8901, save=False)
         host_interface.save()
         if bound_elsewhere:
             foreign = make_interface(make_device("oob-foreign-owner"), "eth9")
-            set_librenms_device_id(foreign, 8902, "default")
+            seed_mapping(foreign, own=8902, save=False)
             foreign.save()
 
         user = make_user_with_perms(
@@ -4301,9 +4283,7 @@ class TestSyncInterfacesViewPost:
             cache.delete(cache_key)
 
         host_interface.refresh_from_db()
-        assert get_librenms_device_id(host_interface, "default", auto_save=False) == 8901, (
-            "the host interface keeps its own port binding"
-        )
+        assert read_mapping(host_interface).own_id("default") == 8901, "the host interface keeps its own port binding"
         warnings = message_texts(request, "warning")
         if bound_elsewhere:
             assert not Interface.objects.filter(device=device, name="eno1-oob").exists()
@@ -4311,10 +4291,10 @@ class TestSyncInterfacesViewPost:
                 "1 interface(s) skipped: eno1-oob (LibreNMS port ID is already assigned to another NetBox interface)."
             ]
             foreign.refresh_from_db()
-            assert get_librenms_device_id(foreign, "default", auto_save=False) == 8902
+            assert read_mapping(foreign).own_id("default") == 8902
         else:
             oob_interface = Interface.objects.get(device=device, name="eno1-oob")
-            assert get_librenms_device_id(oob_interface, "default", auto_save=False) == 8902
+            assert read_mapping(oob_interface).own_id("default") == 8902
             assert warnings == []
 
     def test_duplicate_normalized_selected_port_id_is_rejected_before_writes(self):
@@ -4369,14 +4349,13 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("duplicate-normalized-related-id")
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
-        set_librenms_device_id(child, 10, "default")
-        set_librenms_device_id(parent, 20, "default")
+        seed_mapping(child, own=10, save=False)
+        seed_mapping(parent, own=20, save=False)
         child.save()
         parent.save()
         user = make_user_with_perms(
@@ -4423,13 +4402,11 @@ class TestSyncInterfacesViewPost:
         from dcim.models import Device, Interface
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
         device = make_device("padded-stable-port-id")
         interface = make_interface(device, "oldname")
-        interface.custom_field_data["librenms_id"] = {"default": "0010"}
-        interface.save()
+        seed_stored_mapping(interface, {"default": "0010"}, save=True)
         user = make_user_with_perms(
             "padded-stable-port-id",
             [("view", Device), ("add", Interface), ("change", Interface)],
@@ -4467,7 +4444,7 @@ class TestSyncInterfacesViewPost:
         assert response.status_code == 302
         interface.refresh_from_db()
         assert interface.name == "newname"
-        assert get_librenms_device_id(interface, "default", auto_save=False) == 10
+        assert read_mapping(interface).own_id("default") == 10
         assert Interface.objects.filter(device=device).count() == 1
 
 
@@ -4578,8 +4555,6 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         """A foreign port binding prevents every local field change, even when names match."""
         from dcim.models import Interface
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
-
         # The device the user is syncing — it legitimately owns its own Gi0/1.
         dev = make_device("sync-fallback-own")
         own_iface = make_interface(dev, "Gi0/1")
@@ -4587,7 +4562,7 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         # A DIFFERENT device whose Gi0/1 carries the LibreNMS port_id (stale/duplicate id).
         other = make_device("sync-fallback-other")
         other_iface = make_interface(other, "Gi0/1")
-        set_librenms_device_id(other_iface, 77, "default")
+        seed_mapping(other_iface, own=77, save=False)
         other_iface.save()
 
         librenms_port = {
@@ -4676,11 +4651,9 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         """A port_id stored on this device's own interface updates that interface directly, no duplicate."""
         from dcim.models import Interface
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
-
         dev = make_device("sync-prefers-own")
         iface = make_interface(dev, "Gi0/1")
-        set_librenms_device_id(iface, 42, "default")
+        seed_mapping(iface, own=42, save=False)
         iface.save()
 
         librenms_port = {
@@ -4707,12 +4680,10 @@ class TestSyncInterfacesViewSyncInterfaceDevice:
         """A foreign port binding refuses creation when no local interface exists."""
         from dcim.models import Interface
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
-
         dev = make_device("sync-conflict-nolocal")  # deliberately has NO Gi0/1
         other = make_device("sync-conflict-other")
         other_iface = make_interface(other, "Gi0/1")
-        set_librenms_device_id(other_iface, 77, "default")
+        seed_mapping(other_iface, own=77, save=False)
         other_iface.save()
 
         librenms_port = {
@@ -4747,8 +4718,7 @@ class TestSyncInterfacesViewSyncInterfaceVM:
 
         vm = make_vm("vmsync-portid")
         matched = VMInterface.objects.create(virtual_machine=vm, name="eth0")
-        matched.custom_field_data["librenms_id"] = {"default": 55}
-        matched.save()
+        seed_mapping(matched, "default", own=55)
         librenms_port = {**_PORT_KEYS_UNSET, "ifName": "renamed-in-librenms", "port_id": 55}
 
         _post_sync(client, settings, vm, [librenms_port], [55])
@@ -4759,11 +4729,9 @@ class TestSyncInterfacesViewSyncInterfaceVM:
 
 
 class TestSyncInterfacesViewUpdateInterfaceAttributes:
-    def test_port_id_calls_set_librenms_device_id(self, client, settings):
+    def test_port_id_is_bound_through_assign_own(self, client, settings):
         """An unbound interface that the row matches by name is bound to the row's port ID."""
         from dcim.models import Interface
-
-        from netbox_librenms_plugin.utils import get_librenms_device_id
 
         interface = make_interface(make_device("port-id-write"), "Gi0/1")
         librenms_port = {
@@ -4780,19 +4748,18 @@ class TestSyncInterfacesViewUpdateInterfaceAttributes:
         _post_sync(client, settings, interface.device, [librenms_port], [42])
 
         interface = Interface.objects.get(pk=interface.pk)
-        assert get_librenms_device_id(interface, "default", auto_save=False) == 42
+        assert read_mapping(interface).own_id("default") == 42
 
     def test_port_id_conflict_refuses_before_any_field_change(self):
         from dcim.models import Interface, MACAddress
 
-        from netbox_librenms_plugin.utils import LibreNMSPortBindingConflict, set_librenms_device_id
+        from netbox_librenms_plugin.server_mappings import LibreNMSPortBindingConflict
 
         from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
         from netbox_librenms_plugin.interface_sync import update_interface_from_port
 
         conflicting_owner = make_interface(make_device("port-id-owner"), "Gi0/0")
-        set_librenms_device_id(conflicting_owner, 42, "default")
-        conflicting_owner.save(update_fields=["custom_field_data"])
+        seed_mapping(conflicting_owner, own=42)
         interface = make_interface(make_device("port-id-target"), "Gi0/0")
         librenms_port = {
             **_PORT_KEYS_UNSET,
@@ -4900,10 +4867,9 @@ class TestSyncLagAndParentRelationships:
     @staticmethod
     def _iface(device, name, port_id, itype="1000base-t"):
         from netbox_librenms_plugin.tests.conftest import make_interface
-        from netbox_librenms_plugin.utils import set_librenms_device_id
 
         iface = make_interface(device, name, iface_type=itype)
-        set_librenms_device_id(iface, port_id, "default")
+        seed_mapping(iface, own=port_id, save=False)
         iface.save()
         return iface
 
@@ -4911,10 +4877,8 @@ class TestSyncLagAndParentRelationships:
     def _vm_iface(vm, name, port_id):
         from virtualization.models import VMInterface
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
-
         iface = VMInterface.objects.create(virtual_machine=vm, name=name)
-        set_librenms_device_id(iface, port_id, "default")
+        seed_mapping(iface, own=port_id, save=False)
         iface.save()
         return iface
 
@@ -5328,11 +5292,10 @@ class TestResolveInterfaceByPortId:
     def test_finds_interface_by_server_keyed_dict(self):
         """When librenms_id = {'production': 42}, resolves for port_id=42 and server_key='production'."""
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
-        from netbox_librenms_plugin.utils import set_librenms_device_id
 
         device = make_device("pci-byid")
         iface = make_interface(device, "Gi0/1", iface_type="1000base-t")
-        set_librenms_device_id(iface, 42, "production")  # stored as {"production": 42}
+        seed_mapping(iface, "production", own=42, save=False)  # stored as {"production": 42}
         iface.save()
 
         found, err = resolve_interface_by_port_id(device, "42", "production")
@@ -5343,12 +5306,11 @@ class TestResolveInterfaceByPortId:
     def test_returns_error_when_not_found(self):
         """Returns (None, error) when no interface has matching port_id."""
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
-        from netbox_librenms_plugin.utils import set_librenms_device_id
 
         device = make_device("pci-notfound")
         # An interface exists, but carries a different port id than the one we look up.
         iface = make_interface(device, "Gi0/1", iface_type="1000base-t")
-        set_librenms_device_id(iface, 42, "production")
+        seed_mapping(iface, "production", own=42, save=False)
         iface.save()
 
         found, err = resolve_interface_by_port_id(device, "99", "production")
@@ -5369,15 +5331,27 @@ class TestResolveInterfaceByPortId:
         assert err is None
         assert found == iface
 
+    def test_a_non_numeric_port_id_resolves_by_name_without_a_binding_error(self):
+        """A port ID that is not valid has nothing to contradict, so the name decides."""
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface
+
+        device = make_device("pci-namehint-invalid-port")
+        iface = make_interface(device, "lag-1", iface_type="lag")
+
+        found, err = resolve_interface_by_port_id(device, "abc", "production", name_hint="lag-1")
+
+        assert err is None
+        assert found == iface
+        assert read_mapping(iface).own_id("production") is None
+
     def test_ambiguous_port_id_returns_error_not_first_match(self):
         """Two interfaces carrying the same stale librenms_id must fail as ambiguous, not silently bind lag/parent to whichever happens to be first."""
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
-        from netbox_librenms_plugin.utils import set_librenms_device_id
 
         device = make_device("pci-ambig")
         for name in ("Gi0/1", "Gi0/2"):
             iface = make_interface(device, name, iface_type="1000base-t")
-            set_librenms_device_id(iface, 42, "production")  # same stale id on both
+            seed_mapping(iface, "production", own=42, save=False)  # same stale id on both
             iface.save()
 
         found, err = resolve_interface_by_port_id(device, "42", "production")
@@ -5446,10 +5420,9 @@ class TestResolveInterfaceByPortIdExpectedOwner:
     @staticmethod
     def _iface_with_librenms_id(device, name, port_id, server_key="default"):
         from netbox_librenms_plugin.tests.conftest import make_interface
-        from netbox_librenms_plugin.utils import set_librenms_device_id
 
         iface = make_interface(device, name, iface_type="1000base-t")
-        set_librenms_device_id(iface, port_id, server_key)
+        seed_mapping(iface, server_key, own=port_id, save=False)
         iface.save()
         return iface
 
@@ -5531,17 +5504,12 @@ class TestBulkRelationshipRobustness:
         device = make_device("rel-candidates")
         expected = set()
         for name, value in (("Et1", {"default": 8101}), ("Et2", {"default": {"id": "008102"}}), ("Et3", "8103")):
-            interface = make_interface(device, name)
-            interface.custom_field_data["librenms_id"] = value
-            interface.save(update_fields=["custom_field_data"])
-            expected.add(interface.pk)
-        decoy = make_interface(device, "Et4")
-        decoy.custom_field_data["librenms_id"] = {"default": 81010}
-        decoy.save(update_fields=["custom_field_data"])
+            expected.add(seed_stored_mapping(make_interface(device, name), value, save=True).pk)
+        seed_stored_mapping(make_interface(device, "Et4"), {"default": 81010}, save=True)
         port_ids = [8101, "8102", 8103, 810, *range(9100, 9100 + RELATIONSHIP_CANDIDATE_BATCH_SIZE)]
 
         batch = port_ids[:RELATIONSHIP_CANDIDATE_BATCH_SIZE]
-        sql = str(Interface.objects.filter(relationship_candidate_q("default", batch, ())).query)
+        sql = str(Interface.objects.filter(relationship_candidate_q(Interface, "default", batch, ())).query)
 
         assert sql.count(" ~ ") == 4
         assert relationship_candidate_ids(device, "default", port_ids, ()) == expected
@@ -5680,10 +5648,9 @@ class TestSyncInterfaceLagViewRealDB:
     @staticmethod
     def _iface(device, name, port_id, itype="1000base-t"):
         from netbox_librenms_plugin.tests.conftest import make_interface
-        from netbox_librenms_plugin.utils import set_librenms_device_id
 
         iface = make_interface(device, name, iface_type=itype)
-        set_librenms_device_id(iface, port_id, "default")
+        seed_mapping(iface, own=port_id, save=False)
         iface.save()
         return iface
 
@@ -5758,18 +5725,19 @@ class TestSyncInterfaceParentViewRealPermissions:
     def test_migrated_donor_rejects_direct_parent_sync(self):
         from types import SimpleNamespace
 
-        from netbox_librenms_plugin.utils import mark_librenms_migrated, set_librenms_device_id
+        from netbox_librenms_plugin.server_mappings import mark_migrated
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         donor = make_device("parent-migrated-donor")
         winner = make_device("parent-migrated-winner")
         child = make_interface(donor, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(donor, "Ethernet1")
-        set_librenms_device_id(child, 10, "default")
-        set_librenms_device_id(parent, 11, "default")
+        seed_mapping(child, own=10, save=False)
+        seed_mapping(parent, own=11, save=False)
         child.save()
         parent.save()
-        mark_librenms_migrated(donor, winner.pk, "default")
+        apply_mapping_change(donor, mark_migrated(donor, winner.pk, "default"))
         donor.save()
 
         request = _make_request({"port_id": "10", "parent_port_id": "11"})
@@ -5788,14 +5756,13 @@ class TestSyncInterfaceParentViewRealPermissions:
 
         from dcim.models import Device, Interface
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         device = make_device("parent-related-view-permission")
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
-        set_librenms_device_id(child, 10, "default")
-        set_librenms_device_id(parent, 11, "default")
+        seed_mapping(child, own=10, save=False)
+        seed_mapping(parent, own=11, save=False)
         child.save()
         parent.save()
 
@@ -5826,12 +5793,11 @@ class TestSyncInterfaceParentViewRealPermissions:
         import json
         from types import SimpleNamespace
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         device = make_device("parent-self-link")
         interface = make_interface(device, "Ethernet1")
-        set_librenms_device_id(interface, 12, "default")
+        seed_mapping(interface, own=12, save=False)
         interface.save()
         request = _make_request({"port_id": "12", "parent_port_id": "12", "parent_name": "Ethernet1"})
         view = SyncInterfaceParentView()
@@ -5850,14 +5816,13 @@ class TestSyncInterfaceParentViewRealPermissions:
     def test_name_fallback_rejects_interface_bound_to_a_different_port(self):
         from types import SimpleNamespace
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         device = make_device("parent-conflicting-id")
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         wrong_parent = make_interface(device, "Ethernet1")
-        set_librenms_device_id(child, 10, "default")
-        set_librenms_device_id(wrong_parent, 30, "default")
+        seed_mapping(child, own=10, save=False)
+        seed_mapping(wrong_parent, own=30, save=False)
         child.save()
         wrong_parent.save()
         request = _make_request({"port_id": "10", "parent_port_id": "20", "parent_name": "Ethernet1"})
@@ -5874,14 +5839,13 @@ class TestSyncInterfaceParentViewRealPermissions:
     def test_unknown_server_key_fails_closed_before_relationship_lookup(self):
         from types import SimpleNamespace
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
         device = make_device("parent-stale-server")
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
-        set_librenms_device_id(child, 10, "retired")
-        set_librenms_device_id(parent, 11, "retired")
+        seed_mapping(child, "retired", own=10, save=False)
+        seed_mapping(parent, "retired", own=11, save=False)
         child.save()
         parent.save()
         request = _make_request(
@@ -5924,6 +5888,8 @@ class TestPromoteLagAggregateShared:
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
         agg = make_interface(make_device("lag-single"), "ae0", iface_type="other")
+        # The relationship pass takes the before-state of the aggregate before it calls persist.
+        agg.snapshot()
         view = object.__new__(SyncInterfaceLagView)
         persist = view._prepare_related(agg)
 
@@ -5963,10 +5929,9 @@ class TestRelationshipSyncObjectScope:
     @staticmethod
     def _iface(device, name, port_id):
         from netbox_librenms_plugin.tests.conftest import make_interface
-        from netbox_librenms_plugin.utils import set_librenms_device_id
 
         iface = make_interface(device, name)
-        set_librenms_device_id(iface, port_id, "default")
+        seed_mapping(iface, own=port_id, save=False)
         iface.save()
         return iface
 
@@ -6141,7 +6106,6 @@ class TestRelationshipSyncObjectScope:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView, SyncInterfacesView
 
@@ -6150,10 +6114,9 @@ class TestRelationshipSyncObjectScope:
         visible_parent = make_interface(device, "Ethernet1")
         hidden_duplicate = make_interface(device, "Ethernet2")
         for interface, port_id in ((child, 10), (visible_parent, 20)):
-            set_librenms_device_id(interface, port_id, "default")
+            seed_mapping(interface, own=port_id, save=False)
             interface.save()
-        hidden_duplicate.custom_field_data["librenms_id"] = {"default": hidden_stored_id}
-        hidden_duplicate.save()
+        seed_stored_mapping(hidden_duplicate, {"default": hidden_stored_id}, save=True)
         user = make_user_with_perms(
             "hidden-duplicate-parent-id",
             [("view", Device), ("add", Interface)],
@@ -6225,7 +6188,6 @@ class TestRelationshipSyncObjectScope:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.utils import set_librenms_device_id
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView, SyncInterfacesView
 
@@ -6233,7 +6195,7 @@ class TestRelationshipSyncObjectScope:
         child = make_interface(member1, "Ethernet1.100", iface_type="virtual")
         visible_parent = make_interface(member1, "Ethernet1")
         make_interface(member2, "Ethernet1")
-        set_librenms_device_id(child, 10, "default")
+        seed_mapping(child, own=10, save=False)
         child.save()
         user = make_user_with_perms(
             "hidden-duplicate-parent-name",
@@ -6308,15 +6270,14 @@ def test_relinking_repairs_an_aggregate_edited_back_to_a_non_lag_type(settings):
     from django.core.cache import cache
 
     from netbox_librenms_plugin.tests.conftest import make_superuser
-    from netbox_librenms_plugin.utils import set_librenms_device_id
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
     server_key = configure_default_librenms_server(settings)
     device = make_device("lag-type-repair")
     member = make_interface(device, "Ethernet1")
     aggregate = make_interface(device, "Port-Channel1", iface_type="lag")
-    set_librenms_device_id(member, 10, server_key)
-    set_librenms_device_id(aggregate, 20, server_key)
+    seed_mapping(member, server_key, own=10, save=False)
+    seed_mapping(aggregate, server_key, own=20, save=False)
     aggregate.save()
     member.lag = aggregate
     member.save()
@@ -6361,17 +6322,16 @@ def test_relationship_name_fallback_checks_host_and_oob_rows(client, settings, e
     from django.urls import reverse
 
     from netbox_librenms_plugin.tests.conftest import make_superuser, map_device_to_librenms
-    from netbox_librenms_plugin.utils import set_librenms_device_id
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
     configure_default_librenms_server(settings)
     device = map_device_to_librenms(make_device("cross-source-parent"), 1, server_key="default")
     child = make_interface(device, "Ethernet1.100", iface_type="virtual")
     parent = make_interface(device, "Ethernet1")
-    set_librenms_device_id(child, 10, "default")
+    seed_mapping(child, own=10, save=False)
     child.save()
     if bound_parent:
-        set_librenms_device_id(parent, 20, "default")
+        seed_mapping(parent, own=20, save=False)
         parent.save()
     view = SyncInterfaceParentView()
     key = _cache_relationship(view, device, "sub_interfaces", 10, 20, child.name, parent.name)

@@ -62,7 +62,6 @@ from netbox_librenms_plugin.import_utils import (
     visible_object_label,
 )
 from netbox_librenms_plugin.import_utils.bulk_import import ambiguous_stack_groups, stack_identity
-from netbox_librenms_plugin.interface_sync import copy_before_change, keep_change_log_before_state
 from netbox_librenms_plugin.import_validation_helpers import (
     apply_cluster_to_validation,
     apply_host_to_validation,
@@ -73,30 +72,45 @@ from netbox_librenms_plugin.import_validation_helpers import (
 )
 from netbox_librenms_plugin.ip_addressing import parse_host_address
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.server_mappings import (
+    AmbiguousLibreNMSIdError,
+    ContainerStatus,
     SameServerIdentityConflict,
-    iter_server_mapping_entries,
+    attach_oob,
+    convert_legacy,
+    get_librenms_sync_device,
+    link_import,
+    lock_librenms_id_assignment,
+    merge_links,
+    persist_mapping,
+    persist_merge,
+    promote_to_host,
+    read_mapping,
 )
 from netbox_librenms_plugin.server_selection import parse_configured_server_key
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
-from netbox_librenms_plugin.transactions import classify_conflict, run_transaction
+from netbox_librenms_plugin.transactions import (
+    classify_conflict,
+    lock_and_snapshot,
+    run_transaction,
+    update_existing_row,
+)
 from netbox_librenms_plugin.utils import (
+    CREATE_MISSING_INTERFACES_PREFERENCE,
     IMPORT_CONTEXT_COLUMNS_PREFERENCE,
+    INTERFACE_SYNC_OPTIONS_PREFERENCE,
+    SET_PRIMARY_IP_PREFERENCE,
     acquire_advisory_transaction_lock,
-    add_librenms_server_mapping,
-    coerce_librenms_id,
     coerce_model_pk,
-    get_librenms_sync_device,
-    is_legacy_librenms_id,
-    lock_librenms_id_assignment,
     normalize_serial,
     resolve_naming_preferences,
-    resolve_server_mapping_display_id,
     same_host,
     save_interface_name_preference,
     save_user_pref,
     set_device_ip_fk,
     validate_import_context_columns,
+    validate_interface_sync_options,
     validation_error_detail,
     exception_text_for,
 )
@@ -362,43 +376,97 @@ def _mapping_change_is_allowed(view, model, pk) -> bool:
     return view.restricted_queryset(model, "change").filter(pk=pk).exists()
 
 
-def _lock_mapping_in_scope(view, model, lookup, duplicate_message):
+_MAPPING_CREATED_CONCURRENTLY = "Mapping was created concurrently. Please try again."
+
+
+def _write_mapping_in_scope(view, model, lookup, duplicate_message, *, field, target, existing_mapping, create):
     """
-    Read the candidate mapping pks unlocked, then lock the first one inside the change scope.
+    Run ``_write_mapping_rows`` in one atomic block, and return its error answer, or None.
+
+    A lock conflict propagates, so the lock-conflict middleware gives the "try again" answer.
+    """
+    try:
+        with transaction.atomic():
+            return _write_mapping_rows(
+                view,
+                model,
+                lookup,
+                duplicate_message,
+                field=field,
+                target=target,
+                existing_mapping=existing_mapping,
+                create=create,
+            )
+    except (ValidationError, IntegrityError) as exc:
+        if classify_conflict(exc):
+            raise
+        logger.exception("%s: failed to save mapping: %s", type(view).__name__, exc)
+        return _htmx_error_response("Error saving mapping. Please try again.")
+
+
+def _write_mapping_rows(view, model, lookup, duplicate_message, *, field, target, existing_mapping, create):
+    """
+    Point the one mapping of *lookup* at *target*, or create it with ``create()`` when it does not exist.
 
     Shared by the device-type and platform mapping views so the permission guarantee cannot drift
-    between two copies. Scope BEFORE locking: locking first lets a caller pin a row it cannot see
-    and stall concurrent work on it. The duplicate check still has to see every row, so it reads
-    unlocked and by pk only, materialised in one query (count() would drop the FOR UPDATE clause).
+    between two copies. The duplicate check has to see every row, so it reads unlocked and by pk
+    only. The row is then locked only inside the change scope (``update_existing_row``): locking
+    first would let a caller pin a row it cannot see and stall concurrent work on it.
 
     Args:
-        view: The calling view, used for ``restricted_queryset``.
-        model: The mapping model to lock.
+        view: The calling view, for ``restricted_queryset`` and the permission check.
+        model: The mapping model.
         lookup: Filter kwargs identifying the mapping's natural key.
         duplicate_message: Error text shown when more than one row matches.
+        field (str): The mapping's target field.
+        target (Model): The object that the mapping must point at.
+        existing_mapping (Model | None): The mapping that the upfront read found.
+        create (Callable[[], Model]): Creates the mapping.
 
     Returns:
-        tuple: ``(locked, None)`` on success, where *locked* is None when no row exists, or
-        ``(None, error_response)`` when the caller must stop.
+        HttpResponse | None: The error answer when the caller must stop, else None.
 
     """
     present_pks = list(model.objects.filter(**lookup).values_list("pk", flat=True)[:2])
     if len(present_pks) > 1:
-        return None, _htmx_error_response(duplicate_message)
+        return _htmx_error_response(duplicate_message)
     if not present_pks:
-        return None, None
-    locked = view.restricted_queryset(model, "change").select_for_update(of=("self",)).filter(pk=present_pks[0]).first()
-    # A row appeared (or left this caller's scope) after the upfront check.
-    if locked is None:
-        return None, _htmx_error_response("Existing mapping is no longer available.")
-    return locked, None
+        if existing_mapping:
+            # The mapping was deleted after the upfront read, so this is a create: it needs 'add'.
+            view.required_object_permissions = {"POST": [("view", type(target)), ("add", model)]}
+            if error := view.require_object_permissions("POST"):
+                return error
+        try:
+            create()
+        except IntegrityError:
+            # A concurrent request created it: select_for_update() cannot lock an absent row.
+            return _htmx_error_response(_MAPPING_CREATED_CONCURRENTLY)
+        except ValidationError:
+            # full_clean() on save found the row that a concurrent request committed after the read above.
+            if not model.objects.filter(**lookup).exists():
+                raise
+            return _htmx_error_response(_MAPPING_CREATED_CONCURRENTLY)
+        return None
+
+    def point_at_target(row):
+        if getattr(row, f"{field}_id") == target.pk:
+            return False
+        setattr(row, field, target)
+
+    try:
+        # The change scope is the permission check: a row that a concurrent request created is changed only inside it.
+        update_existing_row(view.restricted_queryset(model, "change").filter(pk=present_pks[0]), point_at_target)
+    except model.DoesNotExist:
+        if not existing_mapping:
+            return _htmx_error_response(_MAPPING_CREATED_CONCURRENTLY)
+        # The row left this caller's change scope (or was deleted) after the unlocked read.
+        return _htmx_error_response("Existing mapping is no longer available.")
+    return None
 
 
 def _lock_librenms_id_assignment_target(view, target_model, target_pk, librenms_id, server_key):
     """Lock one server/ID claim and its target, then reject ownership across Devices and VMs."""
     from virtualization.models import VirtualMachine as NetBoxVM
-
-    from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError
 
     try:
         locked_target, id_conflict = lock_librenms_id_assignment(
@@ -427,6 +495,10 @@ def _lock_librenms_id_assignment_target(view, target_model, target_pk, librenms_
         )
 
     return locked_target, None
+
+
+class _OobIpClaimed(Exception):
+    """The locked OOB address is no longer free to re-home to the interface."""
 
 
 def _oob_ip_is_reassignable(candidate, interface) -> bool:
@@ -625,23 +697,43 @@ def _device_type_rack_fit_error(device) -> HttpResponse | None:
     return None
 
 
+def _targeted_device_checks(row, update_fields):
+    """Return the error response of the checks that stand in for ``full_clean()`` on *update_fields*, or None."""
+    # full_clean() is intentionally skipped here (it would abort on unrelated legacy field
+    # values), but a device_type/platform write still carries the platform/manufacturer
+    # cross-field constraint with no DB backstop — validate just that one rule so an
+    # inconsistent pairing can't be persisted silently with a success toast.
+    if {"device_type", "platform"} & set(update_fields):
+        if mismatch := _platform_device_type_mismatch(row):
+            return mismatch
+    # A device_type write also bypasses Device.clean()'s rack-fit check; re-validate just that rule
+    # so a taller device_type can't overflow the rack elevation with a success toast.
+    if "device_type" in update_fields:
+        if rack_fit := _device_type_rack_fit_error(row):
+            return rack_fit
+    return None
+
+
 @transaction.atomic
-def _save_device(device, update_fields: list[str], request=None) -> HttpResponse | None:
+def _save_device(device, update_fields: list[str], request=None, mapping=None) -> HttpResponse | None:
     """
     Save the columns *update_fields* of a Device or VirtualMachine row, returning an HttpResponse on failure or None on success.
 
     The call uses ``save(update_fields=...)``, which writes only those columns and ``last_updated``
     and bypasses ``full_clean()``. The row may carry pre-existing inconsistencies on *other* fields
     (e.g. a legacy ``face`` value left behind after a rack was cleared), and a validation of those
-    untouched fields would block legitimate updates. The callers change the instance before the
-    call, so the change record takes its before-state from the row as stored.
+    untouched fields would block legitimate updates. The row is read again under its lock, its
+    before-state is recorded, and the callers' values of *update_fields* are copied to it.
+    *mapping*, a mapping change that the caller built on its locked row, is persisted in the same
+    save: its identities are claimed again and their owners checked first.
 
     Args:
         device: The NetBox Device or VirtualMachine to persist.
-        update_fields (list[str]): The columns to write.
+        update_fields (list[str]): The columns to write, apart from the mapping.
         request: The current HTTP request; when it is an HTMX request, errors are
             returned via ``_htmx_error_response()`` so modal swap/toast flows remain
             intact, otherwise plain ``HttpResponse`` status codes are used.
+        mapping (MappingChange | None): The row's mapping change.
 
     Returns:
         HttpResponse | None: An error response on failure, or None on success.
@@ -653,59 +745,57 @@ def _save_device(device, update_fields: list[str], request=None) -> HttpResponse
             return _htmx_error_response(msg)
         return HttpResponse(escape(msg), status=status)
 
-    stored = type(device).objects.select_for_update().filter(pk=device.pk).first()
-    if stored is None:
+    try:
+        stored = lock_and_snapshot(type(device).objects.filter(pk=device.pk))
+    except ObjectDoesNotExist:
         return _err("Could not save: the record may have been changed or deleted; refresh and retry.", 409)
-    before = copy_before_change(stored)
     for name in update_fields:
         field = device._meta.get_field(name)
         setattr(stored, field.attname, getattr(device, field.attname))
 
-    # full_clean() is intentionally skipped here (it would abort on unrelated legacy field
-    # values), but a device_type/platform write still carries the platform/manufacturer
-    # cross-field constraint with no DB backstop — validate just that one rule so an
-    # inconsistent pairing can't be persisted silently with a success toast.
-    if {"device_type", "platform"} & set(update_fields):
-        if mismatch := _platform_device_type_mismatch(stored):
-            return mismatch
-    # A device_type write also bypasses Device.clean()'s rack-fit check; re-validate just that rule
-    # so a taller device_type can't overflow the rack elevation with a success toast.
-    if "device_type" in update_fields:
-        if rack_fit := _device_type_rack_fit_error(stored):
-            return rack_fit
+    def write(row, mapping_fields=frozenset()):
+        if refusal := _targeted_device_checks(row, update_fields):
+            return refusal
+        try:
+            row.save(update_fields=[*update_fields, *mapping_fields, "last_updated"])
+        except IntegrityError:
+            logger.exception("Integrity error saving device pk=%s", getattr(device, "pk", None))
+            return _err("Could not save: a database integrity constraint was violated.", 409)
+        except ValidationError as exc:
+            logger.warning(
+                "Validation error saving %s pk=%s: %s", type(device).__name__, device.pk, validation_error_detail(exc)
+            )
+            user = getattr(request, "user", None)
+            return _err(f"Validation error: {exception_text_for(exc, type(device), user)}", 400)
+        except DataError:
+            # save(update_fields=...) skips full_clean(), so an overlong/invalid value
+            # from LibreNMS (e.g. a hostname past Device.name max_length) reaches the DB
+            # and raises DataError. Convert it to a clean toast instead of a 500.
+            logger.exception("Data error saving device pk=%s", getattr(device, "pk", None))
+            return _err("Could not save: a field value is invalid (for example, too long).", 400)
+        except DatabaseError as exc:
+            if classify_conflict(exc):
+                raise
+            # Catch-all for any other backend-level failure during the UPDATE (a lock conflict goes
+            # to the middleware; a connection drop, a backend that signals a 0-row forced UPDATE, etc.). Note: a
+            # plain save(update_fields=...) against a concurrently-deleted row does NOT reliably
+            # raise on Django 6.0 — it issues an UPDATE that affects 0 rows silently — so this is
+            # a defensive backstop, not a guaranteed concurrent-delete signal. Several callers
+            # don't re-lock the row first, so surface whatever does surface as a toast rather than
+            # a 500. (Must follow the IntegrityError / DataError handlers above — both subclass
+            # DatabaseError.)
+            logger.exception("Database error saving device pk=%s", getattr(device, "pk", None))
+            return _err("Could not save: the record may have been changed or deleted; refresh and retry.", 409)
+        return None
 
-    keep_change_log_before_state(stored, before)
-    try:
-        stored.save(update_fields=[*update_fields, "last_updated"])
-    except IntegrityError:
-        logger.exception("Integrity error saving device pk=%s", getattr(device, "pk", None))
-        return _err("Could not save: a database integrity constraint was violated.", 409)
-    except ValidationError as exc:
-        logger.warning(
-            "Validation error saving %s pk=%s: %s", type(device).__name__, device.pk, validation_error_detail(exc)
-        )
-        user = getattr(request, "user", None)
-        return _err(f"Validation error: {exception_text_for(exc, type(device), user)}", 400)
-    except DataError:
-        # save(update_fields=...) skips full_clean(), so an overlong/invalid value
-        # from LibreNMS (e.g. a hostname past Device.name max_length) reaches the DB
-        # and raises DataError. Convert it to a clean toast instead of a 500.
-        logger.exception("Data error saving device pk=%s", getattr(device, "pk", None))
-        return _err("Could not save: a field value is invalid (for example, too long).", 400)
-    except DatabaseError as exc:
-        if classify_conflict(exc):
-            raise
-        # Catch-all for any other backend-level failure during the UPDATE (a lock conflict goes
-        # to the middleware; a connection drop, a backend that signals a 0-row forced UPDATE, etc.). Note: a
-        # plain save(update_fields=...) against a concurrently-deleted row does NOT reliably
-        # raise on Django 6.0 — it issues an UPDATE that affects 0 rows silently — so this is
-        # a defensive backstop, not a guaranteed concurrent-delete signal. Several callers
-        # don't re-lock the row first, so surface whatever does surface as a toast rather than
-        # a 500. (Must follow the IntegrityError / DataError handlers above — both subclass
-        # DatabaseError.)
-        logger.exception("Database error saving device pk=%s", getattr(device, "pk", None))
-        return _err("Could not save: the record may have been changed or deleted; refresh and retry.", 409)
-    return None
+    if mapping is None:
+        return write(stored)
+    return persist_mapping(stored, mapping, write=write)
+
+
+def _save_mapping_only(row, mapping_fields):
+    """Save only the mapping: an ID-only write must not gate on the row's other fields."""
+    row.save(update_fields=[*mapping_fields, "last_updated"])
 
 
 def _get_hostname_for_action(request, validation: dict, libre_device: dict) -> str:
@@ -1978,8 +2068,8 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         """
         from django.conf import settings
 
-        cf_value = existing_device.custom_field_data.get("librenms_id")
-        if not isinstance(cf_value, dict):
+        mapping = read_mapping(existing_device)
+        if mapping.container is not ContainerStatus.SCOPED:
             return None
 
         plugins_config = settings.PLUGINS_CONFIG.get("netbox_librenms_plugin") or {}
@@ -1987,14 +2077,11 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         if not isinstance(servers_config, dict):
             servers_config = {}
         result = []
-        for sk, did in iter_server_mapping_entries(cf_value):
-            # Resolve the host id, falling back to the OOB controller's id for an OOB-only entry
-            # ({"oob": {...}} with no usable host "id"). An OOB-only link is still a real link to
-            # this server, so surface it like the device-sync modal (_build_all_server_mappings)
-            # does — via the SAME shared helper — instead of dropping it and showing "no link"
-            # (which can prompt a duplicate re-import). The helper centralizes the bool/int/str/
-            # positive coercion, so 0 / negative / malformed ids can't slip through.
-            did, _is_oob_only = resolve_server_mapping_display_id(did)
+        for entry in mapping.servers:
+            # The display ID falls back to the OOB controller's id for an OOB-only entry. An
+            # OOB-only link is still a real link to this server, so surface it like the device-sync
+            # modal does instead of showing "no link" (which can prompt a duplicate re-import).
+            sk, did = entry.server, entry.display_id
             if did is None:
                 continue
             srv_cfg = servers_config.get(sk)
@@ -2169,25 +2256,24 @@ class DeviceConflictActionView(
                 if lock_error is not None:
                     return lock_error
 
-                # Reject legacy bare-int/string librenms_id: set_librenms_device_id
-                # silently skips writes for legacy formats, leaving the device partially
-                # updated. User must run "Convert mapping" migration first. Shared predicate
-                # with AddAsOOBView and set_librenms_device_id so the three can't drift.
-                current_mapping = existing_device.custom_field_data.get("librenms_id")
-                if is_legacy_librenms_id(current_mapping):
+                # Reject legacy bare-int/string librenms_id: the builders skip a legacy value,
+                # which would leave the device partially updated. User must run "Convert mapping"
+                # migration first. The same predicate as AddAsOOBView and assign_own.
+                current_mapping = read_mapping(existing_device)
+                if current_mapping.container is ContainerStatus.LEGACY:
                     return _htmx_error_response(
                         "Object has a legacy bare-integer librenms_id; use 'Convert mapping' "
                         "to migrate to the multi-server format before linking."
                     )
-                if current_mapping is not None and not isinstance(current_mapping, dict):
+                if current_mapping.container is ContainerStatus.INVALID:
                     return _htmx_error_response("The existing LibreNMS mapping has an invalid format.")
 
                 try:
-                    add_librenms_server_mapping(
+                    mapping_change = link_import(
                         existing_device,
-                        librenms_id,
                         self.librenms_api.server_key,
-                        configured_server_keys=self.librenms_api.get_available_servers(),
+                        librenms_id,
+                        configured_servers=self.librenms_api.get_available_servers(),
                         confirmed_replacement_of=(
                             replacement_intent.current_host_id if replacement_intent is not None else None
                         ),
@@ -2201,11 +2287,13 @@ class DeviceConflictActionView(
                     # Link to LibreNMS and update name from LibreNMS data
                     hostname = _get_hostname_for_action(request, validation, libre_device)
                     existing_device.name = hostname
-                    fields = ["custom_field_data", "name"]
+                    fields = ["name"]
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
                         fields.append("device_type")
-                    if err := _save_device(existing_device, update_fields=fields, request=request):
+                    if err := _save_device(
+                        existing_device, update_fields=fields, request=request, mapping=mapping_change
+                    ):
                         return err
                     logger.info(f"Linked device '{existing_device.name}' to LibreNMS ID {librenms_id}")
 
@@ -2215,7 +2303,7 @@ class DeviceConflictActionView(
                     # Trimmed like validate/import_single_device, so the stored value and the
                     # conflict lookup can't disagree with the match paths on whitespace.
                     incoming_serial = normalize_serial(libre_device.get("serial")) if existing_model is Device else None
-                    fields = ["custom_field_data", "name"]
+                    fields = ["name"]
                     if incoming_serial and incoming_serial != "-":
                         if err := _apply_conflict_checked_serial(existing_device, incoming_serial, request.user):
                             return err
@@ -2224,7 +2312,9 @@ class DeviceConflictActionView(
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
                         fields.append("device_type")
-                    if err := _save_device(existing_device, update_fields=fields, request=request):
+                    if err := _save_device(
+                        existing_device, update_fields=fields, request=request, mapping=mapping_change
+                    ):
                         return err
                     logger.info(
                         f"Updated device '{existing_device.name}': serial={incoming_serial}, "
@@ -2235,7 +2325,7 @@ class DeviceConflictActionView(
                     # Update only the serial and link to LibreNMS
                     # Trimmed like validate/import_single_device (see the update branch above).
                     incoming_serial = normalize_serial(libre_device.get("serial"))
-                    fields = ["custom_field_data"]
+                    fields = []
                     if incoming_serial and incoming_serial != "-":
                         if err := _apply_conflict_checked_serial(existing_device, incoming_serial, request.user):
                             return err
@@ -2243,7 +2333,9 @@ class DeviceConflictActionView(
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
                         fields.append("device_type")
-                    if err := _save_device(existing_device, update_fields=fields, request=request):
+                    if err := _save_device(
+                        existing_device, update_fields=fields, request=request, mapping=mapping_change
+                    ):
                         return err
                     logger.info(
                         f"Updated serial on device '{existing_device.name}' to {incoming_serial}, "
@@ -2337,19 +2429,14 @@ class DeviceConflictActionView(
             # Migrate legacy bare-integer librenms_id to the JSON dict format.
             # Only safe when the integer matches the LibreNMS device ID for this server,
             # confirmed by serial match (or explicit force).
-            from netbox_librenms_plugin.utils import migrate_legacy_librenms_id
-
-            # Direct access needed to detect legacy integer format for migration prompt:
-            # LibreNMSAPI.get_librenms_id() returns an int in both formats; only the raw
-            # type check on custom_field_data reveals whether migration is needed.
-            cf_value = existing_device.custom_field_data.get("librenms_id")
-            if not is_legacy_librenms_id(cf_value):
+            legacy = read_mapping(existing_device).legacy
+            if not legacy.is_legacy:
                 return _htmx_error_response("Device librenms_id is already in JSON format; no migration needed.")
-            # coerce_librenms_id, not int(): a reader-only form ("4_2") never matches the rival-owner lookup below.
-            cf_int = coerce_librenms_id(cf_value)
+            # The strict rule, not int(): a reader-only form ("4_2") never matches the rival-owner lookup below.
+            cf_int = legacy.queryable_id
             if cf_int is None:
                 return _htmx_error_response(
-                    f"Legacy librenms_id {cf_value!r} is not a plain positive integer; cannot migrate safely."
+                    "The stored legacy librenms_id is not a plain positive integer; cannot migrate safely."
                 )
             # Verify the stored legacy ID matches the active LibreNMS device_id so we don't
             # migrate a stale/incorrect association to the wrong server mapping.
@@ -2374,26 +2461,22 @@ class DeviceConflictActionView(
                 if lock_error is not None:
                     return lock_error
                 # Re-check under lock — another request may have already migrated it
-                cf_locked = locked_device.custom_field_data.get("librenms_id")
-                if not is_legacy_librenms_id(cf_locked):
+                locked_legacy = read_mapping(locked_device).legacy
+                if not locked_legacy.is_legacy:
                     return _htmx_error_response("Device librenms_id is already in JSON format; no migration needed.")
-                cf_locked_int = coerce_librenms_id(cf_locked)
+                cf_locked_int = locked_legacy.queryable_id
                 if cf_locked_int != librenms_id:
                     return _htmx_error_response(
                         f"Legacy librenms_id changed under lock ({cf_locked_int} != {librenms_id}); cannot migrate safely."
                     )
-                # migrate_legacy_librenms_id refuses only the values is_legacy_librenms_id already
-                # rejects, and the locked value passed that gate above, so it cannot fail here.
+                # The locked value passed the legacy reader's gate above, so it converts.
                 locked_device.snapshot()
-                migrate_legacy_librenms_id(locked_device, server_key)
-                # Save only the field we actually mutated. Running full_clean() on the
-                # whole object would reject the migration over unrelated pre-existing
-                # validation issues (e.g. legacy rack face/position without a rack),
-                # which is too strict for an ID-only migration: the point of "Convert
-                # mapping" is to clean up the librenms_id custom field, not to gate
-                # on every other field being valid.
+                mapping_change = convert_legacy(locked_device, server_key)
+                # Save only the mapping. Running full_clean() on the whole object would reject
+                # the migration over unrelated pre-existing validation issues (e.g. legacy rack
+                # face/position without a rack), which is too strict for an ID-only migration.
                 try:
-                    locked_device.save(update_fields=["custom_field_data", "last_updated"])
+                    persist_mapping(locked_device, mapping_change, write=_save_mapping_only)
                 except IntegrityError:
                     logger.exception(
                         "Failed to persist migrated LibreNMS mapping for %s pk=%s",
@@ -2499,62 +2582,20 @@ class AddDeviceTypeMappingView(
         except DeviceType.DoesNotExist:
             return _htmx_error_response("Selected device type not found.")
 
-        try:
-            with transaction.atomic():
-                # Lock the row to close the window between the upfront permission
-                # check and the actual write (select_for_update prevents a concurrent
-                # INSERT from slipping through undetected). Materialise [:2] in one query
-                # (count() would drop the FOR UPDATE clause) and reject a concurrently-
-                # created duplicate rather than mutating an arbitrary row. Key on the
-                # NORMALISED hardware string (mapping_hardware) so the lock matches
-                # the existing_mapping lookup and create() below.
-                locked, lock_error = _lock_mapping_in_scope(
-                    self,
-                    DeviceTypeMapping,
-                    {"librenms_hardware__iexact": mapping_hardware},
-                    "Multiple mappings exist for this hardware string. Remove duplicates before updating.",
-                )
-                if lock_error is not None:
-                    return lock_error
-                if locked and not existing_mapping:
-                    # A concurrent request created the mapping after our upfront read.
-                    # Only escalate to change permission if we would actually mutate the row;
-                    # if the locked row already maps to the same device type this is a no-op
-                    # and the caller needs only the add permission they already passed above.
-                    if locked.netbox_device_type_id != device_type_id:
-                        self.required_object_permissions = {
-                            "POST": [("view", DeviceType), ("change", DeviceTypeMapping)]
-                        }
-                        if error := self.require_object_permissions("POST"):
-                            return error
-                if existing_mapping and not locked:
-                    # The mapping was deleted between our upfront read and the lock.
-                    # We are about to CREATE a new row, so require add permission.
-                    self.required_object_permissions = {"POST": [("view", DeviceType), ("add", DeviceTypeMapping)]}
-                    if error := self.require_object_permissions("POST"):
-                        return error
-                if locked:
-                    if locked.netbox_device_type_id != device_type_id:
-                        if not _mapping_change_is_allowed(self, DeviceTypeMapping, locked.pk):
-                            return _htmx_error_response("Existing mapping is no longer available.")
-                        locked.netbox_device_type = device_type
-                        locked.full_clean()
-                        locked.save()
-                else:
-                    try:
-                        DeviceTypeMapping.objects.create(
-                            librenms_hardware=mapping_hardware.lower(),
-                            netbox_device_type=device_type,
-                        )
-                    except IntegrityError:
-                        # Two concurrent requests both saw no existing mapping and
-                        # both attempted create(); select_for_update() cannot lock
-                        # absent rows. Surface a toast asking the user to retry
-                        # (the second attempt will find the row and take the update path).
-                        return _htmx_error_response("Mapping was created concurrently. Please try again.")
-        except Exception as exc:
-            logger.exception("AddDeviceTypeMappingView: failed to save mapping: %s", exc)
-            return _htmx_error_response("Error saving mapping. Please try again.")
+        # Key on the NORMALISED hardware string (mapping_hardware), as the upfront read does.
+        if error := _write_mapping_in_scope(
+            self,
+            DeviceTypeMapping,
+            {"librenms_hardware__iexact": mapping_hardware},
+            "Multiple mappings exist for this hardware string. Remove duplicates before updating.",
+            field="netbox_device_type",
+            target=device_type,
+            existing_mapping=existing_mapping,
+            create=lambda: DeviceTypeMapping.objects.create(
+                librenms_hardware=mapping_hardware.lower(), netbox_device_type=device_type
+            ),
+        ):
+            return error
 
         # Repopulate (rather than clear) the cache with the LibreNMS device we already fetched
         # at the top of this request. Re-validation reads the new mapping from the NetBox DB, so
@@ -2950,14 +2991,10 @@ class CreatePlatformFromImportView(
             return platform, None
         # A refusal must not roll back the platform: the platform is the primary action.
         try:
-            with transaction.atomic():
-                target = (
-                    self.restricted_queryset(target_model, "change").select_for_update(of=("self",)).get(pk=target_pk)
-                )
-                target.snapshot()
-                target.platform = platform
-                target.full_clean()
-                target.save()
+            update_existing_row(
+                self.restricted_queryset(target_model, "change").filter(pk=target_pk),
+                lambda row: setattr(row, "platform", platform),
+            )
         except target_model.DoesNotExist:
             logger.warning(
                 "CreatePlatformFromImportView: %s pk=%s not found; platform "
@@ -3040,7 +3077,7 @@ class AddAsOOBView(
         # (get_librenms_sync_device) — which may differ from the user-selected member the OOB
         # candidate matched (matched by the controller's shared chassis serial / primary IP).
         # Every reader (interfaces/cables/modules) resolves the sync device before
-        # get_librenms_oob, so the link — and the lock, guards, IP set, and save around it — must
+        # reading the OOB entry, so the link — and the lock, guards, IP set, and save around it — must
         # target the sync device too: writing to a non-sync member stores the OOB where no reader
         # looks and, since that member holds no host id, orphans it under no host link. For a
         # non-VC device (or when the selected member IS the sync device) this resolves to the same
@@ -3062,19 +3099,12 @@ class AddAsOOBView(
         if librenms_id is None:
             return _htmx_error_response("Invalid or missing LibreNMS device_id")
 
-        # Reject legacy bare-int librenms_id (shared predicate with DeviceConflictActionView and
-        # set_librenms_device_id, so the three can't drift on what counts as legacy).
-        if is_legacy_librenms_id(sync_device.custom_field_data.get("librenms_id")):
+        # Reject legacy bare-int librenms_id (the reader's rule, shared with DeviceConflictActionView and
+        # assign_own, so the three can't drift on what counts as legacy).
+        if read_mapping(sync_device).legacy.is_legacy:
             return _htmx_error_response(
                 "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
             )
-
-        from netbox_librenms_plugin.utils import (
-            AmbiguousLibreNMSIdError,
-            get_librenms_device_id,
-            get_librenms_oob,
-            set_librenms_oob,
-        )
 
         oob_type = oob_candidate.get("type") or ""
         oob_ip_str = oob_candidate.get("ip") or None
@@ -3109,31 +3139,31 @@ class AddAsOOBView(
             # Re-verify the legacy gate on the LOCKED row (mirrors DeviceConflictActionView's
             # post-lock gate): a legacy bare-int written between the unlocked check above and
             # this lock is valid on EVERY server as the documented universal fallback, and
-            # letting it reach set_librenms_oob would trigger its legacy-promotion branch —
+            # letting it reach attach_oob would trigger its legacy-promotion branch —
             # silently namespacing the id under this server only and dropping the device's
             # LibreNMS linkage on all others.
-            if is_legacy_librenms_id(sync_device.custom_field_data.get("librenms_id")):
+            locked_mapping = read_mapping(sync_device)
+            if locked_mapping.legacy.is_legacy:
                 return _htmx_error_response(
                     "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
                 )
 
             # Reject if the locked OOB link differs from what this (possibly stale) modal
             # is about to write — by id OR by type. oob_type is already a canonical OOB_TYPES
-            # token (so is the stored current_oob["type"]), so this is a like-for-like compare
+            # token (so is the stored OOB type), so this is a like-for-like compare
             # that won't false-trip on an idempotent re-attach; it does catch a concurrent
             # re-detection that changed the controller type.
-            current_oob = get_librenms_oob(sync_device, server_key=server_key)
-            if current_oob and (
-                coerce_librenms_id(current_oob.get("id")) != coerce_librenms_id(librenms_id)
-                or (current_oob.get("type") or "") != oob_type
+            if locked_mapping.has_oob(server_key) and (
+                locked_mapping.oob_id(server_key) != librenms_id
+                or (locked_mapping.server(server_key).oob_type or "") != oob_type
             ):
                 return _htmx_error_response("OOB link was modified concurrently; refresh and retry.")
 
             # A concurrent change could have re-linked THIS device's host id to the incoming
             # OOB id; attaching it as OOB would then store it in both the host slot and oob.id
-            # — a self host/OOB conflict. Reject that explicitly (find_by_librenms_id below
+            # — a self host/OOB conflict. Reject that explicitly (find_mapping below
             # would match self and wave it through).
-            current_host_id = get_librenms_device_id(sync_device, server_key=server_key, auto_save=False)
+            current_host_id = locked_mapping.own_id(server_key)
             if coerce_librenms_id(current_host_id) == coerce_librenms_id(librenms_id):
                 return _htmx_error_response(
                     f"LibreNMS device #{librenms_id} is this device's host link; it can't also be its "
@@ -3141,16 +3171,11 @@ class AddAsOOBView(
                 )
 
             try:
-                set_librenms_oob(
-                    sync_device,
-                    librenms_id,
-                    server_key,
-                    oob_type=oob_type,
-                )
+                mapping_change = attach_oob(sync_device, server_key, librenms_id, oob_type=oob_type)
             except ValueError as exc:
                 return _htmx_error_response(f"Invalid OOB data: {exc}")
 
-            update_fields = ["custom_field_data"]
+            update_fields = []
 
             # Buffer OOB status messages and emit them only after the transaction
             # commits — a message queued before _save_device() would survive a
@@ -3160,7 +3185,7 @@ class AddAsOOBView(
             # Set device.oob_ip from an interface-assigned IPAddress. NetBox
             # requires oob_ip be assigned to one of the device's interfaces, so
             # the user picks (or creates) the interface to hang the OOB IP on
-            # via the OOB-attach form. Linkage (set_librenms_oob) happened above.
+            # via the OOB-attach form. The linkage (attach_oob) saves with the device below.
             if oob_ip_str and sync_device.oob_ip_id is None:
                 # The top-level gate only authorizes ("change", Device), but the
                 # IP-set sub-flow can create an Interface, create an IPAddress, or
@@ -3207,33 +3232,42 @@ class AddAsOOBView(
                         )
                     )
                 else:
-                    oob_ip, attach_reason = self._attach_oob_ip(request, oob_ip_str, oob_iface)
-                    if oob_ip is None:
-                        if attach_reason == "permission_change":
-                            msg = (
-                                f"OOB linked, but OOB IP {oob_ip_str} not set — you lack permission "
-                                "to reassign the existing IP address."
-                            )
-                        elif attach_reason == "permission_add":
-                            msg = (
-                                f"OOB linked, but OOB IP {oob_ip_str} not set — you lack permission "
-                                "to add a new IP address."
-                            )
-                        else:
-                            msg = (
-                                f"OOB linked, but couldn't set OOB IP {oob_ip_str} "
-                                "(invalid, or already assigned to another device)."
-                            )
-                        deferred_messages.append((messages.WARNING, msg))
-                    else:
-                        # Guarded write: set_device_ip_fk() enforces that oob_ip is assigned to
-                        # an interface on sync_device (it is — _attach_oob_ip() just hung it
-                        # on oob_iface) before the batched update_fields save below, which skips
-                        # full_clean() and would otherwise accept an off-device address.
-                        update_fields.append(set_device_ip_fk(sync_device, "oob_ip", oob_ip, save=False))
+                    try:
+                        oob_ip, attach_reason = self._attach_oob_ip(request, oob_ip_str, oob_iface)
+                    except ValidationError as exc:
+                        from ipam.models import IPAddress
+
+                        refusal = exception_text_for(exc, IPAddress, request.user)
                         deferred_messages.append(
-                            (messages.INFO, f"Set OOB IP {oob_ip_str} on interface {oob_iface.name}.")
+                            (messages.WARNING, f"OOB linked, but OOB IP {oob_ip_str} not set — {refusal}")
                         )
+                    else:
+                        if oob_ip is None:
+                            if attach_reason == "permission_change":
+                                msg = (
+                                    f"OOB linked, but OOB IP {oob_ip_str} not set — you lack permission "
+                                    "to reassign the existing IP address."
+                                )
+                            elif attach_reason == "permission_add":
+                                msg = (
+                                    f"OOB linked, but OOB IP {oob_ip_str} not set — you lack permission "
+                                    "to add a new IP address."
+                                )
+                            else:
+                                msg = (
+                                    f"OOB linked, but couldn't set OOB IP {oob_ip_str} "
+                                    "(invalid, or already assigned to another device)."
+                                )
+                            deferred_messages.append((messages.WARNING, msg))
+                        else:
+                            # Guarded write: set_device_ip_fk() enforces that oob_ip is assigned to
+                            # an interface on sync_device (it is — _attach_oob_ip() just hung it
+                            # on oob_iface) before the batched update_fields save below, which skips
+                            # full_clean() and would otherwise accept an off-device address.
+                            update_fields.append(set_device_ip_fk(sync_device, "oob_ip", oob_ip, save=False))
+                            deferred_messages.append(
+                                (messages.INFO, f"Set OOB IP {oob_ip_str} on interface {oob_iface.name}.")
+                            )
             elif oob_ip_str:
                 # The device already has an OOB IP set. Don't silently overwrite it — that could
                 # clobber an operator-set address — but don't let the user believe the controller's
@@ -3253,7 +3287,7 @@ class AddAsOOBView(
                         )
                     )
 
-            if err := _save_device(sync_device, update_fields=update_fields, request=request):
+            if err := _save_device(sync_device, update_fields=update_fields, request=request, mapping=mapping_change):
                 # _save_device returns an error response (it doesn't raise), so returning
                 # here would exit the atomic block normally and COMMIT the Interface/IP
                 # rows created above by _resolve_oob_interface()/_attach_oob_ip(). Mark the
@@ -3554,37 +3588,36 @@ class AddAsOOBView(
         host_rows = list(IPAddress.objects.filter(address__net_host=str(parsed), vrf__isnull=True)[:2])
         if len(host_rows) > 1:
             return None, "conflict"
-        existing = None
         if host_rows:
             # Ownership belongs to the data, not the caller, so judge it before taking any lock:
             # a row owned elsewhere is refused without ever being pinned.
             if not _oob_ip_is_reassignable(host_rows[0], interface):
                 return None, "conflict"
-            existing = (
-                IPAddress.objects.restrict(request.user, "change")
-                # of=("self",): restrict() joins the permission tables, and a bare
-                # select_for_update() would try to lock those joined rows too.
-                .select_for_update(of=("self",))
-                .filter(pk=host_rows[0].pk)
-                .first()
-            )
-            # The row was there a moment ago, so a miss means the caller's change grant does not
-            # cover it (or it was deleted in the race). Refuse either way rather than lock it.
-            if existing is None:
+
+            def rehome(row):
+                # Re-verify from the locked row: a concurrent attach could have claimed it since the read above.
+                if not _oob_ip_is_reassignable(row, interface):
+                    raise _OobIpClaimed
+                if row.assigned_object == interface:
+                    return False
+                row.assigned_object = interface
+
+            # Re-homing an existing IP is a 'change', so the row is locked only inside the caller's
+            # change scope: the unlocked pre-flight in _missing_oob_ip_permissions can race a
+            # concurrent create and wave through an 'add'-only user, and this scope catches that.
+            try:
+                return (
+                    update_existing_row(
+                        IPAddress.objects.restrict(request.user, "change").filter(pk=host_rows[0].pk), rehome
+                    ),
+                    None,
+                )
+            except IPAddress.DoesNotExist:
+                # The row was there a moment ago, so the caller's change grant does not cover it,
+                # or it was deleted in the race.
                 return None, "permission_change"
-        if existing is not None:
-            # Re-verify from the locked row: the pre-check above read it unlocked, so a concurrent
-            # attach could have claimed it in between.
-            if not _oob_ip_is_reassignable(existing, interface):
+            except _OobIpClaimed:
                 return None, "conflict"
-            if existing.assigned_object != interface:
-                # Re-homing an existing IP is a 'change'. The lock above already ran through the
-                # caller's change scope, so reaching here means the grant covers this row: the
-                # unlocked pre-flight in _missing_oob_ip_permissions can race a concurrent create
-                # and wave through an 'add'-only user, and the scoped lock is what catches that.
-                existing.assigned_object = interface
-                existing.save()
-            return existing, None
 
         # No row exists under the lock → this is a create, which needs 'add'. Re-verify
         # it here: the unlocked pre-flight in _missing_oob_ip_permissions may have seen an
@@ -3688,7 +3721,7 @@ class PromoteToHostView(
         if validated_existing.pk != existing_device.pk:
             return _htmx_error_response("Device ID mismatch: existing_device_id does not match validation result")
 
-        from netbox_librenms_plugin.utils import coerce_librenms_id
+        from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 
         # coerce_librenms_id centralizes the bool/int/str/positive checks (rejects bools,
         # non-numeric strings, zero/negatives) in one place — same guard used elsewhere.
@@ -3708,17 +3741,13 @@ class PromoteToHostView(
         if not oob_type:
             return _htmx_error_response("Cannot determine OOB type for promotion")
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id, set_librenms_oob
-
         server_key = self.librenms_api.server_key
 
         # Reject legacy bare-int librenms_id form (caller should migrate first).
-        if is_legacy_librenms_id(existing_device.custom_field_data.get("librenms_id")):
+        if read_mapping(existing_device).legacy.is_legacy:
             return _htmx_error_response(
                 "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
             )
-
-        from netbox_librenms_plugin.utils import get_librenms_device_id, get_librenms_oob
 
         with transaction.atomic():
             existing_device, lock_error = _lock_librenms_id_assignment_target(
@@ -3730,33 +3759,23 @@ class PromoteToHostView(
             )
             if lock_error is not None:
                 return lock_error
-            if is_legacy_librenms_id(existing_device.custom_field_data.get("librenms_id")):
+            locked_mapping = read_mapping(existing_device)
+            if locked_mapping.legacy.is_legacy:
                 return _htmx_error_response(
                     "Device has a legacy bare-integer librenms_id; use 'Convert mapping' to migrate first."
                 )
 
-            current_host_id = get_librenms_device_id(existing_device, server_key=server_key, auto_save=False)
-            current_oob = get_librenms_oob(existing_device, server_key=server_key)
+            current_host_id = locked_mapping.own_id(server_key)
             if coerce_librenms_id(current_host_id) != coerce_librenms_id(existing_libre_id):
                 return _htmx_error_response("LibreNMS host link changed concurrently; refresh and retry.")
-            if current_oob:
+            if locked_mapping.has_oob(server_key):
                 return _htmx_error_response(
                     "OOB link already set; this device may have been promoted by a concurrent request."
                 )
             try:
-                # First, swap the host id to the incoming LibreNMS device id.
-                # set_librenms_device_id preserves any existing OOB sub-object.
-                set_librenms_device_id(
-                    existing_device,
-                    new_host_id,
-                    server_key=server_key,
-                )
-                # Then attach the previously-linked LibreNMS id as the OOB controller.
-                set_librenms_oob(
-                    existing_device,
-                    existing_libre_id,
-                    server_key,
-                    oob_type=oob_type,
+                # The incoming LibreNMS device becomes the host; the previous one moves to the OOB slot.
+                mapping_change = promote_to_host(
+                    existing_device, server_key, new_host_id, expected_host=existing_libre_id, oob_type=oob_type
                 )
             except ValueError as exc:
                 return _htmx_error_response(f"Invalid promotion data: {exc}")
@@ -3766,7 +3785,7 @@ class PromoteToHostView(
             # device's interfaces, so those relationships are set from the
             # interface-assigned IP-sync flow — not from auto-created global
             # records here.
-            update_fields = ["custom_field_data"]
+            update_fields = []
 
             # Apply any explicit per-field overrides chosen in the pre-promote modal.
             # Default behaviour (no overrides) keeps the existing device's name, type
@@ -3785,7 +3804,9 @@ class PromoteToHostView(
             # platform/device_type manufacturer invariant via _platform_device_type_mismatch()
             # whenever those columns are written, so an incompatible override is rejected there —
             # no inline duplicate (which would only drift in wording from the shared check).
-            if err := _save_device(existing_device, update_fields=update_fields, request=request):
+            if err := _save_device(
+                existing_device, update_fields=update_fields, request=request, mapping=mapping_change
+            ):
                 return err
 
         logger.info(
@@ -3821,6 +3842,14 @@ class PromoteToHostView(
         return response
 
 
+class _MergeRefused(Exception):
+    """A merge row's save refused; the response is shown after the merge group rolled back."""
+
+    def __init__(self, response):
+        super().__init__("A merge row's save refused.")
+        self.response = response
+
+
 class MergeNetBoxDevicesView(
     LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View
 ):
@@ -3843,11 +3872,6 @@ class MergeNetBoxDevicesView(
             return error
 
         from dcim.models import Device
-
-        from netbox_librenms_plugin.utils import (
-            mark_librenms_migrated,
-            merge_librenms_links,
-        )
 
         # Fail closed on a blank/unknown/misconfigured key (the mixin validates the default too)
         # so a broken default can't 500 via the lazy self.librenms_api property later.
@@ -3966,7 +3990,7 @@ class MergeNetBoxDevicesView(
             # helpers reject legacy data either way; checking here preserves the actionable
             # convert-first message when the legacy link lives on a sibling.
             for label, obj in (("winner", winner_sync), ("donor", donor_sync)):
-                if is_legacy_librenms_id(obj.custom_field_data.get("librenms_id")):
+                if read_mapping(obj).legacy.is_legacy:
                     return _htmx_error_response(
                         f"{label.capitalize()} device has a legacy bare-integer librenms_id; "
                         "use 'Convert mapping' to migrate before merging."
@@ -3979,13 +4003,16 @@ class MergeNetBoxDevicesView(
                     "(they are members of the same virtual chassis); there is nothing to merge."
                 )
 
-            # merge_librenms_links(), set_device_ip_fk() and mark_librenms_migrated() all raise
-            # ValueError on corrupt link shapes or an ownership violation. The locked OOB-IP reads
-            # can also raise DatabaseError (for example, a lock timeout). Guard the whole group:
-            # none of it persists anything (the save block is below), so every failure must return
-            # a safe toast and roll back rather than bubbling up as a 500.
+            # merge_links() and set_device_ip_fk() raise ValueError on corrupt link shapes or an
+            # ownership violation. The locked OOB-IP reads can also raise DatabaseError (for
+            # example, a lock timeout). Guard the whole group: none of it persists anything (the
+            # save block is below), so every failure must return a safe toast and roll back
+            # rather than bubbling up as a 500.
             try:
-                summary = merge_librenms_links(winner_sync, donor_sync, server_key=server_key)
+                # The donor's link clears and its migration marker lands on the donor sync device:
+                # the marker must live where the link it supersedes lives.
+                merge = merge_links(winner_sync, donor_sync, server_key)
+                summary = merge.summary
 
                 # Transfer OOB IP relationship if winner has none and donor has one — but
                 # only when the underlying IP already sits on a winner-owned interface.
@@ -4027,11 +4054,6 @@ class MergeNetBoxDevicesView(
                             set_device_ip_fk(winner, "oob_ip", locked_oob_ip, save=False)
                             set_device_ip_fk(donor, "oob_ip", None, save=False)
                             oob_ip_transferred = True
-
-                # Clear the donor sync device's active link and stamp the migration marker there —
-                # the marker is a sibling key of id/oob in the same librenms_id entry, so it must
-                # live wherever the link it supersedes lives (the sync device), not the raw member.
-                mark_librenms_migrated(donor_sync, winner_sync.pk, server_key=server_key)
             except ValueError as exc:
                 # Nothing was persisted yet, but locks were taken under this atomic block — roll
                 # back defensively before returning the fail-closed toast.
@@ -4042,49 +4064,56 @@ class MergeNetBoxDevicesView(
                     raise
                 return _database_failure_response()
 
-            # Persist only the fields we actually touched. Calling ``full_clean()`` here (or calling
-            # ``_save_device`` without update_fields) would re-validate every field on the device —
-            # undesirable when the rows hold pre-existing inconsistencies (e.g. ``face`` set without
-            # ``rack``) that are unrelated to this merge. See issue surfaced during eve-ng-02 merge.
-            # Persist only the fields we actually touched, per row. The LibreNMS link merge +
-            # migration marker land on the sync devices (custom_field_data); the oob_ip transfer
-            # lands on the selected winner/donor. When a selected device IS its own sync device
-            # (the non-VC common case) these collapse onto one row, saved once with both fields —
-            # never twice with different update_fields, which would drop one change.
+            # Persist only the fields we actually touched, per row, never with ``full_clean()``: the
+            # rows can hold pre-existing inconsistencies (e.g. ``face`` set without ``rack``) that
+            # are unrelated to this merge. The link merge and the migration marker land on the sync
+            # devices; the oob_ip transfer lands on the selected winner/donor. When a selected
+            # device IS its own sync device (the non-VC common case) these collapse onto one row,
+            # saved once with both changes.
             fields_by_pk = {}
 
             def _touch(dev, field):
                 fields_by_pk.setdefault(dev.pk, set()).add(field)
 
-            _touch(winner_sync, "custom_field_data")
-            _touch(donor_sync, "custom_field_data")
             if oob_ip_transferred:
                 _touch(winner, "oob_ip")
                 _touch(donor, "oob_ip")
 
             # The donor side must release the OneToOne ``oob_ip`` (set to None) before the winner
             # side claims it, or two devices momentarily point at the same IP and violate the unique
-            # constraint on ``Device.oob_ip``. The sync devices only carry custom_field_data (no
-            # unique field), so their order is free; save the donor group first and the selected
-            # winner last. A sync device can't cross-coincide with the other side's selected row
-            # (guaranteed by the winner_sync != donor_sync guard above), so grouping is unambiguous.
+            # constraint on ``Device.oob_ip``. The sync devices carry no unique field, so their
+            # order is free; save the donor group first and the selected winner last. A sync device
+            # can't cross-coincide with the other side's selected row (guaranteed by the
+            # winner_sync != donor_sync guard above), so grouping is unambiguous.
             donor_extra = [donor_sync] if donor_sync.pk != donor.pk else []
             winner_extra = [winner_sync] if winner_sync.pk != winner.pk else []
             save_order = [donor, *donor_extra, *winner_extra, winner]
-            saved = set()
-            for dev in save_order:
-                if dev.pk in saved:
-                    continue
-                saved.add(dev.pk)
-                fields = fields_by_pk.get(dev.pk)
-                if fields and (error := _save_device(dev, update_fields=sorted(fields), request=request)):
-                    logger.error(
-                        "MergeNetBoxDevicesView: failed to persist merge winner=%s donor=%s",
-                        winner.pk,
-                        donor.pk,
-                    )
-                    transaction.set_rollback(True)
-                    return error
+
+            def save_group():
+                saved = set()
+                for dev in save_order:
+                    if dev.pk in saved:
+                        continue
+                    saved.add(dev.pk)
+                    fields = fields_by_pk.get(dev.pk, set())
+                    mapping_change = merge.change_for(dev)
+                    if not fields and mapping_change is None:
+                        continue
+                    if error := _save_device(
+                        dev, update_fields=sorted(fields), request=request, mapping=mapping_change
+                    ):
+                        raise _MergeRefused(error)
+
+            try:
+                persist_merge(merge, write=save_group)
+            except _MergeRefused as refused:
+                logger.error(
+                    "MergeNetBoxDevicesView: failed to persist merge winner=%s donor=%s",
+                    winner.pk,
+                    donor.pk,
+                )
+                transaction.set_rollback(True)
+                return refused.response
 
         logger.info(
             "Merged NetBox device '%s' (pk=%d) into '%s' (pk=%d) on server %s. Summary: %s; oob_ip_transferred=%s",
@@ -4122,8 +4151,10 @@ class SaveUserPrefView(LibreNMSPermissionMixin, View):
         "import_columns": IMPORT_CONTEXT_COLUMNS_PREFERENCE,
         "use_sysname": "plugins.netbox_librenms_plugin.use_sysname",
         "strip_domain": "plugins.netbox_librenms_plugin.strip_domain",
-        "set_primary_ip": "plugins.netbox_librenms_plugin.set_primary_ip",
+        "set_primary_ip": SET_PRIMARY_IP_PREFERENCE,
+        "create_missing_interfaces": CREATE_MISSING_INTERFACES_PREFERENCE,
         "interface_name_field": "plugins.netbox_librenms_plugin.interface_name_field",
+        "interface_sync_options": INTERFACE_SYNC_OPTIONS_PREFERENCE,
     }
 
     def post(self, request):
@@ -4160,6 +4191,14 @@ class SaveUserPrefView(LibreNMSPermissionMixin, View):
                 return JsonResponse({"error": "Invalid import columns"}, status=400)
             value = list(validated_columns)
 
+        if key in ("set_primary_ip", "create_missing_interfaces") and not isinstance(value, bool):
+            return JsonResponse({"error": "Invalid preference value"}, status=400)
+
+        if key == "interface_sync_options":
+            value = validate_interface_sync_options(value)
+            if value is None:
+                return JsonResponse({"error": "Invalid interface sync options"}, status=400)
+
         save_user_pref(request, self.ALLOWED_PREFS[key], value)
         return JsonResponse({"status": "ok"})
 
@@ -4169,7 +4208,7 @@ class AddPlatformMappingView(
 ):
     """HTMX view to create a PlatformMapping from the import validation modal."""
 
-    def post(self, request, device_id):  # noqa: C901
+    def post(self, request, device_id):
         """Create a PlatformMapping linking the LibreNMS OS string to a NetBox Platform."""
         if error := self.require_write_permission():
             return error
@@ -4227,52 +4266,17 @@ class AddPlatformMappingView(
         except Platform.DoesNotExist:
             return _htmx_error_response("Selected platform not found.")
 
-        try:
-            with transaction.atomic():
-                # Lock the row to close the TOCTOU window between the upfront
-                # permission check and the actual write. select_for_update cannot
-                # lock absent rows, so the create branch handles IntegrityError.
-                # Materialise the locked rows in one query — count() would drop
-                # the FOR UPDATE clause, leaving the rows unlocked.
-                locked, lock_error = _lock_mapping_in_scope(
-                    self,
-                    PlatformMapping,
-                    {"librenms_os__iexact": librenms_os},
-                    "Multiple mappings exist for this OS string. Remove duplicates before updating.",
-                )
-                if lock_error is not None:
-                    return lock_error
-                if locked and not existing_mapping:
-                    # Concurrent request created the mapping after our upfront read.
-                    # Only escalate to change permission if we would actually mutate.
-                    if locked.netbox_platform_id != platform_id:
-                        self.required_object_permissions = {"POST": [("view", Platform), ("change", PlatformMapping)]}
-                        if error := self.require_object_permissions("POST"):
-                            return error
-                if existing_mapping and not locked:
-                    # Mapping was deleted between our upfront read and the lock.
-                    # We are about to CREATE a new row, so require add permission.
-                    self.required_object_permissions = {"POST": [("view", Platform), ("add", PlatformMapping)]}
-                    if error := self.require_object_permissions("POST"):
-                        return error
-                if locked:
-                    if locked.netbox_platform_id != platform_id:
-                        if not _mapping_change_is_allowed(self, PlatformMapping, locked.pk):
-                            return _htmx_error_response("Existing mapping is no longer available.")
-                        locked.netbox_platform = platform
-                        locked.full_clean()
-                        locked.save()
-                else:
-                    try:
-                        PlatformMapping.objects.create(
-                            librenms_os=librenms_os.lower(),
-                            netbox_platform=platform,
-                        )
-                    except IntegrityError:
-                        return _htmx_error_response("Mapping was created concurrently. Please try again.")
-        except Exception as exc:
-            logger.exception("AddPlatformMappingView: failed to save mapping: %s", exc)
-            return _htmx_error_response("Error saving mapping. Please try again.")
+        if error := _write_mapping_in_scope(
+            self,
+            PlatformMapping,
+            {"librenms_os__iexact": librenms_os},
+            "Multiple mappings exist for this OS string. Remove duplicates before updating.",
+            field="netbox_platform",
+            target=platform,
+            existing_mapping=existing_mapping,
+            create=lambda: PlatformMapping.objects.create(librenms_os=librenms_os.lower(), netbox_platform=platform),
+        ):
+            return error
 
         cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
         cache.delete(cache_key)

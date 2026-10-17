@@ -27,35 +27,7 @@
                 <span class="spinner spinner-border d-none" id="sync-spinner"></span>
                 <span>Sync Selected IP Addresses</span>
             </button>
-            <div class="dropdown" id="ip-sync-options">
-                <button class="btn btn-outline-secondary dropdown-toggle" type="button"
-                        data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
-                    <i class="mdi mdi-tune-variant"></i> Sync options
-                    <span class="badge bg-secondary-lt ms-1" id="ip-sync-options-count">0</span>
-                </button>
-                <div class="dropdown-menu p-3 ip-sync-options-menu">
-                    <div class="form-check form-switch mb-2">
-                        <input type="hidden" name="set-primary-ip-toggle" value="off">
-                        <input class="form-check-input ip-sync-option" type="checkbox" id="set-primary-ip-toggle-cb"
-                               name="set-primary-ip-toggle" value="on" {% if ip_sync.set_primary_ip %}checked{% endif %}
-                               data-default-checked="false"
-                               title="When the synced IP equals the device's LibreNMS management IP and is assigned to an interface, set it as the Primary IP.">
-                        <label class="form-check-label small" for="set-primary-ip-toggle-cb">Set Primary IP</label>
-                    </div>
-                    <div class="form-check form-switch mb-2">
-                        <input type="hidden" name="create-missing-interfaces-toggle" value="off">
-                        <input class="form-check-input ip-sync-option" type="checkbox" id="create-missing-interfaces-toggle-cb"
-                               name="create-missing-interfaces-toggle" value="on" {% if ip_sync.create_missing_interfaces %}checked{% endif %}
-                               data-default-checked="false"
-                               title="Create a missing NetBox interface from the cached LibreNMS port before assigning the selected IP address.">
-                        <label class="form-check-label small" for="create-missing-interfaces-toggle-cb">Create missing interfaces</label>
-                    </div>
-                    <hr class="my-2">
-                    <button class="btn btn-link btn-sm p-0" type="button" id="reset-ip-sync-options">
-                        Reset to defaults
-                    </button>
-                </div>
-            </div>
+            {% include 'netbox_librenms_plugin/inc/_ip_sync_options.html' %}
             {% endif %}
         </div>
     </div>
@@ -115,45 +87,6 @@
 {% else %}
 </form>
 {% endif %}
-<script>
-  // "Set Primary IP" toggle behaviour:
-  //  - persist the choice as a user preference (remembered across visits)
-  //  - auto-tick the management-IP row (flagged server-side with data-mgmt-ip)
-  //    so syncing it sets the device/VM Primary IP in one action.
-  // Guarded so it binds once even after HTMX swaps.
-  (function () {
-    var cb = document.getElementById('set-primary-ip-toggle-cb');
-    if (!cb || cb.dataset.prefBound) return;
-    cb.dataset.prefBound = '1';
-
-    function mgmtRowCheckboxes() {
-      return document.querySelectorAll('tr[data-mgmt-ip="true"] input[name="select"]');
-    }
-
-    function syncMgmtSelection() {
-      mgmtRowCheckboxes().forEach(function (box) { box.checked = cb.checked; });
-    }
-
-    // Reflect the initial (pref-restored) toggle state onto the mgmt row.
-    syncMgmtSelection();
-
-    cb.addEventListener('change', function () {
-      syncMgmtSelection();
-      var url = "{% url 'plugins:netbox_librenms_plugin:save_user_pref' %}";
-      var token = (document.querySelector('[name=csrfmiddlewaretoken]') || {}).value || '';
-      fetch(url, {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json', 'X-CSRFToken': token },
-        body: JSON.stringify({ key: 'set_primary_ip', value: cb.checked })
-      })
-        .then(function (response) {
-          if (!response.ok) { throw new Error('HTTP ' + response.status); }
-        })
-        .catch(function (e) { console.debug('savePref failed:', e.message); });
-    });
-  })();
-</script>
 {% else %}
 <div class="card">
     <div class="card-body text-center text-muted py-4">

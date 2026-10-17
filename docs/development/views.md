@@ -74,7 +74,7 @@ class DeviceVLANTableView(BaseVLANTableView):
 ## Module installation ownership
 
 The module table and branch installer share one inventory attribution context.
-Each item uses its destination member's manufacturer rules and serial. Transparent
+Each item uses its destination member's manufacturer rules, serial, and device type. Transparent
 parents retain their children's attribution. Installation resets the parent-bay
 search when ownership changes. A hidden destination blocks the branch before any
 module is installed.

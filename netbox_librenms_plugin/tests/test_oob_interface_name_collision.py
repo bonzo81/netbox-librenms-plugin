@@ -6,6 +6,7 @@ from django.contrib.messages import get_messages
 from django.core.cache import cache
 from django.urls import reverse
 
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
     make_device,
@@ -13,7 +14,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis_members,
 )
-from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
 
@@ -72,7 +73,7 @@ def _sync(
 
 
 def _binding(interface):
-    return get_librenms_device_id(interface, SERVER_KEY, auto_save=False)
+    return read_mapping(interface).own_id(SERVER_KEY)
 
 
 @pytest.mark.django_db
@@ -275,7 +276,7 @@ def test_bound_oob_keeps_its_name_when_reported_name_is_bound_to_another_server(
     configure_default_librenms_server(settings)
     device = make_device("oob-derived-name-other-server", librenms_cf={SERVER_KEY: {"id": 83}})
     occupied = make_interface(device, "eth0")
-    set_librenms_device_id(occupied, 9911, "secondary")
+    seed_mapping(occupied, "secondary", own=9911, save=False)
     occupied.save()
     client.force_login(make_superuser("oob-derived-name-other-server-user"))
     host = _port(9311, "eth0")
@@ -298,7 +299,7 @@ def test_bound_oob_keeps_its_name_when_reported_name_is_bound_to_another_server(
     assert bound.name == "eth0-oob"
     assert bound.enabled is True
     assert _binding(bound) == 9312
-    assert get_librenms_device_id(occupied, "secondary", auto_save=False) == 9911
+    assert read_mapping(occupied).own_id("secondary") == 9911
     response_messages = [str(message) for message in get_messages(second_response.wsgi_request)]
     assert not any("sync was rolled back" in message for message in response_messages)
     assert any(
@@ -376,7 +377,7 @@ def test_excluding_name_still_updates_an_oob_interface_bound_by_port_id(client, 
     device = make_device("oob-excluded-derived-name-bound", librenms_cf={SERVER_KEY: {"id": 80}})
     interface = make_interface(device, "management-controller")
     interface.enabled = False
-    set_librenms_device_id(interface, 8592, SERVER_KEY)
+    seed_mapping(interface, SERVER_KEY, own=8592, save=False)
     interface.save()
     client.force_login(make_superuser("oob-excluded-derived-name-bound-user"))
     name = "x" * Interface._meta.get_field("name").max_length
@@ -398,7 +399,7 @@ def test_excluding_name_preserves_an_operator_chosen_name(client, settings):
     device = make_device("oob-excluded-name", librenms_cf={SERVER_KEY: {"id": 78}})
     interface = make_interface(device, "management-controller")
     interface.enabled = False
-    set_librenms_device_id(interface, 8572, SERVER_KEY)
+    seed_mapping(interface, SERVER_KEY, own=8572, save=False)
     interface.save()
     client.force_login(make_superuser("oob-excluded-name-user"))
     ports = [
@@ -455,10 +456,10 @@ def test_excluding_name_updates_a_host_row_when_its_reported_name_is_occupied(cl
     device = make_device("host-excluded-occupied-name", librenms_cf={SERVER_KEY: {"id": 84}})
     interface = make_interface(device, "operator-name")
     interface.enabled = False
-    set_librenms_device_id(interface, 9301, SERVER_KEY)
+    seed_mapping(interface, SERVER_KEY, own=9301, save=False)
     interface.save()
     occupied = make_interface(device, "eth0")
-    set_librenms_device_id(occupied, 9302, SERVER_KEY)
+    seed_mapping(occupied, SERVER_KEY, own=9302, save=False)
     occupied.save()
     client.force_login(make_superuser("host-excluded-occupied-name-user"))
 
@@ -488,10 +489,10 @@ def test_bound_host_reports_that_its_reported_name_belongs_to_another_port(clien
     device = make_device("host-occupied-name-reason", librenms_cf={SERVER_KEY: {"id": 85}})
     interface = make_interface(device, "operator-name")
     interface.enabled = False
-    set_librenms_device_id(interface, 9301, SERVER_KEY)
+    seed_mapping(interface, SERVER_KEY, own=9301, save=False)
     interface.save()
     occupied = make_interface(device, "eth0")
-    set_librenms_device_id(occupied, 9302, SERVER_KEY)
+    seed_mapping(occupied, SERVER_KEY, own=9302, save=False)
     occupied.save()
     client.force_login(make_superuser("host-occupied-name-reason-user"))
 
@@ -514,7 +515,7 @@ def test_bound_host_reports_that_its_reported_name_belongs_to_another_port(clien
 def test_cross_page_host_row_reserves_its_inferred_member_name(client, settings):
     configure_default_librenms_server(settings)
     _chassis, (viewed_member, target_member) = make_virtual_chassis_members("oob-cross-page-name")
-    set_librenms_device_id(viewed_member, 86, SERVER_KEY)
+    seed_mapping(viewed_member, SERVER_KEY, own=86, save=False)
     viewed_member.save()
     host_interface = make_interface(target_member, "Ethernet2/1")
     client.force_login(make_superuser("oob-cross-page-name-user"))
@@ -549,7 +550,7 @@ def test_verify_preserves_the_full_table_name_and_action_metadata(client, settin
     client.force_login(user)
     if case == "rebind":
         interface = make_interface(device, "eth0")
-        set_librenms_device_id(interface, 8501, SERVER_KEY)
+        seed_mapping(interface, SERVER_KEY, own=8501, save=False)
         interface.save()
         ports = [_port(8502, "eth0")]
     else:
