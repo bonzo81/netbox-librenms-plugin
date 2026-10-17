@@ -68,6 +68,7 @@ unchecked until that review.
 | `no-lock-on-exists` | error | A `select_for_update()` chain that ends in `exists()` or `count()`. |
 | `assert-is-not-parametrized-flag` | error | A test asserts `value is not flag`, where `flag` is a `pytest.mark.parametrize` argument with `True` or `False` values. That identity check also passes for `None`. |
 | `vc-member-name-through-helper` | error | A `_generate_vc_member_name()` call outside `_member_name()`. Such a name skips the serial rules, so it can differ from the name that import creates. Tests are excluded, and an import alias of the function is not followed. |
+| `posted-module-target-needs-resolver` | error | A read of the posted `selected_device_id` from `request.GET` or `request.POST` outside `_resolve_destination(...)` or a module grant's `require(device_id=...)`. |
 
 ## Scope
 
@@ -241,6 +242,9 @@ later statement ends with `exists()` or `count()`.
 not see a parameter that a class decorator or `pytestmark` sets. The decorator must name the parameter,
 as a string, a comma-separated string, or a tuple or list of strings. Its values must contain a `True`
 or `False` literal. With several argument names, the rule does not check which argument has that literal.
+
+`posted-module-target-needs-resolver` excludes tests. It reads the key by its literal name. It does
+not see the key in a variable, or a read through another name than `GET` or `POST`.
 
 ## `--taint-intrafile` is required
 
