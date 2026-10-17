@@ -49,6 +49,7 @@ class PlatformReason(StrEnum):
     SUBJECT_UNAVAILABLE = "subject_unavailable"
     VERSION_CHANGED = "version_changed"
     OS_PLATFORM_RESOLVED = "os_platform_resolved"
+    NAMED_PLATFORM_UNAVAILABLE = "named_platform_unavailable"
 
 
 class PlatformOperation(StrEnum):
@@ -357,8 +358,20 @@ def _create_platform(actor, assessment, winner, **fields):
 
 
 def _named_os_platform(new_os_platform, actor, named):
-    """Return the OS platform that the actor names, created when no platform has that name; *named* assesses it."""
-    existing = Platform.objects.filter(name__iexact=new_os_platform.name).first()
+    """
+    Return the OS platform that the actor names, created when no platform has that name; *named* assesses it.
+
+    A platform with that name, found now or as the winner of a concurrent create, is reused only when
+    the actor may view it.
+    """
+
+    def reusable():
+        found = Platform.objects.filter(name__iexact=new_os_platform.name).first()
+        if found is not None and not platform_visible(found, actor):
+            raise _Stop(PlatformOutcome(OutcomeStatus.BLOCKED, PlatformReason.NAMED_PLATFORM_UNAVAILABLE, named))
+        return found
+
+    existing = reusable()
     if existing is not None:
         return existing, None
     if not _may_add_platform(actor):
@@ -366,7 +379,7 @@ def _named_os_platform(new_os_platform, actor, named):
     platform, created = _create_platform(
         actor,
         named,
-        lambda: Platform.objects.filter(name__iexact=new_os_platform.name).first(),
+        reusable,
         name=new_os_platform.name,
         slug=_free_slug(slugify(new_os_platform.name), new_os_platform.manufacturer),
         manufacturer=new_os_platform.manufacturer,
@@ -651,5 +664,6 @@ def reason_text(reason, assessment, viewer):
         PlatformReason.OS_PLATFORM_RESOLVED: lambda: (
             f"A platform now matches LibreNMS OS '{os_name}'. Refresh the page and try again."
         ),
+        PlatformReason.NAMED_PLATFORM_UNAVAILABLE: lambda: f"Platform '{assessment.target_name}' is not available.",
     }
     return texts[reason]()
