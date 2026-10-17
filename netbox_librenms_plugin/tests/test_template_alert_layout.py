@@ -9,6 +9,8 @@ import pytest
 import re2
 
 TEMPLATES_DIR = Path(__file__).parents[1] / "templates"
+TABLES_DIR = Path(__file__).parents[1] / "tables"
+ICON_CLASSES = {"mdi", "ti"}
 VOID_TAGS = {"br", "img", "input", "hr", "meta", "link", "source", "wbr"}
 # Alerts that choose their own layout keep it: d-flex rows of badges, or block/column alerts.
 OWN_LAYOUT_CLASSES = {"d-flex", "d-block", "flex-column"}
@@ -16,6 +18,13 @@ TEMPLATE_TAGS_ONLY = re2.compile(r"(?s)^(\s|\{%.*?%\}|\{#.*?#\})*$")
 STYLE_BLOCK = re2.compile(r"(?s)<style[^>]*>(.*?)</style>")
 CSS_COMMENT = re2.compile(r"(?s)/\*.*?\*/")
 CSS_SELECTORS = re2.compile(r"([^{}]+)\{")
+CSS_ID = re2.compile(r"#([\w-]+)")
+# Table ids come from the django-tables2 attrs and from literal <table> tags in the templates.
+TABLE_IDS = {
+    table_id
+    for path in [*TABLES_DIR.glob("*.py"), *TEMPLATES_DIR.rglob("*.html")]
+    for table_id in re2.findall(r'(?:"id": "|<table[^>]*\sid=")([\w-]+)"', path.read_text(encoding="utf-8"))
+}
 
 
 class _AlertScanner(HTMLParser):
@@ -61,7 +70,7 @@ class _AlertScanner(HTMLParser):
             if not (item[0] == "text" and TEMPLATE_TAGS_ONLY.match(item[1]))
             and not (item[0] == "element" and "btn-close" in item[2])
         ]
-        if items and items[0][:2] == ("element", "i"):
+        if items and items[0][:2] == ("element", "i") and ICON_CLASSES & set(items[0][2]):
             items = items[1:]
         if len(items) > 1:
             self.offenders.append((entry["line"], [name if kind == "element" else "text" for kind, name, _ in items]))
@@ -81,6 +90,7 @@ def _offenders(source):
         '<div class="alert"><strong>Note:</strong> text</div>',
         '<div class="alert"><br/>Text<div>Body</div></div>',
         '<div class="alert"></br>Text<div>Body</div></div>',
+        '<div class="alert"><i>Note</i><span>Details</span></div>',
     ],
 )
 def test_the_guard_flags_an_alert_with_several_flex_items(source):
@@ -130,21 +140,27 @@ assert scan(source) == [(1, ["text", "div"])]
     )
 
 
-def _unscoped_column_selectors(source):
-    """Return the template style selectors that pick a table column without naming the table."""
+def _unscoped_column_selectors(source, table_ids):
+    """Return the template style selectors that pick a table column without naming the table by its id."""
     return [
         selector.strip()
         for block in STYLE_BLOCK.findall(source)
         for selectors in CSS_SELECTORS.findall(CSS_COMMENT.sub("", block))
         for selector in selectors.split(",")
-        if "[data-col=" in selector and not selector.strip().startswith("#")
+        if "[data-col=" in selector and not table_ids & set(CSS_ID.findall(selector))
     ]
 
 
 def test_the_style_guard_flags_a_column_rule_that_names_no_table():
     source = '<style>td[data-col="device_selection"] { width: 300px; } #t td[data-col="vrf"] { width: 1px; }</style>'
 
-    assert _unscoped_column_selectors(source) == ['td[data-col="device_selection"]']
+    assert _unscoped_column_selectors(source, {"t"}) == ['td[data-col="device_selection"]']
+
+
+def test_the_style_guard_flags_a_column_rule_scoped_to_a_shared_container():
+    source = '<style>#shared-tab-content td[data-col="vrf"] { width: 1px; }</style>'
+
+    assert _unscoped_column_selectors(source, {"t"}) == ['#shared-tab-content td[data-col="vrf"]']
 
 
 def test_no_template_style_rule_styles_a_column_of_another_tab_table():
@@ -152,6 +168,6 @@ def test_no_template_style_rule_styles_a_column_of_another_tab_table():
     offenders = [
         f"{path.relative_to(TEMPLATES_DIR)}: {selector}"
         for path in sorted(TEMPLATES_DIR.rglob("*.html"))
-        for selector in _unscoped_column_selectors(path.read_text(encoding="utf-8"))
+        for selector in _unscoped_column_selectors(path.read_text(encoding="utf-8"), TABLE_IDS)
     ]
     assert offenders == []
