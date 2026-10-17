@@ -548,8 +548,6 @@ def bulk_import_devices_shared(  # noqa: C901
                 device_mappings["site_id"] = validation["site"]["site"].id
             if validation["device_type"].get("found") and validation["device_type"].get("device_type"):
                 device_mappings["device_type_id"] = validation["device_type"]["device_type"].id
-            if validation["platform"].get("found") and validation["platform"].get("platform"):
-                device_mappings["platform_id"] = validation["platform"]["platform"].id
 
             # Override with any manual mappings provided for this device
             if manual_mappings_per_device and device_id in manual_mappings_per_device:
@@ -625,6 +623,12 @@ def bulk_import_devices_shared(  # noqa: C901
                 # Log progress after each successful import
                 if job and job.logger:
                     job.logger.info(f"Imported device {idx} of {total}")
+                for warn_msg in result["warnings"]:
+                    warnings_list.append(warn_msg)
+                    if job and job.logger:
+                        job.logger.warning(warn_msg)
+                    else:
+                        logger.warning(warn_msg)
 
                 if vc_data.get("is_stack", False) and not creates_vc:
                     warn_msg = VC_MASTER_UNKNOWN_WARNING.format(device_id=device_id)

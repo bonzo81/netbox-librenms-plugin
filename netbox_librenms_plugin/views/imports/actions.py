@@ -79,6 +79,18 @@ from netbox_librenms_plugin.ip_addressing import parse_host_address
 from netbox_librenms_plugin.ip_rules import ip_rules_for_request
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+from netbox_librenms_plugin.platform_versions import (
+    NewOSPlatform,
+    OutcomeStatus,
+    PlatformFacts,
+    PlatformReason,
+    PlatformState,
+    apply_platform,
+    assess_platform,
+    import_platform,
+    platform_version_tracking_enabled,
+    reason_text,
+)
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
     ContainerStatus,
@@ -1709,8 +1721,8 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             if not is_htmx:
                 messages.success(request, _msg)
             htmx_toasts.append(("text-bg-success", "mdi-check-circle", "Success", _msg))
-        # An imported device whose follow-up work failed, such as its virtual chassis.
-        for warning in device_result["warnings"]:
+        # An imported object whose follow-up work failed, such as its virtual chassis or version platform.
+        for warning in [*device_result["warnings"], *vm_result.get("warnings", [])]:
             if not is_htmx:
                 messages.warning(request, warning)
             htmx_toasts.append(("text-bg-warning", "mdi-alert", "Warning", warning))
@@ -1962,12 +1974,14 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
             "strip_domain": strip_domain,
             "server_key": self.librenms_api.server_key,
             "import_row_hx_include": import_row_hx_include(device_id),
+            # Without it the import assigns the OS platform and reports the missing version platform.
+            "can_add_platform": request.user.has_perm("dcim.add_platform"),
         }
 
         # Add sync comparison data for existing devices
         existing = validation.get("existing_device")
         if existing:
-            context["sync_info"] = self._build_sync_info(libre_device, existing)
+            context["sync_info"] = self._build_sync_info(libre_device, existing, request.user)
             context["existing_id_servers"] = self._build_id_server_info(existing)
             context["existing_device_model_name"] = existing._meta.model_name
             # OOB-attach needs an interface to hang the OOB IP on (NetBox requires
@@ -1988,7 +2002,7 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         )
 
     @staticmethod
-    def _build_sync_info(libre_device, existing_device):
+    def _build_sync_info(libre_device, existing_device, actor):
         """Build sync comparison data between LibreNMS device and existing NetBox device."""
         # Trimmed so a padded LibreNMS serial doesn't report drift against the stored trimmed value.
         librenms_serial = normalize_serial(libre_device.get("serial")) or "-"
@@ -2001,25 +2015,18 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         serial_synced = netbox_serial == librenms_serial or librenms_serial == "-"
 
         # Platform comparison
-        platform_info = {
-            "netbox_platform": getattr(existing_device, "platform", None),
-            "librenms_os": librenms_os,
-            "platform_exists": False,
-            "matching_platform": None,
-        }
-        if librenms_os and librenms_os != "-":
-            from netbox_librenms_plugin.utils import find_matching_platform
-
-            match_result = find_matching_platform(librenms_os)
-            if match_result["found"]:
-                platform_info["platform_exists"] = True
-                platform_info["matching_platform"] = match_result["platform"]
-
-        netbox_platform = platform_info["netbox_platform"]
-        matching_platform = platform_info["matching_platform"]
-        platform_synced = librenms_os == "-" or bool(
-            netbox_platform and matching_platform and netbox_platform.pk == matching_platform.pk
+        platform_assessment = assess_platform(
+            existing_device,
+            PlatformFacts.from_librenms(libre_device.get("os"), libre_device.get("version")),
+            tracking=platform_version_tracking_enabled(),
+            actor=actor,
         )
+        platform_info = {
+            "librenms_os": librenms_os,
+            "assessment": platform_assessment,
+            "reason_text": reason_text(platform_assessment.reason, platform_assessment),
+        }
+        platform_synced = platform_assessment.state is PlatformState.CURRENT
 
         # Device type comparison (VMs don't have device_type)
         device_type_synced = True
@@ -2390,30 +2397,24 @@ class DeviceConflictActionView(
                 return _htmx_error_response("No valid serial from LibreNMS")
 
         elif action == "sync_platform":
-            # Sync platform from LibreNMS OS
-            from netbox_librenms_plugin.utils import find_matching_platform
-
-            librenms_os = libre_device.get("os") or ""
-            if librenms_os and librenms_os != "-":
-                match_result = find_matching_platform(librenms_os)
-                if match_result["found"]:
-                    existing_device.platform = match_result["platform"]
-                    if err := _save_device(existing_device, update_fields=["platform"], request=request):
-                        return err
-                    logger.info(f"Synced platform on '{existing_device.name}' to {match_result['platform']}")
-                elif match_result.get("match_type") == "ambiguous":
-                    ambiguity_source = match_result.get("ambiguity_source", "mapping")
-                    if ambiguity_source == "platform":
-                        target = "Platforms"
-                    else:
-                        target = "Platform Mappings"
-                    return _htmx_error_response(
-                        f"Multiple {target} match OS '{librenms_os}' — resolve the conflict in {target}"
-                    )
-                else:
-                    return _htmx_error_response(f"Platform '{librenms_os}' not found in NetBox")
-            else:
+            facts = PlatformFacts.from_librenms(libre_device.get("os"), libre_device.get("version"))
+            if not facts.librenms_os:
                 return _htmx_error_response("No OS info from LibreNMS")
+            outcome = apply_platform(
+                existing_model,
+                existing_device.pk,
+                facts,
+                tracking=platform_version_tracking_enabled(),
+                actor=request.user,
+            )
+            if outcome.status is OutcomeStatus.FAILED:
+                return _htmx_error_response(
+                    f"Could not set platform '{outcome.platform or outcome.assessment.target_name}': "
+                    f"{exception_text_for(outcome.error, outcome.error_model, request.user)}"
+                )
+            if outcome.status is OutcomeStatus.BLOCKED:
+                return _htmx_error_response(reason_text(outcome.reason, outcome.assessment))
+            logger.info(f"Synced platform on '{existing_device.name}' to {outcome.platform}")
 
         elif action == "sync_device_type":
             # Sync device type from LibreNMS hardware (non-mismatch case)
@@ -2719,6 +2720,9 @@ class CreatePlatformFromImportView(
                 # Enable the "map to existing platform" section of the combined modal.
                 "libre_device": libre_device,
                 "current_platform": current_platform,
+                "tracked_version": platform_version_tracking_enabled()
+                and bool(PlatformFacts.from_librenms(libre_device.get("os"), libre_device.get("version")).version),
+                "librenms_version": libre_device.get("version"),
             },
         )
 
@@ -2751,7 +2755,7 @@ class CreatePlatformFromImportView(
         # existing object when current validation unambiguously resolves it
         # (and the supplied device_pk, if any, agrees with that resolution).
         try:
-            _, _validation, _ = self.get_validated_device_with_selections(device_id, request)
+            validated_device, _validation, _ = self.get_validated_device_with_selections(device_id, request)
         except Exception:
             logger.exception(
                 "CreatePlatformFromImportView: failed to resolve assignment target for device_id=%s",
@@ -2772,6 +2776,8 @@ class CreatePlatformFromImportView(
             target_pk = None
 
         librenms_os = (request.POST.get("librenms_os") or "").strip().lower()
+        validated_device = validated_device or {}
+        facts = PlatformFacts.from_librenms(validated_device.get("os"), validated_device.get("version"))
 
         # Do NOT gate the upfront POST on ("add", PlatformMapping): creating/assigning the
         # Platform is the primary action and must succeed for a user who can add a Platform
@@ -2812,7 +2818,7 @@ class CreatePlatformFromImportView(
         try:
             platform, assignment_error = run_transaction(
                 lambda: self._create_platform_attempt(
-                    request, platform_name, manufacturer, create_mapping, librenms_os, target_model, target_pk
+                    request, platform_name, manufacturer, create_mapping, librenms_os, target_model, target_pk, facts
                 )
             )
         except ValidationError as exc:
@@ -2879,7 +2885,7 @@ class CreatePlatformFromImportView(
         return response
 
     def _create_platform_attempt(
-        self, request, platform_name, manufacturer, create_mapping, librenms_os, target_model, target_pk
+        self, request, platform_name, manufacturer, create_mapping, librenms_os, target_model, target_pk, facts
     ):
         """
         Create the platform, its optional mapping and its optional assignment, as one attempt of one transaction.
@@ -2991,41 +2997,50 @@ class CreatePlatformFromImportView(
                     )
                 )
 
+        tracking = platform_version_tracking_enabled()
         if target_model is None or target_pk is None:
+            if tracking:
+                plan = import_platform(facts, tracking=tracking, actor=request.user, os_platform=platform)
+                if plan.reason is not None:
+                    text = f"Platform created, but its version platform was not: {reason_text(plan.reason, plan.assessment)}"
+                    transaction.on_commit(lambda: messages.warning(request, text))
             return platform, None
         # A refusal must not roll back the platform: the platform is the primary action.
-        try:
-            update_existing_row(
-                self.restricted_queryset(target_model, "change").filter(pk=target_pk),
-                lambda row: setattr(row, "platform", platform),
-            )
-        except target_model.DoesNotExist:
+        outcome = apply_platform(
+            target_model,
+            target_pk,
+            facts,
+            tracking=tracking,
+            actor=request.user,
+            new_os_platform=NewOSPlatform(platform.name, manufacturer),
+        )
+        verbose_name = target_model._meta.verbose_name
+        if outcome.reason is PlatformReason.SUBJECT_UNAVAILABLE:
             logger.warning(
-                "CreatePlatformFromImportView: %s pk=%s not found; platform "
-                "'%s' created but not assigned to any object",
+                "CreatePlatformFromImportView: %s pk=%s not found; platform '%s' created but not assigned",
                 target_model.__name__,
                 target_pk,
                 platform.name,
             )
             return platform, (
-                f'Platform "{platform.name}" was created, but the target '
-                f"{target_model._meta.verbose_name} no longer exists, so it could not be "
-                "assigned. Assign the platform manually if it is still needed."
+                f'Platform "{platform.name}" was created, but the target {verbose_name} no longer exists, so it '
+                "could not be assigned. Assign the platform manually if it is still needed."
             )
-        except (ValidationError, IntegrityError) as exc:
-            if classify_conflict(exc):
-                raise
+        if outcome.status is OutcomeStatus.FAILED:
             logger.warning(
-                "CreatePlatformFromImportView: platform '%s' created but assignment to "
-                "%s pk=%s failed and was skipped: %s",
+                "CreatePlatformFromImportView: platform '%s' created but assignment to %s pk=%s failed",
                 platform.name,
                 target_model.__name__,
                 target_pk,
-                exc,
             )
             return platform, (
-                f'Platform "{platform.name}" was created, but could not be assigned to the '
-                f"{target_model._meta.verbose_name}. Assign the platform manually if needed."
+                f'Platform "{platform.name}" was created, but could not be assigned to the {verbose_name}. '
+                "Assign the platform manually if needed."
+            )
+        if outcome.status is OutcomeStatus.BLOCKED:
+            return platform, (
+                f'Platform "{platform.name}" was created, but not assigned: '
+                f"{reason_text(outcome.reason, outcome.assessment)}"
             )
         return platform, None
 

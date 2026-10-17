@@ -59,12 +59,11 @@ def _payload(device_id, hostname=None, **overrides):
     return payload
 
 
-def _validation(tag, *, platform=None, role=None, resolved_name=None):
+def _validation(tag, *, role=None, resolved_name=None):
     return {
         "can_import": True,
         "issues": [],
         "cluster": {"cluster": make_cluster(f"{tag}-cluster")},
-        "platform": {"platform": platform},
         "device_role": {"role": role},
         "resolved_name": resolved_name,
     }
@@ -88,12 +87,12 @@ class TestCreateVmFromLibrenms:
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
         from netbox_librenms_plugin.tests.conftest import _shared_infra
 
-        platform = Platform.objects.create(name="VM integration platform", slug="vm-integration-platform")
+        platform = Platform.objects.create(name="vm-integration-os", slug="vm-integration-os")
         _site, _manufacturer, _device_type, role = _shared_infra()
-        validation = _validation("complete", platform=platform, role=role)
+        validation = _validation("complete", role=role)
 
-        vm = create_vm_from_librenms(
-            _payload(6101, _computed_name="vm-computed"),
+        vm, _warnings = create_vm_from_librenms(
+            _payload(6101, _computed_name="vm-computed", os=platform.name),
             validation,
         )
 
@@ -116,7 +115,9 @@ class TestCreateVmFromLibrenms:
         from netbox_librenms_plugin.tests.view_test_helpers import change_logging, make_request
 
         with change_logging(make_request()):
-            vm = create_vm_from_librenms(_payload(6102, _computed_name="vm-change-log"), _validation("change-log"))
+            vm, _warnings = create_vm_from_librenms(
+                _payload(6102, _computed_name="vm-change-log"), _validation("change-log")
+            )
 
         changes = ObjectChange.objects.filter(
             changed_object_type=ContentType.objects.get_for_model(VirtualMachine), changed_object_id=vm.pk
@@ -127,7 +128,7 @@ class TestCreateVmFromLibrenms:
     def test_validated_name_precedes_raw_name_recomputation(self):
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
 
-        vm = create_vm_from_librenms(
+        vm, _warnings = create_vm_from_librenms(
             _payload(6102, hostname="raw-name.example.test"),
             _validation("validated-name", resolved_name="validated-name"),
         )
@@ -137,7 +138,7 @@ class TestCreateVmFromLibrenms:
     def test_raw_name_uses_the_shared_name_rules_as_the_final_fallback(self):
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
 
-        vm = create_vm_from_librenms(
+        vm, _warnings = create_vm_from_librenms(
             _payload(
                 6103,
                 hostname="host-choice.example.test",
@@ -165,7 +166,7 @@ class TestCreateVmFromLibrenms:
             color="ff0000",
         )
 
-        vm = create_vm_from_librenms(
+        vm, _warnings = create_vm_from_librenms(
             _payload(6104),
             _validation("role-override", role=validation_role),
             role=explicit_role,
@@ -212,7 +213,7 @@ class TestCreateVmFromLibrenms:
     def test_digit_string_id_is_canonicalized_under_the_selected_server(self):
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
 
-        vm = create_vm_from_librenms(
+        vm, _warnings = create_vm_from_librenms(
             _payload("6106", hostname="digit-string-vm"),
             _validation("digit-string"),
             server_key="secondary",
@@ -270,6 +271,7 @@ class TestBulkImportVms:
             "success": [],
             "failed": [],
             "skipped": [],
+            "warnings": [],
         }
 
     def test_permission_denial_propagates_before_any_http_request(self, librenms_api, django_user_model):
@@ -579,6 +581,40 @@ class TestBulkImportVms:
             }
         ]
         assert not VirtualMachine.objects.filter(name="vm-6211.example.test").exists()
+
+    @pytest.mark.parametrize("may_add_platforms", [True, False], ids=["add-platform", "no-add-platform"])
+    def test_tracking_gives_the_vm_its_version_platform_or_reports_why_not(self, librenms_api, may_add_platforms):
+        from dcim.models import Platform
+
+        from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
+        from netbox_librenms_plugin.models import LibreNMSSettings
+        from netbox_librenms_plugin.tests.view_test_helpers import grant
+
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"platform_version_tracking": True})
+        api, _server = librenms_api
+        os_platform = Platform.objects.create(name="vm-tracked-os", slug="vm-tracked-os")
+        cluster = make_cluster(f"vm-tracked-cluster-{may_add_platforms}")
+        user = _vm_writer(f"tracked-{may_add_platforms}")
+        if may_add_platforms:
+            user = grant(user, "add", Platform)
+
+        result = bulk_import_vms(
+            {6220: {"placement": "cluster", "cluster_id": cluster.pk}},
+            api,
+            libre_devices_cache={6220: _payload(6220, hostname="tracked-vm", os=os_platform.name, version="5.15")},
+            user=user,
+        )
+
+        vm = result["success"][0]["device"]
+        if may_add_platforms:
+            assert (vm.platform.name, vm.platform.parent) == ("vm-tracked-os 5.15", os_platform)
+            assert result["warnings"] == []
+        else:
+            assert vm.platform == os_platform
+            assert result["warnings"] == [
+                "Imported VM 6220 with OS platform 'vm-tracked-os': "
+                "You do not have permission to add platform 'vm-tracked-os 5.15'."
+            ]
 
     def test_one_bad_row_does_not_stop_later_real_imports(self, librenms_api):
         from virtualization.models import Cluster
