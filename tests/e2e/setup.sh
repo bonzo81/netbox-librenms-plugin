@@ -21,9 +21,12 @@ else
     wheel="${wheels[0]}"
 fi
 whl_file="$(basename "$wheel")"
-# The build context must hold only this wheel.
+# The build context must hold only this wheel. Stage it first, because it can be one of the old wheels.
+staged="$(mktemp)"
+cp "$wheel" "$staged"
 rm -f "$docker_dir"/*.whl
-cp "$wheel" "$docker_dir/$whl_file"
+mv "$staged" "$docker_dir/$whl_file"
+chmod 644 "$docker_dir/$whl_file"
 # BuildKit reads a build secret only from inside the project. An empty file means no host CA.
 host_ca="${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
 if [ -f "$host_ca" ]; then
