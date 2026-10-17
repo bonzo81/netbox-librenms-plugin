@@ -24,8 +24,13 @@ whl_file="$(basename "$wheel")"
 # The build context must hold only this wheel.
 rm -f "$docker_dir"/*.whl
 cp "$wheel" "$docker_dir/$whl_file"
-# BuildKit reads a build secret only from inside the project.
-cp "${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}" "$docker_dir/host_ca.crt"
+# BuildKit reads a build secret only from inside the project. An empty file means no host CA.
+host_ca="${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
+if [ -f "$host_ca" ]; then
+    cp "$host_ca" "$docker_dir/host_ca.crt"
+else
+    : > "$docker_dir/host_ca.crt"
+fi
 
 # Later compose commands (logs, down) read the same values from .env.
 {

@@ -1111,6 +1111,41 @@ def test_configured_norecursedirs_still_skips_pytest_default_directories(tmp_pat
     )
 
 
+@pytest.mark.parametrize("host_ca_exists", [True, False])
+def test_e2e_setup_starts_without_a_host_ca_bundle(tmp_path, host_ca_exists):
+    """The e2e build treats the host CA as optional, so setup must not stop when the bundle is missing."""
+    import shutil
+
+    e2e = tmp_path / "tests" / "e2e"
+    shutil.copytree(
+        REPOSITORY_ROOT / "tests" / "e2e" / "docker", e2e / "docker", ignore=shutil.ignore_patterns("*.whl")
+    )
+    shutil.copy(REPOSITORY_ROOT / "tests" / "e2e" / "setup.sh", e2e / "setup.sh")
+    wheel = tmp_path / "netbox_librenms_plugin-0.0.0-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    host_ca = tmp_path / "host-ca.pem"
+    if host_ca_exists:
+        host_ca.write_text("CA\n")
+    # A stub docker keeps the run local; the script only has to reach the compose calls.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "docker").write_text("#!/bin/sh\nexit 0\n")
+    (bin_dir / "docker").chmod(0o755)
+    environment = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "NETBOX_CONTAINER_TAG": "v4.7",
+        "SSL_CERT_FILE": str(host_ca),
+    }
+
+    run = subprocess.run(
+        ["bash", str(e2e / "setup.sh"), str(wheel)], capture_output=True, text=True, env=environment, check=False
+    )
+
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert (e2e / "docker" / "host_ca.crt").read_text() == ("CA\n" if host_ca_exists else "")
+
+
 @pytest.mark.django_db
 def test_bounded_executor_releases_a_worker_blocked_on_a_row_lock_this_thread_holds():
     """A hung block must stop its worker, not leave it blocked into teardown and interpreter exit."""
