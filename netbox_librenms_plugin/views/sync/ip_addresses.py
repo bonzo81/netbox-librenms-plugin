@@ -28,7 +28,7 @@ from netbox_librenms_plugin.sync_cache import (
     render_sync_cache_miss,
     schedule_request_cache_mutation,
 )
-from netbox_librenms_plugin.transactions import classify_conflict, run_transaction
+from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, update_existing_row
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
     build_migrated_context,
@@ -36,7 +36,6 @@ from netbox_librenms_plugin.utils import (
     get_migrated_to_marker,
     index_ip_source_interfaces,
     index_ip_sync_rows,
-    ip_family,
     index_ip_port_records,
     ip_row_port_record,
     normalize_ip_sync_row_id,
@@ -77,6 +76,32 @@ def _acquire_ip_host_lock(parsed, vrf) -> None:
 def vrf_create_lock_identity(name):
     """Return the advisory lock identity that serializes creating a VRF with *name*."""
     return f"netbox-librenms-plugin:vrf-create:{name}"
+
+
+class _PrimaryIPNotEligible(Exception):
+    """NetBox would refuse the matched interface as the owner's primary IP interface."""
+
+
+def _primary_ip_interface_is_eligible(owner, interface):
+    """
+    Return whether NetBox accepts an address on *interface* as the primary IP of *owner*.
+
+    ``_build_interface_maps`` indexes ALL VC member interfaces, so *interface* can belong to a
+    sibling member. NetBox's ``Device.clean()`` accepts a primary IP on any same-VC member's
+    non-mgmt-only interface (``vc_interfaces(if_master=False)``), so only an interface outside the
+    owner's VC, or a sibling's mgmt-only interface, is refused.
+    """
+    return not (
+        isinstance(owner, Device)
+        and isinstance(interface, Interface)
+        and interface.device_id != owner.pk
+        and not (
+            owner.virtual_chassis_id is not None
+            and interface.device is not None
+            and interface.device.virtual_chassis_id == owner.virtual_chassis_id
+            and not interface.mgmt_only
+        )
+    )
 
 
 class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -651,30 +676,43 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             return None, None
         return locked_interface, locked_obj
 
-    @staticmethod
-    def _set_primary_ip(obj, ip_obj):
+    def _set_primary_ip(self, obj, ip_obj, interface):
         """
-        Point ``obj.primary_ip4``/``primary_ip6`` (by family) at *ip_obj*.
+        Point ``obj.primary_ip4``/``primary_ip6`` (by family) at *ip_obj*, on *interface*.
 
-        The caller guarantees ``ip_obj`` is assigned to one of the object's interfaces, so this
-        satisfies NetBox's ``primary_ip`` constraint.
+        The owner row is read, checked and written under its lock, from the caller's change scope.
+        NetBox validates the whole owner, so an owner that NetBox refuses fails the write.
 
         Args:
             obj (Device | VirtualMachine): The object whose primary IP to set.
-            ip_obj (IPAddress): The address to set as primary (already interface-assigned).
+            ip_obj (IPAddress): The address to set as primary, assigned to *interface*.
+            interface (Interface | VMInterface): The interface that holds *ip_obj*.
 
         Returns:
             bool: True if the primary IP changed, False if it was already set.
 
+        Raises:
+            _PrimaryIPNotEligible: NetBox would refuse *interface* for the owner's primary IP.
+            ValueError: NetBox refuses the owner; the text is safe for the user.
+
         """
-        # ip_family(), not ip_obj.family: NetBox 4.4's property raises AttributeError on the
-        # in-memory str address of a freshly created IPAddress, failing the whole IP sync row.
-        field = "primary_ip6" if ip_family(ip_obj) == 6 else "primary_ip4"
-        if getattr(obj, f"{field}_id") == ip_obj.pk:
-            return False
-        setattr(obj, field, ip_obj)
-        obj.save()
-        return True
+        field = "primary_ip6" if ip_obj.family == 6 else "primary_ip4"
+        changed = False
+
+        def point_at_ip(owner):
+            nonlocal changed
+            if not _primary_ip_interface_is_eligible(owner, interface):
+                raise _PrimaryIPNotEligible
+            if getattr(owner, f"{field}_id") == ip_obj.pk:
+                return False
+            setattr(owner, field, ip_obj)
+            changed = True
+
+        try:
+            update_existing_row(self.restricted_queryset(type(obj), "change").filter(pk=obj.pk), point_at_ip)
+        except ValidationError as exc:
+            raise ValueError(f"Primary IP not set: {exception_text_for(exc, type(obj), self.request.user)}") from None
+        return changed
 
     @staticmethod
     def _cached_ip_index(cached_ips):
@@ -757,10 +795,6 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
     def _host_rows(vrf, parsed):
         """Return current rows for one host inside one VRF."""
         return list(IPAddress.objects.filter(address__net_host=str(parsed.ip), vrf=vrf).order_by("pk"))
-
-    def _locked_changeable_ip(self, pk):
-        """Lock an IP row only when it remains in the caller's change scope."""
-        return self.restricted_queryset(IPAddress, "change").select_for_update(of=("self",)).filter(pk=pk).first()
 
     def _build_conflict(
         self,
@@ -949,7 +983,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             )
 
         ip_obj = IPAddress.objects.create(
-            # netaddr, as NetBox loads it: save() keeps a str as is, and post_save receivers parse the value.
+            # netaddr, as NetBox loads it: post_save receivers and NetBox 4.4's Device.clean() read this value.
             address=netaddr.IPNetwork(str(parsed)),
             assigned_object=interface,
             status="active",
@@ -964,44 +998,57 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         if payload.get("target_vrf_id") != (vrf.pk if vrf is not None else None):
             raise ValueError("The target VRF changed. Refresh the IP data and try again.")
 
-        ip_obj = self._locked_changeable_ip(payload.get("ip_pk"))
-        if ip_obj is None:
-            raise ValueError("The existing IP address is no longer available in your change scope.")
-        if payload.get("ip_state") != self._ip_state(ip_obj):
-            raise ValueError("The existing IP address changed after confirmation. Refresh the IP data and try again.")
         kind = payload.get("kind")
-        if kind != "change_prefix" and parse_address_with_prefix(str(ip_obj.address)) != parsed:
-            raise ValueError("The existing IP address changed after confirmation. Refresh the IP data and try again.")
-
-        target_rows = self._host_rows(vrf, parsed)
-        exact_rows = [row for row in target_rows if parse_address_with_prefix(str(row.address)) == parsed]
-        other_prefix_rows = [row for row in target_rows if parse_address_with_prefix(str(row.address)) != parsed]
-        if other_prefix_rows and kind != "change_prefix":
-            raise ValueError("The destination VRF now contains this host with a different prefix length.")
-
         target_vrf_id = vrf.pk if vrf is not None else None
-        if kind == "reassign":
-            if len(exact_rows) != 1 or exact_rows[0].pk != ip_obj.pk or ip_obj.vrf_id != target_vrf_id:
-                raise ValueError("The destination VRF changed after confirmation. Refresh the IP data and try again.")
-        elif kind == "move_vrf":
-            if exact_rows or ip_obj.vrf_id == target_vrf_id:
-                raise ValueError("The destination VRF changed after confirmation. Refresh the IP data and try again.")
-            ip_obj.vrf = vrf
-        elif kind == "change_prefix":
-            if (
-                exact_rows
-                or len(other_prefix_rows) != 1
-                or other_prefix_rows[0].pk != ip_obj.pk
-                or ip_obj.vrf_id != target_vrf_id
-            ):
-                raise ValueError("The destination VRF changed after confirmation. Refresh the IP data and try again.")
-            ip_obj.address = netaddr.IPNetwork(str(parsed))
-        else:
-            raise ValueError("IP address confirmation is invalid. Refresh the IP data and try again.")
 
-        ip_obj.assigned_object = interface
-        ip_obj.save()
-        return ip_obj
+        def apply(ip_obj):
+            if payload.get("ip_state") != self._ip_state(ip_obj):
+                raise ValueError(
+                    "The existing IP address changed after confirmation. Refresh the IP data and try again."
+                )
+            if kind != "change_prefix" and parse_address_with_prefix(str(ip_obj.address)) != parsed:
+                raise ValueError(
+                    "The existing IP address changed after confirmation. Refresh the IP data and try again."
+                )
+
+            target_rows = self._host_rows(vrf, parsed)
+            exact_rows = [row for row in target_rows if parse_address_with_prefix(str(row.address)) == parsed]
+            other_prefix_rows = [row for row in target_rows if parse_address_with_prefix(str(row.address)) != parsed]
+            if other_prefix_rows and kind != "change_prefix":
+                raise ValueError("The destination VRF now contains this host with a different prefix length.")
+
+            if kind == "reassign":
+                if len(exact_rows) != 1 or exact_rows[0].pk != ip_obj.pk or ip_obj.vrf_id != target_vrf_id:
+                    raise ValueError(
+                        "The destination VRF changed after confirmation. Refresh the IP data and try again."
+                    )
+            elif kind == "move_vrf":
+                if exact_rows or ip_obj.vrf_id == target_vrf_id:
+                    raise ValueError(
+                        "The destination VRF changed after confirmation. Refresh the IP data and try again."
+                    )
+                ip_obj.vrf = vrf
+            elif kind == "change_prefix":
+                if (
+                    exact_rows
+                    or len(other_prefix_rows) != 1
+                    or other_prefix_rows[0].pk != ip_obj.pk
+                    or ip_obj.vrf_id != target_vrf_id
+                ):
+                    raise ValueError(
+                        "The destination VRF changed after confirmation. Refresh the IP data and try again."
+                    )
+                ip_obj.address = netaddr.IPNetwork(str(parsed))
+            else:
+                raise ValueError("IP address confirmation is invalid. Refresh the IP data and try again.")
+            ip_obj.assigned_object = interface
+
+        try:
+            return update_existing_row(
+                self.restricted_queryset(IPAddress, "change").filter(pk=payload.get("ip_pk")), apply
+            )
+        except IPAddress.DoesNotExist:
+            raise ValueError("The existing IP address is no longer available in your change scope.") from None
 
     def process_ip_sync(
         self,
@@ -1116,6 +1163,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             # Collect this row's mutations separately: two raw selections can canonicalize to the
             # same row_id, so a failing row must not discard a committed row's key.
             row_mutations = set()
+            # The row outcomes publish only when the savepoint commits.
+            row_results = []
             interface_creation_state_before_row = interface_creation_state
             interface_maps_before_row = (
                 (
@@ -1204,9 +1253,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         # or create an unassigned/global address, both of which violate the
                         # interface-assigned model. Skip the row instead of corrupting state.
                         if is_primary_candidate:
-                            results["primary_no_interface"].append(display_address)
+                            row_results.append(("primary_no_interface", display_address))
                         else:
-                            results["skipped_no_interface"].append(display_address)
+                            row_results.append(("skipped_no_interface", display_address))
                         continue
 
                     if is_primary_candidate:
@@ -1215,9 +1264,6 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         # order closes a deadlock cycle with a concurrent donor move.
                         if self.relock_scoped_row(type(obj), pk=obj.pk) is None:
                             raise type(obj).DoesNotExist(f"{type(obj).__name__} {obj.pk} no longer exists")
-                        # Re-read the primary_ip ids from the locked row. A stale in-memory value
-                        # would make _set_primary_ip skip a set it must perform.
-                        obj.refresh_from_db()
 
                     if force_payload is not None:
                         ip_obj = self._apply_confirmed_ip_change(
@@ -1227,7 +1273,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             interface=interface,
                             vrf=vrf,
                         )
-                        results["updated"].append(display_address)
+                        row_results.append(("updated", display_address))
                         row_mutations.add(row_id)
                     else:
                         ip_obj, outcome, conflict = self._classify_ip_change(
@@ -1247,9 +1293,9 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                                 conflict["target_vrf"],
                                 conflict["reason"],
                             )
-                            results["conflicts"].append(conflict)
+                            row_results.append(("conflicts", conflict))
                             continue
-                        results[outcome].append(display_address)
+                        row_results.append((outcome, display_address))
                         if outcome in {"created", "updated"}:
                             row_mutations.add(row_id)
 
@@ -1257,28 +1303,12 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     # handled above (the row was skipped before any write), so here the IP is
                     # guaranteed interface-assigned and can satisfy NetBox's primary constraint.
                     if is_primary_candidate:
-                        # _build_interface_maps indexes ALL VC member interfaces, so `interface`
-                        # can belong to a sibling member. NetBox's Device.clean() accepts a
-                        # primary IP on any same-VC member's non-mgmt-only interface
-                        # (vc_interfaces(if_master=False)) — mirror that exactly: refuse only an
-                        # interface NetBox itself would reject (outside obj's VC, or a sibling's
-                        # mgmt-only interface), instead of refusing every sibling match on the
-                        # very VC case _build_interface_maps exists to support.
-                        if (
-                            isinstance(obj, Device)
-                            and isinstance(interface, Interface)
-                            and interface.device_id != obj.pk
-                            and not (
-                                obj.virtual_chassis_id is not None
-                                and interface.device is not None
-                                and interface.device.virtual_chassis_id == obj.virtual_chassis_id
-                                and not interface.mgmt_only
-                            )
-                        ):
-                            results["primary_interface_not_eligible"].append(display_address)
-                        elif self._set_primary_ip(obj, ip_obj):
-                            results["primary_set"].append(display_address)
-                            row_mutations.add(row_id)
+                        try:
+                            if self._set_primary_ip(obj, ip_obj, interface):
+                                row_results.append(("primary_set", display_address))
+                                row_mutations.add(row_id)
+                        except _PrimaryIPNotEligible:
+                            row_results.append(("primary_interface_not_eligible", display_address))
 
             except Exception as exc:
                 if classify_conflict(exc):
@@ -1304,6 +1334,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         )
                 # The row's savepoint rolled back, so drop only this row's keys.
                 row_mutations.clear()
+                row_results.clear()
                 detail = exception_text_for(exc, IPAddress, request.user)
                 if isinstance(exc, PortSyncBlocked):
                     # The interface rules refused the create: an expected outcome, not an error.
@@ -1317,6 +1348,8 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 # `finally`, not `else`: the conflict and no-interface paths leave the row with
                 # `continue`, which skips an `else` clause but keeps their committed writes.
                 mutated_rows.update(row_mutations)
+                for key, value in row_results:
+                    results[key].append(value)
 
         results["mutated"] = bool(mutated_rows)
         return results

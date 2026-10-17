@@ -29,7 +29,7 @@ done
 if [[ ${#targets[@]} -eq 0 ]]; then
   # opengrep's default ignores skip test directories, so name the test files explicitly.
   shopt -s globstar nullglob
-  targets=("$repo_root/netbox_librenms_plugin" "$repo_root"/netbox_librenms_plugin/tests/**/*.py)
+  targets=("$repo_root/netbox_librenms_plugin" "$repo_root"/netbox_librenms_plugin/tests/**/*.py "$repo_root"/tests/**/*.py)
 fi
 
 exec "$opengrep_bin" scan \

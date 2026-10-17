@@ -222,14 +222,14 @@ class InventoryIgnoreRuleTable(NetBoxTable):
         return record.get_action_display()
 
     def render_pattern(self, value, record):
-        """Show dash for serial_matches_device rules where pattern is unused."""
-        if record.match_type == InventoryIgnoreRule.MATCH_SERIAL_DEVICE:
+        """Show dash for pattern-less rules."""
+        if not record.uses_pattern:
             return mark_safe('<span class="text-muted">—</span>')
         return format_html("<code>{}</code>", value) if value else "—"
 
     def render_require_serial_match_parent(self, value, record):
         """Show the actual stored boolean; dash for rules where the flag has no effect."""
-        if record.match_type == InventoryIgnoreRule.MATCH_SERIAL_DEVICE:
+        if not record.uses_pattern:
             return mark_safe('<span class="text-muted">—</span>')
         return (
             mark_safe('<span class="text-success">Yes</span>')

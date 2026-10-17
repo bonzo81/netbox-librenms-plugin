@@ -644,17 +644,48 @@ class TestSerialCableOverwriteBehaviour:
         assert target_port.cable_id is None
 
     def test_same_connection_untagged_gets_tagged_not_recreated(self):
+        from netbox_librenms_plugin.tests.view_test_helpers import assert_update_logged, change_logging
+
         acs, csp, cp_a, _cp_b = self._setup("tag")
         cable = cable_together(csp, cp_a)  # untagged, already the desired connection
 
         sync = _sync_view()
-        result = sync.handle_cable_creation(_serial_link(csp, cp_a), {"device_id": acs.id})
+        with change_logging(sync.request):
+            result = sync.handle_cable_creation(_serial_link(csp, cp_a), {"device_id": acs.id})
 
         assert result["status"] == "tagged"
         cable.refresh_from_db()
         assert "librenms" in set(cable.tags.values_list("slug", flat=True))
         csp.refresh_from_db()
         assert csp.cable_id == cable.pk  # same cable, not recreated
+        assert_update_logged(cable, "tags", [], [cable.tags.get().name])
+
+    def test_the_tag_before_state_is_the_cable_as_locked(self):
+        """A write that lands just before the sync locks the cable is in the before-state of the tag add."""
+        from django.db import connection
+
+        from netbox_librenms_plugin.tests.view_test_helpers import change_logging, update_change
+
+        acs, csp, cp_a, _cp_b = self._setup("tag-locked")
+        cable = cable_together(csp, cp_a)
+        fired = []
+
+        def write_before_the_cable_lock(execute, sql, params, many, context):
+            if not fired and 'FROM "dcim_cable"' in sql and "FOR UPDATE" in sql:
+                fired.append(sql)
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        'UPDATE "dcim_cable" SET description = %s WHERE id = %s', ["written-first", cable.pk]
+                    )
+            return execute(sql, params, many, context)
+
+        sync = _sync_view()
+        with change_logging(sync.request), connection.execute_wrapper(write_before_the_cable_lock):
+            result = sync.handle_cable_creation(_serial_link(csp, cp_a), {"device_id": acs.id})
+
+        assert result["status"] == "tagged"
+        assert fired
+        assert update_change(cable).prechange_data["description"] == "written-first"
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,9 @@ query path is broken. Reserve mocks for the LibreNMS HTTP boundary and for error
 cannot produce (a lock ``DatabaseError``, a ``save()`` that raises).
 """
 
+from contextlib import contextmanager
+from uuid import uuid4
+
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
 from netbox_librenms_plugin.tests.conftest import make_superuser
 
@@ -156,6 +159,38 @@ def message_texts(request, level=None):
 
     wanted = None if level is None else _message_level(level)
     return [str(m.message) for m in get_messages(request) if wanted is None or m.level == wanted]
+
+
+@contextmanager
+def change_logging(request):
+    """Run the block as NetBox runs *request*: each save in it records a change record."""
+    from netbox.context_managers import event_tracking
+
+    request.id = uuid4()
+    with event_tracking(request):
+        yield
+
+
+def update_change(obj):
+    """Return the one change-log record of an update of *obj*."""
+    from core.models import ObjectChange
+    from django.contrib.contenttypes.models import ContentType
+
+    return ObjectChange.objects.get(
+        changed_object_type=ContentType.objects.get_for_model(obj), changed_object_id=obj.pk, action="update"
+    )
+
+
+def assert_update_logged(obj, field, before, after):
+    """Assert the one change-log record of the update of *obj* holds *field* (a dotted path) before and after."""
+    change = update_change(obj)
+    assert change.prechange_data is not None, "the update has no before-state"
+    logged = []
+    for data in (change.prechange_data, change.postchange_data):
+        for key in field.split("."):
+            data = data[key]
+        logged.append(data)
+    assert logged == [before, after]
 
 
 def missing_pk(model, offset=1000):
