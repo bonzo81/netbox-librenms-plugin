@@ -3136,7 +3136,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             candidates = [m for m in scoped_mappings if m.librenms_class == ""]
 
         for mapping in candidates:
-            match = mapping._compiled_pattern.fullmatch(name)
+            compiled = mapping._compiled_pattern
+            # An exact mapping has no pattern.
+            if compiled is None:
+                continue
+            match = compiled.fullmatch(name)
             if not match:
                 continue
             resolved_bay = match.expand(mapping.netbox_bay_name)
