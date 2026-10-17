@@ -9,12 +9,14 @@ be withheld at DISPLAY time, so every test here drives a real view with a constr
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 from html import unescape
 from pathlib import Path
 
 import pytest
+import yaml
 from django.urls import reverse
 
 from netbox_librenms_plugin.tests.conftest import (
@@ -503,6 +505,37 @@ def test_the_rule_test_script_removes_its_staging_directory():
         # Precondition: the rule-tests really ran, so the staging directory really was created.
         assert result.returncode == 0, result.stdout or result.stderr
         assert list(Path(private_tmp).iterdir()) == [], "the staging directory outlived the run"
+
+
+TRUSTED_BUILTINS = {"isinstance", "hasattr", "type"}
+
+
+def _trusted_name_lists(node):
+    """Yield the names of each regex alternation in *node* that lists exception_text_for or a trusted builtin."""
+    if isinstance(node, dict):
+        node = list(node.values())
+    if isinstance(node, list):
+        for item in node:
+            yield from _trusted_name_lists(item)
+    elif isinstance(node, str):
+        for group in re.findall(r"\((?:\?:)?([\w|]+)\)", node):
+            names = set(group.split("|"))
+            if "exception_text_for" in names or names & TRUSTED_BUILTINS:
+                yield names
+
+
+def test_every_copy_of_the_trusted_names_in_the_shadow_rule_is_the_same():
+    """caught-error-text-shadow repeats the trusted names in many regexes; a copy that misses one opens a gap."""
+    rules = yaml.safe_load((REPOSITORY_ROOT / ".opengrep" / "librenms-rules.yaml").read_text())["rules"]
+    shadow = next(rule for rule in rules if rule["id"] == "caught-error-text-shadow")
+    lists = list(_trusted_name_lists(shadow))
+    named = [names - TRUSTED_BUILTINS for names in lists if "exception_text_for" in names]
+
+    assert len(named) >= 10, "the rule no longer lists the trusted names where this test looks"
+    assert all(names == named[0] for names in named), [sorted(names ^ named[0]) for names in named]
+    # A copy has all trusted builtins or none of them.
+    partial = [sorted(names) for names in lists if names & TRUSTED_BUILTINS not in (set(), TRUSTED_BUILTINS)]
+    assert partial == []
 
 
 def _scan(*args, expect=0):
