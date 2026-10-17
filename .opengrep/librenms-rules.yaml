@@ -1499,3 +1499,76 @@ rules:
           regex: ^(GET|POST)$
       - pattern-not-inside: _resolve_destination(...)
       - pattern-not-inside: $GRANT.require(..., device_id=$VALUE, ...)
+  - id: regex-error-must-raise
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This handler catches a regex error and does not raise, so a broken pattern silently matches
+      nothing. Compile a stored rule regex with models.compile_rule_regex and check its replacement
+      with models.check_rule_replacement: both raise RuleConfigurationError, which names the rule.
+      A pattern that is not stored rule data gets a nosemgrep comment with a reason.
+    metadata:
+      category: correctness
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/migrations/**"
+    patterns:
+      # $CLASS binds the class of the handler, or one element of its tuple.
+      - pattern-either:
+          - pattern: |
+              try:
+                ...
+              except (..., $CLASS, ...):
+                ...
+          - pattern: |
+              try:
+                ...
+              except (..., $CLASS, ...) as $ERROR:
+                ...
+          - pattern: |
+              try:
+                ...
+              except $CLASS as $ERROR:
+                ...
+      - metavariable-regex:
+          metavariable: $CLASS
+          # The module re, its alias _re, or the shared tuple, also unpacked into a tuple.
+          regex: ^\*?(_?re\.error|REGEX_COMPILE_ERRORS)$
+      # A handler that raises, also after other statements, fails closed.
+      - pattern-not: |
+          try:
+            ...
+          except (..., $CLASS, ...):
+            ...
+            raise ...
+      - pattern-not: |
+          try:
+            ...
+          except (..., $CLASS, ...):
+            ...
+            raise $NEW from $CAUSE
+      - pattern-not: |
+          try:
+            ...
+          except (..., $CLASS, ...) as $ERROR:
+            ...
+            raise ...
+      - pattern-not: |
+          try:
+            ...
+          except (..., $CLASS, ...) as $ERROR:
+            ...
+            raise $NEW from $CAUSE
+      - pattern-not: |
+          try:
+            ...
+          except $CLASS as $ERROR:
+            ...
+            raise ...
+      - pattern-not: |
+          try:
+            ...
+          except $CLASS as $ERROR:
+            ...
+            raise $NEW from $CAUSE

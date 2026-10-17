@@ -3277,12 +3277,16 @@ class AddBayTemplateView(
 
         librenms_pattern = "".join(pattern_parts)
         netbox_replacement = "".join(replacement_parts)
+        # The pattern is derived from two bay names, not stored, so a failure only means no suggestion.
+        # nosemgrep: regex-error-must-raise
         try:
             compiled = re.compile(librenms_pattern)
         except REGEX_COMPILE_ERRORS:
             return None
         if not compiled.fullmatch(librenms_name):
             return None
+        # The replacement is derived from two bay names, not stored, so a failure only means no suggestion.
+        # nosemgrep: regex-error-must-raise
         try:
             if compiled.sub(netbox_replacement, librenms_name) != netbox_name:
                 return None
