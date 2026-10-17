@@ -1318,8 +1318,8 @@ class TestValidateDeviceForImport:
 
         result = self._validate(_device_payload(5434, os="Validation shared OS", serial="-"))
 
-        assert result["platform"]["match_type"] == "ambiguous"
-        assert any("Multiple Platforms match OS" in warning for warning in result["warnings"])
+        assert result["platform"]["assessment"].reason == "os_platform_ambiguous"
+        assert any("Multiple platforms match" in warning for warning in result["warnings"])
 
     def test_linked_device_type_drift_is_reported(self):
         from dcim.models import DeviceType, Manufacturer
@@ -1503,7 +1503,7 @@ class TestImportSingleDevice:
 
         _api, _server = librenms_api
         site, device_type, role = self._infrastructure("manual")
-        platform = Platform.objects.create(name="Import platform", slug="import-platform")
+        platform = Platform.objects.create(name="import-manual-os", slug="import-manual-os")
         rack = Rack.objects.create(name="Import manual rack", site=site, status="active")
 
         result = import_single_device(
@@ -1514,10 +1514,9 @@ class TestImportSingleDevice:
                 "site_id": site.pk,
                 "device_type_id": device_type.pk,
                 "device_role_id": role.pk,
-                "platform_id": platform.pk,
                 "rack_id": rack.pk,
             },
-            libre_device=_device_payload(5603),
+            libre_device=_device_payload(5603, os=platform.name),
             user=make_superuser(),
         )
 
@@ -1527,6 +1526,65 @@ class TestImportSingleDevice:
         assert result["device"].role == role
         assert result["device"].platform == platform
         assert result["device"].rack == rack
+
+    @staticmethod
+    def _track_versions():
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"platform_version_tracking": True})
+
+    def test_tracking_creates_the_version_platform_for_an_actor_who_may_add_platforms(self, librenms_api):
+        from dcim.models import Platform
+
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        self._track_versions()
+        site, device_type, role = self._infrastructure("tracked")
+        os_platform = Platform.objects.create(name="import-tracked-os", slug="import-tracked-os")
+
+        result = import_single_device(
+            5611,
+            SERVER_KEY,
+            _validation(site=site, device_type=device_type, role=role, resolved_name="tracked-import"),
+            libre_device=_device_payload(5611, os=os_platform.name, version="7.2.1"),
+            user=make_superuser(),
+        )
+
+        assert result["success"] is True
+        assert result["warnings"] == []
+        assert result["device"].platform.name == "import-tracked-os 7.2.1"
+        assert result["device"].platform.parent == os_platform
+
+    def test_tracking_without_add_platform_assigns_the_os_platform_and_reports_it(self, librenms_api):
+        from dcim.models import Device, DeviceRole, DeviceType, Platform, Site
+
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        self._track_versions()
+        site, device_type, role = self._infrastructure("tracked-denied")
+        os_platform = Platform.objects.create(name="import-denied-os", slug="import-denied-os")
+        actor = make_user_with_perms(
+            "import-no-add-platform",
+            [("add", Device), ("change", Device), ("view", Site), ("view", DeviceType), ("view", DeviceRole)],
+        )
+
+        result = import_single_device(
+            5612,
+            SERVER_KEY,
+            _validation(site=site, device_type=device_type, role=role, resolved_name="tracked-denied-import"),
+            libre_device=_device_payload(5612, os=os_platform.name, version="7.2.2"),
+            user=actor,
+        )
+
+        assert result["success"] is True
+        assert result["device"].platform == os_platform
+        assert result["warnings"] == [
+            "Imported device 5612 with OS platform 'import-denied-os': "
+            "You do not have permission to add platform 'import-denied-os 7.2.2'."
+        ]
+        assert not Platform.objects.filter(parent=os_platform).exists()
 
     def test_manual_rack_outside_the_user_view_scope_is_rejected(self, librenms_api):
         """The persistence boundary must reject a forged hidden rack ID."""

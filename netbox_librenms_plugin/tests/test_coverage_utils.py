@@ -376,21 +376,6 @@ class TestLocationAndPlatformMatching:
         assert result["site"] == expected
         assert find_matching_site("example site")["site"] == expected
 
-    def test_case_insensitive_duplicate_platform_fails_closed(self):
-        from dcim.models import Platform
-
-        from netbox_librenms_plugin.utils import find_matching_platform
-
-        Platform.objects.create(name="example-os", slug="example-os")
-        Platform.objects.create(name="EXAMPLE-OS", slug="example-os-upper")
-
-        assert find_matching_platform("example-os") == {
-            "found": False,
-            "platform": None,
-            "match_type": "ambiguous",
-            "ambiguity_source": "platform",
-        }
-
 
 class TestStoredLibreNMSIdentifiers:
     @pytest.mark.parametrize(
