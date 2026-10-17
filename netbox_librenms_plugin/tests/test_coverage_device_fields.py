@@ -88,6 +88,13 @@ def _linked_device(name, device_id, **kwargs):
     return make_device(name, librenms_cf={SERVER_KEY: device_id}, **kwargs)
 
 
+def _reporting_device(name, server, device_id, os):
+    """A linked device whose LibreNMS device reports *os*."""
+    device = _linked_device(name, device_id)
+    server.device_info_response(device_id=device_id, hostname=name, os=os)
+    return device
+
+
 def _messages(response, level=None):
     return message_texts(response.wsgi_request, level=level)
 
@@ -469,7 +476,7 @@ class TestCreateAndAssignPlatformView:
         from dcim.models import Platform
         from netbox_librenms_plugin.models import PlatformMapping
 
-        device = make_device("platform-create-device")
+        device = _reporting_device("platform-create-device", librenms_server, 6581, " Created-OS ")
         manufacturer = device.device_type.manufacturer
 
         response = _post(
@@ -496,7 +503,7 @@ class TestCreateAndAssignPlatformView:
     def test_existing_platform_is_reused_without_changing_manufacturer(self, logged_in_client, librenms_server):
         from dcim.models import Platform
 
-        device = make_device("platform-reuse-device")
+        device = _reporting_device("platform-reuse-device", librenms_server, 6582, "existing-os")
         manufacturer = device.device_type.manufacturer
         platform = Platform.objects.create(
             name="Existing Platform",
@@ -531,7 +538,7 @@ class TestCreateAndAssignPlatformView:
         from dcim.models import Platform
         from netbox_librenms_plugin.models import PlatformMapping
 
-        device = make_device("platform-mapping-conflict")
+        device = _reporting_device("platform-mapping-conflict", librenms_server, 6583, "conflicted-os")
         existing_target = Platform.objects.create(name="Existing mapping target", slug="existing-mapping-target")
         requested = Platform.objects.create(name="Requested target", slug="requested-target")
         PlatformMapping.objects.create(librenms_os="conflicted-os", netbox_platform=existing_target)
@@ -574,7 +581,7 @@ class TestCreateAndAssignPlatformView:
     def test_invalid_platform_slug_rolls_back_creation(self, logged_in_client, librenms_server):
         from dcim.models import Platform
 
-        device = make_device("platform-invalid-slug")
+        device = _reporting_device("platform-invalid-slug", librenms_server, 6584, "")
 
         response = _post(
             logged_in_client,
@@ -593,7 +600,7 @@ class TestCreateAndAssignPlatformView:
     ):
         from dcim.models import Manufacturer, Platform
 
-        device = make_device("platform-incompatible-manufacturer")
+        device = _reporting_device("platform-incompatible-manufacturer", librenms_server, 6585, "")
         incompatible = Manufacturer.objects.create(
             name="Incompatible platform manufacturer",
             slug="incompatible-platform-manufacturer",
@@ -621,7 +628,7 @@ class TestCreateAndAssignPlatformView:
     def test_missing_mapping_permission_keeps_the_primary_assignment(self, client, librenms_server):
         from dcim.models import Device, Platform
 
-        device = make_device("platform-no-mapping-permission")
+        device = _reporting_device("platform-no-mapping-permission", librenms_server, 6586, "permission-skipped-os")
         platform = Platform.objects.create(name="Assignable without mapping", slug="assignable-without-mapping")
         user = make_user_with_perms(
             "platform-assignment-without-mapping",

@@ -9,7 +9,13 @@ from django.urls import reverse
 
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.platform_versions import HIDDEN_PLATFORM, version_platform_slug
-from netbox_librenms_plugin.tests.conftest import make_device, make_superuser, make_vm
+from netbox_librenms_plugin.tests.conftest import (
+    bounded_executor,
+    make_device,
+    make_superuser,
+    make_vm,
+    transactional_db_with_all_apps,
+)
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.view_test_helpers import (
@@ -544,7 +550,7 @@ class TestTheMappingFollowUpKeepsTheCommittedAssignment:
         from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
 
         _tracking(False)
-        device = make_device(f"mapping-follow-up-{statement.lower()}")
+        device = _linked(f"mapping-follow-up-{statement.lower()}", librenms_server, 7421)
         client.force_login(make_superuser(f"mapping-follow-up-{statement.lower()}-su"))
         table = "netbox_librenms_plugin_platformmapping"
         prefix = "SELECT" if statement == "SELECT" else f'INSERT INTO "{table}"'
@@ -574,7 +580,7 @@ class TestTheMappingFollowUpKeepsTheCommittedAssignment:
         from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
 
         _tracking(False)
-        device = make_device("mapping-follow-up-recovery")
+        device = _linked("mapping-follow-up-recovery", librenms_server, 7422)
         client.force_login(make_superuser("mapping-follow-up-recovery-su"))
         table = "netbox_librenms_plugin_platformmapping"
         insert_failed, select_failed = [], []
@@ -608,7 +614,7 @@ class TestTheMappingFollowUpKeepsTheCommittedAssignment:
         from netbox_librenms_plugin.tests.lock_conflict_helpers import failing_statement
 
         _tracking(False)
-        device = make_device("mapping-follow-up-label")
+        device = _linked("mapping-follow-up-label", librenms_server, 7423)
         client.force_login(make_superuser("mapping-follow-up-label-su"))
         state = {"inserted": False}
 
@@ -719,20 +725,6 @@ class TestImportCreatePlatformModal:
             response.wsgi_request, "success"
         )
 
-    def test_the_mapping_uses_the_librenms_os_of_the_validated_device(self, client, librenms_server):
-        from netbox_librenms_plugin.models import PlatformMapping
-
-        _tracking(False)
-        device = _import_linked("import-tampered-os", librenms_server, 7404)
-        client.force_login(make_superuser("import-tampered-os-su"))
-
-        _import_post(
-            client, device, 7404, {"platform_name": "Juniper Junos", "librenms_os": "eos", "create_mapping": "1"}
-        )
-
-        assert PlatformMapping.objects.get(librenms_os="junos").netbox_platform.name == "Juniper Junos"
-        assert not PlatformMapping.objects.filter(librenms_os="eos").exists()
-
     def test_a_refused_assignment_rolls_back_the_new_platform(self, client, librenms_server):
         from dcim.models import Manufacturer, Platform
 
@@ -784,12 +776,15 @@ def _mapping_constrained(username):
     )
 
 
-_DENIED = ("warning", "Platform mapping for 'junos' not created: you lack permission to add mappings.")
-# outcome: (actor factory, expected level, expected text, mapping created)
+_ADDED = ("success", "Platform mapping 'junos' to 'Juniper Junos' added", True)
+_DENIED = ("warning", "Platform mapping for 'junos' not created: you lack permission to add mappings.", False)
+# outcome: (actor factory, posted LibreNMS OS, expected level, expected text, mapping created)
 _MAPPING_OUTCOMES = {
-    "added": (_mapping_added, "success", "Platform mapping 'junos' to 'Juniper Junos' added", True),
-    "not-granted": (_mapping_not_granted, *_DENIED, False),
-    "constrained-grant": (_mapping_constrained, *_DENIED, False),
+    "added": (_mapping_added, "junos", *_ADDED),
+    "not-granted": (_mapping_not_granted, "junos", *_DENIED),
+    "constrained-grant": (_mapping_constrained, "junos", *_DENIED),
+    # LibreNMS reports junos: a posted OS chooses neither the OS platform lookup nor the mapping.
+    "tampered-os": (_mapping_added, "eos", *_ADDED),
 }
 
 
@@ -799,10 +794,11 @@ def test_both_create_platform_modals_report_the_mapping_alike(client, librenms_s
     from netbox_librenms_plugin.models import PlatformMapping
 
     _tracking(False)
-    actor_factory, level, text, created = _MAPPING_OUTCOMES[outcome]
+    actor_factory, posted_os, level, text, created = _MAPPING_OUTCOMES[outcome]
+    _platform("eos")
     device = _import_linked(f"mapping-{endpoint}-{outcome}", librenms_server, 7410)
     client.force_login(actor_factory(f"mapping-{endpoint}-{outcome}"))
-    data = {"platform_name": "Juniper Junos", "librenms_os": "junos", "create_mapping": "1"}
+    data = {"platform_name": "Juniper Junos", "librenms_os": posted_os, "create_mapping": "1"}
 
     if endpoint == "sync":
         response = _post(client, "create_and_assign_platform", device, data)
@@ -813,3 +809,38 @@ def test_both_create_platform_modals_report_the_mapping_alike(client, librenms_s
     assert device.platform.name == "Juniper Junos"
     assert text in message_texts(response.wsgi_request, level)
     assert PlatformMapping.objects.filter(librenms_os="junos").exists() is created
+    assert not PlatformMapping.objects.filter(librenms_os="eos").exists()
+
+
+@transactional_db_with_all_apps()
+class TestANamedPlatformRaceWinnerNeedsViewScope:
+    def test_a_winner_created_between_preflight_and_apply_is_not_reused_without_view(self, client, librenms_server):
+        """Another session commits the named platform after the view's preflight; the actor may add, not view."""
+        from dcim.models import Device, Platform
+        from django.db import connection, connections
+
+        _tracking(False)
+        device = _linked("named-race", librenms_server, 7431)
+        client.force_login(make_user_with_perms("named-race-actor", [("change", Device), ("add", Platform)]))
+        winners = []
+
+        def create_winner():
+            try:
+                winners.append(Platform.objects.create(name="Juniper Junos", slug="juniper-junos-winner"))
+            finally:
+                connections.close_all()
+
+        def insert_after_the_winner(execute, sql, params, many, context):
+            if sql.startswith('INSERT INTO "dcim_platform"') and not winners:
+                with bounded_executor(1) as executor:
+                    executor.submit(create_winner).result(timeout=10)
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(insert_after_the_winner):
+            response = _post(client, "create_and_assign_platform", device, {"platform_name": "Juniper Junos"})
+
+        device.refresh_from_db()
+        assert winners
+        assert response.status_code == 302
+        assert device.platform is None
+        assert Platform.objects.filter(name="Juniper Junos").count() == 1
