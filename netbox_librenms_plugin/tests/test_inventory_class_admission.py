@@ -396,17 +396,17 @@ class TestInvalidStoredFilter:
 
     def test_the_rule_loader_raises_a_typed_error_naming_rule_and_field(self):
         from netbox_librenms_plugin.inventory_policy import load_inventory_policy
-        from netbox_librenms_plugin.models import InventoryRuleFilterError
+        from netbox_librenms_plugin.models import RuleConfigurationError
         from netbox_librenms_plugin.tests.conftest import make_device
 
         device = make_device("broken-filter-loader")
         rule = _break_the_scb_filter()
 
-        with pytest.raises(InventoryRuleFilterError) as excinfo:
+        with pytest.raises(RuleConfigurationError) as excinfo:
             load_inventory_policy(device.pk)
 
         assert (excinfo.value.rule_pk, excinfo.value.field) == (rule.pk, "name_pattern")
-        assert f"pk={rule.pk}" in str(excinfo.value)
+        assert f"(ID {rule.pk})" in str(excinfo.value)
 
     @pytest.mark.parametrize("action", ["install_selected", "install_branch"])
     def test_an_install_refuses_with_a_message(self, action):

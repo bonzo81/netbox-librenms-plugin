@@ -2753,6 +2753,9 @@ def parse_librenms_location(location_string: str, pattern: str, is_regex: bool =
     Returns:
         dict: Mapping of each supported token to its parsed value (or None).
 
+    Raises:
+        re.error: When ``pattern`` does not compile (OverflowError for a too-large repeat count).
+
     """
     result = {name: None for name in LOCATION_PARSE_TOKENS}
     if not location_string or not pattern:
@@ -2761,16 +2764,10 @@ def parse_librenms_location(location_string: str, pattern: str, is_regex: bool =
     if len(location_string) > LOCATION_PARSE_MAX_INPUT_LEN:
         location_string = location_string[:LOCATION_PARSE_MAX_INPUT_LEN]
 
-    try:
-        if is_regex:
-            compiled = re.compile(pattern)
-            match = compiled.search(location_string)
-        else:
-            compiled = re.compile(_placeholder_pattern_to_regex(pattern))
-            match = compiled.match(location_string)
-    except REGEX_COMPILE_ERRORS:
-        logger.warning("Invalid LibreNMS location parse pattern: %r", pattern)
-        return result
+    if is_regex:
+        match = re.compile(pattern).search(location_string)
+    else:
+        match = re.compile(_placeholder_pattern_to_regex(pattern)).match(location_string)
 
     if not match:
         return result
@@ -2819,6 +2816,9 @@ def parse_location_for_import(location_string: str) -> dict:
     Returns:
         dict: Mapping of each supported token to its parsed value (or None).
 
+    Raises:
+        RuleConfigurationError: When the stored parse pattern does not compile.
+
     """
     location_string = _normalise_location_value(location_string)
     pattern, is_regex = get_location_parse_settings()
@@ -2831,7 +2831,12 @@ def parse_location_for_import(location_string: str) -> dict:
             "rack": None,
             "tenant": None,
         }
-    parsed = parse_librenms_location(location_string, pattern, is_regex)
+    try:
+        parsed = parse_librenms_location(location_string, pattern, is_regex)
+    except REGEX_COMPILE_ERRORS as exc:
+        from netbox_librenms_plugin.models import LibreNMSSettings, RuleConfigurationError
+
+        raise RuleConfigurationError(LibreNMSSettings.objects.order_by("pk").first(), "location_parse_pattern") from exc
     # A global parse pattern is best-effort: if this particular location does
     # not match the pattern (no site token resolved), fall back to whole-string
     # matching so locations that don't fit the pattern still resolve a site.
@@ -4294,6 +4299,9 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, prel
     Returns:
         The normalized string after all matching rules have been applied.
 
+    Raises:
+        RuleConfigurationError: When a rule in the chain stores a pattern or replacement that does not work.
+
     """
     from netbox_librenms_plugin.models import NormalizationRule
 
@@ -4302,12 +4310,7 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, prel
 
     def _apply_rules(val, rules_qs):
         for rule in rules_qs:
-            try:
-                val = re.sub(rule.match_pattern, rule.replacement, val)
-            except (*REGEX_COMPILE_ERRORS, IndexError):
-                logger.error(
-                    "Invalid regex in NormalizationRule pk=%s pattern=%r — skipping", rule.pk, rule.match_pattern
-                )
+            val = rule.apply(val)
         return val
 
     if preloaded_rules is not None:

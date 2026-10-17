@@ -182,12 +182,12 @@ class TestFiltersOnEveryAction:
 
     @pytest.mark.parametrize("action", ["skip", "transparent", "include"])
     def test_a_stored_filter_that_does_not_compile_raises_for_every_action(self, action):
-        from netbox_librenms_plugin.models import InventoryRuleFilterError
+        from netbox_librenms_plugin.models import RuleConfigurationError
 
         rule = InventoryIgnoreRule(pk=7, name="Broken", match_type="class_is", pattern="module", action=action)
         rule.model_pattern = "("
 
-        with pytest.raises(InventoryRuleFilterError) as excinfo:
+        with pytest.raises(RuleConfigurationError) as excinfo:
             rule.matches_filters({"entPhysicalClass": "module"})
 
         assert (excinfo.value.rule_pk, excinfo.value.field) == (7, "model_pattern")

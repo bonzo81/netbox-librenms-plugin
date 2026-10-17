@@ -13,11 +13,10 @@ from django.test import RequestFactory
 
 from netbox_librenms_plugin.interface_rules import (
     InterfaceRuleMatcher,
-    RuleConfigurationError,
     RuleDecisionKind,
     interface_rules_for_request,
 )
-from netbox_librenms_plugin.models import InterfaceTypeMapping
+from netbox_librenms_plugin.models import InterfaceTypeMapping, RuleConfigurationError
 from netbox_librenms_plugin.utils import convert_speed_to_kbps, validate_regex_field
 
 pytestmark = pytest.mark.django_db
@@ -442,8 +441,9 @@ class TestLoading:
     def test_a_stored_pattern_that_does_not_compile_fails_the_load(self, stored):
         rule = _rule(name_pattern="^Te", netbox_type="other")
         InterfaceTypeMapping.objects.filter(pk=rule.pk).update(name_pattern=stored)
-        with pytest.raises(RuleConfigurationError, match=f"Interface rule {rule.pk} "):
+        with pytest.raises(RuleConfigurationError) as excinfo:
             InterfaceRuleMatcher.load()
+        assert (excinfo.value.rule_pk, excinfo.value.field, excinfo.value.value) == (rule.pk, "name_pattern", stored)
 
 
 @pytest.mark.parametrize("missing", ["ifName", "ifDescr", "ifType", "ifSpeed"])

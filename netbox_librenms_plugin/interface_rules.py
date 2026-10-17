@@ -12,8 +12,8 @@ from dataclasses import dataclass
 
 from django.http import HttpRequest
 
-from netbox_librenms_plugin.models import InterfaceTypeMapping
-from netbox_librenms_plugin.utils import REGEX_COMPILE_ERRORS, convert_speed_to_kbps
+from netbox_librenms_plugin.models import InterfaceTypeMapping, compile_rule_regex
+from netbox_librenms_plugin.utils import convert_speed_to_kbps
 
 _REQUEST_CACHE_ATTRIBUTE = "_librenms_interface_rules"
 
@@ -22,10 +22,6 @@ PORT_RECORD_KEYS = ("ifName", "ifDescr", "ifType", "ifSpeed")
 
 # The reason for a blocking port the caller may not view: no port id, name or rule.
 HIDDEN_PORT_REASON = "an interface rule refuses a port on an interface or device you cannot view"
-
-
-class RuleConfigurationError(Exception):
-    """A stored rule cannot be applied, so no decision from this rule set is safe."""
 
 
 class RuleDecisionKind(enum.Enum):
@@ -142,12 +138,7 @@ class InterfaceRuleMatcher:
         """
         rules = []
         for mapping in InterfaceTypeMapping.objects.select_related("platform").order_by("pk"):
-            try:
-                pattern = re.compile(mapping.name_pattern) if mapping.name_pattern else None
-            except REGEX_COMPILE_ERRORS as exc:
-                raise RuleConfigurationError(
-                    f"Interface rule {mapping.pk} has a name pattern that does not compile: {exc}"
-                ) from exc
+            pattern = compile_rule_regex(mapping, "name_pattern") if mapping.name_pattern else None
             rules.append(
                 InterfaceRule(
                     pk=mapping.pk,
