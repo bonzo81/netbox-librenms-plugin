@@ -7,7 +7,7 @@ creates the platforms it needs, and writes the subject. Neither needs an HTTP re
 page, import, and a background job are adapters over this module.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import NamedTuple
 
@@ -422,26 +422,47 @@ def _create_version_platform(assessment, actor):
     )
 
 
-def _assess_locked(row, facts, *, tracking, actor, known, new, named, created):
+def _named_request(new_os_platform, facts, tracking):
     """
-    Assess the locked subject under the *known* OS platform, the *new* one the actor names, or the OS rule.
+    Return the assessment of the OS platform that the actor names, and the stale outcome of a changed version.
 
-    A named OS platform is created (and added to *created*) only while the LibreNMS OS still has no
-    platform.
+    Returns:
+        tuple[PlatformAssessment, PlatformOutcome | None]: The assessment, and the outcome when
+        tracking is on and LibreNMS now reports another version than the actor saw.
+
     """
-    if known is not None:
-        return _assess_under(row, known, facts, tracking=tracking, actor=actor)
-    if new is None:
-        return assess_platform(row, facts, tracking=tracking, actor=actor)
+    named = PlatformAssessment(
+        PlatformState.PROPOSED,
+        PlatformReason.OS_PLATFORM_MISSING,
+        facts,
+        tracking,
+        target_name=new_os_platform.name,
+        operation=PlatformOperation.CREATE_OS_PLATFORM,
+    )
+    if tracking and _fact(new_os_platform.reported_version) != facts.version:
+        return named, PlatformOutcome(OutcomeStatus.STALE, PlatformReason.VERSION_CHANGED, named)
+    return named, None
+
+
+def _resolve_named_os_platform(new_os_platform, facts, actor, named, created):
+    """
+    Return the OS platform that the actor names; a new one is added to *created*.
+
+    The platform is used only while the LibreNMS OS still has no platform.
+
+    Raises:
+        _Stop: A platform or a Platform Mapping now matches the OS, or the actor may not use the platform.
+
+    """
     if facts.librenms_os and _find_os_platform(facts.librenms_os)[1] is not PlatformReason.OS_PLATFORM_MISSING:
         raise _Stop(PlatformOutcome(OutcomeStatus.STALE, PlatformReason.OS_PLATFORM_RESOLVED, named))
-    os_platform, made = _named_os_platform(new, actor, named)
+    os_platform, made = _named_os_platform(new_os_platform, actor, named)
     if made is not None:
         created.append(made)
-    return _assess_under(row, os_platform, facts, tracking=tracking, actor=actor)
+    return os_platform
 
 
-def apply_platform(model, pk, facts, *, tracking, actor, new_os_platform=None, os_platform=None):
+def apply_platform(model, pk, facts, *, tracking, actor, new_os_platform=None):
     """
     Assess the subject again under its row lock, create the platforms it needs, and write it.
 
@@ -455,7 +476,6 @@ def apply_platform(model, pk, facts, *, tracking, actor, new_os_platform=None, o
         new_os_platform (NewOSPlatform | None): The OS platform the actor names when none matches
             the LibreNMS OS. A platform with that name is used as it is. When a platform or a
             Platform Mapping now matches the OS, or the version changed, the outcome is stale.
-        os_platform (Platform | None): The OS platform, when the caller already knows it.
 
     Returns:
         PlatformOutcome: The outcome. A lock conflict is raised, not returned.
@@ -464,31 +484,19 @@ def apply_platform(model, pk, facts, *, tracking, actor, new_os_platform=None, o
     seen = {"created": [], "writing": model}
     named = None
     if new_os_platform is not None:
-        named = PlatformAssessment(
-            PlatformState.PROPOSED,
-            PlatformReason.OS_PLATFORM_MISSING,
-            facts,
-            tracking,
-            target_name=new_os_platform.name,
-            operation=PlatformOperation.CREATE_OS_PLATFORM,
-        )
-        if tracking and _fact(new_os_platform.reported_version) != facts.version:
-            return PlatformOutcome(OutcomeStatus.STALE, PlatformReason.VERSION_CHANGED, named)
+        named, stale = _named_request(new_os_platform, facts, tracking)
+        if stale is not None:
+            return stale
 
     def apply(row):
         seen["previous"] = row.platform
         seen["writing"] = Platform
         seen["assessment"] = named
-        assessment = _assess_locked(
-            row,
-            facts,
-            tracking=tracking,
-            actor=actor,
-            known=os_platform,
-            new=new_os_platform,
-            named=named,
-            created=seen["created"],
-        )
+        if new_os_platform is None:
+            assessment = assess_platform(row, facts, tracking=tracking, actor=actor)
+        else:
+            os_platform = _resolve_named_os_platform(new_os_platform, facts, actor, named, seen["created"])
+            assessment = _assess_under(row, os_platform, facts, tracking=tracking, actor=actor)
         seen["assessment"] = assessment
         if assessment.state is PlatformState.CURRENT:
             return False
@@ -539,7 +547,48 @@ def apply_platform(model, pk, facts, *, tracking, actor, new_os_platform=None, o
     )
 
 
-def import_platform(facts, *, tracking, actor, os_platform=None):
+def create_os_platform(new_os_platform, facts, *, tracking, actor):
+    """
+    Create the OS platform that the actor names for an object that an import creates later.
+
+    The rules are those of ``apply_platform`` with *new_os_platform*. The version platform is not
+    created here: the import creates it with the object (``import_platform``).
+
+    Args:
+        new_os_platform (NewOSPlatform): The OS platform the actor names. A platform with that
+            name is used as it is when the actor may view it.
+        facts (PlatformFacts): The LibreNMS OS and version.
+        tracking (bool): Whether platform version tracking is on.
+        actor: The user; a create needs ``add`` on Platform for the new row.
+
+    Returns:
+        PlatformOutcome: APPLIED with the new platform in ``created``, or UNCHANGED for a reused
+        platform; the assessment holds the OS platform. A lock conflict is raised, not returned.
+
+    """
+    named, stale = _named_request(new_os_platform, facts, tracking)
+    if stale is not None:
+        return stale
+    created = []
+    try:
+        with transaction.atomic():
+            os_platform = _resolve_named_os_platform(new_os_platform, facts, actor, named, created)
+    except _Stop as stop:
+        return stop.outcome
+    except (ValidationError, IntegrityError) as exc:
+        if classify_conflict(exc):
+            raise
+        refused = {"error_model": Platform}
+        # The adapter gives the error to exception_text_for with its own viewer.
+        # nosemgrep: caught-error-text  # noqa: ERA001
+        return PlatformOutcome(OutcomeStatus.FAILED, PlatformReason.PLATFORM_INVALID, named, error=exc, **refused)
+    status = OutcomeStatus.APPLIED if created else OutcomeStatus.UNCHANGED
+    return PlatformOutcome(
+        status, assessment=replace(named, os_platform=os_platform), platform=os_platform, created=tuple(created)
+    )
+
+
+def import_platform(facts, *, tracking, actor):
     """
     Return the platform for an object that an import creates, and create its version platform.
 
@@ -551,16 +600,12 @@ def import_platform(facts, *, tracking, actor, os_platform=None):
         facts (PlatformFacts): The LibreNMS OS and version.
         tracking (bool): Whether platform version tracking is on.
         actor: The import's synchronization actor, or None when the import has none.
-        os_platform: The OS platform, when the caller already knows it.
 
     Returns:
         ImportPlatform: The platform to assign.
 
     """
-    if os_platform is None:
-        assessment = assess_platform(None, facts, tracking=tracking)
-    else:
-        assessment = _assess_under(None, os_platform, facts, tracking=tracking, actor=None)
+    assessment = assess_platform(None, facts, tracking=tracking)
     if assessment.operation is PlatformOperation.ASSIGN:
         return ImportPlatform(assessment.target, assessment)
     if assessment.os_platform is None:
