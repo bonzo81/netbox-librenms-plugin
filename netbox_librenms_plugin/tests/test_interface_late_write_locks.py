@@ -8,7 +8,6 @@ here are real two-connection lock schedules that deadlock when the lock comes be
 """
 
 import re
-from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 
 import pytest
@@ -19,6 +18,7 @@ from ipam.models import VLAN
 from virtualization.models import VMInterface
 
 from netbox_librenms_plugin.tests.conftest import (
+    bounded_executor,
     configure_default_librenms_server,
     make_device,
     make_superuser,
@@ -161,7 +161,7 @@ def _run_schedule(client, device, interface, hold_sql, *, exclude_columns):
             wait_for_lock_wait(other, sync_pid)
             commit_row_change(other, Interface, interface.pk, {"label": "set by another operation"})
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
+    with bounded_executor(max_workers=1) as executor:
         holder = executor.submit(hold_then_update)
         assert held.wait(5), "the other session did not take its lock"
         with raised_sqlstates() as sqlstates:
@@ -286,6 +286,8 @@ def test_a_versioned_save_of_a_model_with_no_version_check_fails():
     from dcim.models import Site
 
     site = Site.objects.create(name="late-lock-unchecked", slug="late-lock-unchecked")
+    # The callers of save_at_version take the before-state of the row.
+    site.snapshot()
     site.description = "changed"
 
     with pytest.raises(RuntimeError, match="No row-version check is connected for Site"):

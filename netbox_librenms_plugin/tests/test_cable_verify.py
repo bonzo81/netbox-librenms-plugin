@@ -20,6 +20,8 @@ import pytest
 from django.conf import settings
 from django.core.cache import cache as real_cache
 from django.test import RequestFactory, override_settings
+from netbox_librenms_plugin.server_mappings import resolve_device_port
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 
 SERVER_KEY = "default"
 
@@ -63,8 +65,7 @@ def _cable_device(tag, ifaces):
     for name, port_id in ifaces:
         iface = Interface.objects.create(device=device, name=name, type="1000base-t")
         if port_id is not None:
-            iface.custom_field_data = {"librenms_id": {SERVER_KEY: port_id}}
-            iface.save()
+            seed_mapping(iface, SERVER_KEY, own=port_id)
         made[name] = iface
     return device, made
 
@@ -724,49 +725,42 @@ class TestResolveLocalInterfaceCore:
     def test_librenms_id_beats_name(self):
         from dcim.models import Interface
 
-        from netbox_librenms_plugin.utils import resolve_interface_on_device
-
         device, by_name = self._dev("core-id-wins")
         by_id = Interface.objects.create(device=device, name="other-name", type="1000base-t")
-        by_id.custom_field_data["librenms_id"] = {"default": 4242}
-        by_id.save()
+        seed_mapping(by_id, "default", own=4242)
 
-        got = resolve_interface_on_device(device, "default", 4242, ["eth-by-name"])
+        got = resolve_device_port(device, server="default", port_id=4242, name_candidates=["eth-by-name"])
         assert got == by_id  # the stable id match wins over the name candidate
 
     def test_name_fallback_covers_all_candidates(self):
-        from netbox_librenms_plugin.utils import resolve_interface_on_device
-
         device, by_name = self._dev("core-name-fb")
         # No id match anywhere: the ALTERNATE candidate (issue #88) must still resolve.
-        got = resolve_interface_on_device(device, "default", 9999, ["displayed-name", "eth-by-name"])
+        got = resolve_device_port(
+            device, server="default", port_id=9999, name_candidates=["displayed-name", "eth-by-name"]
+        )
         assert got == by_name
 
     def test_empty_inputs_resolve_nothing(self):
-        from netbox_librenms_plugin.utils import resolve_interface_on_device
-
         device, _ = self._dev("core-empty")
-        assert resolve_interface_on_device(device, "default", None, []) is None
+        assert resolve_device_port(device, server="default", port_id=None, name_candidates=[]) is None
 
     def test_two_name_matches_resolve_nothing(self):
         from dcim.models import Interface
 
-        from netbox_librenms_plugin.utils import resolve_interface_on_device
-
         device, first = self._dev("core-name-ambiguous")
         second = Interface.objects.create(device=device, name="eth-alt", type="1000base-t")
 
-        assert resolve_interface_on_device(device, "default", None, [first.name, second.name]) is None
+        assert (
+            resolve_device_port(device, server="default", port_id=None, name_candidates=[first.name, second.name])
+            is None
+        )
 
     def test_two_id_matches_resolve_nothing(self):
         from dcim.models import Interface
 
-        from netbox_librenms_plugin.utils import resolve_interface_on_device
-
         device, _by_name = self._dev("core-id-ambiguous")
         for name in ("eth-dup-a", "eth-dup-b"):
             duplicate = Interface.objects.create(device=device, name=name, type="1000base-t")
-            duplicate.custom_field_data["librenms_id"] = {"default": 4242}
-            duplicate.save()
+            seed_stored_mapping(duplicate, {"default": 4242}, save=True)
 
-        assert resolve_interface_on_device(device, "default", 4242, ["eth-by-name"]) is None
+        assert resolve_device_port(device, server="default", port_id=4242, name_candidates=["eth-by-name"]) is None

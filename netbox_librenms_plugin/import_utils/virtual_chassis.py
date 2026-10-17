@@ -1,17 +1,27 @@
 """Virtual chassis detection, creation, and management."""
 
+import functools
 import logging
-from typing import List
+import re
+from typing import List, NamedTuple
 
 from dcim.models import Device, VirtualChassis
 from django.core.cache import cache
 from django.db import transaction
 
+from ..constants import (
+    GENERIC_CONTAINER_MODELS,
+    JUNOS_FPC_DESCR_PREFIX,
+    JUNOS_FPC_MEMBER_DESCR_RE,
+    JUNOS_VC_ROOT_DESCR_MARKER,
+)
 from ..librenms_api import LibreNMSAPI
 from ..utils import (
     exception_text_for,
     find_devices_by_serial,
+    is_vc_position,
     normalize_inventory_serial,
+    normalize_serial,
     normalize_stack_serial,
     preload_normalization_rules,
 )
@@ -35,16 +45,9 @@ def _clone_virtual_chassis_data(data: dict | None) -> dict:
     if not data:
         return empty_virtual_chassis_data()
 
-    members = []
-    for idx, member in enumerate(data.get("members", [])):
-        member_copy = member.copy()
-        raw_position = member_copy.get("position", idx + 1)
-        try:
-            pos = int(raw_position)
-            member_copy["position"] = pos if pos > 0 else idx + 1
-        except (TypeError, ValueError):
-            member_copy["position"] = idx + 1  # 1-based fallback; position 0 is invalid
-        members.append(member_copy)
+    members = [member.copy() for member in data.get("members", [])]
+    for member, position in zip(members, _member_positions([m.get("position") for m in members]), strict=True):
+        member["position"] = position
 
     member_count = data.get("member_count") or len(members)
 
@@ -65,7 +68,7 @@ def _failed_virtual_chassis_data(error: str) -> dict:
     return data
 
 
-_VC_CACHE_VERSION = "v2"
+_VC_CACHE_VERSION = "v5"
 
 
 def _vc_cache_key(api: LibreNMSAPI, device_id: int | str) -> str:
@@ -73,8 +76,14 @@ def _vc_cache_key(api: LibreNMSAPI, device_id: int | str) -> str:
     return f"librenms_vc_detection_{_VC_CACHE_VERSION}_{server_key}_{device_id}"
 
 
-def get_virtual_chassis_data(api: LibreNMSAPI, device_id: int | str, *, force_refresh: bool = False) -> dict:
-    """Fetch (and cache) virtual chassis data for a LibreNMS device."""
+def get_virtual_chassis_data(
+    api: LibreNMSAPI, device_id: int | str, *, force_refresh: bool = False, candidate_keys=None
+) -> dict:
+    """
+    Fetch (and cache) virtual chassis data for a LibreNMS device.
+
+    *candidate_keys* returns :func:`candidate_vc_serial_keys`; a batch passes one memoized callable.
+    """
     if not api or device_id is None:
         return empty_virtual_chassis_data()
 
@@ -86,7 +95,7 @@ def get_virtual_chassis_data(api: LibreNMSAPI, device_id: int | str, *, force_re
         if cached is not None:
             return _clone_virtual_chassis_data(cached)
 
-    detection_data = detect_virtual_chassis_from_inventory(api, device_id)
+    detection_data = detect_virtual_chassis_from_inventory(api, device_id, candidate_keys=candidate_keys)
     if detection_data is None:
         # Cache a confirmed non-stack result so subsequent renders skip repeated reads.
         empty = empty_virtual_chassis_data()
@@ -128,11 +137,13 @@ def prefetch_vc_data_for_devices(api: LibreNMSAPI, device_ids: List[int], *, for
         return
 
     logger.debug(f"Pre-warming VC cache for {len(device_ids)} devices")
+    # Batch-local: a rule change shows in the next batch.
+    candidate_keys = functools.cache(candidate_vc_serial_keys)
 
     for idx, device_id in enumerate(device_ids):
         # This populates the cache if empty, or skips if already cached
         try:
-            get_virtual_chassis_data(api, device_id, force_refresh=force_refresh)
+            get_virtual_chassis_data(api, device_id, force_refresh=force_refresh, candidate_keys=candidate_keys)
         except (BrokenPipeError, ConnectionError, IOError, OSError) as e:
             logger.warning("Connection error during VC prefetch at device %s: %s", idx, e)
             # Stop processing if connection is broken
@@ -144,188 +155,481 @@ def prefetch_vc_data_for_devices(api: LibreNMSAPI, device_ids: List[int], *, for
     logger.debug(f"VC cache warming complete for {len(device_ids)} devices")
 
 
-def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int) -> dict | None:  # noqa: C901
+def select_vc_parent_index(root_rows: list) -> int | None:
+    """Return the index of the root that holds the stack members: a stack root first, else a chassis root."""
+    for wanted in ("stack", "chassis"):
+        for row in root_rows:
+            if isinstance(row, dict) and row.get("entPhysicalClass") == wanted:
+                index = _as_int(row.get("entPhysicalIndex"))
+                if index is not None:
+                    return index
+    return None
+
+
+def _is_junos_vc_root(row: dict) -> bool:
+    """Return whether *row* is a chassis root whose description names a Junos Virtual Chassis."""
+    descr = row.get("entPhysicalDescr")
+    return (
+        row.get("entPhysicalClass") == "chassis"
+        and _as_int(row.get("entPhysicalContainedIn")) == 0
+        and isinstance(descr, str)
+        and JUNOS_VC_ROOT_DESCR_MARKER.casefold() in descr.casefold()
+    )
+
+
+def _is_junos_fpc(row: dict) -> bool:
+    """Return whether *row* is a Junos FPC container row."""
+    descr = row.get("entPhysicalDescr")
+    return (
+        row.get("entPhysicalClass") == "container"
+        and isinstance(descr, str)
+        and descr.startswith(JUNOS_FPC_DESCR_PREFIX)
+    )
+
+
+def _junos_fpc_serials_hold(root_serial, fpc_serials: list, serial_key) -> bool:
+    """Return whether two or more FPCs each have their own real serial and the root serial matches exactly one."""
+    serials = [serial_key(serial) for serial in fpc_serials]
+    return (
+        len(serials) >= 2
+        and all(serials)
+        and len(set(serials)) == len(serials)
+        and serials.count(serial_key(root_serial)) == 1
+    )
+
+
+def _junos_fpc_rows(root: dict, children: list, serial_keys) -> list:
+    """Return the FPC member rows of a Junos Virtual Chassis root, or [] when no serial key meets every condition."""
+    if not _is_junos_vc_root(root):
+        return []
+    fpcs = [row for row in children if _is_junos_fpc(row)]
+    fpc_serials = [row.get("entPhysicalSerialNum") for row in fpcs]
+    # A false stack creates bogus member devices on import, so one serial key must meet every condition.
+    if any(_junos_fpc_serials_hold(root.get("entPhysicalSerialNum"), fpc_serials, key) for key in serial_keys):
+        return fpcs
+    return []
+
+
+def vc_serial_key(manufacturer=None):
+    """
+    Return the function that turns a serial into the form that stack member matching compares.
+
+    This is the one member-serial equality: the serial rules of *manufacturer* and the global
+    rules (Juniper's "S/N " mark, for example), then stack normalization, which blanks
+    placeholders. The master decision, module attribution and the serials modal all compare
+    serials through it.
+
+    Args:
+        manufacturer: The Manufacturer whose serial rules apply, or None for global rules only.
+
+    """
+    rules = preload_normalization_rules("serial", manufacturer=manufacturer)
+
+    def key(value) -> str:
+        return normalize_stack_serial(
+            normalize_inventory_serial(value, manufacturer=manufacturer, preloaded_rules=rules)
+        )
+
+    return key
+
+
+def chassis_serial_key(device):
+    """Return :func:`vc_serial_key` for the manufacturer of *device*'s Virtual Chassis master, or of *device*."""
+    chassis = getattr(device, "virtual_chassis", None)
+    master = getattr(chassis, "master", None) or device
+    return vc_serial_key(getattr(getattr(master, "device_type", None), "manufacturer", None))
+
+
+def candidate_vc_serial_keys() -> tuple:
+    """
+    Return each :func:`vc_serial_key` that an import can compare members with, before its DeviceType is known.
+
+    These are the global key and the key of each manufacturer that has serial rules. Detection accepts a
+    shape that one of them explains, and :func:`identify_vc_master` then uses the key of the DeviceType.
+    """
+    from dcim.models import Manufacturer
+
+    from ..models import NormalizationRule
+
+    scoped_rules = NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL, manufacturer__isnull=False)
+    manufacturers = Manufacturer.objects.filter(pk__in=scoped_rules.values("manufacturer")).order_by("pk")
+    return (vc_serial_key(), *(vc_serial_key(manufacturer) for manufacturer in manufacturers))
+
+
+def members_by_serial_key(vc_members, serial_key) -> dict:
+    """Return ``{serial key: member}``; a key that two members share names neither, so it is left out."""
+    by_key = {}
+    for member in vc_members:
+        if key := serial_key(member.serial):
+            by_key.setdefault(key, []).append(member)
+    return {key: members[0] for key, members in by_key.items() if len(members) == 1}
+
+
+def identify_vc_master(members: list, device_serial, serial_key) -> dict | None:
+    """
+    Return the stack member that is the imported device, or None when no single member is.
+
+    This is the one master decision, for import and for the pages that preview it. The master is
+    returned only when exactly one member matches: none or several mean that the stack is
+    imported as a single device, because a guess splits it into more devices than switches.
+    Junos FPC members must also meet the FPC serial checks under *serial_key*, because detection
+    accepts a shape that the serial rules of any manufacturer explain.
+
+    Args:
+        members: Detected members, as :func:`extract_vc_members` returns them.
+        device_serial: The serial of the device that becomes the master.
+        serial_key: From :func:`vc_serial_key`, for the DeviceType the device imports as.
+
+    """
+    root_serials = [member["root_serial"] for member in members if "root_serial" in member]
+    if root_serials and (
+        len(root_serials) != len(members)
+        or len(set(root_serials)) != 1
+        or not _junos_fpc_serials_hold(root_serials[0], [member.get("serial") for member in members], serial_key)
+    ):
+        return None
+    target = serial_key(device_serial)
+    matches = [member for member in members if target and serial_key(member.get("serial")) == target]
+    return matches[0] if len(matches) == 1 else None
+
+
+def vc_master_view(vc_data: dict, device_serial, serial_key) -> dict:
+    """Return a display copy of detection data that marks the master the way import will identify it."""
+    members = vc_data.get("members", [])
+    master = identify_vc_master(members, device_serial, serial_key) if vc_data.get("is_stack") else None
+    return {
+        **vc_data,
+        "members": [{**member, "is_master": member is master} for member in members],
+        "master_identified": master is not None,
+    }
+
+
+def _member_entries(rows: list, *, model_field: str) -> list[dict]:
+    """Return one member entry per inventory row, in position order."""
+    positions = _member_positions([row.get("entPhysicalParentRelPos") for row in rows])
+    members = [
+        {
+            "serial": row.get("entPhysicalSerialNum", ""),
+            "position": position,
+            "model": row.get(model_field, ""),
+            "name": row.get("entPhysicalName", ""),
+            "index": row.get("entPhysicalIndex"),
+            "description": row.get("entPhysicalDescr", ""),
+        }
+        for row, position in zip(rows, positions, strict=True)
+    ]
+    members.sort(key=lambda member: member["position"])
+    return members
+
+
+# The member shapes that :func:`extract_vc_stack` recognizes; the data-shape signature records them.
+VC_MEMBER_SHAPE_CHASSIS = "chassis"
+VC_MEMBER_SHAPE_JUNOS_FPC = "junos-fpc"
+
+
+class VcStack(NamedTuple):
+    """A stack that :func:`extract_vc_stack` found: its root row, member rows, members and member shape."""
+
+    root: dict | None
+    member_rows: list
+    members: list
+    shape: str | None
+
+
+def extract_vc_members(rows: list, serial_keys) -> list[dict]:
+    """
+    Return the Virtual Chassis members that ENTITY-MIB inventory rows describe.
+
+    This is the one definition of a stack member, for import detection, the sync-tab serials
+    modal and the data-shape signature. Two shapes describe members:
+
+    * Two or more ``chassis`` children of the stack (or chassis) root.
+    * Junos: a ``chassis`` root whose description names the Virtual Chassis, with two or more
+      ``container`` children whose description starts with "FPC". Each FPC needs its own real
+      serial, and the root serial must match exactly one FPC, all under one of *serial_keys*. The
+      model is the FPC name, and the position is the FPC's parent-relative position (the member id).
+
+    Which member is the master is not part of this shape: :func:`identify_vc_master` decides it.
+
+    Args:
+        rows: Inventory rows. They must hold the root rows and at least their direct children;
+            deeper rows are ignored.
+        serial_keys: The :func:`vc_serial_key` functions that may compare the Junos FPC serials.
+
+    Returns:
+        list[dict]: The members in position order, or [] when the rows describe no stack.
+
+    """
+    return extract_vc_stack(rows, serial_keys).members
+
+
+def extract_vc_stack(rows: list, serial_keys) -> VcStack:
+    """Return the stack that :func:`extract_vc_members` reads, with the member shape that matched."""
+    rows = [row for row in rows if isinstance(row, dict)]
+    roots = [row for row in rows if _as_int(row.get("entPhysicalContainedIn")) == 0]
+    parent_index = select_vc_parent_index(roots)
+    if parent_index is None:
+        return VcStack(None, [], [], None)
+    root = next(row for row in roots if _as_int(row.get("entPhysicalIndex")) == parent_index)
+    children = [row for row in rows if _as_int(row.get("entPhysicalContainedIn")) == parent_index]
+
+    chassis = [row for row in children if row.get("entPhysicalClass") == "chassis"]
+    if len(chassis) >= 2:
+        members = _member_entries(chassis, model_field="entPhysicalModelName")
+        return VcStack(root, chassis, members, VC_MEMBER_SHAPE_CHASSIS)
+    fpcs = _junos_fpc_rows(root, children, serial_keys)
+    if fpcs:
+        # The master decision checks the FPC serials again under the key of the imported DeviceType.
+        members = [
+            {**member, "root_serial": root.get("entPhysicalSerialNum")}
+            for member in _member_entries(fpcs, model_field="entPhysicalName")
+        ]
+        return VcStack(root, fpcs, members, VC_MEMBER_SHAPE_JUNOS_FPC)
+    return VcStack(None, [], [], None)
+
+
+class _StackRows(NamedTuple):
+    """The inventory rows that :func:`extract_vc_members` reads as a stack, keyed by raw index."""
+
+    root_index: object
+    positions: dict
+    # Junos only: {FPC slot: FPC row index} for slots that exactly one FPC reports.
+    fpc_slots: dict
+
+    def fpc_named_by(self, row: dict):
+        """Return the index of the FPC row that a Junos "FPC <n> ..." row directly under the root names."""
+        if row.get("entPhysicalContainedIn") != self.root_index or row.get("entPhysicalIndex") in self.positions:
+            return None
+        descr = row.get("entPhysicalDescr")
+        named = JUNOS_FPC_MEMBER_DESCR_RE.match(descr) if isinstance(descr, str) else None
+        return self.fpc_slots.get(int(named.group("member"))) if named else None
+
+
+def _stack_rows(rows, serial_keys) -> _StackRows:
+    """Return the stack root, the member rows' positions and the Junos FPC slots of an inventory."""
+    stack = extract_vc_stack(rows, serial_keys)
+    if stack.root is None:
+        return _StackRows(None, {}, {})
+    fpc_slots = {}
+    if stack.shape == VC_MEMBER_SHAPE_JUNOS_FPC:
+        slots = [_as_int(row.get("entPhysicalParentRelPos")) for row in stack.member_rows]
+        fpc_slots = {
+            slot: row.get("entPhysicalIndex")
+            for row, slot in zip(stack.member_rows, slots, strict=True)
+            if is_vc_position(slot) and slots.count(slot) == 1
+        }
+    return _StackRows(
+        stack.root.get("entPhysicalIndex"),
+        {member["index"]: member["position"] for member in stack.members},
+        fpc_slots,
+    )
+
+
+# A leading member number of 1 or more, then "/", ":" or "-", as in "2/1/1".
+_NAME_HINT_RE = re.compile(r"^\D*([1-9]\d*)[/:\-].*")
+
+
+class _Attribution:
+    """Attribute the rows of one inventory to Virtual Chassis members; see :func:`attribute_inventory`."""
+
+    def __init__(self, rows, vc_members, serial_key):
+        self.vc_members = vc_members
+        self.serial_key = serial_key
+        self.by_serial = members_by_serial_key(vc_members, serial_key)
+        self.by_index = {index: row for row in rows if (index := row.get("entPhysicalIndex")) is not None}
+        self.stack = _stack_rows(rows, (serial_key,))
+        self.results = {}
+
+    def member_at(self, position):
+        """Return the member at *position*, or None."""
+        position = _as_int(position)
+        if not is_vc_position(position):
+            return None
+        return next((member for member in self.vc_members if member.vc_position == position), None)
+
+    def serial_owner(self, row):
+        """Return the member whose serial the row carries, or None."""
+        key = self.serial_key(row.get("entPhysicalSerialNum"))
+        return self.by_serial.get(key) if key else None
+
+    def resolve(self, row, resolving=frozenset()):
+        """Return ``(member | None, source)`` for one row, its parent resolved first."""
+        if id(row) in self.results:
+            return self.results[id(row)]
+        if not self.vc_members:
+            result = (None, "default")
+        elif (member := self.serial_owner(row)) is not None:
+            result = (member, "serial")
+        elif self.stack.positions:
+            result = self._in_stack(row)
+        else:
+            result = self._without_stack(row, resolving | {id(row)})
+        self.results[id(row)] = result
+        return result
+
+    def _member_row_owner(self, row):
+        """Return the member a member row resolves to: its serial first, then its detected position."""
+        return self.serial_owner(row) or self.member_at(self.stack.positions.get(row.get("entPhysicalIndex")))
+
+    def _in_stack(self, row):
+        """Attribute a row of a recognized stack to the member row it is or sits under."""
+        # Walk up to the stack root, which owns no member: a nearer serial wins over a member row.
+        current = row
+        visited = set()
+        while isinstance(current, dict) and current.get("entPhysicalIndex") != self.stack.root_index:
+            if id(current) in visited:
+                break
+            visited.add(id(current))
+            if current is not row and (member := self.serial_owner(current)) is not None:
+                return member, "ancestor-serial"
+            if current.get("entPhysicalIndex") in self.stack.positions:
+                member = self._member_row_owner(current)
+                if member is None:
+                    break
+                return member, "position" if current is row else "parent-context"
+            # A Junos PSU or fan tray under the root names its FPC as "FPC <n> ..." and follows it.
+            fpc = self.by_index.get(self.stack.fpc_named_by(current))
+            if fpc is not None:
+                member = self._member_row_owner(fpc)
+                if member is None:
+                    break
+                return member, "junos-member" if current is row else "parent-context"
+            current = self.by_index.get(current.get("entPhysicalContainedIn"))
+        return None, "default"
+
+    def _inherited(self, row, resolving):
+        """Return ``(inherits, member)`` from the row's parent; a generic root owns nothing."""
+        parent = self.by_index.get(row.get("entPhysicalContainedIn"))
+        if parent is None or id(parent) in resolving:
+            return False, None
+        member, source = self.resolve(parent, resolving)
+        parent_class = normalize_serial(parent.get("entPhysicalClass"))
+        parent_model = normalize_serial(parent.get("entPhysicalModelName")).lower()
+        generic_root = source == "default" and (
+            parent_class == "stack" or (parent_class == "container" and parent_model in GENERIC_CONTAINER_MODELS)
+        )
+        return not generic_root, member
+
+    def _without_stack(self, row, resolving):
+        """Attribute a row of an unrecognized shape with the position and name heuristic."""
+        parent_index = row.get("entPhysicalContainedIn", 0)
+        visited = set()
+        while parent_index and parent_index in self.by_index and parent_index not in visited:
+            visited.add(parent_index)
+            parent = self.by_index[parent_index]
+            if (member := self.serial_owner(parent)) is not None:
+                return member, "ancestor-serial"
+            parent_index = parent.get("entPhysicalContainedIn", 0)
+        # A descendant's parentRelPos is its hardware slot, so it inherits its parent's member.
+        inherits, member = self._inherited(row, resolving)
+        if inherits:
+            return member, "parent-context"
+        # This shape has no member rows, so any row's position or name hint from 1 names a member.
+        if (member := self.member_at(_from_one(row.get("entPhysicalParentRelPos")))) is not None:
+            return member, "position"
+        for field in ("entPhysicalName", "entPhysicalDescr", "entPhysicalModelName"):
+            match = _NAME_HINT_RE.match(normalize_serial(row.get(field)))
+            if match and (member := self.member_at(match.group(1))) is not None:
+                return member, "name-hint"
+        return None, "default"
+
+
+def _from_one(value) -> int | None:
+    """Return *value* as a position of 1 or more, or None."""
+    position = _as_int(value)
+    return position if position is not None and position >= 1 else None
+
+
+def attribute_inventory(rows: list, vc_members: list, serial_key) -> list[tuple]:
+    """
+    Return the Virtual Chassis member that owns each inventory row, in row order.
+
+    This is all of module sync's member attribution. A row's own serial decides first. In a stack
+    that :func:`extract_vc_members` recognizes, only a member row gives a member by its position,
+    its descendants inherit it unless a nearer serial names another member, and the stack root and
+    the other rows directly under it own no member. A Junos PSU or fan tray named "FPC <n> ..."
+    follows the FPC that reports slot n. For an inventory that is not a recognized stack, a row
+    inherits its parent's member, or a position or leading name number of 1 or more names one.
+
+    Args:
+        rows: The main inventory rows of one device; OOB controller rows are no part of it.
+        vc_members: The NetBox Virtual Chassis member Devices.
+        serial_key: From :func:`vc_serial_key`, for the stack's manufacturer; unused without members.
+
+    Returns:
+        list[tuple]: ``(member Device | None, source)`` per row, where None means the page device.
+
+    """
+    attribution = _Attribution(rows, vc_members, serial_key)
+    return [attribution.resolve(row) for row in rows]
+
+
+def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int, *, candidate_keys=None) -> dict | None:
     """
     Detect a stack or Virtual Chassis from ENTITY-MIB inventory.
 
-    Vendor-agnostic using standard hierarchical structure.
+    Reads the root rows and the direct children of the stack (or chassis) root, then lets
+    :func:`extract_vc_members` decide which children are members.
 
     Args:
         api: LibreNMSAPI instance
         device_id: LibreNMS device ID
+        candidate_keys: Returns :func:`candidate_vc_serial_keys`; None calls it directly.
 
     Returns:
-        dict with structure:
-        {
-            'is_stack': bool,
-            'member_count': int,
-            'detection_failed': bool,
-            'detection_error': str | None,
-            'members': [
-                {
-                    'serial': str,
-                    'position': int,
-                    'model': str,
-                    'name': str,
-                    'index': int,
-                    'description': str,
-                    'suggested_name': str  # Generated using master device name
-                }
-            ]
-        }
-        Returns None when the inventory confirms that the device is not a stack. A failed
-        inventory read returns an empty payload with detection_failed=True so callers can
-        fail closed without caching the failure as a negative result.
-
-    Detection Logic:
-        1. Check root level (entPhysicalContainedIn=0) for parent container
-        2. Find parent index (entPhysicalClass='stack' or 'chassis')
-        3. Get children chassis at that parent's index
-        4. If multiple chassis found -> Stack detected
+        dict | None: ``{is_stack, member_count, members, detection_failed, detection_error}``.
+            Each member carries serial, position, model, name, index, description and
+            suggested_name. None when the inventory confirms that the device is not a stack.
+            A failed inventory read returns an empty payload with detection_failed=True so callers
+            can fail closed without caching the failure as a negative result.
 
     """
     try:
-        # Get the master device info to use for naming
         device_found, device_info = api.get_device_info(device_id)
         master_name = None
         if device_found and device_info:
             master_name = device_info.get("sysName") or device_info.get("hostname")
 
-        # Step 1: Get root level items
         # A confirmed device with no inventory rows is a non-stack. For a missing device,
         # an inventory 404 is a failed read and must not be cached as a non-stack.
         success, root_items = api.get_inventory_filtered(
             device_id, ent_physical_contained_in=0, missing_is_empty=device_found
         )
-
         if not success:
             logger.warning(f"Could not read root inventory items for device {device_id}")
             return _failed_virtual_chassis_data("LibreNMS root inventory request failed")
 
-        if not root_items:
-            logger.debug(f"No root inventory items found for device {device_id}")
-            return None
-
-        # Step 2: Find parent container index
-        # Prefer "stack" over "chassis" for deterministic VC detection
-        parent_index = None
-        stack_index = None
-        chassis_index = None
-        for item in root_items:
-            item_class = item.get("entPhysicalClass")
-            if item_class == "stack" and stack_index is None:
-                stack_index = item.get("entPhysicalIndex")
-            elif item_class == "chassis" and chassis_index is None:
-                chassis_index = item.get("entPhysicalIndex")
-        parent_index = stack_index if stack_index is not None else chassis_index
-        if parent_index is not None:
-            logger.debug(f"VC detection: Found parent container at index {parent_index} for device {device_id}")
-
+        root_items = root_items or []
+        parent_index = select_vc_parent_index(root_items)
         if parent_index is None:
             return None
 
-        # Step 3: Get children chassis at next level
         success, child_items = api.get_inventory_filtered(
-            device_id,
-            ent_physical_class="chassis",
-            ent_physical_contained_in=parent_index,
-            missing_is_empty=True,
+            device_id, ent_physical_contained_in=parent_index, missing_is_empty=True
         )
-
         if not success:
-            logger.warning(f"Could not read child chassis inventory for device {device_id}")
-            return _failed_virtual_chassis_data("LibreNMS child chassis inventory request failed")
+            logger.warning(f"Could not read child inventory for device {device_id}")
+            return _failed_virtual_chassis_data("LibreNMS child inventory request failed")
 
-        # Filter for chassis only (in case API filter didn't work)
-        chassis_items = [item for item in (child_items or []) if item.get("entPhysicalClass") == "chassis"]
-
-        # Step 4: Multiple chassis = stack
-        if len(chassis_items) <= 1:
+        serial_keys = (candidate_keys or candidate_vc_serial_keys)()
+        members = extract_vc_members([*root_items, *(child_items or [])], serial_keys)
+        if not members:
             return None
-
-        # Step 5: Extract member info
-        # First pass: collect raw entPhysicalParentRelPos values to detect 0-based
-        # indexing.  Some vendors use 0-based positions (0,1,2,3,4) instead of the
-        # RFC 2737 standard 1-based (1,2,3,4,5).  If any raw position is 0, shift
-        # all valid positions up by 1 so the resulting set is always 1-based.
-        # Exception: if *every* position is 0 the data is invalid (all members
-        # would collide on the same slot) — skip the shift and fall through to
-        # the per-member idx+1 fallback below.
-        raw_positions = []
-        for chassis in chassis_items:
-            raw = chassis.get("entPhysicalParentRelPos")
-            try:
-                raw_positions.append(int(raw))
-            except (TypeError, ValueError):
-                raw_positions.append(None)
-
-        valid_positions = [p for p in raw_positions if p is not None]
-        zero_based = bool(valid_positions) and min(valid_positions) == 0 and max(valid_positions) > 0
-
-        # Identify the master member by matching the LibreNMS device serial
-        # against the ENTITY-MIB serials.  The device-level serial reported by
-        # LibreNMS corresponds to the active/master switch in the stack.
-        device_serial = ""
-        if device_found and device_info:
-            device_serial = normalize_stack_serial(device_info.get("serial"))
 
         # Load naming pattern once to avoid a DB query per member.
         vc_name_pattern = _load_vc_member_name_pattern() if master_name else None
-        members = []
-        for idx, chassis in enumerate(chassis_items):
-            raw_pos = raw_positions[idx]
-            if raw_pos is not None:
-                position = raw_pos + 1 if zero_based else raw_pos
-                # Guard against negative or zero after shift
-                if position <= 0:
-                    position = idx + 1
-            else:
-                position = idx + 1
-
-            serial = chassis.get("entPhysicalSerialNum", "")
-            is_master = bool(device_serial and normalize_stack_serial(serial) == device_serial)
-
-            member_data = {
-                "serial": serial,
-                "position": position,
-                "model": chassis.get("entPhysicalModelName", ""),
-                "name": chassis.get("entPhysicalName", ""),
-                "index": chassis.get("entPhysicalIndex"),
-                "description": chassis.get("entPhysicalDescr", ""),
-                "is_master": is_master,
-            }
-
-            # Generate suggested name if we have master name.
-            # position is already 1-based, so pass it directly (no +1).
+        for member in members:
             if master_name:
-                member_data["suggested_name"] = _generate_vc_member_name(
-                    master_name, position, serial=normalize_stack_serial(serial), pattern=vc_name_pattern
+                member["suggested_name"] = _generate_vc_member_name(
+                    master_name,
+                    member["position"],
+                    serial=normalize_stack_serial(member["serial"]),
+                    pattern=vc_name_pattern,
                 )
             else:
-                member_data["suggested_name"] = f"Member-{position}"
+                member["suggested_name"] = f"Member-{member['position']}"
 
-            members.append(member_data)
-
-        # Sort by position
-        members.sort(key=lambda m: m["position"])
-
-        if zero_based:
-            logger.debug(
-                f"VC detection: corrected 0-based entPhysicalParentRelPos for device {device_id} "
-                f"(raw min={min(valid_positions)})"
-            )
-
-        master_member = next((m for m in members if m["is_master"]), None)
-        if master_member:
-            logger.info(
-                f"Detected stack with {len(members)} members for device {device_id}; "
-                f"master at position {master_member['position']} (serial {device_serial})"
-            )
-        else:
-            logger.info(
-                f"Detected stack with {len(members)} members for device {device_id}; "
-                f"master could not be identified by serial"
-            )
+        logger.info(f"Detected stack with {len(members)} members for device {device_id}")
 
         return {
             "is_stack": True,
@@ -418,16 +722,8 @@ def update_vc_member_suggested_names(vc_data: dict, master_name: str) -> dict:
 
     # Load naming pattern once to avoid a DB query per member
     vc_pattern = _load_vc_member_name_pattern()
-    for idx, member in enumerate(vc_data.get("members", [])):
-        # Positions are stored as 1-based (from entPhysicalParentRelPos or idx+1 fallback).
-        # Use them directly for name generation; only replace 0/negative with 1-based fallback.
-        raw_position = member.get("position", idx + 1)
-        try:
-            position = int(raw_position)
-            if position <= 0:
-                position = idx + 1
-        except (TypeError, ValueError):
-            position = idx + 1
+    members = vc_data.get("members", [])
+    for member, position in zip(members, _member_positions([m.get("position") for m in members]), strict=True):
         member["position"] = position
         member["suggested_name"] = _generate_vc_member_name(
             master_name, position, serial=normalize_stack_serial(member.get("serial")), pattern=vc_pattern
@@ -436,12 +732,23 @@ def update_vc_member_suggested_names(vc_data: dict, master_name: str) -> dict:
     return vc_data
 
 
-def _safe_pos(value) -> int | None:
-    """Return int position or None if not parseable."""
+def _as_int(value) -> int | None:
+    """Return an ENTITY-MIB number (position, index, containment) as an int, or None."""
+    if isinstance(value, bool):
+        return None
     try:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _member_positions(raw_positions: list) -> list[int]:
+    """Return the reported member positions, or row order from 1 when any is missing, negative or shared."""
+    parsed = [_as_int(raw) for raw in raw_positions]
+    if all(is_vc_position(position) for position in parsed) and len(set(parsed)) == len(parsed):
+        return parsed
+    # Repairing one member at a time could reuse a slot that another member reports.
+    return list(range(1, len(parsed) + 1))
 
 
 def _sync_module_bay_counter(device: Device) -> None:
@@ -452,8 +759,20 @@ def _sync_module_bay_counter(device: Device) -> None:
         device.module_bay_count = actual_count
 
 
-def create_virtual_chassis_with_members(  # noqa: C901
-    master_device: Device, members_info: list, libre_device: dict, server_key: str | None = None
+# Import creates no chassis for a stack whose master is unknown: guessing it splits the stack into
+# more devices than switches.
+VC_MASTER_UNKNOWN_WARNING = (
+    "Imported device {device_id} without a virtual chassis: the stack master could not be identified by serial."
+)
+
+
+def create_virtual_chassis_with_members(
+    master_device: Device,
+    members_info: list,
+    libre_device: dict,
+    server_key: str | None = None,
+    *,
+    master_member: dict,
 ) -> VirtualChassis:
     """
     Create Virtual Chassis and member devices from detection info.
@@ -463,15 +782,17 @@ def create_virtual_chassis_with_members(  # noqa: C901
 
     Args:
         master_device: The imported device (becomes VC master)
-        members_info: List of member dicts from VC detection
+        members_info: List of member dicts from VC detection, the master included
         libre_device: Original LibreNMS device data
         server_key: LibreNMS server key stored with the created members.
+        master_member: The entry of *members_info* that is *master_device*, as the caller decided
+            it with :func:`identify_vc_master`.
 
     Returns:
         VirtualChassis: The created virtual chassis instance
 
     Raises:
-        ValidationError: If member count validation fails
+        ValueError: If *master_member* is not one of the *members_info* entries
         IntegrityError: If duplicate serials/names are detected
         Exception: For other creation errors
 
@@ -482,175 +803,72 @@ def create_virtual_chassis_with_members(  # noqa: C901
         ]
 
     """
+    # The ENTITY-MIB serial carries the vendor's decoration ("S/N BCFB9793" on Juniper) while the
+    # stored device serial does not, so member serials go through the same serial key.
+    member_serial = vc_serial_key(getattr(getattr(master_device, "device_type", None), "manufacturer", None))
+    # Caller-supplied members can lack positions; the stack rule then numbers them in row order.
+    positions = _member_positions([member.get("position") for member in members_info])
+    master_pos = next(
+        (pos for member, pos in zip(members_info, positions, strict=True) if member is master_member), None
+    )
+    if master_pos is None:
+        raise ValueError("master_member must be one of the members_info entries")
+
     # Save originals for in-memory rollback — transaction.atomic() rolls back DB but
     # not in-memory model fields.
     original_master_name = master_device.name
     original_vc = master_device.virtual_chassis
     original_vc_position = master_device.vc_position
 
-    # Find master's actual VC position from members_info.
-    # Priority: is_master flag (set during detection) → serial match → default 1.
-    # The ENTITY-MIB serial carries the vendor's decoration ("S/N BCFB9793" on Juniper) while the
-    # stored device serial does not. Resolve the rule chain once here, before the first comparison,
-    # so master matching, the member loop and the member-count check all read the same value.
-    member_manufacturer = getattr(getattr(master_device, "device_type", None), "manufacturer", None)
-    serial_rules = preload_normalization_rules("serial", manufacturer=member_manufacturer)
-
-    def _member_serial(value):
-        """Return a member's serial normalized the way the stored device serial was written."""
-        return normalize_stack_serial(
-            normalize_inventory_serial(value, manufacturer=member_manufacturer, preloaded_rules=serial_rules)
-        )
-
-    _master_serial = normalize_stack_serial(master_device.serial)
-    _master_pos = 1
-    _master_member = next((m for m in members_info if m.get("is_master")), None)
-    if _master_member:
-        _found_pos = _safe_pos(_master_member.get("position"))
-        if _found_pos and _found_pos >= 1:
-            _master_pos = _found_pos
-    elif _master_serial:
-        for _m in members_info:
-            if _member_serial(_m.get("serial")) == _master_serial:
-                _found_pos = _safe_pos(_m.get("position"))
-                if _found_pos and _found_pos >= 1:
-                    _master_pos = _found_pos
-                break
+    master_serial = normalize_stack_serial(master_device.serial)
 
     try:
         with transaction.atomic():
             master_device.snapshot()
             # Load naming pattern once to avoid a DB query per member
             vc_pattern = _load_vc_member_name_pattern()
-            # Rename master device to include position 1 pattern
+            # Rename the master device with its own position
             master_device_new_name = _generate_vc_member_name(
-                original_master_name, _master_pos, serial=_master_serial, pattern=vc_pattern
+                original_master_name, master_pos, serial=master_serial, pattern=vc_pattern
             )
 
             # Check if renamed master conflicts with existing device
-            if Device.objects.filter(name=master_device_new_name).exclude(pk=master_device.pk).exists():
+            rename_master = not Device.objects.filter(name=master_device_new_name).exclude(pk=master_device.pk).exists()
+            if rename_master:
+                master_device.name = master_device_new_name
+            else:
                 logger.warning(
                     f"Cannot rename master to '{master_device_new_name}' - name already exists. "
                     f"Keeping original name '{original_master_name}'"
                 )
-                master_base_name = original_master_name
-                rename_master = False
-            else:
-                master_device.name = master_device_new_name
-                master_base_name = original_master_name
-                rename_master = True
 
             # Create VC using original base name
-            vc_name = master_base_name
             _device_id = libre_device.get("device_id") or master_device.pk
             _domain_prefix = f"librenms-{server_key}" if server_key else "librenms"
             vc = VirtualChassis.objects.create(
-                name=vc_name,
+                name=original_master_name,
                 domain=f"{_domain_prefix}-{_device_id}",
             )
 
             # Update master device
             master_device.virtual_chassis = vc
-            master_device.vc_position = _master_pos
+            master_device.vc_position = master_pos
             save_fields = ["virtual_chassis", "vc_position", "last_updated"]
             if rename_master:
                 save_fields.append("name")
             master_device.save(update_fields=save_fields)
 
-            # Create member devices for remaining positions
-            position = _master_pos + 1  # Start after master position
-            used_positions = {_master_pos}  # Master occupies its actual position
-            members_created = 0
-
-            for member in members_info:
-                # Normalize serial and position up front so all skip-checks and
-                # downstream logic use consistent values (strips whitespace and
-                # treats the sentinel "-" as "no serial").
-                serial = _member_serial(member.get("serial"))
-                member_pos = _safe_pos(member.get("position"))
-
-                # Skip the master member — identified by is_master flag, serial match,
-                # or position match.
-                if member.get("is_master"):
-                    continue
-                # Skip if this is the master's serial (only when both serials are non-empty)
-                if serial and serial == _master_serial:
-                    continue
-                # Skip blank-serial entries that represent the master slot by position
-                if (
-                    not serial
-                    and member_pos is not None
-                    and master_device.vc_position is not None
-                    and member_pos == master_device.vc_position
-                ):
-                    continue
-
-                member_rack = master_device.rack
-                member_location = master_device.location or (
-                    member_rack.location if member_rack and member_rack.location else None
-                )
-
-                # Check for duplicate serial
-                if serial and find_devices_by_serial(serial, limit=1):
-                    logger.warning(f"Device with serial '{serial}' already exists, skipping VC member creation")
-                    continue
-
-                # Prefer the discovered SNMP position; fall back to sequential counter.
-                # member_pos was normalized via _safe_pos() above; 0 is not a valid vc_position.
-                discovered_pos = member_pos if (member_pos is not None and member_pos >= 1) else None
-                # If discovered_pos is already taken by another member, treat as absent.
-                if discovered_pos is not None and discovered_pos in used_positions:
-                    discovered_pos = None
-                # Consume next free sequential slot when no valid discovered_pos.
-                if discovered_pos is None:
-                    while position in used_positions:
-                        position += 1
-                    chosen_pos = position
-                    position += 1
-                else:
-                    chosen_pos = discovered_pos
-                    # Advance sequential counter past chosen position.
-                    position = max(position, chosen_pos + 1)
-                used_positions.add(chosen_pos)
-
-                member_name = _generate_vc_member_name(master_base_name, chosen_pos, serial=serial, pattern=vc_pattern)
-
-                # Check for duplicate name
-                if Device.objects.filter(name=member_name).exists():
-                    logger.warning(f"Device with name '{member_name}' already exists, skipping VC member creation")
-                    continue
-
-                Device.objects.create(
-                    name=member_name,
-                    device_type=master_device.device_type,
-                    role=master_device.role,
-                    site=master_device.site,
-                    location=member_location,
-                    rack=member_rack,
-                    platform=master_device.platform,
-                    serial=serial,
-                    virtual_chassis=vc,
-                    vc_position=chosen_pos,
-                    comments=f"VC member (LibreNMS: {member.get('name', 'Unknown')})\n"
-                    f"Auto-created from stack inventory",
-                )
-                members_created += 1
-
-            # Validate the member count after excluding entries that identify the master.
-            def is_expected_member(member):
-                if member.get("is_master"):
-                    return False
-                serial = _member_serial(member.get("serial"))
-                if serial and serial == _master_serial:
-                    return False
-                return not (
-                    not serial
-                    and member.get("position") is not None
-                    and master_device.vc_position is not None
-                    and _safe_pos(member["position"]) == master_device.vc_position
-                )
-
-            expected_members = sum(is_expected_member(member) for member in members_info)
+            members_created = _create_member_devices(
+                master_device,
+                original_master_name,
+                members_info,
+                positions,
+                master_member,
+                vc,
+                vc_pattern,
+                member_serial,
+            )
+            expected_members = len(members_info) - 1
             if members_created < expected_members:
                 logger.warning(
                     f"Created {members_created} members but expected {expected_members}. "
@@ -677,3 +895,38 @@ def create_virtual_chassis_with_members(  # noqa: C901
         master_device.vc_position = original_vc_position
         logger.error("Virtual Chassis creation failed for device %s: %s", original_master_name, e, exc_info=True)
         raise
+
+
+def _create_member_devices(
+    master_device, base_name, members_info, positions, master_member, vc, vc_pattern, member_serial
+) -> int:
+    """Create a device for each non-master member at its stack position; return how many were created."""
+    member_rack = master_device.rack
+    member_location = master_device.location or (member_rack.location if member_rack and member_rack.location else None)
+    created = 0
+    for member, position in zip(members_info, positions, strict=True):
+        if member is master_member:
+            continue
+        serial = member_serial(member.get("serial"))
+        if serial and find_devices_by_serial(serial, limit=1):
+            logger.warning(f"Device with serial '{serial}' already exists, skipping VC member creation")
+            continue
+        member_name = _generate_vc_member_name(base_name, position, serial=serial, pattern=vc_pattern)
+        if Device.objects.filter(name=member_name).exists():
+            logger.warning(f"Device with name '{member_name}' already exists, skipping VC member creation")
+            continue
+        Device.objects.create(
+            name=member_name,
+            device_type=master_device.device_type,
+            role=master_device.role,
+            site=master_device.site,
+            location=member_location,
+            rack=member_rack,
+            platform=master_device.platform,
+            serial=serial,
+            virtual_chassis=vc,
+            vc_position=position,
+            comments=f"VC member (LibreNMS: {member.get('name', 'Unknown')})\nAuto-created from stack inventory",
+        )
+        created += 1
+    return created

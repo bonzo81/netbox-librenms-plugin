@@ -22,6 +22,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_vm,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 
 ABSENT_DEVICE_ID = 4041
 ERRORING_DEVICE_ID = 1255
@@ -332,6 +333,32 @@ def test_location_update_reports_a_discovered_id_conflict(client, librenms_serve
 
 
 @pytest.mark.django_db
+def test_location_update_answers_a_busy_identity_claim(client, librenms_server, settings):
+    """An identity claim that another transaction holds gives the try-again redirect and no LibreNMS write."""
+    from netbox_librenms_plugin.middleware import TRY_AGAIN_MESSAGE
+    from netbox_librenms_plugin.tests.claim_race_helpers import held_device_claim
+
+    server_key = _point_plugin_at(settings, librenms_server.url)
+    target = make_device("librenms-busy-claim-target.example.com", librenms_cf={server_key: None})
+    librenms_server.register(
+        f"/api/v0/devices/{target.name}",
+        {"status": "ok", "devices": [{"device_id": CONFLICTING_DEVICE_ID}]},
+        method="GET",
+    )
+    client.force_login(make_superuser("librenms-busy-claim-user"))
+
+    with held_device_claim(server_key, CONFLICTING_DEVICE_ID):
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:update_device_location", args=[target.pk]),
+            {"server_key": server_key},
+        )
+
+    assert response.status_code == 302
+    assert [str(message) for message in get_messages(response.wsgi_request)] == [TRY_AGAIN_MESSAGE]
+    assert {request["method"] for request in librenms_server.requests} == {"GET"}, librenms_server.requests
+
+
+@pytest.mark.django_db
 def test_device_status_reports_a_discovered_id_conflict(client, librenms_server, settings):
     """A status lookup must identify the conflicting owner instead of only showing unlinked."""
     server_key = _point_plugin_at(settings, librenms_server.url)
@@ -379,11 +406,11 @@ def test_status_lists_report_each_discovery_conflict_once(
         targets = [make_device(f"{prefix}-{suffix}", librenms_cf={server_key: None}) for suffix in ("a", "b")]
     else:
         owner = make_vm("duplicate-vm-owner")
-        owner.custom_field_data["librenms_id"] = {server_key: CONFLICTING_DEVICE_ID}
+        seed_mapping(owner, server_key, own=CONFLICTING_DEVICE_ID, save=False)
         owner.save()
         targets = [make_vm(f"{prefix}-{suffix}") for suffix in ("a", "b")]
         for target in targets:
-            target.custom_field_data["librenms_id"] = {server_key: None}
+            seed_stored_mapping(target, {server_key: None})
             target.save()
 
     for target in targets:

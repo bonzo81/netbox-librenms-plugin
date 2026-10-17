@@ -107,7 +107,7 @@ def test_the_retry_writes_again_the_librenms_id_that_the_first_attempt_discovere
     No selected row is the management address, so nothing else reads the device again: the retry
     must still write the ID, or the sync reports success while the ID is missing.
     """
-    from netbox_librenms_plugin.utils import get_librenms_device_id
+    from netbox_librenms_plugin.server_mappings import read_mapping
 
     bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
     device = make_device("ip-retry-discovery.example.net")
@@ -133,7 +133,7 @@ def test_the_retry_writes_again_the_librenms_id_that_the_first_attempt_discovere
     assert attempts.count == 2
     assert [level for level, _text in messages_on(response.wsgi_request)] == ["success"]
     device.refresh_from_db()
-    assert get_librenms_device_id(device, SERVER_KEY, auto_save=False) == 4501
+    assert read_mapping(device).own_id(SERVER_KEY) == 4501
 
 
 @transactional_db_with_all_apps()

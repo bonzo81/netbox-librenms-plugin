@@ -54,6 +54,10 @@ Some chassis (e.g. Nokia 7750 SR-s) report child components (CPMs, MDAs) without
 
 For Virtual Chassis devices, the Modules tab automatically distributes inventory rows across the correct VC member based on the component's position in the ENTITY-MIB tree. Each row shows the member hostname to make it clear which physical switch a component belongs to.
 
+When the inventory is a stack that import detection recognizes, only a member row (for example a stack chassis or a Junos FPC) names a member by its position. Rows below a member row belong to that member, unless a serial names another member. The stack root and rows directly under it belong to the device whose page is open. For an inventory that is not a recognized stack, the plugin reads a position of 1 or more, or a leading number in the name, as the member number.
+
+On a Junos Virtual Chassis, all members hang under one root. A row such as "FPC 1 Power Supply 0" belongs to the same member as the FPC that reports slot 1, and a row below an FPC belongs to that FPC's member. An FPC's member comes from its serial first, then from its detected position. If no FPC or more than one FPC reports the slot, the row stays on the open page. Routing Engine numbers are not member numbers.
+
 ## Screenshot
 
 ![Module Sync Tab](../img/Netbox-librenms-plugin-module-sync-tab.png)
@@ -65,5 +69,5 @@ Before using Module Sync you will typically need to configure one or more [mappi
 - **ModuleTypeMapping** — maps LibreNMS model strings (e.g. `SFP-1G-T`) to NetBox ModuleType objects
 - **ModuleBayMapping** — maps LibreNMS bay names (e.g. `Power Supply 1`) to NetBox bay names (e.g. `PSU1`), with optional regex and manufacturer scoping
 - **NormalizationRule** — strips vendor suffixes from model strings before matching (e.g. `3HE16474AARA01` → `3HE16474AA`)
-- **InventoryIgnoreRule** — skips or makes transparent phantom EEPROM/IDPROM entities that some vendors (Cisco IOS-XR) report
+- **InventoryIgnoreRule** — skips or makes transparent phantom EEPROM/IDPROM entities that some vendors (Cisco IOS-XR) report, and the built-in units of fixed platforms (Cisco IOS XE)
 - **CarrierAutoInstallRule** — suggests installing carrier modules for vendors that omit them from SNMP reporting

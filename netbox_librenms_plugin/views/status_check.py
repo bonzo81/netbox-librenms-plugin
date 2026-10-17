@@ -13,7 +13,7 @@ from netbox_librenms_plugin.forms import (
 )
 from netbox_librenms_plugin.tables.device_status import DeviceStatusTable
 from netbox_librenms_plugin.tables.VM_status import VMStatusTable
-from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE, classify_conflict
+from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE, TransactionConflict, classify_conflict
 from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSGenericPermissionMixin
 
 logger = logging.getLogger(__name__)
@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 DISCOVERY_CONFLICT_MESSAGE = (
     "A discovered LibreNMS ID is already assigned to another NetBox object. Open the object to resolve the conflict."
 )
+# A row whose discovery meets another operation's claim is Unknown (None), never "not found".
+BUSY_CLAIM_MESSAGE = "Another operation is linking some of these objects. Refresh to see their status."
 
 
 class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, generic.ObjectListView):
@@ -65,6 +67,7 @@ class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gen
             # Create a list to store device IDs and their status
             device_status_map = {}
             lookup_errors = set()
+            busy = False
 
             # Apply filters
             queryset = self.filterset(self.request.GET, queryset=queryset).qs
@@ -78,6 +81,9 @@ class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gen
                         lookup_errors.add(DISCOVERY_CONFLICT_MESSAGE)
                         continue
                     device_status_map[device.pk] = bool(librenms_id)
+                except TransactionConflict:
+                    device_status_map[device.pk] = None
+                    busy = True
                 except Exception as exc:
                     if classify_conflict(exc):
                         # The discovery write rolled back, so the status stays unknown.
@@ -87,6 +93,8 @@ class DeviceStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gen
 
             for error in sorted(lookup_errors):
                 messages.error(self.request, error)
+            if busy:
+                messages.warning(self.request, BUSY_CLAIM_MESSAGE)
 
             # Annotate the queryset with the status values
             case_when = []
@@ -127,6 +135,7 @@ class VMStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, generic
             # Create a list to store VM IDs and their status
             vm_status_map = {}
             lookup_errors = set()
+            busy = False
 
             # Apply filters
             queryset = self.filterset(self.request.GET, queryset=queryset).qs
@@ -140,6 +149,9 @@ class VMStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, generic
                         lookup_errors.add(DISCOVERY_CONFLICT_MESSAGE)
                         continue
                     vm_status_map[vm.pk] = bool(librenms_id)
+                except TransactionConflict:
+                    vm_status_map[vm.pk] = None
+                    busy = True
                 except Exception as exc:
                     if classify_conflict(exc):
                         # The discovery write rolled back, so the status stays unknown.
@@ -149,6 +161,8 @@ class VMStatusListView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, generic
 
             for error in sorted(lookup_errors):
                 messages.error(self.request, error)
+            if busy:
+                messages.warning(self.request, BUSY_CLAIM_MESSAGE)
 
             # Annotate the queryset with the status values
             case_when = []

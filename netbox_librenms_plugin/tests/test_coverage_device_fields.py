@@ -1,19 +1,35 @@
 """Request-level coverage for device and VM field-sync actions."""
 
+from contextlib import ExitStack
 from copy import deepcopy
 
 import pytest
 from django.core.cache import cache
 from django.urls import reverse
 
+from netbox_librenms_plugin.middleware import TRY_AGAIN_MESSAGE
 from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_superuser,
     make_virtual_chassis,
     make_vm,
+    transactional_db_with_all_apps,
+)
+from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
+from netbox_librenms_plugin.tests.mapping_fixtures import (
+    mapping_from_change_record,
+    seed_mapping,
+    seed_stored_mapping,
+    stored_mapping_for_test,
 )
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
-from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, message_texts
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    assert_update_logged,
+    make_user_with_perms,
+    message_texts,
+    messages_on,
+    update_change,
+)
 
 
 SERVER_KEY = "default"
@@ -76,6 +92,30 @@ def _messages(response, level=None):
     return message_texts(response.wsgi_request, level=level)
 
 
+def _post_while_the_user_row_is_locked(client, name, obj, data, *, check_at_save):
+    """
+    POST while another session holds the user row: the change record's user foreign key check meets a real 55P03.
+
+    The check is deferred to COMMIT, or with *check_at_save* made immediate at the owner's UPDATE, so it runs inside save().
+    """
+    from django.contrib.auth import get_user_model
+    from django.db import connection
+
+    def immediate_checks(execute, sql, params, many, context):
+        if sql.startswith('UPDATE "dcim_device"'):
+            with connection.cursor() as cursor:
+                cursor.execute("SET CONSTRAINTS ALL IMMEDIATE")
+        return execute(sql, params, many, context)
+
+    user_model = get_user_model()
+    with second_connection() as other, ExitStack() as stack:
+        lock_row(other, user_model, int(client.session["_auth_user_id"]))
+        stack.enter_context(lock_timeout(200))
+        if check_at_save:
+            stack.enter_context(connection.execute_wrapper(immediate_checks))
+        return _post(client, name, obj, data)
+
+
 @pytest.mark.django_db
 class TestUpdateDeviceNameView:
     def test_live_name_replaces_a_stale_api_snapshot(self, logged_in_client, librenms_server):
@@ -106,6 +146,7 @@ class TestUpdateDeviceNameView:
         assert response.url.endswith(f"?server_key={SERVER_KEY}")
         assert device.name == "fresh-name"
         assert any("Device name updated" in text for text in _messages(response, "success"))
+        assert_update_logged(device, "name", "old-live-name", "fresh-name")
 
     def test_missing_mapping_leaves_the_name_unchanged(self, logged_in_client, librenms_server):
         device = make_device("name-without-mapping")
@@ -199,6 +240,7 @@ class TestUpdateDeviceSerialView:
         device.refresh_from_db()
         assert device.serial == "NEW-SERIAL"
         assert any("updated from 'OLD-SERIAL'" in text for text in _messages(response, "success"))
+        assert_update_logged(device, "serial", "OLD-SERIAL", "NEW-SERIAL")
 
     @pytest.mark.parametrize("serial", [None, "", "-"])
     def test_missing_live_serial_preserves_the_stored_value(self, logged_in_client, librenms_server, serial):
@@ -276,6 +318,7 @@ class TestUpdateDeviceTypeView:
 
     def test_exact_hardware_match_changes_the_real_device_type(self, logged_in_client, librenms_server):
         device = _linked_device("device-type-update", 6521)
+        original = device.device_type
         replacement = self._device_type("replacement", "Replacement Router")
         librenms_server.device_info_response(
             device_id=6521,
@@ -288,6 +331,7 @@ class TestUpdateDeviceTypeView:
         device.refresh_from_db()
         assert device.device_type == replacement
         assert any("Device type updated" in text for text in _messages(response, "success"))
+        assert_update_logged(device, "device_type", original.pk, replacement.pk)
 
     def test_unmatched_hardware_preserves_the_device_type(self, logged_in_client, librenms_server):
         device = _linked_device("device-type-unmatched", 6522)
@@ -416,6 +460,7 @@ class TestUpdateDevicePlatformView:
         device.refresh_from_db()
         assert device.platform == new_platform
         assert any("updated from 'Old exact platform'" in text for text in _messages(response, "success"))
+        assert_update_logged(device, "platform", old_platform.pk, new_platform.pk)
 
 
 @pytest.mark.django_db
@@ -446,6 +491,7 @@ class TestCreateAndAssignPlatformView:
         assert device.platform == platform
         assert PlatformMapping.objects.get(librenms_os="created-os").netbox_platform == platform
         assert any("Created platform" in text for text in _messages(response, "success"))
+        assert_update_logged(device, "platform", None, platform.pk)
 
     def test_existing_platform_is_reused_without_changing_manufacturer(self, logged_in_client, librenms_server):
         from dcim.models import Platform
@@ -622,6 +668,38 @@ class TestAssignVCSerialView:
         assert first.serial == "FIRST-VC-SERIAL"
         assert second.serial == "SECOND-VC-SERIAL"
         assert any("assigned 2 serial" in text for text in _messages(response, "success"))
+        assert_update_logged(first, "serial", "", "FIRST-VC-SERIAL")
+        assert_update_logged(second, "serial", "", "SECOND-VC-SERIAL")
+
+    @transactional_db_with_all_apps()
+    def test_a_lock_conflict_on_one_member_changes_no_member(self, logged_in_client, librenms_server):
+        """Another session holds the second member's row, so the whole POST gives the try-again answer."""
+        from dcim.models import Device
+
+        first = make_device("vc-serial-lock-first")
+        second = make_device("vc-serial-lock-second")
+        make_virtual_chassis("vc-serial-lock", first, second)
+
+        with second_connection() as other:
+            lock_row(other, Device, second.pk)
+            with lock_timeout(200):
+                response = _post(
+                    logged_in_client,
+                    "assign_vc_serial",
+                    first,
+                    {
+                        "serial_1": "FIRST-LOCKED-SERIAL",
+                        "member_id_1": str(first.pk),
+                        "serial_2": "SECOND-LOCKED-SERIAL",
+                        "member_id_2": str(second.pk),
+                    },
+                )
+
+        first.refresh_from_db()
+        second.refresh_from_db()
+        assert (first.serial, second.serial) == ("", "")
+        assert response.status_code == 302
+        assert messages_on(response.wsgi_request) == [("error", TRY_AGAIN_MESSAGE)]
 
     def test_wrong_chassis_and_missing_member_are_both_reported(self, logged_in_client, librenms_server):
         root = make_device("vc-serial-root")
@@ -639,6 +717,8 @@ class TestAssignVCSerialView:
                 "member_id_1": str(outsider.pk),
                 "serial_2": "MISSING-SERIAL",
                 "member_id_2": str(outsider.pk + 10000),
+                "serial_3": "GARBLED-SERIAL",
+                "member_id_3": "not-a-number",
             },
         )
 
@@ -646,7 +726,8 @@ class TestAssignVCSerialView:
         assert outsider.serial == ""
         errors = _messages(response, "error")
         assert any("not part of the same virtual chassis" in text for text in errors)
-        assert any("not found" in text for text in errors)
+        assert f"Device with ID {outsider.pk + 10000} not found" in errors
+        assert "Device with ID not-a-number not found" in errors
 
     def test_the_redirect_keeps_the_active_server_and_tab(self, logged_in_client, librenms_server):
         """A multi-server user must land back on the server and tab the modal was opened from."""
@@ -740,7 +821,7 @@ class TestRemoveServerMappingView:
         )
 
         device.refresh_from_db()
-        mapping = device.custom_field_data["librenms_id"]
+        mapping = stored_mapping_for_test(device)
         assert mapping == {SERVER_KEY: 6541}
         assert response.url.endswith(f"?tab=interfaces&server_key={SERVER_KEY}")
         assert any("Removed LibreNMS mapping" in text for text in _messages(response, "success"))
@@ -761,8 +842,30 @@ class TestRemoveServerMappingView:
         change = ObjectChange.objects.get(
             changed_object_type=ContentType.objects.get_for_model(Device), changed_object_id=device.pk, action="update"
         )
-        assert change.prechange_data["custom_fields"]["librenms_id"] == {SERVER_KEY: 6544, "retired": 9003}
-        assert change.postchange_data["custom_fields"]["librenms_id"] == {SERVER_KEY: 6544}
+        assert mapping_from_change_record(change, before=True) == {SERVER_KEY: 6544, "retired": 9003}
+        assert mapping_from_change_record(change, before=False) == {SERVER_KEY: 6544}
+
+    @transactional_db_with_all_apps()
+    @pytest.mark.parametrize("check_at_save", [True, False], ids=["in-save", "at-commit"])
+    def test_a_lock_conflict_of_the_write_gives_the_try_again_answer(
+        self, logged_in_client, librenms_server, caplog, check_at_save
+    ):
+        device = make_device("mapping-remove-locked", librenms_cf={SERVER_KEY: 6545, "retired": 9004})
+
+        with caplog.at_level("ERROR"):
+            response = _post_while_the_user_row_is_locked(
+                logged_in_client,
+                "remove_server_mapping",
+                device,
+                {"object_type": "device", "server_key": "retired"},
+                check_at_save=check_at_save,
+            )
+
+        device.refresh_from_db()
+        assert stored_mapping_for_test(device) == {SERVER_KEY: 6545, "retired": 9004}
+        assert response.status_code == 302
+        assert messages_on(response.wsgi_request) == [("error", TRY_AGAIN_MESSAGE)]
+        assert [record.getMessage() for record in caplog.records if record.levelname == "ERROR"] == []
 
     def test_configured_mapping_cannot_be_removed(self, logged_in_client, librenms_server):
         device = _linked_device("mapping-configured", 6542)
@@ -775,13 +878,13 @@ class TestRemoveServerMappingView:
         )
 
         device.refresh_from_db()
-        assert device.custom_field_data["librenms_id"] == {SERVER_KEY: 6542}
+        assert stored_mapping_for_test(device) == {SERVER_KEY: 6542}
         assert any("Cannot remove mapping for configured server" in text for text in _messages(response, "error"))
 
     def test_vm_alias_targets_the_virtual_machine_model(self, logged_in_client, librenms_server):
         vm = make_vm("mapping-remove-vm")
-        vm.custom_field_data["librenms_id"] = {SERVER_KEY: 6543, "retired": 9002}
-        vm.save()
+        seed_mapping(vm, SERVER_KEY, own=6543, save=False)
+        seed_mapping(vm, "retired", own=9002)
 
         _post(
             logged_in_client,
@@ -791,7 +894,7 @@ class TestRemoveServerMappingView:
         )
 
         vm.refresh_from_db()
-        assert vm.custom_field_data["librenms_id"] == {SERVER_KEY: 6543}
+        assert stored_mapping_for_test(vm) == {SERVER_KEY: 6543}
 
     def test_unsupported_object_type_is_a_400(self, logged_in_client, librenms_server):
         device = make_device("mapping-invalid-type")
@@ -830,20 +933,9 @@ class TestRemoveServerMappingView:
 
         assert any("No mapping found" in text for text in _messages(response, "warning"))
 
-    @pytest.mark.parametrize(
-        ("failure_type", "expected_message"),
-        [
-            ("validation", "Validation error removing LibreNMS mapping"),
-            ("unexpected", "Unexpected error removing LibreNMS mapping"),
-        ],
-    )
-    def test_save_failures_roll_back_the_mapping(
-        self,
-        logged_in_client,
-        librenms_server,
-        failure_type,
-        expected_message,
-    ):
+    @pytest.mark.parametrize("failure_type", ["validation", "unexpected"])
+    def test_save_failures_roll_back_the_mapping(self, logged_in_client, librenms_server, failure_type):
+        """A validation error is reported; any other error propagates, and both leave the mapping as it was."""
         from dcim.models import Device
         from django.core.exceptions import ValidationError
         from django.db.models.signals import pre_save
@@ -862,20 +954,30 @@ class TestRemoveServerMappingView:
 
         pre_save.connect(reject_save, sender=Device, weak=False)
         try:
-            response = _post(
-                logged_in_client,
-                "remove_server_mapping",
-                device,
-                {"object_type": "device", "server_key": "retired"},
-            )
+            if failure_type == "validation":
+                response = _post(
+                    logged_in_client,
+                    "remove_server_mapping",
+                    device,
+                    {"object_type": "device", "server_key": "retired"},
+                )
+            else:
+                with pytest.raises(RuntimeError, match="database write failed"):
+                    _post(
+                        logged_in_client,
+                        "remove_server_mapping",
+                        device,
+                        {"object_type": "device", "server_key": "retired"},
+                    )
         finally:
             pre_save.disconnect(reject_save, sender=Device)
 
         device.refresh_from_db()
-        rendered_messages = _messages(response)
-        assert device.custom_field_data["librenms_id"] == {SERVER_KEY: 6546, "retired": 9003}
-        assert any(expected_message in text for text in rendered_messages)
-        assert not any("Removed LibreNMS mapping" in text for text in rendered_messages)
+        assert stored_mapping_for_test(device) == {SERVER_KEY: 6546, "retired": 9003}
+        if failure_type == "validation":
+            rendered_messages = _messages(response)
+            assert any("Validation error removing LibreNMS mapping" in text for text in rendered_messages)
+            assert not any("Removed LibreNMS mapping" in text for text in rendered_messages)
 
 
 @pytest.mark.django_db
@@ -890,8 +992,8 @@ class TestSetPreferredServerView:
         from netbox_librenms_plugin.server_mappings import PREFERRED_SERVER_FIELD
 
         owner = make_device("preferred-device") if object_type == "device" else make_vm("preferred-vm")
-        owner.custom_field_data["librenms_id"] = {SERVER_KEY: 6551, SECONDARY_KEY: 6552}
-        owner.save()
+        seed_mapping(owner, SERVER_KEY, own=6551, save=False)
+        seed_mapping(owner, SECONDARY_KEY, own=6552)
 
         response = _post(
             logged_in_client,
@@ -906,7 +1008,7 @@ class TestSetPreferredServerView:
         )
 
         owner.refresh_from_db()
-        assert owner.custom_field_data["librenms_id"][PREFERRED_SERVER_FIELD] == SECONDARY_KEY
+        assert stored_mapping_for_test(owner)[PREFERRED_SERVER_FIELD] == SECONDARY_KEY
         assert f"server_key={SERVER_KEY}" in response.url
         assert "tab=interfaces" in response.url
         assert any("Preferred LibreNMS server changed" in text for text in _messages(response, "success"))
@@ -922,6 +1024,28 @@ class TestSetPreferredServerView:
         )
 
         assert any("requires at least two usable" in text for text in _messages(response, "error"))
+
+    @transactional_db_with_all_apps()
+    @pytest.mark.parametrize("check_at_save", [True, False], ids=["in-save", "at-commit"])
+    def test_a_lock_conflict_of_the_write_gives_the_try_again_answer(
+        self, logged_in_client, librenms_server, caplog, check_at_save
+    ):
+        device = make_device("preferred-locked", librenms_cf={SERVER_KEY: 6556, SECONDARY_KEY: 6557})
+
+        with caplog.at_level("ERROR"):
+            response = _post_while_the_user_row_is_locked(
+                logged_in_client,
+                "set_preferred_server",
+                device,
+                {"object_type": "device", "server_key": SECONDARY_KEY},
+                check_at_save=check_at_save,
+            )
+
+        device.refresh_from_db()
+        assert stored_mapping_for_test(device) == {SERVER_KEY: 6556, SECONDARY_KEY: 6557}
+        assert response.status_code == 302
+        assert messages_on(response.wsgi_request) == [("error", TRY_AGAIN_MESSAGE)]
+        assert [record.getMessage() for record in caplog.records if record.levelname == "ERROR"] == []
 
     def test_unknown_preference_key_is_rejected(self, logged_in_client, librenms_server):
         device = make_device(
@@ -984,8 +1108,11 @@ class TestConvertLegacyLibreNMSIdView:
         )
 
         device.refresh_from_db()
-        assert device.custom_field_data["librenms_id"] == {SERVER_KEY: 6561}
+        assert stored_mapping_for_test(device) == {SERVER_KEY: 6561}
         assert any("Converted legacy librenms_id" in text for text in _messages(response, "success"))
+        change = update_change(device)
+        assert mapping_from_change_record(change, before=True) == " 6561 "
+        assert mapping_from_change_record(change, before=False) == {SERVER_KEY: 6561}
 
     def test_serial_mismatch_preserves_the_legacy_id(self, logged_in_client, librenms_server):
         device = make_device("legacy-mismatch", serial="NETBOX-SERIAL", librenms_cf=6562)
@@ -1003,13 +1130,12 @@ class TestConvertLegacyLibreNMSIdView:
         )
 
         device.refresh_from_db()
-        assert device.custom_field_data["librenms_id"] == 6562
+        assert stored_mapping_for_test(device) == 6562
         assert any("Serial number mismatch" in text for text in _messages(response, "error"))
 
     def test_vm_conversion_skips_the_device_serial_gate(self, logged_in_client, librenms_server):
         vm = make_vm("legacy-convert-vm")
-        vm.custom_field_data["librenms_id"] = 6563
-        vm.save()
+        seed_stored_mapping(vm, 6563, save=True)
         librenms_server.device_info_response(device_id=6563, hostname=vm.name, serial="REMOTE-SERIAL")
 
         _post(
@@ -1020,13 +1146,13 @@ class TestConvertLegacyLibreNMSIdView:
         )
 
         vm.refresh_from_db()
-        assert vm.custom_field_data["librenms_id"] == {SERVER_KEY: 6563}
+        assert stored_mapping_for_test(vm) == {SERVER_KEY: 6563}
 
     @pytest.mark.parametrize(
         ("value", "fragment"),
         [
             ({SERVER_KEY: 6564}, "already in the server-scoped"),
-            (True, "invalid boolean"),
+            (True, "not a valid integer"),
             ("not-an-id", "not a valid integer"),
         ],
     )
@@ -1047,7 +1173,7 @@ class TestConvertLegacyLibreNMSIdView:
         )
 
         device.refresh_from_db()
-        assert device.custom_field_data["librenms_id"] == value
+        assert stored_mapping_for_test(device) == value
         assert any(fragment in text for text in _messages(response))
 
     def test_live_lookup_failure_preserves_the_legacy_id(self, logged_in_client, librenms_server):
@@ -1062,7 +1188,7 @@ class TestConvertLegacyLibreNMSIdView:
         )
 
         device.refresh_from_db()
-        assert device.custom_field_data["librenms_id"] == 6565
+        assert stored_mapping_for_test(device) == 6565
         assert any("Could not retrieve device info" in text for text in _messages(response, "error"))
 
     def test_stale_server_key_fails_closed(self, logged_in_client, librenms_server):
@@ -1076,7 +1202,7 @@ class TestConvertLegacyLibreNMSIdView:
         )
 
         device.refresh_from_db()
-        assert device.custom_field_data["librenms_id"] == 6566
+        assert stored_mapping_for_test(device) == 6566
         assert any("no longer configured" in text for text in _messages(response, "error"))
 
     def test_conflicting_assignment_blocks_conversion(self, logged_in_client, librenms_server):
@@ -1096,8 +1222,47 @@ class TestConvertLegacyLibreNMSIdView:
         )
 
         device.refresh_from_db()
-        assert device.custom_field_data["librenms_id"] == 6567
+        assert stored_mapping_for_test(device) == 6567
         assert any("ambiguous" in text for text in _messages(response, "error"))
+
+    @pytest.mark.parametrize(("converting", "owning"), [("device", "vm"), ("vm", "device")])
+    def test_an_owner_of_the_other_model_blocks_conversion(self, logged_in_client, librenms_server, converting, owning):
+        """A Device and a VM share one identity space, so an owner of either model refuses the conversion."""
+        from core.models import ObjectChange
+        from django.contrib.contenttypes.models import ContentType
+
+        librenms_id = 6570 if converting == "device" else 6571
+        if converting == "device":
+            obj = make_device(f"legacy-cross-{converting}", serial="LEGACY-CROSS", librenms_cf=librenms_id)
+        else:
+            obj = make_vm(f"legacy-cross-{converting}")
+            seed_stored_mapping(obj, librenms_id, save=True)
+        if owning == "device":
+            make_device(f"legacy-cross-owner-{owning}", librenms_cf={SERVER_KEY: librenms_id})
+        else:
+            owner = make_vm(f"legacy-cross-owner-{owning}")
+            seed_mapping(owner, SERVER_KEY, own=librenms_id)
+        librenms_server.device_info_response(device_id=librenms_id, hostname=obj.name, serial="LEGACY-CROSS")
+        changes = ObjectChange.objects.filter(
+            changed_object_type=ContentType.objects.get_for_model(obj), changed_object_id=obj.pk
+        )
+        logged_before = changes.count()
+
+        response = _post(
+            logged_in_client,
+            "convert_legacy_librenms_id",
+            obj,
+            {"object_type": "device" if converting == "device" else "virtualmachine"},
+        )
+
+        obj.refresh_from_db()
+        assert stored_mapping_for_test(obj) == librenms_id
+        assert _messages(response, "error") == [
+            f"LibreNMS ID {librenms_id} is already assigned to another NetBox object. "
+            f"Cannot convert the legacy ID for server '{SERVER_KEY}'."
+        ]
+        assert not _messages(response, "success")
+        assert changes.count() == logged_before
 
     def test_unsupported_object_type_is_a_400(self, logged_in_client, librenms_server):
         device = make_device("legacy-invalid-type")
@@ -1160,6 +1325,115 @@ class TestCommonFieldUpdateFailures:
 
         assert any("Failed to retrieve device info" in text for text in _messages(response, "error"))
 
+    @transactional_db_with_all_apps()
+    @pytest.mark.parametrize(
+        "view_name",
+        [
+            "update_device_name",
+            "update_device_serial",
+            "update_device_type",
+            "update_device_platform",
+        ],
+    )
+    def test_a_device_deleted_during_the_live_lookup_is_reported_as_gone(
+        self,
+        logged_in_client,
+        librenms_server,
+        view_name,
+    ):
+        """The mock server's thread deletes the device in its own session, so the view's locked write finds no row."""
+        from core.models import ObjectChange
+        from dcim.models import Device, DeviceType, Platform
+        from django.contrib.contenttypes.models import ContentType
+        from django.db import connections
+
+        device = _linked_device(f"deleted-{view_name}".replace("_", "-"), 6573)
+        new_type = DeviceType.objects.create(
+            manufacturer=device.device_type.manufacturer, model="Deleted Lookup Router", slug="deleted-lookup-router"
+        )
+        new_platform = Platform.objects.create(name="deleted-lookup-os", slug="deleted-lookup-os")
+        live = {
+            "device_id": 6573,
+            "hostname": "renamed-during-lookup",
+            "sysName": "renamed-during-lookup",
+            "serial": "LOOKUP-SERIAL",
+            "hardware": new_type.model,
+            "os": new_platform.name,
+        }
+
+        def delete_then_answer(**_request):
+            try:
+                Device.objects.filter(pk=device.pk).delete()
+            finally:
+                connections.close_all()
+            return 200, {"status": "ok", "devices": [live]}
+
+        librenms_server.register("/api/v0/devices/6573", delete_then_answer)
+
+        response = _post(logged_in_client, view_name, device)
+
+        assert _messages(response) == ["Device no longer exists."]
+        assert _messages(response, "error") == ["Device no longer exists."]
+        assert response.status_code == 302
+        assert response.url == f"{_url('device_librenms_sync', device.pk)}?server_key={SERVER_KEY}"
+        assert not Device.objects.filter(pk=device.pk).exists()
+        device_type = ContentType.objects.get_for_model(Device)
+        assert not ObjectChange.objects.filter(changed_object_type=device_type, changed_object_id=device.pk).exists()
+
+    @transactional_db_with_all_apps()
+    @pytest.mark.parametrize(
+        ("view_name", "saved_model", "data"),
+        [
+            ("update_device_serial", "device", {}),
+            ("convert_legacy_librenms_id", "device", {"object_type": "device"}),
+            ("create_and_assign_platform", "device", {"platform_name": "Wrapped Existing Platform"}),
+            ("create_and_assign_platform", "platform", {"platform_name": "Wrapped New Platform"}),
+        ],
+        ids=["field-write", "legacy-convert", "platform-assign", "platform-create"],
+    )
+    def test_a_lock_conflict_wrapped_in_a_validation_error_gives_the_try_again_answer(
+        self, logged_in_client, librenms_server, view_name, saved_model, data
+    ):
+        """NetBox raises a ValidationError ``from None`` over its own lock conflict (ltree save); the middleware answers it."""
+        from dcim.models import Device, Platform
+        from django.contrib.auth import get_user_model
+        from django.core.exceptions import ValidationError
+        from django.db import OperationalError
+        from django.db.models.signals import pre_save
+
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row_nowait
+
+        device = make_device(f"wrapped-{view_name}-{saved_model}", serial="WRAPPED-SERIAL", librenms_cf=6574)
+        if view_name == "update_device_serial":
+            seed_stored_mapping(device, {SERVER_KEY: 6574}, save=True)
+        Platform.objects.create(name="Wrapped Existing Platform", slug="wrapped-existing-platform")
+        live_serial = "NEW-SERIAL" if view_name == "update_device_serial" else "WRAPPED-SERIAL"
+        librenms_server.device_info_response(device_id=6574, hostname=device.name, serial=live_serial)
+        user_model = get_user_model()
+        user_pk = int(logged_in_client.session["_auth_user_id"])
+        sender = {"device": Device, "platform": Platform}[saved_model]
+
+        def save_meets_a_wrapped_conflict(**_kwargs):
+            try:
+                lock_row_nowait(user_model, user_pk)
+            except OperationalError:
+                raise ValidationError("The hierarchy was modified concurrently; please retry.") from None
+
+        pre_save.connect(save_meets_a_wrapped_conflict, sender=sender, weak=False)
+        try:
+            with second_connection() as other:
+                lock_row(other, user_model, user_pk)
+                response = _post(logged_in_client, view_name, device, data)
+        finally:
+            pre_save.disconnect(save_meets_a_wrapped_conflict, sender=sender)
+
+        device.refresh_from_db()
+        assert response.status_code == 302
+        assert messages_on(response.wsgi_request) == [("error", TRY_AGAIN_MESSAGE)]
+        assert (device.serial, device.platform_id) == ("WRAPPED-SERIAL", None)
+        assert stored_mapping_for_test(device) in (6574, {SERVER_KEY: 6574})
+        assert not Platform.objects.filter(name="Wrapped New Platform").exists()
+
 
 class TestDeviceFieldHelpers:
     @pytest.mark.parametrize(
@@ -1176,23 +1450,6 @@ class TestDeviceFieldHelpers:
         from netbox_librenms_plugin.views.sync.device_fields import _normalize_sync_object_type
 
         assert _normalize_sync_object_type(value) == expected
-
-    @pytest.mark.parametrize(
-        ("value", "expected"),
-        [
-            (42, {"default": 42}),
-            ("42", {"default": 42}),
-            ({"secondary": 42}, {"secondary": 42}),
-            (True, {}),
-            (" 42 ", {}),
-            (None, {}),
-            ([], {}),
-        ],
-    )
-    def test_mapping_normalization(self, value, expected):
-        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
-
-        assert RemoveServerMappingView()._normalize_librenms_mapping(value) == expected
 
     def test_model_and_url_helpers_distinguish_devices_from_vms(self):
         from dcim.models import Device

@@ -238,11 +238,6 @@ class TestADeviceFieldSyncShowsNetBoxsMessageOnlyToASuperuser:
 # case: (view name, POST data, the statement that fails)
 _DATABASE_ERROR_CASES = {
     "legacy_conversion": ("convert_legacy_librenms_id", {"object_type": "device"}, 'UPDATE "dcim_device"'),
-    "mapping_removal": (
-        "remove_server_mapping",
-        {"object_type": "device", "server_key": "retired"},
-        'UPDATE "dcim_device"',
-    ),
     "platform_create": ("create_and_assign_platform", {}, 'INSERT INTO "dcim_platform"'),
     "platform_assignment": ("create_and_assign_platform", {}, 'UPDATE "dcim_device"'),
     "platform_mapping": (
@@ -269,8 +264,6 @@ class TestADeviceFieldSyncHidesADatabaseError:
         if case == "legacy_conversion":
             device = make_device(tag, serial="LEGACY-DB", librenms_cf="7109")
             librenms_server.device_info_response(device_id=7109, hostname=device.name, serial="LEGACY-DB")
-        elif case == "mapping_removal":
-            device = make_device(tag, librenms_cf={SERVER_KEY: 7110, "retired": 7111})
         else:
             device = make_device(tag)
             data = {**data, "platform_name": f"Platform {tag}", "librenms_os": f"os-{tag}"}

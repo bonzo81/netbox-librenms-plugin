@@ -13,36 +13,9 @@ from netbox_librenms_plugin.constants import LIBRENMS_PORTS_COLUMNS
 from netbox_librenms_plugin.data_shapes.envelope import MAX_HTTP_STATUS, MIN_HTTP_STATUS, wrap_response
 from netbox_librenms_plugin.data_shapes.ports import port_has_vrf
 from netbox_librenms_plugin.data_shapes.recordings_store import SERIAL_SENSORS_META_KEY, SERIAL_SENSORS_UNAVAILABLE
+from netbox_librenms_plugin.import_utils.virtual_chassis import select_vc_parent_index
 
 SCHEMA_VERSION = 1
-
-
-def _select_parent_index(root_items):
-    """
-    Pick the VC parent-container index from root inventory (stack preferred over chassis).
-
-    Mirrors ``detect_virtual_chassis_from_inventory`` so the captured child-inventory query
-    targets the same parent index VC detection requests on replay.
-
-    Args:
-        root_items: The ``inventory`` list from the ``entPhysicalContainedIn=0`` response.
-
-    Returns:
-        The chosen ``entPhysicalIndex`` (stack class wins over chassis), or None when neither
-        a stack nor a chassis root entry is present.
-
-    """
-    stack_index = None
-    chassis_index = None
-    for item in root_items if isinstance(root_items, list) else []:
-        if not isinstance(item, dict):
-            continue
-        item_class = item.get("entPhysicalClass")
-        if item_class == "stack" and stack_index is None:
-            stack_index = item.get("entPhysicalIndex")
-        elif item_class == "chassis" and chassis_index is None:
-            chassis_index = item.get("entPhysicalIndex")
-    return stack_index if stack_index is not None else chassis_index
 
 
 def _has_vrf_tagged_port(ports_body):
@@ -147,7 +120,7 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
 
     _all_inventory = []  # memoized /inventory/{id}/all body, fetched lazily at most once
 
-    def record_inventory_filtered(query_params, *, contained_in=None, ent_class=None):
+    def record_inventory_filtered(query_params, *, contained_in=None):
         """
         Record a filtered inventory query, mirroring ``get_inventory_filtered``'s ``/all`` fallback.
 
@@ -161,7 +134,6 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         Args:
             query_params (dict[str, str]): Query parameters for the filtered inventory request.
             contained_in (str | int | None): Parent index for client-side filtering.
-            ent_class (str | None): Physical class for client-side filtering.
 
         Returns:
             list[dict]: Inventory entries from the filtered request or the client-side fallback.
@@ -178,8 +150,6 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
             _, all_body = record(f"inventory/{device_id}/all", required=True, row_field="inventory")
             _all_inventory.append(all_body["inventory"])
         filtered = [i for i in _all_inventory[0] if isinstance(i, dict)]
-        if ent_class is not None:
-            filtered = [i for i in filtered if i.get("entPhysicalClass") == ent_class]
         if contained_in is not None:
             filtered = [i for i in filtered if str(i.get("entPhysicalContainedIn")) == str(contained_in)]
         if filtered:
@@ -196,17 +166,13 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
         if isinstance(devices, list) and devices and isinstance(devices[0], dict):
             device_os = devices[0].get("os")
 
-    # 2. VC detection inventory: root, then the chassis children at the resolved parent index. Both
+    # 2. VC detection inventory: root, then the direct children of the resolved parent. Both
     #    query variants share a path, so they MUST be keyed with their query for the loader to
     #    disambiguate them; each mirrors get_inventory_filtered's /all fallback (see helper).
     root_items = record_inventory_filtered({"entPhysicalContainedIn": "0"}, contained_in="0")
-    parent_index = _select_parent_index(root_items)
+    parent_index = select_vc_parent_index(root_items)
     if parent_index is not None:
-        record_inventory_filtered(
-            {"entPhysicalClass": "chassis", "entPhysicalContainedIn": str(parent_index)},
-            contained_in=str(parent_index),
-            ent_class="chassis",
-        )
+        record_inventory_filtered({"entPhysicalContainedIn": str(parent_index)}, contained_in=str(parent_index))
 
     # 3. Ports (request VLAN data so the body matches what get_ports reads) and 4. port_stack
     #    (LAG / sub-interface relationships). Both are keyed path-only — there's a single variant
@@ -288,7 +254,7 @@ def capture_device_recording(api, device_id, *, name=None, description="", meta=
     # host's ports — and a device is not its own out-of-band controller. Compare COERCED ids: the
     # custom field can store the OOB id as a string ("123"), and "123" != 123 would bypass this
     # guard, re-record the host's own ports and falsely stamp the recording as an OOB topology.
-    from netbox_librenms_plugin.utils import coerce_librenms_id
+    from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 
     oob_id = coerce_librenms_id(oob_id)
     if oob_id is not None and oob_id != coerce_librenms_id(device_id):

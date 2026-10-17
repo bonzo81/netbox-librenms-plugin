@@ -3,15 +3,19 @@
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from copy import deepcopy
 from itertools import chain
-from threading import BrokenBarrierError
+from threading import BrokenBarrierError, current_thread
+from time import monotonic
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 import requests
 
+from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.parallel import isolated_test_database_name
 
 _TEST_DATABASE_BASE_NAME = os.environ["TEST_DB_NAME"]
@@ -44,11 +48,8 @@ def configured_server_key():
 
 def persist_test_server_mapping(obj, server_key):
     """Persist the server mapping required by a real sync-page request."""
-    from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
-
-    if get_librenms_device_id(obj, server_key, auto_save=False) is None:
-        set_librenms_device_id(obj, obj.pk, server_key)
-        obj.save(update_fields=["custom_field_data"])
+    if read_mapping(obj).own_id(server_key) is None:
+        seed_mapping(obj, server_key, own=obj.pk)
 
 
 def _isolated_cache_config(caches_config):
@@ -66,6 +67,26 @@ def _isolate_test_cache(settings):
     """Give each test a unique namespace inside its pytest worker's cache database."""
     settings.CACHES = _isolated_cache_config(settings.CACHES)
     yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _install_before_state_guard():
+    """Watch every write of a change-logged row for the whole session."""
+    from netbox_librenms_plugin.tests import before_state_guard
+
+    with before_state_guard.installed():
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _fail_on_missing_before_state(_install_before_state_guard):
+    """Fail a test in which plugin code wrote a change-logged row without a fresh before-state."""
+    from netbox_librenms_plugin.tests import before_state_guard
+
+    before_state_guard.reset()
+    yield
+    if before_state_guard.violations:
+        pytest.fail(before_state_guard.report(), pytrace=False)
 
 
 @pytest.fixture(scope="session")
@@ -440,14 +461,13 @@ def _shared_infra():
 
 
 def make_device(name, *, serial="", librenms_cf=None):
-    """Create a real Device on the shared infra, optionally seeding its librenms_id CF."""
+    """Create a real Device on the shared infra, optionally seeding the raw stored mapping *librenms_cf*."""
     from dcim.models import Device
 
     site, _mfr, dtype, role = _shared_infra()
     dev = Device.objects.create(name=name, device_type=dtype, role=role, site=site, status="active", serial=serial)
     if librenms_cf is not None:
-        dev.custom_field_data["librenms_id"] = librenms_cf
-        dev.save()
+        seed_stored_mapping(dev, librenms_cf, save=True)
     return dev
 
 
@@ -464,6 +484,45 @@ def make_virtual_chassis_members(tag, count=2):
         member.save()
         members.append(member)
     return virtual_chassis, members
+
+
+def junos_vc_inventory():
+    """Return the reporter's EX4400 VC rows plus one synthetic PIC under FPC 1."""
+
+    def row(index, entity_class, descr, *, serial="", position=0, contained_in=1, name="", model=""):
+        return {
+            "entPhysicalIndex": index,
+            "entPhysicalClass": entity_class,
+            "entPhysicalDescr": descr,
+            "entPhysicalName": name,
+            "entPhysicalModelName": model,
+            "entPhysicalSerialNum": serial,
+            "entPhysicalParentRelPos": position,
+            "entPhysicalContainedIn": contained_in,
+        }
+
+    psu = {"name": "JPSU-550-C-DC-AFO", "model": "640-107104"}
+    fpc = {"name": "EX4400-24X-S", "model": "650-151094"}
+    return [
+        row(1, "chassis", "Juniper Virtual Chassis Switch", serial="12345", contained_in=0),
+        row(2, "powerSupply", "FPC 0 Power Supply 0", serial="12346", position=0, **psu),
+        row(4, "powerSupply", "FPC 1 Power Supply 0", serial="12348", position=2, **psu),
+        row(30, "fan", "FPC 1 Fan Tray 0", position=10, name="Fan Module, Airflow Out (AFO)"),
+        row(120, "container", "FPC: EX4400-24X @ 0/*/*", serial="12345", position=0, **fpc),
+        row(121, "container", "FPC: EX4400-24X @ 1/*/*", serial="12350", position=1, **fpc),
+        row(1210, "module", "PIC: 4x10G SFP+ @ 1/2/*", position=2, contained_in=121, name="PIC 2", model="PIC-4X10G"),
+        row(271, "other", "Routing Engine 1", serial="12351", position=1, name="EX4400-24X-S", model="BUILTIN"),
+    ]
+
+
+def make_junos_vc_members(tag):
+    """Return a real two-member VC numbered like Junos: master at 0, member at 1."""
+    _chassis, (master, member) = make_virtual_chassis_members(tag, count=2)
+    for device, position, serial in ((master, 0, "12345"), (member, 1, "12350")):
+        device.vc_position = position
+        device.serial = serial
+        device.save(update_fields=["vc_position", "serial"])
+    return master, member
 
 
 def make_cluster(name):
@@ -644,9 +703,7 @@ def map_device_to_librenms(device, librenms_id=None, *, server_key, oob=None):
         entry["id"] = librenms_id
     if oob is not None:
         entry["oob"] = oob
-    device.custom_field_data["librenms_id"] = {server_key: entry}
-    device.save(update_fields=["custom_field_data"])
-    return device
+    return seed_stored_mapping(device, {server_key: entry}, save=True)
 
 
 @pytest.fixture
@@ -812,6 +869,58 @@ def run_in_threads(*calls, barriers, timeout):
     if failures:
         raise failures[0]
     return [future.result() for future in futures]
+
+
+# How long a failed block waits for its workers after it ends their database sessions.
+WORKER_RELEASE_SECONDS = 5
+
+
+def _terminate_database_sessions(wrappers):
+    """End the PostgreSQL session of each open connection wrapper and return how many it ended."""
+    from django.db import DEFAULT_DB_ALIAS, connections
+
+    # A closed psycopg connection reports pid 0.
+    pids = [pid for wrapper in wrappers if (raw := wrapper.connection) is not None and (pid := raw.info.backend_pid)]
+    if not pids:
+        return 0
+    # The caller's own connection can be in a failed transaction, so use a new one.
+    terminator = connections.create_connection(DEFAULT_DB_ALIAS)
+    try:
+        with terminator.cursor() as cursor:
+            cursor.execute("SELECT pg_terminate_backend(pid) FROM unnest(%s::int[]) AS pid", [pids])
+    finally:
+        terminator.close()
+    return len(pids)
+
+
+@contextmanager
+def bounded_executor(max_workers):
+    """
+    Yield a ThreadPoolExecutor that does not wait for a hung worker when the block raises.
+
+    On failure it ends the database session of each worker, so a worker that waits for a lock
+    stops. When it ended a session, it waits up to WORKER_RELEASE_SECONDS for the workers to finish.
+    """
+    from django.db import DEFAULT_DB_ALIAS, connections
+
+    workers = []
+
+    def record_worker():
+        workers.append((current_thread(), connections[DEFAULT_DB_ALIAS]))
+
+    executor = ThreadPoolExecutor(max_workers=max_workers, initializer=record_worker)
+    try:
+        yield executor
+    except BaseException as error:
+        executor.shutdown(wait=False, cancel_futures=True)
+        if _terminate_database_sessions([wrapper for _thread, wrapper in workers]):
+            deadline = monotonic() + WORKER_RELEASE_SECONDS
+            for thread, _wrapper in workers:
+                thread.join(timeout=max(0, deadline - monotonic()))
+        if alive := sum(thread.is_alive() for thread, _wrapper in workers):
+            error.add_note(f"{alive} worker thread(s) still run after the block failed")
+        raise
+    executor.shutdown(wait=True)
 
 
 def make_superuser(username="review-su"):

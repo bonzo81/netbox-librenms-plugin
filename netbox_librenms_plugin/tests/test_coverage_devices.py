@@ -16,8 +16,8 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis_members,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
-from netbox_librenms_plugin.utils import set_librenms_device_id
 from netbox_librenms_plugin.views.object_sync.devices import (
     DeviceCableTableView,
     DeviceInterfaceTableView,
@@ -64,8 +64,7 @@ def _port(port_id=4001, name="Ethernet1"):
 
 
 def _set_id(obj, value):
-    set_librenms_device_id(obj, value, SERVER_KEY)
-    obj.save(update_fields=["custom_field_data"])
+    seed_mapping(obj, SERVER_KEY, own=value)
 
 
 @pytest.mark.django_db

@@ -152,6 +152,24 @@ pytest netbox_librenms_plugin/tests/ -v --lf
 pytest -c netbox_librenms_plugin/tests/browser/pytest.ini netbox_librenms_plugin/tests/browser --lf
 ```
 
+### End-to-End Suite
+
+The suite in `tests/e2e` drives a real NetBox through its web UI and REST API. The Compose stack in `tests/e2e/docker` runs NetBox with the plugin wheel, an RQ worker, PostgreSQL, Redis, and the LibreNMS stub. The stub serves the recordings of this checkout. The suite needs Docker. It does not need a test database or the devcontainer.
+
+```bash
+uv build --wheel
+NETBOX_CONTAINER_TAG=v4.7 tests/e2e/setup.sh
+uv run --no-project --with-requirements tests/e2e/requirements.txt playwright install chromium
+uv run --no-project --with-requirements tests/e2e/requirements.txt \
+    pytest -c tests/e2e/pytest.ini tests/e2e
+docker compose -f tests/e2e/docker/docker-compose.yml down -v
+```
+
+- `setup.sh` installs the one wheel in `dist/`, or the wheel path that you give as its argument. `NETBOX_CONTAINER_TAG` is a `netboxcommunity/netbox` image tag.
+- `NETBOX_PORT` sets the host port of NetBox (default 8000). Set it for the test run too. `COMPOSE_PROJECT_NAME` gives the stack its own name and its own NetBox image, `<project name>-netbox:<NETBOX_CONTAINER_TAG>`. Give each concurrent stack its own project name. `setup.sh` writes both to `tests/e2e/docker/.env`, so later `docker compose` commands use the same values.
+- Behind a TLS-intercepting proxy, `setup.sh` passes the proxy variables to the image build and gives the build the CA bundle in `SSL_CERT_FILE`.
+- A failed test keeps its Playwright trace in `test-results/`. Open it with `playwright show-trace`.
+
 ## Testing Philosophy
 
 A test is worth what it actually runs. Rank the options in this order:

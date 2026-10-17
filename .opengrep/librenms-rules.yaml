@@ -37,7 +37,7 @@ rules:
       # helpers that resolve a NetBox object with no permission scope applied
       - pattern: resolve_device_by_host_ip(...)
       - pattern: find_devices_by_serial(...)
-      - pattern: find_by_librenms_id(...)
+      - pattern: find_mapping(...)
       - pattern: get_librenms_sync_device(...)
       # a match an unrestricted search already bound into the validation dict
       - pattern: $V["existing_device"]
@@ -255,6 +255,71 @@ rules:
       - metavariable-regex:
           metavariable: $METHOD
           regex: ^(get|head|options|post|put|patch|delete|request|Session|session)$
+  - id: ipaddress-address-needs-netaddr
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Give an ipam IPAddress its address as netaddr.IPNetwork(...), the type NetBox loads from
+      the database. On NetBox 4.4, IPAddress.family (read by Device.clean()) raises on an
+      in-memory str address. A ** expansion hides the address, so it is always reported. The
+      assignment and setattr checks cover files that import IPAddress or ipam.models.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/**"]
+      exclude: ["**/tests/**", "**/migrations/**"]
+    pattern-either:
+      - patterns:
+          - pattern: ipam.models.IPAddress(..., address=$ADDRESS, ...)
+          - pattern-not: ipam.models.IPAddress(..., address=netaddr.IPNetwork(...), ...)
+      - pattern: ipam.models.IPAddress(..., **$VALUES, ...)
+      - patterns:
+          - pattern-either:
+              - patterns:
+                  - pattern: ipam.models.IPAddress.objects. ... .$CREATE(..., address=$ADDRESS, ...)
+                  - pattern-not: ipam.models.IPAddress.objects. ... .$CREATE(..., address=netaddr.IPNetwork(...), ...)
+              - pattern: ipam.models.IPAddress.objects. ... .$CREATE(..., **$VALUES, ...)
+          - metavariable-regex:
+              metavariable: $CREATE
+              regex: ^(create|get_or_create|update_or_create)$
+      - patterns:
+          - pattern-either:
+              - patterns:
+                  - pattern: |
+                      ipam.models.IPAddress.objects. ... .$CREATE(..., $DEFAULTS={..., "address": $ADDRESS, ...}, ...)
+                  - pattern-not: |
+                      ipam.models.IPAddress.objects. ... .$CREATE(..., $DEFAULTS={..., "address": netaddr.IPNetwork(...), ...}, ...)
+              - pattern: |
+                  ipam.models.IPAddress.objects. ... .$CREATE(..., $DEFAULTS={..., **$VALUES, ...}, ...)
+          - metavariable-regex:
+              metavariable: $CREATE
+              regex: ^(get_or_create|update_or_create)$
+          - metavariable-regex:
+              metavariable: $DEFAULTS
+              regex: ^(defaults|create_defaults)$
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  from ipam.models import IPAddress
+                  ...
+              - patterns:
+                  # Resolves `import ipam.models [as m]` and `from ipam import models [as m]` only.
+                  - pattern-inside: |
+                      from $PACKAGE import $MODULE
+                      ...
+                  - metavariable-regex:
+                      metavariable: $PACKAGE
+                      regex: ^ipam$
+                  - metavariable-regex:
+                      metavariable: $MODULE
+                      regex: ^models$
+          - pattern-either:
+              - patterns:
+                  - pattern: $IP.address = $ADDRESS
+                  - pattern-not: $IP.address = netaddr.IPNetwork(...)
+              - patterns:
+                  - pattern: setattr($IP, "address", $ADDRESS)
+                  - pattern-not: setattr($IP, "address", netaddr.IPNetwork(...))
   - id: url-numeric-pk-converter
     languages: [python]
     severity: ERROR
@@ -344,6 +409,69 @@ rules:
               StartsWith|NotStartsWith|EndsWith|NotEndsWith|HasAttr|
               NotHasAttr|IsSubclass|NotIsSubclass
             )$
+  - id: xfail-needs-raises
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Give pytest.mark.xfail the exception that the recorded defect raises, with raises=. Without
+      it, any error satisfies the marker, so a test whose setup fails looks like the defect.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/tests/**"]
+    pattern-either:
+      - patterns:
+          - pattern: pytest.mark.xfail(...)
+          - pattern-not: pytest.mark.xfail(..., raises=$EXCEPTION, ...)
+      - pattern: pytest.mark.xfail(..., raises=None, ...)
+      - pattern: pytest.mark.xfail.with_args(..., raises=None, ...)
+      # A bare marker, but not an alias assignment; the use of an alias is not followed.
+      - patterns:
+          - pattern: pytest.mark.xfail
+          - pattern-not-inside: pytest.mark.xfail(...)
+          - pattern-not-inside: pytest.mark.xfail.with_args(..., raises=$EXCEPTION, ...)
+          - pattern-not-inside: $ALIAS = pytest.mark.xfail
+      - pattern: pytestmark = pytest.mark.xfail
+  - id: executor-needs-bounded-executor
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Use tests.conftest.bounded_executor(...) in place of a ThreadPoolExecutor. When a result
+      timeout raises, a shutdown that waits for the hung worker hangs the test session instead of
+      failing the test.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/tests/**"]
+      # conftest.py holds bounded_executor and run_in_threads.
+      exclude: ["**/netbox_librenms_plugin/tests/conftest.py"]
+    pattern-either:
+      - pattern: ThreadPoolExecutor(...)
+      - pattern: concurrent.futures.ThreadPoolExecutor(...)
+  - id: barrier-needs-run-in-threads
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Run the threads of a test that creates a threading.Barrier with
+      tests.conftest.run_in_threads(..., barriers=...). Without it, a thread that fails leaves its
+      peers at the barrier until the timeout, and the BrokenBarrierError of a peer hides the failure.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/tests/**"]
+    patterns:
+      - pattern-either:
+          - pattern: ThreadPoolExecutor(...)
+          - pattern: $MODULE.ThreadPoolExecutor(...)
+          - pattern: Thread(...)
+          - pattern: $MODULE.Thread(...)
+      - pattern-either:
+          - pattern-inside: |
+              $BARRIER = Barrier(...)
+              ...
+          - pattern-inside: |
+              $BARRIER = threading.Barrier(...)
+              ...
   - id: no-selected-fuzzy-apis
     languages: [python]
     severity: WARNING
@@ -932,3 +1060,271 @@ rules:
               metavariable: $CLASSES
               regex: \b(Base)?Exception\b
       - pattern-regex: (?m)^[ \t]*except[ \t]*\*
+  - id: recorded-response-needs-envelope
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Read a recorded LibreNMS response through data_shapes.envelope.unwrap_response. A bare
+      [status, body] list is the body of a 2xx response, not a status pair, and a second reader
+      of the status framing drifts from the envelope module.
+    metadata:
+      category: correctness
+    paths:
+      exclude: ["**/data_shapes/envelope.py"]
+    pattern-either:
+      - pattern: isinstance($V, list) and len($V) == 2 and isinstance($V[0], int)
+      # The ternary alone is ordinary list selection; report it only for a value read from "responses".
+      - patterns:
+          - pattern: $V[1] if isinstance($V, list) else $V
+          - pattern-either:
+              - pattern-inside: |
+                  $V = <... "responses" ...>
+                  ...
+              - pattern-inside: |
+                  for $K, $V in <... "responses" ...>:
+                    ...
+              - pattern-inside: |
+                  for $V in <... "responses" ...>:
+                    ...
+  - id: no-stored-mapping-access
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This code reads or writes the stored LibreNMS mapping key in a custom field container. Only
+      server_mappings.py knows how a mapping is stored. Read a mapping with read_mapping(), write
+      it with a builder and persist_mapping(), and in tests use the helpers in
+      tests/mapping_fixtures.py.
+    metadata:
+      category: maintainability
+      references:
+        - "netbox_librenms_plugin/server_mappings.py"
+    paths:
+      exclude:
+        - "**/server_mappings.py"
+        - "**/migrations/**"
+    mode: taint
+    options:
+      # A method call on the container, such as .get("other"), does not carry the container on.
+      taint_only_propagate_through_assignments: true
+    pattern-sources:
+      - pattern: $OBJ.custom_field_data
+      - pattern: $OBJ.cf
+      # The custom fields of a serialized object, such as a change record.
+      - pattern: $DATA["custom_fields"]
+      - pattern: $DATA.get("custom_fields", ...)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $CONTAINER["librenms_id"]
+              - pattern: $CONTAINER.get("librenms_id", ...)
+              - pattern: $CONTAINER.pop("librenms_id", ...)
+              - pattern: $CONTAINER.setdefault("librenms_id", ...)
+              - pattern: '"librenms_id" in $CONTAINER'
+              - pattern: '"librenms_id" not in $CONTAINER'
+              # An update that can set the key, or a change to the whole container; the container
+              # rule reports one on the container itself.
+              - patterns:
+                  - pattern-either:
+                      - pattern: '$CONTAINER.update({..., "librenms_id": $VALUE, ...}, ...)'
+                      - pattern: '$CONTAINER.update({..., **$VALUES, ...}, ...)'
+                      - pattern: $CONTAINER.update(..., librenms_id=$VALUE, ...)
+                      - pattern: $CONTAINER.update(..., **$VALUES, ...)
+                      - patterns:
+                          - pattern: $CONTAINER.update($VALUE, ...)
+                          - pattern-not: '$CONTAINER.update({...}, ...)'
+                      - pattern: $CONTAINER.clear()
+                      - pattern: $CONTAINER.popitem()
+                      - pattern: $CONTAINER |= $VALUE
+                  - pattern-not: $OBJ.custom_field_data.$METHOD(...)
+                  - pattern-not: $OBJ.cf.$METHOD(...)
+                  - pattern-not: $OBJ.custom_field_data |= $VALUE
+                  - pattern-not: $OBJ.cf |= $VALUE
+          - focus-metavariable: $CONTAINER
+  - id: no-stored-mapping-access-container
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This code removes the stored LibreNMS mapping key, or replaces, copies or changes the whole
+      custom field container that holds the mapping, or builds a container with the mapping key.
+      Use the mapping API in server_mappings.py, and in tests the helpers in
+      tests/mapping_fixtures.py.
+    metadata:
+      category: maintainability
+      references:
+        - "netbox_librenms_plugin/server_mappings.py"
+    paths:
+      exclude:
+        - "**/server_mappings.py"
+        - "**/migrations/**"
+    pattern-either:
+      - patterns:
+          - pattern-either:
+              - pattern: del $OBJ.$CONTAINER["librenms_id"]
+              - pattern: $OBJ.$CONTAINER = $VALUE
+              - pattern: $OBJ.$CONTAINER |= $VALUE
+              - pattern: copy.deepcopy($OBJ.$CONTAINER, ...)
+              - pattern: copy.copy($OBJ.$CONTAINER)
+              - pattern: dict($OBJ.$CONTAINER)
+              - pattern: '{**$OBJ.$CONTAINER, ...}'
+              - pattern: '$OBJ.$CONTAINER == {..., "librenms_id": $VALUE, ...}'
+              - pattern: '{..., "librenms_id": $VALUE, ...} == $OBJ.$CONTAINER'
+              - patterns:
+                  - pattern: $OBJ.$CONTAINER.$METHOD(...)
+                  - metavariable-regex:
+                      metavariable: $METHOD
+                      regex: ^(copy|clear|popitem)$
+              # An update that can set the key: the key itself, or a value that is not a literal.
+              - pattern: '$OBJ.$CONTAINER.update({..., "librenms_id": $VALUE, ...}, ...)'
+              - pattern: '$OBJ.$CONTAINER.update({..., **$VALUES, ...}, ...)'
+              - pattern: $OBJ.$CONTAINER.update(..., librenms_id=$VALUE, ...)
+              - pattern: $OBJ.$CONTAINER.update(..., **$VALUES, ...)
+              - patterns:
+                  - pattern: $OBJ.$CONTAINER.update($VALUE, ...)
+                  - pattern-not: '$OBJ.$CONTAINER.update({...}, ...)'
+          - metavariable-regex:
+              metavariable: $CONTAINER
+              regex: ^(custom_field_data|cf)$
+      - patterns:
+          - pattern: '$CALL(..., $CONTAINER={..., "librenms_id": $VALUE, ...}, ...)'
+          - metavariable-regex:
+              metavariable: $CONTAINER
+              regex: ^(custom_field_data|cf)$
+      - pattern: '{..., "custom_field_data": {..., "librenms_id": $VALUE, ...}, ...}'
+  - id: no-stored-mapping-access-orm
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This ORM lookup, projection, ordering or field path names the stored LibreNMS mapping.
+      Query mappings with identity_q(), find_mapping() or read_mappings() in server_mappings.py,
+      and in tests read a change record with mapping_from_change_record().
+    metadata:
+      category: maintainability
+      references:
+        - "netbox_librenms_plugin/server_mappings.py"
+    paths:
+      exclude:
+        - "**/server_mappings.py"
+        - "**/migrations/**"
+    pattern-either:
+      - patterns:
+          - pattern: $CALL(..., $LOOKUP=$VALUE, ...)
+          - metavariable-regex:
+              metavariable: $LOOKUP
+              regex: ^(\w+__)?custom_field_data__librenms_id(__\w+)?$
+      - pattern: '"=~/^-?(\w+__)?custom_field_data__librenms_id(__|$)/"'
+      # A dotted path into serialized data, such as a change record.
+      - pattern: '"=~/^custom_fields\.librenms_id($|\.)/"'
+      - pattern-regex: \bf["']-?(\w+__)?custom_field_data__librenms_id\b
+      # The whole container projected, with the mapping in it.
+      - patterns:
+          - pattern-either:
+              - pattern: $QUERYSET.values(..., $FIELD, ...)
+              - pattern: $QUERYSET.values_list(..., $FIELD, ...)
+          - metavariable-regex:
+              metavariable: $FIELD
+              regex: ^["'](\w+__)?custom_field_data["']$
+  - id: no-stored-mapping-access-private
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This code uses a private name of server_mappings.py outside that module. The private names
+      hold the storage of the mapping. Use the public mapping API, and in tests the helpers in
+      tests/mapping_fixtures.py, the one reviewed test seam.
+    metadata:
+      category: maintainability
+      references:
+        - "netbox_librenms_plugin/server_mappings.py"
+        - "netbox_librenms_plugin/tests/mapping_fixtures.py"
+    paths:
+      exclude:
+        - "**/server_mappings.py"
+        - "**/migrations/**"
+    pattern-either:
+      - patterns:
+          - pattern-either:
+              - pattern: from $MODULE import $NAME
+              - pattern: from $MODULE import $NAME as $ALIAS
+          - metavariable-regex:
+              metavariable: $MODULE
+              regex: ^(\.+|netbox_librenms_plugin\.)?server_mappings$
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: ^_
+      - patterns:
+          - pattern-either:
+              - pattern: netbox_librenms_plugin.server_mappings.$NAME
+              - patterns:
+                  - pattern-inside: |
+                      from $PACKAGE import server_mappings as $MODULE
+                      ...
+                  - pattern: $MODULE.$NAME
+              - patterns:
+                  - pattern-inside: |
+                      from $PACKAGE import server_mappings
+                      ...
+                  - pattern: server_mappings.$NAME
+          # Name resolution also matches a bare use of an imported name; the import is the finding.
+          - pattern-regex: \.\s*_\w+
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: ^_
+      # A patch target string.
+      - pattern: '"=~/^netbox_librenms_plugin\.server_mappings\._/"'
+  - id: no-stored-mapping-access-template
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      This template reads the stored LibreNMS mapping from a custom field container. Give the
+      template a context variable that the view derives through read_mapping(), such as
+      has_librenms_id.
+    metadata:
+      category: maintainability
+      references:
+        - "netbox_librenms_plugin/server_mappings.py"
+    paths:
+      include:
+        - "*.html"
+    patterns:
+      - pattern-either:
+          - pattern-regex: \b(?:cf|custom_field_data)\s*\.\s*librenms_id\b
+          - pattern-regex: \b(?:cf|custom_field_data)\s*\|\s*\w+\s*:\s*["']librenms_id["']
+      - pattern-not-inside: "{# ... #}"
+  - id: conflict-raised-without-record
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This code raises a conflict class directly. Raise it through recorded_conflict(...), so the
+      run_transaction runner retries the attempt also when a broad handler in the work catches it.
+      When you add a TransactionConflict subclass, add its name to this rule.
+    metadata:
+      category: correctness
+      references:
+        - "netbox_librenms_plugin/transactions.py"
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/transactions.py"
+    patterns:
+      - pattern-either:
+          - pattern: raise $CONFLICT(...)
+          - pattern: raise $CONFLICT
+      - pattern-not: raise recorded_conflict(...)
+      - metavariable-regex:
+          metavariable: $CONFLICT
+          regex: ^([\w.]+\.)?(TransactionConflict|ConcurrentRowChange|IdentityBusy|MappingChanged|LibreNMSPortBindingBusy)$
+  - id: no-lock-on-exists
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This query ends a select_for_update() chain with exists() or count(). It locks no row that
+      the code reads after it, and exists() clears the select list, so Django can emit a bare
+      FOR UPDATE over joined tables. Lock and read the rows, for example with get() or a list.
+    metadata:
+      category: correctness
+    patterns:
+      - pattern-either:
+          - pattern: $QUERYSET.select_for_update(...).$TERMINAL(...)
+          - pattern: $QUERYSET.select_for_update(...). ... .$TERMINAL(...)
+      - metavariable-regex:
+          metavariable: $TERMINAL
+          regex: ^(exists|count)$

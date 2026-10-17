@@ -14,6 +14,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
     make_vm,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 
@@ -145,8 +146,7 @@ class TestSyncPageRouting:
     ):
         _vc, members = make_virtual_chassis_members("sync-stale", count=2)
         viewed, mapped = members
-        mapped.custom_field_data["librenms_id"] = {SERVER_KEY: 6604}
-        mapped.save()
+        seed_mapping(mapped, SERVER_KEY, own=6604)
 
         response = logged_in_client.get(_sync_url(viewed), {"server_key": "retired"})
 
@@ -164,8 +164,7 @@ class TestSyncPageRouting:
     ):
         _vc, members = make_virtual_chassis_members("sync-vc-delegate", count=2)
         linked, viewed = members
-        linked.custom_field_data["librenms_id"] = {SERVER_KEY: 6605}
-        linked.save()
+        seed_mapping(linked, SERVER_KEY, own=6605)
         _register_device(librenms_server, 6605, linked.name)
 
         response = logged_in_client.get(_sync_url(viewed))
@@ -175,11 +174,32 @@ class TestSyncPageRouting:
         assert response.context["librenms_sync_device"] == linked
         assert response.context["sync_device_has_librenms_id"] is True
 
+    @pytest.mark.parametrize(
+        ("viewed_mapping", "delegation_shown"),
+        [(None, True), (0, True), ({"_preferred_server": SERVER_KEY}, False), ({"retired": "abc"}, False)],
+        ids=repr,
+    )
+    def test_the_delegation_notice_follows_the_viewed_members_own_mapping(
+        self, logged_in_client, librenms_server, viewed_mapping, delegation_shown
+    ):
+        _vc, members = make_virtual_chassis_members(f"sync-vc-notice-{delegation_shown}", count=2)
+        linked, viewed = members
+        seed_mapping(linked, SERVER_KEY, own=6609)
+        seed_stored_mapping(viewed, viewed_mapping, save=True)
+        _register_device(librenms_server, 6609, linked.name)
+
+        response = logged_in_client.get(_sync_url(viewed))
+
+        assert response.status_code == 200
+        assert response.context["librenms_sync_device"] == linked
+        assert response.context["object_has_recorded_mapping"] is not delegation_shown
+        notice = "LibreNMS sync for this virtual chassis is managed by"
+        assert (notice in response.content.decode()) is delegation_shown
+
     def test_vc_member_with_own_mapping_remains_the_lookup_device(self, logged_in_client, librenms_server):
         _vc, members = make_virtual_chassis_members("sync-vc-own", count=2)
         viewed = members[1]
-        viewed.custom_field_data["librenms_id"] = {SERVER_KEY: 6606}
-        viewed.save()
+        seed_mapping(viewed, SERVER_KEY, own=6606)
         _register_device(librenms_server, 6606, viewed.name)
 
         response = logged_in_client.get(_sync_url(viewed))
@@ -190,7 +210,7 @@ class TestSyncPageRouting:
     def test_vc_context_reports_the_linked_members_primary_ip(self, logged_in_client, librenms_server):
         _vc, members = make_virtual_chassis_members("sync-vc-ip", count=2)
         linked, viewed = members
-        linked.custom_field_data["librenms_id"] = {SERVER_KEY: 6607}
+        seed_mapping(linked, SERVER_KEY, own=6607, save=False)
         interface = make_interface(linked, "management")
         primary_ip = make_ip("198.18.50.7/32", assigned_object=interface)
         linked.primary_ip4 = primary_ip
@@ -204,8 +224,7 @@ class TestSyncPageRouting:
 
     def test_vm_page_uses_the_vm_mapping_and_vm_tabs(self, logged_in_client, librenms_server):
         vm = make_vm("sync-page-vm")
-        vm.custom_field_data["librenms_id"] = {SERVER_KEY: 6608}
-        vm.save()
+        seed_mapping(vm, SERVER_KEY, own=6608)
         _register_device(librenms_server, 6608, vm.name)
 
         response = logged_in_client.get(_sync_url(vm))
@@ -255,8 +274,7 @@ class TestServerMappingContext:
     @pytest.mark.parametrize("value", [None, 42, "42", [], True, {}])
     def test_non_scoped_or_empty_values_have_no_mapping_list(self, librenms_server, value):
         device = make_device(f"mapping-none-{type(value).__name__}")
-        device.custom_field_data["librenms_id"] = value
-        device.save()
+        seed_stored_mapping(device, value, save=True)
 
         assert self._mappings(device) is None
 
@@ -380,34 +398,119 @@ class TestLibreNMSDeviceInfo:
         assert result["librenms_device_details"]["netbox_dns_name"] == "dns-identity.example.test"
 
 
+def _stack_inventory(*members, extra=()):
+    """Return a stack root, its chassis members and *extra* rows as one inventory."""
+    root = {"entPhysicalIndex": 1, "entPhysicalClass": "stack", "entPhysicalContainedIn": 0}
+    rows = [
+        {"entPhysicalIndex": 100 + offset, "entPhysicalClass": "chassis", "entPhysicalContainedIn": 1, **member}
+        for offset, member in enumerate(members)
+    ]
+    return [root, *rows, *extra]
+
+
+# The reporter's EX4400 VC rows that the serials modal reads (serials masked by the reporter).
+_JUNOS_VC_INVENTORY = [
+    {
+        "entPhysicalIndex": 1,
+        "entPhysicalClass": "chassis",
+        "entPhysicalDescr": "Juniper Virtual Chassis Switch",
+        "entPhysicalSerialNum": "12345",
+        "entPhysicalContainedIn": 0,
+    },
+    {
+        "entPhysicalIndex": 4,
+        "entPhysicalClass": "powerSupply",
+        "entPhysicalDescr": "FPC 1 Power Supply 0",
+        "entPhysicalSerialNum": "12348",
+        "entPhysicalContainedIn": 1,
+    },
+    *(
+        {
+            "entPhysicalIndex": 120 + member,
+            "entPhysicalClass": "container",
+            "entPhysicalDescr": f"FPC: EX4400-24X @ {member}/*/*",
+            "entPhysicalName": "EX4400-24X-S",
+            "entPhysicalModelName": "650-151094",
+            "entPhysicalSerialNum": serial,
+            "entPhysicalContainedIn": 1,
+            "entPhysicalParentRelPos": member,
+        }
+        for member, serial in ((0, "12345"), (1, "12350"))
+    ),
+    {
+        "entPhysicalIndex": 271,
+        "entPhysicalClass": "other",
+        "entPhysicalDescr": "Routing Engine 1",
+        "entPhysicalName": "EX4400-24X-S",
+        "entPhysicalModelName": "BUILTIN",
+        "entPhysicalSerialNum": "12351",
+        "entPhysicalContainedIn": 1,
+        "entPhysicalParentRelPos": 1,
+    },
+]
+
+
 @pytest.mark.django_db
 class TestVirtualChassisInventory:
+    def test_junos_fpc_members_are_both_offered_in_the_serials_modal(self, logged_in_client, librenms_server):
+        """A Junos VC lists every FPC member serial, not only the root chassis serial."""
+        _vc, members = make_virtual_chassis_members("inventory-junos", count=2)
+        members[0].serial = "12345"
+        members[0].save()
+        seed_mapping(members[0], SERVER_KEY, own=6647)
+        _register_device(librenms_server, 6647, members[0].name, inventory=_JUNOS_VC_INVENTORY)
+
+        response = logged_in_client.get(_sync_url(members[0]))
+
+        html = response.content.decode()
+        start = html.index('id="vc-serials-form"')
+        form = html[start : html.index("</form>", start)]
+        assert "VC Serials (2)" in html
+        assert "12345" in form
+        assert "12350" in form
+        assert "EX4400-24X-S" in form
+        assert "12348" not in form
+        assert "12351" not in form
+
+    @pytest.mark.parametrize("stored", [("VC-DUP", "S/N VC-DUP"), ("S/N VC-DUP", "VC-DUP")])
+    def test_a_serial_that_two_members_share_assigns_neither(self, librenms_server, stored):
+        """Two members normalize to one serial key, so the modal names no assigned member."""
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        _vc, members = make_virtual_chassis_members("inventory-dup-key", count=2)
+        for member, serial in zip(members, stored, strict=True):
+            member.serial = serial
+            member.save()
+        inventory = _stack_inventory({"entPhysicalSerialNum": "VC-DUP"}, {"entPhysicalSerialNum": "VC-OTHER"})
+        _register_device(librenms_server, 6648, members[0].name, inventory=inventory)
+        view = _device_view()
+        view.librenms_id = 6648
+
+        result = view._get_vc_inventory_serials(members[0])
+
+        assert [(item["serial"], item["assigned_member"]) for item in result] == [("VC-DUP", None), ("VC-OTHER", None)]
+
     def test_real_inventory_links_chassis_serials_to_members(self, librenms_server):
         _vc, members = make_virtual_chassis_members("inventory-members", count=2)
         members[0].serial = "VC-SERIAL-A"
         members[0].save()
-        inventory = [
+        inventory = _stack_inventory(
             {
-                "entPhysicalClass": "chassis",
                 "entPhysicalDescr": "First member",
                 "entPhysicalSerialNum": " VC-SERIAL-A ",
                 "entPhysicalModelName": "Member model A",
             },
             {
-                "entPhysicalClass": "chassis",
                 "entPhysicalDescr": "Unassigned member",
                 "entPhysicalSerialNum": "VC-SERIAL-B",
                 "entPhysicalModelName": "Member model B",
             },
-            {
-                "entPhysicalClass": "module",
-                "entPhysicalSerialNum": "IGNORED-MODULE",
-            },
-            {
-                "entPhysicalClass": "chassis",
-                "entPhysicalSerialNum": "-",
-            },
-        ]
+            {"entPhysicalSerialNum": "-"},
+            extra=[{"entPhysicalIndex": 200, "entPhysicalClass": "module", "entPhysicalSerialNum": "IGNORED-MODULE"}],
+        )
         _register_device(librenms_server, 6641, members[0].name, inventory=inventory)
         view = _device_view()
         view.librenms_id = 6641
@@ -429,21 +532,17 @@ class TestVirtualChassisInventory:
         _vc, members = make_virtual_chassis_members("inventory-marker", count=1)
         members[0].serial = "BCFB9793"
         members[0].save()
-        inventory = [
-            {
-                "entPhysicalClass": "chassis",
-                "entPhysicalDescr": "Routing Engine chassis",
-                "entPhysicalSerialNum": "S/N BCFB9793",
-                "entPhysicalModelName": "MX304",
-            }
-        ]
+        inventory = _stack_inventory(
+            {"entPhysicalDescr": "Member 1", "entPhysicalSerialNum": "S/N BCFB9793", "entPhysicalModelName": "EX4300"},
+            {"entPhysicalDescr": "Member 2", "entPhysicalSerialNum": "S/N BCFB9794", "entPhysicalModelName": "EX4300"},
+        )
         _register_device(librenms_server, 6644, members[0].name, inventory=inventory)
         view = _device_view()
         view.librenms_id = 6644
 
         result = view._get_vc_inventory_serials(members[0])
 
-        assert len(result) == 1
+        assert len(result) == 2
         assert result[0]["serial"] == "BCFB9793"
         assert result[0]["assigned_member"] == members[0]
 
@@ -472,7 +571,9 @@ class TestVirtualChassisInventory:
             librenms_server,
             6646,
             master.name,
-            inventory=[{"entPhysicalClass": "chassis", "entPhysicalSerialNum": "VENDOR:MEMBER-SERIAL"}],
+            inventory=_stack_inventory(
+                {"entPhysicalSerialNum": "VENDOR:MEMBER-SERIAL"}, {"entPhysicalSerialNum": "VENDOR:OTHER-SERIAL"}
+            ),
         )
         view = _device_view()
         view.librenms_id = 6646
@@ -492,15 +593,16 @@ class TestVirtualChassisInventory:
         from django.test.utils import CaptureQueriesContext
 
         _vc, members = make_virtual_chassis_members("inventory-preload", count=1)
-        inventory = [
-            {
-                "entPhysicalClass": "chassis",
-                "entPhysicalDescr": f"Member {index}",
-                "entPhysicalSerialNum": f"VC-PRELOAD-{index}",
-                "entPhysicalModelName": "Member model",
-            }
-            for index in range(5)
-        ]
+        inventory = _stack_inventory(
+            *(
+                {
+                    "entPhysicalDescr": f"Member {index}",
+                    "entPhysicalSerialNum": f"VC-PRELOAD-{index}",
+                    "entPhysicalModelName": "Member model",
+                }
+                for index in range(5)
+            )
+        )
         _register_device(librenms_server, 6645, members[0].name, inventory=inventory)
         view = _device_view()
         view.librenms_id = 6645
@@ -525,20 +627,15 @@ class TestVirtualChassisInventory:
     def test_the_serials_form_submits_the_active_server_and_tab(self, logged_in_client, librenms_server):
         """AssignVCSerialView can only preserve the context the rendered form posts."""
         _vc, members = make_virtual_chassis_members("inventory-form-context", count=2)
-        members[0].custom_field_data["librenms_id"] = {SERVER_KEY: 6643}
-        members[0].save()
+        seed_mapping(members[0], SERVER_KEY, own=6643)
         _register_device(
             librenms_server,
             6643,
             members[0].name,
-            inventory=[
-                {
-                    "entPhysicalClass": "chassis",
-                    "entPhysicalDescr": "Unassigned member",
-                    "entPhysicalSerialNum": "VC-FORM-SERIAL",
-                    "entPhysicalModelName": "Member model",
-                }
-            ],
+            inventory=_stack_inventory(
+                {"entPhysicalDescr": "Unassigned member", "entPhysicalSerialNum": "VC-FORM-SERIAL"},
+                {"entPhysicalDescr": "Second member", "entPhysicalSerialNum": "VC-FORM-SERIAL-2"},
+            ),
         )
 
         response = logged_in_client.get(_sync_url(members[0]), {"tab": "cables"})

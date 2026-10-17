@@ -16,8 +16,8 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis_members,
     make_vm,
 )
-from netbox_librenms_plugin.tests.view_test_helpers import make_view, missing_pk
-from netbox_librenms_plugin.utils import set_librenms_device_id
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
+from netbox_librenms_plugin.tests.view_test_helpers import assert_update_logged, make_view, missing_pk
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
 
@@ -84,8 +84,7 @@ def _seed(obj, rows):
 
 def _set_librenms_id(obj, value):
     """Store a LibreNMS id on a real object through the production writer."""
-    set_librenms_device_id(obj, value, SERVER_KEY)
-    obj.save(update_fields=["custom_field_data"])
+    seed_mapping(obj, SERVER_KEY, own=value)
 
 
 def _serve_device_info(live_librenms, device_id, payload):
@@ -154,6 +153,54 @@ class TestPrimaryIPFromManagementAddress:
         device.refresh_from_db()
         assert device.primary_ip4_id == address.pk
         assert any(text.startswith("Set as Primary IP: 198.18.40.10/24") for text in _messages(response, "success"))
+        assert_update_logged(device, "primary_ip4", None, address.pk)
+
+    @pytest.mark.parametrize("superuser", [True, False], ids=["superuser", "writer"])
+    def test_a_device_that_fails_validation_fails_the_row_and_changes_nothing(self, client, live_librenms, superuser):
+        """The primary IP write validates the whole device, so a device NetBox refuses fails its row."""
+        from dcim.models import Device, Interface
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        device = make_device(f"ip-primary-invalid-{superuser}", librenms_cf={SERVER_KEY: {"id": 4209}})
+        interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+        _set_librenms_id(interface, 9210)
+        # A rack face without a rack: NetBox refuses the device, whatever field the write changes.
+        Device.objects.filter(pk=device.pk).update(face="front")
+        _serve_device_info(live_librenms, 4209, {"ip": "198.18.41.30"})
+        row = _row("198.18.41.30", 9210, interface.name)
+        _seed(device, [row])
+        if superuser:
+            _login(client, "ip-primary-invalid-superuser")
+        else:
+            client.force_login(
+                make_user_with_perms(
+                    "ip-primary-invalid-writer",
+                    [
+                        ("view", Device),
+                        ("change", Device),
+                        ("view", Interface),
+                        ("add", IPAddress),
+                        ("change", IPAddress),
+                    ],
+                )
+            )
+
+        response = client.post(_ip_url(device), _sync_payload([row]))
+
+        assert response.status_code == 302
+        assert not IPAddress.objects.filter(address=row["ip_with_mask"]).exists()
+        device.refresh_from_db()
+        assert device.primary_ip4_id is None
+        [error] = _messages(response, "error")
+        assert error.startswith("Failed to sync IP addresses: 198.18.41.30/24 (Primary IP not set: ")
+        # The savepoint rolled the create back, so no other message may name the address.
+        assert [message for message in _messages(response) if "198.18.41.30" in message] == [error]
+        if superuser:
+            assert "face: Cannot select a rack face without assigning a rack." in error
+        else:
+            assert "NetBox refuses the face field (only a superuser sees the message)" in error
 
     def test_primary_ip_already_pointing_at_the_row_is_left_alone(self, client, live_librenms):
         """A row whose address is already the primary IP reports no primary change."""
@@ -203,6 +250,37 @@ class TestPrimaryIPFromManagementAddress:
         device.refresh_from_db()
         assert device.primary_ip4_id == address.pk
 
+    def test_a_held_identity_claim_answers_try_again_and_writes_nothing(self, client, live_librenms):
+        """Discovery that meets another operation's claim stops the sync before its first write."""
+        from dcim.models import Interface
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.middleware import TRY_AGAIN_MESSAGE
+        from netbox_librenms_plugin.tests.claim_race_helpers import held_device_claim
+
+        device = make_device("ip-primary-busy.example.test")
+        interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+        _set_librenms_id(interface, 9231)
+        live_librenms.server.register(
+            f"/api/v0/devices/{device.name}",
+            {"status": "ok", "devices": [{"device_id": 4231, "ip": "198.18.42.31"}]},
+        )
+        _serve_device_info(live_librenms, 4231, {"ip": "198.18.42.31"})
+        row = _row("198.18.42.31", 9231, interface.name)
+        _seed(device, [row])
+        _login(client, "ip-primary-busy-user")
+
+        with held_device_claim(SERVER_KEY, 4231):
+            response = client.post(_ip_url(device), _sync_payload([row]))
+
+        assert response.status_code == 302
+        assert _messages(response, "error") == [TRY_AGAIN_MESSAGE]
+        assert not IPAddress.objects.filter(address=row["ip_with_mask"]).exists()
+        assert list(Interface.objects.filter(device=device)) == [interface]
+        device.refresh_from_db()
+        assert device.primary_ip4_id is None
+        assert stored_mapping_for_test(device) is None
+
     def test_management_row_without_an_interface_reports_primary_not_set(self, client, live_librenms):
         """An unmatched management row is reported apart from an ordinary unmatched row."""
         from ipam.models import IPAddress
@@ -249,6 +327,30 @@ class TestPrimaryIPFromManagementAddress:
             text.startswith("Primary IP not set for 198.18.43.10/24") and "not eligible" in text
             for text in _messages(response, "warning")
         )
+
+    def test_a_lock_conflict_in_the_owner_write_retries_the_batch_and_sets_the_primary_ip(self, client, live_librenms):
+        """The owner save meets a 55P03 that its ValidationError handler lets pass, so the batch runs again."""
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import failing_statement
+
+        device = make_device("ip-primary-busy", librenms_cf={SERVER_KEY: {"id": 4210}})
+        interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+        _set_librenms_id(interface, 9211)
+        _serve_device_info(live_librenms, 4210, {"ip": "198.18.44.10"})
+        row = _row("198.18.44.10", 9211, interface.name)
+        _seed(device, [row])
+        _login(client, "ip-primary-busy-user")
+
+        with failing_statement(lambda sql, _params: sql.startswith('UPDATE "dcim_device"'), "55P03") as failed:
+            response = client.post(_ip_url(device), _sync_payload([row]))
+
+        assert len(failed) == 1
+        assert response.status_code == 302
+        address = IPAddress.objects.get(address=row["ip_with_mask"])
+        device.refresh_from_db()
+        assert device.primary_ip4_id == address.pk
+        assert any(text.startswith("Set as Primary IP: 198.18.44.10/24") for text in _messages(response, "success"))
 
 
 @pytest.mark.django_db

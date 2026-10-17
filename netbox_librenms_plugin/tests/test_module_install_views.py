@@ -2,6 +2,7 @@
 
 import pytest
 
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
 from netbox_librenms_plugin.tests.conftest import (
     install_module,
@@ -12,6 +13,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_module_type,
     make_superuser,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post as view_post
 from netbox_librenms_plugin.utils import (
     module_inventory_binding_token,
@@ -74,7 +76,6 @@ class TestInstallModuleView:
         """With no index there is no cached row, so posted identity and serial must not be read."""
         from dcim.models import Module
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
         device = make_device("install-post-fallback", librenms_cf={"default": 62})
@@ -99,7 +100,7 @@ class TestInstallModuleView:
         interface.refresh_from_db()
         assert response.status_code == 302
         assert interface.module_id is None
-        assert get_librenms_device_id(interface, "default", auto_save=False) is None
+        assert read_mapping(interface).own_id("default") is None
         assert message_texts(request, "info") == []
         # The carrier install itself still runs; only the posted metadata is discarded.
         assert Module.objects.get(device=device, module_bay=bay).serial == ""
@@ -142,12 +143,10 @@ class TestInstallBranchView:
     def test_a_branch_install_creates_the_module_and_binds_its_port(self, live_librenms):
         from dcim.models import Module
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
         device = make_device_with_module_bays("branch-install", ["Slot 1"])
-        device.custom_field_data["librenms_id"] = {"default": 65}
-        device.save(update_fields=["custom_field_data"])
+        seed_mapping(device, "default", own=65)
         module_type = make_module_type("BRANCH-CARD")
         interface = make_interface(device, "Te1/1/1")
         rows = [
@@ -185,7 +184,7 @@ class TestInstallBranchView:
         interface.refresh_from_db()
         assert response.status_code == 302
         assert Module.objects.filter(device=device, module_type=module_type).exists()
-        assert get_librenms_device_id(interface, "default", auto_save=False) == 6501
+        assert read_mapping(interface).own_id("default") == 6501
         assert any("Installed" in text for text in message_texts(request, "success"))
 
     def test_a_bind_failure_is_reported_next_to_the_install(self, live_librenms):
@@ -194,8 +193,7 @@ class TestInstallBranchView:
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
         device = make_device_with_module_bays("branch-bind-miss", ["Slot 1"])
-        device.custom_field_data["librenms_id"] = {"default": 66}
-        device.save(update_fields=["custom_field_data"])
+        seed_mapping(device, "default", own=66)
         module_type = make_module_type("BRANCH-MISS-CARD")
         rows = [_item(10, module_type.model, "Slot 1", _librenms_port_id=6601, _librenms_ifname="No Such Interface")]
 
@@ -271,15 +269,15 @@ class TestUpdateModuleSerialView:
         assert any("falling back to the page device" in text for text in message_texts(request, "warning"))
         assert "Missing or invalid module ID." in message_texts(request, "error")
 
-    def test_a_placeholder_serial_is_stored_as_blank(self, live_librenms):
+    @pytest.mark.parametrize("placeholder", ["N/A", "BUILTIN", "null"])
+    def test_a_placeholder_serial_is_stored_as_blank(self, live_librenms, placeholder):
         """The serial comes from the cached row, so a placeholder there must land as blank."""
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
-        device = make_device_with_module_bays("serial-placeholder", ["Slot 1"])
-        device.custom_field_data["librenms_id"] = {"default": 68}
-        device.save(update_fields=["custom_field_data"])
-        module = install_module(device, "Slot 1", "SERIAL-PLACEHOLDER-CARD", serial="OLD")
-        rows = [_item(11, module.module_type.model, "Slot 1", entPhysicalSerialNum="N/A")]
+        device = make_device_with_module_bays(f"serial-placeholder-{len(placeholder)}", ["Slot 1"])
+        seed_mapping(device, "default", own=68)
+        module = install_module(device, "Slot 1", f"SERIAL-PLACEHOLDER-CARD-{len(placeholder)}", serial="OLD")
+        rows = [_item(11, module.module_type.model, "Slot 1", entPhysicalSerialNum=placeholder)]
 
         request = make_request(
             "post",
@@ -325,10 +323,11 @@ class TestInventoryIgnoreRulesDuringCollection:
         )
 
     def _collect(self, parent_index, rows, rules):
+        from netbox_librenms_plugin.views.base.modules_view import DeviceIdentity
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
         index_map = {row["entPhysicalIndex"]: row for row in rows}
-        return InstallBranchView()._collect_branch(parent_index, rows, rules, "", index_map)
+        return InstallBranchView()._collect_branch(parent_index, rows, rules, DeviceIdentity(), index_map)
 
     def test_a_skip_rule_drops_the_item_and_its_subtree(self):
         rows = [

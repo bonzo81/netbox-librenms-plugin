@@ -21,10 +21,13 @@ from typing import NamedTuple
 
 from netbox_librenms_plugin.constants import (
     GENERIC_CONTAINER_MODELS,
+    JUNOS_FPC_DESCR_PREFIX,
+    JUNOS_FPC_MEMBER_DESCR_RE,
+    JUNOS_VC_ROOT_DESCR_MARKER,
     LIBRENMS_EMPTY_MESSAGES,
     LIBRENMS_GLOBAL_ROUTING_INSTANCE,
     LIBRENMS_PLACEHOLDER_VALUES,
-    MODULE_MODEL_PLACEHOLDERS,
+    is_librenms_placeholder,
 )
 from netbox_librenms_plugin.data_shapes.ports import (
     ANON_INTERFACE_NAME_PREFIX,
@@ -102,7 +105,7 @@ HOSTNAME_KEYS = frozenset(
 )
 # Use one model identity across device, inventory, transceiver, and link rows.
 MODEL_KEYS = frozenset({"hardware", "remote_platform", "entPhysicalModelName", "model"})
-_MODEL_PLACEHOLDERS = GENERIC_CONTAINER_MODELS | LIBRENMS_PLACEHOLDER_VALUES | MODULE_MODEL_PLACEHOLDERS
+_MODEL_PLACEHOLDERS = GENERIC_CONTAINER_MODELS | LIBRENMS_PLACEHOLDER_VALUES
 # entPhysicalMfgName is the ENTITY-MIB manufacturer name (e.g. "Cisco Systems Inc."). It names the
 # vendor the os-hash deliberately masks and is read by no sync logic, so it's pseudonymized to a
 # deterministic MFG-<hash> — the field shape (present, non-empty) survives without the vendor.
@@ -110,6 +113,7 @@ _MODEL_PLACEHOLDERS = GENERIC_CONTAINER_MODELS | LIBRENMS_PLACEHOLDER_VALUES | M
 # reasoning: it names the vendor the os-hash masks, and no sync logic reads it.
 MFG_KEYS = frozenset({"entPhysicalMfgName", "vendor"})
 # Replace private ENTITY display text. Structural fields and model tokens keep joins.
+# A description keeps only the Junos Virtual Chassis markers that VC detection reads.
 ENTITY_TEXT_KEYS = frozenset({"entPhysicalName", "entPhysicalDescr"})
 # The transceiver OUI is the IEEE-registered manufacturer prefix as an integer: 36965 is 0x009065,
 # Finisar. Where "vendor" is null it is the only vendor identifier on the row, so masking the name
@@ -521,11 +525,36 @@ def _anon_serial_label(value, rules):
     return f"device-{_hash(value, rules.salt)}"
 
 
-def _anon_entity_text(value, rules):
+def _entity_token(text, rules):
+    """Return the pseudonym for one piece of ENTITY text; a pseudonym or empty text is kept."""
+    text = text.strip()
+    if not text or _ENTITY_TOKEN_RE.fullmatch(text):
+        return text
+    return f"entity-{_hash(text, rules.salt)}"
+
+
+def _anon_junos_vc_descr(normalized, rules):
+    """Keep the Junos Virtual Chassis markers of a description, or return None when it has none."""
+    member = JUNOS_FPC_MEMBER_DESCR_RE.match(normalized)
+    if member:
+        return f"{member.group(0)}{_entity_token(normalized[member.end() :], rules)}".strip()
+    if normalized.startswith(JUNOS_FPC_DESCR_PREFIX):
+        rest = normalized[len(JUNOS_FPC_DESCR_PREFIX) :]
+        return f"{JUNOS_FPC_DESCR_PREFIX} {_entity_token(rest, rules)}".strip()
+    marker = re.search(re.escape(JUNOS_VC_ROOT_DESCR_MARKER), normalized, re.IGNORECASE)
+    if marker:
+        rest = f"{normalized[: marker.start()]} {normalized[marker.end() :]}"
+        return f"{_entity_token(rest, rules)} {JUNOS_VC_ROOT_DESCR_MARKER}".strip()
+    return None
+
+
+def _anon_entity_text(value, rules, *, keep_vc_markers=False):
     """Replace private ENTITY text while keeping a bounded terminal hierarchy locator."""
     normalized = value.strip()
     if not normalized or _ENTITY_TOKEN_RE.fullmatch(normalized) or _ENTITY_LOCATOR_RE.fullmatch(normalized):
         return normalized
+    if keep_vc_markers and (kept := _anon_junos_vc_descr(normalized, rules)) is not None:
+        return kept
     locator_match = _ENTITY_LOCATOR_SUFFIX_RE.search(normalized)
     token = f"entity-{_hash(normalized, rules.salt)}"
     if locator_match:
@@ -726,7 +755,7 @@ def _anon_value(key, value, rules, container=None):  # noqa: C901
         if isinstance(value, bool) or not isinstance(value, (str, int, float)):
             return value
         serial = str(value).strip()
-        return f"SN-{_hash(serial, salt)}" if serial and serial != "-" else value
+        return f"SN-{_hash(serial, salt)}" if serial and not is_librenms_placeholder(serial) else value
     if key in MODEL_KEYS:
         if isinstance(value, bool) or not isinstance(value, (str, int, float)):
             return value
@@ -760,7 +789,7 @@ def _anon_value(key, value, rules, container=None):  # noqa: C901
     if key in MFG_KEYS:
         return f"MFG-{_hash(value, salt)}"
     if key in ENTITY_TEXT_KEYS:
-        return _anon_entity_text(value, rules)
+        return _anon_entity_text(value, rules, keep_vc_markers=key == "entPhysicalDescr")
     if key in VERSION_KEYS:
         return f"fw-{_hash(value, salt)}"
     if key == "os":

@@ -5,7 +5,6 @@ Global VIDs are serialized by an advisory lock. Confirmed grouped VLAN changes l
 row before applying the disclosed rename.
 """
 
-from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from threading import Barrier, BrokenBarrierError, Event
 
@@ -15,7 +14,7 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.db import close_old_connections, connection
 
-from netbox_librenms_plugin.tests.conftest import make_device, run_in_threads
+from netbox_librenms_plugin.tests.conftest import bounded_executor, make_device, run_in_threads
 from netbox_librenms_plugin.tests.view_test_helpers import (
     assert_locked_before_update,
     make_request,
@@ -321,7 +320,7 @@ def test_grouped_vlan_deleted_after_the_scope_check_is_skipped_not_crashed(reque
         finally:
             close_old_connections()
 
-    with ThreadPoolExecutor(max_workers=1) as executor:
+    with bounded_executor(max_workers=1) as executor:
         syncing = executor.submit(sync_as_caller)
         try:
             assert read_done.wait(10), "the VLAN sync never reached its scoped read"

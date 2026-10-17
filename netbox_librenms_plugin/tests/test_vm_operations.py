@@ -5,7 +5,9 @@ from decimal import Decimal
 
 import pytest
 
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import make_cluster, make_device, make_vm
+from netbox_librenms_plugin.tests.mapping_fixtures import mapping_from_change_record, seed_mapping
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, missing_pk
 
@@ -100,9 +102,27 @@ class TestCreateVmFromLibrenms:
         assert vm.cluster == validation["cluster"]["cluster"]
         assert vm.platform == platform
         assert vm.role == role
-        assert vm.custom_field_data["librenms_id"] == {SERVER_KEY: 6101}
+        assert [(entry.server, entry.own_id) for entry in read_mapping(vm).servers] == [(SERVER_KEY, 6101)]
         assert "device_id=6101" in vm.comments
         assert "netbox-librenms-plugin" in vm.comments
+
+    def test_creation_is_one_change_record_that_holds_the_librenms_id(self):
+        """The VM is written once, so the change log has no update without a before-state."""
+        from core.models import ObjectChange
+        from django.contrib.contenttypes.models import ContentType
+        from virtualization.models import VirtualMachine
+
+        from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
+        from netbox_librenms_plugin.tests.view_test_helpers import change_logging, make_request
+
+        with change_logging(make_request()):
+            vm = create_vm_from_librenms(_payload(6102, _computed_name="vm-change-log"), _validation("change-log"))
+
+        changes = ObjectChange.objects.filter(
+            changed_object_type=ContentType.objects.get_for_model(VirtualMachine), changed_object_id=vm.pk
+        )
+        assert [change.action for change in changes] == ["create"]
+        assert mapping_from_change_record(changes.get(), before=False) == {SERVER_KEY: 6102}
 
     def test_validated_name_precedes_raw_name_recomputation(self):
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
@@ -199,7 +219,7 @@ class TestCreateVmFromLibrenms:
         )
 
         vm.refresh_from_db()
-        assert vm.custom_field_data["librenms_id"] == {"secondary": 6106}
+        assert [(entry.server, entry.own_id) for entry in read_mapping(vm).servers] == [("secondary", 6106)]
 
     def test_device_owned_id_is_rejected_by_the_real_assignment_lock(self):
         from virtualization.models import VirtualMachine
@@ -207,13 +227,16 @@ class TestCreateVmFromLibrenms:
 
         owner = make_device("vm-import-device-owner", librenms_cf={SERVER_KEY: 6107})
 
-        with pytest.raises(ValueError, match="already assigned to another device") as excinfo:
+        with pytest.raises(ValueError) as excinfo:
             create_vm_from_librenms(
                 _payload(6107, hostname="conflicting-vm"),
                 _validation("device-conflict"),
             )
         # The claim search is unrestricted and this helper takes no user, so it must not name the
-        # owner: an importer without view rights would otherwise learn the object exists.
+        # owner or its model: an importer without view rights would otherwise learn the object exists.
+        assert str(excinfo.value) == (
+            "VM cannot be imported: LibreNMS ID 6107 is already assigned to another NetBox object."
+        )
         assert owner.name not in str(excinfo.value)
 
         assert not VirtualMachine.objects.filter(name="conflicting-vm").exists()
@@ -222,14 +245,17 @@ class TestCreateVmFromLibrenms:
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
 
         owner = make_vm("vm-import-vm-owner")
-        owner.custom_field_data["librenms_id"] = {SERVER_KEY: 6108}
+        seed_mapping(owner, SERVER_KEY, own=6108, save=False)
         owner.save()
 
-        with pytest.raises(ValueError, match="already assigned to another VM") as excinfo:
+        with pytest.raises(ValueError) as excinfo:
             create_vm_from_librenms(
                 _payload(6108, hostname="second-conflicting-vm"),
                 _validation("vm-conflict"),
             )
+        assert str(excinfo.value) == (
+            "VM cannot be imported: LibreNMS ID 6108 is already assigned to another NetBox object."
+        )
         assert owner.name not in str(excinfo.value)
 
 
@@ -277,7 +303,7 @@ class TestBulkImportVms:
 
         api, server = librenms_api
         existing = make_vm("bulk-existing-vm")
-        existing.custom_field_data["librenms_id"] = {SERVER_KEY: 6203}
+        seed_mapping(existing, SERVER_KEY, own=6203, save=False)
         existing.save()
         server.device_info_response(device_id=6203, hostname=existing.name)
 
@@ -326,7 +352,7 @@ class TestBulkImportVms:
         assert vm.name == "host-selected"
         assert vm.cluster == cluster
         assert vm.role == role
-        assert vm.custom_field_data["librenms_id"] == {SERVER_KEY: 6204}
+        assert [(entry.server, entry.own_id) for entry in read_mapping(vm).servers] == [(SERVER_KEY, 6204)]
         assert result["success"][0]["message"] == "VM host-selected created successfully"
 
     def test_prefetched_device_cache_can_complete_an_import_without_http(self, librenms_api):
@@ -344,6 +370,28 @@ class TestBulkImportVms:
 
         assert result["failed"] == []
         assert result["success"][0]["device"].name == "prefetched-vm"
+
+    def test_a_held_identity_claim_fails_the_row_with_the_fixed_busy_text(self, librenms_api):
+        from virtualization.models import VirtualMachine
+
+        from netbox_librenms_plugin.import_utils.vm_operations import bulk_import_vms
+        from netbox_librenms_plugin.server_mappings import IDENTITY_BUSY_MESSAGE
+        from netbox_librenms_plugin.tests.claim_race_helpers import held_device_claim
+
+        api, _server = librenms_api
+        cluster = make_cluster("bulk-busy-cluster")
+
+        with held_device_claim(SERVER_KEY, 6209):
+            result = bulk_import_vms(
+                {6209: {"placement": "cluster", "cluster_id": cluster.pk}},
+                api,
+                libre_devices_cache={6209: _payload(6209, hostname="busy-vm")},
+                user=_vm_writer("busy"),
+            )
+
+        assert result["success"] == []
+        assert result["failed"] == [{"device_id": 6209, "error": IDENTITY_BUSY_MESSAGE}]
+        assert not VirtualMachine.objects.filter(name="busy-vm").exists()
 
     def test_deleted_cluster_selection_fails_before_vm_creation(self, librenms_api):
         from virtualization.models import Cluster, VirtualMachine

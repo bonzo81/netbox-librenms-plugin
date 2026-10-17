@@ -1,401 +1,171 @@
-r"""
-End-to-end Playwright tests for the in-place module row actions.
+"""
+In-place module row actions on the device sync page.
 
-Every module action on the device sync page (Install, Install Selected, and the
-mismatch modal's Update Serial Only) answers the HTMX post with the module tab
-fragment. ``#module-sync-content`` is swapped in place, the toasts arrive out of
-band, the modal closes through ``HX-Trigger: closeModal`` and the browser never
-navigates. These tests drive that through the real UI against a live NetBox and
-the LibreNMS stub server.
-
-Prerequisites:
-    - NetBox running at NETBOX_URL
-    - The LibreNMS stub registered under the plugin server key in E2E_STUB_SERVER_KEY
-      and reachable from the NetBox process
-    - Playwright installed: pip install playwright && playwright install chromium
-
-Configuration (environment variables): see ``tests/e2e/conftest.py``, plus
-    E2E_STUB_SERVER_KEY=<key>    Plugin server key of the stub (default "stub")
-    E2E_STUB_DEVICE_ID=<id>      LibreNMS device id in the stub (default 1)
-
-Run (from a host that has Playwright, where NetBox itself is not importable, so the
-repo-root conftest and the coverage addopts have to stay out of the way):
-    cd <repository root>
-    E2E_TESTS_ENABLED=1 NETBOX_URL=... python -m pytest \\
-        tests/e2e/test_module_actions_in_place.py -v -s \\
-        -p no:django -o 'addopts=' --confcutdir=tests/e2e
+Every module action (Install, Install Selected, and the mismatch modal's Update Serial Only)
+answers the HTMX post with the module tab fragment. ``#module-sync-content`` is swapped in place,
+the toasts arrive out of band, the modal closes through ``HX-Trigger: closeModal`` and the
+browser never navigates. The device is linked to the stub's ArcOS recording, whose optics are
+flat ``port`` rows directly under the chassis.
 """
 
-import json
-import os
-from uuid import uuid4
+import re
 
 import pytest
+from playwright.sync_api import expect
 
-from .conftest import NETBOX_URL, netbox_shell
+from . import module_tab as tab
+from .conftest import recorded, recording_device_id
 
-E2E_ENABLED = os.environ.get("E2E_TESTS_ENABLED", "0") == "1"
-
-if not E2E_ENABLED:
-    pytest.skip(
-        "E2E tests skipped: set E2E_TESTS_ENABLED=1 to run against a live instance",
-        allow_module_level=True,
-    )
-
-from playwright.sync_api import TimeoutError as PlaywrightTimeoutError  # noqa: E402  (after the opt-in skip)
-from playwright.sync_api import expect  # noqa: E402  (import after the opt-in skip)
-
-SERVER_KEY = os.environ.get("E2E_STUB_SERVER_KEY", "stub")
-STUB_DEVICE_ID = int(os.environ.get("E2E_STUB_DEVICE_ID", "1"))
-
-RUN_ID = uuid4().hex
-DEVICE_NAME = f"e2e-modules-stub-{RUN_ID}"
-MANUFACTURER_SLUG = f"e2e-modules-mfg-{RUN_ID}"
-DEVICE_TYPE_MODEL = f"E2E-MODULES-DT-{RUN_ID}"
-SITE_SLUG = f"e2e-modules-site-{RUN_ID}"
-ROLE_SLUG = f"e2e-modules-role-{RUN_ID}"
-
-# Port names of the stub inventory recording. The module bays must carry the same
-# names, because the bay matcher pairs an inventory item with a bay of that name.
-BAY_NAMES = [f"sfp{index}" for index in range(1, 19)] + ["sfp20", "sfp34"]
-# entPhysicalModelName values of the same recording, one ModuleType each.
-LIBRENMS_MODELS = [
-    "T1-QSFP28-LR4",
-    "T1-QDD-400G-FR4",
-    "T1-QDD-400G-LR4",
-    "180-3530-900",
-    "LGI-QSFP28LR431",
+RECORDING = "arcos-lag-transceivers"
+LIBRENMS_ID = recording_device_id(RECORDING)
+OPTICS = [
+    item
+    for item in recorded(RECORDING, f"/api/v0/inventory/{LIBRENMS_ID}/all")["inventory"]
+    if item["entPhysicalClass"] == "port"
 ]
-
-SETUP_CODE = f"""
-import json
-
-from dcim.models import (
-    Device,
-    DeviceRole,
-    DeviceType,
-    Manufacturer,
-    ModuleBayTemplate,
-    ModuleType,
-    Site,
-)
-
-from django.db import transaction
-
-from netbox_librenms_plugin.models import ModuleTypeMapping
-from netbox_librenms_plugin.utils import set_librenms_device_id
-
-created = {{}}
-
-# The fixture runs no teardown when setup fails, so roll back every object setup created.
-with transaction.atomic():
-    manufacturer, was_created = Manufacturer.objects.get_or_create(
-        slug="{MANUFACTURER_SLUG}", defaults={{"name": "E2E Modules Manufacturer {RUN_ID}"}}
-    )
-    created["manufacturer"] = [manufacturer.pk, was_created]
-
-    device_type, was_created = DeviceType.objects.get_or_create(
-        manufacturer=manufacturer, model="{DEVICE_TYPE_MODEL}", defaults={{"slug": "e2e-modules-dt-{RUN_ID}"}}
-    )
-    created["device_type"] = [device_type.pk, was_created]
-    for bay_name in {BAY_NAMES!r}:
-        ModuleBayTemplate.objects.get_or_create(device_type=device_type, name=bay_name)
-
-    created["module_types"] = []
-    created["module_type_mappings"] = []
-    for model in {LIBRENMS_MODELS!r}:
-        module_type, was_created = ModuleType.objects.get_or_create(manufacturer=manufacturer, model=model)
-        created["module_types"].append([module_type.pk, was_created])
-        # Scope the mapping to this manufacturer so it beats any global mapping the
-        # instance already has for the same LibreNMS model name.
-        mapping, was_created = ModuleTypeMapping.objects.get_or_create(
-            librenms_model=model,
-            manufacturer=manufacturer,
-            defaults={{"netbox_module_type": module_type}},
-        )
-        created["module_type_mappings"].append([mapping.pk, was_created])
-
-    site, was_created = Site.objects.get_or_create(slug="{SITE_SLUG}", defaults={{"name": "E2E Modules Site {RUN_ID}"}})
-    created["site"] = [site.pk, was_created]
-
-    role, was_created = DeviceRole.objects.get_or_create(slug="{ROLE_SLUG}", defaults={{"name": "E2E Modules Role {RUN_ID}"}})
-    created["role"] = [role.pk, was_created]
-
-    device = Device.objects.create(
-        name="{DEVICE_NAME}",
-        device_type=device_type,
-        role=role,
-        site=site,
-        status="active",
-    )
-    created["device"] = [device.pk, True]
-
-    set_librenms_device_id(device, {STUB_DEVICE_ID}, "{SERVER_KEY}")
-    device.save()
-print("E2E_SETUP " + json.dumps(created))
-"""
-
-TEARDOWN_CODE = """
-import json
-
-from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, ModuleType, Site
-
-from netbox_librenms_plugin.models import ModuleTypeMapping
-
-created = json.loads({payload!r})
-
-
-def own_pks(key):
-    entries = created.get(key) or []
-    if entries and not isinstance(entries[0], list):
-        entries = [entries]
-    return [pk for pk, was_created in entries if was_created]
-
-
-for model, key in (
-    (Device, "device"),
-    (ModuleTypeMapping, "module_type_mappings"),
-    (ModuleType, "module_types"),
-    (DeviceType, "device_type"),
-    (Manufacturer, "manufacturer"),
-    (Site, "site"),
-    (DeviceRole, "role"),
-):
-    pks = own_pks(key)
-    if pks:
-        model.objects.filter(pk__in=pks).delete()
-print("E2E_TEARDOWN done")
-"""
-
-
-def _shell_json(code, marker):
-    """Run shell code and return the JSON object printed after a marker."""
-    output = netbox_shell(code)
-    for line in output.split("\n"):
-        if line.startswith(marker):
-            return json.loads(line[len(marker) :].strip())
-    raise AssertionError(f"marker {marker!r} not found in shell output: {output}")
+# The bay matcher pairs an inventory item with the bay of the same name.
+NAMES = [item["entPhysicalName"] for item in OPTICS]
+SERIAL = {item["entPhysicalName"]: item["entPhysicalSerialNum"] for item in OPTICS}
+MODELS = sorted({item["entPhysicalModelName"] for item in OPTICS})
 
 
 @pytest.fixture(scope="module")
-def stub_device():
-    """Create the device, bays and module types the stub inventory matches."""
-    created = _shell_json(SETUP_CODE, "E2E_SETUP")
-    yield {"pk": created["device"][0], "created": created}
-    netbox_shell(TEARDOWN_CODE.format(payload=json.dumps(created)))
+def seeded_device(module_device) -> dict:
+    """Create the device, bays and module types that the stub inventory matches."""
+    return module_device(LIBRENMS_ID, NAMES, {model: [] for model in MODELS})
 
 
-@pytest.fixture(autouse=True)
-def clean_modules(stub_device):
-    """Leave the device with no installed modules before each test."""
-    _delete_modules(stub_device["pk"])
+@pytest.fixture
+def modules_page(logged_in_page, netbox_url, netbox_api, seeded_device):
+    """Leave the device with no modules, and open its module tab with fresh inventory."""
+    netbox_api.delete_modules(seeded_device["id"])
+    tab.open_modules_tab(logged_in_page, netbox_url, seeded_device["id"])
+    return logged_in_page
 
 
-def _delete_modules(device_pk):
-    """Remove every module of the device."""
-    netbox_shell(f"from dcim.models import Module; Module.objects.filter(device_id={device_pk}).delete()")
-
-
-def _installed_modules(device_pk):
-    """Return {bay name: (module type model, serial)} for the device's modules."""
-    return _shell_json(
-        "import json\n"
-        "from dcim.models import Module\n"
-        f"rows = Module.objects.filter(device_id={device_pk}).select_related('module_bay', 'module_type')\n"
-        'print("E2E_MODULES " + json.dumps({m.module_bay.name: [m.module_type.model, m.serial] for m in rows}))',
-        "E2E_MODULES",
-    )
-
-
-def _set_module_serial(device_pk, bay_name, serial):
-    """Write a serial straight to the installed module of one bay."""
-    netbox_shell(
-        "from dcim.models import Module\n"
-        f"module = Module.objects.get(device_id={device_pk}, module_bay__name='{bay_name}')\n"
-        f"module.serial = '{serial}'\n"
-        "module.save()"
-    )
-
-
-def _sync_url(device_pk):
-    """Return the module sync tab URL for the stub server."""
-    return f"{NETBOX_URL}/dcim/devices/{device_pk}/librenms-sync/?tab=modules&server_key={SERVER_KEY}"
-
-
-def _dom_click(page, selector):
-    """Click through the DOM, because NetBox's fixed toast container can cover a control."""
-    page.eval_on_selector(selector, "element => element.click()")
-
-
-def _row_selector(name):
-    """Return the CSS selector of one inventory item's table row."""
-    return f"#librenms-module-table tbody tr:has(td[data-col=name]:text-is('{name}'))"
-
-
-def _row(page, name):
-    """Return the table row locator of one inventory item."""
-    return page.locator(_row_selector(name))
-
-
-def _toasts(page):
-    """Return the toast container locator; every sync-tab partial repeats that id."""
-    return page.locator("#django-messages").first
-
-
-def _row_forms_bound(page, selector="#librenms-module-table"):
-    """Report whether every hx-post form under a selector carries its HTMX binding."""
-    return page.eval_on_selector_all(
-        f"{selector} form[hx-post]",
-        "forms => forms.length > 0 && forms.every(form => !!form['htmx-internal-data'])",
-    )
-
-
-def _open_modules_tab(page, device_pk):
-    """Open the module sync tab and mark the page so a reload is detectable."""
-    page.goto(_sync_url(device_pk), timeout=30000)
-    page.wait_for_selector('button:has-text("Refresh Modules")', timeout=20000)
-    page.evaluate("window.__marker = 1")
-
-
-def _refresh_modules(page):
-    """Click Refresh Modules and return the cache-fragment request the status check made."""
-    # The status check restores the tab through the loader, so wait for that response:
-    # it is the swap the next action has to act on.
-    with page.expect_response(
-        lambda response: "/sync-cache-fragment/modules/" in response.url, timeout=60000
-    ) as fragment:
-        _dom_click(page, 'button:has-text("Refresh Modules")')
-    page.wait_for_selector("#librenms-module-table tbody tr", timeout=60000)
-    expect(_row(page, BAY_NAMES[0])).to_have_count(1)
-    return fragment.value.request
-
-
-def _mark_table(page):
-    """Flag the current table node so the next swap is observable."""
-    page.eval_on_selector("#librenms-module-table", "table => table.dataset.e2eStale = '1'")
-
-
-def _wait_for_table_swap(page):
-    """Wait until a table without the stale flag replaced the flagged one."""
-    try:
-        page.wait_for_selector("#librenms-module-table:not([data-e2e-stale])", timeout=30000)
-    except PlaywrightTimeoutError as error:
-        pane = page.eval_on_selector(
-            "#module-sync-content", "pane => pane.innerText.replace(/\\s+/g, ' ').slice(0, 200)"
-        )
-        raise AssertionError(f"the module tab was not swapped in place. It now reads: {pane}") from error
-
-
-def _assert_no_navigation(page, url_before):
-    """Assert the page never reloaded: the marker survives and the URL is unchanged."""
-    assert page.evaluate("window.__marker") == 1, "page reloaded: the in-page marker is gone"
-    assert page.url == url_before, f"page navigated: {page.url} != {url_before}"
-
-
-def _install_row(page, name):
-    """Submit one row's Install form and wait for the in-place swap."""
-    _mark_table(page)
-    with page.expect_request(
-        lambda request: "/install-module/" in request.url and request.method == "POST", timeout=30000
-    ) as install:
-        _dom_click(page, f"{_row_selector(name)} form[hx-post] button[type=submit]")
-    _wait_for_table_swap(page)
-    return install.value
-
-
-def test_refresh_then_install_swaps_in_place(page, stub_device):
+def test_refresh_then_install_swaps_in_place(modules_page, netbox_api, seeded_device):
     """Installing a module swaps the module tab in place and reports it in a toast."""
-    device_pk = stub_device["pk"]
-    _open_modules_tab(page, device_pk)
+    page = modules_page
     url_before = page.url
-    _refresh_modules(page)
+    tab.refresh_modules(page, NAMES[0])
 
-    assert _row_forms_bound(page), "row forms are not HTMX-bound after the refresh"
-    expect(_row(page, "sfp1")).to_have_attribute("data-status", "Matched")
-    module_type = _row(page, "sfp1").locator("td[data-col=module_type]").inner_text().strip()
+    assert tab.forms_bound(page), "row forms are not HTMX-bound after the refresh"
+    expect(tab.row(page, NAMES[0])).to_have_attribute("data-status", "Matched")
+    module_type = tab.row(page, NAMES[0]).locator("td[data-col=module_type]").inner_text().strip()
 
-    request = _install_row(page, "sfp1")
+    request = tab.install_row(page, NAMES[0])
 
     assert request.headers.get("hx-request") == "true", "the install did not go out as an HTMX request"
-    _assert_no_navigation(page, url_before)
-    expect(_row(page, "sfp1")).to_have_attribute("data-status", "Installed")
-    expect(_toasts(page)).to_contain_text(f"Installed {module_type} in sfp1")
-    assert _row_forms_bound(page), "row forms lost their HTMX binding after the swap"
-    assert _installed_modules(device_pk) == {"sfp1": [module_type, "SN-2a1946"]}
+    tab.assert_no_navigation(page, url_before)
+    expect(tab.row(page, NAMES[0])).to_have_attribute("data-status", "Installed")
+    expect(tab.toasts(page)).to_contain_text(f"Installed {module_type} in {NAMES[0]}")
+    assert tab.forms_bound(page), "row forms lost their HTMX binding after the swap"
+    assert netbox_api.installed_modules(seeded_device["id"]) == {NAMES[0]: (module_type, SERIAL[NAMES[0]])}
 
 
-def test_second_action_in_a_row_also_swaps(page, stub_device):
+def test_install_toast_renders_once(modules_page):
+    """The page keeps one toast container, so the install message shows once and is visible."""
+    page = modules_page
+    expect(tab.toasts(page)).to_have_count(1)
+    tab.refresh_modules(page, NAMES[0])
+
+    tab.install_row(page, NAMES[0])
+
+    expect(tab.toasts(page)).to_have_count(1)
+    toast = page.locator(".toast", has_text=re.compile(rf"Installed \S+ in {re.escape(NAMES[0])} "))
+    expect(toast).to_have_count(1)
+    expect(toast).to_be_visible()
+
+
+def test_dismissed_toast_stays_hidden_after_a_later_swap(modules_page):
+    """NetBox shows every toast that is not showing after each HTMX swap, so a dismissed toast must not come back."""
+    page = modules_page
+    tab.refresh_modules(page, NAMES[0])
+    tab.install_row(page, NAMES[0])
+    toasts = tab.toasts(page).locator(".toast")
+    expect(toasts.first).to_be_visible()
+    # One DOM pass: a toast that auto-hides leaves the page, so a list of buttons taken first can go stale.
+    page.eval_on_selector_all(
+        "#django-messages .toast [data-bs-dismiss=toast]", "buttons => buttons.forEach(b => b.click())"
+    )
+    expect(toasts.filter(visible=True)).to_have_count(0)
+
+    page.get_by_role("button", name="Capture data shape").click()
+    page.wait_for_selector("#htmx-modal.show")
+
+    expect(toasts.filter(visible=True)).to_have_count(0)
+
+
+def test_second_action_in_a_row_also_swaps(modules_page, netbox_api, seeded_device):
     """A second row action right after the first one swaps in place as well."""
-    device_pk = stub_device["pk"]
-    _open_modules_tab(page, device_pk)
+    page = modules_page
     url_before = page.url
-    _refresh_modules(page)
+    tab.refresh_modules(page, NAMES[0])
 
-    _install_row(page, "sfp1")
-    expect(_row(page, "sfp1")).to_have_attribute("data-status", "Installed")
+    tab.install_row(page, NAMES[0])
+    expect(tab.row(page, NAMES[0])).to_have_attribute("data-status", "Installed")
 
-    request = _install_row(page, "sfp2")
+    request = tab.install_row(page, NAMES[1])
 
     assert request.headers.get("hx-request") == "true", "the second install did not go out as an HTMX request"
-    _assert_no_navigation(page, url_before)
-    expect(_row(page, "sfp2")).to_have_attribute("data-status", "Installed")
-    assert _row_forms_bound(page), "row forms lost their HTMX binding after the second swap"
-    assert sorted(_installed_modules(device_pk)) == ["sfp1", "sfp2"]
+    tab.assert_no_navigation(page, url_before)
+    expect(tab.row(page, NAMES[1])).to_have_attribute("data-status", "Installed")
+    assert tab.forms_bound(page), "row forms lost their HTMX binding after the second swap"
+    assert sorted(netbox_api.installed_modules(seeded_device["id"])) == sorted(NAMES[:2])
 
 
-def test_mismatch_modal_updates_serial_in_place(page, stub_device):
+def test_mismatch_modal_updates_serial_in_place(modules_page, netbox_api, seeded_device):
     """Update Serial Only closes the mismatch modal and swaps the tab in place."""
-    device_pk = stub_device["pk"]
-    _open_modules_tab(page, device_pk)
+    page = modules_page
     url_before = page.url
-    _refresh_modules(page)
-    _install_row(page, "sfp1")
-    expect(_row(page, "sfp1")).to_have_attribute("data-status", "Installed")
+    tab.refresh_modules(page, NAMES[0])
+    tab.install_row(page, NAMES[0])
+    expect(tab.row(page, NAMES[0])).to_have_attribute("data-status", "Installed")
 
-    _set_module_serial(device_pk, "sfp1", "E2E-WRONG-SERIAL")
-    _refresh_modules(page)
-    expect(_row(page, "sfp1")).to_have_attribute("data-status", "Serial Mismatch")
+    (module,) = netbox_api.list("dcim/modules", device_id=seeded_device["id"])
+    netbox_api.update(f"dcim/modules/{module['id']}", {"serial": "E2E-WRONG-SERIAL"})
+    tab.refresh_modules(page, NAMES[0])
+    expect(tab.row(page, NAMES[0])).to_have_attribute("data-status", "Serial Mismatch")
 
-    _dom_click(page, f"{_row_selector('sfp1')} button[hx-get]")
-    page.wait_for_selector("#htmx-modal.show #htmx-modal-content form[hx-post]", timeout=15000)
-    assert _row_forms_bound(page, "#htmx-modal-content"), "modal forms are not HTMX-bound"
-    expect(page.locator("#htmx-modal-content #htmx-modal-label")).to_have_text("Module Mismatch")
+    tab.dom_click(page, f"{tab.row_selector(NAMES[0])} button[hx-get]")
+    page.wait_for_selector("#htmx-modal.show #htmx-modal-content form[hx-post]")
+    assert tab.forms_bound(page, "#htmx-modal-content"), "modal forms are not HTMX-bound"
+    expect(page.locator("#htmx-modal-content .modal-title")).to_have_text("Module Mismatch")
 
-    _mark_table(page)
+    tab.mark_table(page)
     with page.expect_request(
-        lambda request: "/update-module-serial/" in request.url and request.method == "POST", timeout=30000
+        lambda request: "/update-module-serial/" in request.url and request.method == "POST"
     ) as update:
-        _dom_click(page, "#htmx-modal-content form[hx-post] button:has-text('Update Serial Only')")
-    _wait_for_table_swap(page)
+        tab.dom_click(page, "#htmx-modal-content form[hx-post] button:has-text('Update Serial Only')")
+    tab.wait_for_table_swap(page)
 
     assert update.value.headers.get("hx-request") == "true", "the serial update did not go out as an HTMX request"
-    _assert_no_navigation(page, url_before)
+    tab.assert_no_navigation(page, url_before)
     # NetBox's base template ships a second element with that id, so count the open ones.
     expect(page.locator("#htmx-modal.show")).to_have_count(0)
-    expect(_toasts(page)).to_contain_text("Updated serial for")
-    expect(_row(page, "sfp1")).to_have_attribute("data-status", "Installed")
-    assert _installed_modules(device_pk)["sfp1"][1] == "SN-2a1946"
+    expect(tab.toasts(page)).to_contain_text("Updated serial for")
+    expect(tab.row(page, NAMES[0])).to_have_attribute("data-status", "Installed")
+    assert netbox_api.installed_modules(seeded_device["id"])[NAMES[0]][1] == SERIAL[NAMES[0]]
 
 
-def test_restored_content_after_refresh_keeps_bindings(page, stub_device):
+def test_restored_content_after_refresh_keeps_bindings(modules_page):
     """The status check restores the tab through the HTMX loader, so the forms stay bound."""
-    _open_modules_tab(page, stub_device["pk"])
-    request = _refresh_modules(page)
+    page = modules_page
+    request = tab.refresh_modules(page, NAMES[0])
 
     assert request.headers.get("hx-request") == "true", "the cache fragment was not fetched through HTMX"
-    assert _row_forms_bound(page), "restored row forms are not HTMX-bound"
+    assert tab.forms_bound(page), "restored row forms are not HTMX-bound"
     assert page.eval_on_selector(
         "#modules [data-fragment-loader]",
         "loader => !!loader['htmx-internal-data']",
     ), "the fragment loader itself is not HTMX-bound"
 
 
-def test_second_click_while_in_flight_is_dropped(page, stub_device):
+def test_second_click_while_in_flight_is_dropped(modules_page, netbox_api, seeded_device):
     """hx-sync drops a second row action that starts while the first one is in flight."""
-    device_pk = stub_device["pk"]
-    _open_modules_tab(page, device_pk)
+    page = modules_page
     url_before = page.url
-    _refresh_modules(page)
+    tab.refresh_modules(page, NAMES[0])
 
     posts = []
     page.on(
@@ -405,7 +175,7 @@ def test_second_click_while_in_flight_is_dropped(page, stub_device):
         ),
     )
 
-    _mark_table(page)
+    tab.mark_table(page)
     # Both clicks run in one task, so the second one starts while the first POST is in flight.
     page.evaluate(
         """names => {
@@ -413,23 +183,22 @@ def test_second_click_while_in_flight_is_dropped(page, stub_device):
                 .find(row => row.querySelector('td[data-col=name]')?.innerText.trim() === name);
             for (const name of names) rowFor(name).querySelector('form[hx-post] button[type=submit]').click();
         }""",
-        ["sfp1", "sfp2"],
+        NAMES[:2],
     )
-    _wait_for_table_swap(page)
+    tab.wait_for_table_swap(page)
 
     assert len(posts) == 1, f"expected one install POST, got {len(posts)}"
-    _assert_no_navigation(page, url_before)
-    expect(_row(page, "sfp1")).to_have_attribute("data-status", "Installed")
-    expect(_row(page, "sfp2")).to_have_attribute("data-status", "Matched")
-    assert sorted(_installed_modules(device_pk)) == ["sfp1"]
+    tab.assert_no_navigation(page, url_before)
+    expect(tab.row(page, NAMES[0])).to_have_attribute("data-status", "Installed")
+    expect(tab.row(page, NAMES[1])).to_have_attribute("data-status", "Matched")
+    assert sorted(netbox_api.installed_modules(seeded_device["id"])) == [NAMES[0]]
 
 
-def test_install_selected_swaps_in_place(page, stub_device):
+def test_install_selected_swaps_in_place(modules_page, netbox_api, seeded_device):
     """Install Selected installs every checked row and swaps the tab in place."""
-    device_pk = stub_device["pk"]
-    _open_modules_tab(page, device_pk)
+    page = modules_page
     url_before = page.url
-    _refresh_modules(page)
+    tab.refresh_modules(page, NAMES[0])
 
     page.evaluate(
         """names => {
@@ -437,18 +206,18 @@ def test_install_selected_swaps_in_place(page, stub_device):
                 .find(row => row.querySelector('td[data-col=name]')?.innerText.trim() === name);
             for (const name of names) rowFor(name).querySelector('input[name=select]').checked = true;
         }""",
-        ["sfp3", "sfp4"],
+        NAMES[2:4],
     )
-    _mark_table(page)
+    tab.mark_table(page)
     with page.expect_request(
-        lambda request: "/install-selected/" in request.url and request.method == "POST", timeout=30000
+        lambda request: "/install-selected/" in request.url and request.method == "POST"
     ) as install:
-        _dom_click(page, "#install-selected-form button[type=submit]")
-    _wait_for_table_swap(page)
+        tab.dom_click(page, "#install-selected-form button[type=submit]")
+    tab.wait_for_table_swap(page)
 
     assert install.value.headers.get("hx-request") == "true", "the bulk install did not go out as an HTMX request"
-    _assert_no_navigation(page, url_before)
-    expect(_row(page, "sfp3")).to_have_attribute("data-status", "Installed")
-    expect(_row(page, "sfp4")).to_have_attribute("data-status", "Installed")
-    expect(_toasts(page)).to_contain_text("Installed 2 module(s)")
-    assert sorted(_installed_modules(device_pk)) == ["sfp3", "sfp4"]
+    tab.assert_no_navigation(page, url_before)
+    expect(tab.row(page, NAMES[2])).to_have_attribute("data-status", "Installed")
+    expect(tab.row(page, NAMES[3])).to_have_attribute("data-status", "Installed")
+    expect(tab.toasts(page)).to_contain_text("Installed 2 module(s)")
+    assert sorted(netbox_api.installed_modules(seeded_device["id"])) == sorted(NAMES[2:4])

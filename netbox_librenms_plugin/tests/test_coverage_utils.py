@@ -5,6 +5,12 @@ from types import SimpleNamespace
 import pytest
 from django.test import RequestFactory
 
+from netbox_librenms_plugin.server_mappings import (
+    MappingRole,
+    find_mapping,
+    name_match_may_be_port,
+    read_mapping,
+)
 from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_interface,
@@ -14,14 +20,10 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping, stored_mapping_for_test
 
 
 pytestmark = pytest.mark.django_db
-
-
-def _set_mapping(obj, value):
-    obj.custom_field_data["librenms_id"] = value
-    obj.save(update_fields=["custom_field_data"])
 
 
 def _add_primary_ip(device, tag):
@@ -141,34 +143,34 @@ class TestGetLibreNMSSyncDevice:
         return vc, members
 
     def test_explicit_server_mapping_has_highest_priority(self):
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         _vc, (first, second, _third) = self._members("mapping")
-        _set_mapping(first, {"other": 10})
-        _set_mapping(second, {"default": {"id": "42"}})
+        seed_stored_mapping(first, {"other": 10}, save=True)
+        seed_stored_mapping(second, {"default": {"id": "42"}}, save=True)
 
         assert get_librenms_sync_device(first, server_key="default") == second
         assert get_librenms_sync_device(first, server_key=None) == first
 
     def test_legacy_mapping_is_a_server_fallback(self):
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         _vc, (first, second, _third) = self._members("legacy")
-        _set_mapping(second, 55)
+        seed_stored_mapping(second, 55, save=True)
 
         assert get_librenms_sync_device(first, server_key="default") == second
 
     def test_float_mapping_is_rejected_in_favor_of_a_valid_mapping(self):
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         _vc, (first, second, third) = self._members("float")
-        _set_mapping(first, {"default": 1.0})
-        _set_mapping(third, {"other": 5})
+        seed_stored_mapping(first, {"default": 1.0}, save=True)
+        seed_stored_mapping(third, {"other": 5}, save=True)
 
         assert get_librenms_sync_device(first, server_key=None) == third
 
     def test_master_then_any_primary_ip_then_lowest_position_fallbacks(self):
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         vc, (first, second, third) = self._members("fallback")
         _add_primary_ip(second, "second")
@@ -185,7 +187,7 @@ class TestGetLibreNMSSyncDevice:
         assert get_librenms_sync_device(third, server_key="default") == first
 
     def test_standalone_device_is_its_own_sync_device(self):
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         device = make_device("sync-standalone")
         assert get_librenms_sync_device(device, server_key="default") == device
@@ -389,44 +391,48 @@ class TestLocationAndPlatformMatching:
 
 class TestStoredLibreNMSIdentifiers:
     @pytest.mark.parametrize(
-        ("stored", "server_key", "expected", "persisted"),
+        ("stored", "server_key", "expected"),
         [
-            ("42", "default", 42, 42),
-            ({"default": "77"}, "default", 77, {"default": 77}),
-            ({"default": {"id": "88"}}, "default", 88, {"default": {"id": 88}}),
-            ("not-a-number", "default", None, "not-a-number"),
+            ("42", "default", 42),
+            ({"default": "77"}, "default", 77),
+            ({"default": {"id": "88"}}, "default", 88),
+            ("not-a-number", "default", None),
         ],
     )
-    def test_real_object_normalization_and_persistence(self, stored, server_key, expected, persisted):
-        from netbox_librenms_plugin.utils import get_librenms_device_id
-
+    def test_real_object_read_normalizes_without_persisting(self, stored, server_key, expected):
         device = make_device(f"stored-id-{expected}")
-        _set_mapping(device, stored)
+        seed_stored_mapping(device, stored, save=True)
 
-        assert get_librenms_device_id(device, server_key) == expected
+        assert read_mapping(device).own_id(server_key) == expected
         device.refresh_from_db()
-        assert device.custom_field_data["librenms_id"] == persisted
+        assert stored_mapping_for_test(device) == stored
 
     def test_read_only_lookup_normalizes_without_persisting(self):
-        from netbox_librenms_plugin.utils import get_librenms_device_id
-
         device = make_device("stored-id-read-only")
-        _set_mapping(device, {"default": "99"})
+        seed_stored_mapping(device, {"default": "99"}, save=True)
 
-        assert get_librenms_device_id(device, "default", auto_save=False) == 99
+        assert read_mapping(device).own_id("default") == 99
         device.refresh_from_db()
-        assert device.custom_field_data["librenms_id"] == {"default": "99"}
+        assert stored_mapping_for_test(device) == {"default": "99"}
 
     def test_find_by_none_short_circuits_and_locked_lookup_finds_the_owner(self):
         from dcim.models import Device
         from django.db import transaction
 
-        from netbox_librenms_plugin.utils import find_by_librenms_id
-
-        assert find_by_librenms_id(Device, None, server_key="default") is None
+        assert (
+            find_mapping(
+                Device.objects.all(), server="default", identity=None, roles=(MappingRole.OWN, MappingRole.OOB)
+            )
+            is None
+        )
         owner = make_device("stored-id-owner", librenms_cf={"default": 4242})
         with transaction.atomic():
-            found = find_by_librenms_id(Device, 4242, server_key="default", select_for_update=True)
+            found = find_mapping(
+                Device.objects.select_for_update(),
+                server="default",
+                identity=4242,
+                roles=(MappingRole.OWN, MappingRole.OOB),
+            )
         assert found == owner
 
 
@@ -442,9 +448,9 @@ class TestSmallRenderingAndShapeHelpers:
         [(42, True), (" 42 ", True), (True, False), ({"default": 42}, False), (None, False), ("abc", False)],
     )
     def test_legacy_identifier_shape(self, stored, expected):
-        from netbox_librenms_plugin.utils import is_legacy_librenms_id
+        from dcim.models import Device
 
-        assert is_legacy_librenms_id(stored) is expected
+        assert read_mapping(seed_stored_mapping(Device(), stored)).legacy.is_legacy is expected
 
 
 class TestNetBoxVersionGates:
@@ -571,7 +577,7 @@ class TestInterfaceNameFallbackMatchesPort:
         device = make_device(f"interface-fallback-{stored}")
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
         if stored is not None:
-            _set_mapping(interface, stored)
+            seed_stored_mapping(interface, stored, save=True)
         return interface
 
     @pytest.mark.parametrize(
@@ -586,25 +592,16 @@ class TestInterfaceNameFallbackMatchesPort:
         ],
     )
     def test_agrees_with_the_shared_identifier_reader(self, stored):
-        from netbox_librenms_plugin.utils import get_librenms_device_id, interface_name_fallback_matches_port
-
         interface = self._interface(stored)
-        assert get_librenms_device_id(interface, "default", auto_save=False) == 42
-        assert interface_name_fallback_matches_port(interface, 42, "default") is True
-        assert interface_name_fallback_matches_port(interface, 43, "default") is False
+        assert read_mapping(interface).own_id("default") == 42
+        assert name_match_may_be_port(interface, server="default", port_id=42) is True
+        assert name_match_may_be_port(interface, server="default", port_id=43) is False
 
     def test_unbound_and_other_server_entries_are_available(self):
-        from netbox_librenms_plugin.utils import interface_name_fallback_matches_port
-
-        assert interface_name_fallback_matches_port(self._interface(None), 42, "default") is True
-        assert interface_name_fallback_matches_port(self._interface({"other": 42}), 42, "default") is True
+        assert name_match_may_be_port(self._interface(None), server="default", port_id=42) is True
+        assert name_match_may_be_port(self._interface({"other": 42}), server="default", port_id=42) is True
         assert (
-            interface_name_fallback_matches_port(
-                self._interface({"default": {"no_id": 42}}),
-                42,
-                "default",
-            )
-            is False
+            name_match_may_be_port(self._interface({"default": {"no_id": 42}}), server="default", port_id=42) is False
         )
 
 

@@ -13,9 +13,10 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from utilities.permissions import get_permission_for_model
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
-from netbox_librenms_plugin.interface_sync import write_interface_row
+from netbox_librenms_plugin.interface_sync import ApplicationResult, write_interface_row
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSIDConflictError, LibreNMSLookupError
-from netbox_librenms_plugin.utils import coerce_librenms_id, coerce_model_pk, effective_vlan_mode, is_list_of_dicts
+from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+from netbox_librenms_plugin.utils import coerce_model_pk, effective_vlan_mode, is_list_of_dicts
 
 logger = logging.getLogger(__name__)
 
@@ -773,6 +774,8 @@ class LibreNMSAPIMixin:
         # don't need to pass it themselves; the `**context` spread comes last only so that if one
         # ever does set it explicitly, that value still wins (defensive — no caller relies on it).
         merged = {"has_write_permission": self.has_write_permission(), **context}
+        # Only the partial response renders the messages; the full page renders them once in base.html.
+        merged["sync_partial_response"] = True
         return render(request, self.partial_template_name, {**merged, **build_migrated_context(obj, server_key)})
 
     def rebind_api_for_posted_server(self, data):
@@ -1744,7 +1747,7 @@ class VlanAssignmentMixin:
             row.mode = mode
             if not (untagged_vid and untagged_set is None):
                 row.untagged_vlan = untagged_set
-            return False
+            return ApplicationResult(changed_elsewhere=False)
 
         # Save mode + untagged_vlan before M2M operations.
         # tagged_vlans.set() triggers a DB refresh that wipes unsaved
@@ -1764,9 +1767,8 @@ class VlanAssignmentMixin:
         else:
             tagged_vlan_ids = set()
         if tagged_vlan_ids != prior_tagged_vlan_ids:
-            # An unsaved row has no change-log before-state yet, and its tagged VLANs are about to change.
-            if not fields_changed:
-                interface.snapshot()
+            # The change merges into the record of the row's save only inside a NetBox request.
+            interface.snapshot()
             if tagged_vids:
                 interface.tagged_vlans.set(tagged_set)
             else:
