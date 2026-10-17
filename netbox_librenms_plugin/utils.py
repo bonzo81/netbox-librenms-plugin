@@ -9,7 +9,7 @@ from typing import NamedTuple, Optional
 import django_tables2 as tables
 import psycopg
 from dcim.models import Device, Interface
-from django.core.exceptions import FieldDoesNotExist, ObjectDoesNotExist, ValidationError
+from django.core.exceptions import NON_FIELD_ERRORS, FieldDoesNotExist, ObjectDoesNotExist, ValidationError
 from django.core.paginator import EmptyPage, PageNotAnInteger
 from django.db import DatabaseError, IntegrityError, transaction
 from django.db.models import Count, Max
@@ -3589,7 +3589,8 @@ def load_module_type_bay_types():
 
 
 def module_type_bay_type_ids(module_type, preloaded=None):
-    """Return the module bay types *module_type* installs into; an empty set fits any bay.
+    """
+    Return the module bay types *module_type* installs into; an empty set fits any bay.
 
     *preloaded* is the result of ``load_module_type_bay_types``; without it, this reads one query.
     """
@@ -3772,6 +3773,37 @@ def exception_text_for(exc: Exception, model, user) -> str:
     keys = exc.error_dict if hasattr(exc, "error_dict") else ()
     fields = [name for name in dict.fromkeys(refused_model_field(model, key) for key in keys) if name]
     return hidden_refusal_text(model, fields)
+
+
+# This is the failure text that caught-error-text trusts.
+# nosemgrep: caught-error-text-shadow  # noqa: ERA001
+def write_failure_message(exc, action, written_field, model, user):
+    """
+    Describe a failed single-field write to *user*, and say when the failure is on another field.
+
+    Args:
+        exc (Exception): The caught error of the write.
+        action (str): The write, for example "update serial to 'X'".
+        written_field (str): The field that the write changed.
+        model (type[Model]): The model that NetBox validated.
+        user (User | None): The viewer.
+
+    Returns:
+        str: The failure text; its detail comes from ``exception_text_for``.
+
+    """
+    detail = exception_text_for(exc, model, user)
+    # full_clean() validates the whole object, so the failure can sit on a field this write never
+    # touched. Whether the write caused the failure is not knowable from the error keys alone:
+    # a custom validator can add any key, so the wording states what failed, never when it broke.
+    # The keys only choose the wording; the text comes from exception_text_for.
+    # nosemgrep: caught-error-text  # noqa: ERA001
+    keys = exc.error_dict if hasattr(exc, "error_dict") else ()
+    # nosemgrep: caught-error-text  # noqa: ERA001
+    elsewhere = [key for key in keys if key not in (written_field, NON_FIELD_ERRORS)]
+    if elsewhere and len(elsewhere) == len(keys):
+        return f"Cannot {action}: another field fails validation. {detail.rstrip('.')}. Resolve that, then retry."
+    return f"Failed to {action}: {detail}"
 
 
 # The device-level IP foreign keys this plugin re-homes during OOB linking, merges, and the
