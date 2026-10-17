@@ -2427,6 +2427,8 @@ class DeviceConflictActionView(
             reports = platform_reports(outcome, existing_model, request.user)
             if refusal := next((report.text for report in reports if report.level == messages.ERROR), None):
                 return _htmx_error_response(refusal)
+            for report in reports:
+                messages.add_message(request, *report)
             logger.info(f"Synced platform on '{existing_device.name}' to {outcome.platform}")
 
         elif action == "sync_device_type":
