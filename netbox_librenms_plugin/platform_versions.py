@@ -54,6 +54,7 @@ class PlatformReason(StrEnum):
     VERSION_CHANGED = "version_changed"
     OS_PLATFORM_RESOLVED = "os_platform_resolved"
     NAMED_PLATFORM_UNAVAILABLE = "named_platform_unavailable"
+    OS_CHANGED = "os_changed"
 
 
 class PlatformOperation(StrEnum):
@@ -123,11 +124,12 @@ class NewOSPlatform:
     """
     The OS platform that the actor names when no platform matches the LibreNMS OS.
 
-    ``reported_version`` is the version that the actor saw; with tracking on, a different current
-    version makes the application stale.
+    ``reported_os`` and ``reported_version`` are the OS and the version that the actor saw. A
+    different current OS, or with tracking on a different current version, makes the application stale.
     """
 
     name: str
+    reported_os: str
     manufacturer: object = None
     reported_version: str = ""
 
@@ -424,11 +426,11 @@ def _create_version_platform(assessment, actor):
 
 def _named_request(new_os_platform, facts, tracking):
     """
-    Return the assessment of the OS platform that the actor names, and the stale outcome of a changed version.
+    Return the assessment of the OS platform that the actor names, and the stale outcome of changed facts.
 
     Returns:
         tuple[PlatformAssessment, PlatformOutcome | None]: The assessment, and the outcome when
-        tracking is on and LibreNMS now reports another version than the actor saw.
+        LibreNMS now reports another OS than the actor saw, or with tracking on another version.
 
     """
     named = PlatformAssessment(
@@ -439,6 +441,9 @@ def _named_request(new_os_platform, facts, tracking):
         target_name=new_os_platform.name,
         operation=PlatformOperation.CREATE_OS_PLATFORM,
     )
+    # The OS platform lookup ignores case, so the OS comparison does too.
+    if _fact(new_os_platform.reported_os).casefold() != facts.librenms_os.casefold():
+        return named, PlatformOutcome(OutcomeStatus.STALE, PlatformReason.OS_CHANGED, named)
     if tracking and _fact(new_os_platform.reported_version) != facts.version:
         return named, PlatformOutcome(OutcomeStatus.STALE, PlatformReason.VERSION_CHANGED, named)
     return named, None
@@ -475,7 +480,7 @@ def apply_platform(model, pk, facts, *, tracking, actor, new_os_platform=None):
             create needs ``add`` on Platform.
         new_os_platform (NewOSPlatform | None): The OS platform the actor names when none matches
             the LibreNMS OS. A platform with that name is used as it is. When a platform or a
-            Platform Mapping now matches the OS, or the version changed, the outcome is stale.
+            Platform Mapping now matches the OS, or the OS or the version changed, the outcome is stale.
 
     Returns:
         PlatformOutcome: The outcome. A lock conflict is raised, not returned.
@@ -719,6 +724,10 @@ def reason_text(reason, assessment, viewer):
         PlatformReason.VERSION_CHANGED: lambda: (
             f"LibreNMS now reports version '{facts.version}', not the version the page showed. "
             "Refresh the page and try again."
+        ),
+        PlatformReason.OS_CHANGED: lambda: (
+            (f"LibreNMS now reports OS '{os_name}'" if os_name else "LibreNMS now reports no OS")
+            + ", not the OS the page showed. Refresh the page and try again."
         ),
         PlatformReason.OS_PLATFORM_RESOLVED: lambda: (
             f"A platform now matches LibreNMS OS '{os_name}'. Refresh the page and try again."
