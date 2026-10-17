@@ -18,7 +18,6 @@ from django.template.loader import render_to_string
 from django.urls import reverse
 from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
-from django.utils.text import slugify
 from django.views import View
 
 from netbox_librenms_plugin.constants import OOB_TYPES
@@ -80,13 +79,13 @@ from netbox_librenms_plugin.ip_rules import ip_rules_for_request
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.platform_versions import (
-    OutcomeStatus,
+    NewOSPlatform,
     PlatformFacts,
-    PlatformReason,
     PlatformState,
     apply_platform,
     assess_platform,
-    import_platform,
+    create_os_platform,
+    map_os_platform,
     platform_label,
     platform_reports,
     platform_version_tracking_enabled,
@@ -2679,7 +2678,7 @@ class AddDeviceTypeMappingView(
 class CreatePlatformFromImportView(
     LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, DeviceImportHelperMixin, View
 ):
-    """HTMX view to create a Platform (and optionally a mapping and device assignment) from the import page."""
+    """HTMX view to create or reuse the named OS platform, assign it to the matched object, and add its mapping."""
 
     def get(self, request, device_id):
         """Render the shared create-platform form fragment for the import HTMX modal."""
@@ -2742,10 +2741,8 @@ class CreatePlatformFromImportView(
             },
         )
 
-    def post(self, request, device_id):  # noqa: C901
-        """Create platform + optional mapping + optional device assignment, then return OOB swaps."""
-        from dcim.models import Manufacturer, Platform
-
+    def post(self, request, device_id):
+        """Create or reuse the named OS platform, assign it, add the optional mapping, and swap the row."""
         if error := self.require_write_permission():
             return error
         if error := _invalid_import_intent_response(request, device_id):
@@ -2756,119 +2753,107 @@ class CreatePlatformFromImportView(
         if err := _rebind_or_htmx_error(self, request):
             return err
 
-        create_mapping = _parse_boolish(request.POST.get("create_mapping")) is True
-        device_pk_str = (request.POST.get("device_pk") or "").strip()
-        device_pk = None
-        if device_pk_str:
-            try:
-                device_pk = int(device_pk_str)
-            except (ValueError, TypeError):
-                device_pk = None
-
         # Re-resolve the matched NetBox object via current validation. This
         # tells us which model (Device vs VirtualMachine) to assign to and
         # protects against a stale/spoofed hidden device_pk: we only mutate an
         # existing object when current validation unambiguously resolves it
         # (and the supplied device_pk, if any, agrees with that resolution).
         try:
-            validated_device, _validation, _ = self.get_validated_device_with_selections(device_id, request)
+            validated_device, validation, _ = self.get_validated_device_with_selections(device_id, request)
         except Exception:
             logger.exception(
                 "CreatePlatformFromImportView: failed to resolve assignment target for device_id=%s",
                 device_id,
             )
             return _htmx_error_response("Unable to confirm the target object for platform assignment.")
-        existing_obj = _validation.get("existing_device") if _validation else None
+        target_model, target_pk = self._assignment_target(request, validation)
+        # The facts come from the validated LibreNMS device, never from the posted form.
+        facts = PlatformFacts.from_librenms((validated_device or {}).get("os"), (validated_device or {}).get("version"))
 
-        if existing_obj is not None and (device_pk is None or device_pk == existing_obj.pk):
-            target_model = type(existing_obj)
-            target_pk = existing_obj.pk
-        else:
-            # Either validation could not confirm a target, or the hidden
-            # device_pk disagreed with the validated object. Don't guess a
-            # model — create the platform but skip assignment so we never
-            # mutate the wrong record.
-            target_model = None
-            target_pk = None
-
-        librenms_os = (request.POST.get("librenms_os") or "").strip().lower()
-        validated_device = validated_device or {}
-        facts = PlatformFacts.from_librenms(validated_device.get("os"), validated_device.get("version"))
-
-        # Do NOT gate the upfront POST on ("add", PlatformMapping): creating/assigning the
-        # Platform is the primary action and must succeed for a user who can add a Platform
-        # even when they can't create OS mappings. The optional mapping write is gated at its
-        # own site below, where a missing add-permission skips the mapping with a warning
-        # instead of failing the whole request.
-        perms = [("add", Platform)]
-        if target_model is not None:
-            perms.append(("change", target_model))
-        # When a manufacturer is posted it is resolved by client-supplied id through a restricted
-        # queryset, so state that read in the gate.
-        if (request.POST.get("manufacturer") or "").strip():
-            perms.append(("view", Manufacturer))
-        self.required_object_permissions = {"POST": perms}
-
-        if error := self.require_object_permissions("POST"):
+        if error := self._require_create_permissions(request, target_model):
             return error
-
         platform_name = (request.POST.get("platform_name") or "").strip()
-        manufacturer_id = (request.POST.get("manufacturer") or "").strip()
-
         if not platform_name:
             return _htmx_error_response("Platform name is required.")
+        manufacturer, error = self._posted_manufacturer(request)
+        if error:
+            return error
 
-        if Platform.objects.filter(name__iexact=platform_name).exists():
-            return _htmx_error_response(f'Platform "{platform_name}" already exists.')
-
-        manufacturer = None
-        if manufacturer_id:
-            try:
-                manufacturer = self.restricted_queryset(Manufacturer).get(pk=int(manufacturer_id))
-            except (Manufacturer.DoesNotExist, ValueError, TypeError):
-                # The user explicitly submitted a manufacturer; a stale/tampered id must be
-                # rejected, not silently dropped to None (which would persist a Platform with
-                # the wrong/no manufacturer).
-                return _htmx_error_response("Selected manufacturer not found.")
-
-        try:
-            platform, assignment_error = run_transaction(
-                lambda: self._create_platform_attempt(
-                    request, platform_name, manufacturer, create_mapping, librenms_os, target_model, target_pk, facts
+        tracking = platform_version_tracking_enabled()
+        named = NewOSPlatform(platform_name, manufacturer, request.POST.get("librenms_version") or "")
+        if target_model is None:
+            outcome = run_transaction(lambda: create_os_platform(named, facts, tracking=tracking, actor=request.user))
+        else:
+            outcome = run_transaction(
+                lambda: apply_platform(
+                    target_model, target_pk, facts, tracking=tracking, actor=request.user, new_os_platform=named
                 )
             )
-        except ValidationError as exc:
-            logger.exception("CreatePlatformFromImportView: validation failed while creating platform")
-            return _htmx_error_response(f"Error creating platform: {exception_text_for(exc, Platform, request.user)}")
-        except IntegrityError:
-            logger.exception("CreatePlatformFromImportView: integrity error while creating platform")
-            return _htmx_error_response(
-                "Error creating platform due to a database constraint. Please try again or contact an administrator."
-            )
-        if target_model is None:
-            logger.info(
-                "CreatePlatformFromImportView: no existing NetBox object matched "
-                "for LibreNMS device_id=%s; platform '%s' created without assignment",
-                device_id,
-                platform.name,
-            )
-        elif assignment_error is None:
-            logger.info(
-                "CreatePlatformFromImportView: assigned platform '%s' to %s pk=%s",
-                platform.name,
-                target_model.__name__,
-                target_pk,
+        reports = platform_reports(outcome, target_model, request.user, named=True)
+        if refusal := next((report.text for report in reports if report.level == messages.ERROR), None):
+            return _htmx_error_response(refusal)
+        logger.info(
+            "CreatePlatformFromImportView: platform '%s' for LibreNMS device_id=%s: %s",
+            platform_name,
+            device_id,
+            outcome.status,
+        )
+        for report in reports:
+            messages.add_message(request, *report)
+        if _parse_boolish(request.POST.get("create_mapping")) is True and facts.librenms_os:
+            messages.add_message(
+                request, *map_os_platform(facts.librenms_os, outcome.assessment.os_platform, request.user)
             )
 
         cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
         cache.delete(cache_key)
+        return self._updated_row_response(request, device_id)
 
-        if assignment_error:
-            # The platform (and any mapping) were intentionally kept, but the device assignment
-            # failed. Surface that to the user instead of a success swap — the failure detail is
-            # already logged above; the toast carries a fixed, non-sensitive message.
-            return _htmx_error_response(assignment_error)
+    def _assignment_target(self, request, validation):
+        """Return ``(model, pk)`` of the object that validation matched, or ``(None, None)``."""
+        device_pk = None
+        try:
+            device_pk = int((request.POST.get("device_pk") or "").strip())
+        except ValueError:
+            pass
+        existing_obj = validation.get("existing_device") if validation else None
+        if existing_obj is not None and (device_pk is None or device_pk == existing_obj.pk):
+            return type(existing_obj), existing_obj.pk
+        # Validation found no object, or the hidden device_pk disagrees: never guess which record to change.
+        return None, None
 
+    def _require_create_permissions(self, request, target_model):
+        """Return the error of a missing permission; the gate mirrors the sync page's Create & Sync."""
+        from dcim.models import Manufacturer, Platform
+
+        platform_name = (request.POST.get("platform_name") or "").strip()
+        # A platform with this name is reused as it is: it needs "view", not "add".
+        exists = bool(platform_name) and Platform.objects.filter(name__iexact=platform_name).exists()
+        perms = [("view", Platform) if exists else ("add", Platform)]
+        if target_model is not None:
+            perms.append(("change", target_model))
+        # A posted manufacturer is resolved by its id through a restricted queryset.
+        if (request.POST.get("manufacturer") or "").strip():
+            perms.append(("view", Manufacturer))
+        # "add PlatformMapping" is checked at the optional mapping write, not here.
+        self.required_object_permissions = {"POST": perms}
+        return self.require_object_permissions("POST")
+
+    def _posted_manufacturer(self, request):
+        """Return ``(manufacturer, None)``, or ``(None, error)`` for a posted id that the user cannot use."""
+        from dcim.models import Manufacturer
+
+        manufacturer_id = (request.POST.get("manufacturer") or "").strip()
+        if not manufacturer_id:
+            return None, None
+        try:
+            return self.restricted_queryset(Manufacturer).get(pk=int(manufacturer_id)), None
+        except (Manufacturer.DoesNotExist, ValueError, TypeError):
+            # A stale or tampered id is refused, never dropped to None.
+            return None, _htmx_error_response("Selected manufacturer not found.")
+
+    def _updated_row_response(self, request, device_id):
+        """Return the modal and the table row as OOB swaps, with the queued messages."""
         # Re-render the modal content as an OOB swap so it updates in place.
         # The inner views render via Django templates (auto-escaped), so the
         # decoded content is already safe HTML; wrap with format_html + mark_safe
@@ -2899,169 +2884,6 @@ class CreatePlatformFromImportView(
         if libre_device is None or validation is None:
             return _attach_messages_oob(response, request)
         return response
-
-    def _create_platform_attempt(
-        self, request, platform_name, manufacturer, create_mapping, librenms_os, target_model, target_pk, facts
-    ):
-        """
-        Create the platform, its optional mapping and its optional assignment, as one attempt of one transaction.
-
-        The assignment runs in its own savepoint. A refusal of the assignment keeps the platform
-        and returns the refusal text. A lock conflict rolls back the whole attempt, so the
-        platform is never committed without the assignment that the request asked for.
-
-        Returns:
-            tuple[Platform, str | None]: The platform, and the text of a failed assignment.
-
-        """
-        from dcim.models import Platform
-
-        from netbox_librenms_plugin.models import PlatformMapping
-
-        platform = Platform(
-            name=platform_name,
-            slug=slugify(platform_name),
-            manufacturer=manufacturer,
-        )
-        platform.full_clean()
-        platform.save()
-
-        if create_mapping and librenms_os:
-            if not PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).exists():
-                # Re-check the add permission at the write site. The upfront gate only
-                # requires ("add", PlatformMapping) when no mapping existed at preflight;
-                # if one existed then but was deleted since, this branch would otherwise
-                # create a mapping the caller was never authorized for. Skip rather than
-                # error — the Platform is already created and is the primary action.
-                from utilities.permissions import get_permission_for_model
-
-                if request.user.has_perm(get_permission_for_model(PlatformMapping, "add")):
-                    try:
-                        with transaction.atomic():
-                            # full_clean() before save so a tampered/overlong POST-derived
-                            # librenms_os fails as a caught ValidationError rather than a raw
-                            # DataError that would 500 the modal. The mapping is a secondary
-                            # side-effect, so skip+warn instead of failing the Platform create.
-                            mapping = PlatformMapping(
-                                librenms_os=librenms_os.lower(),
-                                netbox_platform=platform,
-                            )
-                            mapping.full_clean()
-                            mapping.save()
-                    except IntegrityError:
-                        # A concurrent request inserted the mapping between our existence
-                        # check and save, so ours was not applied. If the winning row
-                        # targets a *different* platform, future imports for this OS keep
-                        # resolving through it rather than the platform just created —
-                        # surface the same warning as the "already exists" branch instead
-                        # of reporting a clean success. Same-platform winner is a true no-op.
-                        winner = PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).first()
-                        if winner is not None and getattr(winner, "netbox_platform_id", None) != platform.pk:
-                            winner_target = platform_label(winner.netbox_platform, request.user)
-                            transaction.on_commit(
-                                lambda os=librenms_os, target=winner_target: messages.warning(
-                                    request,
-                                    f"Platform created, but a LibreNMS-OS mapping for '{os}' already exists"
-                                    + (f" (→ {target})" if target else "")
-                                    + ". It was left unchanged, so future imports for this OS will keep "
-                                    "using the existing mapping. Update the mapping if you want them to use "
-                                    "the new platform.",
-                                )
-                            )
-                    except ValidationError:
-                        logger.warning(
-                            "CreatePlatformFromImportView: skipped invalid PlatformMapping for OS %r",
-                            librenms_os,
-                            exc_info=True,
-                        )
-                        transaction.on_commit(
-                            lambda os=librenms_os: messages.warning(
-                                request,
-                                f"Platform created, but the LibreNMS-OS mapping for '{os}' was not "
-                                "added — the OS value was invalid.",
-                            )
-                        )
-                else:
-                    logger.warning(
-                        "CreatePlatformFromImportView: skipped PlatformMapping create for OS %r — "
-                        "user lacks add permission (mapping was removed after the preflight check).",
-                        librenms_os,
-                    )
-                    # Surface it in the modal too — but only after the Platform commits,
-                    # so we don't warn about a skipped side-effect of a rolled-back write.
-                    transaction.on_commit(
-                        lambda os=librenms_os: messages.warning(
-                            request,
-                            f"Platform created, but the LibreNMS-OS mapping for '{os}' was not added — "
-                            "you lack permission to add mappings.",
-                        )
-                    )
-            else:
-                # A mapping for this OS already exists, so create_mapping is a silent
-                # no-op: the new Platform is assigned to the current object, but future
-                # imports for this OS keep resolving through the pre-existing mapping.
-                # Surface that mismatch instead of reporting a clean success.
-                existing = PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).first()
-                existing_target = platform_label(existing.netbox_platform, request.user) if existing else None
-                transaction.on_commit(
-                    lambda os=librenms_os, target=existing_target: messages.warning(
-                        request,
-                        f"Platform created, but a LibreNMS-OS mapping for '{os}' already exists"
-                        + (f" (→ {target})" if target else "")
-                        + ". It was left unchanged, so future imports for this OS will keep using the "
-                        "existing mapping. Update the mapping if you want them to use the new platform.",
-                    )
-                )
-
-        tracking = platform_version_tracking_enabled()
-        if target_model is None or target_pk is None:
-            if tracking:
-                plan = import_platform(facts, tracking=tracking, actor=request.user, os_platform=platform)
-                if plan.reason is not None:
-                    text = (
-                        "Platform created, but its version platform was not: "
-                        f"{reason_text(plan.reason, plan.assessment, request.user)}"
-                    )
-                    transaction.on_commit(lambda: messages.warning(request, text))
-            return platform, None
-        # A refusal must not roll back the platform: the platform is the primary action.
-        outcome = apply_platform(
-            target_model,
-            target_pk,
-            facts,
-            tracking=tracking,
-            actor=request.user,
-            os_platform=platform,
-        )
-        verbose_name = target_model._meta.verbose_name
-        if outcome.reason is PlatformReason.SUBJECT_UNAVAILABLE:
-            logger.warning(
-                "CreatePlatformFromImportView: %s pk=%s not found; platform '%s' created but not assigned",
-                target_model.__name__,
-                target_pk,
-                platform.name,
-            )
-            return platform, (
-                f'Platform "{platform.name}" was created, but the target {verbose_name} no longer exists, so it '
-                "could not be assigned. Assign the platform manually if it is still needed."
-            )
-        if outcome.status is OutcomeStatus.FAILED:
-            logger.warning(
-                "CreatePlatformFromImportView: platform '%s' created but assignment to %s pk=%s failed",
-                platform.name,
-                target_model.__name__,
-                target_pk,
-            )
-            return platform, (
-                f'Platform "{platform.name}" was created, but could not be assigned to the {verbose_name}. '
-                "Assign the platform manually if needed."
-            )
-        if outcome.status is OutcomeStatus.BLOCKED:
-            return platform, (
-                f'Platform "{platform.name}" was created, but not assigned: '
-                f"{reason_text(outcome.reason, outcome.assessment, request.user)}"
-            )
-        return platform, None
 
 
 class AddAsOOBView(
