@@ -4852,7 +4852,8 @@ class TestCreatePlatformAssignmentIndependence:
             lock_row(other, Device, target.pk)
 
             def release_before_the_second_lock(execute, sql, params, many, context):
-                if sql.startswith("SELECT") and '"dcim_device"' in sql and "FOR UPDATE" in sql:
+                is_lock = sql.startswith("SELECT") and '"dcim_device"' in sql and "FOR UPDATE" in sql
+                if is_lock and params and target.pk in params:
                     locks.append(sql)
                     if len(locks) == 2:
                         other.rollback()
