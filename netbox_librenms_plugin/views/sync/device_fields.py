@@ -537,15 +537,20 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             messages.error(request, lookup_failure)
             return self._sync_redirect(request, pk, self._active_key())
 
-        # The posted version is the version the page showed; a different one makes the create stale.
-        reported_version = request.POST.get("librenms_version") or ""
+        # The posted OS and version are what the page showed; a different one makes the create stale.
+        named = NewOSPlatform(
+            platform_name,
+            request.POST.get("librenms_os") or "",
+            manufacturer=manufacturer,
+            reported_version=request.POST.get("librenms_version") or "",
+        )
         outcome = apply_platform(
             self.subject_model,
             pk,
             facts,
             tracking=platform_version_tracking_enabled(),
             actor=request.user,
-            new_os_platform=NewOSPlatform(platform_name, manufacturer, reported_version),
+            new_os_platform=named,
         )
         _add_reports(request, platform_reports(outcome, self.subject_model, request.user, named=True))
         if outcome.status not in (OutcomeStatus.APPLIED, OutcomeStatus.UNCHANGED):
