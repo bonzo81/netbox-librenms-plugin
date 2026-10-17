@@ -175,6 +175,34 @@ class TestSingleModuleVerifyRow:
         assert body["formatted_row"]["name"] == "Bay 1"
         assert "MOD-SERIAL-1" in body["formatted_row"]["serial"]
 
+    def test_a_rule_broken_after_the_render_is_named_in_the_verify_answer(self, client, librenms_server):
+        """A refresh may never evaluate the broken rule, so the verify answer itself must identify it."""
+        from netbox_librenms_plugin.models import ModuleBayMapping
+        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type, make_superuser
+
+        device = make_device_with_module_bays("module-verify-broken-rule", ["Bay 1"], serial="CHASSIS-6")
+        seed_mapping(device, SERVER_KEY, own=LIBRENMS_ID, save=False)
+        device.save()
+        make_module_type("LC-24")
+        _register_inventory(librenms_server, INVENTORY)
+        client.force_login(make_superuser("module-verify-broken-rule-user"))
+        refreshed = _refresh_modules(client, _in_a_chassis(device))
+        assert refreshed.status_code == 200
+        # bulk_create skips clean(), the way an import or old data stores a broken pattern.
+        (mapping,) = ModuleBayMapping.objects.bulk_create(
+            [ModuleBayMapping(librenms_name="(", librenms_class="", netbox_bay_name="Bay 1", is_regex=True)]
+        )
+
+        response = _verify_module(
+            client,
+            refreshed,
+            device,
+            {"device_id": device.pk, "ent_physical_index": 1, "server_key": SERVER_KEY},
+        )
+
+        assert response.status_code == 409
+        assert f"(ID {mapping.pk})" in response.json()["message"]
+
     def test_a_verified_row_uses_the_same_carrier_rules_as_the_modules_table(self, client, librenms_server):
         """The verify adapter must preserve the production table builder's carrier-rule state."""
         from dcim.models import ModuleType
