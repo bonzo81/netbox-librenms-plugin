@@ -489,9 +489,6 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         create_mapping = bool(request.POST.get("create_mapping"))
         # A stray space must not force the create path past the case-insensitive name match.
         platform_name = (request.POST.get("platform_name") or "").strip()
-        # The facts the page rendered; with tracking on they are checked against LibreNMS below.
-        facts = PlatformFacts.from_librenms(request.POST.get("librenms_os"), request.POST.get("librenms_version"))
-
         # A platform with this name is reused as it is: it needs "view", not "add".
         existing_platform = None
         if platform_name:
@@ -534,20 +531,19 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 messages.error(request, "Selected manufacturer is not available.")
                 return self._sync_redirect(request, pk, self._active_key())
 
-        tracking = platform_version_tracking_enabled()
-        reported_version = facts.version
-        if tracking:
-            # A version platform is named from LibreNMS, never from the posted form alone.
-            facts, lookup_failure = self._bound_live_facts(subject, server_key)
-            if lookup_failure:
-                messages.error(request, lookup_failure)
-                return self._sync_redirect(request, pk, self._active_key())
+        # The OS and version come from LibreNMS, never from the posted form.
+        facts, lookup_failure = self._bound_live_facts(subject, server_key)
+        if lookup_failure:
+            messages.error(request, lookup_failure)
+            return self._sync_redirect(request, pk, self._active_key())
 
+        # The posted version is the version the page showed; a different one makes the create stale.
+        reported_version = request.POST.get("librenms_version") or ""
         outcome = apply_platform(
             self.subject_model,
             pk,
             facts,
-            tracking=tracking,
+            tracking=platform_version_tracking_enabled(),
             actor=request.user,
             new_os_platform=NewOSPlatform(platform_name, manufacturer, reported_version),
         )

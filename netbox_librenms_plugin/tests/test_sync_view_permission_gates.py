@@ -210,7 +210,8 @@ class TestSyncPostPermissionGates:
         }
         configure_librenms_servers(settings, servers)
         server_key = next(iter(servers))
-        device = make_device("platform-permission-device")
+        device = make_device("platform-permission-device", librenms_cf={server_key: 7501})
+        librenms_server.device_info_response(device_id=7501, hostname=device.name, os="")
         perms = [("change", Device)] + ([("add", Platform)] if allow_create else [])
         user = make_user_with_perms("platform-creator", perms)
         request = make_request(data={"platform_name": "Permission platform", "server_key": server_key}, user=user)
@@ -223,10 +224,12 @@ class TestSyncPostPermissionGates:
             assert Platform.objects.count() == count + 1
             device.refresh_from_db()
             assert device.platform.name == "Permission platform"
+            # The OS and version come from LibreNMS, not from the form.
+            assert librenms_server.requests
         else:
             response = _post_without_writes(view, request, pk=device.pk)
             _assert_object_denial(view, request, response, htmx=False)
             assert Platform.objects.count() == count
             device.refresh_from_db()
             assert device.platform_id is None
-        assert librenms_server.requests == []
+            assert librenms_server.requests == []
