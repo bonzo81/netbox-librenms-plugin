@@ -220,8 +220,8 @@ local or module string constant. A key built at run time is outside the check. T
 - The private rule reports an import of a private name, and a dotted access through a module
   import. It does not see `getattr()` with a computed name.
 - The template rule reads `cf` and `custom_field_data` by name. It does not see a container
-  that the view passes under another name. It skips a `{# ... #}` comment. It reports an HTML
-  comment, because Django renders the template code in it.
+  that the view passes under another name. The rule skips a `{# ... #}` comment. It reports an
+  HTML comment, because Django renders the template code in it.
 
 `conflict-raised-without-record` knows the conflict classes by name, also with a module prefix.
 It does not see a conflict that is raised from a variable. When you add a `TransactionConflict`
