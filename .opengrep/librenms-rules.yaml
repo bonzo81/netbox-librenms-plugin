@@ -1506,3 +1506,27 @@ rules:
       include:
         - '**/views/base/modules_view.py'
         - '**/views/base/cables_view.py'
+  - id: posted-module-target-needs-resolver
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This code reads the posted selected_device_id outside _resolve_destination(). Pass it to
+      _resolve_destination(page_device, value, restricted Device queryset) and refuse with
+      GrantRefusal.DESTINATION when it returns None. Do not fall back to the page device.
+    metadata:
+      category: security
+      references:
+        - "netbox_librenms_plugin/views/sync/modules.py"
+    paths:
+      exclude:
+        - "**/tests/**"
+    patterns:
+      - pattern-either:
+          - pattern: $REQUEST.$QUERY.get("selected_device_id", ...)
+          - pattern: $REQUEST.$QUERY.getlist("selected_device_id", ...)
+          - pattern: $REQUEST.$QUERY["selected_device_id"]
+      - metavariable-regex:
+          metavariable: $QUERY
+          regex: ^(GET|POST)$
+      - pattern-not-inside: _resolve_destination(...)
+      - pattern-not-inside: $GRANT.require(..., device_id=$VALUE, ...)
