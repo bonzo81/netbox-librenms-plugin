@@ -178,6 +178,32 @@ function fetchErrorMessage(response) {
 }
 
 /**
+ * Reject with an Error for a failed fetch() answer; its `refusal` is the server's reason.
+ *
+ * @param {Response} response
+ * @param {string} label - The prefix of the logged message
+ * @returns {Promise<never>}
+ */
+function rejectWithRefusal(response, label) {
+    return fetchErrorMessage(response).then(msg => {
+        const error = new Error(`${label} ${response.status}: ${msg}`);
+        error.refusal = msg;
+        throw error;
+    });
+}
+
+/**
+ * Return *text* trimmed and ending in a full stop, so a next sentence does not run into it.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function withFullStop(text) {
+    const sentence = String(text).trim();
+    return /[.!?]$/.test(sentence) ? sentence : sentence + '.';
+}
+
+/**
  * Show an error in NetBox's standard Django-message toast area.
  *
  * @param {string} message
@@ -2891,7 +2917,7 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
     })
         .then(response => {
             if (!response.ok) {
-                return fetchErrorMessage(response).then(msg => { throw new Error(msg); });
+                return rejectWithRefusal(response, 'HTTP');
             }
             return response.json();
         })
@@ -2942,6 +2968,7 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
         })
         .catch(err => {
             console.error('VLAN group verify failed:', err && err.message ? err.message : String(err));
+            showErrorToast(withFullStop(`The VLAN group check failed: ${err?.refusal || err?.message || err}`));
         })
         .finally(() => {
             const saveBtn = document.getElementById('saveVlanGroups');
@@ -3165,7 +3192,7 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
     })
         .then(response => {
             if (!response.ok) {
-                return fetchErrorMessage(response).then(msg => { throw new Error(`HTTP ${response.status}: ${msg}`); });
+                return rejectWithRefusal(response, 'HTTP');
             }
             return response.json();
         })
@@ -3204,6 +3231,7 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
         })
         .catch(error => {
             console.error('VLAN sync group verification error:', error);
+            showErrorToast(withFullStop(`The VLAN group check failed: ${error.refusal || error.message}`));
         });
 }
 
@@ -3254,7 +3282,7 @@ function handleVRFChange(select, value) {
     })
         .then(response => {
             if (!response.ok) {
-                return fetchErrorMessage(response).then(msg => { throw new Error(msg); });
+                return rejectWithRefusal(response, 'HTTP');
             }
             return response.json();
         })
@@ -3279,6 +3307,7 @@ function handleVRFChange(select, value) {
         .catch(error => {
             if (error.name === 'AbortError') return;
             console.error('VRF verification failed:', error.message);
+            showErrorToast(withFullStop(`The VRF check failed: ${error.refusal || error.message}`));
         });
 }
 
@@ -3394,7 +3423,7 @@ function handleInterfaceChange(select, value) {
     })
         .then(response => {
             if (!response.ok) {
-                return fetchErrorMessage(response).then(msg => { throw new Error(`Server error ${response.status}: ${msg}`); });
+                return rejectWithRefusal(response, 'Server error');
             }
             return response.json();
         })
@@ -3485,7 +3514,18 @@ function handleInterfaceChange(select, value) {
             // stranding the user on an unverified selection with locked controls.
             console.error('Error verifying interface:', error.message);
             rollbackToLastVerified();
+            showErrorToast(memberCheckFailure(error));
         });
+}
+
+/**
+ * Return the toast text for a member check that failed: the server's reason, then what the row keeps.
+ *
+ * @param {Error} error - The failure; `refusal` holds the server's reason when it answered
+ * @returns {string}
+ */
+function memberCheckFailure(error) {
+    return withFullStop(error.refusal || `The member check failed: ${error.message}`) + ' The row keeps its previous member.';
 }
 
 /**
@@ -3561,7 +3601,7 @@ function handleCableChange(select, value) {
     })
         .then(response => {
             if (!response.ok) {
-                return fetchErrorMessage(response).then(msg => { throw new Error(`Server error ${response.status}: ${msg}`); });
+                return rejectWithRefusal(response, 'Server error');
             }
             return response.json();
         })
@@ -3621,6 +3661,7 @@ function handleCableChange(select, value) {
             if (error.name === 'AbortError' || !_isLiveRow(row)) return;
             console.error('Error verifying cable:', error.message);
             rollbackToLastVerified();
+            showErrorToast(memberCheckFailure(error));
         });
 }
 
@@ -3757,10 +3798,8 @@ function handleModuleChange(select, value, options = {}) {
         const checkbox = options.restored && row ? row.querySelector('td[data-col="selection"] input[name="select"]') : null;
         if (checkbox) checkbox.checked = false;
         if (table) commitSelectionChange(table);
-        // A server refusal can end without a full stop, so the two sentences do not run together.
-        const refusal = reason.trim();
         showErrorToast(
-            (/[.!?]$/.test(refusal) ? refusal : refusal + '.') + (options.restored
+            withFullStop(reason) + (options.restored
                 ? ' The saved selection of this row is cleared.'
                 : ' The row keeps its previous member.')
         );
@@ -3792,11 +3831,7 @@ function handleModuleChange(select, value, options = {}) {
     })
         .then(response => {
             if (!response.ok) {
-                return fetchErrorMessage(response).then(msg => {
-                    const refusal = new Error(`Server error ${response.status}: ${msg}`);
-                    refusal.refusal = msg;
-                    throw refusal;
-                });
+                return rejectWithRefusal(response, 'Server error');
             }
             return response.json();
         })
