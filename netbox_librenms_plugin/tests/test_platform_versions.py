@@ -12,6 +12,7 @@ from netbox_librenms_plugin.platform_versions import (
     apply_platform,
     assess_platform,
     import_platform,
+    map_os_platform,
     platform_version_tracking_enabled,
     version_platform_slug,
 )
@@ -691,3 +692,139 @@ class TestANamedPlatformRaceWinnerNeedsViewScope:
         assert response.status_code == 302
         assert device.platform is None
         assert Platform.objects.filter(name="Juniper Junos").count() == 1
+
+
+def _mapping_actor(username, **constraints):
+    """A user who may view platforms and add Platform Mappings, within *constraints* when given."""
+    from dcim.models import Platform
+
+    from netbox_librenms_plugin.models import PlatformMapping
+
+    actor = make_user_with_perms(username, [("view", Platform)])
+    return grant(actor, "add", PlatformMapping, constraints=constraints or None)
+
+
+@pytest.mark.django_db
+class TestMapOSPlatform:
+    def test_a_missing_mapping_is_added_in_lowercase(self):
+        from django.contrib.messages import constants
+
+        from netbox_librenms_plugin.models import PlatformMapping
+
+        platform = _platform("Juniper Junos")
+
+        report = map_os_platform("JunOS", platform, _mapping_actor("map-added"))
+
+        assert report == (constants.SUCCESS, "Platform mapping 'junos' to 'Juniper Junos' added")
+        assert PlatformMapping.objects.get(librenms_os="junos").netbox_platform == platform
+
+    def test_a_mapping_to_the_same_platform_is_not_modified(self):
+        from django.contrib.messages import constants
+
+        from netbox_librenms_plugin.models import PlatformMapping
+
+        platform = _platform("Juniper Junos")
+        PlatformMapping.objects.create(librenms_os="junos", netbox_platform=platform)
+
+        report = map_os_platform("junos", platform, _mapping_actor("map-present"))
+
+        assert report == (constants.INFO, "Platform mapping for 'junos' already exists; not modified.")
+        assert PlatformMapping.objects.count() == 1
+
+    def test_a_mapping_to_another_platform_is_kept_and_named(self):
+        from django.contrib.messages import constants
+
+        from netbox_librenms_plugin.models import PlatformMapping
+
+        other = _platform("Other Junos")
+        PlatformMapping.objects.create(librenms_os="junos", netbox_platform=other)
+
+        report = map_os_platform("junos", _platform("Juniper Junos"), _mapping_actor("map-conflict"))
+
+        assert report == (
+            constants.WARNING,
+            "Platform mapping for 'junos' not created: a mapping already points to 'Other Junos'.",
+        )
+        assert PlatformMapping.objects.get().netbox_platform == other
+
+    def test_case_variant_mappings_are_reported_as_ambiguous(self):
+        from django.contrib.messages import constants
+
+        from netbox_librenms_plugin.models import PlatformMapping
+
+        PlatformMapping.objects.create(librenms_os="junos", netbox_platform=_platform("Lab Junos"))
+        variant = PlatformMapping.objects.create(librenms_os="junos-variant", netbox_platform=_platform("Core Junos"))
+        PlatformMapping.objects.filter(pk=variant.pk).update(librenms_os="JUNOS")
+
+        report = map_os_platform("junos", _platform("Juniper Junos"), _mapping_actor("map-ambiguous"))
+
+        assert report.level == constants.WARNING
+        assert "Multiple Platform Mappings match 'junos'" in report.text
+        assert PlatformMapping.objects.count() == 2
+
+    def test_an_actor_who_cannot_add_mappings_gets_a_warning(self):
+        from dcim.models import Platform
+        from django.contrib.messages import constants
+
+        from netbox_librenms_plugin.models import PlatformMapping
+
+        actor = make_user_with_perms("map-denied", [("view", Platform)])
+
+        report = map_os_platform("junos", _platform("Juniper Junos"), actor)
+
+        assert report == (
+            constants.WARNING,
+            "Platform mapping for 'junos' not created: you lack permission to add mappings.",
+        )
+        assert not PlatformMapping.objects.exists()
+
+    def test_a_constrained_add_grant_that_excludes_the_new_mapping_rolls_it_back(self):
+        from django.contrib.messages import constants
+
+        from netbox_librenms_plugin.models import PlatformMapping
+
+        actor = _mapping_actor("map-constrained", librenms_os="eos")
+
+        report = map_os_platform("junos", _platform("Juniper Junos"), actor)
+
+        assert report == (
+            constants.WARNING,
+            "Platform mapping for 'junos' not created: you lack permission to add mappings.",
+        )
+        assert not PlatformMapping.objects.exists()
+
+
+@transactional_db_with_all_apps()
+class TestMapOSPlatformRace:
+    def test_a_concurrent_mapping_to_another_platform_is_reported_from_the_winner(self):
+        """Another session commits the mapping first; this insert meets a real unique violation."""
+        from django.contrib.messages import constants
+        from django.db import connection, connections
+
+        from netbox_librenms_plugin.models import PlatformMapping
+
+        other = _platform("Other Junos")
+        actor = _mapping_actor("map-race")
+        winners = []
+
+        def create_winner():
+            try:
+                winners.append(PlatformMapping.objects.create(librenms_os="junos", netbox_platform=other))
+            finally:
+                connections.close_all()
+
+        def insert_after_the_winner(execute, sql, params, many, context):
+            if sql.startswith('INSERT INTO "netbox_librenms_plugin_platformmapping"') and not winners:
+                with bounded_executor(1) as executor:
+                    executor.submit(create_winner).result(timeout=10)
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(insert_after_the_winner):
+            report = map_os_platform("junos", _platform("Juniper Junos"), actor)
+
+        assert winners
+        assert report == (
+            constants.WARNING,
+            "Platform mapping for 'junos' not created: a mapping already points to 'Other Junos'.",
+        )
+        assert PlatformMapping.objects.get().netbox_platform == other

@@ -563,7 +563,7 @@ class TestTheMappingFollowUpKeepsTheCommittedAssignment:
         assert device.platform.name == "Juniper Junos"
         assert not PlatformMapping.objects.filter(librenms_os="junos").exists()
         assert message_texts(response.wsgi_request, "warning") == [
-            f"Platform assigned; OS mapping not created: {TRY_AGAIN_MESSAGE}"
+            f"Platform mapping for 'junos' not created: {TRY_AGAIN_MESSAGE}"
         ]
 
     def test_a_lock_conflict_on_the_recovery_select_is_still_reported(self, client, librenms_server):
@@ -599,7 +599,7 @@ class TestTheMappingFollowUpKeepsTheCommittedAssignment:
         assert insert_failed and select_failed
         assert device.platform.name == "Juniper Junos"
         assert message_texts(response.wsgi_request, "warning") == [
-            f"Platform assigned; OS mapping not created: {TRY_AGAIN_MESSAGE}"
+            f"Platform mapping for 'junos' not created: {TRY_AGAIN_MESSAGE}"
         ]
 
     def test_a_platform_query_failing_after_the_mapping_insert_still_reports_it_added(self, client, librenms_server):
