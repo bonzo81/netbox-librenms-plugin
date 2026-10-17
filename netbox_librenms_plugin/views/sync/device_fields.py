@@ -4,7 +4,7 @@ from urllib.parse import urlencode
 from dcim.models import Device, Manufacturer, Platform
 from django.contrib import messages
 from django.core.exceptions import ValidationError
-from django.db import DatabaseError, IntegrityError, transaction
+from django.db import IntegrityError, transaction
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse
@@ -14,13 +14,12 @@ from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.virtual_chassis import _member_name, chassis_serial_key
-from netbox_librenms_plugin.models import PlatformMapping
 from netbox_librenms_plugin.platform_versions import (
     NewOSPlatform,
     OutcomeStatus,
     PlatformFacts,
     apply_platform,
-    platform_label,
+    map_os_platform,
     platform_reports,
     platform_version_tracking_enabled,
 )
@@ -190,62 +189,6 @@ def _live_platform_facts(view, subject):
 def _add_reports(request, reports):
     for report in reports:
         messages.add_message(request, *report)
-
-
-def _report_os_mapping(request, librenms_os, platform):
-    """
-    Add a Platform Mapping from *librenms_os* to the OS *platform* when none exists, and report it.
-
-    The platform assignment has committed, so no failure of the follow-up reaches the request's
-    retry answer, and the report needs no further query.
-    """
-    viewer = request.user
-    try:
-        level, text = _write_os_mapping(librenms_os, platform, viewer)
-    except (ValidationError, DatabaseError) as exc:
-        level, text = messages.WARNING, _mapping_not_created(exception_text_for(exc, PlatformMapping, viewer))
-    messages.add_message(request, level, text)
-
-
-def _mapping_not_created(reason):
-    return f"Platform assigned; OS mapping not created: {reason}"
-
-
-def _write_os_mapping(librenms_os, platform, viewer):
-    """
-    Add the mapping when none exists and return ``(message level, text)``.
-
-    Raises:
-        ValidationError | DatabaseError: A query or the insert failed; the caller reports it.
-
-    """
-    from utilities.permissions import get_permission_for_model
-
-    def existing_text(mapping):
-        if mapping.netbox_platform_id == platform.pk:
-            return messages.INFO, f"Platform mapping for '{librenms_os}' already exists; not modified."
-        target = platform_label(mapping.netbox_platform, viewer)
-        return messages.WARNING, _mapping_not_created(f"a mapping for '{librenms_os}' already points to {target}.")
-
-    existing = PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).first()
-    if existing is not None:
-        return existing_text(existing)
-    if not viewer.has_perm(get_permission_for_model(PlatformMapping, "add")):
-        return messages.WARNING, _mapping_not_created("you lack permission to add mappings.")
-    # Read the label before the insert, so a failed query cannot follow a committed mapping.
-    added = f"Platform mapping '{librenms_os}' to {platform_label(platform, viewer)} added"
-    try:
-        with transaction.atomic():
-            mapping = PlatformMapping(librenms_os=librenms_os, netbox_platform=platform)
-            mapping.full_clean()
-            mapping.save()
-    except IntegrityError:
-        # A concurrent request may have added the mapping first.
-        winner = PlatformMapping.objects.filter(librenms_os__iexact=librenms_os).first()
-        if winner is None:
-            raise
-        return existing_text(winner)
-    return messages.SUCCESS, added
 
 
 class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
@@ -611,9 +554,10 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         _add_reports(request, platform_reports(outcome, self.subject_model, request.user, named=True))
         if outcome.status not in (OutcomeStatus.APPLIED, OutcomeStatus.UNCHANGED):
             return self._sync_redirect(request, pk, self._active_key())
-        os_platform = outcome.assessment.os_platform
         if create_mapping and facts.librenms_os:
-            _report_os_mapping(request, facts.librenms_os.lower(), os_platform)
+            messages.add_message(
+                request, *map_os_platform(facts.librenms_os, outcome.assessment.os_platform, request.user)
+            )
         return self._sync_redirect(request, pk, self._active_key())
 
     def _active_key(self):
