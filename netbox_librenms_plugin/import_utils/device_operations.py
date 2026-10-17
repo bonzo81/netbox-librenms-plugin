@@ -25,6 +25,7 @@ from ..platform_versions import (
     PlatformState,
     assess_platform,
     import_platform,
+    platform_label,
     platform_version_tracking_enabled,
     reason_text,
 )
@@ -1589,7 +1590,8 @@ def validate_device_for_import(  # noqa: C901
         result["platform"] = {
             "platform": platform_assessment.target or platform_assessment.os_platform,
             "assessment": platform_assessment,
-            "reason_text": reason_text(platform_assessment.reason, platform_assessment),
+            # The validation is cached and shown to any import user, so its text names no platform.
+            "reason_text": reason_text(platform_assessment.reason, platform_assessment, None),
         }
         if platform_assessment.state is PlatformState.BLOCKED or platform_assessment.os_platform is None:
             if platform_assessment.reason is not PlatformReason.NO_OS:
@@ -1715,10 +1717,10 @@ def import_platform_warnings(label, plan, text_viewer):
         return []
     from dcim.models import Platform
 
-    detail = reason_text(plan.reason, plan.assessment)
+    detail = reason_text(plan.reason, plan.assessment, text_viewer)
     if plan.error is not None:
         detail = f"{detail} {exception_text_for(plan.error, Platform, text_viewer)}"
-    return [f"Imported {label} with OS platform '{plan.platform}': {detail}"]
+    return [f"Imported {label} with OS platform {platform_label(plan.platform, text_viewer)}: {detail}"]
 
 
 def import_single_device(  # noqa: C901

@@ -1593,6 +1593,34 @@ class TestDeviceValidationDetailsView:
         assert response.content.count(existing.serial.encode()) >= 2
         assert b"mdi-check-circle" in response.content
 
+    def test_a_viewer_who_cannot_view_platforms_sees_no_platform_name(self):
+        from dcim.models import Platform
+
+        from netbox_librenms_plugin.models import LibreNMSSettings, PlatformMapping
+        from netbox_librenms_plugin.platform_versions import HIDDEN_PLATFORM
+        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
+
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"platform_version_tracking": True})
+        os_platform = Platform.objects.create(name="Secret Junos", slug="secret-junos")
+        PlatformMapping.objects.create(librenms_os="junos", netbox_platform=os_platform)
+        Platform.objects.create(name="Secret Junos 21.2R1", slug="secret-junos-elsewhere")
+        self.primary_server.device_info_response(
+            device_id=1, hostname="details-hidden", os="junos", version="21.2R1", serial="-", ip="198.18.0.9"
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+        request = make_view_request(
+            "get",
+            {"server_key": "default"},
+            user=make_view_user("details-platform-blind", []),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = get_view(DeviceValidationDetailsView(), request, device_id=1)
+
+        assert response.status_code == 200
+        assert b"Secret" not in response.content
+        assert HIDDEN_PLATFORM.encode() in response.content
+
     def test_get_rebinds_to_request_server_key(self):
         view, response = self._get("secondary")
 
@@ -3879,7 +3907,11 @@ class TestDeviceConflictActionBranches:
             self._assert_success(response)
             assert (target.platform.name, target.platform.parent) == ("branches-version-os 9.9", os_platform)
         else:
-            self._assert_htmx_error(response, "You do not have permission to add platform 'branches-version-os 9.9'.")
+            self._assert_htmx_error(
+                response,
+                "You do not have permission to add platforms, so a new version platform for version '9.9' "
+                "cannot be created.",
+            )
             assert target.platform == os_platform
 
     def test_sync_platform_reports_when_no_platform_matches(self):

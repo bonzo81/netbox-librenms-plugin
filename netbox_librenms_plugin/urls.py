@@ -38,6 +38,7 @@ from .views import (
     CarrierAutoInstallRuleView,
     ConvertLegacyLibreNMSIdView,
     CreateAndAssignPlatformView,
+    CreateAndAssignVMPlatformView,
     CreatePlatformFromImportView,
     DeleteNetBoxInterfacesView,
     DeviceCableTableView,
@@ -197,6 +198,7 @@ from .views import (
     UpdateDeviceTypeView,
     UpdateModuleInterfaceView,
     UpdateModuleSerialView,
+    UpdateVMPlatformView,
     VCNormalizationReportView,
     VerifyVlanSyncGroupView,
     VMInterfaceTableView,
@@ -362,6 +364,16 @@ urlpatterns = [
         "virtual-machines/<int:pk>/librenms-sync/",
         VMLibreNMSSyncView.as_view(),
         name="vm_librenms_sync",
+    ),
+    path(
+        "virtual-machines/<int:pk>/update-platform/",
+        UpdateVMPlatformView.as_view(),
+        name="update_vm_platform",
+    ),
+    path(
+        "virtual-machines/<int:pk>/create-and-assign-platform/",
+        CreateAndAssignVMPlatformView.as_view(),
+        name="create_and_assign_vm_platform",
     ),
     # Sync interfaces URL
     path(
