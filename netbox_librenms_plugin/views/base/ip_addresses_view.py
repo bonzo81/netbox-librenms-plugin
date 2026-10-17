@@ -1137,6 +1137,9 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
 class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionMixin, CacheMixin, View):
     """View for verifying single IP address data with different VRF."""
 
+    # A fetch() caller reads the answer, so the middleware answers with a JSON error.
+    answers_json = True
+
     # Read-only verify endpoint: require object-view permission (mirrors the interface/module/
     # cable verify views). Without it any user with mere plugin-view rights could POST an
     # arbitrary device id and read back that object's name/url/cached IP rows. The effective

@@ -148,6 +148,9 @@ class SingleInterfaceVerifyView(
 ):
     """Verify single interface data for a device via cached LibreNMS payload."""
 
+    # A fetch() caller reads the answer, so the middleware answers with a JSON error.
+    answers_json = True
+
     # Read-only verify endpoint: require object-view permission (mirrors SingleModuleVerifyView).
     required_object_permissions = {"POST": [("view", Device)]}
 
@@ -416,6 +419,9 @@ class SingleModuleVerifyView(
 ):
     """Verify module row data against cached LibreNMS inventory for a selected VC member."""
 
+    # A fetch() caller reads the answer, so the middleware answers with a JSON error.
+    answers_json = True
+
     # JSON endpoint that returns the rendered module row — only viewers of the
     # underlying Device should be able to surface its inventory data.
     required_object_permissions = {"POST": [("view", Device)]}
@@ -556,6 +562,9 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
     which VLANs are "missing" (don't exist in selected group) and returns
     updated HTML for the VLANs cell with correct colors.
     """
+
+    # A fetch() caller reads the answer, so the middleware answers with a JSON error.
+    answers_json = True
 
     # Read-only verify endpoint that surfaces a device's interface VLAN assignments —
     # require object-view permission on the underlying Device (mirrors the other verify views).
@@ -708,6 +717,9 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
     update row colors without a full page reload.
     """
 
+    # A fetch() caller reads the answer, so the middleware answers with a JSON error.
+    answers_json = True
+
     # Read-only verify endpoint that surfaces NetBox VLAN existence + names — require
     # object-view permission on VLAN (there is no device in scope here, unlike the other
     # verify views), so an unauthorized caller can't enumerate VLANs/groups.
@@ -779,6 +791,9 @@ class SaveVlanGroupOverridesView(
     The overrides are stored with the same remaining TTL as the ports
     cache so they expire together.
     """
+
+    # A fetch() caller reads the answer, so the middleware answers with a JSON error.
+    answers_json = True
 
     def post(self, request):
         # Require plugin write permission to persist VLAN group overrides
