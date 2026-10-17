@@ -437,3 +437,40 @@ class TestImportPlatform:
 
         assert result.platform is None
         assert result.assessment.reason is PlatformReason.OS_PLATFORM_MISSING
+
+
+@pytest.mark.django_db
+class TestCollisionSafeSlugs:
+    def test_versions_whose_slugs_collide_get_the_next_free_suffix(self):
+        from dcim.models import Device
+
+        os_platform = _platform("Linux")
+        actor = make_superuser("slug-su")
+        first, second = make_device("slug-first"), make_device("slug-second")
+
+        apply_platform(Device, first.pk, _facts(os="Linux", version="6.1.0"), tracking=True, actor=actor)
+        apply_platform(Device, second.pk, _facts(os="Linux", version="6.1.0+"), tracking=True, actor=actor)
+
+        first.refresh_from_db()
+        second.refresh_from_db()
+        assert (first.platform.name, first.platform.slug) == ("Linux 6.1.0", "linux-6-1-0")
+        assert (second.platform.name, second.platform.slug) == ("Linux 6.1.0+", "linux-6-1-0-2")
+        assert {first.platform.parent, second.platform.parent} == {os_platform}
+
+    def test_a_named_os_platform_whose_slug_is_taken_gets_a_suffix(self):
+        from dcim.models import Device
+
+        _platform("Cisco IOS XR", slug="cisco-ios-xr")
+        device = make_device("slug-named")
+
+        outcome = apply_platform(
+            Device,
+            device.pk,
+            _facts(os="iosxr", version=""),
+            tracking=False,
+            actor=make_superuser("slug-named-su"),
+            new_os_platform=NewOSPlatform("Cisco IOS-XR", None),
+        )
+
+        assert outcome.status is OutcomeStatus.APPLIED
+        assert outcome.created[0].slug == "cisco-ios-xr-2"
