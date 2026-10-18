@@ -840,7 +840,9 @@ def _terminate_database_sessions(wrappers):
     """End the PostgreSQL session of each open worker connection."""
     from django.db import DEFAULT_DB_ALIAS, connections
 
-    pids = [pid for wrapper in wrappers if (raw := wrapper.connection) is not None and (pid := raw.info.backend_pid)]
+    pids = sorted(
+        {pid for wrapper in wrappers if (raw := wrapper.connection) is not None and (pid := raw.info.backend_pid)}
+    )
     if not pids:
         return False
     # The caller's connection can be in a failed transaction, so use a new one.
@@ -866,8 +868,10 @@ def _abort_stuck_workers():
         os._exit(1)
 
 
-def _stop_unreleased_workers(executor):
+def _stop_unreleased_workers(executor, record_connection):
     """Bound shutdown even after a failed test returns."""
+    from django.db.backends.signals import connection_created
+
     watchdog = Timer(WORKER_RELEASE_SECONDS, _abort_stuck_workers)
     watchdog.daemon = True
     watchdog.start()
@@ -875,39 +879,46 @@ def _stop_unreleased_workers(executor):
         executor.shutdown(wait=True)
     finally:
         watchdog.cancel()
+        connection_created.disconnect(record_connection)
 
 
 @contextmanager
 def bounded_executor(max_workers):
     """Bound executor shutdown to five seconds; release worker DB sessions when the block fails."""
-    from django.db import DEFAULT_DB_ALIAS, connections
+    from django.db.backends.signals import connection_created
 
-    workers = []
+    workers = {}
 
     def record_worker():
-        wrapper = connections[DEFAULT_DB_ALIAS]
-        wrapper.settings_dict = deepcopy(wrapper.settings_dict)
-        options = wrapper.settings_dict.setdefault("OPTIONS", {})
-        options["connect_timeout"] = 5
-        options["options"] = options.get("options", "") + " -c lock_timeout=10000 -c statement_timeout=30000"
-        workers.append((current_thread(), wrapper))
+        workers[current_thread()] = []
+
+    def record_connection(sender, connection, **kwargs):
+        wrappers = workers.get(current_thread())
+        if wrappers is not None:
+            wrappers.append(connection)
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT set_config('lock_timeout', '10s', false), set_config('statement_timeout', '30s', false)"
+                )
 
     executor = ThreadPoolExecutor(max_workers=max_workers, initializer=record_worker)
+    connection_created.connect(record_connection, weak=False)
     try:
         yield executor
     except BaseException as error:
         executor.shutdown(wait=False, cancel_futures=True)
         deadline = monotonic() + WORKER_RELEASE_SECONDS
         # A daemon watchdog also bounds cleanup and Python's joins at interpreter exit.
-        Thread(target=_stop_unreleased_workers, args=(executor,), daemon=True).start()
+        Thread(target=_stop_unreleased_workers, args=(executor, record_connection), daemon=True).start()
         try:
-            if _terminate_database_sessions([wrapper for _thread, wrapper in workers]):
-                for thread, _wrapper in workers:
+            wrappers = [wrapper for group in list(workers.values()) for wrapper in group]
+            if _terminate_database_sessions(wrappers):
+                for thread in list(workers):
                     thread.join(timeout=max(0, deadline - monotonic()))
         except Exception as cleanup_error:
             error.add_note(f"Worker database cleanup failed: {cleanup_error!r}")
         raise
-    Thread(target=_stop_unreleased_workers, args=(executor,), daemon=True).start()
+    Thread(target=_stop_unreleased_workers, args=(executor, record_connection), daemon=True).start()
     executor.shutdown(wait=True)
 
 

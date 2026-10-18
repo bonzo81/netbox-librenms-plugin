@@ -45,3 +45,7 @@ if not _test_database_name.startswith(TEST_DB_NAME_PREFIX):
     raise ValueError(f"TEST_DB_NAME must start with '{TEST_DB_NAME_PREFIX}'.")
 
 DATABASES["default"].setdefault("TEST", {})["NAME"] = _test_database_name
+
+# Apply this before connection setup, including separate wrappers created inside workers.
+for _database_config in DATABASES.values():
+    _database_config.setdefault("OPTIONS", {})["connect_timeout"] = 5

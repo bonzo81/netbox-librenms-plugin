@@ -1124,13 +1124,14 @@ def test_configured_norecursedirs_still_skips_pytest_default_directories(tmp_pat
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("helper", ["bounded_executor", "run_in_threads"])
-def test_thread_helpers_release_a_worker_blocked_on_a_row_lock_this_thread_holds(helper):
+@pytest.mark.parametrize("connection_source", ["cached", "separate"])
+def test_thread_helpers_release_a_worker_blocked_on_a_row_lock_this_thread_holds(helper, connection_source):
     """A failed block must release its worker while this thread still holds the row lock."""
     from threading import Event, current_thread
     from time import monotonic, sleep
 
     from django.contrib.contenttypes.models import ContentType
-    from django.db import connection, connections, transaction
+    from django.db import connection, connections
 
     from netbox_librenms_plugin.tests.conftest import bounded_executor, run_in_threads
 
@@ -1142,13 +1143,14 @@ def test_thread_helpers_release_a_worker_blocked_on_a_row_lock_this_thread_holds
 
     def lock_the_same_row():
         workers.append(current_thread())
+        db_connection = connections.create_connection("default") if connection_source == "separate" else connection
         try:
-            with connection.cursor() as cursor:
+            with db_connection.cursor() as cursor:
                 cursor.execute("SELECT pg_backend_pid()")
                 pids.append(cursor.fetchone()[0])
-            with transaction.atomic():
-                ContentType.objects.select_for_update().get(pk=locked.pk)
+                cursor.execute("SELECT id FROM django_content_type WHERE id = %s FOR UPDATE", [locked.pk])
         finally:
+            db_connection.close()
             connections.close_all()
             finished.set()
 
@@ -1183,18 +1185,21 @@ def test_thread_helpers_release_a_worker_blocked_on_a_row_lock_this_thread_holds
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("helper", ["bounded_executor", "run_in_threads"])
-def test_thread_helpers_bound_worker_database_waits(helper):
+@pytest.mark.parametrize("connection_source", ["cached", "separate"])
+def test_thread_helpers_bound_worker_database_waits(helper, connection_source):
     """Worker connections must bound connection setup, locks, and statements."""
     from django.db import connection, connections
 
     from netbox_librenms_plugin.tests.conftest import bounded_executor, run_in_threads
 
     def read_limits():
+        db_connection = connections.create_connection("default") if connection_source == "separate" else connection
         try:
-            with connection.cursor() as cursor:
+            with db_connection.cursor() as cursor:
                 cursor.execute("SELECT current_setting('lock_timeout'), current_setting('statement_timeout')")
-                return (*cursor.fetchone(), connection.settings_dict["OPTIONS"].get("connect_timeout"))
+                return (*cursor.fetchone(), db_connection.settings_dict["OPTIONS"].get("connect_timeout"))
         finally:
+            db_connection.close()
             connections.close_all()
 
     if helper == "bounded_executor":
