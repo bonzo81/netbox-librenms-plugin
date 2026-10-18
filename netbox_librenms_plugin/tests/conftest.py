@@ -868,23 +868,33 @@ def _abort_stuck_workers():
         os._exit(1)
 
 
-def _stop_unreleased_workers(executor, record_connection):
+def _stop_unreleased_workers(executor, record_connection, release_database_sessions):
     """Bound shutdown even after a failed test returns."""
     from django.db.backends.signals import connection_created
 
-    watchdog = Timer(WORKER_RELEASE_SECONDS, _abort_stuck_workers)
+    def release_sessions():
+        try:
+            release_database_sessions()
+        except Exception as error:
+            os.write(2, f"Worker database cleanup failed: {error!r}\n".encode())
+
+    release = Timer(WORKER_RELEASE_SECONDS, release_sessions)
+    release.daemon = True
+    watchdog = Timer(2 * WORKER_RELEASE_SECONDS, _abort_stuck_workers)
     watchdog.daemon = True
     watchdog.start()
+    release.start()
     try:
         executor.shutdown(wait=True)
     finally:
+        release.cancel()
         watchdog.cancel()
         connection_created.disconnect(record_connection)
 
 
 @contextmanager
 def bounded_executor(max_workers):
-    """Bound executor shutdown to five seconds; release worker DB sessions when the block fails."""
+    """Allow five seconds for shutdown and five more to release worker DB sessions."""
     from django.db.backends.signals import connection_created
 
     workers = {}
@@ -901,6 +911,10 @@ def bounded_executor(max_workers):
                     "SELECT set_config('lock_timeout', '10s', false), set_config('statement_timeout', '30s', false)"
                 )
 
+    def release_database_sessions():
+        wrappers = [wrapper for group in list(workers.values()) for wrapper in group]
+        return _terminate_database_sessions(wrappers)
+
     executor = ThreadPoolExecutor(max_workers=max_workers, initializer=record_worker)
     connection_created.connect(record_connection, weak=False)
     try:
@@ -909,16 +923,19 @@ def bounded_executor(max_workers):
         executor.shutdown(wait=False, cancel_futures=True)
         deadline = monotonic() + WORKER_RELEASE_SECONDS
         # A daemon watchdog also bounds cleanup and Python's joins at interpreter exit.
-        Thread(target=_stop_unreleased_workers, args=(executor, record_connection), daemon=True).start()
+        Thread(
+            target=_stop_unreleased_workers, args=(executor, record_connection, release_database_sessions), daemon=True
+        ).start()
         try:
-            wrappers = [wrapper for group in list(workers.values()) for wrapper in group]
-            if _terminate_database_sessions(wrappers):
+            if release_database_sessions():
                 for thread in list(workers):
                     thread.join(timeout=max(0, deadline - monotonic()))
         except Exception as cleanup_error:
             error.add_note(f"Worker database cleanup failed: {cleanup_error!r}")
         raise
-    Thread(target=_stop_unreleased_workers, args=(executor, record_connection), daemon=True).start()
+    Thread(
+        target=_stop_unreleased_workers, args=(executor, record_connection, release_database_sessions), daemon=True
+    ).start()
     executor.shutdown(wait=True)
 
 

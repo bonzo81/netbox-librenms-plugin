@@ -1257,15 +1257,103 @@ except TimeoutError:
     assert "worker" in result.stderr
 
 
+@pytest.mark.django_db
+@pytest.mark.parametrize("connection_source", ["cached", "separate"])
+def test_normal_executor_shutdown_releases_a_worker_blocked_on_a_row_lock(connection_source):
+    """End a blocked worker session before the watchdog can discard the test results."""
+    from django.db import connection
+
+    script = """
+import sys
+from threading import Event
+from time import monotonic, sleep
+import django
+
+django.setup()
+from django.conf import settings
+settings.DATABASES["default"]["NAME"] = sys.argv[1]
+from django.db import DatabaseError, connection, connections, transaction
+from netbox_librenms_plugin.tests.conftest import bounded_executor
+
+pids = []
+finished = Event()
+
+def worker():
+    db = connections.create_connection("default") if sys.argv[2] == "separate" else connection
+    try:
+        with db.cursor() as cursor:
+            cursor.execute("SELECT pg_backend_pid()")
+            pids.append(cursor.fetchone()[0])
+            cursor.execute("SELECT id FROM django_content_type WHERE id = %s FOR UPDATE", [locked_id])
+    finally:
+        db.close()
+        finished.set()
+
+with transaction.atomic():
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT id FROM django_content_type ORDER BY id LIMIT 1 FOR UPDATE")
+        locked_id = cursor.fetchone()[0]
+        with bounded_executor(max_workers=1) as executor:
+            future = executor.submit(worker)
+            deadline = monotonic() + 5
+            while True:
+                if pids:
+                    cursor.execute("SELECT cardinality(pg_blocking_pids(%s))", pids)
+                    if cursor.fetchone()[0]:
+                        print("row lock observed", flush=True)
+                        break
+                assert monotonic() < deadline, "worker did not block on the row lock"
+                sleep(0.01)
+        assert finished.is_set()
+        error = future.exception(timeout=1)
+        assert isinstance(error, DatabaseError)
+        assert getattr(error.__cause__, "sqlstate", None) != "55P03", str(error)
+        cursor.execute("SELECT 1")
+        assert cursor.fetchone() == (1,)
+        print("normal block returned with the lock still held", flush=True)
+connections.close_all()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, connection.settings_dict["NAME"], connection_source],
+        env={**os.environ, "DJANGO_SETTINGS_MODULE": "netbox_librenms_plugin.tests.isolated_settings"},
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert "row lock observed" in result.stdout, result.stdout + result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "normal block returned with the lock still held" in result.stdout
+    assert "Worker threads did not stop" not in result.stderr
+
+
+@pytest.mark.django_db
 def test_bounded_executor_finishes_queued_calls_on_normal_exit():
     """Normal shutdown must drain the queue while the watchdog watches the worker."""
     from threading import Event
 
+    from django.db import connection, connections
+
     from netbox_librenms_plugin.tests.conftest import bounded_executor
 
-    with bounded_executor(max_workers=1) as executor:
-        waiting = executor.submit(Event().wait, timeout=0.2)
-        queued = executor.submit(str, "queued result")
+    started = Event()
 
-    assert waiting.result(timeout=1) is False
+    def query_after_waiting():
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1")
+                started.set()
+                Event().wait(timeout=0.2)
+                cursor.execute("SELECT 1")
+                return cursor.fetchone()[0]
+        finally:
+            connections.close_all()
+
+    with bounded_executor(max_workers=1) as executor:
+        waiting = executor.submit(query_after_waiting)
+        queued = executor.submit(str, "queued result")
+        assert started.wait(timeout=5)
+
+    assert waiting.result(timeout=1) == 1
     assert queued.result(timeout=1) == "queued result"
