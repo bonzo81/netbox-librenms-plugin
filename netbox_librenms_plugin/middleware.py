@@ -106,4 +106,4 @@ class RuleConfigurationErrorMiddleware:
             return render(
                 request, "netbox_librenms_plugin/rule_configuration_error.html", {"rule_error": exception}, status=409
             )
-        return _answer(request, str(exception))
+        return _answer(request, exception.public_message)
