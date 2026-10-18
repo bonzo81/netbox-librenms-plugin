@@ -1277,6 +1277,67 @@ class TestPostInventoryRefresh:
         snapshot = cache.get(view.get_cache_key(device, "inventory", server_key=server_key))
         assert [item["entPhysicalIndex"] for item in snapshot["inventory"]] == [300]
 
+    @pytest.mark.parametrize("existing_entity", [False, True], ids=["synthetic", "existing-entity"])
+    def test_post_keeps_both_optics_when_the_serial_rules_remove_their_identities(
+        self, librenms_server, server_keys, existing_entity
+    ):
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        server_key, _ = server_keys
+        device = _mapped_device("unknown-optic-serials", server_key)
+        NormalizationRule.objects.create(
+            scope="serial",
+            manufacturer=device.device_type.manufacturer,
+            match_pattern=r"^TAG (.+)$",
+            replacement=r"\1",
+        )
+        inventory = (
+            [
+                {
+                    "entPhysicalIndex": 400,
+                    "entPhysicalClass": "port",
+                    "entPhysicalName": "Existing optic",
+                    "entPhysicalModelName": "",
+                    "entPhysicalSerialNum": "",
+                    "entPhysicalContainedIn": 0,
+                }
+            ]
+            if existing_entity
+            else []
+        )
+        self._register_successful_refresh(
+            librenms_server,
+            inventory=inventory,
+            transceivers=[
+                {
+                    "entity_physical_index": 400,
+                    "port_id": 42,
+                    "model": "SFP-10G-LR",
+                    "serial": "TAG unknown",
+                    "type": "SFP+",
+                },
+                {
+                    "entity_physical_index": 401,
+                    "port_id": 43,
+                    "model": "SFP-10G-LR",
+                    "serial": "TAG n/a",
+                    "type": "SFP+",
+                },
+            ],
+            ports=[{"port_id": 42, "ifName": "xe-0/0/0"}, {"port_id": 43, "ifName": "xe-0/0/1"}],
+        )
+        view = DeviceModuleTableView()
+
+        response = post(view, make_request("post", {"server_key": server_key}), pk=device.pk)
+
+        assert response.status_code == 200
+        snapshot = cache.get(view.get_cache_key(device, "inventory", server_key=server_key))
+        assert [item["entPhysicalIndex"] for item in snapshot["inventory"]] == [400, 401]
+
     def test_post_fetches_ports_once_and_reuses_payload(self, librenms_server, server_keys):
         from django.core.cache import cache
 

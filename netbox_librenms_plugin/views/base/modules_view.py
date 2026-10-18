@@ -1853,6 +1853,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
             model = _clean_librenms_value(txr.get("model"))
             serial = _clean_librenms_value(txr.get("serial"))
+            serial_identity = serial_key(serial)
             txr_type = _clean_librenms_value(txr.get("type"))
 
             # Skip containers and entries with no useful data
@@ -1870,7 +1871,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 existing_serial = _clean_librenms_value(existing.get("entPhysicalSerialNum"))
                 if not existing_serial and serial:
                     existing["entPhysicalSerialNum"] = serial
-                    inv_serials.add(serial_key(serial))
+                    if serial_identity:
+                        inv_serials.add(serial_identity)
                 if port_id:
                     existing["_librenms_port_id"] = port_id
                 if ifname:
@@ -1879,7 +1881,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     existing["_librenms_ifdescr"] = ifdescr
             else:
                 # Skip if serial already exists in ENTITY-MIB data (avoid duplicates)
-                if serial and serial_key(serial) in inv_serials:
+                if serial_identity and serial_identity in inv_serials:
                     continue
                 # Create synthetic inventory item for SFPs not in entity inventory
                 if ifname:
@@ -1907,8 +1909,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 inventory_data.append(synthetic)
                 # Update dedupe maps so subsequent iterations skip this entry
                 inv_by_index[ent_idx] = synthetic
-                if serial:
-                    inv_serials.add(serial_key(serial))
+                if serial_identity:
+                    inv_serials.add(serial_identity)
 
         # Nest synthetic transceivers under their parent inventory item by
         # matching the leading slash-separated path components of the synthetic
