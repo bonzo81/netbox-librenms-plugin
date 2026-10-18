@@ -894,6 +894,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             if refresh_incomplete
             else self._build_context(request, obj, inventory_data, server_key=server_key, sync_device=sync_device)
         )
+        refresh_incomplete = refresh_incomplete or context.get("inventory_rule_error") is not None
         if ports_error:
             logger.warning("Port metadata fetch failed for device %s: %s", self.librenms_id, ports_error)
             messages.warning(

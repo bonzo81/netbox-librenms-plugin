@@ -358,6 +358,12 @@ class TestInvalidStoredFilter:
         assert 'id="module-inventory-rule-error"' in content
         assert rule.get_absolute_url() in content
         assert "No inventory data loaded" not in content
+        assert "Inventory data refreshed successfully." not in content
+        from django.core.cache import cache
+        from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
+
+        state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.MODULES, server_key))
+        assert state["state"] == SyncTabState.REFRESH_FAILED.value
 
     def test_the_rule_loader_raises_a_typed_error_naming_rule_and_field(self):
         from netbox_librenms_plugin.models import InventoryRuleFilterError

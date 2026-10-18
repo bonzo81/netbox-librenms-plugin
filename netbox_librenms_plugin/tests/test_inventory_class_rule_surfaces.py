@@ -518,3 +518,14 @@ class TestListAndDetail:
         if SERIAL_GUARD[shape]:
             assert cells[flag] in content
         assert content.count('<span class="text-danger">No</span>') == int(SERIAL_GUARD[shape] and not flag)
+
+
+def test_the_list_help_explains_class_actions_and_their_serial_guard(ui):
+    """Operators can use class matches for Skip and Transparent as well as Include."""
+    response = ui.get(_url("list"))
+
+    assert response.status_code == 200
+    content = response.content.decode()
+    assert "Include action only" not in content
+    assert "Skip and Transparent" in content
+    assert "including class_is" in content

@@ -2272,3 +2272,11 @@ def test_device_dependency_absence_survives_anonymization(value):
 
     anonymized = anonymize_recording(recording, salt="absent-dependency")
     assert _response(anonymized, "GET /api/v0/devices/1")["devices"][0]["dependency_parent_id"] == value
+
+
+@pytest.mark.parametrize("address", ["fd12:3456::1", "fe80::1", "::1"])
+def test_find_pii_ipv6_flags_an_address_after_a_mib_prefix(address):
+    """A MIB separator must not hide an address suffix from the recording check."""
+    rec = _ports({"port_id": 1, "ifName": "Gi0/1", "entPhysicalName": f"EXAMPLE-MIB::{address}"})
+
+    assert ("ipv6", address) in {(finding["kind"], finding["value"]) for finding in find_pii(rec)}

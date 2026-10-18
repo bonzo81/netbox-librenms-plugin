@@ -428,11 +428,12 @@ class TestRepairRule:
         """The readers key rows by index, so a shared index can resolve to another row."""
         from netbox_librenms_plugin.inventory_tree import repair_dangling_parents
 
-        rows = self._rows()
-        port = rows[2]
         for other in ("first", "last"):
+            rows = self._rows()
+            port = rows[2]
             shared = {"entPhysicalIndex": duplicate, "entPhysicalClass": "sensor", "entPhysicalDescr": "X"}
             listed = [shared, *rows] if other == "first" else [*rows, shared]
+            assert "_dangling_parent" not in port, other
 
             repair_dangling_parents(listed)
 
