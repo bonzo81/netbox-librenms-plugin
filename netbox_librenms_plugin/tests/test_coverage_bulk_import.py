@@ -299,6 +299,80 @@ class TestBulkImportIntegration:
         assert imported.serial == "TEST-SERIAL-81"
         assert stored_mapping_for_test(imported)["default"] == 81
 
+    def test_a_batch_reuses_its_serial_rules_and_the_next_batch_sees_a_change(self, live_librenms):
+        from dcim.models import Device, DeviceRole, DeviceType, Site
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices
+        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data, vc_serial_key
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        prerequisites = self._prerequisites()
+        NormalizationRule.objects.filter(scope="serial").delete()
+        rule = NormalizationRule.objects.create(
+            scope="serial",
+            match_pattern=r"^S/N\s+(.+)$",
+            replacement=r"\1",
+        )
+        user = make_user_with_perms(
+            "batch-serial-reader",
+            [
+                ("add", Device),
+                ("change", Device),
+                ("view", Device),
+                ("view", DeviceType),
+                ("view", DeviceRole),
+                ("view", Site),
+            ],
+        )
+        rows = {}
+        for device_id in (181, 182, 183):
+            serial = f"BATCH-{device_id}"
+            rows[device_id] = _libre_device(
+                device_id,
+                f"batch-serial-{device_id}",
+                serial=serial,
+                hardware=prerequisites["hardware"],
+                location=prerequisites["location"],
+            )
+            _seed_stack(live_librenms.server, device_id, serials=(f"S/N {serial}", f"PEER-{device_id}"))
+            assert get_virtual_chassis_data(live_librenms.api, device_id, force_refresh=True)["is_stack"]
+        table = f'"{NormalizationRule._meta.db_table}"'
+
+        def run_batch():
+            with CaptureQueriesContext(connection) as queries:
+                result = bulk_import_devices(
+                    list(rows),
+                    server_key="default",
+                    user=user,
+                    manual_mappings_per_device={device_id: prerequisites for device_id in rows},
+                    libre_devices_cache=dict(rows),
+                )
+            serial_reads = [q for q in queries if table in q["sql"] and "'serial'" in q["sql"]]
+            return result, serial_reads
+
+        with CaptureQueriesContext(connection) as key_queries:
+            vc_serial_key(DeviceType.objects.get(pk=prerequisites["device_type_id"]).manufacturer)
+        one_key_read_count = len([q for q in key_queries if table in q["sql"] and "'serial'" in q["sql"]])
+        assert one_key_read_count > 0
+
+        first, reads = run_batch()
+        assert len(first["failed"]) == 3
+        assert all("dcim.add_virtualchassis" in row["error"] for row in first["failed"])
+        assert len(reads) == one_key_read_count
+        rule.replacement = r"changed-\1"
+        rule.save()
+
+        second, reads = run_batch()
+        assert second["failed"] == []
+        assert len(second["success"]) == 3
+        assert second["virtual_chassis_created"] == 0
+        assert len(reads) == one_key_read_count
+        assert Device.objects.filter(name__startswith="batch-serial-", virtual_chassis__isnull=True).count() == 3
+
     def test_missing_live_device_is_reported_failed(self, live_librenms):
         from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices
 
@@ -667,3 +741,57 @@ def test_import_validation_reads_location_parse_settings_once():
     assert result["site"]["site"] == device.site
     settings_reads = [query["sql"] for query in queries if f'FROM "{settings_model._meta.db_table}"' in query["sql"]]
     assert len(settings_reads) == 1, settings_reads
+
+
+@pytest.mark.django_db
+def test_bulk_confirmation_reuses_serial_rules_and_refreshes_them_next_request(client, live_librenms):
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+    from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack
+
+    prerequisites = TestBulkImportIntegration()._prerequisites()
+    NormalizationRule.objects.filter(scope="serial").delete()
+    rule = NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
+    rows = {}
+    for device_id in (281, 282, 283):
+        serial = f"CONFIRM-{device_id}"
+        rows[device_id] = _libre_device(
+            device_id,
+            f"confirm-rules-{device_id}",
+            serial=serial,
+            hardware=prerequisites["hardware"],
+            location=prerequisites["location"],
+        )
+        _seed_stack(live_librenms.server, device_id, serials=(f"S/N {serial}", f"PEER-{device_id}"))
+        cache.set(get_import_device_cache_key(device_id, "default"), rows[device_id], timeout=300)
+        assert get_virtual_chassis_data(live_librenms.api, device_id, force_refresh=True)["is_stack"]
+    client.force_login(make_superuser("confirm-rules-user"))
+    table = f'"{NormalizationRule._meta.db_table}"'
+
+    def confirm(device_ids):
+        with CaptureQueriesContext(connection) as queries:
+            response = client.post(
+                reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
+                {"server_key": "default", "select": [str(device_id) for device_id in device_ids]},
+                HTTP_HX_REQUEST="true",
+            )
+        assert response.status_code == 200
+        entries = response.context["devices"]
+        assert len(entries) == len(device_ids)
+        reads = [q for q in queries if table in q["sql"] and "'serial'" in q["sql"]]
+        return entries, len(reads)
+
+    _single, one_key_reads = confirm([281])
+    entries, batch_reads = confirm(list(rows))
+    assert all(entry["validation"]["virtual_chassis"]["master_identified"] for entry in entries)
+    assert batch_reads == one_key_reads > 0
+    rule.replacement = r"changed-\1"
+    rule.save()
+    entries, batch_reads = confirm(list(rows))
+    assert all(not entry["validation"]["virtual_chassis"]["master_identified"] for entry in entries)
+    assert batch_reads == one_key_reads

@@ -128,3 +128,68 @@ def test_anonymization_keeps_a_placeholder_fpc_serial_so_the_shape_stays_rejecte
     assert _detect(recording_server, recording) is None
     assert _detect(recording_server, anonymized) is None
     assert compute_shape_signature(anonymized) == compute_shape_signature(recording)
+
+
+@pytest.mark.parametrize("scoped", [False, True], ids=["global", "manufacturer"])
+@pytest.mark.parametrize("surface", ["signature", "anonymized-replay"])
+def test_recordings_keep_the_production_serial_equality(recording_server, scoped, surface):
+    from dcim.models import Manufacturer
+
+    from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
+    from netbox_librenms_plugin.data_shapes.signature import compute_shape_signature
+    from netbox_librenms_plugin.import_utils.virtual_chassis import vc_serial_key
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    NormalizationRule.objects.filter(scope="serial").delete()
+    manufacturer = Manufacturer.objects.create(name="Capture maker", slug="capture-maker")
+    NormalizationRule.objects.create(
+        scope="serial",
+        manufacturer=manufacturer if scoped else None,
+        match_pattern=r"^S/N\s+(.+)$",
+        replacement=r"\1",
+    )
+    recording = copy.deepcopy(load_recording(_RECORDING))
+    _edit_rows(recording, 1, lambda row: row.update(entPhysicalSerialNum="S/N MEMBER-A"))
+    _edit_rows(recording, 120, lambda row: row.update(entPhysicalSerialNum="MEMBER-A"))
+    _edit_rows(recording, 121, lambda row: row.update(entPhysicalSerialNum="MEMBER-B"))
+    device = unwrap_response(recording["responses"][f"GET /api/v0/devices/{_DEVICE_ID}"])[1]["devices"][0]
+    device["serial"] = "S/N MEMBER-A"
+    recording["expected"]["virtual_chassis"]["member_serials"] = ["MEMBER-A", "MEMBER-B"]
+    original = copy.deepcopy(recording)
+    assert _detect(recording_server, recording)["member_count"] == 2
+    serial_key = vc_serial_key(manufacturer)
+
+    if surface == "signature":
+        signature = compute_shape_signature(recording, serial_key=serial_key)
+    else:
+        anonymized = anonymize_recording(recording, serial_key=serial_key)
+        # A recording must replay on a host that has none of the capture's rules.
+        NormalizationRule.objects.filter(scope="serial").delete()
+        assert _detect(recording_server, anonymized)["member_count"] == 2
+        signature = compute_shape_signature(anonymized)
+        import json
+
+        assert "MEMBER-A" not in json.dumps(anonymized)
+        assert "MEMBER-B" not in json.dumps(anonymized)
+    assert signature["virtual_chassis"]["present"] is True
+    assert signature["virtual_chassis"]["member_count"] == 2
+    assert recording == original
+
+
+@pytest.mark.parametrize(("pattern", "replacement"), [(r"^CAPTURE-.+()$", r"\1"), (r"^CAPTURE-.+$", "unknown")])
+def test_a_serial_rule_that_removes_identity_does_not_publish_the_original_serial(pattern, replacement):
+    import json
+
+    from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
+    from netbox_librenms_plugin.import_utils.virtual_chassis import vc_serial_key
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    NormalizationRule.objects.filter(scope="serial").delete()
+    NormalizationRule.objects.create(scope="serial", match_pattern=pattern, replacement=replacement)
+    recording = {"device_id": 1, "responses": {"GET /api/v0/devices/1": {"devices": [{"serial": "CAPTURE-A"}]}}}
+
+    anonymized = anonymize_recording(recording, serial_key=vc_serial_key())
+
+    assert "CAPTURE-A" not in json.dumps(anonymized)
+    assert anonymized["responses"][f"GET /api/v0/devices/{anonymized['device_id']}"]["devices"][0]["serial"] == ""
+    assert recording["responses"]["GET /api/v0/devices/1"]["devices"][0]["serial"] == "CAPTURE-A"

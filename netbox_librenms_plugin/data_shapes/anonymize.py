@@ -17,6 +17,7 @@ Use find_pii to check the result for residual identifying data.
 import hashlib
 import ipaddress
 import re
+from collections.abc import Callable
 from typing import NamedTuple
 
 from netbox_librenms_plugin.constants import (
@@ -755,6 +756,9 @@ def _anon_value(key, value, rules, container=None):  # noqa: C901
         if isinstance(value, bool) or not isinstance(value, (str, int, float)):
             return value
         serial = str(value).strip()
+        if rules.serial_key is not None:
+            serial = rules.serial_key(value)
+            value = serial
         return f"SN-{_hash(serial, salt)}" if serial and not is_librenms_placeholder(serial) else value
     if key in MODEL_KEYS:
         if isinstance(value, bool) or not isinstance(value, (str, int, float)):
@@ -815,6 +819,7 @@ class _Rules(NamedTuple):
     """The per-recording anonymization context threaded through the walk."""
 
     salt: str = ""
+    serial_key: Callable | None = None
     database_ids: _DatabaseIDs | None = None
     model_tokens: dict | None = None
     # Compiled LAG name patterns captured WITH the recording (see _anon_interface_name).
@@ -880,7 +885,7 @@ def _walk(obj, rules, container=None):
     return obj
 
 
-def anonymize_recording(recording, *, salt=""):
+def anonymize_recording(recording, *, salt="", serial_key=None):
     """
     Return a copy of *recording* with every response body anonymized field-by-field.
 
@@ -895,6 +900,7 @@ def anonymize_recording(recording, *, salt=""):
     Args:
         recording (dict): A recording as produced by :func:`.capture.capture_device_recording`.
         salt (str): Optional salt mixed into the deterministic pseudonym hashes.
+        serial_key: The production serial key for a live capture. Offline recordings use their stored serials.
 
     Returns:
         dict: A new recording with anonymized ``responses`` and a neutral name/description.
@@ -907,6 +913,7 @@ def anonymize_recording(recording, *, salt=""):
     # are compiled once here and threaded through the walk.
     rules = _Rules(
         salt=salt,
+        serial_key=serial_key,
         database_ids=database_ids,
         model_tokens={},
         lag_patterns=tuple(compile_lag_patterns(recording)),

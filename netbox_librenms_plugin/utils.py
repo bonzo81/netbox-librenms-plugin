@@ -4398,9 +4398,7 @@ def module_type_lookup_candidates(item):
     """
     candidates = []
     for key in ("entPhysicalModelName", "entPhysicalDescr"):
-        value = item.get(key)
-        if isinstance(value, str):
-            value = value.strip()
+        value = normalize_serial(item.get(key))
         if not is_librenms_placeholder(value) and value not in candidates:
             candidates.append(value)
     return candidates
