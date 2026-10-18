@@ -42,10 +42,14 @@ class RuleConfigurationError(Exception):
         self.rule_url = rule.get_absolute_url()
         self.field = field
         self.value = getattr(rule, field)
-        # The text names only stored rule data, so a caught error can show it.
-        super().__init__(
+        super().__init__(self.public_message)
+
+    @property
+    def public_message(self):
+        """Return stored rule details without exception diagnostics."""
+        return (
             f'{self.rule_kind[:1].upper()}{self.rule_kind[1:]} "{self.rule_name}" (ID {self.rule_pk}) stores an '
-            f"invalid {field}: {self.value}. Fix the rule, then try again."
+            f"invalid {self.field}: {self.value}. Fix the rule, then try again."
         )
 
 
