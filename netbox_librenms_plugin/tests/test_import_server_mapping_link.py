@@ -1,8 +1,8 @@
 """Request-level coverage for adding server mappings through import."""
 
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from copy import deepcopy
+from functools import partial
 from threading import Barrier, Event
 from types import SimpleNamespace
 
@@ -14,6 +14,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_ip,
     make_superuser,
     make_vm,
+    run_in_threads,
     transactional_db_with_all_apps,
 )
 from netbox_librenms_plugin.tests.import_server_helpers import librenms_device
@@ -415,7 +416,7 @@ def test_device_and_vm_links_serialize_one_cross_model_id_claim(servers):
     vm.custom_field_data["librenms_id"] = {"primary": 49702}
     vm.save(update_fields=["custom_field_data"])
     first_fetch_completed = Event()
-    fetch_barrier = Barrier(2)
+    fetch_barrier = Barrier(2, timeout=10)
     response_names = iter((device.name, vm.name))
 
     def device_response(**_request):
@@ -434,7 +435,7 @@ def test_device_and_vm_links_serialize_one_cross_model_id_claim(servers):
             {"status": "ok", "inventory": []},
         )
     user = make_superuser("concurrent-cross-model-linker")
-    claim_barrier = Barrier(2)
+    claim_barrier = Barrier(2, timeout=10)
     wrappers = [_MappingClaimBarrier(claim_barrier) for _target in range(2)]
 
     def link(target_pk, target_type, wrapper, *, wait_for_first_fetch=False):
@@ -464,12 +465,12 @@ def test_device_and_vm_links_serialize_one_cross_model_id_claim(servers):
         finally:
             connection.close()
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = [
-            executor.submit(link, device.pk, "device", wrappers[0]),
-            executor.submit(link, vm.pk, "virtualmachine", wrappers[1], wait_for_first_fetch=True),
-        ]
-        outcomes = [future.result(timeout=60) for future in futures]
+    outcomes = run_in_threads(
+        partial(link, device.pk, "device", wrappers[0]),
+        partial(link, vm.pk, "virtualmachine", wrappers[1], wait_for_first_fetch=True),
+        barriers=(fetch_barrier, claim_barrier),
+        timeout=60,
+    )
 
     device.refresh_from_db()
     vm.refresh_from_db()

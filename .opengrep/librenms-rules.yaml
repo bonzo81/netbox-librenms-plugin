@@ -255,6 +255,71 @@ rules:
       - metavariable-regex:
           metavariable: $METHOD
           regex: ^(get|head|options|post|put|patch|delete|request|Session|session)$
+  - id: ipaddress-address-needs-netaddr
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Give an ipam IPAddress its address as netaddr.IPNetwork(...), the type NetBox loads from
+      the database. On NetBox 4.4, IPAddress.family (read by Device.clean()) raises on an
+      in-memory str address. A ** expansion hides the address, so it is always reported. The
+      assignment and setattr checks cover files that import IPAddress or ipam.models.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/**"]
+      exclude: ["**/tests/**", "**/migrations/**"]
+    pattern-either:
+      - patterns:
+          - pattern: ipam.models.IPAddress(..., address=$ADDRESS, ...)
+          - pattern-not: ipam.models.IPAddress(..., address=netaddr.IPNetwork(...), ...)
+      - pattern: ipam.models.IPAddress(..., **$VALUES, ...)
+      - patterns:
+          - pattern-either:
+              - patterns:
+                  - pattern: ipam.models.IPAddress.objects. ... .$CREATE(..., address=$ADDRESS, ...)
+                  - pattern-not: ipam.models.IPAddress.objects. ... .$CREATE(..., address=netaddr.IPNetwork(...), ...)
+              - pattern: ipam.models.IPAddress.objects. ... .$CREATE(..., **$VALUES, ...)
+          - metavariable-regex:
+              metavariable: $CREATE
+              regex: ^(create|get_or_create|update_or_create)$
+      - patterns:
+          - pattern-either:
+              - patterns:
+                  - pattern: |
+                      ipam.models.IPAddress.objects. ... .$CREATE(..., $DEFAULTS={..., "address": $ADDRESS, ...}, ...)
+                  - pattern-not: |
+                      ipam.models.IPAddress.objects. ... .$CREATE(..., $DEFAULTS={..., "address": netaddr.IPNetwork(...), ...}, ...)
+              - pattern: |
+                  ipam.models.IPAddress.objects. ... .$CREATE(..., $DEFAULTS={..., **$VALUES, ...}, ...)
+          - metavariable-regex:
+              metavariable: $CREATE
+              regex: ^(get_or_create|update_or_create)$
+          - metavariable-regex:
+              metavariable: $DEFAULTS
+              regex: ^(defaults|create_defaults)$
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  from ipam.models import IPAddress
+                  ...
+              - patterns:
+                  # Resolves `import ipam.models [as m]` and `from ipam import models [as m]` only.
+                  - pattern-inside: |
+                      from $PACKAGE import $MODULE
+                      ...
+                  - metavariable-regex:
+                      metavariable: $PACKAGE
+                      regex: ^ipam$
+                  - metavariable-regex:
+                      metavariable: $MODULE
+                      regex: ^models$
+          - pattern-either:
+              - patterns:
+                  - pattern: $IP.address = $ADDRESS
+                  - pattern-not: $IP.address = netaddr.IPNetwork(...)
+              - patterns:
+                  - pattern: setattr($IP, "address", $ADDRESS)
+                  - pattern-not: setattr($IP, "address", netaddr.IPNetwork(...))
   - id: url-numeric-pk-converter
     languages: [python]
     severity: ERROR
@@ -344,6 +409,86 @@ rules:
               StartsWith|NotStartsWith|EndsWith|NotEndsWith|HasAttr|
               NotHasAttr|IsSubclass|NotIsSubclass
             )$
+  - id: xfail-needs-raises
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Give pytest.mark.xfail the exception that the recorded defect raises, with raises=. Without
+      it, any error satisfies the marker, so a test whose setup fails looks like the defect.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/tests/**"]
+    pattern-either:
+      - patterns:
+          - pattern: pytest.mark.xfail(...)
+          - pattern-not: pytest.mark.xfail(..., raises=$EXCEPTION, ...)
+      - pattern: pytest.mark.xfail(..., raises=None, ...)
+      - pattern: pytest.mark.xfail.with_args(..., raises=None, ...)
+      # A bare marker, but not an alias assignment; the use of an alias is not followed.
+      - patterns:
+          - pattern: pytest.mark.xfail
+          - pattern-not-inside: pytest.mark.xfail(...)
+          - pattern-not-inside: pytest.mark.xfail.with_args(..., raises=$EXCEPTION, ...)
+          - pattern-not-inside: $ALIAS = pytest.mark.xfail
+      - pattern: pytestmark = pytest.mark.xfail
+  - id: executor-needs-bounded-executor
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Use tests.conftest.bounded_executor(...) in place of a ThreadPoolExecutor. When a result
+      timeout raises, a shutdown that waits for the hung worker hangs the test session instead of
+      failing the test.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/tests/**"]
+      # conftest.py holds bounded_executor and run_in_threads.
+      exclude: ["**/netbox_librenms_plugin/tests/conftest.py"]
+    pattern-either:
+      - pattern: ThreadPoolExecutor(...)
+      - pattern: concurrent.futures.ThreadPoolExecutor(...)
+  - id: synchronization-needs-timeout
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Set a default timeout on each Barrier and pass a timeout to each Event.wait().
+      Cancelling a future does not stop its running thread.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/tests/**"]
+    pattern-either:
+      - pattern: threading.Barrier($PARTIES)
+      - patterns:
+          - pattern-inside: |
+              $EVENT = threading.Event(...)
+              ...
+          - pattern: $EVENT.wait()
+  - id: barrier-needs-run-in-threads
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Run the threads of a test that creates a threading.Barrier with
+      tests.conftest.run_in_threads(..., barriers=...). Without it, a thread that fails leaves its
+      peers at the barrier until the timeout, and the BrokenBarrierError of a peer hides the failure.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/tests/**"]
+    patterns:
+      - pattern-either:
+          - pattern: ThreadPoolExecutor(...)
+          - pattern: $MODULE.ThreadPoolExecutor(...)
+          - pattern: Thread(...)
+          - pattern: $MODULE.Thread(...)
+      - pattern-either:
+          - pattern-inside: |
+              $BARRIER = Barrier(...)
+              ...
+          - pattern-inside: |
+              $BARRIER = threading.Barrier(...)
+              ...
   - id: no-selected-fuzzy-apis
     languages: [python]
     severity: WARNING
@@ -932,3 +1077,17 @@ rules:
               metavariable: $CLASSES
               regex: \b(Base)?Exception\b
       - pattern-regex: (?m)^[ \t]*except[ \t]*\*
+  - id: recorded-response-needs-envelope
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Read a recorded LibreNMS response through data_shapes.envelope.unwrap_response. A bare
+      [status, body] list is the body of a 2xx response, not a status pair, and a second reader
+      of the status framing drifts from the envelope module.
+    metadata:
+      category: correctness
+    paths:
+      exclude: ["**/data_shapes/envelope.py"]
+    pattern-either:
+      - pattern: isinstance($V, list) and len($V) == 2 and isinstance($V[0], int)
+      - pattern: $V[1] if isinstance($V, list) else $V

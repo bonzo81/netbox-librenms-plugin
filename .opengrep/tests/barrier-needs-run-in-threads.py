@@ -1,0 +1,84 @@
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from threading import Barrier, Event, Thread
+
+from netbox_librenms_plugin.tests.conftest import run_in_threads
+
+
+def test_executor_with_a_barrier():
+    # ruleid: synchronization-needs-timeout
+    barrier = Barrier(2)
+    # ruleid: barrier-needs-run-in-threads, executor-needs-bounded-executor
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(barrier.wait, timeout=5) for _ in range(2)]
+        for future in futures:
+            future.result(timeout=10)
+
+
+def test_thread_with_a_qualified_barrier():
+    # ruleid: synchronization-needs-timeout
+    barrier = threading.Barrier(2)
+    # ruleid: barrier-needs-run-in-threads
+    worker = threading.Thread(target=barrier.wait)
+    worker.start()
+    barrier.wait(timeout=5)
+    worker.join()
+
+
+def test_thread_with_a_barrier_in_a_wrapper():
+    wrappers = [object() for _ in range(2)]
+    # ruleid: synchronization-needs-timeout
+    barrier = Barrier(len(wrappers))
+    # ruleid: barrier-needs-run-in-threads
+    worker = Thread(target=barrier.wait)
+    worker.start()
+    worker.join()
+
+
+def test_barrier_through_the_helper():
+    # ruleid: synchronization-needs-timeout
+    barrier = Barrier(2)
+    # ok: barrier-needs-run-in-threads
+    run_in_threads(partial(barrier.wait, timeout=5), partial(barrier.wait, timeout=5), barriers=(barrier,), timeout=10)
+
+
+def test_executor_without_a_barrier():
+    # ok: barrier-needs-run-in-threads
+    # ruleid: executor-needs-bounded-executor
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(print).result(timeout=10)
+
+
+def test_executor_before_the_barrier():
+    # ok: barrier-needs-run-in-threads
+    # ruleid: executor-needs-bounded-executor
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        executor.submit(print).result(timeout=10)
+    # ruleid: synchronization-needs-timeout
+    barrier = Barrier(1)
+    barrier.wait(timeout=5)
+
+
+def test_unbounded_event_wait():
+    event = Event()
+    # ruleid: synchronization-needs-timeout
+    event.wait()
+
+
+def test_qualified_unbounded_event_wait():
+    event = threading.Event()
+    # ruleid: synchronization-needs-timeout
+    event.wait()
+
+
+def test_bounded_waits():
+    # ok: synchronization-needs-timeout
+    barrier = Barrier(2, timeout=5)
+    # ok: synchronization-needs-timeout
+    barrier.wait()
+    event = Event()
+    # ok: synchronization-needs-timeout
+    event.wait(timeout=5)
+    # ok: synchronization-needs-timeout
+    event.wait(5)

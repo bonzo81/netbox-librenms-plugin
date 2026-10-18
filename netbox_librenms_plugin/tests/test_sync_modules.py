@@ -9,6 +9,7 @@ from django.db import OperationalError, transaction
 
 from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
 from netbox_librenms_plugin.tests.conftest import (
+    bounded_executor,
     configure_librenms_servers,
     install_module,
     make_device,
@@ -3276,7 +3277,6 @@ def test_branch_install_uses_each_members_destination_and_ignore_policy(client, 
 @pytest.mark.django_db(transaction=True)
 def test_branch_install_refreshes_page_serial_after_waiting_for_its_lock(client):
     """An edit before lock acquisition must reach the branch's ignore-policy planning."""
-    from concurrent.futures import ThreadPoolExecutor
     from dcim.models import Device, Module
     from django.core.cache import cache
     from django.db import close_old_connections, connection
@@ -3322,7 +3322,7 @@ def test_branch_install_refreshes_page_serial_after_waiting_for_its_lock(client)
 
     def edit_before_lock(execute, sql, params, many, context):
         if "pg_advisory_xact_lock" in sql and not changed:
-            with ThreadPoolExecutor(max_workers=1) as executor:
+            with bounded_executor(max_workers=1) as executor:
                 executor.submit(change_serial).result(timeout=5)
             changed.append(True)
         return execute(sql, params, many, context)
@@ -3667,7 +3667,6 @@ def test_module_advisory_lock_sections_do_not_render_responses():
 @pytest.mark.parametrize("selected_member, deleted", [(False, False), (True, False), (True, True)])
 def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(client, selected_member, deleted):
     """An edit before lock acquisition must reach the selected install's ignore-policy planning."""
-    from concurrent.futures import ThreadPoolExecutor
     from dcim.models import Device, Module
     from django.core.cache import cache
     from django.db import close_old_connections, connection
@@ -3722,7 +3721,7 @@ def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(cli
 
     def edit_before_lock(execute, sql, params, many, context):
         if "pg_advisory_xact_lock" in sql and not changed:
-            with ThreadPoolExecutor(max_workers=1) as executor:
+            with bounded_executor(max_workers=1) as executor:
                 executor.submit(change_serial).result(timeout=5)
             changed.append(True)
         return execute(sql, params, many, context)

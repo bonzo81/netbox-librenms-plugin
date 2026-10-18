@@ -1,5 +1,6 @@
 import logging
 import re
+from dataclasses import dataclass
 
 from django.contrib import messages
 from django.core.cache import cache
@@ -153,12 +154,75 @@ def _class_is_included(item: dict, rules: list) -> bool:
     return any(rule.action == rule.ACTION_INCLUDE and rule.matches_class(phys_class) for rule in rules)
 
 
-def _check_ignore_rules(  # noqa: C901
+@dataclass(frozen=True)
+class DeviceIdentity:
+    """The target device facts that the pattern-less ignore rules compare an inventory item with."""
+
+    serial: str = ""
+    # Casefolded DeviceType model and part number, without blanks.
+    type_models: frozenset = frozenset()
+
+    @classmethod
+    def of(cls, device) -> "DeviceIdentity":
+        """Return the serial of *device* and the model and part number of its device type."""
+        device_type = device.device_type
+        names = (device_type.model, device_type.part_number)
+        return cls(
+            serial=(device.serial or "").strip(),
+            type_models=frozenset(folded for name in names if (folded := (name or "").strip().casefold())),
+        )
+
+
+NO_DEVICE_IDENTITY = DeviceIdentity()
+
+
+def _sits_at_chassis_level(
+    item: dict, parent_item: dict | None, index_map: dict | None, *, through_containers: bool
+) -> bool:
+    """Return True when an item has no parent or hangs off the chassis, optionally through slot containers only."""
+    if parent_item is None:
+        # A parent index that the inventory does not hold is unknown topology, not the top level.
+        return not item.get("entPhysicalContainedIn")
+    current, seen = parent_item, set()
+    while through_containers and current is not None and current.get("entPhysicalClass") == "container":
+        index = current.get("entPhysicalIndex")
+        if index_map is None or index in seen:
+            return False
+        seen.add(index)
+        current = index_map.get(current.get("entPhysicalContainedIn"))
+    if current is None:
+        # Only a top-level item may skip the chassis; a container chain must end at one.
+        return not seen
+    return current.get("entPhysicalClass") == "chassis"
+
+
+def _matches_target_device(
+    rule, item: dict, parent_item: dict | None, index_map: dict | None, device_identity: DeviceIdentity
+) -> bool:
+    """Return True when a pattern-less rule matches a chassis-level item against the target device."""
+    # A line card that shares the device serial is a real FRU, so the serial rule takes direct chassis children only.
+    # A real line card never carries the chassis PID, so the model rule may look through slot containers (NX-OS).
+    through_containers = rule.match_type == rule.MATCH_MODEL_DEVICE_TYPE
+    if not _sits_at_chassis_level(item, parent_item, index_map, through_containers=through_containers):
+        return False
+    if rule.match_type == rule.MATCH_SERIAL_DEVICE:
+        item_serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
+        device_serial = "" if device_identity.serial.lower() in _PLACEHOLDER_VALUES else device_identity.serial
+        return bool(item_serial and device_serial and item_serial == device_serial)
+    if rule.match_type == rule.MATCH_MODEL_DEVICE_TYPE:
+        if _normalize_librenms_text(item.get("entPhysicalClass")) == "chassis":
+            return False
+        item_model = _clean_librenms_value(item.get("entPhysicalModelName")).casefold()
+        return bool(item_model) and item_model in device_identity.type_models
+    raise ValueError(f"Unhandled pattern-less match type {rule.match_type!r}")
+
+
+def _check_ignore_rules(
     item: dict,
     parent_item: dict | None,
     rules: list,
     index_map: dict | None = None,
-    device_serial: str = "",
+    device_identity: DeviceIdentity = NO_DEVICE_IDENTITY,
 ) -> str | None:
     """
     Return the matched rule action or ``None`` if no rule matches.
@@ -173,8 +237,8 @@ def _check_ignore_rules(  # noqa: C901
     Match logic per rule type:
 
     **serial_matches_device**
-        Matches when the item's ``entPhysicalSerialNum`` equals *device_serial*
-        (the NetBox ``Device.serial`` value) **and** the item sits at chassis
+        Matches when the item's ``entPhysicalSerialNum`` equals the target
+        device's ``Device.serial`` value **and** the item sits at chassis
         level. It must have no parent (top-level entity), or its direct parent
         must have ``entPhysicalClass="chassis"``.  No name pattern is used.
         ``require_serial_match_parent`` is ignored for this type.
@@ -184,6 +248,15 @@ def _check_ignore_rules(  # noqa: C901
         the device record (e.g. Cisco ASR-9904 with ``Device.serial`` set to
         the linecard's serial). Without the guard, the linecard becomes
         transparent and its sub-ports collapse to chassis-level bay matching.
+
+    **model_matches_device_type**
+        Matches an item that is not itself the chassis when its
+        ``entPhysicalModelName`` equals the target device type's ``model`` or
+        ``part_number``, ignoring case. The item must be chassis-level, or reach
+        the chassis through ``container`` entities only. Fixed IOS XE platforms
+        report their built-in units ("module 0", "module R0", "module F0") with
+        the chassis PID; fixed NX-OS platforms put the built-in line card in a
+        slot container.
 
     **Name-based types** (ends_with / starts_with / contains / regex):
         Matches on ``entPhysicalName``.  When ``require_serial_match_parent``
@@ -203,30 +276,20 @@ def _check_ignore_rules(  # noqa: C901
         parent_item (dict | None): The item's direct parent, if it has one.
         rules (list): The ignore rules to evaluate.
         index_map (dict | None): Inventory items keyed by physical index.
-        device_serial (str): The NetBox device serial.
+        device_identity (DeviceIdentity): The serial and device type models of the target device.
 
     Returns:
         str | None: The matched rule action, or None if no rule matches.
 
     """
     item_serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
-    if device_serial.lower() in _PLACEHOLDER_VALUES:
-        device_serial = ""
     name = (item.get("entPhysicalName") or "").strip()
 
     for rule in rules:
-        # --- serial_matches_device: no name match, just compare serials ---
-        if rule.match_type == "serial_matches_device":
-            if not (item_serial and device_serial and item_serial == device_serial):
-                continue
-            # Restrict to chassis-level entries.  The rule targets fixed-form
-            # routers' system board (top-level or direct child of the chassis
-            # entity); on chassis devices a linecard sharing the device serial
-            # is *not* a system board, and marking it transparent silently
-            # promotes its sub-ports to chassis bay-matching.
-            if parent_item is not None and parent_item.get("entPhysicalClass") != "chassis":
-                continue
-            return rule.action
+        if not rule.uses_pattern:
+            if _matches_target_device(rule, item, parent_item, index_map, device_identity):
+                return rule.action
+            continue
 
         # --- name-based rules ---
         if not rule.matches_name(name):
@@ -833,7 +896,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             get_enabled_ignore_rules,
         )
         ignore_rules = default_ignore_context["ignore_rules"]
-        device_serial = default_ignore_context["device_serial"]
+        device_identity = default_ignore_context["device_identity"]
 
         # Preload NormalizationRule rows once to avoid N+1 queries inside the
         # _match_module_bay and resolve_module_type loops.
@@ -853,7 +916,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 index_map.get(item.get("entPhysicalContainedIn")),
                 item_context["ignore_rules"],
                 index_map,
-                item_context["device_serial"],
+                item_context["device_identity"],
             )
 
         module_types = self._get_module_types()
@@ -866,7 +929,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             inventory_data,
             index_map,
             ignore_rules,
-            device_serial,
+            device_identity,
             transparent_indices,
             ignore_cache,
             ignore_contexts=item_ignore_contexts,
@@ -877,7 +940,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             index_map,
             children_by_parent,
             ignore_rules,
-            device_serial,
+            device_identity,
             module_types,
             manufacturer=manufacturer,
             vc_members=vc_members,
@@ -956,7 +1019,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 policy_cache[device_id] = {
                     "manufacturer": manufacturer,
                     "ignore_rules": get_enabled_ignore_rules(manufacturer),
-                    "device_serial": (getattr(device, "serial", None) or "").strip(),
+                    "device_identity": DeviceIdentity.of(device),
                 }
             return policy_cache[device_id]
 
@@ -1012,12 +1075,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         return default_context, item_contexts
 
     @staticmethod
-    def _ignore_policy_for_item(item, ignore_contexts, default_rules, default_device_serial):
+    def _ignore_policy_for_item(item, ignore_contexts, default_rules, default_device_identity):
         """Return one item's attributed policy, or the caller's default policy."""
         context = ignore_contexts.get(_inventory_item_key(item)) if ignore_contexts is not None else None
         if context is None:
-            return default_rules, default_device_serial
-        return context["ignore_rules"], context["device_serial"]
+            return default_rules, default_device_identity
+        return context["ignore_rules"], context["device_identity"]
 
     @staticmethod
     def _has_inventory_ancestor(
@@ -1026,7 +1089,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         transparent_indices,
         ignore_contexts,
         default_rules,
-        default_device_serial,
+        default_device_identity,
     ):
         """Return whether an item belongs below a visible inventory-class ancestor."""
         current_idx = item.get("entPhysicalContainedIn", 0)
@@ -1038,11 +1101,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 current_idx = ancestor.get("entPhysicalContainedIn", 0)
                 continue
             anc_class = _normalize_librenms_text(ancestor.get("entPhysicalClass"))
-            ancestor_rules, _ancestor_device_serial = BaseModuleTableView._ignore_policy_for_item(
+            ancestor_rules, _ancestor_device_identity = BaseModuleTableView._ignore_policy_for_item(
                 ancestor,
                 ignore_contexts,
                 default_rules,
-                default_device_serial,
+                default_device_identity,
             )
             if anc_class in INVENTORY_CLASSES or _class_is_included(ancestor, ancestor_rules):
                 anc_model = _normalize_librenms_text(ancestor.get("entPhysicalModelName")).lower()
@@ -1058,7 +1121,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         inventory_data,
         index_map,
         ignore_rules,
-        device_serial,
+        device_identity,
         transparent_indices,
         ignore_cache,
         ignore_contexts=None,
@@ -1073,7 +1136,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             inventory_data (list): The inventory items to inspect.
             index_map (dict): Inventory items keyed by physical index.
             ignore_rules (list): The ignore rules to evaluate for uncached items.
-            device_serial (str): The NetBox device serial.
+            device_identity (DeviceIdentity): The target device identity.
             transparent_indices (set): Physical indices for transparent parents.
             ignore_cache (dict): Cached ignore actions keyed by physical index.
             ignore_contexts (dict | None): Per-item ignore policies for attributed VC members.
@@ -1084,11 +1147,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         """
         top_items = []
         for item in inventory_data:
-            item_rules, item_device_serial = BaseModuleTableView._ignore_policy_for_item(
+            item_rules, item_device_identity = BaseModuleTableView._ignore_policy_for_item(
                 item,
                 ignore_contexts,
                 ignore_rules,
-                device_serial,
+                device_identity,
             )
             if item.get("_from_transceiver_api"):
                 idx = item.get("entPhysicalIndex")
@@ -1100,7 +1163,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                         index_map.get(item.get("entPhysicalContainedIn")),
                         item_rules,
                         index_map,
-                        item_device_serial,
+                        item_device_identity,
                     )
                 )
                 if action in ("skip", "transparent"):
@@ -1129,7 +1192,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     index_map.get(item.get("entPhysicalContainedIn")),
                     item_rules,
                     index_map,
-                    item_device_serial,
+                    item_device_identity,
                 )
             )
             if action == "skip":
@@ -1153,7 +1216,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 transparent_indices,
                 ignore_contexts,
                 ignore_rules,
-                device_serial,
+                device_identity,
             ):
                 continue
             # Mark only rows that reach the table at top level. A Cisco converter is class
@@ -1206,7 +1269,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         index_map,
         children_by_parent,
         ignore_rules,
-        device_serial,
+        device_identity,
         module_types,
         manufacturer=None,
         vc_members=None,
@@ -1226,13 +1289,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             if ignore_context is None:
                 target_device, resolution_source = self._infer_vc_member_for_item(obj, item, index_map, vc_members)
                 target_ignore_rules = ignore_rules
-                target_device_serial = device_serial
+                target_device_identity = device_identity
                 target_manufacturer = manufacturer
             else:
                 target_device = ignore_context["selected_device"]
                 resolution_source = ignore_context["resolution_source"]
                 target_ignore_rules = ignore_context["ignore_rules"]
-                target_device_serial = ignore_context["device_serial"]
+                target_device_identity = ignore_context["device_identity"]
                 target_manufacturer = ignore_context["manufacturer"]
             target_context = member_contexts.get(target_device.id) or member_contexts.get(obj.id)
             if target_context is None:
@@ -1244,7 +1307,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 index_map,
                 children_by_parent,
                 target_ignore_rules,
-                target_device_serial,
+                target_device_identity,
                 module_types,
                 manufacturer=target_manufacturer,
                 selected_device=target_device,
@@ -1262,7 +1325,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         index_map,
         children_by_parent,
         ignore_rules,
-        device_serial,
+        device_identity,
         module_types,
         manufacturer=None,
     ):
@@ -1281,7 +1344,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 index_map,
                 children_by_parent,
                 ignore_rules,
-                device_serial,
+                device_identity,
                 module_types,
                 manufacturer=manufacturer,
                 selected_device=member,
@@ -1447,7 +1510,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         index_map,
         children_by_parent,
         ignore_rules,
-        device_serial,
+        device_identity,
         module_types,
         manufacturer,
         selected_device,
@@ -1546,7 +1609,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             children_by_parent,
             index_map,
             ignore_rules,
-            device_serial,
+            device_identity,
             ignore_contexts=ignore_contexts,
         )
         target_context_by_depth = {0: target_context}
@@ -2136,7 +2199,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         children_by_parent,
         index_map,
         ignore_rules,
-        device_serial="",
+        device_identity=NO_DEVICE_IDENTITY,
         ignore_contexts=None,
     ):
         """
@@ -2147,7 +2210,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             children_by_parent (dict): Child items keyed by parent physical index.
             index_map (dict): Inventory items keyed by physical index.
             ignore_rules (list): The ignore rules to apply.
-            device_serial (str): The NetBox device serial.
+            device_identity (DeviceIdentity): The target device identity.
             ignore_contexts (dict | None): Per-item policies for attributed VC members.
 
         Returns:
@@ -2160,7 +2223,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             children_by_parent,
             index_map,
             ignore_rules,
-            device_serial=device_serial,
+            device_identity=device_identity,
             depth=1,
             results=results,
             visited={parent_idx},
@@ -2177,7 +2240,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         depth,
         results,
         visited=None,
-        device_serial="",
+        device_identity=NO_DEVICE_IDENTITY,
         ignore_contexts=None,
     ):
         """Recursively collect descendant items that have a model name."""
@@ -2193,13 +2256,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             # Apply ignore rules: skip drops the item and its subtree; transparent
             # hides the item but promotes its children to the current depth level.
             parent_item = index_map.get(parent_idx)
-            child_rules, child_device_serial = self._ignore_policy_for_item(
+            child_rules, child_device_identity = self._ignore_policy_for_item(
                 child,
                 ignore_contexts,
                 ignore_rules,
-                device_serial,
+                device_identity,
             )
-            action = _check_ignore_rules(child, parent_item, child_rules, index_map, child_device_serial)
+            action = _check_ignore_rules(child, parent_item, child_rules, index_map, child_device_identity)
             if action == "skip":
                 continue
             if action == "transparent":
@@ -2213,7 +2276,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     depth=depth,
                     results=results,
                     visited=visited,
-                    device_serial=child_device_serial,
+                    device_identity=child_device_identity,
                     ignore_contexts=ignore_contexts,
                 )
                 continue
@@ -2229,7 +2292,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     depth=depth + 1,
                     results=results,
                     visited=visited,
-                    device_serial=child_device_serial,
+                    device_identity=child_device_identity,
                     ignore_contexts=ignore_contexts,
                 )
             else:
@@ -2242,7 +2305,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     depth=depth,
                     results=results,
                     visited=visited,
-                    device_serial=child_device_serial,
+                    device_identity=child_device_identity,
                     ignore_contexts=ignore_contexts,
                 )
 

@@ -47,10 +47,16 @@ unchecked until that review.
 | `caught-error-text` | error | A read of a caught error that can be a ValidationError, a database error or an `AbortRequest`, other than through `exception_text_for`, the module logger or a `raise`. |
 | `caught-error-text-shadow` | error | A binding of a name that `caught-error-text` trusts, a logging change, a risky error class under another name, or `except*`. |
 | `no-requests-outside-http-client` | error | Selected imported requests HTTP calls outside the package HTTP client and tests. |
+| `ipaddress-address-needs-netaddr` | error | An ipam `IPAddress` gets an address that is not a `netaddr.IPNetwork(...)` call, or a `**` expansion. |
 | `url-numeric-pk-converter` | error | A `path()` route uses `<str:pk>` or `<pk>`, including local string constants. |
 | `no-direct-htmx-request-header-read` | error | Code reads the `HX-Request` header (or `HTTP_HX_REQUEST`) instead of `request.htmx`. |
 | `no-django-testcase-in-tests` | warning | A test directly imports or inherits Django `TestCase`. Dynamic bases are outside this check. |
 | `no-unittest-assertions` | warning | A test calls a `self` method with a unittest assertion API name. |
+| `xfail-needs-raises` | error | A test marks an expected failure with `pytest.mark.xfail` and does not name the exception with `raises=`, or gives `raises=None`. An alias of the marker is not followed. |
+| `executor-needs-bounded-executor` | error | A test creates a `ThreadPoolExecutor` and does not use `tests.conftest.bounded_executor`. `tests/conftest.py` is excluded. |
+| `synchronization-needs-timeout` | error | A test creates a one-argument Barrier or calls `Event.wait()` without an argument on a local Event binding. |
+| `barrier-needs-run-in-threads` | error | A test creates a `threading.Barrier` and then starts threads with `ThreadPoolExecutor` or `Thread`, not with `tests.conftest.run_in_threads`. |
+| `recorded-response-needs-envelope` | error | Code reads a recorded response as a bare `[status, body]` list instead of through `data_shapes.envelope.unwrap_response`. |
 | `no-selected-fuzzy-apis` | warning | Code calls selected approximate-selection APIs. This does not prove exact-only selection. |
 
 ## Scope
@@ -60,13 +66,15 @@ definitions carry explicit suppressions. All other local bindings of these names
 `caught-error-text` and its shadow rule also exclude tests and migrations. The canonical
 definitions of the trusted names, and each reviewed read of a caught error, carry explicit
 suppressions. The requests rule covers
-`netbox_librenms_plugin/`, except its root `librenms_api.py` and tests. The htmx header rule
-excludes tests, because a test sends the header to build an htmx request. The two test-convention
-rules include only `netbox_librenms_plugin/tests/`. The remaining rules apply to Python files
+`netbox_librenms_plugin/`, except its root `librenms_api.py` and tests. The IPAddress rule covers
+`netbox_librenms_plugin/`, except tests and migrations. The htmx header rule excludes tests,
+because a test sends the header to build an htmx request. The six test-convention
+rules (TestCase, unittest assertions, xfail, Barrier, synchronization timeout and executor) include only
+`netbox_librenms_plugin/tests/`. The remaining rules apply to Python files
 in the scan target.
 
 Opengrep 1.30.0 skips test directories during directory scans. The scan script expands the default
-targets into the package directory and explicit Python test files. Options alone keep these defaults.
+targets into the package directory and explicit Python test files, in the package and in `tests/`. Options alone keep these defaults.
 Pass options before the first `--`. The wrapper passes them to opengrep unchanged.
 Pass explicit targets after `--` to replace the defaults. With no `--`, the defaults apply.
 
@@ -86,6 +94,22 @@ because rules cannot infer its destination.
 The htmx header rule checks `.get()`, subscript and `in` reads whose key is the header name or its
 `META` name, in any letter case, also through a local string constant. It does not see a key built
 at run time.
+
+The IPAddress rule checks the `address` keyword of the constructor and of `create`,
+`get_or_create` and `update_or_create` at the end of any `IPAddress.objects` queryset chain, and
+`address` in `defaults` or `create_defaults`. A `**` expansion into these calls hides the address,
+so the rule reports it outright. Filters such as `filter(address=...)` are allowed. The rule cannot
+infer the type of an assigned object, so it checks `.address =` and `setattr(..., "address", ...)`
+only in files that import `IPAddress` from `ipam.models` or import `ipam.models` itself. A value
+passed in as a `netaddr.IPNetwork` variable is also reported; wrap the value at the call.
+
+The Barrier rule checks a test function that assigns a `Barrier(...)` or `threading.Barrier(...)` before it
+starts a thread. It does not follow a barrier that another function creates, a thread that a helper starts,
+or a handshake with an `Event`.
+
+The executor rule checks each `ThreadPoolExecutor(...)` call, also through an import alias or a module
+alias. It does not see an executor that a variable of another type supplies, such as a class in a
+variable. It excludes `tests/conftest.py`, which holds `bounded_executor` and `run_in_threads`.
 
 The URL rule checks `<str:pk>` and `<pk>` in literal routes and local string constants.
 It leaves `<str:id>` alone because external IDs can contain text. The `pk` name is a package
@@ -146,6 +170,11 @@ the same file. Its limits:
   of a lambda default.
 - The rule follows a closure or a lambda that the function defines before the handler only when
   the `try` statement is at the top level of the function body.
+
+The recorded-response rule checks the two legacy spellings of the `[status, body]` read: the
+`isinstance(..., list) and len(...) == 2 and isinstance(...[0], int)` test and the
+`x[1] if isinstance(x, list) else x` expression. It does not see tuple unpacking or a `type()`
+check. `data_shapes/envelope.py` is excluded because it owns the format.
 
 ## `--taint-intrafile` is required
 

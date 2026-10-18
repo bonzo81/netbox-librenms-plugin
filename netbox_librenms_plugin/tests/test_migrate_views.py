@@ -14,7 +14,12 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_vm,
 )
-from netbox_librenms_plugin.tests.view_test_helpers import grant, make_request, make_user_with_perms
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    assert_update_logged,
+    grant,
+    make_request,
+    make_user_with_perms,
+)
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
     get_migrated_to_marker,
@@ -192,6 +197,8 @@ class TestMoveInterfaceToWinner:
         assert lag.device == winner
         assert member.device == winner
         assert member.lag == lag
+        assert_update_logged(lag, "device", donor.pk, winner.pk)
+        assert_update_logged(member, "device", donor.pk, winner.pk)
 
     def test_parent_move_carries_children_and_bridged_interfaces(self, client):
         donor = make_device("interface-parent-donor")
@@ -252,6 +259,7 @@ class TestMoveInterfaceToWinner:
             termination_id=interface.pk,
         )
         assert termination._device_id == winner.pk
+        assert_update_logged(termination, "_device", donor.pk, winner.pk)
 
     def test_user_without_change_grant_cannot_move_interface(self, client):
         donor = make_device("interface-permission-donor")

@@ -7,7 +7,6 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Optional
 
-import netaddr
 import psycopg
 from dcim.models import Device, Interface
 from django.core import signing
@@ -4646,27 +4645,6 @@ def netbox_resolves_module_token_per_leaf():
     return version >= _MODULE_TOKEN_LEAF_FIX_VERSION
 
 
-def ip_family(ip):
-    """
-    Return the IP family (4 or 6) of an IPAddress, or None when it has no address.
-
-    Mirrors NetBox >= 4.5's ``IPAddress.family``. NetBox 4.4's property lacks the
-    str-tolerant branch, and a freshly constructed ``IPAddress(address="...")``
-    keeps the plain str in memory even after ``save()`` — so reading ``.family``
-    on 4.4 raises AttributeError for exactly the objects the sync flows create.
-
-    Args:
-        ip: The IPAddress whose family to read.
-
-    """
-    address = ip.address
-    if not address:
-        return None
-    if isinstance(address, str):
-        return netaddr.IPNetwork(address).version
-    return address.version
-
-
 def _normalize_merge_entry(entry, *, owner_label, owner_name, server_key, copy_dict):
     """
     Coerce one device's per-server ``librenms_id`` entry to a dict, failing closed on corrupt shapes.
@@ -5121,9 +5099,7 @@ def set_device_ip_fk(device, field, ip, *, save=True):
         # NetBox's Device.clean() requires primary_ip4 to be IPv4 and primary_ip6 to be IPv6;
         # update_fields skips full_clean(), so enforce the family here too (oob_ip is family-
         # agnostic). Otherwise an IPv6 address could be silently stored as primary_ip4.
-        # ip_family(), not ip.family: NetBox 4.4's property raises on in-memory str addresses,
-        # and getattr's default would turn that crash into a bogus refusal of a valid address.
-        family = ip_family(ip)
+        family = ip.family
         if field == "primary_ip4" and family != 4:
             raise ValueError(f"set_device_ip_fk: refusing to set primary_ip4 to non-IPv4 address {ip}")
         if field == "primary_ip6" and family != 6:

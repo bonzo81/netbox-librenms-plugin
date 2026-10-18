@@ -325,10 +325,11 @@ class TestInventoryIgnoreRulesDuringCollection:
         )
 
     def _collect(self, parent_index, rows, rules):
+        from netbox_librenms_plugin.views.base.modules_view import DeviceIdentity
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
         index_map = {row["entPhysicalIndex"]: row for row in rows}
-        return InstallBranchView()._collect_branch(parent_index, rows, rules, "", index_map)
+        return InstallBranchView()._collect_branch(parent_index, rows, rules, DeviceIdentity(), index_map)
 
     def test_a_skip_rule_drops_the_item_and_its_subtree(self):
         rows = [
