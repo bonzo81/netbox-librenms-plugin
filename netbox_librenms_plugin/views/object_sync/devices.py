@@ -473,7 +473,7 @@ class SingleModuleVerifyView(
             server_key=server_key,
         )
         if (rule_error := context.get("inventory_rule_error")) is not None:
-            return JsonResponse({"status": "error", "message": str(rule_error)}, status=409)
+            return JsonResponse({"status": "error", "message": rule_error.public_message}, status=409)
         if context.get("table") is None:
             return JsonResponse({"status": "error", "message": "No cached inventory data"}, status=404)
         if context.get("inventory_index_ambiguous"):
