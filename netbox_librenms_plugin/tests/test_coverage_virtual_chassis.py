@@ -97,3 +97,19 @@ class TestStackMemberSerials:
 
         assert virtual_chassis.members.count() == 2
         assert virtual_chassis.members.get(vc_position=2).serial == expected
+
+
+@pytest.mark.parametrize("serials", [["OTHER", "MEMBER"], ["MASTER", "MASTER"]])
+def test_the_vc_modal_explains_that_no_unique_member_matches(serials):
+    from django.template.loader import render_to_string
+
+    members = [{"name": f"Member {index}", "serial": serial} for index, serial in enumerate(serials)]
+    content = render_to_string(
+        "netbox_librenms_plugin/htmx/device_vc_details.html",
+        {
+            "libre_device": {"hostname": "test-device"},
+            "vc_data": {"is_stack": True, "master_identified": False, "member_count": 2, "members": members},
+        },
+    )
+
+    assert "No unique member matches the device serial" in content
