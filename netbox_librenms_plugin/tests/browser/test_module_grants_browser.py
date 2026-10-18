@@ -413,3 +413,28 @@ def test_a_verified_row_opens_its_replace_preview_in_the_modal(page):
 
     assert (preview.value.method, preview.value.url) == ("GET", f"https://plugin.example.com{PREVIEW_URL}")
     expect(page.locator("#htmx-modal-content #mismatch-preview")).to_have_text("Preview")
+
+
+@pytest.mark.parametrize("content_type", ["text/html", "text/plain"])
+@pytest.mark.parametrize("reverify", [False, True], ids=["member-change", "saved-selection"])
+def test_a_non_json_member_refusal_keeps_the_response_body_out_of_the_toast(page, content_type, reverify):
+    """An upstream error page must not become the user's refusal message."""
+    refusal = {"status": 502, "content_type": content_type, "body": "private diagnostic content"}
+    if reverify:
+        _answers(page, _success(30, "2", "override-30"), refusal)
+    else:
+        _answers(page, refusal)
+    _load(page, [_row(30), _row(31)], url=f"{PAGE_URL}?page=1")
+
+    with page.expect_response(VERIFY_ROUTE):
+        _change_member(page, 30, "2")
+    if reverify:
+        page.check("#cb-30")
+        _load(page, [_row(40)], url=f"{PAGE_URL}?page=2")
+        with page.expect_response(VERIFY_ROUTE):
+            _load(page, [_row(30), _row(31)], url=f"{PAGE_URL}?page=1")
+
+    expect(_toasts(page)).to_contain_text("502")
+    expect(_toasts(page)).not_to_contain_text("private diagnostic content")
+    expect(page.locator("#install-30")).to_be_enabled()
+    assert page.locator("#device_selection_30").input_value() == "1"
