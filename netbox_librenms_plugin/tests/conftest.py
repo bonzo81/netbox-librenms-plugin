@@ -839,10 +839,22 @@ WORKER_RELEASE_SECONDS = 5
 def _terminate_database_sessions(wrappers):
     """End the PostgreSQL session of each open worker connection."""
     from django.db import DEFAULT_DB_ALIAS, connections
+    from psycopg import OperationalError
 
-    pids = sorted(
-        {pid for wrapper in wrappers if (raw := wrapper.connection) is not None and (pid := raw.info.backend_pid)}
-    )
+    pids = set()
+    for wrapper in wrappers:
+        raw = wrapper.connection
+        if raw is None:
+            continue
+        try:
+            pid = raw.info.backend_pid
+        except OperationalError:
+            # Django retains a closed connection inside an atomic block.
+            if raw.closed:
+                continue
+            raise
+        if pid:
+            pids.add(pid)
     if not pids:
         return False
     # The caller's connection can be in a failed transaction, so use a new one.
@@ -853,7 +865,7 @@ def _terminate_database_sessions(wrappers):
     )
     try:
         with terminator.cursor() as cursor:
-            cursor.execute("SELECT pg_terminate_backend(pid) FROM unnest(%s::int[]) AS pid", [pids])
+            cursor.execute("SELECT pg_terminate_backend(pid) FROM unnest(%s::int[]) AS pid", [sorted(pids)])
     finally:
         terminator.close()
     return True

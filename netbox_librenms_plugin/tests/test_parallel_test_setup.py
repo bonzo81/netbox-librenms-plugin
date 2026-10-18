@@ -1259,7 +1259,8 @@ except TimeoutError:
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("connection_source", ["cached", "separate"])
-def test_normal_executor_shutdown_releases_a_worker_blocked_on_a_row_lock(connection_source):
+@pytest.mark.parametrize("closed_peer", [False, True], ids=["single-worker", "closed-peer"])
+def test_normal_executor_shutdown_releases_a_worker_blocked_on_a_row_lock(connection_source, closed_peer):
     """End a blocked worker session before the watchdog can discard the test results."""
     from django.db import connection
 
@@ -1277,6 +1278,14 @@ from netbox_librenms_plugin.tests.conftest import bounded_executor
 
 pids = []
 finished = Event()
+peer_closed = Event()
+
+def close_in_atomic():
+    with transaction.atomic():
+        connection.ensure_connection()
+        connection.close()
+        peer_closed.set()
+        Event().wait(timeout=7)
 
 def worker():
     db = connections.create_connection("default") if sys.argv[2] == "separate" else connection
@@ -1293,7 +1302,10 @@ with transaction.atomic():
     with connection.cursor() as cursor:
         cursor.execute("SELECT id FROM django_content_type ORDER BY id LIMIT 1 FOR UPDATE")
         locked_id = cursor.fetchone()[0]
-        with bounded_executor(max_workers=1) as executor:
+        with bounded_executor(max_workers=2 if sys.argv[3] == "True" else 1) as executor:
+            if sys.argv[3] == "True":
+                closed = executor.submit(close_in_atomic)
+                assert peer_closed.wait(timeout=5)
             future = executor.submit(worker)
             deadline = monotonic() + 5
             while True:
@@ -1304,6 +1316,8 @@ with transaction.atomic():
                         break
                 assert monotonic() < deadline, "worker did not block on the row lock"
                 sleep(0.01)
+        if sys.argv[3] == "True":
+            assert closed.result(timeout=1) is None
         assert finished.is_set()
         error = future.exception(timeout=1)
         assert isinstance(error, DatabaseError)
@@ -1314,7 +1328,7 @@ with transaction.atomic():
 connections.close_all()
 """
     result = subprocess.run(
-        [sys.executable, "-c", script, connection.settings_dict["NAME"], connection_source],
+        [sys.executable, "-c", script, connection.settings_dict["NAME"], connection_source, str(closed_peer)],
         env={**os.environ, "DJANGO_SETTINGS_MODULE": "netbox_librenms_plugin.tests.isolated_settings"},
         capture_output=True,
         text=True,
