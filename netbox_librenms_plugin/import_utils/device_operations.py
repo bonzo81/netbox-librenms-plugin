@@ -21,6 +21,7 @@ from ..librenms_api import LibreNMSAPI, librenms_id_owned_message
 from ..librenms_ids import coerce_librenms_id
 from ..models import RuleConfigurationError
 from ..platform_versions import (
+    HIDDEN_PLATFORM,
     PlatformFacts,
     PlatformReason,
     PlatformState,
@@ -1723,7 +1724,9 @@ def import_platform_warnings(label, plan, text_viewer):
     detail = reason_text(plan.reason, plan.assessment, text_viewer)
     if plan.error is not None:
         detail = f"{detail} {exception_text_for(plan.error, Platform, text_viewer)}"
-    return [f"Imported {label} with OS platform {platform_label(plan.platform, text_viewer)}: {detail}"]
+    platform = platform_label(plan.platform, text_viewer)
+    assigned = "an OS platform you cannot view" if platform == HIDDEN_PLATFORM else f"OS platform {platform}"
+    return [f"Imported {label} with {assigned}: {detail}"]
 
 
 def import_single_device(  # noqa: C901
