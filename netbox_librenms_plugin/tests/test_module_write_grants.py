@@ -363,6 +363,27 @@ def test_a_rule_that_does_not_work_renders_no_table_and_no_grant(ui, c8300, brea
     assert "inventory_binding" not in content
 
 
+def test_a_broken_optic_serial_rule_discards_the_old_snapshot_and_names_the_rule(ui, c8300):
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
+
+    device, _entities = c8300
+    render(ui, device)
+    assert cache.get(cache_key(device)) is not None
+    rule, field = _break_serial_replacement()
+
+    content = render(ui, device)
+
+    assert 'id="module-inventory-rule-error"' in content
+    assert rule.get_absolute_url() in content and f"<code>{field}</code>" in content
+    assert "inventory_binding" not in content
+    assert "Inventory data refreshed successfully." not in content
+    assert cache.get(cache_key(device)) is None
+    state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.MODULES, SERVER_KEY))
+    assert state["state"] == SyncTabState.REFRESH_FAILED.value
+
+
 @pytest.mark.parametrize("breakage", list(BREAKAGES))
 @pytest.mark.parametrize("writer", list(WRITERS))
 def test_a_rule_broken_after_render_refuses_every_writer(ui, c8300, writer, breakage):
