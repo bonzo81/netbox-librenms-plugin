@@ -20,6 +20,7 @@ from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording, fi
 from netbox_librenms_plugin.data_shapes.capture import capture_device_recording
 from netbox_librenms_plugin.data_shapes.compress import compress_recording
 from netbox_librenms_plugin.data_shapes.signature import classify_novelty, compute_shape_signature
+from netbox_librenms_plugin.import_utils.virtual_chassis import chassis_serial_key
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.views.mixins import (
@@ -85,7 +86,9 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             # WITHIN one recording (that is what keeps cross-references matching), and the
             # contributor publishes this file: with the empty default salt, a sha256 of a
             # low-entropy value like a hostname is recoverable by hashing dictionary candidates.
-            anonymized = anonymize_recording(recording, salt=secrets.token_hex(16))
+            anonymized = anonymize_recording(
+                recording, salt=secrets.token_hex(16), serial_key=chassis_serial_key(sync_device)
+            )
         except RuntimeError as exc:
             # capture raises on an incomplete capture (a transport failure, or an error status on a
             # required structural route such as a stale librenms_id), and anonymization raises when

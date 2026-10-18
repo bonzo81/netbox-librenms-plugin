@@ -193,3 +193,73 @@ def test_a_serial_rule_that_removes_identity_does_not_publish_the_original_seria
     assert "CAPTURE-A" not in json.dumps(anonymized)
     assert anonymized["responses"][f"GET /api/v0/devices/{anonymized['device_id']}"]["devices"][0]["serial"] == ""
     assert recording["responses"]["GET /api/v0/devices/1"]["devices"][0]["serial"] == "CAPTURE-A"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("scoped", [False, True], ids=["global", "manufacturer"])
+def test_capture_download_replays_the_same_normalized_virtual_chassis(client, recording_server, scoped):
+    import json
+    from copy import deepcopy
+
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
+    from netbox_librenms_plugin.data_shapes.signature import compute_shape_signature
+    from netbox_librenms_plugin.import_utils.virtual_chassis import (
+        detect_virtual_chassis_from_inventory,
+        identify_vc_master,
+        vc_serial_key,
+    )
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+    from netbox_librenms_plugin.tests.test_data_shapes_view import _captured_recording, _override_servers
+
+    recording = deepcopy(load_recording("juniper-ex4400-vc-2member"))
+    device_id = recording["device_id"]
+    _edit_rows(recording, 1, lambda row: row.update(entPhysicalSerialNum="S/N CAPTURE-A"))
+    _edit_rows(recording, 120, lambda row: row.update(entPhysicalSerialNum="CAPTURE-A"))
+    _edit_rows(recording, 121, lambda row: row.update(entPhysicalSerialNum="CAPTURE-B"))
+    unwrap_response(recording["responses"][f"GET /api/v0/devices/{device_id}"])[1]["devices"][0]["serial"] = (
+        "S/N CAPTURE-A"
+    )
+    device = make_device("normalized-capture", librenms_cf={"test": {"id": device_id}})
+    NormalizationRule.objects.filter(scope="serial").delete()
+    NormalizationRule.objects.create(
+        scope="serial",
+        manufacturer=device.device_type.manufacturer if scoped else None,
+        match_pattern=r"^S/N\s+(.+)$",
+        replacement=r"\1",
+    )
+    server, api = recording_server(recording)
+    for suffix, field in [
+        ("ports", "ports"),
+        ("port_stack", "mappings"),
+        ("ip", "addresses"),
+        ("links", "links"),
+        ("transceivers", "transceivers"),
+    ]:
+        server.register(f"/api/v0/devices/{device_id}/{suffix}", {"status": "ok", field: []})
+    assert detect_virtual_chassis_from_inventory(api, device_id)["member_count"] == 2
+    client.force_login(make_superuser("normalized-capture-user"))
+
+    with _override_servers(server):
+        response = client.get(
+            reverse("plugins:netbox_librenms_plugin:capture_data_shape", kwargs={"device_id": device.pk}),
+            {"server_key": "test"},
+            HTTP_HX_REQUEST="true",
+        )
+
+    assert response.status_code == 200
+    assert b'id="capture-json"' in response.content, response.content.decode()
+    captured = _captured_recording(response)
+    assert compute_shape_signature(captured)["virtual_chassis"]["member_count"] == 2
+    assert "CAPTURE-A" not in json.dumps(captured)
+    assert "CAPTURE-B" not in json.dumps(captured)
+    NormalizationRule.objects.filter(scope="serial").delete()
+    _server, replay_api = recording_server(captured)
+    replay_id = captured["device_id"]
+    detected = detect_virtual_chassis_from_inventory(replay_api, replay_id)
+    assert detected["member_count"] == 2
+    ok, replay_device = replay_api.get_device_info(replay_id)
+    assert ok
+    assert identify_vc_master(detected["members"], replay_device["serial"], vc_serial_key()) is detected["members"][0]
