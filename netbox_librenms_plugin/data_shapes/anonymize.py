@@ -247,8 +247,8 @@ _IPV6_RE = re.compile(
     rf"|:(?:(?::{_H16}){{1,7}}|:)"  # ::2:3:4:5:6:7:8  ::
     r")(?![0-9A-Fa-f:])"
 )
-# An SNMP module-qualified name ("OLD-CISCO-TS-MIB::ltsLineTable") is not an address; find_pii blanks only these.
-_MIB_QUALIFIED_NAME_RE = re.compile(r"\b[A-Za-z][\w-]*-MIB::\w+")
+# SNMP module-qualified names are not addresses. Keep address-shaped suffixes for the IPv6 scan.
+_MIB_QUALIFIED_NAME_RE = re.compile(r"\b[A-Za-z][\w-]*-MIB::(?P<suffix>[\w:]+)")
 _MAC_RE = re.compile(r"\b(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}\b")
 # Match a full email AND the dotless internal-domain form (``user@host``): internal mail domains and
 # short-hostname contacts (e.g. ``netops@corp``) carry no dot, so requiring one let a real leak slip
@@ -1075,7 +1075,11 @@ def find_pii(recording):
             ):
                 if ip_exempt and kind in ("ipv4", "ipv6", "fqdn"):
                     continue
-                text = _MIB_QUALIFIED_NAME_RE.sub(" ", obj) if kind == "ipv6" else obj
+                text = (
+                    _MIB_QUALIFIED_NAME_RE.sub(lambda mib: " " + mib["suffix"] if ":" in mib["suffix"] else " ", obj)
+                    if kind == "ipv6"
+                    else obj
+                )
                 for match in regex.findall(text):
                     # IPv6 hex is case-insensitive, so lower-case before the documentation-range
                     # check (e.g. 2001:DB8::1 must still be exempted like 2001:db8::1).
