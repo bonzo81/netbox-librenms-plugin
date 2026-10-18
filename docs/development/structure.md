@@ -45,6 +45,6 @@ This document provides an overview of the NetBox LibreNMS Plugin's codebase orga
   - `utils.py` — Shared matching, normalization, and data-conversion helpers
 - `docs/` — User and developer documentation plus screenshots
 - `contrib/` — Example mapping, normalization, and rule files for bulk import
-- `tests/e2e/` — End-to-end tests outside the primary Django test suite
+- `tests/e2e/` — End-to-end browser tests against a Compose stack of NetBox and the LibreNMS stub
 - `tools/` — Repository-specific lint and maintenance utilities
 - `.devcontainer/` — Local NetBox development environment and helper scripts
