@@ -1176,6 +1176,107 @@ class TestPostInventoryRefresh:
             method="GET",
         )
 
+    @pytest.mark.parametrize("entity_index", [300, 7], ids=["entity-index", "port-ifindex"])
+    def test_post_compares_optic_serials_with_the_device_manufacturer_rules(
+        self, librenms_server, server_keys, entity_index
+    ):
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        server_key, _ = server_keys
+        device = _mapped_device("normalized-optic", server_key)
+        NormalizationRule.objects.create(
+            scope="serial",
+            manufacturer=device.device_type.manufacturer,
+            match_pattern=r"^TAG (.+)$",
+            replacement=r"\1",
+        )
+        inventory = [
+            {
+                "entPhysicalIndex": 300,
+                "ifIndex": 7,
+                "entPhysicalClass": "port",
+                "entPhysicalName": "Unlabelled optic",
+                "entPhysicalModelName": "",
+                "entPhysicalSerialNum": "TAG OPTIC-7",
+                "entPhysicalContainedIn": 0,
+            }
+        ]
+        self._register_successful_refresh(
+            librenms_server,
+            inventory=inventory,
+            transceivers=[
+                {
+                    "entity_physical_index": entity_index,
+                    "port_id": 42,
+                    "model": "SFP-10G-LR",
+                    "serial": "OPTIC-7",
+                    "type": "SFP+",
+                }
+            ],
+            ports=[{"port_id": 42, "ifIndex": 7, "ifName": "xe-0/0/0", "ifDescr": "uplink"}],
+        )
+        view = DeviceModuleTableView()
+
+        response = post(view, make_request("post", {"server_key": server_key}), pk=device.pk)
+
+        assert response.status_code == 200
+        snapshot = cache.get(view.get_cache_key(device, "inventory", server_key=server_key))
+        optic = next(item for item in snapshot["inventory"] if item["entPhysicalIndex"] == 300)
+        assert optic.get("_librenms_port_id") == 42
+        assert optic["entPhysicalModelName"] == "SFP-10G-LR"
+        assert optic["entPhysicalSerialNum"] == "TAG OPTIC-7"
+
+    def test_post_deduplicates_an_optic_with_the_device_manufacturer_serial_rules(self, librenms_server, server_keys):
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        server_key, _ = server_keys
+        device = _mapped_device("deduplicated-optic", server_key)
+        NormalizationRule.objects.create(
+            scope="serial",
+            manufacturer=device.device_type.manufacturer,
+            match_pattern=r"^TAG (.+)$",
+            replacement=r"\1",
+        )
+        inventory = [
+            {
+                "entPhysicalIndex": 300,
+                "entPhysicalClass": "port",
+                "entPhysicalName": "Existing optic",
+                "entPhysicalModelName": "SFP-10G-LR",
+                "entPhysicalSerialNum": "TAG OPTIC-7",
+                "entPhysicalContainedIn": 0,
+            }
+        ]
+        self._register_successful_refresh(
+            librenms_server,
+            inventory=inventory,
+            transceivers=[
+                {
+                    "entity_physical_index": 400,
+                    "port_id": 42,
+                    "model": "SFP-10G-LR",
+                    "serial": "OPTIC-7",
+                    "type": "SFP+",
+                }
+            ],
+            ports=[{"port_id": 42, "ifName": "xe-0/0/0", "ifDescr": "uplink"}],
+        )
+        view = DeviceModuleTableView()
+
+        response = post(view, make_request("post", {"server_key": server_key}), pk=device.pk)
+
+        assert response.status_code == 200
+        snapshot = cache.get(view.get_cache_key(device, "inventory", server_key=server_key))
+        assert [item["entPhysicalIndex"] for item in snapshot["inventory"]] == [300]
+
     def test_post_fetches_ports_once_and_reuses_payload(self, librenms_server, server_keys):
         from django.core.cache import cache
 
@@ -7080,7 +7181,7 @@ def test_vc_default_hardware_parent_keeps_child_on_page_device(client, settings,
 
 
 @pytest.mark.django_db
-def test_junos_vc_rows_on_the_page_belong_to_the_member_they_name(client, settings):
+def test_junos_vc_rows_on_the_page_belong_to_the_member_they_name(client, settings, librenms_server):
     """Junos rows under the one VC root belong to the member their FPC names, not to the root's master."""
     from django.core.cache import cache
     from django.urls import reverse
@@ -7089,11 +7190,13 @@ def test_junos_vc_rows_on_the_page_belong_to_the_member_they_name(client, settin
     from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
     from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
-    configure_servers(
-        settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
-    )
+    from netbox_librenms_plugin.tests.conftest import bind_librenms_server
+
+    bind_librenms_server(settings, librenms_server, server_key="default")
     master, member = make_junos_vc_members("junos-modules")
-    payload = trusted_module_inventory_payload(master, junos_vc_inventory(), librenms_id=9355)
+    inventory = junos_vc_inventory()
+    librenms_server.inventory_response(9355, inventory)
+    payload = trusted_module_inventory_payload(master, inventory, librenms_id=9355)
     cache.set(DeviceModuleTableView().get_cache_key(master, "inventory", server_key="default"), payload, 300)
     cache.set("librenms_device_info_default_9355", (True, {"device_id": 9355, "hostname": master.name}), 300)
     client.force_login(make_superuser("junos-modules-user"))
@@ -7103,6 +7206,7 @@ def test_junos_vc_rows_on_the_page_belong_to_the_member_they_name(client, settin
         {"tab": "modules", "server_key": "default"},
     )
 
+    assert any("/inventory/" in request["path"] for request in librenms_server.requests)
     assert response.status_code == 200
     owners = {
         row["ent_physical_index"]: row["selected_device_id"] for row in response.context["module_sync"]["table"].data
@@ -7114,7 +7218,7 @@ def test_junos_vc_rows_on_the_page_belong_to_the_member_they_name(client, settin
 
 
 @pytest.mark.django_db
-def test_a_decorated_junos_fpc_serial_is_serial_evidence_on_the_page(client, settings):
+def test_a_decorated_junos_fpc_serial_is_serial_evidence_on_the_page(client, settings, librenms_server):
     """Juniper reports "S/N 12350"; after the serial rules it names its member even where the position disagrees."""
     from django.core.cache import cache
     from django.urls import reverse
@@ -7124,9 +7228,9 @@ def test_a_decorated_junos_fpc_serial_is_serial_evidence_on_the_page(client, set
     from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
     from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
-    configure_servers(
-        settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
-    )
+    from netbox_librenms_plugin.tests.conftest import bind_librenms_server
+
+    bind_librenms_server(settings, librenms_server, server_key="default")
     NormalizationRule.objects.get_or_create(
         scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
     )
@@ -7139,6 +7243,7 @@ def test_a_decorated_junos_fpc_serial_is_serial_evidence_on_the_page(client, set
         {**row, "entPhysicalSerialNum": f"S/N {row['entPhysicalSerialNum']}"} if row["entPhysicalSerialNum"] else row
         for row in junos_vc_inventory()
     ]
+    librenms_server.inventory_response(9356, inventory)
     payload = trusted_module_inventory_payload(master, inventory, librenms_id=9356)
     cache.set(DeviceModuleTableView().get_cache_key(master, "inventory", server_key="default"), payload, 300)
     cache.set("librenms_device_info_default_9356", (True, {"device_id": 9356, "hostname": master.name}), 300)
@@ -7149,6 +7254,7 @@ def test_a_decorated_junos_fpc_serial_is_serial_evidence_on_the_page(client, set
         {"tab": "modules", "server_key": "default"},
     )
 
+    assert any("/inventory/" in request["path"] for request in librenms_server.requests)
     assert response.status_code == 200
     rows = {row["ent_physical_index"]: row for row in response.context["module_sync"]["table"].data}
     assert rows[1210]["selected_device_id"] == master.pk

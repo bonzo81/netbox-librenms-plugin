@@ -13,7 +13,7 @@ from netbox_librenms_plugin.constants import (
     OOB_INVENTORY_SOURCE,
     is_librenms_placeholder,
 )
-from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory, chassis_serial_key
+from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory, chassis_serial_key, vc_serial_key
 from netbox_librenms_plugin.librenms_ids import (
     coerce_librenms_id,
     normalize_librenms_port_id,
@@ -109,20 +109,20 @@ def _clean_librenms_value(value) -> str:
     return "" if is_librenms_placeholder(text) else text
 
 
-def _names_another_part(item: dict, transceiver: dict) -> bool:
+def _names_another_part(item: dict, transceiver: dict, serial_key) -> bool:
     """Return whether an entity and a transceiver both have a real serial and the serials differ."""
-    item_serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
-    transceiver_serial = _clean_librenms_value(transceiver.get("serial"))
+    item_serial = serial_key(item.get("entPhysicalSerialNum"))
+    transceiver_serial = serial_key(transceiver.get("serial"))
     return bool(item_serial and transceiver_serial and item_serial != transceiver_serial)
 
 
-def _ifindex_entity_is_the_optic(item: dict, transceiver: dict) -> bool:
+def _ifindex_entity_is_the_optic(item: dict, transceiver: dict, serial_key) -> bool:
     """Return whether an entity matched only by port ifIndex has the optic's serial, or neither model nor serial."""
-    if _names_another_part(item, transceiver):
+    if _names_another_part(item, transceiver, serial_key):
         return False
-    item_serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
+    item_serial = serial_key(item.get("entPhysicalSerialNum"))
     if item_serial:
-        return item_serial == _clean_librenms_value(transceiver.get("serial"))
+        return item_serial == serial_key(transceiver.get("serial"))
     return not _clean_librenms_value(item.get("entPhysicalModelName"))
 
 
@@ -709,7 +709,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # are counted in main_max_idx.  Vendors like Nokia expose SFPs in the
         # transceiver API with indices that are absent from ENTITY-MIB; without
         # this reordering those high indices could fall inside the OOB namespace.
-        inventory_data, txr_error = self._merge_transceiver_data(inventory_data, ports_data=ports_data)
+        inventory_data, txr_error = self._merge_transceiver_data(
+            inventory_data, ports_data=ports_data, manufacturer=sync_device.device_type.manufacturer
+        )
         for item in inventory_data:
             item.setdefault("_source", MAIN_INVENTORY_SOURCE)
         # Enrich port rows with stable LibreNMS port_id using ports data so
@@ -1762,7 +1764,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     child_item
                 )
 
-    def _merge_transceiver_data(self, inventory_data, ports_data=None):  # noqa: C901
+    def _merge_transceiver_data(self, inventory_data, ports_data=None, *, manufacturer=None):  # noqa: C901
         """
         Merge transceiver API data with entity inventory.
 
@@ -1806,7 +1808,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         inv_by_index = {
             idx: item for item in inventory_data if (idx := _coerce_idx(item.get("entPhysicalIndex"))) is not None
         }
-        inv_serials = {s for item in inventory_data if (s := _clean_librenms_value(item.get("entPhysicalSerialNum")))}
+        serial_key = vc_serial_key(manufacturer)
+        inv_serials = {s for item in inventory_data if (s := serial_key(item.get("entPhysicalSerialNum")))}
         inv_by_ifindex = {}
         for item in inventory_data:
             if (if_index := _coerce_idx(item.get("ifIndex"))) is not None:
@@ -1836,13 +1839,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             existing = inv_by_index.get(ent_idx)
             index_taken = existing is not None
             if existing is not None and (
-                _names_another_part(existing, txr)
+                _names_another_part(existing, txr, serial_key)
                 or (port_ifindex is not None and _coerce_idx(existing.get("ifIndex")) not in {None, port_ifindex})
             ):
                 existing = None
             if existing is None and port_ifindex is not None:
                 by_ifindex = inv_by_ifindex.get(port_ifindex)
-                if by_ifindex is not None and _ifindex_entity_is_the_optic(by_ifindex, txr):
+                if by_ifindex is not None and _ifindex_entity_is_the_optic(by_ifindex, txr, serial_key):
                     existing = by_ifindex
             if existing is None and index_taken:
                 # A synthetic row would duplicate the unrelated entity's index.
@@ -1867,7 +1870,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 existing_serial = _clean_librenms_value(existing.get("entPhysicalSerialNum"))
                 if not existing_serial and serial:
                     existing["entPhysicalSerialNum"] = serial
-                    inv_serials.add(serial)
+                    inv_serials.add(serial_key(serial))
                 if port_id:
                     existing["_librenms_port_id"] = port_id
                 if ifname:
@@ -1876,7 +1879,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     existing["_librenms_ifdescr"] = ifdescr
             else:
                 # Skip if serial already exists in ENTITY-MIB data (avoid duplicates)
-                if serial and serial in inv_serials:
+                if serial and serial_key(serial) in inv_serials:
                     continue
                 # Create synthetic inventory item for SFPs not in entity inventory
                 if ifname:
@@ -1905,7 +1908,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 # Update dedupe maps so subsequent iterations skip this entry
                 inv_by_index[ent_idx] = synthetic
                 if serial:
-                    inv_serials.add(serial)
+                    inv_serials.add(serial_key(serial))
 
         # Nest synthetic transceivers under their parent inventory item by
         # matching the leading slash-separated path components of the synthetic
