@@ -1582,7 +1582,7 @@ class TestImportSingleDevice:
         assert result["device"].platform == os_platform
         # Saved text names no platform.
         assert result["warnings"] == [
-            "Imported device 5612 with OS platform a platform you cannot view: You do not have permission to "
+            "Imported device 5612 with an OS platform you cannot view: You do not have permission to "
             "add platforms, so a new version platform for version '7.2.2' cannot be created."
         ]
         assert not Platform.objects.filter(parent=os_platform).exists()
