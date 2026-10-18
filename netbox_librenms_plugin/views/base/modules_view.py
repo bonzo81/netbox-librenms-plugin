@@ -832,9 +832,34 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # are counted in main_max_idx.  Vendors like Nokia expose SFPs in the
         # transceiver API with indices that are absent from ENTITY-MIB; without
         # this reordering those high indices could fall inside the OOB namespace.
-        inventory_data, txr_error = self._merge_transceiver_data(
-            inventory_data, ports_data=ports_data, manufacturer=sync_device.device_type.manufacturer
-        )
+        from netbox_librenms_plugin.models import RuleConfigurationError
+
+        try:
+            inventory_data, txr_error = self._merge_transceiver_data(
+                inventory_data, ports_data=ports_data, manufacturer=sync_device.device_type.manufacturer
+            )
+        except RuleConfigurationError as exc:
+            cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
+            SyncCacheConsistency(obj).mark_refresh_failure(
+                SyncTab.MODULES,
+                server_key,
+                actor_id=request_actor_id(request),
+            )
+            logger.error("Module table for %s not built: %s", obj, exc)
+            return self.render_sync_partial(
+                request,
+                obj,
+                server_key,
+                {
+                    "module_sync": {
+                        "object": obj,
+                        "table": None,
+                        "cache_expiry": None,
+                        "server_key": server_key,
+                        "inventory_rule_error": exc,
+                    }
+                },
+            )
         for item in inventory_data:
             item.setdefault("_source", MAIN_INVENTORY_SOURCE)
         # Enrich port rows with stable LibreNMS port_id using ports data so
