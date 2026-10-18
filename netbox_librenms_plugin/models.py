@@ -712,6 +712,11 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
             Match when the item's ``entPhysicalSerialNum`` equals the NetBox
             device's own serial number.  No ``pattern`` is required.
             Pair with ``action='transparent'`` for embedded-RP detection.
+        ``model_matches_device_type``
+            Match when the item's ``entPhysicalModelName`` equals the model or
+            part number of the NetBox device's type.  No ``pattern`` is required.
+            Pair with ``action='transparent'`` for the built-in units of a fixed
+            platform (e.g. Cisco C8500L-8S4X), which report the chassis PID.
     """
 
     # --- action ---
@@ -730,6 +735,7 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
     MATCH_CONTAINS = "contains"
     MATCH_REGEX = "regex"
     MATCH_SERIAL_DEVICE = "serial_matches_device"
+    MATCH_MODEL_DEVICE_TYPE = "model_matches_device_type"
     MATCH_CLASS_IS = "class_is"
 
     MATCH_TYPE_CHOICES = [
@@ -738,8 +744,14 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
         (MATCH_CONTAINS, "Contains (entPhysicalName)"),
         (MATCH_REGEX, "Regex (entPhysicalName)"),
         (MATCH_SERIAL_DEVICE, "Serial matches device (entPhysicalSerialNum = Device.serial)"),
+        (
+            MATCH_MODEL_DEVICE_TYPE,
+            "Model matches device type (entPhysicalModelName = DeviceType model or part number)",
+        ),
         (MATCH_CLASS_IS, "Class is (entPhysicalClass)"),
     ]
+    # Match types that compare the item with the target device and read no pattern.
+    PATTERNLESS_MATCH_TYPES = frozenset({MATCH_SERIAL_DEVICE, MATCH_MODEL_DEVICE_TYPE})
 
     name = models.CharField(
         max_length=100,
@@ -757,7 +769,7 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
         help_text="Pattern to match against entPhysicalName. "
         "Case-insensitive for ends_with / starts_with / contains; "
         "Python re syntax for regex. "
-        "Not used for serial_matches_device.",
+        "Not used for serial_matches_device or model_matches_device_type.",
     )
     action = models.CharField(
         max_length=15,
@@ -770,7 +782,8 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
         default=True,
         help_text="(Name-based rules only) Only apply this rule if the item's serial "
         "number matches an ancestor entity's serial number.  Recommended to "
-        "prevent false positives.  Ignored for serial_matches_device rules.",
+        "prevent false positives.  Ignored for serial_matches_device and "
+        "model_matches_device_type rules.",
     )
     manufacturer = models.ForeignKey(
         Manufacturer,
@@ -799,7 +812,7 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
         pattern_stripped = self.pattern.strip() if self.pattern else ""
         if self.match_type == self.MATCH_REGEX and pattern_stripped:
             validate_regex_field(pattern_stripped, "pattern")
-        if self.match_type != self.MATCH_SERIAL_DEVICE and not pattern_stripped:
+        if self.uses_pattern and not pattern_stripped:
             raise ValidationError({"pattern": "Pattern is required for name-based match types."})
         if (self.action == self.ACTION_INCLUDE) != (self.match_type == self.MATCH_CLASS_IS):
             raise ValidationError(
@@ -811,6 +824,11 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
         # Normalize stored pattern to the stripped form so matches_name() and
         # clean() always operate on the same string.
         self.pattern = pattern_stripped
+
+    @property
+    def uses_pattern(self) -> bool:
+        """Return True when this rule's match type reads the pattern field."""
+        return self.match_type not in self.PATTERNLESS_MATCH_TYPES
 
     @functools.cached_property
     def _compiled_pattern(self):
@@ -830,7 +848,7 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
 
     def matches_name(self, name: str) -> bool:
         """Return True if *name* matches this rule's pattern/match_type (name-based rules only)."""
-        if not name or self.match_type == self.MATCH_SERIAL_DEVICE:
+        if not name or not self.uses_pattern:
             return False
         if not self.pattern or not self.pattern.strip():
             return False
@@ -864,7 +882,7 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
         ordering = ["name", "pk"]
 
     def __str__(self):
-        if self.match_type == self.MATCH_SERIAL_DEVICE:
+        if not self.uses_pattern:
             return f"{self.name}: {self.get_match_type_display()}"
         serial_note = " [serial match]" if self.require_serial_match_parent else ""
         return f"{self.name}: {self.get_match_type_display()} '{self.pattern}'{serial_note}"

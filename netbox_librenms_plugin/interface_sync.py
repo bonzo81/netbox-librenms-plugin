@@ -251,9 +251,9 @@ def write_interface_row(interface, apply, *, fresh_read_queryset, created=False)
     instance. With no changed column, nothing is locked, written or serialized. With a changed
     column, the change log's before-state is the state of the fresh read, and the row is saved only
     when no other operation changed it since the fresh read (``save_at_version``). A row that this
-    sync created is private to its transaction, so it is written without a fresh read. When the
-    write renames the row, the channel children that NetBox renames after the commit are recorded
-    for the final check of the interface sync.
+    sync created is private to its transaction, so it is written without a fresh read, and its
+    before-state is its state as created. When the write renames the row, the channel children
+    that NetBox renames after the commit are recorded for the final check of the interface sync.
 
     Args:
         interface (Interface | VMInterface): The interface as the caller read it.
@@ -284,11 +284,13 @@ def write_interface_row(interface, apply, *, fresh_read_queryset, created=False)
     changed_columns = {field.column for field in changed_fields(row, fresh)}
     if row.name != fresh.name:
         _record_renamed_channel_children(row, fresh.name)
-    if changed_columns and created:
-        row.save()
-    elif changed_columns:
+    if changed_columns:
+        # A created row gets this second save too: its MAC needs the row's pk, and the row needs the MAC's pk.
         keep_change_log_before_state(row, fresh)
-        save_at_version(row, version=version, changed_columns=changed_columns, name=interface.name)
+        if created:
+            row.save()
+        else:
+            save_at_version(row, version=version, changed_columns=changed_columns, name=interface.name)
     return InterfaceWrite(row, bool(changed_columns) or changed_elsewhere)
 
 
@@ -330,11 +332,11 @@ def assign_interface_mac(interface, mac_address):
         logger.debug("LibreNMS reported no usable MAC for interface %s; skipping only the MAC.", interface.pk)
         return False
     mac_obj = interface.mac_addresses.filter(mac_address=mac_address).first()
-    # The lookup above is scoped to this interface, so a miss means add() attaches it.
+    # The lookup above is scoped to this interface, so a miss means a new MAC for it.
     changed = mac_obj is None
     if changed:
-        mac_obj = MACAddress.objects.create(mac_address=mac_address)
-        interface.mac_addresses.add(mac_obj)
+        # Assigned in the create: mac_addresses.add() is a bulk update that NetBox does not log.
+        mac_obj = MACAddress.objects.create(mac_address=mac_address, assigned_object=interface)
     changed = changed or interface.primary_mac_address_id != mac_obj.pk
     interface.primary_mac_address = mac_obj
     return changed

@@ -1,11 +1,14 @@
 """Shared pytest fixtures for NetBox LibreNMS Plugin tests."""
 
+import faulthandler
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from copy import deepcopy
 from itertools import chain
-from threading import BrokenBarrierError
+from threading import BrokenBarrierError, Thread, Timer, current_thread
+from time import monotonic
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -66,6 +69,26 @@ def _isolate_test_cache(settings):
     """Give each test a unique namespace inside its pytest worker's cache database."""
     settings.CACHES = _isolated_cache_config(settings.CACHES)
     yield
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _install_before_state_guard():
+    """Watch every write of a change-logged row for the whole session."""
+    from netbox_librenms_plugin.tests import before_state_guard
+
+    with before_state_guard.installed():
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _fail_on_missing_before_state(_install_before_state_guard):
+    """Fail a test in which plugin code wrote a change-logged row without a fresh before-state."""
+    from netbox_librenms_plugin.tests import before_state_guard
+
+    before_state_guard.reset()
+    yield
+    if before_state_guard.violations:
+        pytest.fail(before_state_guard.report(), pytrace=False)
 
 
 @pytest.fixture(scope="session")
@@ -796,22 +819,136 @@ def run_in_threads(*calls, barriers, timeout):
                 barrier.abort()
             raise
 
-    executor = ThreadPoolExecutor(max_workers=len(calls))
-    try:
+    with bounded_executor(max_workers=len(calls)) as executor:
         futures = [executor.submit(run, call) for call in calls]
-        # One deadline for all calls; a hung call must fail the run, not block the executor exit.
         _done, pending = wait(futures, timeout=timeout)
         if pending:
             for barrier in barriers:
                 barrier.abort()
             raise TimeoutError(f"{len(pending)} of {len(calls)} threaded calls did not finish in {timeout}s")
         failures = [error for future in futures if (error := future.exception()) is not None]
+        failures.sort(key=lambda error: isinstance(error, BrokenBarrierError))
+        if failures:
+            raise failures[0]
+        return [future.result() for future in futures]
+
+
+WORKER_RELEASE_SECONDS = 5
+
+
+def _terminate_database_sessions(wrappers):
+    """End the PostgreSQL session of each open worker connection."""
+    from django.db import DEFAULT_DB_ALIAS, connections
+    from psycopg import OperationalError
+
+    pids = set()
+    for wrapper in wrappers:
+        raw = wrapper.connection
+        if raw is None:
+            continue
+        try:
+            pid = raw.info.backend_pid
+        except OperationalError:
+            # Django retains a closed connection inside an atomic block.
+            if raw.closed:
+                continue
+            raise
+        if pid:
+            pids.add(pid)
+    if not pids:
+        return False
+    # The caller's connection can be in a failed transaction, so use a new one.
+    terminator = connections.create_connection(DEFAULT_DB_ALIAS)
+    terminator.settings_dict = deepcopy(terminator.settings_dict)
+    terminator.settings_dict["OPTIONS"].update(
+        connect_timeout=5, options="-c statement_timeout=5000 -c lock_timeout=5000"
+    )
+    try:
+        with terminator.cursor() as cursor:
+            cursor.execute("SELECT pg_terminate_backend(pid) FROM unnest(%s::int[]) AS pid", [sorted(pids)])
     finally:
+        terminator.close()
+    return True
+
+
+def _abort_stuck_workers():
+    """Report the stuck threads before the process stops without interpreter joins."""
+    try:
+        os.write(2, b"Worker threads did not stop during shutdown. Terminating the process.\n")
+        faulthandler.dump_traceback(all_threads=True)
+    finally:
+        os._exit(1)
+
+
+def _stop_unreleased_workers(executor, record_connection, release_database_sessions):
+    """Bound shutdown even after a failed test returns."""
+    from django.db.backends.signals import connection_created
+
+    def release_sessions():
+        try:
+            release_database_sessions()
+        except Exception as error:
+            os.write(2, f"Worker database cleanup failed: {error!r}\n".encode())
+
+    release = Timer(WORKER_RELEASE_SECONDS, release_sessions)
+    release.daemon = True
+    watchdog = Timer(2 * WORKER_RELEASE_SECONDS, _abort_stuck_workers)
+    watchdog.daemon = True
+    watchdog.start()
+    release.start()
+    try:
+        executor.shutdown(wait=True)
+    finally:
+        release.cancel()
+        watchdog.cancel()
+        connection_created.disconnect(record_connection)
+
+
+@contextmanager
+def bounded_executor(max_workers):
+    """Allow five seconds for shutdown and five more to release worker DB sessions."""
+    from django.db.backends.signals import connection_created
+
+    workers = {}
+
+    def record_worker():
+        workers[current_thread()] = []
+
+    def record_connection(sender, connection, **kwargs):
+        wrappers = workers.get(current_thread())
+        if wrappers is not None:
+            wrappers.append(connection)
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT set_config('lock_timeout', '10s', false), set_config('statement_timeout', '30s', false)"
+                )
+
+    def release_database_sessions():
+        wrappers = [wrapper for group in list(workers.values()) for wrapper in group]
+        return _terminate_database_sessions(wrappers)
+
+    executor = ThreadPoolExecutor(max_workers=max_workers, initializer=record_worker)
+    connection_created.connect(record_connection, weak=False)
+    try:
+        yield executor
+    except BaseException as error:
         executor.shutdown(wait=False, cancel_futures=True)
-    failures.sort(key=lambda error: isinstance(error, BrokenBarrierError))
-    if failures:
-        raise failures[0]
-    return [future.result() for future in futures]
+        deadline = monotonic() + WORKER_RELEASE_SECONDS
+        # A daemon watchdog also bounds cleanup and Python's joins at interpreter exit.
+        Thread(
+            target=_stop_unreleased_workers, args=(executor, record_connection, release_database_sessions), daemon=True
+        ).start()
+        try:
+            if release_database_sessions():
+                for thread in list(workers):
+                    thread.join(timeout=max(0, deadline - monotonic()))
+        except Exception as cleanup_error:
+            error.add_note(f"Worker database cleanup failed: {cleanup_error!r}")
+        raise
+    Thread(
+        target=_stop_unreleased_workers, args=(executor, record_connection, release_database_sessions), daemon=True
+    ).start()
+    executor.shutdown(wait=True)
 
 
 def make_superuser(username="review-su"):

@@ -5924,6 +5924,8 @@ class TestPromoteLagAggregateShared:
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
         agg = make_interface(make_device("lag-single"), "ae0", iface_type="other")
+        # The relationship pass takes the before-state of the aggregate before it calls persist.
+        agg.snapshot()
         view = object.__new__(SyncInterfaceLagView)
         persist = view._prepare_related(agg)
 
