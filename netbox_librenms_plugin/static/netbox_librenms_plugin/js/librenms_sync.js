@@ -178,13 +178,17 @@ function fetchErrorMessage(response) {
 }
 
 /**
- * Reject with an Error for a failed fetch() answer; its `refusal` is the server's reason.
+ * Reject a failed fetch() answer; only a JSON response supplies a refusal reason.
  *
  * @param {Response} response
  * @param {string} label - The prefix of the logged message
  * @returns {Promise<never>}
  */
 function rejectWithRefusal(response, label) {
+    const contentType = (response.headers.get('Content-Type') || '').toLowerCase();
+    if (!contentType.includes('application/json')) {
+        return Promise.reject(new Error(`${label} ${response.status}`));
+    }
     return fetchErrorMessage(response).then(msg => {
         const error = new Error(`${label} ${response.status}: ${msg}`);
         error.refusal = msg;

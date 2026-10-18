@@ -201,7 +201,11 @@ class TestSingleModuleVerifyRow:
         )
 
         assert response.status_code == 409
-        assert f"(ID {mapping.pk})" in response.json()["message"]
+        from netbox_librenms_plugin.models import RuleConfigurationError
+
+        assert response.json() == {"status": "error", "message": str(RuleConfigurationError(mapping, "librenms_name"))}
+        assert "Traceback" not in response.json()["message"]
+        assert "unterminated subpattern" not in response.json()["message"]
 
     def test_a_verified_row_uses_the_same_carrier_rules_as_the_modules_table(self, client, librenms_server):
         """The verify adapter must preserve the production table builder's carrier-rule state."""
