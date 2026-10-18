@@ -258,7 +258,7 @@ def _try_chassis_device_type_match(api, device_id, preloaded_device_type_rules: 
         for item in inventory:
             # Try entPhysicalName first (often the chassis part number like CHAS-BP-MX480-S)
             for field in ("entPhysicalName", "entPhysicalModelName"):
-                value = item.get(field)
+                value = normalize_serial(item.get(field))
                 if not is_librenms_placeholder(value):
                     chassis_match = match_librenms_hardware_to_device_type(
                         value, preloaded_rules=preloaded_device_type_rules

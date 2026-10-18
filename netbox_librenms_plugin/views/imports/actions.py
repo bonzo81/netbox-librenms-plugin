@@ -1,5 +1,6 @@
 """HTMX endpoints and POST handlers for importing LibreNMS devices."""
 
+import functools
 import json
 import logging
 import re
@@ -1154,6 +1155,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         errors = []
         seen_ids = set()
         cache_expired_count = 0
+        serial_key_for = functools.cache(vc_serial_key)
 
         for raw_device_id in device_ids:
             try:
@@ -1211,7 +1213,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 validation["virtual_chassis"] = vc_master_view(
                     validation["virtual_chassis"],
                     libre_device.get("serial"),
-                    vc_serial_key(getattr(device_type, "manufacturer", None)),
+                    serial_key_for(getattr(device_type, "manufacturer", None)),
                 )
 
             from dcim.models import DeviceRole, Rack

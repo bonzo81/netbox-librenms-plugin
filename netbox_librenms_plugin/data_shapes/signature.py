@@ -132,13 +132,14 @@ def _ports(recording):
     return []
 
 
-def compute_shape_signature(recording):
+def compute_shape_signature(recording, *, serial_key=normalize_stack_serial):
     """
     Compute the testing-relevant fingerprint of a recording.
 
     Args:
         recording (dict): A recording (raw or anonymized — the signature only reads structural
             fields that anonymization preserves).
+        serial_key: The production serial key for a raw capture. Offline recordings compare stored serials.
 
     Returns:
         dict: ``{os, virtual_chassis:{present,root_class,member_count,position_base,member_shape},
@@ -166,8 +167,8 @@ def compute_shape_signature(recording):
     child_items = []
     if parent_index is not None:
         child_items = _inventory_items(_body(recording, lambda k: _contained_in_query(k) == str(parent_index)))
-    # A recording carries no serial rules, so its stack serials compare without them.
-    stack = extract_vc_stack([*root_items, *child_items], (normalize_stack_serial,))
+    # Live callers supply their serial key. Anonymized recordings already preserve that equality.
+    stack = extract_vc_stack([*root_items, *child_items], (serial_key,))
     members = stack.members
     vc = {
         "present": bool(members),

@@ -256,3 +256,28 @@ class TestTransceiverMergeTreatsPlaceholdersAsMissing:
     def test_a_real_model_is_not_overwritten(self, settings, librenms_server):
         """Positive control: the API must not replace a model ENTITY-MIB actually reported."""
         assert self._merge(settings, librenms_server, "SFP-1G-SX")["entPhysicalModelName"] == "SFP-1G-SX"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("value", [0, 4410])
+def test_numeric_inventory_description_can_match_a_real_module_type(recording_server, value):
+    from netbox_librenms_plugin.utils import module_type_lookup_candidates, resolve_module_type
+
+    module_type = _module_type(str(value))
+    recording = {
+        "device_id": 1,
+        "responses": {
+            "GET /api/v0/inventory/1/all": {
+                "status": "ok",
+                "inventory": [{"entPhysicalModelName": "unspecified", "entPhysicalDescr": value}],
+            }
+        },
+    }
+    _server, api = recording_server(recording)
+    ok, inventory = api.get_device_inventory(1)
+    assert ok
+    item = inventory[0]
+    assert (
+        resolve_module_type(item["entPhysicalModelName"], _index(), fallback_names=module_type_lookup_candidates(item))
+        == module_type
+    )

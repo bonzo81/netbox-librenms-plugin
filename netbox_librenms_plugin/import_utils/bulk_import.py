@@ -453,6 +453,7 @@ def bulk_import_devices_shared(  # noqa: C901
     # Preload the device_type NormalizationRule set once so the per-device hardware→device-type
     # match doesn't re-query it for every device in the loop (issue #90 / N+1 avoidance, #92).
     device_type_norm_rules = preload_normalization_rules("device_type")
+    serial_key_for = functools.cache(vc_serial_key)
 
     for idx, device_id in enumerate(device_ids, start=1):
         # Check for job cancellation on first iteration and every 5th thereafter.
@@ -572,7 +573,7 @@ def bulk_import_devices_shared(  # noqa: C901
                 master_member = identify_vc_master(
                     vc_data["members"],
                     libre_device.get("serial"),
-                    vc_serial_key(getattr(device_type, "manufacturer", None)),
+                    serial_key_for(getattr(device_type, "manufacturer", None)),
                 )
             creates_vc = master_member is not None
             if creates_vc:
