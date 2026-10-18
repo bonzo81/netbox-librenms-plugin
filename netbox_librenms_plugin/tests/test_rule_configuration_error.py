@@ -138,6 +138,9 @@ def test_the_evaluation_of_a_broken_stored_rule_raises_an_error_that_names_the_r
         rule.get_absolute_url(),
     )
     assert f"(ID {rule.pk}) stores an invalid {field}: {getattr(rule, field)}." in str(error)
+    expected_message = str(error)
+    error.args = ("private exception diagnostics",)
+    assert error.public_message == expected_message
 
 
 def _break_device_type_normalization():

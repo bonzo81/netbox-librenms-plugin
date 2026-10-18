@@ -1530,6 +1530,32 @@ rules:
           regex: ^(GET|POST)$
       - pattern-not-inside: _resolve_destination(...)
       - pattern-not-inside: $GRANT.require(..., device_id=$VALUE, ...)
+  - id: rule-error-message-needs-projection
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Return RuleConfigurationError.public_message. Converting the exception to text mixes
+      response data with exception diagnostics and triggers the CodeQL exposure check.
+    metadata:
+      category: security
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/migrations/**"
+    pattern-either:
+      - patterns:
+          - pattern-inside: |
+              if ($ERROR := $CONTEXT.get("inventory_rule_error")) is not None:
+                ...
+          - pattern: str($ERROR)
+      - patterns:
+          - pattern-inside: |
+              class RuleConfigurationErrorMiddleware:
+                ...
+          - pattern-inside: |
+              def process_exception($SELF, $REQUEST, $ERROR):
+                ...
+          - pattern: str($ERROR)
   - id: regex-error-must-raise
     languages: [python]
     severity: ERROR
