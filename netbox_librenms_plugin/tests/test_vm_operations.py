@@ -613,7 +613,7 @@ class TestBulkImportVms:
             assert vm.platform == os_platform
             # The importing user may not view platforms, so the warning names none.
             assert result["warnings"] == [
-                "Imported VM 6220 with OS platform a platform you cannot view: You do not have permission to "
+                "Imported VM 6220 with an OS platform you cannot view: You do not have permission to "
                 "add platforms, so a new version platform for version '5.15' cannot be created."
             ]
 
