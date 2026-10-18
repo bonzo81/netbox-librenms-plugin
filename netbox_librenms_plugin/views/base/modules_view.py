@@ -910,7 +910,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             if refresh_incomplete
             else self._build_context(request, obj, inventory_data, server_key=server_key, sync_device=sync_device)
         )
-        refresh_incomplete = refresh_incomplete or context.get("inventory_rule_error") is not None
+        refresh_incomplete = refresh_incomplete or context.get("table") is None
         if ports_error:
             logger.warning("Port metadata fetch failed for device %s: %s", self.librenms_id, ports_error)
             messages.warning(
@@ -1029,6 +1029,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             tuple: ``(page context, pinned context)``; the pinned context is None when no table could be built.
 
         """
+        from dcim.models import Device
+
         from netbox_librenms_plugin.models import InventoryRuleFilterError
 
         scoped_server, sync_device, inventory, empty = self._read_render_inventory(request, page_device, server_key)
@@ -1036,6 +1038,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             return empty, None
         try:
             policy = load_inventory_policy(page_device.pk)
+        except Device.DoesNotExist:
+            return {
+                "table": None,
+                "object": page_device,
+                "cache_expiry": None,
+                "server_key": scoped_server,
+            }, None
         except InventoryRuleFilterError as exc:
             logger.error("Module table for %s not built: %s", page_device, exc)
             return {
@@ -1093,11 +1102,20 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # (reached via the row builders) uses the same key without threading it through
         # every intermediate signature.
         self._active_server_key = server_key or self.librenms_api.server_key
+        from dcim.models import Device
+
         from netbox_librenms_plugin.models import InventoryRuleFilterError
 
         if policy is None:
             try:
                 policy = load_inventory_policy(obj.pk)
+            except Device.DoesNotExist:
+                return {
+                    "table": None,
+                    "object": obj,
+                    "cache_expiry": None,
+                    "server_key": self._active_server_key,
+                }
             except InventoryRuleFilterError as exc:
                 # Rows that a broken rule would admit are unknown, so the tab shows no partial table.
                 logger.error("Module table for %s not built: %s", obj, exc)

@@ -284,3 +284,93 @@ class TestSingleInterfaceVerifyChassisGuard:
 
         assert response.status_code == 404
         assert response.json() == {"status": "error", "message": "No sync device found for virtual chassis"}
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("endpoint", ["cached-page", "refresh", "verify"])
+def test_a_module_render_refuses_a_page_that_leaves_its_chassis_during_the_policy_read(
+    client, librenms_server, endpoint
+):
+    from dcim.models import Device, VirtualChassis
+    from django.db import close_old_connections, connection, transaction
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import (
+        bounded_executor,
+        make_device_with_module_bays,
+        make_module_type,
+        make_superuser,
+    )
+
+    device = _in_a_chassis(make_device_with_module_bays("module-policy-race", ["Bay 1"], serial="CHASSIS-6"))
+    seed_mapping(device, SERVER_KEY, own=LIBRENMS_ID, save=False)
+    device.save()
+    make_module_type("LC-24")
+    _register_inventory(librenms_server, INVENTORY)
+    client.force_login(make_superuser("module-policy-race-user"))
+    refreshed = _refresh_modules(client, device)
+    assert refreshed.status_code == 200
+    page_query, page_params = (
+        Device.objects.select_related("virtual_chassis").filter(pk=device.pk).order_by().query.sql_with_params()
+    )
+    page_read = False
+    changed = False
+
+    def leave_chassis():
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                VirtualChassis.objects.filter(pk=device.virtual_chassis_id).update(master=None)
+                Device.objects.filter(pk=device.pk).update(virtual_chassis=None, vc_position=None)
+        finally:
+            connection.close()
+
+    with bounded_executor(max_workers=1) as executor:
+
+        def change_between_policy_reads(execute, sql, params, many, context):
+            nonlocal page_read, changed
+            if sql.startswith(page_query) and tuple(params) == tuple(page_params):
+                page_read = True
+            elif (
+                page_read
+                and not changed
+                and '"dcim_manufacturer"' in sql
+                and '"dcim_device"."virtual_chassis_id" = %s' in sql
+            ):
+                # Commit on another connection after the page read and before its member read.
+                executor.submit(leave_chassis).result(timeout=10)
+                changed = True
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(change_between_policy_reads):
+            if endpoint == "cached-page":
+                response = client.get(
+                    reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
+                    {"tab": "modules", "server_key": SERVER_KEY},
+                )
+            elif endpoint == "refresh":
+                response = _refresh_modules(client, device)
+            else:
+                response = _verify_module(
+                    client,
+                    refreshed,
+                    device,
+                    {"device_id": device.pk, "ent_physical_index": 1, "server_key": SERVER_KEY},
+                )
+
+    assert changed, "the competing transaction did not reach the policy read"
+    if endpoint == "verify":
+        assert response.status_code == 404
+        assert response.json() == {"status": "error", "message": "No cached inventory data"}
+    else:
+        assert response.status_code == 200
+        assert response.context["module_sync"]["table"] is None
+        assert "inventory_binding" not in response.content.decode()
+        if endpoint == "refresh":
+            from django.core.cache import cache
+
+            from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
+
+            assert "Inventory data refreshed successfully." not in response.content.decode()
+            state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.MODULES, SERVER_KEY))
+            assert state["state"] == SyncTabState.REFRESH_FAILED.value
