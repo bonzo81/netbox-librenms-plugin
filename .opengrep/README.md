@@ -54,6 +54,7 @@ unchecked until that review.
 | `no-unittest-assertions` | warning | A test calls a `self` method with a unittest assertion API name. |
 | `xfail-needs-raises` | error | A test marks an expected failure with `pytest.mark.xfail` and does not name the exception with `raises=`, or gives `raises=None`. An alias of the marker is not followed. |
 | `executor-needs-bounded-executor` | error | A test creates a `ThreadPoolExecutor` and does not use `tests.conftest.bounded_executor`. `tests/conftest.py` is excluded. |
+| `synchronization-needs-timeout` | error | A test creates a one-argument Barrier or calls `Event.wait()` without an argument on a local Event binding. |
 | `barrier-needs-run-in-threads` | error | A test creates a `threading.Barrier` and then starts threads with `ThreadPoolExecutor` or `Thread`, not with `tests.conftest.run_in_threads`. |
 | `recorded-response-needs-envelope` | error | Code reads a recorded response as a bare `[status, body]` list instead of through `data_shapes.envelope.unwrap_response`. |
 | `no-selected-fuzzy-apis` | warning | Code calls selected approximate-selection APIs. This does not prove exact-only selection. |
@@ -67,8 +68,8 @@ definitions of the trusted names, and each reviewed read of a caught error, carr
 suppressions. The requests rule covers
 `netbox_librenms_plugin/`, except its root `librenms_api.py` and tests. The IPAddress rule covers
 `netbox_librenms_plugin/`, except tests and migrations. The htmx header rule excludes tests,
-because a test sends the header to build an htmx request. The five test-convention
-rules (TestCase, unittest assertions, xfail, Barrier and executor) include only
+because a test sends the header to build an htmx request. The six test-convention
+rules (TestCase, unittest assertions, xfail, Barrier, synchronization timeout and executor) include only
 `netbox_librenms_plugin/tests/`. The remaining rules apply to Python files
 in the scan target.
 

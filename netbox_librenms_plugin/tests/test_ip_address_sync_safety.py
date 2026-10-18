@@ -514,7 +514,7 @@ def test_concurrent_global_ip_sync_creates_one_address(settings):
             timeout=300,
         )
 
-    lookup_barrier = Barrier(2)
+    lookup_barrier = Barrier(2, timeout=10)
     lookup_wrappers = [_IPHostLookupBarrier(lookup_barrier) for _device in devices]
     statuses = run_in_threads(
         *(
@@ -576,7 +576,7 @@ def test_concurrent_bulk_ip_sync_orders_host_locks_before_interface_scope(settin
         timeout=300,
     )
 
-    barrier = Barrier(2)
+    barrier = Barrier(2, timeout=10)
     wrappers = [_FirstHostAdvisoryBarrier(barrier) for _ in range(2)]
     row_ids = [row["ip_with_mask"] for row in rows]
     outcomes = run_in_threads(

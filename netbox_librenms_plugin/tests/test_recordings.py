@@ -513,7 +513,7 @@ def test_concurrent_manifest_rebuilds_do_not_share_a_temporary_file(monkeypatch,
 
     manifest_path = tmp_path / "manifest.json"
     original_replace = type(manifest_path).replace
-    writers_ready = Barrier(2)
+    writers_ready = Barrier(2, timeout=10)
     synchronized_writes = []
 
     def synchronized_replace(path, target):

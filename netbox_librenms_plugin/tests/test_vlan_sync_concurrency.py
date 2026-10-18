@@ -127,7 +127,7 @@ def test_concurrent_global_vlan_sync_creates_one_vlan():
         is_superuser=True,
     )
     devices = [make_device("global-vlan-device-a"), make_device("global-vlan-device-b")]
-    lookup_barrier = Barrier(2)
+    lookup_barrier = Barrier(2, timeout=10)
     lookup_wrappers = [_GlobalVLANLookupBarrier(lookup_barrier) for _device in devices]
 
     run_in_threads(

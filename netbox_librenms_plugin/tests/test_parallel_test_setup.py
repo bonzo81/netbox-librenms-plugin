@@ -1120,3 +1120,147 @@ def test_configured_norecursedirs_still_skips_pytest_default_directories(tmp_pat
     assert "test_skipped_by_default" not in collection.stdout, (
         "norecursedirs dropped pytest's default exclusions:\n" + collection.stdout
     )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("helper", ["bounded_executor", "run_in_threads"])
+def test_thread_helpers_release_a_worker_blocked_on_a_row_lock_this_thread_holds(helper):
+    """A failed block must release its worker while this thread still holds the row lock."""
+    from threading import Event, current_thread
+    from time import monotonic, sleep
+
+    from django.contrib.contenttypes.models import ContentType
+    from django.db import connection, connections, transaction
+
+    from netbox_librenms_plugin.tests.conftest import bounded_executor, run_in_threads
+
+    locked = ContentType.objects.select_for_update().order_by("pk").first()
+    workers = []
+    pids = []
+    blocking_seen = Event()
+    finished = Event()
+
+    def lock_the_same_row():
+        workers.append(current_thread())
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                pids.append(cursor.fetchone()[0])
+            with transaction.atomic():
+                ContentType.objects.select_for_update().get(pk=locked.pk)
+        finally:
+            connections.close_all()
+            finished.set()
+
+    def wait_until_blocked():
+        try:
+            deadline = monotonic() + 10
+            with connection.cursor() as cursor:
+                while True:
+                    if pids:
+                        cursor.execute("SELECT cardinality(pg_blocking_pids(%s))", pids)
+                        if cursor.fetchone()[0]:
+                            blocking_seen.set()
+                            return
+                    assert monotonic() < deadline, "the worker never waited for the row lock"
+                    sleep(0.05)
+        finally:
+            if helper == "run_in_threads":
+                connections.close_all()
+
+    with pytest.raises(TimeoutError):
+        if helper == "bounded_executor":
+            with bounded_executor(max_workers=1) as executor:
+                future = executor.submit(lock_the_same_row)
+                wait_until_blocked()
+                future.result(timeout=0.1)
+        else:
+            run_in_threads(lock_the_same_row, wait_until_blocked, barriers=(), timeout=2)
+    assert blocking_seen.is_set(), "the worker never waited for the row lock"
+    assert finished.is_set(), "the worker still waits for the row lock"
+    assert not workers[0].is_alive()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("helper", ["bounded_executor", "run_in_threads"])
+def test_thread_helpers_bound_worker_database_waits(helper):
+    """Worker connections must bound connection setup, locks, and statements."""
+    from django.db import connection, connections
+
+    from netbox_librenms_plugin.tests.conftest import bounded_executor, run_in_threads
+
+    def read_limits():
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT current_setting('lock_timeout'), current_setting('statement_timeout')")
+                return (*cursor.fetchone(), connection.settings_dict["OPTIONS"].get("connect_timeout"))
+        finally:
+            connections.close_all()
+
+    if helper == "bounded_executor":
+        with bounded_executor(max_workers=1) as executor:
+            limits = executor.submit(read_limits).result(timeout=5)
+    else:
+        (limits,) = run_in_threads(read_limits, barriers=(), timeout=5)
+    assert limits == ("10s", "30s", 5)
+
+
+@pytest.mark.parametrize("helper", ["bounded_executor", "run_in_threads", "executor_exit"])
+def test_a_stuck_worker_cannot_hold_the_process_open(helper):
+    """The interpreter must exit even when a failed block leaves an unreleasable worker."""
+    script = """
+import sys
+from threading import Event
+import django
+from netbox_librenms_plugin.tests.conftest import bounded_executor, run_in_threads
+
+django.setup()
+started = Event()
+stuck = Event()
+
+def worker():
+    print("the worker started", flush=True)
+    started.set()
+    stuck.wait()
+
+try:
+    if sys.argv[1] != "run_in_threads":
+        with bounded_executor(max_workers=1) as executor:
+            future = executor.submit(worker)
+            assert started.wait(timeout=2)
+            if sys.argv[1] == "bounded_executor":
+                future.result(timeout=0.1)
+    else:
+        run_in_threads(worker, barriers=(), timeout=0.5)
+except TimeoutError:
+    print("the failed block returned", flush=True)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script, helper],
+        env={**os.environ, "DJANGO_SETTINGS_MODULE": "netbox_librenms_plugin.tests.isolated_settings"},
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+
+    assert "the worker started" in result.stdout, result.stdout + result.stderr
+    if helper != "executor_exit":
+        assert "the failed block returned" in result.stdout, result.stdout + result.stderr
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "Worker threads did not stop" in result.stderr
+    assert "worker" in result.stderr
+
+
+def test_bounded_executor_finishes_queued_calls_on_normal_exit():
+    """Normal shutdown must drain the queue while the watchdog watches the worker."""
+    from threading import Event
+
+    from netbox_librenms_plugin.tests.conftest import bounded_executor
+
+    with bounded_executor(max_workers=1) as executor:
+        waiting = executor.submit(Event().wait, timeout=0.2)
+        queued = executor.submit(str, "queued result")
+
+    assert waiting.result(timeout=1) is False
+    assert queued.result(timeout=1) == "queued result"

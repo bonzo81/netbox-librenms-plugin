@@ -15,7 +15,7 @@ _Result = TypeVar("_Result")
 
 def run_librenms_id_claim_race(*operations: Callable[[], _Result]) -> tuple[list[_Result], list[int]]:
     """Run claim operations concurrently and return their results and lock keys."""
-    claim_barrier = Barrier(len(operations))
+    claim_barrier = Barrier(len(operations), timeout=10)
     claim_keys = []
 
     def run(operation):

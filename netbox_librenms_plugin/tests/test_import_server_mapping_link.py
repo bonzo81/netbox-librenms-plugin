@@ -416,7 +416,7 @@ def test_device_and_vm_links_serialize_one_cross_model_id_claim(servers):
     vm.custom_field_data["librenms_id"] = {"primary": 49702}
     vm.save(update_fields=["custom_field_data"])
     first_fetch_completed = Event()
-    fetch_barrier = Barrier(2)
+    fetch_barrier = Barrier(2, timeout=10)
     response_names = iter((device.name, vm.name))
 
     def device_response(**_request):
@@ -435,7 +435,7 @@ def test_device_and_vm_links_serialize_one_cross_model_id_claim(servers):
             {"status": "ok", "inventory": []},
         )
     user = make_superuser("concurrent-cross-model-linker")
-    claim_barrier = Barrier(2)
+    claim_barrier = Barrier(2, timeout=10)
     wrappers = [_MappingClaimBarrier(claim_barrier) for _target in range(2)]
 
     def link(target_pk, target_type, wrapper, *, wait_for_first_fetch=False):

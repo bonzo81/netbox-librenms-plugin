@@ -1115,7 +1115,7 @@ def test_run_in_threads_raises_the_failure_that_broke_the_barrier_at_once():
     from threading import Barrier
     from time import monotonic
 
-    barrier = Barrier(2)
+    barrier = Barrier(2, timeout=10)
 
     def fail():
         raise ValueError("the real failure")
@@ -1131,7 +1131,7 @@ def test_run_in_threads_fails_a_hung_call_within_its_timeout():
     from threading import Barrier, BrokenBarrierError, Timer
     from time import monotonic
 
-    barrier = Barrier(2)
+    barrier = Barrier(2, timeout=10)
     hung = Event()
     # Release the hung thread later, so a helper that waits for it ends instead of hanging the session.
     release = Timer(3, hung.set)
@@ -1147,7 +1147,7 @@ def test_run_in_threads_fails_a_hung_call_within_its_timeout():
     started = monotonic()
     try:
         with pytest.raises(TimeoutError):
-            run_in_threads(hung.wait, peer, barriers=(barrier,), timeout=0.5)
+            run_in_threads(partial(hung.wait, timeout=3), peer, barriers=(barrier,), timeout=0.5)
         assert monotonic() - started < 2
     finally:
         hung.set()
@@ -1167,7 +1167,7 @@ def test_bounded_executor_fails_a_hung_worker_within_its_timeout():
     started = monotonic()
     try:
         with pytest.raises(TimeoutError), bounded_executor(max_workers=1) as executor:
-            executor.submit(hung.wait).result(timeout=0.5)
+            executor.submit(hung.wait, timeout=3).result(timeout=0.5)
         assert monotonic() - started < 2
     finally:
         hung.set()
@@ -1179,8 +1179,8 @@ def test_opposite_order_port_claims_refuse_without_deadlock():
     from django.db import close_old_connections, connections, transaction
     from netbox_librenms_plugin.utils import LibreNMSPortBindingBusy, claim_librenms_port_binding
 
-    first_claims_ready = Barrier(2)
-    second_claims_done = Barrier(2)
+    first_claims_ready = Barrier(2, timeout=10)
+    second_claims_done = Barrier(2, timeout=10)
 
     def claim_in_order(first, second):
         close_old_connections()

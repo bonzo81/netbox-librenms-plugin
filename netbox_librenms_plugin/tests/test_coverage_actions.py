@@ -7178,7 +7178,7 @@ def _another_session_commits_before(create, model, statement, *, occurrence):
             seen += 1
             if seen == occurrence:
                 with bounded_executor(max_workers=1) as pool:
-                    pool.submit(in_own_session).result()
+                    pool.submit(in_own_session).result(timeout=10)
         return execute(sql, params, many, context)
 
     with connection.execute_wrapper(hook):

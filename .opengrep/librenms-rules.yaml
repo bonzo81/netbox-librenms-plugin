@@ -448,6 +448,23 @@ rules:
     pattern-either:
       - pattern: ThreadPoolExecutor(...)
       - pattern: concurrent.futures.ThreadPoolExecutor(...)
+  - id: synchronization-needs-timeout
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Set a default timeout on each Barrier and pass a timeout to each Event.wait().
+      Cancelling a future does not stop its running thread.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/tests/**"]
+    pattern-either:
+      - pattern: threading.Barrier($PARTIES)
+      - patterns:
+          - pattern-inside: |
+              $EVENT = threading.Event(...)
+              ...
+          - pattern: $EVENT.wait()
   - id: barrier-needs-run-in-threads
     languages: [python]
     severity: ERROR
