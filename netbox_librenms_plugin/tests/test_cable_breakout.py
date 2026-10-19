@@ -689,6 +689,28 @@ def test_an_ignore_rule_on_the_parent_port_does_not_block_the_channel(librenms_s
 
 
 @pytest.mark.usefixtures("breakout_server")
+@pytest.mark.usefixtures("breakout_server")
+def test_the_channels_of_one_parent_share_its_permission_checks():
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    setup = _Breakout("shared-checks")
+    setup.seed(setup.row(1), setup.row(2))
+    setup.sync(1)
+    parent_check = f'FROM "dcim_interface" WHERE "dcim_interface"."id" = {setup.parent.pk} LIMIT 1'
+    cable_check = f'FROM "dcim_cable" WHERE "dcim_cable"."id" = {setup.parent_cable().pk} LIMIT 1'
+
+    def checks(*channel_ids):
+        setup.seed(*(setup.row(channel_id) for channel_id in channel_ids))
+        with CaptureQueriesContext(connection) as queries:
+            setup.records()
+        return [sum(check in query["sql"] for query in queries) for check in (parent_check, cable_check)]
+
+    one_row = checks(2)
+    assert one_row[0] > 0, "precondition: the gate checks the parent"
+    assert checks(2, 3, 4) == one_row
+
+
 def test_a_cached_render_of_a_channel_row_never_calls_librenms(librenms_server):
     from netbox_librenms_plugin.models import InterfaceTypeMapping
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
