@@ -4938,21 +4938,27 @@ class TestMatchedInterfaceLinking:
             self._make_interface(member, "Te1/1/1", port_id=42)
 
     def test_build_member_contexts_builds_interface_indexes_once_per_member(self):
-        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
 
         from netbox_librenms_plugin.tests.conftest import make_superuser
         from netbox_librenms_plugin.tests.view_test_helpers import make_request
 
         view = self._view()
         view.request = make_request("get", user=make_superuser())
-        member = make_device("interface-member-context")
+        member = make_device_with_module_bays("interface-member-context", ["Slot 1"])
+        installed = install_module(member, "Slot 1", "INTERFACE-MEMBER-CONTEXT")
         interface = self._make_interface(member, "Te1/1/1", port_id=42)
+        module_interface = self._make_interface(member, "Te1/1/2", module=installed)
         context = view._build_member_contexts(member, vc_members=[], items=[{"_librenms_port_id": 42}])
 
         assert context[member.pk]["port_holders"] == {42: ("dcim.interface", interface.pk)}
-        assert context[member.pk]["interfaces_by_pk"] == {interface.pk: interface}
-        assert context[member.pk]["interfaces_by_name"] == {"Te1/1/1": interface}
-        assert context[member.pk]["viewable_interface_ids"] == {interface.pk}
+        assert context[member.pk]["interfaces_by_pk"] == {
+            interface.pk: interface,
+            module_interface.pk: module_interface,
+        }
+        assert context[member.pk]["interfaces_by_name"] == {"Te1/1/1": interface, "Te1/1/2": module_interface}
+        assert context[member.pk]["interfaces_by_module"] == {None: [interface], installed.pk: [module_interface]}
+        assert context[member.pk]["viewable_interface_ids"] == {interface.pk, module_interface.pk}
 
     def test_attach_interface_match_sets_name_and_url(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
@@ -5607,6 +5613,7 @@ class TestScopePreservedAcrossIntegratedContainer:
             "sibling_counts": {module_id: len(bays) for module_id, bays in module_scoped_bays.items()},
             "interfaces_by_pk": {},
             "interfaces_by_name": {},
+            "interfaces_by_module": {},
             "port_holders": {},
             "server_key": "test-server",
         }

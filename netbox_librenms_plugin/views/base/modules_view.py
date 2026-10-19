@@ -1471,7 +1471,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             changeable_ids_by_member[member_id].add(interface_id)
         for member in context_members:
             device_bays, module_scoped_bays = self._get_module_bays(member)
-            interfaces_by_pk, interfaces_by_name = self._build_interface_indexes(member)
+            interfaces_by_pk, interfaces_by_name, interfaces_by_module = self._build_interface_indexes(member)
             member_contexts[member.id] = {
                 "device": member,
                 "device_bays": device_bays,
@@ -1480,6 +1480,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 "sibling_counts": {mid: len(bays) for mid, bays in module_scoped_bays.items()},
                 "interfaces_by_pk": interfaces_by_pk,
                 "interfaces_by_name": interfaces_by_name,
+                "interfaces_by_module": interfaces_by_module,
                 "port_holders": holders,
                 # The match reads every interface, so the table shows only one the user may view.
                 "viewable_interface_ids": frozenset(viewable_ids_by_member[member.id]),
@@ -1490,17 +1491,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         return member_contexts
 
     def _build_interface_indexes(self, member):
-        """Build the member's interface indexes keyed by primary key and by unique name."""
+        """Build the member's interface indexes keyed by primary key, by unique name and by module."""
         interfaces_by_pk = {}
         interfaces_by_name = {}
+        interfaces_by_module = {}
         duplicate_names = set()
 
         interface_manager = getattr(member, "interfaces", None)
         if interface_manager is None or not hasattr(interface_manager, "all"):
-            return interfaces_by_pk, interfaces_by_name
+            return interfaces_by_pk, interfaces_by_name, interfaces_by_module
 
         for interface in interface_manager.all():
             interfaces_by_pk[interface.pk] = interface
+            interfaces_by_module.setdefault(interface.module_id, []).append(interface)
             name = (getattr(interface, "name", "") or "").strip()
             if name:
                 if name in interfaces_by_name:
@@ -1511,7 +1514,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         for name in duplicate_names:
             interfaces_by_name.pop(name, None)
 
-        return interfaces_by_pk, interfaces_by_name
+        return interfaces_by_pk, interfaces_by_name, interfaces_by_module
 
     @staticmethod
     def _attach_interface_match(row, item, target_context):
@@ -1539,11 +1542,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             confidence = "high"
         else:
             module_interfaces = (
-                [
-                    match
-                    for match in target_context["interfaces_by_pk"].values()
-                    if match.module_id == installed_module_id
-                ]
+                target_context["interfaces_by_module"].get(installed_module_id, [])
                 if port_id is not None and installed_module_id
                 else []
             )
