@@ -756,10 +756,14 @@ def _anon_value(key, value, rules, container=None):  # noqa: C901
         if isinstance(value, bool) or not isinstance(value, (str, int, float)):
             return value
         serial = str(value).strip()
+        if not serial or is_librenms_placeholder(serial):
+            return value
         if rules.serial_key is not None:
             serial = rules.serial_key(value)
-            value = serial
-        return f"SN-{_hash(serial, salt)}" if serial and not is_librenms_placeholder(serial) else value
+            if not serial:
+                # The key removed the identity of a real serial: never publish the raw value.
+                return ""
+        return f"SN-{_hash(serial, salt)}"
     if key in MODEL_KEYS:
         if isinstance(value, bool) or not isinstance(value, (str, int, float)):
             return value
