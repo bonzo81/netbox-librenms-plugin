@@ -14,6 +14,7 @@ cannot produce (a lock ``DatabaseError``, a ``save()`` that raises).
 """
 
 from contextlib import contextmanager
+from html.parser import HTMLParser
 from uuid import uuid4
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
@@ -132,43 +133,71 @@ def render_module_tab(device, *, user=None, server_key="default"):
     return view.render_sync_partial(request, device, context["server_key"], {"module_sync": context}).content.decode()
 
 
-class _ModuleTabParser:
+class _ModuleTabParser(HTMLParser):
     """Collect the forms, the hx-get controls and the member selects of a rendered Modules tab."""
 
     def __init__(self, html):
-        from html.parser import HTMLParser
-
+        super().__init__(convert_charrefs=True)
         self.forms, self.links, self.selects = [], [], []
         self.manifest = None
         self.table_attrs = {}
-        parser = HTMLParser(convert_charrefs=True)
-        current = []
+        self._open_forms = []
+        # The named form <select> that is open, and the open <option> without a value attribute.
+        self._select = self._text_option = None
+        self.feed(html)
 
-        def start(tag, attrs):
-            attrs = dict(attrs)
-            if tag == "form":
-                current.append({"action": attrs.get("action", ""), "fields": {}})
-                self.forms.append(current[-1])
-            elif tag == "table" and attrs.get("id") == "librenms-module-table":
-                self.table_attrs = attrs
-            elif tag == "input" and attrs.get("name"):
-                if current:
-                    current[-1]["fields"][attrs["name"]] = attrs.get("value", "")
-                if attrs.get("type") == "hidden" and attrs["name"].startswith("selection_grant_"):
-                    self.links.append({"selection_grant": attrs["name"], "value": attrs.get("value", "")})
-            elif tag == "select" and attrs.get("data-module") is not None:
-                self.selects.append(attrs)
-            if attrs.get("hx-get"):
-                self.links.append({"hx-get": attrs["hx-get"], "action": attrs.get("data-action", "")})
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "form":
+            self._open_forms.append({"action": attrs.get("action", ""), "fields": {}})
+            self.forms.append(self._open_forms[-1])
+        elif tag == "table" and attrs.get("id") == "librenms-module-table":
+            self.table_attrs = attrs
+        elif tag == "input" and attrs.get("name"):
+            self._input(attrs)
+        elif tag == "select":
+            self._open_select(attrs)
+        elif tag == "option" and self._select is not None:
+            self._option(attrs)
+        if attrs.get("hx-get"):
+            self.links.append({"hx-get": attrs["hx-get"], "action": attrs.get("data-action", "")})
 
-        def end(tag):
-            if tag == "form" and current:
-                current.pop()
+    handle_startendtag = handle_starttag
 
-        parser.handle_starttag = start
-        parser.handle_startendtag = start
-        parser.handle_endtag = end
-        parser.feed(html)
+    def handle_data(self, data):
+        if self._text_option is not None:
+            self._text_option["fields"][self._text_option["name"]] += data.strip()
+
+    def handle_endtag(self, tag):
+        if tag == "form" and self._open_forms:
+            self._open_forms.pop()
+        elif tag == "option":
+            self._text_option = None
+        elif tag == "select":
+            self._select = self._text_option = None
+
+    def _input(self, attrs):
+        # A browser submits a checkbox or radio only when it is checked, and "on" without a value.
+        toggle = attrs.get("type") in ("checkbox", "radio")
+        if self._open_forms and (not toggle or "checked" in attrs):
+            self._open_forms[-1]["fields"][attrs["name"]] = attrs.get("value", "on" if toggle else "")
+        if attrs.get("type") == "hidden" and attrs["name"].startswith("selection_grant_"):
+            self.links.append({"selection_grant": attrs["name"], "value": attrs.get("value", "")})
+
+    def _open_select(self, attrs):
+        if attrs.get("data-module") is not None:
+            self.selects.append(attrs)
+        if self._open_forms and attrs.get("name"):
+            self._select = {"fields": self._open_forms[-1]["fields"], "name": attrs["name"], "state": None}
+
+    def _option(self, attrs):
+        # A browser submits the first selected option, or the first option when none is selected.
+        select = self._select
+        state = "selected" if "selected" in attrs else "first"
+        if select["state"] is None or (state == "selected" and select["state"] == "first"):
+            select["fields"][select["name"]] = attrs.get("value", "")
+            select["state"] = state
+            self._text_option = None if "value" in attrs else select
 
 
 def module_tab_forms(html):

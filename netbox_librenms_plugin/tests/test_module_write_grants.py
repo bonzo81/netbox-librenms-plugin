@@ -673,3 +673,29 @@ def test_a_grant_does_not_outlive_the_permission_it_was_rendered_for(client, c83
 
     assert "Missing permissions: dcim.add_module" in messages_of(response)
     assert written_state(device) == before
+
+
+def test_the_tab_parser_reads_a_form_the_way_a_browser_submits_it():
+    html = """
+    <form action="/install/">
+      <input type="hidden" name="ent_index" value="7">
+      <input type="checkbox" name="unchecked" value="1">
+      <input type="checkbox" name="checked" checked>
+      <input type="radio" name="kind" value="a">
+      <input type="radio" name="kind" value="b" checked>
+      <select name="first"><option value="x">X</option><option value="y">Y</option></select>
+      <select name="picked"><option value="x">X</option><option value="y" selected>Y</option></select>
+      <select name="text"><option selected> Bay 1 </option></select>
+    </form>
+    """
+
+    (form,) = module_tab_forms(html).forms
+
+    assert form["fields"] == {
+        "ent_index": "7",
+        "checked": "on",
+        "kind": "b",
+        "first": "x",
+        "picked": "y",
+        "text": "Bay 1",
+    }
