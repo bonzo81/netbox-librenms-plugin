@@ -206,11 +206,12 @@ def test_a_serial_rule_that_removes_identity_does_not_publish_the_original_seria
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("scoped", [False, True], ids=["global", "manufacturer"])
-def test_capture_download_replays_the_same_normalized_virtual_chassis(client, recording_server, scoped):
+@pytest.mark.parametrize("rule_owner", ["global", "manufacturer", "other-manufacturer"])
+def test_capture_download_replays_the_same_normalized_virtual_chassis(client, recording_server, rule_owner):
     import json
     from copy import deepcopy
 
+    from dcim.models import Manufacturer
     from django.urls import reverse
 
     from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
@@ -234,9 +235,15 @@ def test_capture_download_replays_the_same_normalized_virtual_chassis(client, re
     )
     device = make_device("normalized-capture", librenms_cf={"test": {"id": device_id}})
     NormalizationRule.objects.filter(scope="serial").delete()
+    # Detection accepts a stack that the rules of any manufacturer explain, not only the device's.
+    owners = {
+        "global": None,
+        "manufacturer": device.device_type.manufacturer,
+        "other-manufacturer": Manufacturer.objects.create(name="Other capture maker", slug="other-capture-maker"),
+    }
     NormalizationRule.objects.create(
         scope="serial",
-        manufacturer=device.device_type.manufacturer if scoped else None,
+        manufacturer=owners[rule_owner],
         match_pattern=r"^S/N\s+(.+)$",
         replacement=r"\1",
     )
