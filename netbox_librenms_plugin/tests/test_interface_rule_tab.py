@@ -338,7 +338,7 @@ class TestVirtualChassisOwners:
         assert f"Not synced: ignored by interface rule {rule.pk} ({rule})" in shown[701]
         assert OWNER_PILL not in shown[701]
 
-    def test_mixed_member_platforms_ignore_an_unresolved_row_by_global_rules_only(self, superuser_client):
+    def test_mixed_member_platforms_ignore_an_unresolved_row_only_when_every_platform_does(self, superuser_client):
         platform_p, platform_q = _platform("rule-tab-mixed-p"), _platform("rule-tab-mixed-q")
         InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform_p, name_pattern="^null0$")
         InterfaceTypeMapping.objects.create(action=IGNORE, platform=None, name_pattern="^lo0$")
@@ -352,6 +352,22 @@ class TestVirtualChassisOwners:
         assert "1 ignored" in hidden
         assert 'data-rule-state="owner_unresolved"' in _row_tag(shown[710])
         assert 'data-rule-state="ignored"' in _row_tag(shown[711])
+
+    def test_members_on_two_versions_of_one_os_ignore_by_the_os_platform_rule(self, superuser_client):
+        junos = _platform("rule-tab-vc-junos")
+        versions = [
+            Platform.objects.create(name=f"RULE-TAB-VC-JUNOS {v}", slug=f"rule-tab-vc-junos-{i}", parent=junos)
+            for i, v in enumerate(("21.2R3", "22.4R1"))
+        ]
+        InterfaceTypeMapping.objects.create(action=IGNORE, platform=junos, name_pattern="^null0$")
+        first = self._members_on("rule-tab-vc-versions", *versions)
+        _seed(first, [_port(720, "Gi1/0/1"), _port(721, "null0", if_type="other")])
+
+        hidden = _tab(superuser_client, first)
+        shown = _rows(_tab(superuser_client, first, interfaces_show_ignored="1"))
+
+        assert sorted(_rows(hidden)) == [720]
+        assert 'data-rule-state="ignored"' in _row_tag(shown[721])
 
     def test_the_verify_repaint_decides_with_the_selected_member(self, superuser_client):
         first, second = self._chassis("rule-tab-verify")
