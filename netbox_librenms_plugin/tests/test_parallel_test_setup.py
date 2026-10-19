@@ -29,6 +29,12 @@ from netbox_librenms_plugin.tests.parallel import (
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
+def _python_child_environment(**overrides):
+    """Return the environment for a child Python that imports NetBox and the plugin."""
+    # pytest injects the NetBox source path from pyproject; a bare subprocess does not.
+    return {**os.environ, "PYTHONPATH": os.pathsep.join(path for path in sys.path if path), **overrides}
+
+
 def _pytest_plugins_lines(source):
     """Return the line of every module-level ``pytest_plugins`` assignment in *source*."""
     import ast
@@ -741,13 +747,7 @@ def test_settings_module_exports_the_stripped_redis_host():
         [sys.executable, "-c", script],
         capture_output=True,
         text=True,
-        env={
-            **os.environ,
-            # pytest injects the NetBox source path from pyproject; a bare subprocess does not.
-            "PYTHONPATH": os.pathsep.join(path for path in sys.path if path),
-            "TEST_DB_NAME": "test_netbox_librenms",
-            "TEST_REDIS_HOST": "  redis  ",
-        },
+        env=_python_child_environment(TEST_DB_NAME="test_netbox_librenms", TEST_REDIS_HOST="  redis  "),
         cwd=REPOSITORY_ROOT,
         check=False,
     )
@@ -1319,7 +1319,7 @@ except TimeoutError:
 """
     result = subprocess.run(
         [sys.executable, "-c", script, helper],
-        env={**os.environ, "DJANGO_SETTINGS_MODULE": "netbox_librenms_plugin.tests.isolated_settings"},
+        env=_python_child_environment(DJANGO_SETTINGS_MODULE="netbox_librenms_plugin.tests.isolated_settings"),
         capture_output=True,
         text=True,
         timeout=15,
@@ -1406,7 +1406,7 @@ connections.close_all()
 """
     result = subprocess.run(
         [sys.executable, "-c", script, connection.settings_dict["NAME"], connection_source, str(closed_peer)],
-        env={**os.environ, "DJANGO_SETTINGS_MODULE": "netbox_librenms_plugin.tests.isolated_settings"},
+        env=_python_child_environment(DJANGO_SETTINGS_MODULE="netbox_librenms_plugin.tests.isolated_settings"),
         capture_output=True,
         text=True,
         timeout=20,
