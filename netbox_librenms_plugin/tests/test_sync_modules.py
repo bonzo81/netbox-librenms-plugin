@@ -3235,7 +3235,8 @@ def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint,
         for query in queries
         if "SELECT" in query["sql"] and "normalizationrule" in query["sql"] and "'serial'" in query["sql"]
     ]
-    # One read per manufacturer for the install, plus one for the stack's member attribution.
+    # A preload reads the manufacturer's rules and the global rules. A mixed install preloads up to three times:
+    # once for the stack's member attribution and once for each destination manufacturer.
     assert len(serial_queries) <= (6 if mixed_manufacturers else 2), serial_queries
 
 
