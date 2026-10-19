@@ -2393,8 +2393,8 @@ def get_interface_name_field(request: Optional[HttpRequest] = None, obj=None) ->
     """
     Get interface name field with request override support.
 
-    Checks in order: GET/POST params, platform-specific user preference, global
-    user preference, plugin config default. Platform-specific storage is used
+    Checks in order: GET/POST params, platform-specific user preference (the object's platform,
+    then its nearest ancestor with a choice), global user preference, plugin config default. Platform-specific storage is used
     only when the installation setting is enabled and the object has a platform.
 
     Args:
@@ -2416,10 +2416,15 @@ def get_interface_name_field(request: Optional[HttpRequest] = None, obj=None) ->
 
         if platform_id is not None and _remember_interface_name_per_platform(request):
             platform_preferences = get_user_pref(request, INTERFACE_NAME_PLATFORM_PREFERENCES_PATH, {})
-            if isinstance(platform_preferences, dict):
+            if isinstance(platform_preferences, dict) and platform_preferences:
                 platform_value = platform_preferences.get(str(platform_id))
                 if is_supported_interface_name_field(platform_value):
                     return platform_value
+                # A version platform reads the choice of its nearest ancestor that has one.
+                for ancestor in obj.platform.get_ancestors(ascending=True):
+                    platform_value = platform_preferences.get(str(ancestor.pk))
+                    if is_supported_interface_name_field(platform_value):
+                        return platform_value
 
         # Check user preference
         pref_val = get_user_pref(request, INTERFACE_NAME_PREFERENCE_PATH)
