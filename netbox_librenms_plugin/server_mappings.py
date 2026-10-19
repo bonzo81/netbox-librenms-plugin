@@ -813,9 +813,20 @@ def _stored_value(obj):
     return obj.custom_field_data.get(_MAPPING_KEY)
 
 
+def _same_stored(first, second) -> bool:
+    # Python finds 42.0 == 42 and True == 1, but the decoder rejects a float or bool ID.
+    if type(first) is not type(second):
+        return False
+    if isinstance(first, dict):
+        return first.keys() == second.keys() and all(_same_stored(first[key], second[key]) for key in first)
+    if isinstance(first, list):
+        return len(first) == len(second) and all(map(_same_stored, first, second))
+    return first == second
+
+
 def _change(obj, stored_after, outcome=None, *, claims=(), group=None) -> MappingChange:
     stored_before = _stored_value(obj)
-    changed = stored_after != stored_before
+    changed = not _same_stored(stored_after, stored_before)
     if outcome is None:
         outcome = ChangeOutcome.APPLIED if changed else ChangeOutcome.UNCHANGED
     return MappingChange(
@@ -871,7 +882,7 @@ def _with_own_id(stored, server_key, identity, obj):
         value[server_key] = {"id": int_id, "oob": existing_entry["oob"]}
     else:
         value[server_key] = int_id
-    return value, (ChangeOutcome.APPLIED if value != stored else ChangeOutcome.UNCHANGED)
+    return value, (ChangeOutcome.UNCHANGED if _same_stored(value, stored) else ChangeOutcome.APPLIED)
 
 
 def assign_own(obj, server: str, identity) -> MappingChange:

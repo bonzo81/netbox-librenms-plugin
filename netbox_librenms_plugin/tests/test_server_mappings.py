@@ -1047,6 +1047,13 @@ class TestAssignOwn:
         assert change.outcome is ChangeOutcome.UNCHANGED
         assert change.changed is False
 
+    @pytest.mark.parametrize(("stored", "identity"), [({"primary": 5.0}, 5), ({"primary": True}, 1)])
+    def test_a_stored_id_that_only_compares_equal_is_replaced(self, stored, identity):
+        change = assign_own(_dev(stored), "primary", identity)
+        assert change.outcome is ChangeOutcome.APPLIED
+        assert change.changed is True
+        assert change.after.own_id("primary") == identity
+
     def test_a_builder_runs_no_query_and_does_not_mutate(self, django_assert_num_queries):
         dev = _dev({"primary": 5})
         with django_assert_num_queries(0):
