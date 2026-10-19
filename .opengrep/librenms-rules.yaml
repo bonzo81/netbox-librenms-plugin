@@ -1111,6 +1111,21 @@ rules:
               - pattern-inside: |
                   for $V in <... "responses" ...>:
                     ...
+              # The same reads through a local alias of the "responses" mapping.
+              - patterns:
+                  - pattern-inside: |
+                      $R = <... "responses" ...>
+                      ...
+                  - pattern-either:
+                      - pattern-inside: |
+                          $V = <... $R ...>
+                          ...
+                      - pattern-inside: |
+                          for $K, $V in <... $R ...>:
+                            ...
+                      - pattern-inside: |
+                          for $V in <... $R ...>:
+                            ...
   - id: no-stored-mapping-access
     languages: [python]
     severity: ERROR

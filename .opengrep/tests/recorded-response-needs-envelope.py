@@ -28,6 +28,27 @@ def legacy_values_reader(recording):
         yield value[1] if isinstance(value, list) else value
 
 
+def legacy_alias_reader(recording, key):
+    responses = recording["responses"]
+    value = responses[key]
+    # ruleid: recorded-response-needs-envelope
+    return value[1] if isinstance(value, list) else value
+
+
+def legacy_alias_loop_reader(recording):
+    responses = recording.get("responses", {})
+    for value in responses.values():
+        # ruleid: recorded-response-needs-envelope
+        yield value[1] if isinstance(value, list) else value
+
+
+def alias_of_other_rows(recording, key):
+    rows = recording["rows"]
+    value = rows[key]
+    # ok: recorded-response-needs-envelope
+    return value[1] if isinstance(value, list) else value
+
+
 def envelope_reader(value):
     # ok: recorded-response-needs-envelope
     return unwrap_response(value)[1]
