@@ -132,6 +132,28 @@ def _ports(recording):
     return []
 
 
+def _vc_rows(recording):
+    """Return the root inventory rows and the direct children of the stack root that VC detection reads."""
+    root_items = _inventory_items(_body(recording, lambda k: _contained_in_query(k) == "0"))
+    parent_index = select_vc_parent_index(root_items)
+    child_items = []
+    if parent_index is not None:
+        child_items = _inventory_items(_body(recording, lambda k: _contained_in_query(k) == str(parent_index)))
+    return root_items, child_items
+
+
+def vc_detecting_serial_key(recording, serial_keys):
+    """
+    Return the first of *serial_keys* under which a raw capture holds a stack, or the first key.
+
+    Detection accepts a stack that any candidate key explains, so a capture must anonymize serials
+    with that key for the recording to keep the stack.
+    """
+    root_items, child_items = _vc_rows(recording)
+    rows = [*root_items, *child_items]
+    return next((key for key in serial_keys if extract_vc_stack(rows, (key,)).members), serial_keys[0])
+
+
 def compute_shape_signature(recording, *, serial_key=normalize_stack_serial):
     """
     Compute the testing-relevant fingerprint of a recording.
@@ -157,16 +179,12 @@ def compute_shape_signature(recording, *, serial_key=normalize_stack_serial):
             os_name = devices[0].get("os")
 
     # Virtual chassis: root container class + the members and member shape VC detection finds under it.
-    root_items = _inventory_items(_body(recording, lambda k: _contained_in_query(k) == "0"))
+    root_items, child_items = _vc_rows(recording)
     root_class = None
     if any(i.get("entPhysicalClass") == "stack" for i in root_items):
         root_class = "stack"
     elif any(i.get("entPhysicalClass") == "chassis" for i in root_items):
         root_class = "chassis"
-    parent_index = select_vc_parent_index(root_items)
-    child_items = []
-    if parent_index is not None:
-        child_items = _inventory_items(_body(recording, lambda k: _contained_in_query(k) == str(parent_index)))
     # Live callers supply their serial key. Anonymized recordings already preserve that equality.
     stack = extract_vc_stack([*root_items, *child_items], (serial_key,))
     members = stack.members
