@@ -59,14 +59,19 @@ def _add_url(obj):
     return reverse("plugins:netbox_librenms_plugin:add_device_to_librenms", args=[obj.pk])
 
 
-def _configure_only_other_server(settings):
-    """Configure one server that is not ``default``, so a legacy ``default`` mapping is unprotected."""
+def _configure_only_server(settings, server_key):
+    """Configure *server_key* as the only server."""
     plugin_config = deepcopy(settings.PLUGINS_CONFIG)
     plugin_config["netbox_librenms_plugin"]["servers"] = {
-        "primary": {"librenms_url": "https://primary.example.test", "api_token": "remove-test-token"}
+        server_key: {"librenms_url": f"https://{server_key}.example.test", "api_token": "remove-test-token"}
     }
     plugin_config["netbox_librenms_plugin"].pop("librenms_url", None)
     settings.PLUGINS_CONFIG = plugin_config
+
+
+def _configure_only_other_server(settings):
+    """Configure one server that is not ``default``, so a legacy ``default`` mapping is unprotected."""
+    _configure_only_server(settings, "primary")
 
 
 def _post_remove(client, obj, server_key):
@@ -372,7 +377,8 @@ class TestRemoveServerMappingView:
         device.refresh_from_db()
         assert device.custom_field_data["librenms_id"] == "+42"
 
-    def test_a_readable_legacy_value_stays_when_default_is_configured(self, client):
+    def test_a_readable_legacy_value_stays_when_default_is_configured(self, client, settings):
+        _configure_only_server(settings, "default")
         device = make_device("remove-legacy-protected-default", librenms_cf="+42")
         client.force_login(make_superuser("remove-legacy-protected-default-writer"))
 
