@@ -14,6 +14,7 @@ rules and the member-name pattern, so the outcome tests use the test database.
 
 from io import StringIO
 import json
+import re
 from threading import Barrier
 
 import pytest
@@ -93,22 +94,57 @@ def test_bundled_response_labels_and_revisions_are_anonymized(recording):
     check(recording.get("responses", {}))
 
 
+_ANON_TEXT = re.compile(r"(?:entity-[0-9a-f]{6}(?: \d+(?:/(?:\d+|[xc]\d+))+)?)|(?:\d+(?:/(?:\d+|[xc]\d+))+)")
+# A description may also keep the Junos Virtual Chassis markers that VC detection reads and the
+# Juniper MX "@ fpc/pic/port" locators that the dangling-parent repair reads.
+_JUNOS_DESCR = re.compile(
+    r"(?:(?:FPC(?: \d+)? )?entity-[0-9a-f]{6} @ \d+/\d+/\d+)|(?:PIC: entity-[0-9a-f]{6} @ \d+/\d+/\*)"
+    r"|(?:FPC: entity-[0-9a-f]{6} @ \d+/\*/\*)|(?:FPC(?: \d+)? entity-[0-9a-f]{6})"
+    r"|(?:entity-[0-9a-f]{6} Virtual Chassis)"
+)
+# A Juniper switch control board name keeps the prefix an include rule matches, never the SKU.
+_SCB_NAME = re.compile(r"SCB entity-[0-9a-f]{6}")
+# An IOS XE description keeps the leading "Front Panel" a description rule matches, as typed.
+_FRONT_PANEL_DESCR = re.compile(rf"\s*(?i:front panel)\s*(?:{_ANON_TEXT.pattern}|{_JUNOS_DESCR.pattern})?")
+
+
+def _inventory_text_is_anonymized(field, value):
+    if field == "entPhysicalDescr" and (_JUNOS_DESCR.fullmatch(value) or _FRONT_PANEL_DESCR.fullmatch(value)):
+        return True
+    if field == "entPhysicalName" and _SCB_NAME.fullmatch(value):
+        return True
+    return bool(_ANON_TEXT.fullmatch(value))
+
+
+def test_the_display_text_check_accepts_what_the_anonymizer_keeps():
+    """Every name and description the anonymizer writes passes the check on bundled recordings."""
+    descrs = [
+        "Front Panel 6 ports Gigabitethernet Module",
+        "Front Panel uplink card @ 1/0/2",
+        "FPC: MPC7E 3D 40XGE @ 1/*/*",
+        "PIC: 4x QSFP28 @ 1/0/*",
+        "QSFP+-40G-SR4 @ 1/0/2",
+        "16 ports Async Serial NIM",
+    ]
+    rows = [
+        {"entPhysicalIndex": index, "entPhysicalName": descr, "entPhysicalDescr": descr}
+        for index, descr in enumerate(descrs, start=1)
+    ]
+    recording = {
+        "schema_version": 1,
+        "name": "synthetic",
+        "device_id": 1,
+        "responses": {"GET /api/v0/inventory/1/all": {"status": "ok", "inventory": rows}},
+    }
+    anonymized = anonymize_recording(recording, salt="display-text")
+    (body,) = [unwrap_response(value)[1] for key, value in anonymized["responses"].items() if "/inventory/" in key]
+    texts = [(field, row[field]) for row in body["inventory"] for field in ("entPhysicalName", "entPhysicalDescr")]
+    assert [text for text in texts if not _inventory_text_is_anonymized(*text)] == []
+    assert [descr for descr in descrs if _inventory_text_is_anonymized("entPhysicalDescr", descr)] == []
+
+
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
 def test_bundled_inventory_display_text_is_anonymized(recording):
-    import re
-
-    allowed = re.compile(r"(?:entity-[0-9a-f]{6}(?: \d+(?:/(?:\d+|[xc]\d+))+)?)|(?:\d+(?:/(?:\d+|[xc]\d+))+)")
-    # A description may also keep the Junos Virtual Chassis markers that VC detection reads and the
-    # Juniper MX "@ fpc/pic/port" locators that the dangling-parent repair reads.
-    junos_descr = re.compile(
-        r"(?:(?:FPC(?: \d+)? )?entity-[0-9a-f]{6} @ \d+/\d+/\d+)|(?:PIC: entity-[0-9a-f]{6} @ \d+/\d+/\*)"
-        r"|(?:FPC: entity-[0-9a-f]{6} @ \d+/\*/\*)|(?:FPC(?: \d+)? entity-[0-9a-f]{6})"
-        r"|(?:entity-[0-9a-f]{6} Virtual Chassis)"
-    )
-    # A Juniper switch control board name keeps the prefix an include rule matches, never the SKU.
-    scb_name = re.compile(r"SCB entity-[0-9a-f]{6}")
-    # An IOS XE description keeps the leading "Front Panel" a description rule matches, as typed.
-    front_panel_descr = re.compile(rf"\s*(?i:front panel)\s*(?:{allowed.pattern})?")
     for key, value in recording.get("responses", {}).items():
         body = unwrap_response(value)[1]
         if "/inventory/" not in key or not isinstance(body, dict):
@@ -116,12 +152,7 @@ def test_bundled_inventory_display_text_is_anonymized(recording):
         for item in body.get("inventory") or []:
             for field in ("entPhysicalName", "entPhysicalDescr"):
                 if isinstance(item, dict) and item.get(field):
-                    value = item[field]
-                    kept = (
-                        field == "entPhysicalDescr"
-                        and (junos_descr.fullmatch(value) or front_panel_descr.fullmatch(value))
-                    ) or (field == "entPhysicalName" and scb_name.fullmatch(value))
-                    assert allowed.fullmatch(value) or kept, (recording["name"], field, value)
+                    assert _inventory_text_is_anonymized(field, item[field]), (recording["name"], field, item[field])
 
 
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
