@@ -113,6 +113,29 @@ def superuser_client(client, settings):
 
 
 @pytest.mark.django_db
+class TestRulesFollowThePlatformTree:
+    """A rule on a platform also applies on its descendants, such as a tracked version platform."""
+
+    def test_a_parent_platform_rule_hides_ports_on_a_version_child(self, superuser_client):
+        junos = _platform("rule-tab-junos")
+        version = Platform.objects.create(name="RULE-TAB-JUNOS 21.2R3", slug="rule-tab-junos-21-2r3", parent=junos)
+        InterfaceTypeMapping.objects.create(action=IGNORE, platform=junos, name_pattern="^Vlan")
+        device = _device("rule-tab-on-version", version)
+        _seed(device, _vlan_ports())
+
+        assert sorted(_rows(_tab(superuser_client, device))) == [100]
+
+    def test_a_child_platform_rule_does_not_apply_on_its_parent(self, superuser_client):
+        junos = _platform("rule-tab-junos-parent")
+        version = Platform.objects.create(name="RULE-TAB-JUNOS 22.4R1", slug="rule-tab-junos-22-4r1", parent=junos)
+        InterfaceTypeMapping.objects.create(action=IGNORE, platform=version, name_pattern="^Vlan")
+        device = _device("rule-tab-on-parent", junos)
+        _seed(device, _vlan_ports())
+
+        assert sorted(_rows(_tab(superuser_client, device))) == [100, 101, 102]
+
+
+@pytest.mark.django_db
 class TestIgnoredRowsInTheTab:
     """Acceptance 1: a platform Ignore rule hides its ports on that platform only."""
 
