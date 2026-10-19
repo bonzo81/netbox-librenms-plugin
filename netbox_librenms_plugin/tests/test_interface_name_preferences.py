@@ -279,6 +279,40 @@ def test_interface_name_choice_is_saved_per_user_and_platform(client):
 
 
 @pytest.mark.django_db
+def test_a_platform_choice_applies_on_its_descendants_until_one_saves_its_own(client):
+    """A version platform reads its nearest ancestor's choice; a save on the version stays on it."""
+    LibreNMSSettings.objects.create(remember_interface_name_per_platform=True)
+    junos = Platform.objects.create(name="Vendor J", slug="vendor-j")
+    version = Platform.objects.create(name="Vendor J 21.2R3", slug="vendor-j-21-2r3", parent=junos)
+    other_version = Platform.objects.create(name="Vendor J 22.4R1", slug="vendor-j-22-4r1", parent=junos)
+    devices = {}
+    for platform in (junos, version, other_version):
+        devices[platform.pk] = make_device(f"tree-preference-{platform.slug}")
+        devices[platform.pk].platform = platform
+        devices[platform.pk].save(update_fields=["platform"])
+    user = make_superuser("tree-interface-name-user")
+    client.force_login(user)
+
+    assert _post_preference(client, "ifDescr").status_code == 200
+    assert _post_preference(client, "ifName", junos.pk).status_code == 200
+    request = _request_for(user)
+    assert [get_interface_name_field(request, devices[p.pk]) for p in (junos, version, other_version)] == [
+        "ifName",
+        "ifName",
+        "ifName",
+    ]
+
+    assert _post_preference(client, "ifDescr", version.pk).status_code == 200
+    request = _request_for(user)
+    assert [get_interface_name_field(request, devices[p.pk]) for p in (junos, version, other_version)] == [
+        "ifName",
+        "ifDescr",
+        "ifName",
+    ]
+    assert request.user.config.get(PLATFORM_PREFERENCES) == {str(junos.pk): "ifName", str(version.pk): "ifDescr"}
+
+
+@pytest.mark.django_db
 def test_disabling_platform_memory_keeps_using_the_global_user_preference(client):
     """The installation setting can opt out of platform-specific preference storage."""
     settings = LibreNMSSettings.objects.create(remember_interface_name_per_platform=True)
