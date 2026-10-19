@@ -1036,7 +1036,7 @@ class TestStorelibrenmsId:
         from netbox_librenms_plugin.tests.conftest import make_device
 
         device = make_device("store-repairs-a-look-alike", librenms_cf={"default": None})
-        Device.objects.filter(pk=device.pk).update(custom_field_data={"librenms_id": stored})
+        seed_stored_mapping_row(device, stored)
         device.refresh_from_db()
         api = api_for(settings, librenms_server.url)
 
