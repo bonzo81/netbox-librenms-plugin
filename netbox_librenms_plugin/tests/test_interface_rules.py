@@ -393,6 +393,47 @@ class TestIgnoreAndAmbiguity:
         assert (decision.kind, _pks(decision)) == (RuleDecisionKind.SET_TYPE, [winner.pk])
 
 
+class TestPlatformTree:
+    def _tree(self, slug):
+        parent = _platform(slug)
+        child = Platform.objects.create(name=f"{parent.name} 1.0", slug=f"{slug}-1-0", parent=parent)
+        grandchild = Platform.objects.create(name=f"{parent.name} 1.0.1", slug=f"{slug}-1-0-1", parent=child)
+        return parent, child, grandchild
+
+    def test_a_platform_rule_applies_on_every_descendant_and_not_on_a_sibling_tree(self):
+        parent, child, grandchild = self._tree("tree-junos")
+        other = _platform("tree-other")
+        ignore = _rule(action=IGNORE, platform=parent, name_pattern="^Vlan")
+        port = _port("Vlan10", if_type="propVirtual")
+        for platform in (parent, child, grandchild):
+            assert _pks(_decide(port, platform)) == [ignore.pk], platform
+        assert _decide(port, other).kind is RuleDecisionKind.UNMAPPED
+        assert _decide(port, None).kind is RuleDecisionKind.UNMAPPED
+
+    def test_a_child_platform_rule_applies_only_from_the_child_down(self):
+        parent, child, grandchild = self._tree("tree-child")
+        ignore = _rule(action=IGNORE, platform=child, name_pattern="^Vlan")
+        port = _port("Vlan10", if_type="propVirtual")
+        assert _decide(port, parent).kind is RuleDecisionKind.UNMAPPED
+        assert _pks(_decide(port, child)) == [ignore.pk]
+        assert _pks(_decide(port, grandchild)) == [ignore.pk]
+
+    def test_the_deeper_platform_rule_wins_a_set_type_tie(self):
+        parent, child, _grandchild = self._tree("tree-rank")
+        _rule(platform=parent, name_pattern="^Te", netbox_type="10gbase-x-sfpp")
+        child_rule = _rule(platform=child, librenms_type="ethernetCsmacd", netbox_type="10gbase-x-xfp")
+        decision = _decide(_port("Te1/1"), child)
+        assert (decision.kind, _pks(decision)) == (RuleDecisionKind.SET_TYPE, [child_rule.pk])
+        assert _decide(_port("Te1/1"), parent).netbox_type == "10gbase-x-sfpp"
+
+    def test_may_ignore_follows_the_platform_tree(self):
+        parent, child, grandchild = self._tree("tree-may")
+        _rule(action=IGNORE, platform=parent, name_pattern="^Vlan")
+        matcher = InterfaceRuleMatcher.load()
+        assert all(matcher.may_ignore(platform.pk) for platform in (parent, child, grandchild))
+        assert not matcher.may_ignore(None)
+
+
 class TestMayIgnore:
     def test_may_ignore_follows_the_ignore_rules_platforms(self):
         ios, junos = _platform("ios"), _platform("junos")
@@ -412,12 +453,13 @@ class TestMayIgnore:
 
 
 class TestLoading:
-    def test_one_query_to_load_and_none_to_decide(self, django_assert_num_queries):
+    def test_two_queries_to_load_and_none_to_decide(self, django_assert_num_queries):
         ios = _platform("ios")
         _rule(action=IGNORE, platform=ios, name_pattern="^Vlan")
         _rule(platform=ios, name_pattern="^Te", netbox_type="10gbase-x-sfpp")
         _rule(librenms_type="ethernetCsmacd", librenms_speed=1_000_000, netbox_type="1000base-t")
-        with django_assert_num_queries(1):
+        # The rules, then the platform tree that the platform rules apply to.
+        with django_assert_num_queries(2):
             matcher = InterfaceRuleMatcher.load()
         with django_assert_num_queries(0):
             decisions = [matcher.decide(_port(name), platform_id=ios.pk) for name in ("Vlan10", "Te1/1", "Gi1/1")]
