@@ -1856,8 +1856,13 @@ class BaseCableTableView(
 
     def _may(self, action, obj):
         """Return whether the request user may do *action* (``view`` or ``change``) on *obj*."""
-        queryset = self._viewable_queryset if action == "view" else self._changeable_queryset
-        return queryset(type(obj)).filter(pk=obj.pk).exists()
+        # The channels of one parent ask the same questions; the writer keeps its own uncached check.
+        memo = self.__dict__.setdefault("_may_memo", {})
+        key = (action, type(obj), obj.pk)
+        if key not in memo:
+            queryset = self._viewable_queryset if action == "view" else self._changeable_queryset
+            memo[key] = queryset(type(obj)).filter(pk=obj.pk).exists()
+        return memo[key]
 
     def _viewable_cable_peer_device(self, interface, cable):
         """Return the device at the far end of *cable*, only when the request may view it."""
