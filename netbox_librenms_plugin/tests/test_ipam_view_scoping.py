@@ -7,6 +7,8 @@ tab and ``SyncInterfacesView``, plus the notice that tells a user which IPAM per
 the data.
 """
 
+from collections import Counter
+
 import pytest
 
 from netbox_librenms_plugin.tests.conftest import (
@@ -127,34 +129,6 @@ class TestInterfacesTabIpamScoping:
         assert context["hidden_ipam_permissions"] == []
         assert group.name in _table_html(context["table"])
 
-    @pytest.mark.parametrize("superuser", [False, True])
-    def test_render_does_not_repeat_unscoped_vlan_queries(self, settings, django_user_model, superuser):
-        from collections import Counter
-
-        from django.db import connection
-        from django.test.utils import CaptureQueriesContext
-
-        server_key = configure_default_librenms_server(settings)
-        device = make_device("iface-tab-query-scope")
-        group, _vlan = _site_group_with_vlan(device, "iface-tab-query-scope")
-        user = (
-            django_user_model.objects.create_superuser(username="iface-tab-query-admin", password="test-password")
-            if superuser
-            else _reader("iface-tab-query-reader")
-        )
-
-        with CaptureQueriesContext(connection) as queries:
-            context = self._context(user, device, server_key)
-
-        group_reads = Counter(query["sql"] for query in queries if 'FROM "ipam_vlangroup"' in query["sql"])
-        assert group_reads
-        assert max(group_reads.values()) == 1, "The render repeated the same VLAN group query"
-        assert list(context["vlan_groups"]) == ([group] if superuser else [])
-        assert context["hidden_ipam_permissions"] == ([] if superuser else [VLAN_GROUP_PERM, VLAN_PERM])
-        assert context["vlan_scope_incomplete"] is not superuser
-        if superuser:
-            assert not any("COUNT(" in query["sql"] and 'FROM "ipam_vlan"' in query["sql"] for query in queries)
-
     def test_a_constrained_ipam_grant_marks_the_interface_scope_incomplete(self, settings):
         """A partial object grant must show the same incomplete-scope warning as the VLAN tab."""
         from ipam.models import VLAN, VLANGroup
@@ -193,8 +167,11 @@ class TestInterfacesTabIpamScoping:
             if 'FROM "ipam_vlangroup"' in query["sql"] and '"scope_type_id" IS NULL' in query["sql"]
         ]
         assert len(global_group_reads) == 1, global_group_reads
+        group_reads = Counter(query["sql"] for query in queries if 'FROM "ipam_vlangroup"' in query["sql"])
+        assert max(group_reads.values()) == 1, "The render repeated the same VLAN group query"
         assert context["hidden_ipam_permissions"] == ([] if superuser else [VLAN_GROUP_PERM, VLAN_PERM])
         assert list(context["vlan_groups"]) == ([group] if superuser else [])
+        assert context["vlan_scope_incomplete"] is not superuser
 
     def test_superuser_render_skips_vlan_scope_count_queries(self, settings):
         from django.db import connection
