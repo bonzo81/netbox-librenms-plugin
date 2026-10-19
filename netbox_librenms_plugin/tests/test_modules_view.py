@@ -7279,6 +7279,38 @@ def test_junos_vc_rows_on_the_page_belong_to_the_member_they_name(client, settin
 
 
 @pytest.mark.django_db
+def test_a_standalone_device_with_a_junos_vc_inventory_keeps_every_row(client, settings, librenms_server):
+    """A Junos stack that imported standalone has no members, so every row stays on the page."""
+    from django.core.cache import cache
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    from netbox_librenms_plugin.tests.conftest import bind_librenms_server
+
+    bind_librenms_server(settings, librenms_server, server_key="default")
+    device = make_device("junos-standalone-modules")
+    inventory = junos_vc_inventory()
+    librenms_server.inventory_response(9357, inventory)
+    payload = trusted_module_inventory_payload(device, inventory, librenms_id=9357)
+    cache.set(DeviceModuleTableView().get_cache_key(device, "inventory", server_key="default"), payload, 300)
+    cache.set("librenms_device_info_default_9357", (True, {"device_id": 9357, "hostname": device.name}), 300)
+    client.force_login(make_superuser("junos-standalone-modules-user"))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
+        {"tab": "modules", "server_key": "default"},
+    )
+
+    assert response.status_code == 200
+    rows = response.context["module_sync"]["table"].data
+    assert rows
+    assert {row["selected_device_id"] for row in rows} == {device.pk}
+
+
+@pytest.mark.django_db
 def test_a_decorated_junos_fpc_serial_is_serial_evidence_on_the_page(client, settings, librenms_server):
     """Juniper reports "S/N 12350"; after the serial rules it names its member even where the position disagrees."""
     from django.core.cache import cache

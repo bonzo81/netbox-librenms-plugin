@@ -437,7 +437,8 @@ class _Attribution:
         self.serial_key = serial_key
         self.by_serial = members_by_serial_key(vc_members, serial_key)
         self.by_index = {index: row for row in rows if (index := row.get("entPhysicalIndex")) is not None}
-        self.stack = _stack_rows(rows, (serial_key,))
+        # Without members every row stays on the page, and serial_key can be None.
+        self.stack = _stack_rows(rows, (serial_key,)) if vc_members else _StackRows(None, {}, {})
         self.results = {}
 
     def member_at(self, position):
