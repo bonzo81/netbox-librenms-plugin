@@ -18,6 +18,7 @@ from netbox_librenms_plugin.constants import (
     LIBRENMS_PORTS_COLUMNS,
     RELATIONSHIP_KINDS,
 )
+from netbox_librenms_plugin.server_mappings import AmbiguousLibreNMSIdError, read_mapping
 
 # HTTP request timeout constants (in seconds)
 DEFAULT_API_TIMEOUT = 10
@@ -38,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 def normalized_pair_key(first_port, second_port):
     """Return one order-independent key for a port pair, or None when it names a single port."""
-    from netbox_librenms_plugin.utils import normalize_librenms_port_id
+    from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 
     first_id = normalize_librenms_port_id(first_port.get("port_id"))
     second_id = normalize_librenms_port_id(second_port.get("port_id"))
@@ -459,20 +460,15 @@ class LibreNMSAPI:
             int: LibreNMS ID if found in the custom field or cache, None otherwise
 
         """
-        from netbox_librenms_plugin.utils import get_librenms_device_id
-
         resolved_key = server_key or self.server_key
-        librenms_id = get_librenms_device_id(obj, resolved_key, auto_save=False)
+        librenms_id = read_mapping(obj).own_id(resolved_key)
         if librenms_id is not None:
             return librenms_id
+        return self.get_cached_librenms_id(obj, server_key=resolved_key)
 
-        # Check cache (scoped to the same server the CF was read under)
-        cache_key = self._get_cache_key(obj, server_key=resolved_key)
-        librenms_id = cache.get(cache_key)
-        if librenms_id is not None:
-            return librenms_id
-
-        return None
+    def get_cached_librenms_id(self, obj, server_key=None):
+        """Return the LibreNMS ID cached for *obj* on the server, or None."""
+        return cache.get(self._get_cache_key(obj, server_key=server_key or self.server_key))
 
     def get_librenms_id(self, obj):
         """
@@ -536,7 +532,7 @@ class LibreNMSAPI:
         """
         Coerce a raw LibreNMS ID value to int or None.
 
-        Thin wrapper around :func:`netbox_librenms_plugin.utils.coerce_librenms_id`
+        Thin wrapper around :func:`netbox_librenms_plugin.librenms_ids.coerce_librenms_id`
         kept for back-compat with internal callers in this module.
 
         Args:
@@ -546,7 +542,7 @@ class LibreNMSAPI:
             int | None: The coerced id, or None if it can't be coerced.
 
         """
-        from netbox_librenms_plugin.utils import coerce_librenms_id
+        from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 
         return coerce_librenms_id(value)
 
@@ -597,7 +593,6 @@ class LibreNMSAPI:
         )
         if can_persist_mapping:
             from netbox_librenms_plugin.utils import (
-                AmbiguousLibreNMSIdError,
                 lock_librenms_id_assignment,
                 set_librenms_device_id,
             )
@@ -995,7 +990,7 @@ class LibreNMSAPI:
             ports = []
         if not isinstance(port_stack, list):
             port_stack = []
-        from netbox_librenms_plugin.utils import normalize_librenms_port_id
+        from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 
         # Ignore malformed port items without losing valid relationships from the same payload.
         safe_ports = [port for port in ports if isinstance(port, dict)]

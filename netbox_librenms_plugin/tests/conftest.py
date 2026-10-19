@@ -15,6 +15,7 @@ from uuid import uuid4
 import pytest
 import requests
 
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.parallel import isolated_test_database_name
 
 _TEST_DATABASE_BASE_NAME = os.environ["TEST_DB_NAME"]
@@ -47,9 +48,9 @@ def configured_server_key():
 
 def persist_test_server_mapping(obj, server_key):
     """Persist the server mapping required by a real sync-page request."""
-    from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
+    from netbox_librenms_plugin.utils import set_librenms_device_id
 
-    if get_librenms_device_id(obj, server_key, auto_save=False) is None:
+    if read_mapping(obj).own_id(server_key) is None:
         set_librenms_device_id(obj, obj.pk, server_key)
         obj.save(update_fields=["custom_field_data"])
 

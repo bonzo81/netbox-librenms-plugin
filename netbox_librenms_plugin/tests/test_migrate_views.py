@@ -5,6 +5,7 @@ from dcim.models import CableTermination, Device
 from django.urls import reverse
 from virtualization.models import VMInterface
 
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
     cable_together,
     ip_on,
@@ -22,12 +23,10 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
 )
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
-    get_migrated_to_marker,
     mark_librenms_migrated,
     set_device_ip_fk,
 )
 from netbox_librenms_plugin.views.sync.migrate import (
-    _parse_marker_winner_pk,
     _reconcile_donor_device_ip_fks,
     _resolve_winner_for_donor,
     _safe_referer,
@@ -81,29 +80,28 @@ class TestMigrationMarkerContract:
         _mark(donor, winner)
         donor.refresh_from_db()
 
-        marker = get_migrated_to_marker(donor, SERVER_KEY)
-        assert marker["device_id"] == winner.pk
-        assert marker["server_key"] == SERVER_KEY
+        marker = read_mapping(donor).migrated_to(SERVER_KEY)
+        assert marker.device_id == winner.pk
+        assert marker.server_key == SERVER_KEY
         resolved, resolved_marker = _resolve_winner_for_donor(donor, SERVER_KEY)
         assert resolved == winner
         assert resolved_marker == marker
 
-    @pytest.mark.parametrize(
-        "candidate",
-        [None, True, False, 0, -1, "", " 1 ", "+1", "1.0", "1e2", object()],
-    )
-    def test_marker_winner_parser_rejects_non_positive_or_numeric_like_values(self, candidate):
-        assert _parse_marker_winner_pk(candidate) is None
+    @pytest.mark.parametrize("candidate", [None, True, False, 0, -1, "", "1", " 1 ", "+1", "1.0", 1.0])
+    def test_a_marker_without_a_positive_integer_winner_is_no_marker(self, candidate):
+        donor = make_device(f"marker-bad-winner-{candidate!r}")
+        donor.custom_field_data["librenms_id"] = {
+            SERVER_KEY: {"_migrated_to": {"device_id": candidate, "server_key": SERVER_KEY}}
+        }
+        donor.save(update_fields=["custom_field_data"])
 
-    @pytest.mark.parametrize("candidate", [1, "1", 42, "42"])
-    def test_marker_winner_parser_accepts_positive_integer_shapes(self, candidate):
-        assert _parse_marker_winner_pk(candidate) == int(candidate)
+        assert _resolve_winner_for_donor(donor, SERVER_KEY) == (None, None)
 
     def test_deleted_winner_is_distinct_from_missing_marker(self):
         donor = make_device("marker-deleted-donor")
         winner = make_device("marker-deleted-winner")
         _mark(donor, winner)
-        marker = get_migrated_to_marker(donor, SERVER_KEY)
+        marker = read_mapping(donor).migrated_to(SERVER_KEY)
         Device.objects.filter(pk=winner.pk).delete()
         donor.refresh_from_db()
 
@@ -131,8 +129,8 @@ class TestMigrationMarkerContract:
         _mark(donor, winner, "secondary")
         donor.refresh_from_db()
 
-        assert get_migrated_to_marker(donor, SERVER_KEY) is None
-        assert get_migrated_to_marker(donor, "secondary")["device_id"] == winner.pk
+        assert read_mapping(donor).migrated_to(SERVER_KEY) is None
+        assert read_mapping(donor).migrated_to("secondary").device_id == winner.pk
 
 
 @pytest.mark.django_db

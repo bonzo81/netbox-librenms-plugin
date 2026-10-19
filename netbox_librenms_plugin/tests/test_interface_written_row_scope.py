@@ -20,6 +20,7 @@ from django.urls import reverse
 from ipam.models import VLAN, IPAddress, VLANGroup
 from virtualization.models import VirtualMachine, VMInterface
 
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
     make_device,
@@ -37,7 +38,7 @@ from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
 )
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, messages_on
-from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
+from netbox_librenms_plugin.utils import set_librenms_device_id
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
 IN_SCOPE = {"name__startswith": "eth"}
@@ -371,8 +372,8 @@ def test_a_port_bound_to_another_owner_is_refused_in_every_change_scope(
         ("warning", "1 interface(s) skipped: eth0 (LibreNMS port ID is already assigned to another NetBox interface).")
     ]
     assert local.description == "local-old"
-    assert get_librenms_device_id(local, SERVER_KEY, auto_save=False) is None
-    assert (foreign.description, get_librenms_device_id(foreign, SERVER_KEY, auto_save=False)) == ("foreign-old", 1)
+    assert read_mapping(local).own_id(SERVER_KEY) is None
+    assert (foreign.description, read_mapping(foreign).own_id(SERVER_KEY)) == ("foreign-old", 1)
     assert "private-foreign" not in response.content.decode()
 
 

@@ -13,6 +13,11 @@ from django.urls import reverse
 from extras.validators import CustomValidator
 from ipam.models import VRF
 
+from netbox_librenms_plugin.server_mappings import (
+    AmbiguousLibreNMSIdError,
+    MappingRole,
+    find_mapping,
+)
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
 from netbox_librenms_plugin.tests.test_ip_row_vrf_create import RD_ROWS, _create, seeded  # noqa: F401
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
@@ -23,12 +28,12 @@ HIDDEN = "(only a superuser sees the message)"
 
 @pytest.mark.django_db
 def test_ambiguous_identity_text_does_not_disclose_other_owners(caplog):
-    from netbox_librenms_plugin.utils import AmbiguousLibreNMSIdError, exception_text_for, find_by_librenms_id
+    from netbox_librenms_plugin.utils import exception_text_for
 
     owners = [make_device(name, librenms_cf={"default": 7201}) for name in ("identity-first", "identity-second")]
     viewer = make_user_with_perms("identity-viewer", [("view", Device)], constraints={"pk": owners[0].pk})
     with pytest.raises(AmbiguousLibreNMSIdError) as caught:
-        find_by_librenms_id(Device, 7201, "default")
+        find_mapping(Device.objects.all(), server="default", identity=7201, roles=(MappingRole.OWN, MappingRole.OOB))
 
     text = exception_text_for(caught.value, Device, viewer)
 

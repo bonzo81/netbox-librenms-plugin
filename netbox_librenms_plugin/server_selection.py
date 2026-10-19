@@ -6,15 +6,8 @@ from enum import StrEnum
 from django.conf import settings as django_settings
 
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-from netbox_librenms_plugin.server_mappings import (
-    PREFERRED_SERVER_FIELD,
-    iter_server_mapping_entries,
-)
-from netbox_librenms_plugin.utils import (
-    get_librenms_sync_device,
-    is_legacy_librenms_id,
-    resolve_server_mapping_display_id,
-)
+from netbox_librenms_plugin.server_mappings import PreferenceStatus, read_mapping
+from netbox_librenms_plugin.utils import get_librenms_sync_device
 
 
 class ServerSelectionState(StrEnum):
@@ -153,17 +146,17 @@ def _servers_config(plugin_config) -> dict:
 def build_server_mappings(owner, active_key=None, *, plugin_config=None) -> tuple[ServerMapping, ...]:
     """Build the owner's per-server mapping rows, excluding reserved metadata."""
     plugin_config = _plugin_config() if plugin_config is None else plugin_config
-    raw_mappings = owner.custom_field_data.get("librenms_id")
-    if not isinstance(raw_mappings, dict) or not raw_mappings:
+    mapping_state = read_mapping(owner)
+    if not mapping_state.servers:
         return ()
 
     servers_config = _servers_config(plugin_config)
     available_servers = LibreNMSAPI.get_available_servers()
     mappings = []
-    stored_preference = raw_mappings.get(PREFERRED_SERVER_FIELD)
+    stored_preference = mapping_state.preference.server
 
-    for server_key, entry in iter_server_mapping_entries(raw_mappings):
-        device_id, is_oob_only = resolve_server_mapping_display_id(entry)
+    for entry in mapping_state.servers:
+        server_key, device_id, is_oob_only = entry.server, entry.display_id, entry.is_oob_only
         if device_id is None:
             continue
 
@@ -208,20 +201,18 @@ def resolve_object_server(page_object, requested_key=None, installation_default_
     mappings = build_server_mappings(mapping_owner)
     mappings_by_key = {mapping.server_key: mapping for mapping in mappings}
     selectable = tuple(mapping for mapping in mappings if mapping.is_selectable)
-    raw_mappings = mapping_owner.custom_field_data.get("librenms_id")
-    legacy_mapping = is_legacy_librenms_id(raw_mappings)
+    owner_mapping = read_mapping(mapping_owner)
+    legacy_mapping = owner_mapping.legacy.is_legacy
     selectable_keys = {mapping.server_key for mapping in selectable}
-    preference_is_stored = isinstance(raw_mappings, dict) and PREFERRED_SERVER_FIELD in raw_mappings
-    stored_preference = raw_mappings.get(PREFERRED_SERVER_FIELD) if preference_is_stored else None
-    preferred_key = (
-        stored_preference if isinstance(stored_preference, str) and stored_preference in selectable_keys else None
-    )
+    preference_is_stored = owner_mapping.preference.status is not PreferenceStatus.ABSENT
+    stored_preference = owner_mapping.preference.server
+    preferred_key = stored_preference if stored_preference in selectable_keys else None
 
     warning = None
     if len(selectable) > 1 and not preference_is_stored:
         warning = "No preferred LibreNMS server is stored."
     elif preference_is_stored and preferred_key is None:
-        if not isinstance(stored_preference, str) or not stored_preference.strip():
+        if owner_mapping.preference.status is PreferenceStatus.MALFORMED:
             warning = "The stored preferred LibreNMS server is malformed."
         elif stored_preference not in mappings_by_key:
             warning = f"The stored preferred LibreNMS server '{stored_preference}' has no object mapping."
@@ -242,8 +233,8 @@ def resolve_object_server(page_object, requested_key=None, installation_default_
 
     if requested_key is not None:
         mapping = mappings_by_key.get(requested_key)
-        migrated_entry = raw_mappings.get(requested_key) if isinstance(raw_mappings, dict) else None
-        migrated_scope = isinstance(migrated_entry, dict) and isinstance(migrated_entry.get("_migrated_to"), dict)
+        migrated_entry = owner_mapping.server(requested_key)
+        migrated_scope = migrated_entry is not None and migrated_entry.migration.recorded
         available_requested_key = requested_key in available_servers
         legacy_default_scope = legacy_mapping and available_requested_key and requested_key == installation_default_key
         if (mapping is None or not mapping.is_selectable) and not (

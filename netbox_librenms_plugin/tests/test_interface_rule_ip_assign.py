@@ -17,6 +17,7 @@ from django.urls import reverse
 from ipam.models import IPAddress
 
 from netbox_librenms_plugin.models import InterfaceTypeMapping
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncTab, sync_snapshot_key
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
 from netbox_librenms_plugin.tests.test_interface_rule_writes import _platform, _port
@@ -175,8 +176,7 @@ def renamed_source(client, live_librenms):
     """
     The source port 7101 is named eth0, but NetBox's eth0 is bound to port 7100, which is ignored.
 
-    Nothing is bound to 7101, so the resolver falls back by name to eth0. The snapshot keeps the
-    record of port 7100 because an interface in scope is bound to it.
+    Nothing is bound to 7101, and the binding to 7100 outranks the name, so the row has no target.
     """
     platform = _platform("ip-assign-bound")
     rule = InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform, name_pattern="^Vlan")
@@ -195,35 +195,29 @@ def renamed_source(client, live_librenms):
 
 
 @pytest.mark.django_db
-class TestTheTargetInterfacesOwnPortIsChecked:
+class TestANameMatchBoundToAnotherPortIsNotTheTarget:
     def test_a_new_address_is_refused_and_the_row_says_why(self, client, renamed_source):
-        device, _eth, _other, rows, rule = renamed_source
-        reason = f"LibreNMS port 7100 (Vlan10): ignored by interface rule {rule.pk}"
+        device, _eth, _other, rows, _rule = renamed_source
 
         cell = _status_cell(client, device, "198.18.70.10/24")
         response = _sync(client, device, rows)
 
-        assert f"Not synced: {reason}" in cell
+        assert "Missing NetBox Object" in cell
         assert not IPAddress.objects.filter(address="198.18.70.10/24").exists()
-        assert _skipped(response, "198.18.70.10/24", reason)
+        assert "Skipped (no matching NetBox interface): 198.18.70.10/24" in " ".join(_messages(response))
 
-    def test_a_confirmed_reassignment_is_refused(self, client, renamed_source):
-        device, eth, other, rows, rule = renamed_source
+    def test_an_existing_address_is_not_moved(self, client, renamed_source):
+        device, _eth, other, rows, _rule = renamed_source
         existing = IPAddress.objects.create(address="198.18.70.10/24", assigned_object=other, status="active")
-        InterfaceTypeMapping.objects.filter(pk=rule.pk).update(platform=None, name_pattern="^no-such-port$")
-        conflict = _sync(client, device, rows).context["conflicts"][0]
-        InterfaceTypeMapping.objects.filter(pk=rule.pk).update(platform=device.platform, name_pattern="^Vlan")
 
-        response = _sync(client, device, [], force_all="1", conflict_intent=conflict["intent"])
+        response = _sync(client, device, rows)
 
         existing.refresh_from_db()
         assert existing.assigned_object == other
-        assert _skipped(
-            response, "198.18.70.10/24", f"LibreNMS port 7100 (Vlan10): ignored by interface rule {rule.pk}"
-        )
+        assert "Skipped (no matching NetBox interface): 198.18.70.10/24" in " ".join(_messages(response))
 
     def test_the_primary_ip_is_not_set(self, client, renamed_source, live_librenms):
-        device, eth, _other, rows, rule = renamed_source
+        device, eth, _other, rows, _rule = renamed_source
         IPAddress.objects.create(address="198.18.70.10/24", assigned_object=eth, status="active")
         live_librenms.server.register(
             f"/api/v0/devices/{DEVICE_ID}",
@@ -234,9 +228,7 @@ class TestTheTargetInterfacesOwnPortIsChecked:
 
         device.refresh_from_db()
         assert device.primary_ip4_id is None
-        assert _skipped(
-            response, "198.18.70.10/24", f"LibreNMS port 7100 (Vlan10): ignored by interface rule {rule.pk}"
-        )
+        assert "Primary IP not set for 198.18.70.10/24" in " ".join(_messages(response))
 
 
 def _serve_device(live_librenms, device_id, ports, addresses):
@@ -253,9 +245,8 @@ def test_a_refresh_keeps_the_record_of_the_port_bound_to_the_target_interface(cl
     """
     NetBox eth0 is bound to port 7100, which LibreNMS now calls eth9; port 7101 is named eth0.
 
-    The one IP row is on 7101 and resolves by name to NetBox eth0. Neither record matches the
-    global Ignore rule, so the address is assigned. The record of 7100 is evidence only: it is
-    not an IP row and not a name candidate.
+    The one IP row is on 7101. NetBox eth0 has its name but is bound to 7100, so the row has no
+    target until the interfaces are synced. The record of 7100 is evidence only: it is not an IP row.
     """
     InterfaceTypeMapping.objects.create(action=IGNORE, name_pattern="^Vlan")
     device = make_device("ip-assign-refresh", librenms_cf={SERVER_KEY: {"id": DEVICE_ID}})
@@ -280,8 +271,9 @@ def test_a_refresh_keeps_the_record_of_the_port_bound_to_the_target_interface(cl
     assert [row["port_id"] for row in snapshot["ip_addresses"]] == [7101]
     assert {str(key) for key in snapshot["ports_by_id"]} == {"7101"}
     assert snapshot["bound_ports_by_id"]["7100"]["ifName"] == "eth9"
-    assert IPAddress.objects.get(address="198.18.80.10/24").assigned_object == eth0
-    assert not any("Skipped" in message for message in _messages(response))
+    assert not IPAddress.objects.filter(address="198.18.80.10/24").exists()
+    assert read_mapping(eth0).own_id(SERVER_KEY) == 7100
+    assert "Skipped (no matching NetBox interface): 198.18.80.10/24" in " ".join(_messages(response))
 
 
 @pytest.mark.django_db

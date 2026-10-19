@@ -8,16 +8,18 @@ from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_interface,
     make_ip,
+    map_device_to_librenms,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import make_request
 from netbox_librenms_plugin.tests.view_test_helpers import post as view_post
+from netbox_librenms_plugin.utils import set_librenms_device_id
 
 
 pytestmark = pytest.mark.django_db
 
 
 def _set_librenms_id(obj, value, server_key="default"):
-    obj.custom_field_data["librenms_id"] = {server_key: value}
+    set_librenms_device_id(obj, value, server_key)
     obj.save(update_fields=["custom_field_data"])
 
 
@@ -218,9 +220,9 @@ class TestCableHTTPAndORM:
     def test_host_and_oob_links_are_merged_from_two_real_devices(self, live_librenms):
         from netbox_librenms_plugin.views.object_sync.devices import DeviceCableTableView
 
-        device = make_device("cable-oob")
-        device.custom_field_data["librenms_id"] = {"default": {"id": 42, "oob": {"id": 99, "type": "controller"}}}
-        device.save(update_fields=["custom_field_data"])
+        device = map_device_to_librenms(
+            make_device("cable-oob"), 42, server_key="default", oob={"id": 99, "type": "controller"}
+        )
         _register_ports(live_librenms, 42)
         _register_links(live_librenms, 42)
         _register_ports(
@@ -412,9 +414,9 @@ class TestInterfaceViewWithRealObjects:
         resolved = []
         original_lookup = view._get_object_librenms_id
 
-        def record_lookup(interface):
+        def record_lookup(interface, mapping):
             resolved.append(interface.pk)
-            return original_lookup(interface)
+            return original_lookup(interface, mapping)
 
         monkeypatch.setattr(view, "_get_object_librenms_id", record_lookup)
 

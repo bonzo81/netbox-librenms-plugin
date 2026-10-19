@@ -6,6 +6,7 @@ from django.contrib.messages import get_messages
 from django.core.cache import cache
 from django.urls import reverse
 
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
     make_device,
@@ -13,7 +14,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis_members,
 )
-from netbox_librenms_plugin.utils import get_librenms_device_id, set_librenms_device_id
+from netbox_librenms_plugin.utils import set_librenms_device_id
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
 
@@ -72,7 +73,7 @@ def _sync(
 
 
 def _binding(interface):
-    return get_librenms_device_id(interface, SERVER_KEY, auto_save=False)
+    return read_mapping(interface).own_id(SERVER_KEY)
 
 
 @pytest.mark.django_db
@@ -298,7 +299,7 @@ def test_bound_oob_keeps_its_name_when_reported_name_is_bound_to_another_server(
     assert bound.name == "eth0-oob"
     assert bound.enabled is True
     assert _binding(bound) == 9312
-    assert get_librenms_device_id(occupied, "secondary", auto_save=False) == 9911
+    assert read_mapping(occupied).own_id("secondary") == 9911
     response_messages = [str(message) for message in get_messages(second_response.wsgi_request)]
     assert not any("sync was rolled back" in message for message in response_messages)
     assert any(

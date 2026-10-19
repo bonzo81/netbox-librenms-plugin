@@ -15,9 +15,7 @@ from django_htmx.middleware import HtmxDetails
 from django.urls import reverse
 from ipam.models import IPAddress, VLAN
 
-from netbox_librenms_plugin.sync_cache import (
-    _ACKNOWLEDGED_REVISIONS_SESSION_KEY as SYNC_CACHE_ACKNOWLEDGED_SESSION_KEY,
-)
+from netbox_librenms_plugin.sync_cache import _ACKNOWLEDGED_REVISIONS_SESSION_KEY as SYNC_CACHE_ACKNOWLEDGED_SESSION_KEY
 from netbox_librenms_plugin.sync_cache import (
     CacheMutationTransition,
     SyncCacheConsistency,
@@ -2392,13 +2390,13 @@ def test_cleanup_failure_before_affected_tabs_are_known_invalidates_all_tabs(
 
     results = iter([{"primary"}, RuntimeError("mapping lookup failed"), {"primary"}])
 
-    def mapped_server_keys(*_args, **_kwargs):
+    def mapped_device_servers(*_args, **_kwargs):
         result = next(results)
         if isinstance(result, Exception):
             raise result
         return result
 
-    monkeypatch.setattr(sync_cache, "mapped_server_keys", mapped_server_keys)
+    monkeypatch.setattr(sync_cache, "mapped_device_servers", mapped_device_servers)
     with django_capture_on_commit_callbacks(execute=True):
         transition = coordinator.schedule_mutation(SyncTab.INTERFACES, "primary", actor_id=1)
 

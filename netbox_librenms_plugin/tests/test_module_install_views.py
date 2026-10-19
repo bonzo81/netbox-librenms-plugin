@@ -2,6 +2,7 @@
 
 import pytest
 
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
 from netbox_librenms_plugin.tests.conftest import (
     install_module,
@@ -74,7 +75,6 @@ class TestInstallModuleView:
         """With no index there is no cached row, so posted identity and serial must not be read."""
         from dcim.models import Module
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
 
         device = make_device("install-post-fallback", librenms_cf={"default": 62})
@@ -99,7 +99,7 @@ class TestInstallModuleView:
         interface.refresh_from_db()
         assert response.status_code == 302
         assert interface.module_id is None
-        assert get_librenms_device_id(interface, "default", auto_save=False) is None
+        assert read_mapping(interface).own_id("default") is None
         assert message_texts(request, "info") == []
         # The carrier install itself still runs; only the posted metadata is discarded.
         assert Module.objects.get(device=device, module_bay=bay).serial == ""
@@ -142,7 +142,6 @@ class TestInstallBranchView:
     def test_a_branch_install_creates_the_module_and_binds_its_port(self, live_librenms):
         from dcim.models import Module
 
-        from netbox_librenms_plugin.utils import get_librenms_device_id
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
         device = make_device_with_module_bays("branch-install", ["Slot 1"])
@@ -185,7 +184,7 @@ class TestInstallBranchView:
         interface.refresh_from_db()
         assert response.status_code == 302
         assert Module.objects.filter(device=device, module_type=module_type).exists()
-        assert get_librenms_device_id(interface, "default", auto_save=False) == 6501
+        assert read_mapping(interface).own_id("default") == 6501
         assert any("Installed" in text for text in message_texts(request, "success"))
 
     def test_a_bind_failure_is_reported_next_to_the_install(self, live_librenms):
