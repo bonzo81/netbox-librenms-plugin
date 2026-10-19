@@ -2,11 +2,11 @@
 
 import re
 
-# Bounded at 19 digits, the width of a PostgreSQL bigint. Without the bound an oversized string is
-# rejected only by CPython's int_max_str_digits limit, which a host may raise or disable.
+# The text bound of 19 digits keeps int() off an oversized string, whatever CPython's int_max_str_digits is.
 _ID_TEXT_SPACE = r"[ \t\r\n\f\v]*"
 _ID_TEXT_SIGN = r"\+?"
 _ID_TEXT_MAX_DIGITS = 19
+_ID_MAX = 2**63 - 1  # The largest PostgreSQL bigint.
 _ASCII_POSITIVE_INTEGER_RE = re.compile(
     rf"^{_ID_TEXT_SPACE}{_ID_TEXT_SIGN}[0-9]{{1,{_ID_TEXT_MAX_DIGITS}}}{_ID_TEXT_SPACE}$"
 )
@@ -20,7 +20,7 @@ def coerce_librenms_id(value) -> int | None:
     return None. Booleans are rejected because ``bool`` is a subclass of ``int`` in
     Python, so ``int(True)`` silently becomes ``1`` — a valid-looking device ID. Zero
     and negative values are also rejected since LibreNMS IDs are strictly positive
-    integers. An int wider than 19 digits is rejected like its text form.
+    integers. A value above the largest PostgreSQL bigint is rejected in both forms.
 
     Args:
         value: The raw LibreNMS id value to coerce.
@@ -32,7 +32,7 @@ def coerce_librenms_id(value) -> int | None:
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
-        return value if 0 < value < 10**_ID_TEXT_MAX_DIGITS else None
+        return value if 0 < value <= _ID_MAX else None
     if isinstance(value, str):
         if not _ASCII_POSITIVE_INTEGER_RE.fullmatch(value):
             return None
@@ -40,7 +40,7 @@ def coerce_librenms_id(value) -> int | None:
             coerced = int(value)
         except ValueError:
             return None
-        return coerced if coerced > 0 else None
+        return coerced if 0 < coerced <= _ID_MAX else None
     return None
 
 

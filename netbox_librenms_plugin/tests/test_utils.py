@@ -406,8 +406,8 @@ class TestConversionHelpers:
         sys.set_int_max_str_digits(0)
         try:
             assert normalize_librenms_port_id("1" * 5000) is None
-            # 19 digits is the bigint width and stays acceptable.
-            assert normalize_librenms_port_id("9" * 19) == int("9" * 19)
+            assert normalize_librenms_port_id(str(2**63 - 1)) == 2**63 - 1
+            assert normalize_librenms_port_id("9" * 19) is None
             assert normalize_librenms_port_id("9" * 20) is None
         finally:
             sys.set_int_max_str_digits(previous)
@@ -1778,7 +1778,7 @@ class TestLibreNMSIdQueryMatchesDecoder:
             "+42",
             " \t42\n",
             "0042",
-            "0" * 17 + "42",  # 19 digits: the bigint width, still readable
+            "0" * 17 + "42",  # 19 digits: the widest text form, still readable
             "0" * 18 + "42",  # 20 digits: past the bound
             "0" * 20 + "42",  # 22 digits
         ],
@@ -1827,9 +1827,9 @@ class TestLibreNMSIdQueryMatchesDecoder:
 
         assert (found == dev) == (coerce_librenms_id(stored) == 42)
 
-    @pytest.mark.parametrize("wide", [10**19, str(10**19)])
-    def test_id_past_the_digit_bound_is_neither_read_nor_found(self, wide):
-        """An ID wider than 19 digits is invalid in both int and text form, so no lookup finds it."""
+    @pytest.mark.parametrize("wide", [2**63, str(2**63), "9300000000000000000", 10**19, str(10**19)])
+    def test_id_past_the_bigint_bound_is_neither_read_nor_found(self, wide):
+        """An ID above the PostgreSQL bigint maximum is invalid in both int and text form, so no lookup finds it."""
         from dcim.models import Device
 
         from netbox_librenms_plugin.tests.conftest import make_device
