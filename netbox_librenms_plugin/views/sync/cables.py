@@ -23,6 +23,16 @@ from netbox_librenms_plugin.constants import (
     SERIAL_INVENTORY_SOURCE,
 )
 from netbox_librenms_plugin.interface_rules import RuleDecisionKind, decision_reason, interface_rules_for_request
+from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
+from netbox_librenms_plugin.server_mappings import (
+    AmbiguousLibreNMSIdError,
+    MappingRole,
+    find_port_owner,
+    identity_q,
+    name_match_may_be_port,
+    read_mapping,
+    resolve_device_port,
+)
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
@@ -38,29 +48,27 @@ from netbox_librenms_plugin.transactions import (
     run_transaction,
 )
 from netbox_librenms_plugin.utils import (
-    AmbiguousLibreNMSIdError,
     LibreNMSPortBindingConflict,
     claim_librenms_port_binding,
     apply_cable_manual_picks,
-    build_librenms_id_qs,
     cable_path_reaches,
     classify_cable_action,
-    coerce_librenms_id,
-    find_interface_by_librenms_port_id,
     get_cable_sync_settings,
     get_librenms_cable_tag,
     get_interface_name_field,
-    get_librenms_device_id,
     get_librenms_sync_device,
-    get_migrated_to_marker,
     is_list_of_dicts,
     PortDisclosure,
     exception_text_for,
     render_cable_trace,
-    resolve_interface_on_device,
     set_librenms_device_id,
 )
-from netbox_librenms_plugin.views.base.cables_view import cable_row_ports, port_owner_id, port_record, remote_port_ref
+from netbox_librenms_plugin.views.base.cables_view import (
+    cable_row_ports,
+    port_owner_id,
+    port_record,
+    remote_port_ref,
+)
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
     LibreNMSAPIMixin,
@@ -342,7 +350,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             locked_cache_device = getattr(self, "_locked_cache_device", None)
             server_key = getattr(self, "_post_server_key", None)
             if any(
-                get_migrated_to_marker(device, server_key)
+                read_mapping(device).migrated_to(server_key or "default")
                 for device in (
                     locked_initial_device,
                     locked_origin_device,
@@ -353,6 +361,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             ):
                 return {"status": "stale", "interface": display_name}
             local_term, remote_term = locked_terms
+            if not self._locked_ends_may_be_row_ports(local_term, remote_term, link_data):
+                return {"status": "stale", "interface": display_name}
             locked_cables = self._lock_current_cables(local_term, remote_term)
             visible_cable_ids = set(
                 self.restricted_queryset(Cable, "view").filter(pk__in=locked_cables).values_list("pk", flat=True)
@@ -467,6 +477,23 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             locked_remote,
         )
 
+    def _locked_ends_may_be_row_ports(self, local_term, remote_term, link_data):
+        """
+        Return whether each locked Interface end may still be the LibreNMS port its row names.
+
+        The ends were resolved before the lock, so a binding written since then is read here. A
+        manually picked remote is the user's choice, not a port match, so only the local end is checked.
+        """
+        server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
+        ends = [(local_term, link_data.get("local_port_id"))]
+        if not link_data.get("manual_remote"):
+            ends.append((remote_term, remote_port_ref(link_data)))
+        return all(
+            name_match_may_be_port(term, server=server_key, port_id=port_id)
+            for term, port_id in ends
+            if isinstance(term, Interface)
+        )
+
     @staticmethod
     def _group_terminations(local_term, remote_term):
         """Group the submitted terminations by model, and record the owner each one claims."""
@@ -556,7 +583,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             owner_id = port_owner_id(link_data, side)
             ports[(port_id, owner_id)] = None if owner_id is None else owners[owner_id]
         for interface in touched_interfaces:
-            if (port_id := get_librenms_device_id(interface, server_key, auto_save=False)) is not None:
+            if (port_id := read_mapping(interface).own_id(server_key)) is not None:
                 ports[(port_id, interface.device_id)] = owners[interface.device_id]
         if not ports:
             return None
@@ -595,7 +622,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             Interface.objects.filter(pk__in=[pk for _model, pk in self._displaced_interfaces(*terminations)])
         )
         for interface in interfaces:
-            if (port_id := get_librenms_device_id(interface, server_key, auto_save=False)) is not None:
+            if (port_id := read_mapping(interface).own_id(server_key)) is not None:
                 wanted.add(port_id)
         for port_id in sorted(wanted - set(records)):
             if (record := self._fetch_port_record(port_id)) is not None:
@@ -916,11 +943,11 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             selected_device = self.restricted_queryset(Device, "view").filter(pk=selected_device_id).first()
             if selected_device is None:
                 return None, {"status": "rejected_selection", "interface": display_name}
-            selected_local = resolve_interface_on_device(
+            selected_local = resolve_device_port(
                 selected_device,
-                getattr(self, "_post_server_key", None) or self.librenms_api.server_key,
-                link_data.get("local_port_id"),
-                [link_data.get("local_port"), link_data.get("local_port_alt")],
+                server=getattr(self, "_post_server_key", None) or self.librenms_api.server_key,
+                port_id=link_data.get("local_port_id"),
+                name_candidates=[link_data.get("local_port"), link_data.get("local_port_alt")],
             )
             if (
                 selected_local is None
@@ -1204,7 +1231,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                     "?tab=cables",
                     server_key,
                 )
-        if get_migrated_to_marker(origin_device, server_key) or get_migrated_to_marker(initial_device, server_key):
+        if read_mapping(origin_device).migrated_to(server_key) or read_mapping(initial_device).migrated_to(server_key):
             messages.error(request, "This device has been migrated and is read-only for this LibreNMS server.")
             return redirect_with_server_key(
                 request,
@@ -1449,7 +1476,7 @@ class CableRemoteCreateView(SyncCablesView):
             f"&server_key={quote_plus(server_key)}" if server_key else ""
         )
         if any(
-            get_migrated_to_marker(device, server_key)
+            read_mapping(device).migrated_to(server_key)
             for device in (obj, context["local_interface"].device, getattr(self, "_cache_device", None))
             if device is not None
         ):
@@ -1560,6 +1587,13 @@ class CableRemoteCreateView(SyncCablesView):
             return None, HttpResponse(
                 "LibreNMS returned no record for the remote port. Refresh the cable data and try again.", status=409
             )
+        if not self._port_record_is_live_on_neighbour(port, row):
+            return None, HttpResponse(
+                f"The remote port no longer exists in LibreNMS on {remote_device.name}. "
+                "Refresh the cable data and try again.",
+                status=409,
+                content_type="text/plain",
+            )
         # The far end is an interface create, so the rules decide the port for the remote device.
         decision = interface_rules_for_request(request).check_interface_write(
             port, platform_id=remote_device.platform_id
@@ -1596,6 +1630,16 @@ class CableRemoteCreateView(SyncCablesView):
         if port_id is None:
             return None
         return self._fetch_port_record(port_id)
+
+    @staticmethod
+    def _port_record_is_live_on_neighbour(port, row):
+        """True only when *port* is a not-deleted port of the row's neighbour; a missing field refuses."""
+        neighbour_id = coerce_librenms_id(row.get("remote_device_id"))
+        return (
+            neighbour_id is not None
+            and coerce_librenms_id(port.get("device_id")) == neighbour_id
+            and port.get("deleted") in (None, 0, "0")
+        )
 
     @staticmethod
     def _proposed_interface_name(request, obj, row, port):
@@ -1636,10 +1680,10 @@ class CableRemoteCreateView(SyncCablesView):
         """
         remote_device = context["remote_device"]
         name = context["proposed_name"]
-        port_key = context["row"].get("remote_port_key")
+        port_key = remote_port_ref(context["row"])
         claim_librenms_port_binding(port_key, context["server_key"])
         try:
-            port_is_bound = find_interface_by_librenms_port_id(port_key, context["server_key"]) is not None
+            port_is_bound = find_port_owner(port_key, server=context["server_key"]) is not None
         except AmbiguousLibreNMSIdError:
             port_is_bound = True
         if port_is_bound:
@@ -1651,10 +1695,14 @@ class CableRemoteCreateView(SyncCablesView):
             raise _RemoteCreateAborted(
                 f"{remote_device.name} already has an interface named {name}. Refresh the cable data and try again."
             )
-        port_key = coerce_librenms_id(context["row"].get("remote_port_key"))
         if port_key is not None:
-            host_q, oob_q = build_librenms_id_qs(context["server_key"], port_key)
-            if Interface.objects.filter(host_q | oob_q).exists():
+            port_q = identity_q(
+                Interface,
+                server=context["server_key"],
+                identities=(port_key,),
+                roles=(MappingRole.OWN, MappingRole.OOB),
+            )
+            if Interface.objects.filter(port_q).exists():
                 raise _RemoteCreateAborted("The remote port is already mapped. Refresh the cable data and try again.")
         interface = Interface(device=remote_device, name=name, type=context["proposed_type"])
         try:
@@ -1678,6 +1726,6 @@ class CableRemoteCreateView(SyncCablesView):
             raise _RemoteCreateAborted(f"You may not add interfaces to {remote_device.name}.")
         # The row resolves by LibreNMS port id from now on, never by name luck.
         interface.snapshot()
-        set_librenms_device_id(interface, context["row"].get("remote_port_key"), context["server_key"])
+        set_librenms_device_id(interface, port_key, context["server_key"])
         interface.save(update_fields=["custom_field_data", "last_updated"])
         return interface

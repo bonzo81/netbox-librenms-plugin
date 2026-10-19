@@ -20,7 +20,8 @@ from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording, fi
 from netbox_librenms_plugin.data_shapes.capture import capture_device_recording
 from netbox_librenms_plugin.data_shapes.compress import compress_recording
 from netbox_librenms_plugin.data_shapes.signature import classify_novelty, compute_shape_signature
-from netbox_librenms_plugin.utils import coerce_librenms_id, get_librenms_oob, get_librenms_sync_device
+from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.utils import get_librenms_sync_device
 from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,
@@ -64,9 +65,9 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
 
         # Include a linked OOB controller's ports (a separate LibreNMS device the interfaces view
         # merges into the host) so the submitted shape is complete for OOB hosts.
-        oob = get_librenms_oob(sync_device, server_key=server_key)
-        oob_id = coerce_librenms_id(oob.get("id")) if oob else None
-        if oob and oob_id is None:
+        sync_mapping = read_mapping(sync_device)
+        oob_id = sync_mapping.oob_id(server_key)
+        if sync_mapping.has_oob(server_key) and oob_id is None:
             return self._error(request, device, "The linked OOB controller has an invalid LibreNMS id.")
         try:
             recording = capture_device_recording(

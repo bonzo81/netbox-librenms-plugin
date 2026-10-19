@@ -21,6 +21,7 @@ from django.urls import reverse
 from ipam.models import IPAddress, VRF
 
 from netbox_librenms_plugin.constants import INTERFACE_NAME_FIELDS
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncCacheConsistency, SyncTab, sync_snapshot_key
 from netbox_librenms_plugin.tests.conftest import (
     _PORT_KEYS_UNSET,
@@ -111,6 +112,34 @@ class TestCachedInterfaceUrlFallback:
             [
                 {
                     "ipv4_address": "192.0.2.51",
+                    "ipv4_prefixlen": 24,
+                    "port_id": 9999,
+                    "interface_name": "Ethernet1",
+                    "interface_url": cached_url,
+                }
+            ],
+            device,
+            "ifName",
+            server_key="default",
+            port_data_cache={9999: None},
+        )
+
+        assert len(enriched) == 1
+        assert "interface_url" not in enriched[0]
+
+    def test_a_cached_url_to_an_interface_bound_to_another_port_drops_it(self):
+        """The PK survives a rename, but a binding to a different port outranks it."""
+        device = make_device("ipurl-rebound")
+        interface = make_interface(device, "Ethernet1")
+        cached_url = interface.get_absolute_url()
+        interface.name = "Ethernet1-renamed"
+        interface.custom_field_data["librenms_id"] = {"default": 9000}
+        interface.save()
+
+        enriched = self._view().enrich_ip_data(
+            [
+                {
+                    "ipv4_address": "192.0.2.53",
                     "ipv4_prefixlen": 24,
                     "port_id": 9999,
                     "interface_name": "Ethernet1",
@@ -721,6 +750,54 @@ def test_refresh_and_sync_accepts_an_already_prefixed_address(
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("tag", "binding", "matches"),
+    [
+        ("ip-name-other-port", {"default": 7999}, False),
+        ("ip-name-unbound", None, True),
+        ("ip-name-other-server", {"secondary": 7999}, True),
+    ],
+)
+def test_a_same_name_interface_bound_to_another_port_does_not_take_the_ip(
+    client, settings, live_librenms, tag, binding, matches
+):
+    """Port 7001 has no bound interface, so only the name Ethernet1 can match the row."""
+    _configure_test_server(settings)
+    device = make_device(tag, librenms_cf={"default": {"id": 42}})
+    interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+    if binding is not None:
+        interface.custom_field_data["librenms_id"] = binding
+        interface.save(update_fields=["custom_field_data"])
+    client.force_login(make_superuser(f"{tag}-user"))
+    assert _refresh_ip_snapshot(client, device, "198.18.40.10", 24, live_librenms).status_code == 200
+
+    render_response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
+        {"tab": "ipaddresses", "server_key": "default"},
+    )
+    table = render_response.context["ip_sync"]["table"]
+    (row,) = list(table.data)
+    table_html = table.as_html(render_response.wsgi_request)
+    sync_response = client.post(
+        reverse(
+            "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+            kwargs={"object_type": "device", "pk": device.pk},
+        ),
+        {"server_key": "default", "select": "198.18.40.10/24", "vrf_198.18.40.10/24": ""},
+    )
+
+    assert sync_response.status_code == 302
+    synced = IPAddress.objects.filter(address="198.18.40.10/24").first()
+    if matches:
+        assert synced.assigned_object == interface
+    else:
+        assert synced is None
+        assert "Skipped (no matching NetBox interface): 198.18.40.10/24" in " ".join(_message_texts(sync_response))
+    assert (row.get("interface_url") == interface.get_absolute_url()) is matches
+    assert (interface.get_absolute_url() in table_html) is matches
+
+
+@pytest.mark.django_db
 def test_refresh_rejects_conflicting_embedded_and_separate_prefixes(client, settings, live_librenms):
     """Contradictory LibreNMS prefix evidence must not produce a syncable cache entry."""
     _configure_test_server(settings)
@@ -1032,8 +1109,6 @@ def test_create_missing_interfaces_materializes_one_interface_for_bulk_ip_rows(c
     """Bulk IP sync must create one shared termination for rows on the same missing port."""
     from dcim.models import Interface
 
-    from netbox_librenms_plugin.utils import get_librenms_device_id
-
     _configure_test_server(settings)
     device = make_device("ip-create-missing-interface", librenms_cf={"default": {"id": 42}})
     blue = VRF.objects.create(name="Create Missing Blue")
@@ -1088,7 +1163,7 @@ def test_create_missing_interfaces_materializes_one_interface_for_bulk_ip_rows(c
     assert response.status_code == 302
     interface = Interface.objects.get(device=device, name="Ethernet1")
     assert Interface.objects.filter(device=device, name="Ethernet1").count() == 1
-    assert get_librenms_device_id(interface, "default", auto_save=False) == 7001
+    assert read_mapping(interface).own_id("default") == 7001
     assert interface.description == "Server uplink"
     assert interface.mtu == 1500
     assert interface.enabled is True
@@ -1903,6 +1978,65 @@ def test_interface_scope_change_during_lock_is_reported_as_a_failure(client, set
     assert scope_change.fired
     assert any("no longer available in your view scope" in message for message in _message_texts(response))
     assert not IPAddress.objects.filter(address="198.18.19.30/24").exists()
+
+
+@pytest.mark.django_db
+def test_a_name_match_bound_to_another_port_before_the_lock_is_refused(client, settings):
+    """Ethernet1 matches port 7031 by name, then a concurrent write binds it to port 7999."""
+    from dcim.models import Interface
+    from django.db import connection
+
+    _configure_test_server(settings)
+    device = make_device("ip-name-rebound-before-lock", librenms_cf={"default": {"id": 42}})
+    interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+    client.force_login(make_superuser("ip-name-rebound-before-lock-user"))
+    cache.set(
+        _ip_snapshot_key(device),
+        {
+            "ip_addresses": [
+                {
+                    "ip_address": "198.18.19.31",
+                    "prefix_length": 24,
+                    "ip_with_mask": "198.18.19.31/24",
+                    "port_id": 7031,
+                    "interface_name": "Ethernet1",
+                }
+            ],
+            "mgmt_ip": "",
+            "ports_by_id": {},
+            "interface_name_field": "ifName",
+        },
+        timeout=300,
+    )
+
+    class BindInterfaceBeforeLock:
+        """Bind the matched interface to another port before its locking read."""
+
+        def __init__(self):
+            self.fired = False
+
+        def __call__(self, execute, sql, params, many, context):
+            if not self.fired and 'FROM "dcim_interface"' in sql and "FOR UPDATE" in sql.upper():
+                self.fired = True
+                rebound = Interface.objects.get(pk=interface.pk)
+                rebound.custom_field_data["librenms_id"] = {"default": 7999}
+                rebound.save(update_fields=["custom_field_data"])
+            return execute(sql, params, many, context)
+
+    rebind = BindInterfaceBeforeLock()
+    with connection.execute_wrapper(rebind):
+        response = client.post(
+            reverse(
+                "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+                kwargs={"object_type": "device", "pk": device.pk},
+            ),
+            {"server_key": "default", "select": "198.18.19.31/24", "vrf_198.18.19.31/24": ""},
+        )
+
+    assert response.status_code == 302
+    assert rebind.fired
+    assert any("bound to a different LibreNMS port" in message for message in _message_texts(response))
+    assert not IPAddress.objects.filter(address="198.18.19.31/24").exists()
 
 
 @pytest.mark.django_db

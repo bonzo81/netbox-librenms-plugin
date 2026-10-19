@@ -15,6 +15,7 @@ from netbox_librenms_plugin.constants import (
     NAME_OWNER_UNKNOWN,
     REPORTED_NAME_PORT_COLLISION_REASON,
 )
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,
     make_cluster,
@@ -25,7 +26,6 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
 )
 from netbox_librenms_plugin.utils import (
-    get_librenms_device_id,
     reported_name_owners,
     set_librenms_device_id,
     synced_interface_names,
@@ -74,7 +74,7 @@ def _bound_interface(owner, name, port_id):
 
 def _binding(interface):
     interface.refresh_from_db()
-    return get_librenms_device_id(interface, SERVER_KEY, auto_save=False)
+    return read_mapping(interface).own_id(SERVER_KEY)
 
 
 def _device(name):

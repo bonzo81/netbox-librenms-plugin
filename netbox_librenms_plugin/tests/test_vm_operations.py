@@ -5,9 +5,11 @@ from decimal import Decimal
 
 import pytest
 
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import make_cluster, make_device, make_vm
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, missing_pk
+from netbox_librenms_plugin.utils import set_librenms_device_id
 
 
 SERVER_KEY = "default"
@@ -100,7 +102,7 @@ class TestCreateVmFromLibrenms:
         assert vm.cluster == validation["cluster"]["cluster"]
         assert vm.platform == platform
         assert vm.role == role
-        assert vm.custom_field_data["librenms_id"] == {SERVER_KEY: 6101}
+        assert [(entry.server, entry.own_id) for entry in read_mapping(vm).servers] == [(SERVER_KEY, 6101)]
         assert "device_id=6101" in vm.comments
         assert "netbox-librenms-plugin" in vm.comments
 
@@ -217,7 +219,7 @@ class TestCreateVmFromLibrenms:
         )
 
         vm.refresh_from_db()
-        assert vm.custom_field_data["librenms_id"] == {"secondary": 6106}
+        assert [(entry.server, entry.own_id) for entry in read_mapping(vm).servers] == [("secondary", 6106)]
 
     def test_device_owned_id_is_rejected_by_the_real_assignment_lock(self):
         from virtualization.models import VirtualMachine
@@ -243,7 +245,7 @@ class TestCreateVmFromLibrenms:
         from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
 
         owner = make_vm("vm-import-vm-owner")
-        owner.custom_field_data["librenms_id"] = {SERVER_KEY: 6108}
+        set_librenms_device_id(owner, 6108, SERVER_KEY)
         owner.save()
 
         with pytest.raises(ValueError) as excinfo:
@@ -301,7 +303,7 @@ class TestBulkImportVms:
 
         api, server = librenms_api
         existing = make_vm("bulk-existing-vm")
-        existing.custom_field_data["librenms_id"] = {SERVER_KEY: 6203}
+        set_librenms_device_id(existing, 6203, SERVER_KEY)
         existing.save()
         server.device_info_response(device_id=6203, hostname=existing.name)
 
@@ -350,7 +352,7 @@ class TestBulkImportVms:
         assert vm.name == "host-selected"
         assert vm.cluster == cluster
         assert vm.role == role
-        assert vm.custom_field_data["librenms_id"] == {SERVER_KEY: 6204}
+        assert [(entry.server, entry.own_id) for entry in read_mapping(vm).servers] == [(SERVER_KEY, 6204)]
         assert result["success"][0]["message"] == "VM host-selected created successfully"
 
     def test_prefetched_device_cache_can_complete_an_import_without_http(self, librenms_api):

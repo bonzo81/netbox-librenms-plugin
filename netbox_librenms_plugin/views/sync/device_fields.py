@@ -18,7 +18,12 @@ from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_mem
 from netbox_librenms_plugin.models import PlatformMapping
 from netbox_librenms_plugin.server_mappings import (
     PREFERRED_SERVER_FIELD,
-    iter_server_mapping_entries,
+    AmbiguousLibreNMSIdError,
+    ContainerStatus,
+    MappingRole,
+    decode_stored_mapping,
+    find_mapping,
+    read_mapping,
     require_server_key,
     with_preferred_server,
     without_server_mapping,
@@ -27,11 +32,8 @@ from netbox_librenms_plugin.server_selection import build_server_mappings
 from netbox_librenms_plugin.sync_cache import SyncTab
 from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, update_existing_row
 from netbox_librenms_plugin.utils import (
-    AmbiguousLibreNMSIdError,
-    find_by_librenms_id,
     find_matching_platform,
     get_librenms_sync_device,
-    is_legacy_librenms_id,
     match_librenms_hardware_to_device_type,
     migrate_legacy_librenms_id,
     normalize_serial,
@@ -209,7 +211,7 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         # (which would rename the device from a different server's LibreNMS device).
         librenms_lookup_device = device
         if hasattr(device, "virtual_chassis") and device.virtual_chassis:
-            if not device.cf.get("librenms_id"):
+            if not read_mapping(device).has_recorded_state:
                 sync_device = get_librenms_sync_device(device, server_key=server_key)
                 if sync_device:
                     librenms_lookup_device = sync_device
@@ -902,6 +904,11 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
         return None
 
 
+def _has_removable_mapping(mapping, server_key):
+    """Return whether *server_key* has an entry, or a readable legacy value that ``default`` serves."""
+    return mapping.server(server_key) is not None or (server_key == "default" and mapping.legacy.is_legacy)
+
+
 class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
     """Remove a single server entry from the device's (or VM's) librenms_id custom field dict."""
 
@@ -913,15 +920,6 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
         """Return the Device or VirtualMachine for the given pk."""
         model = _sync_model(object_type)
         return self.restrict_object_or_404(model, "change", pk=pk), model
-
-    def _normalize_librenms_mapping(self, value):
-        if isinstance(value, bool):
-            return {}
-        if isinstance(value, int):
-            return {"default": value}
-        if isinstance(value, str) and value.isdigit():
-            return {"default": int(value)}
-        return value if isinstance(value, dict) else {}
 
     def post(self, request, pk):
         # Scope required permissions to the specific model being modified before checking.
@@ -949,8 +947,7 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             messages.error(request, str(exc))
             return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
 
-        cf_value = self._normalize_librenms_mapping(obj.custom_field_data.get("librenms_id"))
-        if not isinstance(cf_value, dict) or server_key not in cf_value:
+        if not _has_removable_mapping(read_mapping(obj), server_key):
             messages.warning(request, f"No mapping found for server '{server_key}'.")
             return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
 
@@ -982,19 +979,20 @@ class RemoveServerMappingView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
             except model.DoesNotExist:
                 messages.error(request, f"{model.__name__} no longer exists.")
                 return _server_mapping_redirect(object_type, pk, active_server_key, active_sync_tab)
-            cf = self._normalize_librenms_mapping(obj_locked.custom_field_data.get("librenms_id"))
             # Re-check after acquiring lock; mirror the pre-transaction protection logic
             _is_protected = server_key in configured_servers or (
                 legacy_url_configured and not configured_servers and server_key == "default"
             )
-            if isinstance(cf, dict) and server_key in cf and not _is_protected:
+            if _has_removable_mapping(read_mapping(obj_locked), server_key) and not _is_protected:
                 obj_locked.snapshot()
-                cf = without_server_mapping(cf, server_key)
+                # A legacy value has no server entry, so removing it leaves an empty mapping.
+                cf = without_server_mapping(obj_locked.custom_field_data.get("librenms_id"), server_key)
                 obj_locked.custom_field_data["librenms_id"] = cf
+                # The count reads the edited object, so a preference for the removed server goes.
                 usable_count = sum(mapping.is_selectable for mapping in build_server_mappings(obj_locked))
                 if usable_count <= 1:
                     cf.pop(PREFERRED_SERVER_FIELD, None)
-                obj_locked.custom_field_data["librenms_id"] = cf if any(iter_server_mapping_entries(cf)) else None
+                obj_locked.custom_field_data["librenms_id"] = cf if decode_stored_mapping(cf).servers else None
                 try:
                     obj_locked.clean_fields(
                         exclude={field.name for field in obj_locked._meta.fields if field.name != "custom_field_data"}
@@ -1154,7 +1152,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         model, obj = self._get_model_and_object(object_type, pk)
         # Rebind the API client to the POST-scoped server before any lookup/migration so the
         # legacy-ID conversion is verified (get_device_info), conflict-checked
-        # (find_by_librenms_id) and written (migrate_legacy_librenms_id) under the same server
+        # (find_mapping) and written (migrate_legacy_librenms_id) under the same server
         # namespace the user is acting on — otherwise a multi-server page could check server A
         # while redirecting back to server B and write the mapping under the wrong key.
         server_key = self.rebind_api_for_posted_server(request.POST)
@@ -1162,21 +1160,16 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return self._sync_url(object_type, pk)
 
-        # Verify the device actually has a legacy bare-int librenms_id
-        cf_value = obj.custom_field_data.get("librenms_id")
-        if isinstance(cf_value, bool):
-            messages.error(request, "librenms_id has an invalid boolean value; cannot convert.")
-            return self._sync_url(object_type, pk)
-        if not isinstance(cf_value, (int, str)):
+        # Verify the device actually has a legacy bare-int librenms_id. The reader's wide rule
+        # accepts exactly the values the "Convert ID" badge shows, so " 42 " is no dead end.
+        mapping = read_mapping(obj)
+        if mapping.container in (ContainerStatus.SCOPED, ContainerStatus.ABSENT):
             messages.warning(request, "librenms_id is already in the server-scoped JSON format.")
             return self._sync_url(object_type, pk)
-        # Gate with is_legacy_librenms_id() (not str.isdigit()) so this handler accepts exactly the
-        # values the "Convert ID" badge shows — a whitespace-padded legacy int (" 42 ") is legacy
-        # via int() coercion, so it must not be a dead-end button (issue #99).
-        if not is_legacy_librenms_id(cf_value):
+        if not mapping.legacy.is_legacy:
             messages.error(request, "librenms_id is not a valid integer; cannot convert.")
             return self._sync_url(object_type, pk)
-        librenms_id = int(cf_value)
+        librenms_id = mapping.legacy.readable_id
 
         # Verify serial match before converting — get_live_device_info reads live (uncached): the
         # serial gate decides whether to rewrite the id, so it must not read a stale sync-tab snapshot.
@@ -1199,18 +1192,23 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         def convert(locked):
             # Re-check preconditions on the locked row (another admin may have
             # changed cf_value or serial between the initial read and the lock).
-            locked_cf = locked.custom_field_data.get("librenms_id")
-            if not isinstance(locked_cf, (int, str)) or isinstance(locked_cf, bool):
+            locked_mapping = read_mapping(locked)
+            if locked_mapping.container in (ContainerStatus.SCOPED, ContainerStatus.ABSENT):
                 raise _WriteRefused("librenms_id is already in the server-scoped JSON format.", messages.WARNING)
-            if not is_legacy_librenms_id(locked_cf):
+            if not locked_mapping.legacy.is_legacy:
                 raise _WriteRefused("librenms_id changed before lock was acquired; aborting.")
-            locked_id = int(locked_cf)
+            locked_id = locked_mapping.legacy.readable_id
             locked_serial = (getattr(locked, "serial", None) or "").strip()
             if locked_id != librenms_id or locked_serial != netbox_serial:
                 raise _WriteRefused("Device data changed before lock was acquired; aborting conversion.")
             # Check that no other object already owns this ID (server-scoped or legacy)
             try:
-                match = find_by_librenms_id(model, librenms_id, server_key)
+                match = find_mapping(
+                    model.objects.all(),
+                    server=server_key,
+                    identity=librenms_id,
+                    roles=(MappingRole.OWN, MappingRole.OOB),
+                )
             except AmbiguousLibreNMSIdError:
                 raise _WriteRefused(
                     f"librenms_id {librenms_id} is ambiguous — it matches more than one "

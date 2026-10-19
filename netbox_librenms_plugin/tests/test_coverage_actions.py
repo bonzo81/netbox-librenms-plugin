@@ -10,6 +10,7 @@ from django.db import connection, connections
 from django.test import RequestFactory
 from django.urls import reverse as url_for
 
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
     bounded_executor,
     make_cluster,
@@ -1642,8 +1643,9 @@ class TestBuildSyncInfo:
         assert result["all_synced"] is True
 
 
+@pytest.mark.django_db
 class TestBuildIdServerInfo:
-    """Tests for _build_id_server_info (lines 888-924)."""
+    """Tests for _build_id_server_info on real Device rows."""
 
     def _get_method(self):
         from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
@@ -1652,7 +1654,7 @@ class TestBuildIdServerInfo:
 
     @staticmethod
     def _object(mapping):
-        return Namespace(custom_field_data={"librenms_id": mapping})
+        return make_device("build-id-server-info", librenms_cf=mapping)
 
     @staticmethod
     def _configure(settings, plugin_config):
@@ -1666,7 +1668,7 @@ class TestBuildIdServerInfo:
     def test_none_cf_returns_none(self):
         method = self._get_method()
 
-        assert method(Namespace(custom_field_data={})) is None
+        assert method(make_device("build-id-server-info-unmapped")) is None
 
     def test_dict_cf_returns_list(self, settings):
         method = self._get_method()
@@ -4756,7 +4758,7 @@ class TestAddAsOOBViewGenericSentinel:
 
     def test_generic_oob_sentinel_accepted_by_set_librenms_oob(self):
         """set_librenms_oob must not raise ValueError for oob_type='oob'."""
-        from netbox_librenms_plugin.utils import get_librenms_oob, set_librenms_oob
+        from netbox_librenms_plugin.utils import set_librenms_oob
 
         obj = make_device("generic-oob-storage")
         obj.custom_field_data = {"librenms_id": {"default": {"id": 10}}}
@@ -4765,13 +4767,13 @@ class TestAddAsOOBViewGenericSentinel:
         # Previously this raised ValueError("does not match any known OOB type")
         # → AddAsOOBView returned HTTP 400 "Invalid OOB data: ..."
         set_librenms_oob(obj, 55, "default", oob_type="oob")
-        result = get_librenms_oob(obj, "default")
-        assert result is not None
-        assert result["type"] == "oob"
+        entry = read_mapping(obj).server("default")
+        assert entry.oob_recorded
+        assert entry.oob_type == "oob"
 
     def test_legacy_bare_int_librenms_id_promoted_on_oob_attach(self):
         """A device whose librenms_id is still the legacy bare int must NOT silently no-op: set_librenms_oob promotes it to the per-server dict and attaches the OOB block."""
-        from netbox_librenms_plugin.utils import get_librenms_oob, set_librenms_oob
+        from netbox_librenms_plugin.utils import set_librenms_oob
 
         obj = make_device("legacy-oob-storage")
         obj.custom_field_data = {"librenms_id": 42}  # legacy single-server format (bare int)
@@ -4783,7 +4785,8 @@ class TestAddAsOOBViewGenericSentinel:
         assert isinstance(cf, dict)
         assert cf["default"]["id"] == 42  # legacy host id promoted under the server key
         assert cf["default"]["oob"] == {"id": 55, "type": "idrac"}
-        assert get_librenms_oob(obj, "default") == {"id": 55, "type": "idrac"}
+        entry = read_mapping(obj).server("default")
+        assert (entry.oob_id, entry.oob_type) == (55, "idrac")
 
     def test_generic_sentinel_from_detection_layer_flows_to_storage(self):
         """The generic 'oob' sentinel that _detect_serial_match_role produces (see TestDetectSerialMatchRole) is accepted by set_librenms_oob and stored."""
@@ -5097,7 +5100,7 @@ class TestAddAsOOBViewPost:
         """An OOB link matched through a non-sync virtual-chassis member is stored on the resolved sync device."""
         from dcim.models import Device, VirtualChassis
 
-        from netbox_librenms_plugin.utils import get_librenms_oob, get_librenms_sync_device
+        from netbox_librenms_plugin.utils import get_librenms_sync_device
 
         view = self._make_view()
 
@@ -5136,10 +5139,11 @@ class TestAddAsOOBViewPost:
         # The link landed on the SYNC member, nested under its existing host id, so readers
         # (which resolve the sync device) can see it.
         sync_reloaded = Device.objects.get(pk=sync_member.pk)
-        assert get_librenms_oob(sync_reloaded, server_key=self.server_key) == {"id": 17, "type": "oob"}
+        sync_entry = read_mapping(sync_reloaded).server(self.server_key)
+        assert (sync_entry.oob_id, sync_entry.oob_type) == (17, "oob")
         assert sync_reloaded.custom_field_data["librenms_id"][self.server_key]["id"] == 10  # host id kept
         # The selected non-sync member got NO orphan OOB link written to it.
-        assert get_librenms_oob(Device.objects.get(pk=selected_member.pk), server_key=self.server_key) is None
+        assert not read_mapping(Device.objects.get(pk=selected_member.pk)).has_oob(self.server_key)
 
     def test_legacy_id_written_in_race_window_is_rejected_post_lock(self):
         """The locked-row check rejects a legacy ID written during the race window before OOB link promotion."""

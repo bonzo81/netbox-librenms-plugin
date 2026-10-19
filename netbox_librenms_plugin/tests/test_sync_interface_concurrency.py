@@ -7,6 +7,7 @@ from threading import Event
 import pytest
 from django.apps import apps
 
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
     _PORT_KEYS_UNSET,
     bounded_executor,
@@ -415,7 +416,6 @@ def test_vm_sync_serializes_duplicate_display_name_resolution(settings, monkeypa
 
     from netbox_librenms_plugin.tests.conftest import make_vm
     from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
-    from netbox_librenms_plugin.utils import get_librenms_device_id
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
     server_key = configure_default_librenms_server(settings)
@@ -481,7 +481,7 @@ def test_vm_sync_serializes_duplicate_display_name_resolution(settings, monkeypa
 
     interface = VMInterface.objects.get(virtual_machine=vm, name="Ethernet")
     assert not resolved_during_first
-    assert get_librenms_device_id(interface, server_key) == 10, (
+    assert read_mapping(interface).own_id(server_key) == 10, (
         interface.custom_field_data,
         first_texts,
         second_texts,
@@ -938,7 +938,7 @@ def test_concurrent_cross_model_port_claim_refuses_without_partial_writes(settin
     from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
     from netbox_librenms_plugin.tests.conftest import make_cluster, make_device, make_interface, make_superuser, make_vm
     from netbox_librenms_plugin.tests.test_interface_port_binding_cross_model import _port, _sync
-    from netbox_librenms_plugin.utils import LibreNMSPortBindingBusy, get_librenms_device_id
+    from netbox_librenms_plugin.utils import LibreNMSPortBindingBusy
     from netbox_librenms_plugin.views.sync.modules import _bind_interface_librenms_id
 
     server_key = configure_default_librenms_server(settings)
@@ -983,7 +983,7 @@ def test_concurrent_cross_model_port_claim_refuses_without_partial_writes(settin
                 with pytest.raises(LibreNMSPortBindingBusy):
                     executor.submit(competing_write).result(timeout=10)
                 loser_interface.refresh_from_db()
-                assert get_librenms_device_id(loser_interface, server_key, auto_save=False) is None
+                assert read_mapping(loser_interface).own_id(server_key) is None
             else:
                 from django.contrib.messages import get_messages
 
@@ -992,7 +992,7 @@ def test_concurrent_cross_model_port_claim_refuses_without_partial_writes(settin
                 owner_filter = {"virtual_machine": loser} if winner_kind == "device" else {"device": loser}
                 assert not loser_model.objects.filter(**owner_filter).exists()
         held.refresh_from_db()
-        assert get_librenms_device_id(held, server_key, auto_save=False) == 9301
+        assert read_mapping(held).own_id(server_key) == 9301
 
 
 def test_port_claims_are_reentrant_isolated_by_server_and_released_on_rollback():

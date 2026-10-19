@@ -27,7 +27,7 @@ import logging
 import re
 
 from netbox_librenms_plugin.constants import SERIAL_INVENTORY_SOURCE
-from netbox_librenms_plugin.utils import coerce_librenms_id
+from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 
 logger = logging.getLogger(__name__)
 

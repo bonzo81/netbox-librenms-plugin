@@ -20,6 +20,7 @@ from django.urls import reverse
 
 from netbox_librenms_plugin.interface_rules import HIDDEN_PORT_REASON
 from netbox_librenms_plugin.models import InterfaceTypeMapping
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.sync_cache import sync_snapshot_key
 from netbox_librenms_plugin.tests.conftest import (
     bind_librenms_server,
@@ -31,7 +32,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.test_cable_overwrite import _confirmed_intent
 from netbox_librenms_plugin.tests.test_interface_rule_writes import _platform, _port
-from netbox_librenms_plugin.utils import assign_cable_row_ids, get_librenms_device_id, set_librenms_device_id
+from netbox_librenms_plugin.utils import assign_cable_row_ids, set_librenms_device_id
 from netbox_librenms_plugin.views.base.cables_view import _RAW_LINK_KEYS, port_record
 from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
@@ -474,7 +475,7 @@ class _ChangesBeforeTheLock(SyncCablesView):
 
     def _lock_cable_terminations(self, local_term, remote_term, **kwargs):
         # The endpoints and the far ends are already read; the lock re-reads them.
-        bindings = [get_librenms_device_id(term, SERVER_KEY, auto_save=False) for term in (local_term, remote_term)]
+        bindings = [read_mapping(term).own_id(SERVER_KEY) for term in (local_term, remote_term)]
         self.steps.append(("pre-lock bindings", *bindings))
         self.change()
         return super()._lock_cable_terminations(local_term, remote_term, **kwargs)
@@ -516,10 +517,10 @@ def test_the_gate_decides_with_the_binding_and_platform_read_under_the_lock(clie
         assert link.cables() == set()
         assert any(f"LibreNMS port 500 (Gi0/1): ignored by interface rule {moved_rule.pk}" in text for text in texts)
     else:
+        # Gi0/1 is now bound to port 888, so it is no longer the row's port 500.
         assert link.cables() == set()
-        assert any(
-            "LibreNMS port 888: no LibreNMS port record is cached for it; refresh the data" in text for text in texts
-        )
+        assert any("The cable state or target changed after confirmation" in text for text in texts)
+        assert not any("refuse a port" in text for text in texts)
 
 
 @pytest.mark.django_db

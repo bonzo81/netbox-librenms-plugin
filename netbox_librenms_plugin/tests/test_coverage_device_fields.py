@@ -1144,7 +1144,7 @@ class TestConvertLegacyLibreNMSIdView:
         ("value", "fragment"),
         [
             ({SERVER_KEY: 6564}, "already in the server-scoped"),
-            (True, "invalid boolean"),
+            (True, "not a valid integer"),
             ("not-an-id", "not a valid integer"),
         ],
     )
@@ -1404,23 +1404,6 @@ class TestDeviceFieldHelpers:
         from netbox_librenms_plugin.views.sync.device_fields import _normalize_sync_object_type
 
         assert _normalize_sync_object_type(value) == expected
-
-    @pytest.mark.parametrize(
-        ("value", "expected"),
-        [
-            (42, {"default": 42}),
-            ("42", {"default": 42}),
-            ({"secondary": 42}, {"secondary": 42}),
-            (True, {}),
-            (" 42 ", {}),
-            (None, {}),
-            ([], {}),
-        ],
-    )
-    def test_mapping_normalization(self, value, expected):
-        from netbox_librenms_plugin.views.sync.device_fields import RemoveServerMappingView
-
-        assert RemoveServerMappingView()._normalize_librenms_mapping(value) == expected
 
     def test_model_and_url_helpers_distinguish_devices_from_vms(self):
         from dcim.models import Device

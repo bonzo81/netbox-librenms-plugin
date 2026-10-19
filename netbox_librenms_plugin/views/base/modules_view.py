@@ -14,12 +14,14 @@ from netbox_librenms_plugin.constants import (
     OOB_INVENTORY_SOURCE,
     is_module_model_placeholder,
 )
+from netbox_librenms_plugin.librenms_ids import (
+    coerce_librenms_id,
+    normalize_librenms_port_id,
+)
+from netbox_librenms_plugin.server_mappings import name_match_may_be_port, port_holders, read_mapping
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
-    coerce_librenms_id,
-    get_librenms_device_id,
-    get_librenms_oob,
     get_librenms_sync_device,
     get_module_template_interface_names,
     get_module_template_interface_specs,
@@ -31,7 +33,6 @@ from netbox_librenms_plugin.utils import (
     module_inventory_row_digest,
     module_inventory_snapshot_digest,
     module_type_bay_type_ids,
-    normalize_librenms_port_id,
     normalize_serial,
     prefetch_module_bay_types,
 )
@@ -324,6 +325,161 @@ def _check_ignore_rules(
     return None
 
 
+def _get_item_port_identity(item):
+    """Return an inventory item's LibreNMS port ID and its candidate interface names, in order."""
+    port_id = normalize_librenms_port_id(item.get("_librenms_port_id") or item.get("port_id"))
+    interface_names = []
+    for value in (
+        item.get("_librenms_ifname"),
+        item.get("_librenms_ifdescr"),
+        item.get("entPhysicalName"),
+        item.get("entPhysicalDescr"),
+    ):
+        name = _normalize_librenms_text(value)
+        if name and name not in interface_names:
+            interface_names.append(name)
+    return port_id, interface_names
+
+
+def _collect_item_interface_coordinates(item):
+    """Collect unique numeric interface coordinate tuples from inventory metadata."""
+    _, interface_names = _get_item_port_identity(item)
+    coordinates = []
+    for name in interface_names:
+        parts = BaseModuleTableView._extract_interface_numeric_coordinates(name)
+        if parts and parts not in coordinates:
+            coordinates.append(parts)
+    return coordinates
+
+
+def _same_port_number(interface_coordinates, item_coordinates):
+    """Return whether two coordinate lists name the same port of a module."""
+    # Each port of the module shares its module and member coordinates, so only the port number tells ports apart.
+    return interface_coordinates[-1] == item_coordinates[-1]
+
+
+def _coordinates_contradict(interface, item):
+    """Return whether the item's coordinates name a port number that *interface* does not have."""
+    item_coordinates = _collect_item_interface_coordinates(item)
+    coords = BaseModuleTableView._extract_interface_numeric_coordinates(getattr(interface, "name", "") or "")
+    if not item_coordinates or not coords:
+        return False
+    return not any(_same_port_number(coords, item_coords) for item_coords in item_coordinates)
+
+
+def _select_module_interface_by_coordinates(device, module_interfaces, item):
+    """Pick a unique best module interface using coordinate similarity scoring."""
+    if not module_interfaces:
+        return None
+
+    item_coordinates = _collect_item_interface_coordinates(item)
+    if not item_coordinates:
+        return None
+
+    vc_position = getattr(device, "vc_position", None)
+    scored = []
+
+    for interface in module_interfaces:
+        coords = BaseModuleTableView._extract_interface_numeric_coordinates(getattr(interface, "name", "") or "")
+        if not coords:
+            continue
+
+        best_score = 0
+        for item_coords in item_coordinates:
+            if not _same_port_number(coords, item_coords):
+                continue
+            score = 4
+            if len(coords) >= 2 and len(item_coords) >= 2 and coords[-2] == item_coords[-2]:
+                score += 2
+            if isinstance(vc_position, int) and vc_position > 0 and coords[0] == vc_position:
+                score += 1
+            if score > best_score:
+                best_score = score
+
+        if best_score > 0:
+            scored.append((best_score, getattr(interface, "pk", None), interface))
+
+    if not scored:
+        return None
+
+    scored.sort(key=lambda row: row[0], reverse=True)
+    if len(scored) > 1 and scored[0][0] == scored[1][0]:
+        return None
+    return scored[0][2]
+
+
+@dataclass(frozen=True)
+class ModuleInterfaceChoice:
+    """The interface that a port item names, or the refusal status and reason when none may bind."""
+
+    interface: object = None
+    source: str = ""
+    status: str = ""
+    reason: str = ""
+
+
+def select_module_interface(device, item, *, server_key, interfaces_by_name, module_interfaces):
+    """
+    Choose the interface of *device* for a port item whose port no interface holds yet.
+
+    The modules table shows this choice and the bind writer binds it, so the two cannot disagree.
+    A same-name interface wins when it may stand for the port. When every same-name interface is
+    bound to another port, the choice is refused. Otherwise the item's coordinates pick one of
+    *module_interfaces*, or a module with exactly one interface gives that interface when their
+    coordinates do not contradict. That interface must also be free to stand for the port.
+
+    Args:
+        device (Device): The device that owns the interfaces.
+        item (dict): The LibreNMS inventory item with its port identity.
+        server_key (str): The LibreNMS server key of the port identity.
+        interfaces_by_name (dict): The interfaces of *device* keyed by name.
+        module_interfaces (list): The interfaces of the installed module, or an empty list.
+
+    Returns:
+        ModuleInterfaceChoice: The chosen interface and its source, or the refusal. A refusal of a
+            same-name interface carries that interface.
+
+    """
+    port_id, interface_names = _get_item_port_identity(item)
+    named = [interfaces_by_name[name] for name in interface_names if name in interfaces_by_name]
+    for match in named:
+        # A name never wins over a binding to a different port; try the next name.
+        if name_match_may_be_port(match, server=server_key, port_id=port_id):
+            return ModuleInterfaceChoice(interface=match, source="name")
+    if named:
+        return _bound_elsewhere(named[0])
+    if not module_interfaces:
+        return ModuleInterfaceChoice()
+    by_coordinates = _select_module_interface_by_coordinates(device, module_interfaces, item)
+    if by_coordinates is not None:
+        candidate, source = by_coordinates, "coordinates"
+    elif len(module_interfaces) == 1:
+        if _coordinates_contradict(module_interfaces[0], item):
+            return ModuleInterfaceChoice()
+        candidate, source = module_interfaces[0], "lone_module_interface"
+    else:
+        return ModuleInterfaceChoice(
+            status="skipped",
+            reason=f"multiple module interfaces found for port_id {port_id}; manual mapping required",
+        )
+    if not name_match_may_be_port(candidate, server=server_key, port_id=port_id):
+        return _bound_elsewhere(candidate)
+    return ModuleInterfaceChoice(interface=candidate, source=source)
+
+
+def _bound_elsewhere(interface):
+    """Return the refusal of *interface* because it is bound to a different LibreNMS port."""
+    return ModuleInterfaceChoice(
+        interface=interface,
+        status="conflict",
+        reason=f"{interface.name} is already bound to a different LibreNMS port; not overwriting",
+    )
+
+
+# The table's confidence label for each source of a ModuleInterfaceChoice.
+_CHOICE_CONFIDENCE = {"name": "medium", "coordinates": "low", "lone_module_interface": "low"}
+
+
 class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
     """
     Base view for synchronizing module/inventory data from LibreNMS.
@@ -368,25 +524,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
     def _normalize_serial(value):
         """Normalize serial values for reliable cross-source comparison."""
         return _clean_librenms_value(value)
-
-    def _get_interface_port_id(self, interface):
-        """
-        Resolve an interface's stored LibreNMS port_id (no discovery), scoped to the active server.
-
-        The verify path (SingleModuleVerifyView) sets ``_active_server_key`` but leaves the API
-        bound to the default client, so read the interface's per-server port_id under the active
-        key, not ``self.librenms_api.server_key``. This matches the server that the row's
-        interface match (``_attach_interface_match``) resolves against.
-
-        Args:
-            interface (Interface): The NetBox interface to inspect.
-
-        Returns:
-            int | None: The normalized LibreNMS port ID, or None if no valid ID is stored.
-
-        """
-        server_key = getattr(self, "_active_server_key", None) or self.librenms_api.server_key
-        return normalize_librenms_port_id(self.librenms_api.get_stored_librenms_id(interface, server_key=server_key))
 
     def _count_adoptable_template_interfaces(self, module):
         """Count standalone interfaces that match an installed module's interface templates."""
@@ -634,14 +771,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # is not safe for high-density chassis. Instead we compute an offset
         # that is always above the main device's highest observed index,
         # including any synthetic transceiver rows added above.
-        oob = get_librenms_oob(sync_device, server_key=server_key)
-        # Coerce to a positive int (or None) like interfaces_view.py:212 / cables_view.py — a
-        # bool/negative/non-numeric stored OOB id must not be treated as valid and fired at
-        # get_device_inventory(). It also normalizes the value cached as the OOB fingerprint
-        # below so get_context_data()'s comparison is int-vs-int (see the read side).
-        oob_id = coerce_librenms_id(oob.get("id")) if isinstance(oob, dict) else None
+        sync_mapping = read_mapping(sync_device)
+        # A bool/negative/non-numeric stored OOB id reads as None, so it is never fired at
+        # get_device_inventory(). The int is also the OOB fingerprint cached below.
+        oob_id = sync_mapping.oob_id(server_key)
         oob_failed = False
-        if oob and oob_id is None:
+        if sync_mapping.has_oob(server_key) and oob_id is None:
             # An OOB controller IS linked but its stored id is corrupt (non-numeric / bool /
             # zero / negative — e.g. after a manual custom-field edit). A bare falsy check
             # would conflate this with "no OOB linked": the controller's inventory rows would
@@ -650,11 +785,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             # Cables tabs fail closed with an explicit warning for the very same state. Take
             # the same partial-outcome path as a fetch failure.
             oob_failed = True
-            logger.warning(
-                "Invalid OOB controller id for device %s: %r",
-                self.librenms_id,
-                oob.get("id"),
-            )
+            logger.warning("Invalid OOB controller id for device %s", self.librenms_id)
         elif oob_id:
             oob_success, oob_inventory = self.librenms_api.get_device_inventory(oob_id)
             # get_device_inventory guarantees a list of dicts on success, but not the TYPE of
@@ -813,16 +944,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # Same for the linked OOB controller: a re-link (or unlink) to a different
         # controller must drop merged inventory built for the old one. Symmetric on
         # None so had-OOB→none and none→has-OOB both invalidate.
-        current_oob = get_librenms_oob(sync_device, server_key=scoped_server)
-        # Coerce both sides of the fingerprint so a stored string id ("5") and an int id (5) of
-        # the same value compare equal — otherwise the merged inventory is wrongly treated as
-        # stale on every GET and the module table renders empty until a manual refresh. The write
-        # side (post()) now caches the coerced value, so this matches it.
-        current_oob_id = coerce_librenms_id(current_oob.get("id")) if isinstance(current_oob, dict) else None
+        sync_mapping = read_mapping(sync_device)
+        # The snapshot reads a stored "5" and 5 as the same int, which post() also caches.
+        current_oob_id = sync_mapping.oob_id(scoped_server)
         # A linked-but-corrupt OOB id must not collapse to the no-OOB fingerprint: post()
         # takes the partial-outcome path (never caches) for this state, so the GET compare
         # can't quietly serve a prior no-OOB snapshot while an OOB controller is linked.
-        if current_oob and current_oob_id is None:
+        if sync_mapping.has_oob(scoped_server) and current_oob_id is None:
             cache.delete(cache_key)
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped_server}
         if cached_payload.get("oob_librenms_id") != current_oob_id:
@@ -1279,7 +1407,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         if vc_members is None:
             vc_members = list(obj.virtual_chassis.members.all()) if getattr(obj, "virtual_chassis", None) else []
 
-        member_contexts = self._build_member_contexts(obj, vc_members)
+        items = [*top_items, *(child for children in children_by_parent.values() for child in children)]
+        member_contexts = self._build_member_contexts(obj, vc_members, items)
         ignore_contexts = ignore_contexts or {}
 
         table_data = []
@@ -1318,80 +1447,63 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         return table_data
 
-    def _build_table_rows_for_member(
-        self,
-        member,
-        top_items,
-        index_map,
-        children_by_parent,
-        ignore_rules,
-        device_identity,
-        module_types,
-        manufacturer=None,
-    ):
-        """Build rows using a fixed target member for every inventory item."""
-        member_contexts = self._build_member_contexts(member, vc_members=[])
-        target_context = member_contexts.get(member.id)
-        if target_context is None:
-            return []
+    def _build_member_contexts(self, obj, vc_members, items):
+        """Build per-member bay context data used for row resolution of the inventory *items*."""
+        from dcim.models import Interface
 
-        table_data = []
-        for item in top_items:
-            self._append_rows_for_item_context(
-                table_data,
-                item,
-                target_context,
-                index_map,
-                children_by_parent,
-                ignore_rules,
-                device_identity,
-                module_types,
-                manufacturer=manufacturer,
-                selected_device=member,
-                resolution_source="manual",
-                member_contexts=member_contexts,
-            )
-
-        return table_data
-
-    def _build_member_contexts(self, obj, vc_members):
-        """Build per-member bay context data used for row resolution."""
+        server_key = getattr(self, "_active_server_key", None) or self.librenms_api.server_key
+        # One lookup for every row: the writer binds a held port only to its one holder.
+        holders = port_holders((_get_item_port_identity(item)[0] for item in items), server=server_key)
         member_contexts = {}
         context_members = vc_members if vc_members else [obj]
+        member_ids = [member.pk for member in context_members]
+        viewable_ids_by_member = {member_id: set() for member_id in member_ids}
+        for member_id, interface_id in (
+            self.restricted_queryset(Interface).filter(device_id__in=member_ids).values_list("device_id", "pk")
+        ):
+            viewable_ids_by_member[member_id].add(interface_id)
+        changeable_ids_by_member = {member_id: set() for member_id in member_ids}
+        for member_id, interface_id in (
+            self.restricted_queryset(Interface, "change")
+            .filter(device_id__in=member_ids)
+            .values_list("device_id", "pk")
+        ):
+            changeable_ids_by_member[member_id].add(interface_id)
         for member in context_members:
             device_bays, module_scoped_bays = self._get_module_bays(member)
-            interfaces_by_port_id, interfaces_by_name = self._build_interface_indexes(member)
+            interfaces_by_pk, interfaces_by_name, interfaces_by_module = self._build_interface_indexes(member)
             member_contexts[member.id] = {
                 "device": member,
                 "device_bays": device_bays,
                 "module_scoped_bays": module_scoped_bays,
                 "all_bays": self._compute_all_bays(device_bays, module_scoped_bays),
                 "sibling_counts": {mid: len(bays) for mid, bays in module_scoped_bays.items()},
-                "interfaces_by_port_id": interfaces_by_port_id,
+                "interfaces_by_pk": interfaces_by_pk,
                 "interfaces_by_name": interfaces_by_name,
-                "server_key": getattr(self, "_active_server_key", None) or self.librenms_api.server_key,
+                "interfaces_by_module": interfaces_by_module,
+                "port_holders": holders,
+                # The match reads every interface, so the table shows only one the user may view.
+                "viewable_interface_ids": frozenset(viewable_ids_by_member[member.id]),
+                # The writer skips a choice outside the change scope, and then its template adoption too.
+                "changeable_interface_ids": frozenset(changeable_ids_by_member[member.id]),
+                "server_key": server_key,
             }
         return member_contexts
 
     def _build_interface_indexes(self, member):
-        """Build unique interface indexes keyed by LibreNMS port_id and name."""
-        interfaces_by_port_id = {}
+        """Build the member's interface indexes keyed by primary key, by unique name and by module."""
+        interfaces_by_pk = {}
         interfaces_by_name = {}
-        duplicate_port_ids = set()
+        interfaces_by_module = {}
         duplicate_names = set()
 
         interface_manager = getattr(member, "interfaces", None)
         if interface_manager is None or not hasattr(interface_manager, "all"):
-            return interfaces_by_port_id, interfaces_by_name
+            return interfaces_by_pk, interfaces_by_name, interfaces_by_module
 
         for interface in interface_manager.all():
-            port_id = self._get_interface_port_id(interface)
-            if port_id is not None:
-                if port_id in interfaces_by_port_id:
-                    duplicate_port_ids.add(port_id)
-                else:
-                    interfaces_by_port_id[port_id] = interface
-
+            interfaces_by_pk[interface.pk] = interface
+            interfaces_by_module.setdefault(interface.module_id, []).append(interface)
             name = (getattr(interface, "name", "") or "").strip()
             if name:
                 if name in interfaces_by_name:
@@ -1399,30 +1511,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 else:
                     interfaces_by_name[name] = interface
 
-        for port_id in duplicate_port_ids:
-            interfaces_by_port_id.pop(port_id, None)
         for name in duplicate_names:
             interfaces_by_name.pop(name, None)
 
-        return interfaces_by_port_id, interfaces_by_name
+        return interfaces_by_pk, interfaces_by_name, interfaces_by_module
 
     @staticmethod
-    def _build_interface_match_candidates(row):
-        """Return ordered candidate interface labels from a row."""
-        candidates = []
-        for value in [
-            row.get("librenms_ifname"),
-            row.get("librenms_ifdescr"),
-            row.get("name"),
-            row.get("description"),
-        ]:
-            label = _normalize_librenms_text(value)
-            if label and label not in candidates:
-                candidates.append(label)
-        return candidates
-
-    @staticmethod
-    def _attach_interface_match(row, target_context):  # noqa: C901
+    def _attach_interface_match(row, item, target_context):
         """Attach matched NetBox interface metadata to a table row when available."""
         # OOB controller inventory rows are merged into the same list, but only
         # the main device's interfaces are indexed in target_context. Matching an
@@ -1430,31 +1525,42 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # skip interface matching entirely for OOB-sourced rows.
         if row.get("_source") == OOB_INVENTORY_SOURCE:
             return
-        try:
-            port_id = int(row.get("librenms_port_id") or 0)
-        except (TypeError, ValueError):
-            port_id = 0
+        port_id, _ = _get_item_port_identity(item)
+        installed_module_id = row.get("installed_module_id")
 
         interface = None
         source = None
         confidence = None
 
-        if port_id > 0:
-            interface = (target_context.get("interfaces_by_port_id") or {}).get(port_id)
-            if interface is not None:
-                source = "port_id"
-                confidence = "high"
+        holders = target_context["port_holders"]
+        if port_id in holders:
+            # The writer binds a held port only to its one holder, so no other interface may match.
+            holder = holders[port_id]
+            if holder is not None and holder[0] == "dcim.interface":
+                interface = target_context["interfaces_by_pk"].get(holder[1])
+            source = "port_id"
+            confidence = "high"
+        else:
+            module_interfaces = (
+                target_context["interfaces_by_module"].get(installed_module_id, [])
+                if port_id is not None and installed_module_id
+                else []
+            )
+            choice = select_module_interface(
+                target_context.get("device"),
+                item,
+                server_key=target_context.get("server_key"),
+                interfaces_by_name=target_context.get("interfaces_by_name") or {},
+                module_interfaces=module_interfaces,
+            )
+            if not choice.status:
+                interface, source = choice.interface, choice.source
+                confidence = _CHOICE_CONFIDENCE.get(source)
 
-        if interface is None:
-            interfaces_by_name = target_context.get("interfaces_by_name") or {}
-            for candidate in BaseModuleTableView._build_interface_match_candidates(row):
-                interface = interfaces_by_name.get(candidate)
-                if interface is not None:
-                    source = "name"
-                    confidence = "medium"
-                    break
-
-        if interface is None:
+        if interface is None or interface.pk not in target_context["viewable_interface_ids"]:
+            if port_id is not None:
+                # The writer refuses this port's bind, and a refused bind also skips the template adoption.
+                row.pop("can_update_interface_binding", None)
             return
 
         row["matched_interface_name"] = getattr(interface, "name", None) or row.get("name") or "-"
@@ -1471,21 +1577,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         candidate_module_id = getattr(interface, "module_id", None)
         row["matched_interface_module_id"] = candidate_module_id
 
-        installed_module_id = row.get("installed_module_id")
-        if not installed_module_id or port_id <= 0:
+        if not installed_module_id or port_id is None:
             return
 
         server_key = target_context.get("server_key")
-        current_port_id = None
-        if server_key:
-            try:
-                current_port_id = int(get_librenms_device_id(interface, server_key, auto_save=False) or 0) or None
-            except (TypeError, ValueError):
-                current_port_id = None
+        current_port_id = read_mapping(interface).own_id(server_key) if server_key else None
 
-        if candidate_module_id not in {None, installed_module_id}:
-            return
-        if current_port_id not in {None, port_id}:
+        if (
+            candidate_module_id not in {None, installed_module_id}
+            or current_port_id not in {None, port_id}
+            or interface.pk not in target_context["changeable_interface_ids"]
+        ):
+            # The writer refuses this bind, so it skips the template adoption too.
+            row.pop("can_update_interface_binding", None)
             return
         if candidate_module_id == installed_module_id and current_port_id == port_id:
             return
@@ -1543,7 +1647,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         row["selected_device_name"] = selected_device.name
         row["member_resolution_source"] = resolution_source
         self._apply_carrier_install_rules(row, item, selected_device)
-        self._attach_interface_match(row, target_context)
+        self._attach_interface_match(row, item, target_context)
         parent_row_idx = len(table_data)
         table_data.append(row)
 
@@ -1660,7 +1764,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             sub_row["selected_device_name"] = sub_selected_device.name
             sub_row["member_resolution_source"] = sub_resolution_source
             self._apply_carrier_install_rules(sub_row, sub_item, sub_selected_device)
-            self._attach_interface_match(sub_row, sub_target_context)
+            self._attach_interface_match(sub_row, sub_item, sub_target_context)
             table_data.append(sub_row)
 
             # Update bay scope for children of this sub-item.

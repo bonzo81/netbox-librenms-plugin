@@ -1001,6 +1001,21 @@ class TestStorelibrenmsId:
         assert device.custom_field_data["librenms_id"]["default"] == 42
         assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"]["default"] == 42
 
+    def test_a_read_after_the_store_sees_the_mapping_on_the_callers_instance(self, settings, librenms_server):
+        """The store copies the mapping onto the caller's object, and no earlier snapshot hides it."""
+        from netbox_librenms_plugin.server_mappings import read_mapping
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("store-then-read", librenms_cf={"default": None})
+        api = api_for(settings, librenms_server.url)
+        before = read_mapping(device)
+
+        api._store_librenms_id(device, 42)
+
+        assert before.own_id("default") is None
+        assert read_mapping(device).own_id("default") == 42
+        assert api.get_stored_librenms_id(device) == 42
+
     def test_an_owner_deleted_mid_claim_reports_a_lookup_error_not_a_500(self, settings, librenms_server):
         """A concurrent delete leaves no row for the claim to lock, which must not reach the view."""
         from dcim.models import Device
