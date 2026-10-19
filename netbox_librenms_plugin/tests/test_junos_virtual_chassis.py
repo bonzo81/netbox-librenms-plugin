@@ -116,15 +116,25 @@ def test_two_fpcs_that_share_a_serial_are_not_a_stack(recording_server):
     assert _detect(recording_server, recording) is None
 
 
-def test_anonymization_keeps_a_placeholder_fpc_serial_so_the_shape_stays_rejected(recording_server):
+@pytest.mark.parametrize("live_capture", [False, True], ids=["offline", "live-capture"])
+def test_anonymization_keeps_a_placeholder_fpc_serial_so_the_shape_stays_rejected(recording_server, live_capture):
     """A BUILTIN FPC serial is no member serial; anonymizing it must not turn the shape into a stack."""
     from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
     from netbox_librenms_plugin.data_shapes.signature import compute_shape_signature
+    from netbox_librenms_plugin.import_utils.virtual_chassis import vc_serial_key
 
     recording = copy.deepcopy(load_recording(_RECORDING))
     _edit_rows(recording, 121, lambda row: row.update(entPhysicalSerialNum="BUILTIN"))
-    anonymized = anonymize_recording(recording)
+    anonymized = anonymize_recording(recording, serial_key=vc_serial_key() if live_capture else None)
 
+    routes = (f"{anonymized['device_id']}?entPhysicalContainedIn=1", f"{anonymized['device_id']}/all")
+    serials = {
+        row["entPhysicalSerialNum"]
+        for route in routes
+        for row in _rows(anonymized, f"GET /api/v0/inventory/{route}")
+        if row["entPhysicalIndex"] == 121
+    }
+    assert serials == {"BUILTIN"}
     assert _detect(recording_server, recording) is None
     assert _detect(recording_server, anonymized) is None
     assert compute_shape_signature(anonymized) == compute_shape_signature(recording)
