@@ -875,9 +875,8 @@ class BaseInterfaceTableView(
             )
 
             rules = interface_rules_for_request(request)
-            # A row with no resolved member is decided for any member: on their shared platform, else global rules only.
-            member_platform_ids = {member.platform_id for member in virtual_chassis_members}
-            any_member_platform_id = member_platform_ids.pop() if len(member_platform_ids) == 1 else None
+            # A row with no resolved member is decided on every member's platform.
+            member_platform_ids = sorted({member.platform_id for member in virtual_chassis_members}, key=str)
             target_device_ids = {}
             for port in ports_data:
                 port_id = normalize_librenms_port_id(port.get("port_id"))
@@ -929,8 +928,9 @@ class BaseInterfaceTableView(
                     port["rule_decision"] = rules.check_interface_write(port, platform_id=rule_owner.platform_id)
                 else:
                     # Ignored only when the writer refuses every member the user can pick; else it asks for one.
-                    any_member = rules.check_interface_write(port, platform_id=any_member_platform_id)
-                    port["rule_decision"] = any_member if any_member.kind is RuleDecisionKind.IGNORE else None
+                    decisions = [rules.check_interface_write(port, platform_id=pk) for pk in member_platform_ids]
+                    ignored = bool(decisions) and all(d.kind is RuleDecisionKind.IGNORE for d in decisions)
+                    port["rule_decision"] = decisions[0] if ignored else None
 
                 netbox_interface = resolve_relationship_row(
                     relationship_context,
