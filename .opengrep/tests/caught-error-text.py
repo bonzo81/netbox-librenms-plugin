@@ -145,6 +145,30 @@ def show_the_write_failure_message(request, model):
         messages.error(request, failure)
 
 
+def pass_the_error_as_the_action(request, model, other):
+    try:
+        save()
+    except ValidationError as exc:
+        # ruleid: caught-error-text
+        messages.error(request, write_failure_message(other, exc.messages[0], "serial", model, request.user))
+
+
+def pass_the_error_as_a_keyword_action(request, model, other):
+    try:
+        save()
+    except ValidationError as exc:
+        # ruleid: caught-error-text
+        failure = write_failure_message(other, action=str(exc), written_field="serial", model=model, user=None)
+
+
+def put_the_error_text_into_the_action(request, model):
+    try:
+        save()
+    except ValidationError as exc:
+        # ruleid: caught-error-text
+        failure = write_failure_message(exc, f"save {exc.messages[0]}", "serial", model, request.user)
+
+
 def log_validation_error_detail():
     try:
         save()
