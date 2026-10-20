@@ -689,7 +689,6 @@ def test_an_ignore_rule_on_the_parent_port_does_not_block_the_channel(librenms_s
 
 
 @pytest.mark.usefixtures("breakout_server")
-@pytest.mark.usefixtures("breakout_server")
 def test_the_channels_of_one_parent_share_its_permission_checks():
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
@@ -711,6 +710,7 @@ def test_the_channels_of_one_parent_share_its_permission_checks():
     assert checks(2, 3, 4) == one_row
 
 
+@pytest.mark.usefixtures("breakout_server")
 def test_a_cached_render_of_a_channel_row_never_calls_librenms(librenms_server):
     from netbox_librenms_plugin.models import InterfaceTypeMapping
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
@@ -738,6 +738,7 @@ def test_a_cached_render_of_a_channel_row_never_calls_librenms(librenms_server):
     assert (page.status_code, fragment.status_code) == (200, 200)
     # The page shell reads the device and its poller group; the cached cable table reads nothing.
     page_paths = [request["path"] for request in librenms_server.requests[before:after_page]]
+    assert page_paths, "precondition: the page reads LibreNMS through the recorded server"
     assert [path for path in page_paths if "/ports" in path] == []
     assert [request["path"] for request in librenms_server.requests[after_page:]] == []
 
