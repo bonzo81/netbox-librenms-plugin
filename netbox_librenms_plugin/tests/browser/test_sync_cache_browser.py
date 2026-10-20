@@ -5152,3 +5152,39 @@ def test_netbox_only_select_all_uses_only_the_current_rows_after_reinitializatio
 
     assert page.locator(".netbox-interface-checkbox").is_checked()
     assert page.evaluate("oldNetboxCheckbox.checked") is False
+
+
+def test_vlan_modal_warning_icons_are_named_by_their_titles(page):
+    """The missing-VLAN warnings carry their text only in the title, so it is also their accessible name."""
+    vlans = [{"vid": 501, "type": "T", "missing": True}, {"vid": 502, "type": "T", "missing": False, "group_id": ""}]
+    groups = [{"id": "", "name": "Global"}, {"id": 1, "name": "Group A"}]
+    page.set_content(
+        f"""
+        <input name="csrfmiddlewaretoken" value="test-token">
+        <span id="vlanModalInterfaceName"></span>
+        <div id="vlanDetailModal"><table><tbody id="vlanDetailTableBody"></tbody></table></div>
+        <button id="edit" data-interface="Ethernet1" data-row-key="port-1" data-device-id="7"
+                data-vlans='{escape(json.dumps(vlans))}' data-vlan-groups='{escape(json.dumps(groups))}'>Edit</button>
+        """
+    )
+    page.route(
+        "**/plugins/librenms_plugin/verify-vlan-group/",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"status": "success", "css_class": "text-danger", "is_missing": True}),
+        ),
+    )
+    _add_page_scripts(page)
+
+    page.evaluate("openVlanDetailModal(document.getElementById('edit'))")
+    second = page.locator("#vlanDetailTableBody tr").nth(1)
+    second.locator("select").select_option("1")
+    expect(second.locator("i.mdi-alert")).to_have_count(1)
+
+    icons = page.locator("#vlanDetailTableBody i[title]")
+    expect(icons).to_have_count(2)
+    for index in range(2):
+        icon = icons.nth(index)
+        assert icon.get_attribute("role") == "img"
+        assert icon.get_attribute("aria-label") == icon.get_attribute("title")

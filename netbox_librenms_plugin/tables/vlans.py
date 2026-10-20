@@ -4,7 +4,12 @@ from django.utils.safestring import mark_safe
 from netbox.tables.columns import ToggleColumn
 
 from netbox_librenms_plugin.constants import LIBRENMS_VLAN_STATE_ACTIVE
-from netbox_librenms_plugin.utils import get_vlan_sync_css_class, paginate_sync_table, render_vlan_sync_action
+from netbox_librenms_plugin.utils import (
+    get_vlan_sync_css_class,
+    note_icon,
+    paginate_sync_table,
+    render_vlan_sync_action,
+)
 
 
 class _VLANSelectionColumn(ToggleColumn):
@@ -194,9 +199,9 @@ class LibreNMSVLANTable(tables.Table):
 
         # Add warning icon if ambiguous (VID exists in multiple groups at same priority level)
         if record.get("is_ambiguous") and not record.get("exists_in_netbox"):
-            warning_html = mark_safe(
-                '<i class="mdi mdi-alert text-warning ms-1" '
-                'title="VID exists in multiple groups at the same scope level. Please select the target group."></i>'
+            warning_html = note_icon(
+                "mdi-alert text-warning ms-1",
+                "VID exists in multiple groups at the same scope level. Please select the target group.",
             )
             return format_html("{}{}", select_html, warning_html)
 

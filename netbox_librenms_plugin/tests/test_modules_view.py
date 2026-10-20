@@ -5447,27 +5447,10 @@ class TestStatusIconNotesHaveAnAccessibleName:
         ids=["repaired-parent", "name-conflict", "model-warning"],
     )
     def test_each_titled_icon_is_an_image_named_by_its_title(self, status, record):
-        from html.parser import HTMLParser
-
         from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+        from netbox_librenms_plugin.tests.view_test_helpers import assert_titled_icons_are_named
 
-        class Icons(HTMLParser):
-            def __init__(self):
-                super().__init__()
-                self.titled = []
-
-            def handle_starttag(self, tag, attrs):
-                attrs = dict(attrs)
-                if tag == "i" and "title" in attrs:
-                    self.titled.append(attrs)
-
-        icons = Icons()
-        icons.feed(str(LibreNMSModuleTable([]).render_status(status, record)))
-
-        assert icons.titled
-        for attrs in icons.titled:
-            assert attrs.get("role") == "img"
-            assert attrs.get("aria-label") == attrs["title"]
+        assert_titled_icons_are_named(LibreNMSModuleTable([]).render_status(status, record))
 
 
 class TestRenderStatusNoBayOnParent:

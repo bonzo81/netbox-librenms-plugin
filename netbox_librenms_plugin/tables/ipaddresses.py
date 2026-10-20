@@ -108,7 +108,7 @@ class IPAddressTable(tables.Table):
                 {% endfor %}
             </select>
             {% if record.vrf_suggested_from %}
-                <i class="mdi mdi-lightbulb-on-outline text-muted"
+                <i class="mdi mdi-lightbulb-on-outline text-muted" role="img"
                    title="Suggested from LibreNMS VRF {{ record.vrf_suggested_from.name }} by {{ record.vrf_suggested_from.matched_by }} match"
                    aria-label="Suggested from LibreNMS VRF {{ record.vrf_suggested_from.name }} by {{ record.vrf_suggested_from.matched_by }} match"></i>
             {% endif %}

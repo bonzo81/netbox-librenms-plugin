@@ -2747,6 +2747,12 @@ function initializeVlanGroupSelects() {
     });
 }
 
+// The warning icons carry their text only in the title, so the same text is their accessible name.
+const VLAN_MISSING_ICON = ' <i class="mdi mdi-alert text-danger" role="img" title="VLAN not in NetBox" aria-label="VLAN not in NetBox"></i>';
+const VLAN_MISSING_IN_GROUP_ICON = ' <i class="mdi mdi-alert text-danger" role="img"'
+    + ' title="VLAN not in selected group—use VLAN Sync first to create it"'
+    + ' aria-label="VLAN not in selected group—use VLAN Sync first to create it"></i>';
+
 /**
  * Open the VLAN detail modal for a specific interface.
  * Populates the modal table with per-VLAN rows and group dropdowns.
@@ -2786,7 +2792,7 @@ function openVlanDetailModal(btn) {
         vidSpan.className = vlan.css;
         vidSpan.textContent = vlan.vid;
         if (vlan.missing) {
-            vidSpan.innerHTML += ' <i class="mdi mdi-alert text-danger" title="VLAN not in NetBox"></i>';
+            vidSpan.innerHTML += VLAN_MISSING_ICON;
         }
         tdVid.appendChild(vidSpan);
         tr.appendChild(tdVid);
@@ -2930,7 +2936,7 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
                         // Update warning icon
                         const existingIcon = vidSpan.querySelector('.mdi-alert');
                         if (isMissing && !existingIcon) {
-                            vidSpan.innerHTML = vid + ' <i class="mdi mdi-alert text-danger" title="VLAN not in selected group\u2014use VLAN Sync first to create it"></i>';
+                            vidSpan.innerHTML = vid + VLAN_MISSING_IN_GROUP_ICON;
                         } else if (!isMissing && existingIcon) {
                             vidSpan.textContent = String(vid);
                         }
@@ -3064,7 +3070,7 @@ function initializeVlanModalSave() {
                             const MAX_INLINE = 3;
                             const inlineParts = btnVlans.slice(0, MAX_INLINE).map(v => {
                                 const warning = v.missing
-                                    ? ' <i class="mdi mdi-alert text-danger" title="VLAN not in selected group\u2014use VLAN Sync first to create it"></i>'
+                                    ? VLAN_MISSING_IN_GROUP_ICON
                                     : '';
                                 return `<span class="${v.css}">${v.vid}(${v.type})${warning}</span>`;
                             });
