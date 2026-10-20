@@ -20,20 +20,23 @@ class _FailingCache:
     only, so the failure is injected here and every other key still round-trips.
     """
 
-    def __init__(self, failing_key, error):
+    def __init__(self, failing_key, error, failing_ops=("get",)):
         from django.core.cache import cache
 
         self._cache = cache
         self._failing_key = failing_key
         self._error = error
+        self._failing_ops = failing_ops
 
     def get(self, key, *args, **kwargs):
-        if key == self._failing_key:
+        if key == self._failing_key and "get" in self._failing_ops:
             raise self._error
         return self._cache.get(key, *args, **kwargs)
 
-    def set(self, *args, **kwargs):
-        return self._cache.set(*args, **kwargs)
+    def set(self, key, *args, **kwargs):
+        if key == self._failing_key and "set" in self._failing_ops:
+            raise self._error
+        return self._cache.set(key, *args, **kwargs)
 
     def delete(self, *args, **kwargs):
         return self._cache.delete(*args, **kwargs)
@@ -267,6 +270,30 @@ class TestPrefetchVcData:
 
 @pytest.mark.django_db
 class TestDetectVirtualChassisFailures:
+    @pytest.mark.parametrize("failing_op", ["get", "set"])
+    def test_a_cache_outage_on_one_rows_vc_key_marks_only_that_row_unresolved(
+        self, settings, librenms_server, monkeypatch, failing_op
+    ):
+        from redis.exceptions import ConnectionError as RedisConnectionError
+
+        from netbox_librenms_plugin.import_utils import virtual_chassis as vc_module
+        from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+
+        api = _api(settings, librenms_server, f"vc_precheck_cache_{failing_op}")
+        device_ids = [7501, 7502]
+        for device_id in device_ids:
+            _seed_stack(librenms_server, device_id, serials=(f"SN-{device_id}-A", f"SN-{device_id}-B"))
+        rows = {device_id: {"device_id": device_id, "hostname": f"sw-{device_id}"} for device_id in device_ids}
+        error = RedisConnectionError("redis unreachable")
+        monkeypatch.setattr(
+            vc_module, "cache", _FailingCache(vc_module._vc_cache_key(api, 7501), error, failing_ops=(failing_op,))
+        )
+
+        _collisions, unresolved = detect_collisions_for_device_ids(device_ids, api, libre_devices_cache=rows)
+
+        assert unresolved == [7501]
+        assert vc_module.get_virtual_chassis_data(api, 7502)["is_stack"] is True
+
     def test_a_failed_member_lookup_reports_detection_failure(self, settings, librenms_server, caplog):
         from netbox_librenms_plugin.import_utils import virtual_chassis as vc_module
 
