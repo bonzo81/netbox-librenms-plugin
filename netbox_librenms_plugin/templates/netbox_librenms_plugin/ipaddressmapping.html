@@ -1,0 +1,30 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% load plugins %}
+
+{% block content %}
+<div class="row mb-3">
+  <div class="col col-md-12">
+    <div class="card">
+      <table class="table table-hover attr-table">
+        <thead>
+          <tr>
+            <th>Prefix</th>
+            <th>VRF</th>
+            <th>Action</th>
+            <th>Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><code>{{ object.prefix }}</code></td>
+            <td>{% if object.vrf %}{{ object.vrf|linkify }}{% else %}All VRFs and the global table{% endif %}</td>
+            <td>{{ object.get_action_display }}</td>
+            <td>{{ object.description|placeholder }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}
