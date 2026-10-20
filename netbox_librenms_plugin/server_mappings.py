@@ -759,7 +759,7 @@ class LibreNMSPortBindingBusy(TransactionConflict):
 
 
 class ChangeOutcome(StrEnum):
-    """What a builder did. A skip changes nothing, so the writer's other fields can still save."""
+    """What a builder did. A skip stores no value, but a valid ID is still claimed: an owner conflict stops the save."""
 
     APPLIED = "applied"
     UNCHANGED = "unchanged"
