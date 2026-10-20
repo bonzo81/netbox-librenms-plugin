@@ -1432,3 +1432,22 @@ rules:
           pattern-either:
             - pattern: "True"
             - pattern: "False"
+  - id: vc-member-name-through-helper
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This code builds a Virtual Chassis member name with _generate_vc_member_name(). That call
+      does not apply the serial rules, so a `{serial}` name can differ from the name that import
+      creates. Call _member_name() with a vc_serial_key() serial key.
+    metadata:
+      category: correctness
+    paths:
+      exclude:
+        - "**/tests/**"
+    patterns:
+      - pattern-either:
+          - pattern: _generate_vc_member_name(...)
+          - pattern: $MODULE._generate_vc_member_name(...)
+      - pattern-not-inside: |
+          def _member_name(...):
+              ...

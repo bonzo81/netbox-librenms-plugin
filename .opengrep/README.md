@@ -67,6 +67,7 @@ unchecked until that review.
 | `conflict-raised-without-record` | error | A raise of a `TransactionConflict` or `ConcurrentRowChange` class that does not go through `recorded_conflict(...)`. |
 | `no-lock-on-exists` | error | A `select_for_update()` chain that ends in `exists()` or `count()`. |
 | `assert-is-not-parametrized-flag` | error | A test asserts `value is not flag`, where `flag` is a `pytest.mark.parametrize` argument with `True` or `False` values. That identity check also passes for `None`. |
+| `vc-member-name-through-helper` | error | A `_generate_vc_member_name()` call outside `_member_name()`. Such a name skips the serial rules, so it can differ from the name that import creates. Tests are excluded, and an import alias of the function is not followed. |
 
 ## Scope
 
