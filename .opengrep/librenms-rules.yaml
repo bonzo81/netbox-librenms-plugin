@@ -783,8 +783,6 @@ rules:
                   - pattern: exception_text_for($ERROR, ...)
                   - pattern-not: exception_text_for(..., exc=$OTHER, ...)
               - pattern: exception_text_for(..., exc=$ERROR, ...)
-              # The keys of the error choose only its wording; exception_text_for gives its detail.
-              - pattern: write_failure_message($ERROR, ...)
               - pattern: classify_conflict($ERROR)
               - pattern: database_error_sqlstate($ERROR)
               - pattern: isinstance($ERROR, $TYPES)
@@ -793,6 +791,14 @@ rules:
           - metavariable-regex:
               metavariable: $ERROR
               regex: ^\w+(\.__(cause|context)__)*$
+        exact: true
+      # Only the first argument goes through exception_text_for. The other arguments go into the text.
+      - patterns:
+          - pattern: write_failure_message($ERROR, ...)
+          - metavariable-regex:
+              metavariable: $ERROR
+              regex: ^\w+(\.__(cause|context)__)*$
+          - focus-metavariable: $ERROR
         exact: true
       # Only in the reviewed factory: TypeRefusal.text_for applies the superuser rule to the message.
       # Each call of the factory is still a finding at the call.
@@ -822,7 +828,6 @@ rules:
           - pattern-not: logger.critical(...)
           - pattern-not: logger.log(...)
           - pattern-not: exception_text_for(...)
-          - pattern-not: write_failure_message($ERROR, ...)
           - pattern-not: classify_conflict($ERROR)
           - pattern-not: database_error_sqlstate($ERROR)
           - pattern-not: isinstance($ERROR, $TYPES)
