@@ -465,6 +465,29 @@ class TestMarkBuiltInWithAPartNumber:
         # The rule names one class, so the cpmModule board keeps its own action.
         assert SLOT_A in rows
 
+    def test_the_prefilled_rule_hides_a_unit_whose_model_carries_spaces(self):
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+        device = ixr_device("ixr-link-spaces", part_number="3HE00000AAAA01")
+        inventory = ixr_inventory()
+        next(row for row in inventory if row["entPhysicalIndex"] == SLOT_1)["entPhysicalModelName"] = f" {PART_NUMBER} "
+        seed_snapshot(device, inventory)
+        _tag, _path, query = controls(device)[SLOT_1]
+
+        rule = InventoryIgnoreRule(
+            name=query["name"],
+            match_type=query["match_type"],
+            pattern=query["pattern"],
+            action=query["action"],
+            model_pattern=query["model_pattern"],
+            require_serial_match_parent=bool(query["require_serial_match_parent"]),
+            manufacturer_id=int(query["manufacturer"]),
+        )
+        rule.full_clean()
+        rule.save()
+
+        assert SLOT_1 not in tab_rows(device)
+
     def test_the_rule_form_opens_with_the_prefilled_values(self, client):
         from netbox_librenms_plugin.tests.conftest import make_superuser
 
@@ -480,7 +503,7 @@ class TestMarkBuiltInWithAPartNumber:
             "match_type": "class_is",
             "pattern": "ioModule",
             "action": "transparent",
-            "model_pattern": f"^{PART_NUMBER}$",
+            "model_pattern": rf"^\s*{PART_NUMBER}\s*$",
         }
         assert "checked" not in str(form["require_serial_match_parent"])
         assert str(form["manufacturer"].value()) == str(device.device_type.manufacturer_id)
