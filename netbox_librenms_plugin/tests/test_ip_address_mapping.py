@@ -89,6 +89,32 @@ class TestTheModel:
         assert set(refused.value.message_dict) == {"action"}
 
 
+class TestADuplicateIsReportedOnThePrefix:
+    @pytest.mark.parametrize("scoped", [False, True], ids=["global", "vrf"])
+    def test_the_edit_form_shows_the_duplicate_on_the_prefix(self, ui, blue, scoped):
+        vrf = blue if scoped else None
+        IPAddressMapping.objects.create(prefix="fe80::/10", vrf=vrf)
+
+        response = ui.post(
+            _url("add"), {"prefix": "fe80::1/10", "vrf": vrf.pk if vrf else "", "action": "ignore", "description": ""}
+        )
+
+        assert response.status_code == 200
+        form = response.context["form"]
+        assert list(form.errors) == ["prefix"]
+        assert IPAddressMapping.objects.count() == 1
+
+    @pytest.mark.parametrize("scoped", [False, True], ids=["global", "vrf"])
+    def test_the_api_keys_the_duplicate_on_the_prefix(self, api, blue, scoped):
+        payload = {"prefix": "fe80::/10", "vrf": blue.pk if scoped else None}
+        assert api.post(reverse(API_LIST), payload, format="json").status_code == 201
+
+        duplicate = api.post(reverse(API_LIST), payload, format="json")
+
+        assert duplicate.status_code == 400
+        assert list(duplicate.json()) == ["prefix"]
+
+
 class TestTheReader:
     def test_an_address_matches_only_a_prefix_of_its_family(self):
         v6 = IPAddressMapping.objects.create(prefix="fe80::/10")
