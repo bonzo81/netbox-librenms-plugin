@@ -365,13 +365,23 @@ def _matches_target_device(
 _BUILT_IN_CANDIDATE_CLASSES = _INTEGRATED_MODULE_CLASSES - {"port"}
 
 
-def built_in_candidate_model(item: dict, index_map: dict, device_identity: DeviceIdentity, *, has_bay: bool) -> str:
-    """
-    Return the model that "Mark built-in" records as the target device type's part number, or "" for no candidate.
+@dataclass(frozen=True)
+class BuiltInCandidate:
+    """A unit that "Mark built-in" may mark, and whether the mark records its model as the part number."""
 
-    A candidate is a main-inventory unit of a module class that matched no bay. Its model is not blank and is
-    not the model or part number of the target device type. It sits at chassis level as the model rule walks:
-    directly below the chassis, or through slot containers and other built-in units.
+    model: str
+    # False when the device type already holds the model, so only the rule is missing.
+    records_part_number: bool
+
+
+def built_in_candidate(item: dict, index_map: dict, device_identity: DeviceIdentity, *, has_bay: bool):
+    """
+    Return the "Mark built-in" candidate of a row, or None.
+
+    A candidate is a main-inventory unit of a module class that matched no bay and reports a model. It sits at
+    chassis level as the model rule walks: directly below the chassis, or through slot containers and other
+    built-in units. When its model is not the model or part number of the target device type, the mark records
+    the model as the part number; otherwise the mark only adds the rule.
 
     Args:
         item (dict): The inventory item of the row.
@@ -380,21 +390,21 @@ def built_in_candidate_model(item: dict, index_map: dict, device_identity: Devic
         has_bay (bool): Whether the row matched a module bay.
 
     Returns:
-        str: The model of the candidate unit, or "".
+        BuiltInCandidate | None: The candidate, or None.
 
     """
     if has_bay or item.get("_source", MAIN_INVENTORY_SOURCE) != MAIN_INVENTORY_SOURCE:
-        return ""
+        return None
     if item.get("_from_transceiver_api"):
-        return ""
+        return None
     if _normalize_librenms_text(item.get("entPhysicalClass")) not in _BUILT_IN_CANDIDATE_CLASSES:
-        return ""
+        return None
     model = _clean_librenms_value(item.get("entPhysicalModelName"))
-    if not model or model.casefold() in device_identity.type_models:
-        return ""
     parent = index_map.get(item.get("entPhysicalContainedIn"))
     passes = _passes_to_the_chassis(device_identity)
-    return model if _sits_at_chassis_level(item, parent, index_map, passes=passes) else ""
+    if not model or not _sits_at_chassis_level(item, parent, index_map, passes=passes):
+        return None
+    return BuiltInCandidate(model, records_part_number=model.casefold() not in device_identity.type_models)
 
 
 def reusable_built_in_rule(rules):
@@ -1904,13 +1914,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
     @staticmethod
     def _mark_built_in_candidate(row, item, index_map, ignore_rules, device_identity, selected_device):
         """Give a top-level row the facts of its "Mark built-in" action when its unit is a candidate."""
-        model = built_in_candidate_model(item, index_map, device_identity, has_bay=bool(row.get("module_bay_id")))
-        if not model:
+        candidate = built_in_candidate(item, index_map, device_identity, has_bay=bool(row.get("module_bay_id")))
+        if candidate is None:
             return
         device_type = selected_device.device_type
         rule = reusable_built_in_rule(ignore_rules)
         row["built_in"] = {
-            "model": model,
+            "model": candidate.model,
+            "records_part_number": candidate.records_part_number,
             "device_type_id": device_type.pk,
             "manufacturer_id": device_type.manufacturer_id,
             "part_number": device_type.part_number,
