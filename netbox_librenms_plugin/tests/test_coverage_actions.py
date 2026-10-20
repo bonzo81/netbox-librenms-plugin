@@ -5089,7 +5089,7 @@ class TestAddAsOOBViewPost:
         """An OOB link matched through a non-sync virtual-chassis member is stored on the resolved sync device."""
         from dcim.models import Device, VirtualChassis
 
-        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
+        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
         view = self._make_view()
 

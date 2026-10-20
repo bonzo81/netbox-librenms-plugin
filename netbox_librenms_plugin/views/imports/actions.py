@@ -79,7 +79,6 @@ from netbox_librenms_plugin.server_mappings import (
     SameServerIdentityConflict,
     attach_oob,
     convert_legacy,
-    get_librenms_sync_device,
     link_import,
     lock_librenms_id_assignment,
     merge_links,
@@ -88,7 +87,7 @@ from netbox_librenms_plugin.server_mappings import (
     promote_to_host,
     read_mapping,
 )
-from netbox_librenms_plugin.server_selection import parse_configured_server_key
+from netbox_librenms_plugin.server_selection import get_librenms_sync_device, parse_configured_server_key
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.transactions import (
     classify_conflict,

@@ -11,10 +11,11 @@ from netbox.views import generic
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
-from netbox_librenms_plugin.server_mappings import get_librenms_sync_device, mapped_device_servers, read_mapping
+from netbox_librenms_plugin.server_mappings import mapped_device_servers, read_mapping
 from netbox_librenms_plugin.server_selection import (
     ServerSelectionState,
     build_server_mappings,
+    get_librenms_sync_device,
     resolve_object_server,
 )
 from netbox_librenms_plugin.sync_cache import (
