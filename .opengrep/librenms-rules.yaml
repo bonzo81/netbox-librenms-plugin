@@ -1425,3 +1425,22 @@ rules:
       - metavariable-regex:
           metavariable: $PATCH
           regex: ^(setattr|delattr)$
+  - id: assert-is-not-parametrized-flag
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `assert value is not flag` is an identity check against one bool. It passes for every value
+      that is not that object, also for None, so the test does not prove the expected flag. Write
+      `assert value is (not flag)`.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/tests/**"]
+    patterns:
+      - pattern-inside: |
+          @pytest.mark.parametrize(...)
+          def $TEST(..., $FLAG, ...):
+              ...
+      - pattern-either:
+          - pattern: assert $VALUE is not $FLAG
+          - pattern: assert $VALUE is not $FLAG, $MESSAGE
