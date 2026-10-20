@@ -181,6 +181,18 @@ def orm_lookups(Device, Interface, server_key):
     Interface.objects.filter(**{f"device__custom_field_data__librenms_id__{server_key}": 5})
     # ruleid: no-stored-mapping-access-orm
     Interface.objects.values("name", "device__custom_field_data")
+    # ruleid: no-stored-mapping-access-orm
+    Device.objects.filter(custom_field_data__has_key="librenms_id")
+    # ruleid: no-stored-mapping-access-orm
+    Q(device__custom_field_data__has_keys=["librenms_id", "operator_note"])
+    # ruleid: no-stored-mapping-access-orm
+    Device.objects.exclude(custom_field_data__has_any_keys=("operator_note", "librenms_id"))
+    # ruleid: no-stored-mapping-access-orm
+    Interface.objects.filter(device__custom_field_data__contains={"librenms_id": {"default": 5}})
+    # ok: no-stored-mapping-access-orm
+    Device.objects.filter(custom_field_data__has_key="operator_note")
+    # ok: no-stored-mapping-access-orm
+    Device.objects.filter(custom_field_data__contains={"operator_note": "kept"})
     # ok: no-stored-mapping-access-orm
     Interface.objects.filter(device__custom_field_data__operator_note="kept")
     # ok: no-stored-mapping-access-orm

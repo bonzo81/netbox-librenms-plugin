@@ -60,7 +60,7 @@ unchecked until that review.
 | `no-selected-fuzzy-apis` | warning | Code calls selected approximate-selection APIs. This does not prove exact-only selection. |
 | `no-stored-mapping-access` | error | A read or write of the `librenms_id` key in `custom_field_data`, `cf` or serialized `custom_fields`, also through a local alias, a parameter or a key constant. |
 | `no-stored-mapping-access-container` | error | A `del` of the key; a replacement (`=`, `\|=`), copy, `clear()` or `popitem()` of the whole container; an `update()` that can set the key; a container built with the key. |
-| `no-stored-mapping-access-orm` | error | A `custom_field_data__librenms_id` lookup, projection or ordering, also across a relation such as `device__`; a projection of the whole container; or a `custom_fields.librenms_id` path. |
+| `no-stored-mapping-access-orm` | error | A `custom_field_data__librenms_id` lookup, projection or ordering, also across a relation such as `device__`; a `has_key`, `has_keys`, `has_any_keys` or `contains` lookup on the container whose value names the key; a projection of the whole container; or a `custom_fields.librenms_id` path. |
 | `no-stored-mapping-access-private` | error | An import or attribute access of a private name of `server_mappings`, or a patch target string that names one. |
 | `no-stored-mapping-access-template` | error | A template that reads `cf.librenms_id` or `custom_field_data.librenms_id`, or looks the key up with a filter. |
 | `conflict-raised-without-record` | error | A raise of a `TransactionConflict` or `ConcurrentRowChange` class that does not go through `recorded_conflict(...)`. |
@@ -214,6 +214,9 @@ local or module string constant. A key built at run time is outside the check. T
   an `update()` with a dict literal that has neither the key nor a `**` expansion is not reported.
 - The ORM rule matches the lookup path at the start of a string or a keyword name, after any
   relation prefix. A path that code builds from parts is outside the check.
+- The ORM rule reports a `has_key`, `has_keys`, `has_any_keys` or `contains` lookup only as a
+  keyword argument whose value is a literal, a list, a tuple or a dict that holds the key. The same
+  lookup in a `**{...}` expansion, or with a key list or dict in a variable, is outside the check.
 - A raw SQL statement that writes `custom_field_data` is outside the check.
 - The private rule reports an import of a private name, and a dotted access through a module
   import. It does not see `getattr()` with a computed name.

@@ -1215,6 +1215,16 @@ rules:
           - metavariable-regex:
               metavariable: $LOOKUP
               regex: ^(\w+__)?custom_field_data__librenms_id(__\w+)?$
+      # The key named in the lookup value, not in the lookup path.
+      - patterns:
+          - pattern-either:
+              - pattern: $CALL(..., $LOOKUP="librenms_id", ...)
+              - pattern: $CALL(..., $LOOKUP=[..., "librenms_id", ...], ...)
+              - pattern: $CALL(..., $LOOKUP=(..., "librenms_id", ...), ...)
+              - pattern: '$CALL(..., $LOOKUP={..., "librenms_id": $VALUE, ...}, ...)'
+          - metavariable-regex:
+              metavariable: $LOOKUP
+              regex: ^(\w+__)?custom_field_data__(has_key|has_keys|has_any_keys|contains)$
       - pattern: '"=~/^-?(\w+__)?custom_field_data__librenms_id(__|$)/"'
       # A dotted path into serialized data, such as a change record.
       - pattern: '"=~/^custom_fields\.librenms_id($|\.)/"'
