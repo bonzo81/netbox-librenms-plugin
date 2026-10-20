@@ -95,3 +95,9 @@
     flex-wrap: wrap;
     align-items: center;
 }
+
+/* A row an IP mapping ignores has a disabled checkbox; make it clear in the dark theme too. */
+#librenms-ipaddress-table input[name="select"]:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
