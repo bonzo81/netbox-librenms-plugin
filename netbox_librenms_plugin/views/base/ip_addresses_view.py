@@ -18,6 +18,7 @@ from virtualization.models import VirtualMachine, VMInterface
 from netbox_librenms_plugin.constants import LIBRENMS_GLOBAL_ROUTING_INSTANCE, is_supported_interface_name_field
 from netbox_librenms_plugin.interface_rules import interface_rules_for_request, row_rule_block
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_librenms_ip_entry
+from netbox_librenms_plugin.ip_rules import ip_rules_for_request, row_ip_rule_block
 from netbox_librenms_plugin.librenms_ids import (
     coerce_librenms_id,
     normalize_librenms_port_id,
@@ -320,6 +321,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             server_key or self._render_server_key(),
             prefetched_data,
         )
+        self._add_ip_rule_blocks(enriched_data, visible_vrf_ids)
         self._flag_management_ip(enriched_data, mgmt_ip)
         return identify_ip_sync_rows(enriched_data)
 
@@ -727,6 +729,26 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         for enriched_ip, ports in decided:
             if (blocked := rules.first_blocked_port(ports, disclose)) is not None:
                 enriched_ip["rule_block"] = row_rule_block(*blocked)
+
+    def _add_ip_rule_blocks(self, enriched_data, visible_vrf_ids):
+        """
+        Stamp each row whose address an IP mapping ignores in the VRF the row selects first.
+
+        The VRF select shows the row's NetBox VRF or its suggested VRF when the user may view it,
+        else Global. A VRF change re-decides the row in ``SingleIPAddressVerifyView``.
+
+        Args:
+            enriched_data (list[dict]): The enriched rows.
+            visible_vrf_ids (set[int]): The VRFs the select lists.
+
+        """
+        rules = ip_rules_for_request(self.request)
+        for enriched_ip in enriched_data:
+            shown = (enriched_ip["vrf_id"], enriched_ip.get("suggested_vrf_id"))
+            vrf_id = next((pk for pk in shown if pk is not None and pk in visible_vrf_ids), None)
+            rule = rules.decide(ip_interface(enriched_ip["ip_with_mask"]).ip, vrf_id)
+            if rule is not None:
+                enriched_ip["ip_rule_block"] = row_ip_rule_block(rule)
 
     @staticmethod
     def _interface_owner_id(interface):
@@ -1396,9 +1418,9 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
 
             # Update record with cache data if found
             if cache_entry:
-                # Update with all fields except vrf_id and status
+                # Update with all fields except the ones the chosen VRF decides
                 for key, value in cache_entry.items():
-                    if key not in ["vrf_id", "status"]:
+                    if key not in ["vrf_id", "status", "ip_rule_block"]:
                         updated_record[key] = value
 
             # If no interface found in cache, use first device interface
@@ -1420,6 +1442,10 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
                 exists_any_vrf, exists_specific_vrf, original_vrf_id, vrf_id
             )
 
+            ip_rule = ip_rules_for_request(request).decide(ip_interface(updated_record["ip_with_mask"]).ip, vrf_id)
+            if ip_rule is not None:
+                updated_record["ip_rule_block"] = row_ip_rule_block(ip_rule)
+
             # Render status HTML
             table = IPAddressTable(data=[])
             status_html = table.render_status(updated_record["status"], updated_record)
@@ -1428,7 +1454,7 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
                 {
                     "status": "success",
                     "ip_address": ip_address,
-                    "formatted_row": {"status": status_html},
+                    "formatted_row": {"status": status_html, "selectable": ip_rule is None},
                 }
             )
 

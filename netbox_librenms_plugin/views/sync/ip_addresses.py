@@ -21,6 +21,7 @@ from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE, is_supported_
 from netbox_librenms_plugin.interface_rules import PortSyncBlocked, interface_rules_for_request
 from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix
+from netbox_librenms_plugin.ip_rules import ip_rules_for_request
 from netbox_librenms_plugin.librenms_api import LibreNMSIDConflictError
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.server_mappings import name_match_may_be_port, read_mapping
@@ -1126,6 +1127,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             "primary_interface_not_eligible": [],
             "skipped_no_interface": [],
             "skipped_by_rule": [],
+            "skipped_by_ip_rule": [],
             "errors": {},
             "conflicts": [],
             "mutated": False,
@@ -1200,6 +1202,11 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         vrf = self._resolve_vrf_id(force_payload.get("target_vrf_id"))
                     else:
                         vrf = self.get_vrf_selection(request, row_id)
+                    # Decided in the VRF this request writes to, before any write; the table pill is a preview.
+                    ip_rule = ip_rules_for_request(request).decide(parsed.ip, vrf.pk if vrf is not None else None)
+                    if ip_rule is not None:
+                        row_results.append(("skipped_by_ip_rule", f"{display_address} ({ip_rule.reason})"))
+                        continue
                     if _ip_host_lock_identity(parsed, vrf) not in prelocked_host_locks:
                         _acquire_ip_host_lock(parsed, vrf)
 
@@ -1391,6 +1398,11 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             messages.warning(
                 request,
                 f"Skipped (the interface rules refuse the interface): {', '.join(results['skipped_by_rule'])}.",
+            )
+        if results.get("skipped_by_ip_rule"):
+            messages.warning(
+                request,
+                f"Skipped (an IP mapping ignores the address): {', '.join(results['skipped_by_ip_rule'])}.",
             )
         if results.get("skipped_no_interface"):
             messages.warning(

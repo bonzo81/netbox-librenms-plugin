@@ -3227,6 +3227,13 @@ function handleVRFChange(select, value) {
                 if (statusCell) {
                     statusCell.innerHTML = data.formatted_row.status;
                 }
+                // An IP mapping can ignore the address in the chosen VRF, so the selection follows the verdict.
+                const checkbox = row.querySelector('input[name="select"]');
+                if (checkbox) {
+                    checkbox.disabled = !data.formatted_row.selectable;
+                    if (checkbox.disabled) checkbox.checked = false;
+                    commitSelectionChange(row.closest('table'));
+                }
             }
         })
         .catch(error => {
