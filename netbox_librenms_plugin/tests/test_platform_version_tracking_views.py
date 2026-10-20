@@ -13,6 +13,7 @@ from netbox_librenms_plugin.tests.conftest import (
     bounded_executor,
     make_device,
     make_superuser,
+    make_virtual_chassis,
     make_vm,
     transactional_db_with_all_apps,
 )
@@ -244,6 +245,43 @@ class TestCreateAndAssignPlatformView:
         assert device.platform.name == f"Juniper Junos {VERSION}"
         assert device.platform.parent == os_platform
         assert PlatformMapping.objects.get(librenms_os="junos").netbox_platform == os_platform
+
+
+class TestAVirtualChassisMemberReadsTheChassisFacts:
+    """The sync page of an unmapped member shows the chassis facts, so its platform writes read them too."""
+
+    def _unmapped_member(self, tag, server, device_id):
+        mapped = _linked(f"{tag}-m1", server, device_id)
+        unmapped = make_device(f"{tag}-m2")
+        make_virtual_chassis(f"vc-{tag}", mapped, unmapped)
+        return unmapped
+
+    def test_the_update_sets_the_chassis_version_platform_on_the_member(self, client, librenms_server):
+        from dcim.models import Platform
+
+        _tracking(True)
+        os_platform = _platform("junos")
+        member = self._unmapped_member("vc-update", librenms_server, 7441)
+        client.force_login(make_superuser("vc-update-su"))
+
+        response = _post(client, "update_device_platform", member)
+
+        member.refresh_from_db()
+        assert member.platform == Platform.objects.get(parent=os_platform, name=f"junos {VERSION}")
+        assert message_texts(response.wsgi_request, "error") == []
+
+    def test_the_create_sets_the_named_platform_on_the_member(self, client, librenms_server):
+        _tracking(False)
+        member = self._unmapped_member("vc-create", librenms_server, 7442)
+        client.force_login(make_superuser("vc-create-su"))
+
+        response = _post(
+            client, "create_and_assign_platform", member, {"platform_name": "Juniper Junos", "librenms_os": "junos"}
+        )
+
+        member.refresh_from_db()
+        assert member.platform.name == "Juniper Junos"
+        assert message_texts(response.wsgi_request, "error") == []
 
 
 class TestImportDetailsPlatformCell:

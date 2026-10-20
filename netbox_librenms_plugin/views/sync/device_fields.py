@@ -167,15 +167,18 @@ def _write_device_field(view, request, pk, server_key, field, value, action):
     return old_values[0], None
 
 
-def _live_platform_facts(view, subject):
+def _live_platform_facts(view, subject, server_key):
     """
     Return the live LibreNMS platform facts of *subject*, read through *view*'s bound server.
+
+    A virtual chassis member reads the facts of the chassis sync device for *server_key*, as the sync page does.
 
     Returns:
         tuple: ``(PlatformFacts, None)``, or ``(None, text)`` when the lookup failed.
 
     """
-    view.librenms_id, lookup_error = view.resolve_librenms_id(subject)
+    lookup_subject = get_librenms_sync_device(subject, server_key=server_key) or subject
+    view.librenms_id, lookup_error = view.resolve_librenms_id(lookup_subject)
     if lookup_error is not None:
         return None, view.scoped_lookup_message(lookup_error)
     if not view.librenms_id:
@@ -444,7 +447,7 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return self._redirect(request, pk, server_key)
 
-        facts, lookup_failure = _live_platform_facts(self, subject)
+        facts, lookup_failure = _live_platform_facts(self, subject, server_key)
         if lookup_failure:
             messages.error(request, lookup_failure)
             return self._redirect(request, pk, server_key)
@@ -568,7 +571,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         """Return the subject's live facts from the posted server, or why they cannot be read; never another server."""
         if server_key is None:
             return None, "Selected LibreNMS server is no longer configured."
-        return _live_platform_facts(self, subject)
+        return _live_platform_facts(self, subject, server_key)
 
     def _sync_redirect(self, request, pk, fallback_server_key=None):
         """
