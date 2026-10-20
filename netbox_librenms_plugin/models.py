@@ -355,6 +355,8 @@ class IPAddressMapping(FullCleanOnSaveMixin, NetBoxModel):
     ACTION_CHOICES = [
         (ACTION_IGNORE, "Ignore"),
     ]
+    # What a mapping without a VRF applies to, wherever the UI shows it.
+    ANY_VRF_LABEL = "All VRFs and Global"
 
     prefix = IPNetworkField(
         help_text="IPv4 or IPv6 prefix, for example fe80::/10. A host address is stored as its network.",

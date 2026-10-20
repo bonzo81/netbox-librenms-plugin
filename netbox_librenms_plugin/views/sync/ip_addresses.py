@@ -1402,7 +1402,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         if results.get("skipped_by_ip_rule"):
             messages.warning(
                 request,
-                f"Skipped (an IP mapping ignores the address): {', '.join(results['skipped_by_ip_rule'])}.",
+                f"Skipped: {', '.join(results['skipped_by_ip_rule'])}.",
             )
         if results.get("skipped_no_interface"):
             messages.warning(

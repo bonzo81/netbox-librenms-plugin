@@ -175,10 +175,7 @@ class TestTheWriterRefusesAnIgnoredAddress:
 
         assert IPAddress.objects.filter(address=GLOBAL_V4).exists()
         assert not IPAddress.objects.filter(address__net_host_contained="fe80::/10").exists()
-        assert (
-            f"Skipped (an IP mapping ignores the address): {LINK_LOCAL} (IP mapping fe80::/10 ignores this address)."
-            in _messages(response)
-        )
+        assert f"{LINK_LOCAL} (IP mapping fe80::/10 ignores this address)" in _messages(response)
 
     def test_an_address_netbox_holds_is_neither_changed_nor_deleted(self, client, device):
         IPAddressMapping.objects.create(prefix="fe80::/10")
@@ -191,7 +188,7 @@ class TestTheWriterRefusesAnIgnoredAddress:
         existing.refresh_from_db()
         assert existing.assigned_object == eth0
         assert existing.description == "kept"
-        assert f"Skipped (an IP mapping ignores the address): {LINK_LOCAL}" in _messages(response)
+        assert f"{LINK_LOCAL} (IP mapping fe80::/10 ignores this address)" in _messages(response)
 
     @pytest.mark.parametrize("posted", ["blue", "red", "global"])
     def test_a_vrf_mapping_refuses_only_an_address_posted_into_its_vrf(self, client, device, blue, red, posted):
