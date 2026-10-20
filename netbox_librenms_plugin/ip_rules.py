@@ -21,7 +21,6 @@ class IPRule:
     """An immutable snapshot of one stored Ignore mapping."""
 
     pk: int
-    label: str
     network: IPv4Network | IPv6Network
     vrf_id: int | None
 
@@ -34,7 +33,8 @@ class IPRule:
     @property
     def reason(self) -> str:
         """Say why this rule refuses an address, for a row pill and a sync message."""
-        return f"IP mapping {self.label} ignores this address"
+        # Only the prefix: the user may not view the mapping's VRF.
+        return f"IP mapping {self.network} ignores this address"
 
 
 class IPRuleMatcher:
@@ -48,10 +48,8 @@ class IPRuleMatcher:
     def load(cls) -> "IPRuleMatcher":
         """Read every Ignore mapping in one query."""
         return cls(
-            IPRule(pk=mapping.pk, label=str(mapping), network=ip_network(str(mapping.prefix)), vrf_id=mapping.vrf_id)
-            for mapping in IPAddressMapping.objects.filter(action=IPAddressMapping.ACTION_IGNORE)
-            .select_related("vrf")
-            .order_by("pk")
+            IPRule(pk=mapping.pk, network=ip_network(str(mapping.prefix)), vrf_id=mapping.vrf_id)
+            for mapping in IPAddressMapping.objects.filter(action=IPAddressMapping.ACTION_IGNORE).order_by("pk")
         )
 
     def decide(self, address: IPv4Address | IPv6Address, vrf_id: int | None) -> IPRule | None:
