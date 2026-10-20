@@ -7,8 +7,13 @@
 </div>
 <div class="modal-body">
     <p class="mb-2">
+        {% if records_part_number %}
         Set the part number of device type <a href="{{ device_type.get_absolute_url }}">{{ device_type }}</a>
         to <code>{{ model }}</code>.
+        {% else %}
+        Device type <a href="{{ device_type.get_absolute_url }}">{{ device_type }}</a> already holds
+        <code>{{ model }}</code> as its model or part number, so it does not change.
+        {% endif %}
     </p>
     <p class="mb-2">
         {% if rule %}
