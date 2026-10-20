@@ -12,6 +12,8 @@ from django.db import models
 from django.db.models import Q
 from django.db.models.functions import Lower
 from django.urls import reverse
+from ipam.fields import IPNetworkField
+from ipam.models import VRF
 from netbox.models import NetBoxModel
 from utilities.fields import ColorField
 
@@ -334,6 +336,92 @@ class InterfaceTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
             "librenms_type": self.librenms_type,
             "librenms_speed": self.librenms_speed,
             "netbox_type": self.netbox_type,
+            "description": self.description,
+        }
+        return yaml.dump(data, sort_keys=False)
+
+
+_IP_MAPPING_EXISTS = "An IP mapping for this prefix and VRF already exists."
+
+
+class IPAddressMapping(FullCleanOnSaveMixin, NetBoxModel):
+    """
+    One IP mapping: an action for the LibreNMS addresses in a prefix, optionally in one VRF.
+
+    ``ip_rules.IPRuleMatcher`` is the one reader that applies these mappings.
+    """
+
+    ACTION_IGNORE = "ignore"
+    ACTION_CHOICES = [
+        (ACTION_IGNORE, "Ignore"),
+    ]
+
+    prefix = IPNetworkField(
+        help_text="IPv4 or IPv6 prefix, for example fe80::/10. A host address is stored as its network.",
+    )
+    vrf = models.ForeignKey(
+        VRF,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="librenms_ip_address_mappings",
+        help_text="Apply only to addresses synced into this VRF. Leave blank for every VRF and the global table.",
+    )
+    action = models.CharField(
+        max_length=10,
+        choices=ACTION_CHOICES,
+        default=ACTION_IGNORE,
+        help_text="Ignore keeps matching addresses out of IP sync.",
+    )
+    description = models.TextField(
+        blank=True,
+        help_text="Optional description or notes about this IP mapping",
+    )
+
+    def clean_fields(self, exclude=None):
+        """Store the network address of the prefix, so ``fe80::1/10`` is saved as ``fe80::/10``."""
+        # NetBox's prefix validator refuses host bits and runs here, before clean(). 0.0.0.0/0 is falsy.
+        if self.prefix not in (None, "") and "prefix" not in (exclude or ()):
+            try:
+                self.prefix = self._meta.get_field("prefix").to_python(self.prefix).cidr
+            except ValidationError as exc:
+                raise ValidationError({"prefix": "Enter a prefix in CIDR notation, for example fe80::/10."}) from exc
+        super().clean_fields(exclude=exclude)
+
+    def get_absolute_url(self):
+        """Return the URL for this mapping's detail page."""
+        return reverse("plugins:netbox_librenms_plugin:ipaddressmapping_detail", args=[self.pk])
+
+    class Meta:
+        """Meta options for IPAddressMapping."""
+
+        # NULL is never equal in SQL, so the global rows get their own partition.
+        constraints = [
+            models.UniqueConstraint(
+                fields=["prefix", "vrf"],
+                condition=Q(vrf__isnull=False),
+                name="unique_ip_address_mapping_vrf",
+                violation_error_message=_IP_MAPPING_EXISTS,
+            ),
+            models.UniqueConstraint(
+                fields=["prefix"],
+                condition=Q(vrf__isnull=True),
+                name="unique_ip_address_mapping_global",
+                violation_error_message=_IP_MAPPING_EXISTS,
+            ),
+        ]
+        ordering = ["prefix", "pk"]
+        verbose_name = "IP mapping"
+        verbose_name_plural = "IP mappings"
+
+    def __str__(self):
+        return f"{self.prefix} (VRF {self.vrf})" if self.vrf_id else str(self.prefix)
+
+    def to_yaml(self):
+        data = {
+            "prefix": str(self.prefix),
+            "vrf": self.vrf.name if self.vrf_id else "",
+            "action": self.action,
             "description": self.description,
         }
         return yaml.dump(data, sort_keys=False)
