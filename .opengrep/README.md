@@ -261,6 +261,8 @@ reports the check when `obj.save(...)` or `obj = ....create(...)` comes before i
 statement before the check. It does not see a write in another function, such as a helper that
 saves the row, or a write through `update_existing_row`: those read-backs call `saved_in_scope`
 by review. A check in the `view` scope, or of another row than the saved one, is not reported.
+A check through a restricted queryset that a variable or a parameter holds is not reported either,
+because the rule cannot tell that queryset from an unrestricted one.
 
 ## `--taint-intrafile` is required
 
