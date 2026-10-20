@@ -179,14 +179,14 @@
             <tr>
                 <td class="ps-3" style="width:40%">
                     {% if mapping.is_preferred %}
-                    <i class="mdi mdi-star text-warning me-1" title="Preferred server"></i>
+                    <i class="mdi mdi-star text-warning me-1" role="img" title="Preferred server" aria-label="Preferred server"></i>
                     {% endif %}
                     {% if mapping.is_active and mapping.is_selectable %}
-                    <i class="mdi mdi-check-circle text-success me-1" title="Currently active server"></i>
+                    <i class="mdi mdi-check-circle text-success me-1" role="img" title="Currently active server" aria-label="Currently active server"></i>
                     {% elif mapping.is_configured %}
                     <i class="mdi mdi-server-network text-muted me-1"></i>
                     {% else %}
-                    <i class="mdi mdi-server-off text-danger me-1" title="Server not configured in NetBox"></i>
+                    <i class="mdi mdi-server-off text-danger me-1" title="Server not configured in NetBox" aria-hidden="true"></i>
                     {% endif %}
                     {% if mapping.is_configured %}
                     <strong>{{ mapping.display_name }}</strong>
@@ -511,8 +511,9 @@
                         <!-- Name Row -->
                         <tr>
                             <td style="padding-left: 1rem;">Name
-                                <i class="mdi mdi-information-outline text-muted ms-1"
+                                <i class="mdi mdi-information-outline text-muted ms-1" role="img"
                                    title="Name check uses your sysName and strip domain preferences. For virtual chassis members, the VC naming pattern is also applied."
+                                   aria-label="Name check uses your sysName and strip domain preferences. For virtual chassis members, the VC naming pattern is also applied."
                                    style="cursor: help;"></i>
                             </td>
                             <td>

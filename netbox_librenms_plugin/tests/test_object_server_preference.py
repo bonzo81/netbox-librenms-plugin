@@ -25,7 +25,7 @@ from netbox_librenms_plugin.tests.mapping_fixtures import (
     stored_mapping_for_test,
 )
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
-from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+from netbox_librenms_plugin.tests.view_test_helpers import assert_titled_icons_are_named, grant, make_user_with_perms
 
 
 def _message_texts(response):
@@ -336,6 +336,33 @@ def test_active_and_preferred_servers_render_as_distinct_states(client, servers)
     assert _preference_url(owner) in html
     card_start = html.index('id="librenms-connections"')
     assert "confirm(" not in html[card_start : html.index("</table>", card_start)]
+
+
+@pytest.mark.django_db
+def test_the_server_state_and_name_check_icons_are_named_or_hidden(client, servers):
+    owner = make_device(
+        "named-server-icons",
+        librenms_cf={
+            "primary": {"id": 13512},
+            "secondary": {"id": 13513},
+            "retired": {"id": 13514},
+            "_preferred_server": "secondary",
+        },
+    )
+    _register_device(servers.primary, 13512, owner.name)
+    client.force_login(make_superuser("named-server-icons-viewer"))
+
+    response = client.get(_sync_url(owner), {"server_key": "primary"})
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    # NetBox's own page chrome is outside the plugin: check the server card through the device sync table.
+    start = html.index('id="librenms-connections"')
+    icons = assert_titled_icons_are_named(html[start : html.index("</table>", html.index("librenms-info-sync-table"))])
+    by_class = {next(c for c in icon["class"].split() if c.startswith("mdi-")): icon for icon in icons}
+    assert by_class["mdi-server-off"]["aria-hidden"] == "true"
+    for named in ("mdi-star", "mdi-check-circle", "mdi-information-outline"):
+        assert by_class[named]["role"] == "img"
 
 
 @pytest.mark.django_db
