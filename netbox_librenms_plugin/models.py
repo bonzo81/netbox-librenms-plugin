@@ -388,6 +388,14 @@ class IPAddressMapping(FullCleanOnSaveMixin, NetBoxModel):
                 raise ValidationError({"prefix": "Enter a prefix in CIDR notation, for example fe80::/10."}) from exc
         super().clean_fields(exclude=exclude)
 
+    def validate_constraints(self, exclude=None):
+        """Report a duplicate mapping on the prefix field, so the forms and the API show it there."""
+        try:
+            super().validate_constraints(exclude=exclude)
+        except ValidationError as exc:
+            # The two unique constraints are this model's only constraints.
+            raise ValidationError({"prefix": _IP_MAPPING_EXISTS}) from exc
+
     def get_absolute_url(self):
         """Return the URL for this mapping's detail page."""
         return reverse("plugins:netbox_librenms_plugin:ipaddressmapping_detail", args=[self.pk])
