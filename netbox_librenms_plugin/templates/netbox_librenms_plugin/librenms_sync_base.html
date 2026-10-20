@@ -830,26 +830,26 @@ that may well be correct.
 <div class="d-flex justify-content-between align-items-center">
     <ul class="nav nav-tabs mt-3" id="librenmsSync" role="tablist">
         <li class="nav-item" role="presentation">
-            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='interfaces' tab_label='Interfaces' tab_url=sync_tab_urls.interfaces tab_status=sync_cache_status.interfaces only %}
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='interfaces' tab_label='Interfaces' tab_url=sync_tab_urls.interfaces tab_status=sync_cache_status.interfaces interface_name_field=interface_name_field only %}
         </li>
         {% if cable_sync %}
         <li class="nav-item" role="presentation">
-            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='cables' tab_label='Cables' tab_url=sync_tab_urls.cables tab_status=sync_cache_status.cables only %}
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='cables' tab_label='Cables' tab_url=sync_tab_urls.cables tab_status=sync_cache_status.cables interface_name_field=interface_name_field only %}
         </li>
         {% endif %}
         <li class="nav-item" role="presentation">
-            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='ipaddresses' tab_label='IP Addresses' tab_url=sync_tab_urls.ipaddresses tab_status=sync_cache_status.ipaddresses only %}
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='ipaddresses' tab_label='IP Addresses' tab_url=sync_tab_urls.ipaddresses tab_status=sync_cache_status.ipaddresses interface_name_field=interface_name_field only %}
         </li>
         {% with model_name=object|meta:"model_name" %}
         {% if model_name == "device" %}
         <li class="nav-item" role="presentation">
-            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='vlans' tab_label='VLANs' tab_url=sync_tab_urls.vlans tab_status=sync_cache_status.vlans only %}
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='vlans' tab_label='VLANs' tab_url=sync_tab_urls.vlans tab_status=sync_cache_status.vlans interface_name_field=interface_name_field only %}
         </li>
         {% endif %}
         {% endwith %}
         {% if module_sync and object|meta:"model_name" == "device" %}
         <li class="nav-item" role="presentation">
-            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='modules' tab_label='Modules' tab_url=sync_tab_urls.modules tab_status=sync_cache_status.modules only %}
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='modules' tab_label='Modules' tab_url=sync_tab_urls.modules tab_status=sync_cache_status.modules interface_name_field=interface_name_field only %}
         </li>
         {% endif %}
     </ul>
