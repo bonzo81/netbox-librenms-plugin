@@ -14,7 +14,8 @@ that the read returned. It locks the row in ``pre_save``, at the point and in th
 ``UPDATE`` that follows, so the check adds no lock wait that the ``UPDATE`` does not have.
 
 ``update_existing_row`` writes one existing row under its row lock, and records the row's state
-before the write, so NetBox's change log has the before-state of the row.
+before the write, so NetBox's change log has the before-state of the row. A mapping change that
+the row's ``apply`` returns is saved in the same save.
 """
 
 import logging
@@ -261,6 +262,29 @@ def _row_version_sql(table):
     return f"{table}.xmin::text"
 
 
+def lock_and_snapshot(queryset):
+    """
+    Lock the one row of *queryset* ``FOR UPDATE`` and record its before-state for NetBox's change log.
+
+    The two writers of an existing Device or VM row share it: ``update_existing_row`` and the
+    partial save of the import actions.
+
+    Raises:
+        Model.DoesNotExist: *queryset* has no row.
+
+    """
+    # of=("self",): a permission-restricted queryset joins other tables that must not be locked.
+    row = queryset.select_for_update(of=("self",)).get()
+    row.snapshot()
+    return row
+
+
+def _validate_and_save(row, _mapping_fields=frozenset()):
+    row.full_clean()
+    row.save()
+    return row
+
+
 def update_existing_row(queryset, apply):
     """
     Lock the one row of *queryset*, record its before-state, change it, validate it, and save it.
@@ -269,13 +293,15 @@ def update_existing_row(queryset, apply):
     The row is read ``FOR UPDATE`` in a savepoint. ``snapshot()`` records the before-state for
     NetBox's change log. Then ``apply(row)`` sets the new values; it can also check the locked row
     and raise to stop the write. When ``apply`` returns False, the row already holds the values,
-    and it is not validated or saved. An exception from ``apply``, ``full_clean()`` or ``save()``
-    rolls the savepoint back and propagates.
+    and it is not validated or saved. When it returns a mapping change that it built on the row,
+    ``persist_mapping`` puts the change on the row before the one validation and save. An
+    exception from ``apply``, the persistence, ``full_clean()`` or ``save()`` rolls the savepoint
+    back and propagates.
 
     Args:
         queryset (QuerySet): The rows that the caller may change, filtered to one row.
-        apply (Callable[[Model], bool | None]): Sets the new values on the locked row, or returns
-            False when the row needs no write.
+        apply (Callable[[Model], bool | MappingChange | None]): Sets the new values on the locked
+            row. It returns False when the row needs no write, or the row's mapping change.
 
     Returns:
         Model: The saved row.
@@ -286,14 +312,16 @@ def update_existing_row(queryset, apply):
 
     """
     with transaction.atomic():
-        # of=("self",): a permission-restricted queryset joins other tables that must not be locked.
-        row = queryset.select_for_update(of=("self",)).get()
-        row.snapshot()
-        if apply(row) is False:
+        row = lock_and_snapshot(queryset)
+        result = apply(row)
+        if result is False:
             return row
-        row.full_clean()
-        row.save()
-    return row
+        if result is None:
+            return _validate_and_save(row)
+        # A local import: server_mappings imports this module for TransactionConflict.
+        from netbox_librenms_plugin.server_mappings import persist_mapping
+
+        return persist_mapping(row, result, write=_validate_and_save)
 
 
 def first_at_version(queryset):

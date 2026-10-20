@@ -297,14 +297,14 @@ def test_a_withheld_match_does_not_disclose_its_role(client, librenms_server, se
 @pytest.mark.django_db
 def test_a_withheld_match_does_not_disclose_its_librenms_linkage(client, librenms_server, settings):
     """The modal must not render the LibreNMS host ID of a withheld hostname match."""
-    from netbox_librenms_plugin.utils import set_librenms_device_id
+    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
     stale_host_id = 987654
     server_key = _point_plugin_at(settings, librenms_server.url)
     hidden_match = make_device("disclosure-import-host.example.net")
     # Linked to a DIFFERENT LibreNMS host than the one being imported, so the row still matches by
     # hostname while carrying a linkage of its own to disclose.
-    set_librenms_device_id(hidden_match, stale_host_id, server_key)
+    seed_own_mapping(hidden_match, stale_host_id, server_key)
     hidden_match.save()
     elsewhere = make_device("disclosure-unrelated-link-scope")
     _register_device(librenms_server)
@@ -323,11 +323,11 @@ def test_a_withheld_match_does_not_disclose_its_librenms_linkage(client, librenm
 def test_a_withheld_match_leaves_no_match_state_behind(client, librenms_server, settings):
     """The teardown must demote the match itself, not only the fields today's templates render."""
     from netbox_librenms_plugin.import_utils.disclosure import OUT_OF_SCOPE_MATCH_MESSAGE
-    from netbox_librenms_plugin.utils import set_librenms_device_id
+    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
     server_key = _point_plugin_at(settings, librenms_server.url)
     hidden_match = make_device("disclosure-import-host.example.net")
-    set_librenms_device_id(hidden_match, 987654, server_key)
+    seed_own_mapping(hidden_match, 987654, server_key)
     hidden_match.save()
     elsewhere = make_device("disclosure-unrelated-teardown-scope")
     _register_device(librenms_server)

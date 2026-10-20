@@ -15,9 +15,21 @@ from ..import_validation_helpers import (
     vm_host_placement_issue,
 )
 from ..librenms_api import LibreNMSAPI, librenms_id_owned_message
-from ..utils import exception_text_for, lock_librenms_id_assignment
+from ..server_mappings import (
+    IDENTITY_BUSY_MESSAGE,
+    IdentityBusy,
+    assign_own,
+    lock_librenms_id_assignment,
+    persist_mapping,
+)
+from ..utils import exception_text_for
 from .bulk_import import _is_job_cancelled
-from .device_operations import _determine_device_name, fetch_device_with_cache, validate_device_for_import
+from .device_operations import (
+    _determine_device_name,
+    _validate_and_insert,
+    fetch_device_with_cache,
+    validate_device_for_import,
+)
 from .permissions import require_permissions
 
 logger = logging.getLogger(__name__)
@@ -89,6 +101,7 @@ def create_vm_from_librenms(
 
     Raises:
         ValueError: If the VM cannot be created from the validated data.
+        IdentityBusy: If another open transaction holds the LibreNMS identity claim.
 
     """
     from virtualization.models import VirtualMachine
@@ -140,10 +153,7 @@ def create_vm_from_librenms(
     if librenms_device_id <= 0:
         raise ValueError(f"device_id {raw_device_id!r} must be a positive integer")
 
-    from ..utils import set_librenms_device_id
-
-    # Create the VM and assign its LibreNMS ID atomically so a failure in
-    # set_librenms_device_id never leaves a VM without a mapping.
+    # Create the VM and assign its LibreNMS ID atomically, so no failure leaves a VM without a mapping.
     with transaction.atomic():
         _locked_owner, conflict = lock_librenms_id_assignment(librenms_device_id, server_key)
         if conflict is not None:
@@ -160,10 +170,8 @@ def create_vm_from_librenms(
             platform=platform,
             comments=f"Imported from LibreNMS (device_id={librenms_device_id}) by netbox-librenms-plugin on {import_time}",
         )
-        # Set before the one save: a second save would log an update without a before-state.
-        set_librenms_device_id(vm, librenms_device_id, server_key)
-        vm.full_clean()
-        vm.save()
+        # The mapping goes on before the one save: a second save would log an update without a before-state.
+        persist_mapping(vm, assign_own(vm, server_key, librenms_device_id), write=_validate_and_insert)
 
     logger.info(f"Created VM {vm.name} (ID: {vm.pk}) from LibreNMS device {libre_device['device_id']}")
     return vm
@@ -329,7 +337,11 @@ def bulk_import_vms(
             log.info(f"Successfully imported VM {vm.name} (ID: {vm_id})")
 
         except Exception as vm_error:
-            detail = exception_text_for(vm_error, VirtualMachine, text_viewer)
+            # The import names a busy identity claim; every other lock conflict gets the try-again text.
+            if isinstance(vm_error, IdentityBusy):
+                detail = IDENTITY_BUSY_MESSAGE
+            else:
+                detail = exception_text_for(vm_error, VirtualMachine, text_viewer)
             log.error(f"Failed to import VM {vm_id}: {detail}", exc_info=True)
             result["failed"].append({"device_id": vm_id, "error": detail})
 

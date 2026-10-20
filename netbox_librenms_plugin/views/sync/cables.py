@@ -26,10 +26,15 @@ from netbox_librenms_plugin.interface_rules import RuleDecisionKind, decision_re
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
+    LibreNMSPortBindingConflict,
     MappingRole,
+    assign_own,
+    claim_librenms_port_binding,
     find_port_owner,
+    get_librenms_sync_device,
     identity_q,
     name_match_may_be_port,
+    persist_mapping,
     read_mapping,
     resolve_device_port,
 )
@@ -48,20 +53,16 @@ from netbox_librenms_plugin.transactions import (
     run_transaction,
 )
 from netbox_librenms_plugin.utils import (
-    LibreNMSPortBindingConflict,
-    claim_librenms_port_binding,
     apply_cable_manual_picks,
     cable_path_reaches,
     classify_cable_action,
     get_cable_sync_settings,
     get_librenms_cable_tag,
     get_interface_name_field,
-    get_librenms_sync_device,
     is_list_of_dicts,
     PortDisclosure,
     exception_text_for,
     render_cable_trace,
-    set_librenms_device_id,
 )
 from netbox_librenms_plugin.views.base.cables_view import (
     cable_row_ports,
@@ -1408,6 +1409,12 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 getattr(messages, level)(request, template.format(items=", ".join(interfaces)))
 
 
+def _save_mapping_fields(row, fields):
+    """Save only the new far end's mapping: its insert already ran the validation."""
+    row.save(update_fields=[*fields, "last_updated"])
+    return row
+
+
 class _RemoteCreateAborted(Exception):
     """Abandon the whole action: the interface and the cable are created together or not at all."""
 
@@ -1726,6 +1733,5 @@ class CableRemoteCreateView(SyncCablesView):
             raise _RemoteCreateAborted(f"You may not add interfaces to {remote_device.name}.")
         # The row resolves by LibreNMS port id from now on, never by name luck.
         interface.snapshot()
-        set_librenms_device_id(interface, port_key, context["server_key"])
-        interface.save(update_fields=["custom_field_data", "last_updated"])
-        return interface
+        change = assign_own(interface, context["server_key"], port_key)
+        return persist_mapping(interface, change, write=_save_mapping_fields)

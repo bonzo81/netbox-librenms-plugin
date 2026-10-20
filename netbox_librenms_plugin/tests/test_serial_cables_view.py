@@ -140,14 +140,14 @@ class TestEnrichLocalPortSerial:
     def test_csp_resolved_on_sync_device_not_viewed_obj(self):
         """On a VC-member page the CSP lives on the resolved sync device; enrich_local_port must resolve it there, not on the viewed obj (which would drop the row to 'Console Server Port Not Found')."""
         from netbox_librenms_plugin.tests.conftest import configured_server_key, make_virtual_chassis
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         view = _make_view()
         # The viewed member has NO CSP; the sync device (priority member) owns it.
         viewed, _, _ = make_serial_device("ser-enrich-viewed")
         sync_device, (csp,), _ = make_serial_device("ser-enrich-sync", csp_names=["ttyS5"])
         make_virtual_chassis("ser-enrich-vc", viewed, sync_device)
-        set_librenms_device_id(sync_device, view.librenms_id, configured_server_key())
+        seed_own_mapping(sync_device, view.librenms_id, configured_server_key())
         sync_device.save()
 
         link = {"local_port": "ttyS5", "local_port_id": "serial:1005", "_source": "serial"}
@@ -1025,10 +1025,10 @@ class TestSerialSyncSurvivesHostLinks404:
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         acs, csps, _ = make_serial_device("acs-ts26", csp_names=["ttyS7"])
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         server_key = configured_server_key()
-        set_librenms_device_id(acs, 13, server_key)
+        seed_own_mapping(acs, 13, server_key)
         acs.save()
         _router, _, cps = make_serial_device("router-z", cp_names=["console"])
         csp = csps[0]
@@ -1110,12 +1110,12 @@ class TestSerialSyncSurvivesHostLinks404:
 
         from netbox_librenms_plugin.tests.conftest import make_superuser
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         local, (csp,), _ = make_serial_device("serial-carryover-local", csp_names=["ttyS7"])
         server_key = configured_server_key()
-        set_librenms_device_id(local, 13, server_key)
+        seed_own_mapping(local, 13, server_key)
         local.save()
         _remote, _, (console_port,) = make_serial_device("serial-carryover-remote", cp_names=["console"])
 
@@ -1197,10 +1197,10 @@ class TestSerialSyncSurvivesHostLinks404:
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         local, _csps, _ = make_serial_device("serial-partial-host-local", csp_names=["ttyS1"])
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         server_key = configured_server_key()
-        set_librenms_device_id(local, 13, server_key)
+        seed_own_mapping(local, 13, server_key)
         local.save()
         local_interface = make_interface(local, "Ethernet1")
         remote = make_device("serial-partial-host-remote")
@@ -1283,10 +1283,10 @@ class TestSerialSyncSurvivesHostLinks404:
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         local, (csp,), _ = make_serial_device("serial-partial-sensor-local", csp_names=["ttyS7"])
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         server_key = configured_server_key()
-        set_librenms_device_id(local, 13, server_key)
+        seed_own_mapping(local, 13, server_key)
         local.save()
         _remote, _, (console_port,) = make_serial_device("serial-partial-sensor-remote", cp_names=["console"])
 
@@ -1762,11 +1762,11 @@ class TestSerialCableReadScope:
         from django.urls import reverse
 
         from netbox_librenms_plugin.tests.conftest import make_superuser
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         device, (modelled_csp,), _ = make_serial_device("serial-unmodelled-port", csp_names=["ttyS1"])
         server_key = configured_server_key()
-        set_librenms_device_id(device, 42, server_key)
+        seed_own_mapping(device, 42, server_key)
         device.save()
 
         _register_refresh(
@@ -1837,13 +1837,13 @@ class TestSerialCableReadScope:
         from django.urls import reverse
 
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         hidden, (csp,), _ = make_serial_device("serial-hidden-sync-owner", csp_names=["ttyS1"])
         visible, _, _ = make_serial_device("serial-visible-vc-member")
         make_virtual_chassis("serial-read-scope-vc", hidden, visible)
         server_key = configured_server_key()
-        set_librenms_device_id(hidden, 42, server_key)
+        seed_own_mapping(hidden, 42, server_key)
         hidden.save(update_fields=["custom_field_data"])
         self._cache_row(hidden, csp, visible, server_key)
         user = self._user("serial-hidden-sync-owner-user", visible)
@@ -1876,7 +1876,7 @@ class TestSerialCableReadScope:
         from django.core.cache import cache
         from django.urls import reverse
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         device, (visible_csp, hidden_csp), _ = make_serial_device(
@@ -1884,7 +1884,7 @@ class TestSerialCableReadScope:
             csp_names=["ttyS1", "ttyS2"],
         )
         server_key = configured_server_key()
-        set_librenms_device_id(device, 42, server_key)
+        seed_own_mapping(device, 42, server_key)
         device.save()
         user = self._user("serial-constrained-refresh-user", device)
         self._grant(
@@ -1945,11 +1945,11 @@ class TestSerialCableReadScope:
         """A Device grant alone must not authorize an instance-wide sensor download."""
         from django.urls import reverse
 
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         device, _csps, _ = make_serial_device("serial-no-csp-grant", csp_names=["ttyS1"])
         server_key = configured_server_key()
-        set_librenms_device_id(device, 43, server_key)
+        seed_own_mapping(device, 43, server_key)
         device.save()
         user = self._user("serial-no-csp-grant-user", device)
         client.force_login(user)
@@ -2025,7 +2025,7 @@ class TestSerialCableReadScope:
 
         from netbox_librenms_plugin.models import LibreNMSSettings
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface, map_device_to_librenms
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         local = make_device("cable-strong-id-local")
@@ -2034,7 +2034,7 @@ class TestSerialCableReadScope:
         visible = make_device("cable-strong-id-advertised")
         visible_interface = make_interface(visible, "Ethernet9")
         server_key = configured_server_key()
-        set_librenms_device_id(hidden, 42, server_key)
+        seed_own_mapping(hidden, 42, server_key)
         hidden.save()
         cache_key = object.__new__(SyncCablesView).get_cache_key(local, "links", server_key)
         cache.set(
@@ -2165,14 +2165,14 @@ class TestSerialCableReadScope:
         from django.urls import reverse
 
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         page, (csp,), _ = make_serial_device("serial-cache-page", csp_names=["ttyS1"])
         cache_owner = make_serial_device("serial-cache-owner")[0]
         make_virtual_chassis("serial-cache-scope-vc", page, cache_owner)
         remote = make_serial_device("serial-cache-target")[0]
         server_key = configured_server_key()
-        set_librenms_device_id(cache_owner, 42, server_key)
+        seed_own_mapping(cache_owner, 42, server_key)
         cache_owner.save()
         row = self._cache_row(cache_owner, csp, remote, server_key)
         user = self._user("serial-hidden-cache-owner-user", page)

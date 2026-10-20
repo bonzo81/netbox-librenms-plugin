@@ -21,6 +21,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_ip,
     make_virtual_chassis,
     map_device_to_librenms,
+    seed_own_mapping,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import (
     grant,
@@ -30,7 +31,6 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     message_texts,
     post as _post,
 )
-from netbox_librenms_plugin.utils import set_librenms_device_id
 
 
 pytestmark = pytest.mark.django_db
@@ -45,7 +45,7 @@ _map_device = partial(map_device_to_librenms, server_key=SERVER_KEY)
 
 def _map_interface(interface, port_id):
     """Bind a NetBox interface to a LibreNMS port id under the test server key."""
-    set_librenms_device_id(interface, port_id, SERVER_KEY)
+    seed_own_mapping(interface, port_id, SERVER_KEY)
     interface.save(update_fields=["custom_field_data"])
     return interface
 

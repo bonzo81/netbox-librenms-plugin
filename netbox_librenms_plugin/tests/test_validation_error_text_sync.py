@@ -13,15 +13,10 @@ from django.urls import reverse
 from extras.validators import CustomValidator
 from ipam.models import VRF
 
-from netbox_librenms_plugin.server_mappings import (
-    AmbiguousLibreNMSIdError,
-    MappingRole,
-    find_mapping,
-)
-from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
+from netbox_librenms_plugin.server_mappings import AmbiguousLibreNMSIdError, MappingRole, find_mapping, mark_migrated
+from netbox_librenms_plugin.tests.conftest import apply_mapping_change, make_device, make_interface, make_superuser
 from netbox_librenms_plugin.tests.test_ip_row_vrf_create import RD_ROWS, _create, seeded  # noqa: F401
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
-from netbox_librenms_plugin.utils import mark_librenms_migrated
 
 HIDDEN = "(only a superuser sees the message)"
 
@@ -87,7 +82,7 @@ class _Refuses(CustomValidator):
 def test_an_interface_move_shows_netboxs_bridge_message_only_to_a_superuser(client, superuser):
     tag = f"vetext-move-{int(superuser)}"
     donor, winner, hidden = make_device(f"{tag}-donor"), make_device(f"{tag}-winner"), make_device(f"{tag}-hidden")
-    mark_librenms_migrated(donor, winner.pk, "default")
+    apply_mapping_change(donor, mark_migrated(donor, winner.pk, "default"))
     donor.save(update_fields=["custom_field_data"])
     interface = make_interface(donor, "Ethernet1")
     bridge = make_interface(hidden, f"{tag}-bridge")

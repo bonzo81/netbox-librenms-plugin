@@ -16,8 +16,8 @@ from netbox_librenms_plugin.tests.conftest import (
     make_interface,
     make_superuser,
     make_vm,
+    seed_own_mapping,
 )
-from netbox_librenms_plugin.utils import set_librenms_device_id
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
 SERVER_KEY = "default"
@@ -177,7 +177,7 @@ def test_an_htmx_rebind_swaps_the_tab_in_place(client, settings, django_capture_
     configure_default_librenms_server(settings)
     device = make_device("htmx-rebind", librenms_cf={SERVER_KEY: {"id": 86}})
     interface = make_interface(device, "eth12")
-    set_librenms_device_id(interface, 8679, SERVER_KEY)
+    seed_own_mapping(interface, 8679, SERVER_KEY)
     interface.save()
     _seed(device, _ports())
     client.force_login(make_superuser("htmx-rebind-user"))

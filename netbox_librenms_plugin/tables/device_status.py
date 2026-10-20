@@ -15,10 +15,8 @@ from netbox_librenms_plugin.import_plan import ImportObjectType, VMPlacementMeth
 from netbox_librenms_plugin.import_utils.disclosure import scope_validation_disclosures
 from netbox_librenms_plugin.import_utils.naming import import_name_variants
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
-from netbox_librenms_plugin.utils import (
-    get_librenms_sync_device,
-    netbox_allows_standalone_vm_host,
-)
+from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
+from netbox_librenms_plugin.utils import netbox_allows_standalone_vm_host
 
 _IMPORT_NAMING_INCLUDE = "#use-sysname-toggle, #strip-domain-toggle"
 

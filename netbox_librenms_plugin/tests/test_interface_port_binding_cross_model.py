@@ -21,8 +21,8 @@ from netbox_librenms_plugin.tests.conftest import (
     make_interface,
     make_superuser,
     make_vm,
+    seed_own_mapping,
 )
-from netbox_librenms_plugin.utils import set_librenms_device_id
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
 
@@ -47,7 +47,7 @@ def _port(port_id, name):
 
 
 def _bind(interface, port_id):
-    set_librenms_device_id(interface, port_id, SERVER_KEY)
+    seed_own_mapping(interface, port_id, SERVER_KEY)
     interface.save()
     return interface
 
@@ -268,7 +268,7 @@ def _hold_cable_port(name, holder, server_key):
         held_by = VMInterface.objects.create(virtual_machine=vm, name="Gi0/1")
     else:
         held_by = make_interface(make_device(f"{name}-third"), "Gi0/1")
-    set_librenms_device_id(held_by, 500, server_key)
+    seed_own_mapping(held_by, 500, server_key)
     held_by.save()
 
 

@@ -17,6 +17,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_superuser,
     make_vm,
+    seed_own_mapping,
 )
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
     SERVER_KEY,
@@ -26,7 +27,6 @@ from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
     sync_port,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import messages_on
-from netbox_librenms_plugin.utils import set_librenms_device_id
 
 MAC = "00:11:22:33:44:55"
 
@@ -42,7 +42,7 @@ def _device_owner(tag):
 
 def _vm_owner(tag):
     vm = make_vm(f"before-state-{tag}")
-    set_librenms_device_id(vm, 40, SERVER_KEY)
+    seed_own_mapping(vm, 40, SERVER_KEY)
     vm.save()
     return vm, VMInterface
 

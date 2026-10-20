@@ -2881,7 +2881,8 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         assert response.status_code == 200
         assert response.headers.get("HX-Reswap") == "none"
         assert b"already assigned to device" in response.content
-        assert any("pg_advisory_xact_lock" in query["sql"] for query in queries.captured_queries)
+        # The device-identity claim takes its lock without a wait.
+        assert any("pg_try_advisory_xact_lock" in query["sql"] for query in queries.captured_queries)
         assert VirtualMachine.objects.get(pk=vm.pk).custom_field_data["librenms_id"] == 42
         assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == {self.server_key: 42}
 
@@ -4756,69 +4757,58 @@ class TestBulkImportDevicesViewCollisionGate:
 class TestAddAsOOBViewGenericSentinel:
     """AddAsOOBView must not return HTTP 400 when oob_candidate.type == "oob"."""
 
-    def test_generic_oob_sentinel_accepted_by_set_librenms_oob(self):
-        """set_librenms_oob must not raise ValueError for oob_type='oob'."""
-        from netbox_librenms_plugin.utils import set_librenms_oob
+    def test_generic_oob_sentinel_accepted_by_attach_oob(self):
+        """attach_oob must not raise ValueError for oob_type='oob'."""
+        from netbox_librenms_plugin.server_mappings import attach_oob
 
-        obj = make_device("generic-oob-storage")
-        obj.custom_field_data = {"librenms_id": {"default": {"id": 10}}}
-        obj.cf = obj.custom_field_data
+        obj = make_device("generic-oob-storage", librenms_cf={"default": {"id": 10}})
 
         # Previously this raised ValueError("does not match any known OOB type")
         # → AddAsOOBView returned HTTP 400 "Invalid OOB data: ..."
-        set_librenms_oob(obj, 55, "default", oob_type="oob")
-        entry = read_mapping(obj).server("default")
+        entry = attach_oob(obj, "default", 55, oob_type="oob").after.server("default")
         assert entry.oob_recorded
         assert entry.oob_type == "oob"
 
     def test_legacy_bare_int_librenms_id_promoted_on_oob_attach(self):
-        """A device whose librenms_id is still the legacy bare int must NOT silently no-op: set_librenms_oob promotes it to the per-server dict and attaches the OOB block."""
-        from netbox_librenms_plugin.utils import set_librenms_oob
+        """A device whose librenms_id is still the legacy bare int must NOT silently no-op: attach_oob promotes it to the per-server dict and attaches the OOB block."""
+        from netbox_librenms_plugin.server_mappings import ContainerStatus, attach_oob
 
-        obj = make_device("legacy-oob-storage")
-        obj.custom_field_data = {"librenms_id": 42}  # legacy single-server format (bare int)
-        obj.cf = obj.custom_field_data
+        obj = make_device("legacy-oob-storage", librenms_cf=42)  # legacy single-server format (bare int)
 
-        set_librenms_oob(obj, 55, "default", oob_type="idrac")
+        after = attach_oob(obj, "default", 55, oob_type="idrac").after
 
-        cf = obj.custom_field_data["librenms_id"]
-        assert isinstance(cf, dict)
-        assert cf["default"]["id"] == 42  # legacy host id promoted under the server key
-        assert cf["default"]["oob"] == {"id": 55, "type": "idrac"}
-        entry = read_mapping(obj).server("default")
-        assert (entry.oob_id, entry.oob_type) == (55, "idrac")
+        assert after.container is ContainerStatus.SCOPED
+        entry = after.server("default")
+        # The legacy host id is promoted under the server key.
+        assert (entry.own_id, entry.oob_id, entry.oob_type) == (42, 55, "idrac")
 
     def test_generic_sentinel_from_detection_layer_flows_to_storage(self):
-        """The generic 'oob' sentinel that _detect_serial_match_role produces (see TestDetectSerialMatchRole) is accepted by set_librenms_oob and stored."""
-        from netbox_librenms_plugin.utils import set_librenms_oob
+        """The generic 'oob' sentinel that _detect_serial_match_role produces (see TestDetectSerialMatchRole) is accepted by attach_oob and stored."""
+        from netbox_librenms_plugin.server_mappings import attach_oob
 
         # The 'oob' sentinel is REAL production output (verified against _detect_serial_match_role
         # in test_coverage_device_operations.py); here we only assert storage accepts it — no
         # inline reimplementation of the production fallback chain to drift against.
-        obj = make_device("detected-oob-storage")
-        obj.custom_field_data = {"librenms_id": {"default": {"id": 99}}}
+        obj = make_device("detected-oob-storage", librenms_cf={"default": {"id": 99}})
 
-        set_librenms_oob(obj, 42, "default", oob_type="oob")  # must not raise
-        assert obj.custom_field_data["librenms_id"]["default"]["oob"]["id"] == 42
-        assert obj.custom_field_data["librenms_id"]["default"]["oob"]["type"] == "oob"
+        entry = attach_oob(obj, "default", 42, oob_type="oob").after.server("default")  # must not raise
+        assert (entry.oob_id, entry.oob_type) == (42, "oob")
 
 
 @pytest.mark.django_db
-class TestSetLibreNMSOOBGenericSentinel:
-    """set_librenms_oob must accept the generic "oob" sentinel oob_type."""
+class TestAttachOOBGenericSentinel:
+    """attach_oob must accept the generic "oob" sentinel oob_type."""
 
-    def test_promote_generic_oob_sentinel_accepted_by_set_librenms_oob(self):
-        """The generic 'oob' sentinel from the promote path's existing_oob_type fallback must not raise in set_librenms_oob."""
-        from netbox_librenms_plugin.utils import set_librenms_oob
+    def test_promote_generic_oob_sentinel_accepted_by_attach_oob(self):
+        """The generic 'oob' sentinel from the promote path's existing_oob_type fallback must not raise in attach_oob."""
+        from netbox_librenms_plugin.server_mappings import attach_oob
 
-        obj = make_device("promoted-oob-storage")
-        obj.custom_field_data = {"librenms_id": {"default": {"id": 10}}}
+        obj = make_device("promoted-oob-storage", librenms_cf={"default": {"id": 10}})
 
         # 'oob' is the promote path's real `existing_oob_from_name or "oob"` fallback (production
-        # output); this asserts only that storage accepts it. Previously set_librenms_oob raised
+        # output); this asserts only that storage accepts it. Previously the setter raised
         # ValueError("oob_type 'oob' does not match any known OOB type") here.
-        set_librenms_oob(obj, 7, "default", oob_type="oob")
-        assert obj.custom_field_data["librenms_id"]["default"]["oob"]["type"] == "oob"
+        assert attach_oob(obj, "default", 7, oob_type="oob").after.server("default").oob_type == "oob"
 
 
 @pytest.mark.django_db
@@ -5059,7 +5049,7 @@ class TestAddAsOOBViewPost:
         assert response["HX-Reswap"] == "none"
 
     def test_happy_path_oob_sentinel_links_and_refreshes(self):
-        """End-to-end happy path with type=='oob': the real concurrency guards and ``set_librenms_oob`` run, the link is persisted via the real ``_save_device`` / ``transaction.atomic`` + ``select_for_update`` path, and a non-error validationRefresh response is returned."""
+        """End-to-end happy path with type=='oob': the real concurrency guards and ``attach_oob`` run, the link is persisted via the real ``_save_device`` / ``transaction.atomic`` + ``select_for_update`` path, and a non-error validationRefresh response is returned."""
         from dcim.models import Device
 
         view = self._make_view()
@@ -5089,7 +5079,7 @@ class TestAddAsOOBViewPost:
         assert "validationRefresh" in response.get("HX-Trigger", "")
         assert b"controller-node" in response.content
 
-        # The real set_librenms_oob + _save_device persisted under the active key: reload from
+        # The real attach_oob + _save_device persisted under the active key: reload from
         # the DB and confirm the incoming controller id (17) landed in oob with the generic
         # sentinel type, while the host id (10) is preserved.
         entry = Device.objects.get(pk=existing_device.pk).custom_field_data["librenms_id"][self.server_key]
@@ -5100,7 +5090,7 @@ class TestAddAsOOBViewPost:
         """An OOB link matched through a non-sync virtual-chassis member is stored on the resolved sync device."""
         from dcim.models import Device, VirtualChassis
 
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         view = self._make_view()
 
@@ -6194,14 +6184,14 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
         assert "_migrated_to" not in entry
 
     def test_corrupt_donor_oob_id_with_winner_oob_fails_closed_not_500(self):
-        """A donor oob id merge_librenms_links skipped (winner already has an oob) fails closed at the marker, not a 500."""
+        """A donor oob id the link merge skipped (winner already has an oob) fails closed at the marker, not a 500."""
         winner = make_device(
             "merge-f2-winner",
             librenms_cf={self.server_key: {"id": 5, "oob": {"id": 9, "type": "idrac"}}},
         )
         # Same host id (so the orphan guard doesn't fire) but a corrupt donor oob id. Because the
-        # winner already holds an oob, merge_librenms_links() skips validating the donor oob id —
-        # mark_librenms_migrated() is the one that rejects it, and that call must be guarded too.
+        # winner already holds an oob, the link merge skips validating the donor oob id; the
+        # donor's migration marker is the one that rejects it, and that refusal must be guarded too.
         donor = make_device(
             "merge-f2-donor",
             librenms_cf={self.server_key: {"id": 5, "oob": {"id": "abc"}}},
@@ -6216,6 +6206,30 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
         entry = donor.custom_field_data["librenms_id"][self.server_key]
         assert entry == {"id": 5, "oob": {"id": "abc"}}
         assert "_migrated_to" not in entry
+
+    def test_a_refused_winner_save_rolls_back_the_donor_saved_before_it(self):
+        """The donor saves first; when the winner's save refuses, the whole group rolls back and the refusal shows."""
+        from django.db import IntegrityError, connection
+
+        winner = make_device("merge-refused-winner", librenms_cf={self.server_key: {"id": 20}})
+        donor = make_device("merge-refused-donor", librenms_cf={self.server_key: {"id": 10}})
+
+        def refuse_the_winner_update(execute, sql, params, many, context):
+            # A database refusal is not reproducible here without a second writer; inject it at the statement.
+            if sql.startswith('UPDATE "dcim_device"') and params and params[-1] == winner.pk:
+                raise IntegrityError("injected refusal of the winner's save")
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(refuse_the_winner_update):
+            resp = self._post_merge(winner, donor)
+
+        assert resp.status_code == 200
+        assert resp["HX-Reswap"] == "none"
+        assert b"integrity constraint" in resp.content
+        donor.refresh_from_db()
+        winner.refresh_from_db()
+        assert donor.custom_field_data["librenms_id"] == {self.server_key: {"id": 10}}
+        assert winner.custom_field_data["librenms_id"] == {self.server_key: {"id": 20}}
 
     def test_oob_transfer_valueerror_fails_closed_and_rolls_back(self, monkeypatch):
         """A ValueError from the oob_ip transfer (the TOCTOU race the lock guards) fails closed with rollback, not a 500."""

@@ -20,7 +20,11 @@ from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.interface_diff import type_change_refusal
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
+    assign_own,
+    claim_librenms_port_binding,
     find_port_owner,
+    get_librenms_sync_device,
+    persist_mapping,
     read_mapping,
 )
 from netbox_librenms_plugin.sync_cache import (
@@ -31,9 +35,7 @@ from netbox_librenms_plugin.sync_cache import (
 from netbox_librenms_plugin.transactions import classify_conflict, update_existing_row
 from netbox_librenms_plugin.utils import (
     REGEX_COMPILE_ERRORS,
-    claim_librenms_port_binding,
     acquire_advisory_transaction_lock,
-    get_librenms_sync_device,
     get_module_template_interface_names,
     get_module_template_interface_specs,
     get_module_types_indexed,
@@ -49,7 +51,6 @@ from netbox_librenms_plugin.utils import (
     normalize_serial,
     prefetch_module_bay_types,
     rewrite_interface_name_for_vc_member,
-    set_librenms_device_id,
     exception_text_for,
 )
 from netbox_librenms_plugin.utils import coerce_positive_int as _coerce_positive_int
@@ -707,41 +708,19 @@ def _format_vc_adjustment_summary(adjustments):
     return ", ".join(parts)
 
 
-# Its own savepoint: callers catch a non-conflict error and keep their transaction.
-@transaction.atomic
-def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces):  # noqa: C901
+def _select_bind_candidate(device, item, module_pk, server_key, interfaces, port_id, interface_names):
     """
-    Bind LibreNMS ``port_id`` to the best matching NetBox interface.
+    Choose the interface that a port bind writes, from the current state, and return ``(candidate, refusal)``.
 
-    Applies only for inventory items carrying stable port identity metadata.
-    The binding is non-destructive: if the port ID already belongs to a different
-    interface, no reassignment is performed and a conflict is reported.
-
-    Args:
-        device (Device): The NetBox device that owns the interface.
-        item (dict): The LibreNMS inventory item with port identity metadata.
-        module_pk (int | None): The module primary key for the interface.
-        server_key (str): The LibreNMS server key for the port identity.
-        interfaces (QuerySet): The interfaces available to the caller.
-
-    Returns:
-        dict | None: The binding outcome, or ``None`` when the item has no port ID.
-
-    Raises:
-        LibreNMSPortBindingBusy: Another open transaction holds the claim on the port.
-
+    The port's owner is the evidence first, then the item's names, then the module's interfaces.
+    The binder runs it before and after it locks the candidate, and both runs must choose one row.
     """
     from dcim.models import Interface
 
-    port_id, interface_names = _get_item_port_identity(item)
-    if not port_id:
-        return None
-
-    claim_librenms_port_binding(port_id, server_key)
     try:
         existing_owner = find_port_owner(port_id, server=server_key)
     except AmbiguousLibreNMSIdError:
-        return {
+        return None, {
             "status": "conflict",
             "reason": (
                 f"port_id {port_id} is ambiguous — it matches more than one interface; "
@@ -749,17 +728,17 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
             ),
         }
     if existing_owner is not None and not isinstance(existing_owner, Interface):
-        return {
+        return None, {
             "status": "conflict",
             "reason": f"port_id {port_id} already assigned to another NetBox interface owner; not reassigning",
         }
     if existing_owner is not None and not interfaces.filter(pk=existing_owner.pk).exists():
-        return {
+        return None, {
             "status": "skipped",
             "reason": f"matching interface is not available for port_id {port_id}",
         }
     if existing_owner is not None and existing_owner.device_id != device.pk:
-        return {
+        return None, {
             "status": "conflict",
             "reason": (
                 f"port_id {port_id} already assigned to {existing_owner.device.name}/{existing_owner.name}; "
@@ -781,19 +760,74 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
             module_interfaces=list(device_interfaces.filter(module_id=module_pk)) if module_pk else [],
         )
         if choice.interface is not None and not interfaces.filter(pk=choice.interface.pk).exists():
-            return {
+            return None, {
                 "status": "skipped",
                 "reason": f"matching interface is not available for port_id {port_id}",
             }
         if choice.status:
-            return {"status": choice.status, "reason": choice.reason}
+            return None, {"status": choice.status, "reason": choice.reason}
         candidate = choice.interface
 
     if candidate is None:
-        return {
+        return None, {
             "status": "skipped",
             "reason": f"no matching interface found for port_id {port_id}",
         }
+    return candidate, None
+
+
+# Its own savepoint: callers catch a non-conflict error and keep their transaction.
+@transaction.atomic
+def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces):
+    """
+    Bind LibreNMS ``port_id`` to the best matching NetBox interface.
+
+    Applies only for inventory items carrying stable port identity metadata.
+    The binding is non-destructive: if the port ID already belongs to a different
+    interface, no reassignment is performed and a conflict is reported.
+
+    Args:
+        device (Device): The NetBox device that owns the interface.
+        item (dict): The LibreNMS inventory item with port identity metadata.
+        module_pk (int | None): The module primary key for the interface.
+        server_key (str): The LibreNMS server key for the port identity.
+        interfaces (QuerySet): The interfaces available to the caller.
+
+    Returns:
+        dict | None: The binding outcome, or ``None`` when the item has no port ID.
+
+    Raises:
+        LibreNMSPortBindingBusy: Another open transaction holds the claim on the port.
+
+    """
+    port_id, interface_names = _get_item_port_identity(item)
+    if not port_id:
+        return None
+
+    claim_librenms_port_binding(port_id, server_key)
+    candidate, refusal = _select_bind_candidate(
+        device, item, module_pk, server_key, interfaces, port_id, interface_names
+    )
+    if refusal is not None:
+        return refusal
+
+    # The checks and the change below read the locked row: a concurrent bind may have written it since the read above.
+    locked = interfaces.select_for_update(of=("self",)).filter(pk=candidate.pk, device=device).first()
+    if locked is None:
+        return {
+            "status": "skipped",
+            "reason": f"matching interface is not available for port_id {port_id}",
+        }
+    # The same evidence must still choose the locked row: a rename can move a name to another interface.
+    current, refusal = _select_bind_candidate(device, item, module_pk, server_key, interfaces, port_id, interface_names)
+    if refusal is not None:
+        return refusal
+    if current is None or current.pk != locked.pk:
+        return {
+            "status": "skipped",
+            "reason": f"the matching interface for port_id {port_id} changed; refresh and retry",
+        }
+    candidate = locked
 
     set_module = False
     if module_pk:
@@ -813,20 +847,22 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
         }
 
     bind_port = current_port_id != port_id
-    if set_module or bind_port:
-        candidate.snapshot()
+    if not (set_module or bind_port):
+        return {"status": "bound", "interface": candidate.name, "port_id": port_id, "changed": False}
+    candidate.snapshot()
     update_fields = []
     if set_module:
         candidate.module_id = module_pk
         update_fields.append("module")
+
+    def save(row, mapping_fields=frozenset()):
+        row.save(update_fields=[*update_fields, *mapping_fields, "last_updated"])
+
     if bind_port:
-        set_librenms_device_id(candidate, port_id, server_key)
-        update_fields.append("custom_field_data")
-
-    if update_fields:
-        candidate.save(update_fields=[*update_fields, "last_updated"])
-
-    return {"status": "bound", "interface": candidate.name, "port_id": port_id, "changed": bool(update_fields)}
+        persist_mapping(candidate, assign_own(candidate, server_key, port_id), write=save)
+    else:
+        save(candidate)
+    return {"status": "bound", "interface": candidate.name, "port_id": port_id, "changed": True}
 
 
 def _resolve_posted_inventory_row(

@@ -27,8 +27,8 @@ from netbox_librenms_plugin.tests.conftest import (
     make_serial_row,
     make_superuser,
     persist_test_server_mapping,
+    seed_own_mapping,
 )
-from netbox_librenms_plugin.utils import set_librenms_device_id
 
 SERVER_KEY = configured_server_key()
 
@@ -148,7 +148,7 @@ class TestNameFallbackRespectsThePortBinding:
         bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
         local_device = make_device(f"fallback-local-{attached}")
         local = make_interface(local_device, "eth0")
-        set_librenms_device_id(local, 7, binding_server)
+        seed_own_mapping(local, 7, binding_server)
         local.save()
         remote_device = make_device(f"fallback-remote-{attached}")
         remote = make_interface(remote_device, "Ethernet2")
@@ -226,7 +226,7 @@ class TestNameFallbackRespectsThePortBinding:
             # The endpoints are resolved; the binder commits before the lock re-reads them.
             pre_lock_bindings.append(read_mapping(local_term).own_id(SERVER_KEY))
             rebound = Interface.objects.get(pk=local.pk)
-            set_librenms_device_id(rebound, 7, SERVER_KEY)
+            seed_own_mapping(rebound, 7, SERVER_KEY)
             rebound.save()
             return real_lock(view, local_term, remote_term, **kwargs)
 
@@ -958,7 +958,7 @@ class TestCableOverwriteHtmxModal:
         )
         old = Cable(a_terminations=csps, b_terminations=old_ports, status="connected")
         old.save()
-        set_librenms_device_id(acs, 13, SERVER_KEY)
+        seed_own_mapping(acs, 13, SERVER_KEY)
         acs.save(update_fields=["custom_field_data"])
         row = make_serial_row(csps[0], target_device.name, acs)
         snapshot = {"links": [row], "snapshot_token": "multi-termination"}

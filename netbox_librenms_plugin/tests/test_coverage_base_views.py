@@ -9,17 +9,17 @@ from netbox_librenms_plugin.tests.conftest import (
     make_interface,
     make_ip,
     map_device_to_librenms,
+    seed_own_mapping,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import make_request
 from netbox_librenms_plugin.tests.view_test_helpers import post as view_post
-from netbox_librenms_plugin.utils import set_librenms_device_id
 
 
 pytestmark = pytest.mark.django_db
 
 
 def _set_librenms_id(obj, value, server_key="default"):
-    set_librenms_device_id(obj, value, server_key)
+    seed_own_mapping(obj, value, server_key)
     obj.save(update_fields=["custom_field_data"])
 
 

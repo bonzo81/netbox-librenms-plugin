@@ -5,8 +5,9 @@ from dcim.models import CableTermination, Device
 from django.urls import reverse
 from virtualization.models import VMInterface
 
-from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.server_mappings import mark_migrated, read_mapping
 from netbox_librenms_plugin.tests.conftest import (
+    apply_mapping_change,
     cable_together,
     ip_on,
     make_device,
@@ -21,11 +22,7 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     make_request,
     make_user_with_perms,
 )
-from netbox_librenms_plugin.utils import (
-    build_migrated_context,
-    mark_librenms_migrated,
-    set_device_ip_fk,
-)
+from netbox_librenms_plugin.utils import build_migrated_context, set_device_ip_fk
 from netbox_librenms_plugin.views.sync.migrate import (
     _reconcile_donor_device_ip_fks,
     _resolve_winner_for_donor,
@@ -43,7 +40,7 @@ def _login(client, username):
 
 
 def _mark(donor, winner, server_key=SERVER_KEY):
-    mark_librenms_migrated(donor, winner.pk, server_key)
+    apply_mapping_change(donor, mark_migrated(donor, winner.pk, server_key))
     donor.save(update_fields=["custom_field_data"])
 
 

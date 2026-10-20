@@ -10,7 +10,7 @@ Both are pure functions, so these exercise the real implementations directly wit
 
 import pytest
 
-from netbox_librenms_plugin.server_mappings import decode_stored_mapping
+from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.utils import (
     cached_row_matches,
     is_valid_ports_payload,
@@ -110,7 +110,9 @@ class TestIsValidPortsPayload:
 
 def _display_id(entry):
     """Return the display ID and the OOB-only flag of one stored server entry."""
-    state = decode_stored_mapping({"default": entry}).server("default")
+    from dcim.models import Device
+
+    state = read_mapping(Device(custom_field_data={"librenms_id": {"default": entry}})).server("default")
     return state.display_id, state.is_oob_only
 
 
