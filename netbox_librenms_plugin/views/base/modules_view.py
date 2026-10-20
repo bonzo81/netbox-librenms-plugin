@@ -361,6 +361,47 @@ def _matches_target_device(
     raise ValueError(f"Unhandled pattern-less match type {rule.match_type!r}")
 
 
+# Classes of a unit that "Mark built-in" may record: the module classes, not ports, optics, fans or supplies.
+_BUILT_IN_CANDIDATE_CLASSES = _INTEGRATED_MODULE_CLASSES - {"port"}
+
+
+def built_in_candidate_model(item: dict, index_map: dict, device_identity: DeviceIdentity, *, has_bay: bool) -> str:
+    """
+    Return the model that "Mark built-in" records as the target device type's part number, or "" for no candidate.
+
+    A candidate is a main-inventory unit of a module class that matched no bay. Its model is not blank and is
+    not the model or part number of the target device type. It sits at chassis level as the model rule walks:
+    directly below the chassis, or through slot containers and other built-in units.
+
+    Args:
+        item (dict): The inventory item of the row.
+        index_map (dict): Inventory items keyed by physical index.
+        device_identity (DeviceIdentity): The identity of the row's target device.
+        has_bay (bool): Whether the row matched a module bay.
+
+    Returns:
+        str: The model of the candidate unit, or "".
+
+    """
+    if has_bay or item.get("_source", MAIN_INVENTORY_SOURCE) != MAIN_INVENTORY_SOURCE:
+        return ""
+    if item.get("_from_transceiver_api"):
+        return ""
+    if _normalize_librenms_text(item.get("entPhysicalClass")) not in _BUILT_IN_CANDIDATE_CLASSES:
+        return ""
+    model = _clean_librenms_value(item.get("entPhysicalModelName"))
+    if not model or model.casefold() in device_identity.type_models:
+        return ""
+    parent = index_map.get(item.get("entPhysicalContainedIn"))
+    passes = _passes_to_the_chassis(device_identity)
+    return model if _sits_at_chassis_level(item, parent, index_map, passes=passes) else ""
+
+
+def reusable_built_in_rule(rules):
+    """Return the first of the enabled *rules* that hides every built-in unit, or None."""
+    return next((rule for rule in rules if rule.hides_built_in_units), None)
+
+
 def _check_ignore_rules(
     item: dict,
     parent_item: dict | None,
@@ -1860,6 +1901,22 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         self._current_manufacturer_name = getattr(manufacturer, "name", None)
         self._carrier_install_rules = self._carrier_install_rules_for(manufacturer)
 
+    @staticmethod
+    def _mark_built_in_candidate(row, item, index_map, ignore_rules, device_identity, selected_device):
+        """Give a top-level row the facts of its "Mark built-in" action when its unit is a candidate."""
+        model = built_in_candidate_model(item, index_map, device_identity, has_bay=bool(row.get("module_bay_id")))
+        if not model:
+            return
+        device_type = selected_device.device_type
+        rule = reusable_built_in_rule(ignore_rules)
+        row["built_in"] = {
+            "model": model,
+            "device_type_id": device_type.pk,
+            "manufacturer_id": device_type.manufacturer_id,
+            "part_number": device_type.part_number,
+            "rule_id": rule.pk if rule else None,
+        }
+
     def _append_rows_for_item_context(  # noqa: C901
         self,
         table_data,
@@ -1919,6 +1976,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 row["device_type_incomplete_name"] = str(device_type)
                 row["device_type_incomplete_target_pk"] = device_type.pk
                 row["device_type_incomplete_suggestion"] = self._derive_bay_template_suggestion(item)
+        self._mark_built_in_candidate(row, item, index_map, ignore_rules, device_identity, selected_device)
 
         # Determine child bay scope based on parent match state
         parent_module_id = None

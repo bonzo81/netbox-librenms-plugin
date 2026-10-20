@@ -1,0 +1,46 @@
+{# Modal-content fragment that confirms marking a chassis-level unit as built into its device type. #}
+<div class="modal-header">
+    <h5 class="modal-title">
+        <i class="mdi mdi-chip me-1"></i>Mark Built-in
+    </h5>
+    <button type="button" class="btn-close" onclick="closeHtmxModal()" aria-label="Close"></button>
+</div>
+<div class="modal-body">
+    <p class="mb-2">
+        Set the part number of device type <a href="{{ device_type.get_absolute_url }}">{{ device_type }}</a>
+        to <code>{{ model }}</code>.
+    </p>
+    <p class="mb-2">
+        {% if rule %}
+        The rule <a href="{{ rule.get_absolute_url }}">{{ rule.name }}</a> then hides every chassis-level unit
+        that reports this model, and the units below them match device-level bays.
+        {% else %}
+        A <strong>Model matches device type</strong> rule with the <strong>Transparent</strong> action is created
+        for {{ device_type.manufacturer }}. It hides every chassis-level unit that reports this model, and the
+        units below them match device-level bays.
+        {% endif %}
+    </p>
+    <p class="text-muted small mb-3">
+        Do this only when the unit is part of the chassis. A field-replaceable card never reports the chassis
+        part number.
+    </p>
+    <form method="post"
+          action="{% url 'plugins:netbox_librenms_plugin:mark_built_in' pk=device_pk %}"
+          hx-post="{% url 'plugins:netbox_librenms_plugin:mark_built_in' pk=device_pk %}"
+          hx-target="#module-sync-content"
+          hx-swap="innerHTML"
+          hx-sync="#module-sync-content:drop"
+          hx-disabled-elt="#htmx-modal-content button[type=submit]">
+        {% csrf_token %}
+        <input type="hidden" name="server_key" value="{{ server_key }}">
+        <input type="hidden" name="selected_device_id" value="{{ selected_device_id }}">
+        <input type="hidden" name="ent_index" value="{{ ent_index }}">
+        <input type="hidden" name="inventory_binding" value="{{ inventory_binding }}">
+        <div class="d-flex gap-2 justify-content-end">
+            <button type="button" class="btn btn-secondary" onclick="closeHtmxModal()">Cancel</button>
+            <button type="submit" class="btn btn-primary">
+                <i class="mdi mdi-check me-1"></i>Mark Built-in
+            </button>
+        </div>
+    </form>
+</div>
