@@ -1406,10 +1406,29 @@ rules:
     paths:
       include: ["**/netbox_librenms_plugin/tests/**"]
     patterns:
-      - pattern-inside: |
-          @pytest.mark.parametrize(...)
-          def $TEST(..., $FLAG, ...):
-              ...
+      - pattern-either:
+          - pattern-inside: |
+              @pytest.mark.parametrize($NAME, $VALUES, ...)
+              def $TEST(..., $FLAG, ...):
+                  ...
+          - pattern-inside: |
+              @pytest.mark.parametrize((..., $NAME, ...), $VALUES, ...)
+              def $TEST(..., $FLAG, ...):
+                  ...
+          - pattern-inside: |
+              @pytest.mark.parametrize([..., $NAME, ...], $VALUES, ...)
+              def $TEST(..., $FLAG, ...):
+                  ...
       - pattern-either:
           - pattern: assert $VALUE is not $FLAG
           - pattern: assert $VALUE is not $FLAG, $MESSAGE
+      # Opengrep parses the name string as Python, so "flag, other" also binds $FLAG.
+      - metavariable-pattern:
+          metavariable: $NAME
+          language: python
+          pattern: $FLAG
+      - metavariable-pattern:
+          metavariable: $VALUES
+          pattern-either:
+            - pattern: "True"
+            - pattern: "False"
