@@ -8,6 +8,7 @@ from typing import List, NamedTuple
 from dcim.models import Device, VirtualChassis
 from django.core.cache import cache
 from django.db import transaction
+from redis.exceptions import RedisError
 
 from ..constants import (
     GENERIC_CONTAINER_MODELS,
@@ -86,7 +87,16 @@ def get_virtual_chassis_data(
     """
     if not api or device_id is None:
         return empty_virtual_chassis_data()
+    try:
+        return _cached_virtual_chassis_data(api, device_id, force_refresh, candidate_keys)
+    except RedisError as e:
+        # A Redis outage fails only this device, as one does inside detection.
+        logger.exception("Virtual chassis cache unavailable for device %s: %s", device_id, e)
+        return _failed_virtual_chassis_data(exception_text_for(e, VirtualChassis, None) or type(e).__name__)
 
+
+def _cached_virtual_chassis_data(api: LibreNMSAPI, device_id, force_refresh: bool, candidate_keys) -> dict:
+    """Return the cached detection data of *device_id*, and detect and cache it on a miss."""
     cache_key = _vc_cache_key(api, device_id)
     _cache_timeout = getattr(api, "cache_timeout", None)
     cache_timeout = 300 if _cache_timeout is None else _cache_timeout
