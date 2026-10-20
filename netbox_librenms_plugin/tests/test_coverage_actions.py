@@ -657,7 +657,7 @@ class TestBulkImportConfirmView:
         )
 
         notice = "The stack master could not be identified by serial"
-        assert (notice in html) is not master_identified
+        assert (notice in html) is (not master_identified)
 
 
 @pytest.mark.django_db
