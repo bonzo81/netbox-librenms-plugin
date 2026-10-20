@@ -67,7 +67,11 @@ class IPAddressTable(tables.Table):
     selection = ToggleColumn(
         orderable=False,
         visible=True,
-        attrs={"td": {"data-col": "selection"}, "input": {"name": "select"}},
+        attrs={
+            "td": {"data-col": "selection"},
+            # The writer refuses an address an IP mapping ignores, so the row offers no selection.
+            "input": {"name": "select", "disabled": lambda record: "disabled" if record.get("ip_rule_block") else None},
+        },
         accessor="row_id",
     )
 
@@ -130,8 +134,9 @@ class IPAddressTable(tables.Table):
         row_id = record.get("row_id", record.get("ip_with_mask"))
         if row_id is None:
             return "Ambiguous source row"
-        if record.get("rule_block") and value != "matched":
-            return rule_block_html(record["rule_block"])
+        rule_block = record.get("ip_rule_block") or record.get("rule_block")
+        if rule_block and value != "matched":
+            return rule_block_html(rule_block)
         if value == "update":
             return format_html(
                 '<button type="submit" class="btn btn-sm btn-warning" name="sync_one" value="{}">'

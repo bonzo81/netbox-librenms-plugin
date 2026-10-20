@@ -3253,13 +3253,14 @@ def oob_badge_html(record, leading_space=False):
 
 def rule_block_html(rule_block):
     """
-    Return the pill that says why the interface rules refuse a row's write.
+    Return the pill that says why the interface rules or an IP mapping refuse a row's write.
 
     Shared by the IP and cable tables and the cable-verify formatter. It uses the badge language
     of the interfaces table's rule pill.
 
     Args:
-        rule_block (dict): The row data from ``interface_rules.row_rule_block``.
+        rule_block (dict): The row data from ``interface_rules.row_rule_block`` or
+            ``ip_rules.row_ip_rule_block``.
 
     Returns:
         SafeString: The pill markup.
