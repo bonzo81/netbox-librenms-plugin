@@ -282,9 +282,8 @@ def test_capture_download_replays_the_same_normalized_virtual_chassis(client, re
     assert identify_vc_master(detected["members"], replay_device["serial"], vc_serial_key()) is detected["members"][0]
 
 
-@pytest.mark.parametrize("rule_owner", ["global", "manufacturer"])
-def test_the_import_preview_names_the_members_that_the_import_creates(live_librenms, rule_owner):
-    """A ``{serial}`` member name reads the serial through the serial rules in the preview and in the import."""
+def _import_named_stack(live_librenms, rule_owner):
+    """Serve a decorated-serial Junos VC with a serial rule and a ``-{serial}`` pattern; return its row and preview."""
     from dcim.models import DeviceType
 
     from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
@@ -322,9 +321,42 @@ def test_the_import_preview_names_the_members_that_the_import_creates(live_libre
         libre_devices_cache={_DEVICE_ID: libre_device},
         user=make_superuser(f"named-stack-{rule_owner}-user"),
     )
-
     assert result["failed"] == []
     master = result["success"][0]["device"]
     master.refresh_from_db()
+    # Import stores the raw LibreNMS serial, so every reader must apply the rules itself.
     assert master.serial == "S/N NAMED-A"
+    return libre_device, previewed, master
+
+
+@pytest.mark.parametrize("rule_owner", ["global", "manufacturer"])
+def test_the_import_preview_names_the_members_that_the_import_creates(live_librenms, rule_owner):
+    """A ``{serial}`` member name reads the serial through the serial rules in the preview and in the import."""
+    _libre_device, previewed, master = _import_named_stack(live_librenms, rule_owner)
+
     assert {device.vc_position: device.name for device in master.virtual_chassis.members.all()} == previewed
+
+
+@pytest.mark.parametrize("rule_owner", ["global", "manufacturer"])
+def test_an_imported_stack_master_already_has_the_name_that_validation_and_the_sync_page_expect(
+    client, live_librenms, rule_owner
+):
+    """Validation and the sync page header read the master serial through the same rules as import."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
+    libre_device, _previewed, master = _import_named_stack(live_librenms, rule_owner)
+
+    validation = validate_device_for_import(libre_device, api=live_librenms.api, server_key="default")
+    assert validation["existing_device"] == master
+    assert (validation["name_matches"], validation["suggested_name"]) == (True, None)
+
+    client.force_login(make_superuser(f"named-stack-{rule_owner}-viewer"))
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": master.pk}),
+        {"server_key": "default"},
+    )
+    assert response.status_code == 200
+    assert response.context["resolved_name"] == master.name
