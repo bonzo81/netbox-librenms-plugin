@@ -400,9 +400,11 @@ class LibreNMSModuleTable(tables.Table):
                 f"LibreNMS reports parent index {dangling}, which is not in the inventory.",
             )
         if (reported := record.get("reported_parent")) is not None:
+            note = f"LibreNMS reports parent index {reported}; the PIC locator in the description sets the parent."
             return format_html(
-                ' <i class="mdi mdi-information-outline text-muted" title="{}"></i>',
-                f"LibreNMS reports parent index {reported}; the PIC locator in the description sets the parent.",
+                ' <i class="mdi mdi-information-outline text-muted" role="img" title="{}" aria-label="{}"></i>',
+                note,
+                note,
             )
         return mark_safe("")
 
@@ -487,18 +489,21 @@ class LibreNMSModuleTable(tables.Table):
 
         if value == "Name Conflict" and (conflict_reason := record.get("name_conflict_reason")):
             status_html = format_html(
-                '<span class="badge {}">{}</span> <i class="mdi mdi-alert-outline text-warning" title="{}"></i>',
+                '<span class="badge {}">{}</span>'
+                ' <i class="mdi mdi-alert-outline text-warning" role="img" title="{}" aria-label="{}"></i>',
                 badge_class,
                 display_text,
+                conflict_reason,
                 conflict_reason,
             )
         elif warning:
             status_html = format_html(
                 '<span class="badge {}" title="{}">{}</span>'
-                ' <i class="mdi mdi-alert-outline text-warning" title="{}"></i>',
+                ' <i class="mdi mdi-alert-outline text-warning" role="img" title="{}" aria-label="{}"></i>',
                 badge_class,
                 warning,
                 display_text,
+                warning,
                 warning,
             )
         else:
