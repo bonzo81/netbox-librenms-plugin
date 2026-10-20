@@ -52,7 +52,7 @@ from netbox_librenms_plugin.sync_cache import (
     module_inventory_oob_matches,
     schedule_request_cache_mutation,
 )
-from netbox_librenms_plugin.transactions import classify_conflict, update_existing_row
+from netbox_librenms_plugin.transactions import classify_conflict, saved_in_scope, update_existing_row
 from netbox_librenms_plugin.utils import (
     REGEX_COMPILE_ERRORS,
     acquire_advisory_transaction_lock,
@@ -2457,9 +2457,7 @@ class ApplyModuleInterfaceTypesView(
     """Apply selected module interface-template types after checking preview state."""
 
     def _assert_updated_interface_change_scope(self, interface, outcome):
-        from dcim.models import Interface
-
-        if outcome == "updated" and not self.restricted_queryset(Interface, "change").filter(pk=interface.pk).exists():
+        if outcome == "updated" and not saved_in_scope(interface, self.request.user, "change"):
             raise _InterfaceChangeScopeViolation(interface.name)
 
     def post(self, request, pk):  # noqa: C901
@@ -3896,7 +3894,7 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
 
             update_existing_row(self.restricted_queryset(DeviceType, "change").filter(pk=locked.pk), apply)
             # A constrained grant decides on the saved row; a denial rolls the whole mark back.
-            if not self.restricted_queryset(DeviceType, "change").filter(pk=locked.pk).exists():
+            if not saved_in_scope(locked, self.request.user, "change"):
                 raise _MarkBuiltInOutOfScope
         rule = plan.rule
         if rule is not None:
@@ -3906,7 +3904,7 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
         rule = InventoryIgnoreRule(**BUILT_IN_UNITS_RULE, manufacturer_id=plan.manufacturer_id)
         rule.full_clean()
         rule.save()
-        if not self.restricted_queryset(InventoryIgnoreRule, "add").filter(pk=rule.pk).exists():
+        if not saved_in_scope(rule, self.request.user, "add"):
             raise _MarkBuiltInOutOfScope
         return rule
 

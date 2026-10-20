@@ -51,6 +51,7 @@ from .models import (
     PortStackLagPattern,
     SerialSensorTypePattern,
 )
+from .transactions import saved_in_scope
 from .utils import REGEX_COMPILE_ERRORS, _free_cable_tag_slug, normalize_cable_tag_slug
 
 logger = logging.getLogger(__name__)
@@ -461,7 +462,7 @@ class CableSyncSettingsForm(NetBoxModelForm):
                 # A concurrent insert can take either the unique name or the selected free slug.
                 # Do not adopt that row because this settings form did not create it.
                 raise CableSyncTagNameTaken({"cable_sync_tag": CABLE_SYNC_TAG_TAKEN}) from exc
-            if self.user is not None and not Tag.objects.restrict(self.user, "add").filter(pk=tag.pk).exists():
+            if self.user is not None and not saved_in_scope(tag, self.user, "add"):
                 raise PermissionDenied("You do not have permission to create the cable provenance tag.")
         elif tag.name != new_tag_name or tag.color != new_color:
             if self.user is not None and not Tag.objects.restrict(self.user, "change").filter(pk=tag.pk).exists():
@@ -476,7 +477,7 @@ class CableSyncSettingsForm(NetBoxModelForm):
                 # select_for_update cannot lock a name that has no row yet, so a concurrent
                 # create can take the target name between clean_cable_sync_tag and this save.
                 raise CableSyncTagNameTaken({"cable_sync_tag": CABLE_SYNC_TAG_TAKEN}) from exc
-            if self.user is not None and not Tag.objects.restrict(self.user, "change").filter(pk=tag.pk).exists():
+            if self.user is not None and not saved_in_scope(tag, self.user, "change"):
                 raise PermissionDenied("You do not have permission to change the cable provenance tag.")
 
         setting_fields = ("cable_sync_tag", "cable_sync_tag_color", "cable_sync_description")

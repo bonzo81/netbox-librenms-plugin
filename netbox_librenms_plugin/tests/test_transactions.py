@@ -31,6 +31,7 @@ from netbox_librenms_plugin.transactions import (
     classify_conflict,
     database_error_sqlstate,
     run_transaction,
+    saved_in_scope,
     update_existing_row,
 )
 from netbox_librenms_plugin.server_mappings import (
@@ -266,6 +267,35 @@ def _set_description(value):
         row.description = value
 
     return apply
+
+
+@pytest.mark.django_db
+def test_a_saved_row_is_in_scope_only_while_its_saved_state_meets_the_grant_constraint():
+    from dcim.models import Site
+
+    user = make_user_with_perms(
+        f"scope-{uuid4().hex[:8]}", [("add", Site), ("change", Site)], constraints={"description": "in"}
+    )
+    site = Site(name="saved-in-scope", slug="saved-in-scope", description="in")
+    site.save()
+    assert saved_in_scope(site, user, "add")
+    assert saved_in_scope(site, user, "change")
+
+    site.description = "out"
+    site.save()
+    assert not saved_in_scope(site, user, "add")
+    assert not saved_in_scope(site, user, "change")
+
+
+@pytest.mark.django_db
+def test_a_saved_row_is_out_of_scope_for_an_action_the_user_lacks():
+    from dcim.models import Site
+
+    user = make_user_with_perms(f"scope-{uuid4().hex[:8]}", [("change", Site)])
+    site = _site("saved-without-add")
+
+    assert saved_in_scope(site, user, "change")
+    assert not saved_in_scope(site, user, "add")
 
 
 @pytest.mark.django_db
