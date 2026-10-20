@@ -204,7 +204,7 @@ class TestTheWriterRefusesAnIgnoredAddress:
         created = IPAddress.objects.filter(address=LINK_LOCAL)
         if posted == "blue":
             assert not created.exists()
-            assert f"{LINK_LOCAL} (IP mapping fe80::/10 (VRF ip-rule-blue) ignores this address)" in _messages(response)
+            assert f"{LINK_LOCAL} (IP mapping fe80::/10 ignores this address)" in _messages(response)
         else:
             assert list(created.values_list("vrf", flat=True)) == [vrf.pk if vrf is not None else None]
             assert "Skipped" not in _messages(response)
@@ -224,9 +224,27 @@ class TestAVrfChangeRedecidesTheRow:
         into_red = _verify(client, device, LINK_LOCAL, red)
         into_global = _verify(client, device, LINK_LOCAL, None)
 
-        assert "IP mapping fe80::/10 (VRF ip-rule-blue) ignores this address" in into_blue["status"]
+        assert "IP mapping fe80::/10 ignores this address" in into_blue["status"]
         assert into_blue["selectable"] is False
         for verdict in (into_red, into_global):
             assert "Ignored" not in verdict["status"]
             assert "Create</button>" in verdict["status"]
             assert verdict["selectable"] is True
+
+
+class TestTheReasonNamesNoVrf:
+    """A user who cannot view the mapping's VRF must not learn its name, so the reason names the prefix only."""
+
+    def test_the_pill_the_verify_and_the_writer_name_only_the_prefix(self, client, device, blue):
+        IPAddressMapping.objects.create(prefix="fe80::/10", vrf=blue)
+        # The NetBox address in blue makes the row show blue; the second row has none, so its verify is not Synced.
+        IPAddress.objects.create(address=LINK_LOCAL, vrf=blue)
+        _seed(device, [_row(LINK_LOCAL), _row("fe80::2/64")])
+
+        pill = _cell(_row_html(client, device, LINK_LOCAL), "status")
+        verdict = _verify(client, device, "fe80::2/64", blue)["status"]
+        message = _messages(_sync(client, device, {LINK_LOCAL: blue.pk}))
+
+        for text in (pill, verdict, message):
+            assert "IP mapping fe80::/10 ignores this address" in text
+            assert blue.name not in text
