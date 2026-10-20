@@ -32,7 +32,7 @@
             </td>
             <td{% if type_mismatch %} class="text-danger fw-semibold"{% endif %}>
                 {{ librenms_model }}
-                {% if type_matched %}<i class="mdi mdi-check-decagram text-success ms-1" title="Recognised as NetBox module type {{ installed_module.module_type.model }}"></i>{% endif %}
+                {% if type_matched %}<i class="mdi mdi-check-decagram text-success ms-1" role="img" title="Recognised as NetBox module type {{ installed_module.module_type.model }}" aria-label="Recognised as NetBox module type {{ installed_module.module_type.model }}"></i>{% endif %}
             </td>
         </tr>
         <tr>

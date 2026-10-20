@@ -40,6 +40,7 @@ from netbox_librenms_plugin.utils import (
     get_missing_vlan_warning,
     get_tagged_vlan_css_class,
     get_untagged_vlan_css_class,
+    note_icon,
     paginate_sync_table,
     render_vc_member_options,
     resolve_interface_row_device,
@@ -335,11 +336,8 @@ class LibreNMSInterfaceTable(tables.Table):
         donor = record.get("vlan_inherited_from")
         if not donor:
             return ""
-        return format_html(
-            ' <i class="mdi mdi-arrow-right-bottom text-muted" title="Inherited from {}:'
-            ' LibreNMS reported no VLANs on this port"></i>',
-            donor,
-        )
+        note = format_html("Inherited from {}: LibreNMS reported no VLANs on this port", donor)
+        return format_html(" {}", note_icon("mdi-arrow-right-bottom text-muted", note))
 
     @staticmethod
     def _collect_row_vlans(record):
@@ -408,16 +406,14 @@ class LibreNMSInterfaceTable(tables.Table):
         """Render up to three coloured VLANs inline, then count the rest."""
         inline_parts = []
         for vlan_type, vid in all_vlans[: self._MAX_INLINE_VLANS]:
-            # Escape the LibreNMS-sourced vid/vlan_type (XSS, issue #105 class). css is an
-            # internal class name; warning is the static icon HTML from get_missing_vlan_warning,
-            # so it is marked safe rather than escaped.
+            # Escape the LibreNMS-sourced vid/vlan_type (XSS, issue #105 class); the warning is already safe.
             inline_parts.append(
                 format_html(
                     '<span class="{}">{}({}){}</span>',
                     self._vlan_css_class(context, vlan_type, vid),
                     vid,
                     vlan_type,
-                    mark_safe(get_missing_vlan_warning(vid, context.missing)),
+                    get_missing_vlan_warning(vid, context.missing),
                 )
             )
         # inline_parts are already escaped SafeStrings; join them and keep the result safe.
@@ -1079,46 +1075,45 @@ class LibreNMSInterfaceTable(tables.Table):
         state = self.row_sync_state(record)
         if decision is None:
             return format_html(
-                '<span class="text-muted">{} <i class="mdi mdi-help-circle-outline" title="{}"></i></span>',
+                '<span class="text-muted">{} {}</span>',
                 value,
-                _OWNER_UNRESOLVED_HINT,
+                note_icon("mdi-help-circle-outline", _OWNER_UNRESOLVED_HINT),
             )
         if decision.kind in (RuleDecisionKind.IGNORE, RuleDecisionKind.INCOMPLETE):
             icon = "mdi-eye-off" if decision.kind is RuleDecisionKind.IGNORE else "mdi-refresh"
             return format_html(
-                '<span class="text-muted">{} <i class="mdi {}" title="Not synced: {}"></i></span>',
+                '<span class="text-muted">{} {}</span>',
                 value,
-                icon,
-                decision_reason(decision),
+                note_icon(icon, format_html("Not synced: {}", decision_reason(decision))),
             )
         if decision.kind is RuleDecisionKind.AMBIGUOUS:
             return format_html(
-                '<span class="text-warning">{} <i class="mdi mdi-alert" title="Not synced: {}"></i></span>',
+                '<span class="text-warning">{} {}</span>',
                 value,
-                decision_reason(decision),
+                note_icon("mdi-alert", format_html("Not synced: {}", decision_reason(decision))),
             )
         if state.type_kept is not None:
             # The sync keeps the NetBox type, so the cell names that type and says why.
             display = format_html(
-                '{} <i class="mdi mdi-lock-outline" title="{}"></i>',
+                "{} {}",
                 record["netbox_interface"].type,
-                state.type_kept.note_for(self.user),
+                note_icon("mdi-lock-outline", state.type_kept.note_for(self.user)),
             )
         elif decision.kind is RuleDecisionKind.SET_TYPE:
             display = format_html(
-                '{} <i class="mdi mdi-link-variant" title="Set by interface {} from LibreNMS type {}"></i>',
+                "{} {}",
                 decision.netbox_type,
-                rule_names(decision.rules),
-                value,
+                note_icon(
+                    "mdi-link-variant",
+                    format_html("Set by interface {} from LibreNMS type {}", rule_names(decision.rules), value),
+                ),
             )
         else:
             # Name the ifType: the gap is only fixable if the user knows which rule to add.
-            display = format_html(
-                '{} <i class="mdi mdi-link-variant-off" title="No interface rule sets a type for ifType'
-                ' {}; the sync leaves the NetBox type unchanged"></i>',
-                value,
-                value,
+            note = format_html(
+                "No interface rule sets a type for ifType {}; the sync leaves the NetBox type unchanged", value
             )
+            display = format_html("{} {}", value, note_icon("mdi-link-variant-off", note))
         # An unmapped port stays red even on a matched row: the sync holds no opinion on the type,
         # and the column is the only place that gap is visible. It is not a row difference.
         if state.state == ROW_ABSENT or decision.kind is RuleDecisionKind.UNMAPPED:

@@ -23,6 +23,7 @@ from netbox_librenms_plugin.utils import (
     SYNC_TABLE_HEADER_ATTRS,
     coerce_positive_int,
     netbox_relocates_module_subtree,
+    note_icon,
     oob_badge_html,
     paginate_sync_table,
     render_vc_member_options,
@@ -467,11 +468,7 @@ class LibreNMSModuleTable(tables.Table):
             )
         if (reported := record.get("reported_parent")) is not None:
             note = f"LibreNMS reports parent index {reported}; the @ locator in the description sets the parent."
-            return format_html(
-                ' <i class="mdi mdi-information-outline text-muted" role="img" title="{}" aria-label="{}"></i>',
-                note,
-                note,
-            )
+            return format_html(" {}", note_icon("mdi-information-outline text-muted", note))
         return mark_safe("")
 
     def _status_badge_html(self, value, record):
@@ -555,22 +552,18 @@ class LibreNMSModuleTable(tables.Table):
 
         if value == "Name Conflict" and (conflict_reason := record.get("name_conflict_reason")):
             status_html = format_html(
-                '<span class="badge {}">{}</span>'
-                ' <i class="mdi mdi-alert-outline text-warning" role="img" title="{}" aria-label="{}"></i>',
+                '<span class="badge {}">{}</span> {}',
                 badge_class,
                 display_text,
-                conflict_reason,
-                conflict_reason,
+                note_icon("mdi-alert-outline text-warning", conflict_reason),
             )
         elif warning:
             status_html = format_html(
-                '<span class="badge {}" title="{}">{}</span>'
-                ' <i class="mdi mdi-alert-outline text-warning" role="img" title="{}" aria-label="{}"></i>',
+                '<span class="badge {}" title="{}">{}</span> {}',
                 badge_class,
                 warning,
                 display_text,
-                warning,
-                warning,
+                note_icon("mdi-alert-outline text-warning", warning),
             )
         else:
             status_html = format_html('<span class="badge {}">{}</span>', badge_class, display_text)
