@@ -18,7 +18,7 @@
         <tbody>
           <tr>
             <td><code>{{ object.prefix }}</code></td>
-            <td>{% if object.vrf %}{{ object.vrf|linkify }}{% else %}All VRFs and the global table{% endif %}</td>
+            <td>{% if object.vrf %}{{ object.vrf|linkify }}{% else %}{{ object.ANY_VRF_LABEL }}{% endif %}</td>
             <td>{{ object.get_action_display }}</td>
             <td>{{ object.description|placeholder }}</td>
           </tr>

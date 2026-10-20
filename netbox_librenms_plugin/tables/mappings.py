@@ -65,7 +65,7 @@ class IPAddressMappingTable(NetBoxTable):
     """Table for displaying IPAddressMapping data."""
 
     prefix = tables.Column(verbose_name="Prefix", linkify=True)
-    vrf = tables.Column(verbose_name="VRF", linkify=True, default="All")
+    vrf = tables.Column(verbose_name="VRF", linkify=True, default=IPAddressMapping.ANY_VRF_LABEL)
     action = tables.Column(verbose_name="Action")
     description = tables.Column(verbose_name="Description", linkify=False)
     actions = columns.ActionsColumn(actions=("edit", "delete"))
