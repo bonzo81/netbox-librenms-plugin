@@ -1288,16 +1288,19 @@ class LibreNMSModuleTable(tables.Table):
         """
         Render the "Mark built-in" control of a candidate row, or None when the viewer may not use it.
 
-        A device type without a part number gets a confirm modal that records the row's model as the part
-        number. A device type with another part number keeps it, so the control opens the rule form instead,
-        pre-filled with a transparent class rule that matches this exact model.
+        The confirm modal records the row's model as the part number of a device type without one, or only
+        adds the rule when the device type already holds the model. A device type with another part number
+        keeps it, so the control opens the rule form instead, pre-filled with a transparent class rule that
+        matches this exact model.
         """
         built_in = record.get("built_in")
         if not built_in:
             return None
-        if not (built_in["part_number"] or "").strip():
+        records = built_in["records_part_number"]
+        if not (records and (built_in["part_number"] or "").strip()):
             rule_permission = self.can_change_inventory_rule if built_in["rule_id"] else self.can_add_inventory_rule
-            if not (self.can_change_device_type and rule_permission and self.grant_index(record)):
+            type_permission = self.can_change_device_type or not records
+            if not (type_permission and rule_permission and self.grant_index(record)):
                 return None
             modal_url = reverse("plugins:netbox_librenms_plugin:mark_built_in", kwargs={"pk": self.device.pk})
             params = urlencode(
@@ -1320,7 +1323,7 @@ class LibreNMSModuleTable(tables.Table):
                     modal_url,
                     params,
                 ),
-                "Mark this unit as built into the chassis: record its model as the device type's part number",
+                "Mark this unit as built into the chassis and hide the units that report its model",
                 "mdi-chip",
                 "Mark Built-in",
             )

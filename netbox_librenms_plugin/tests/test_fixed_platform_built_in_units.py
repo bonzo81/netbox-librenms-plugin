@@ -257,26 +257,29 @@ def user_with(name, *perms):
 
 
 class TestCandidate:
-    """built_in_candidate_model(): the one test that the table and the writer apply."""
+    """built_in_candidate(): the one test that the table and the writer apply."""
 
     @staticmethod
-    def _model(index, *, type_models=(), has_bay=False, **changes):
-        from netbox_librenms_plugin.views.base.modules_view import DeviceIdentity, built_in_candidate_model
+    def _candidate(index, *, type_models=(), has_bay=False, **changes):
+        from netbox_librenms_plugin.views.base.modules_view import DeviceIdentity, built_in_candidate
 
         inventory = {item["entPhysicalIndex"]: item for item in ixr_inventory()}
         inventory[index] = {**inventory[index], **changes}
         identity = DeviceIdentity(type_models=frozenset(type_models))
-        return built_in_candidate_model(inventory[index], inventory, identity, has_bay=has_bay)
+        candidate = built_in_candidate(inventory[index], inventory, identity, has_bay=has_bay)
+        return None if candidate is None else (candidate.model, candidate.records_part_number)
 
     def test_a_chassis_level_unit_without_a_bay_is_a_candidate(self):
-        assert self._model(SLOT_1) == PART_NUMBER
-        assert self._model(SLOT_A) == PART_NUMBER
+        assert self._candidate(SLOT_1) == (PART_NUMBER, True)
+        assert self._candidate(SLOT_A) == (PART_NUMBER, True)
+
+    def test_a_unit_that_reports_the_device_type_needs_only_the_rule(self):
+        assert self._candidate(SLOT_1, type_models={PART_NUMBER.casefold()}) == (PART_NUMBER, False)
 
     @pytest.mark.parametrize(
         ("index", "kwargs"),
         [
             (SLOT_1, {"has_bay": True}),
-            (SLOT_1, {"type_models": {PART_NUMBER.casefold()}}),
             (SLOT_1, {"entPhysicalModelName": ""}),
             (SLOT_1, {"entPhysicalClass": "powerSupply"}),
             (SLOT_1, {"_source": "oob"}),
@@ -285,24 +288,15 @@ class TestCandidate:
             (OPTIC, {}),
             (CHASSIS, {}),
         ],
-        ids=[
-            "bay",
-            "known-model",
-            "no-model",
-            "power-supply",
-            "oob",
-            "unknown-parent",
-            "below-a-module",
-            "port",
-            "chassis",
-        ],
+        ids=["bay", "no-model", "power-supply", "oob", "unknown-parent", "below-a-module", "port", "chassis"],
     )
     def test_other_rows_are_not_candidates(self, index, kwargs):
-        assert self._model(index, **kwargs) == ""
+        assert self._candidate(index, **kwargs) is None
 
     def test_a_unit_below_a_built_in_unit_is_a_candidate(self):
         """A unit of another model below the built-in board sits at chassis level."""
-        assert self._model(MDA, type_models={PART_NUMBER.casefold()}, entPhysicalModelName="3HE16474AA") == "3HE16474AA"
+        found = self._candidate(MDA, type_models={PART_NUMBER.casefold()}, entPhysicalModelName="3HE16474AA")
+        assert found == ("3HE16474AA", True)
 
 
 class TestMarkBuiltIn:
@@ -555,3 +549,117 @@ class TestMarkBuiltInPermissions:
                 device, user=user_with(f"{name}-ok", *self._perms("change-device-type", "add-rule", "change-rule"))
             )
         ) == {SLOT_1, SLOT_A}
+
+
+class TestMarkBuiltInScope:
+    """The writer checks what it wrote against constrained grants, and the device type it locked."""
+
+    @staticmethod
+    def _user(name, *specs):
+        """Return a user with the tab's view grants and each ``(action, model, constraints)`` grant."""
+        from netbox_librenms_plugin.tests.view_test_helpers import grant
+
+        user = user_with(name)
+        for action, model, constraints in specs:
+            user = grant(user, action, model, constraints=constraints)
+        return user
+
+    def test_a_rule_outside_the_add_constraint_rolls_everything_back(self):
+        from dcim.models import DeviceType
+
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+        device = ixr_device("ixr-scope-add", part_number="")
+        user = self._user(
+            "ixr-scope-add",
+            ("change", DeviceType, None),
+            ("add", InventoryIgnoreRule, {"manufacturer__slug": "another-vendor"}),
+        )
+        fields = modal_form(device, SLOT_1, user=user)
+        before = written(device)
+
+        mark(device, fields, user=user)
+
+        assert written(device) == before
+
+    def test_a_part_number_outside_the_change_constraint_rolls_everything_back(self):
+        from dcim.models import DeviceType
+
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+        device = ixr_device("ixr-scope-change", part_number="")
+        user = self._user(
+            "ixr-scope-change",
+            ("change", DeviceType, {"part_number": ""}),
+            ("add", InventoryIgnoreRule, None),
+        )
+        fields = modal_form(device, SLOT_1, user=user)
+        before = written(device)
+
+        mark(device, fields, user=user)
+
+        assert written(device) == before
+
+    def test_a_manufacturer_changed_before_the_lock_refuses_the_mark(self):
+        from dcim.models import DeviceType, Manufacturer
+        from django.db import connection
+
+        device = ixr_device("ixr-scope-manufacturer", part_number="")
+        model_rule(manufacturer=device.device_type.manufacturer)
+        other = Manufacturer.objects.create(name="IXR other vendor", slug="ixr-other-vendor")
+        fields = modal_form(device, SLOT_1)
+        changed = []
+
+        def concurrent_edit(execute, sql, params, many, context):
+            # Another session moves the device type to another manufacturer just before the writer locks it.
+            if not changed and "FOR UPDATE" in sql and '"dcim_devicetype"' in sql:
+                changed.append(sql)
+                execute(
+                    'UPDATE "dcim_devicetype" SET "manufacturer_id" = %s WHERE "id" = %s',
+                    [other.pk, device.device_type_id],
+                    False,
+                    context,
+                )
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(concurrent_edit):
+            mark(device, fields)
+
+        assert changed
+        assert DeviceType.objects.get(pk=device.device_type_id).part_number == ""
+
+
+class TestMarkBuiltInRuleOnly:
+    """A unit that already reports the device type's model or part number needs only the rule."""
+
+    def test_the_rule_is_created_without_a_device_type_write(self):
+        from dcim.models import DeviceType
+
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+        device = ixr_device("ixr-rule-only")
+        user = user_with("ixr-rule-only", ("add", InventoryIgnoreRule))
+        type_before = DeviceType.objects.filter(pk=device.device_type_id).values().get()
+        assert set(controls(device, user=user)) == {SLOT_1, SLOT_A}
+
+        mark(device, modal_form(device, SLOT_1, user=user), user=user)
+
+        (rule,) = built_in_rules()
+        assert rule.manufacturer_id == device.device_type.manufacturer_id
+        assert DeviceType.objects.filter(pk=device.device_type_id).values().get() == type_before
+        assert set(tab_rows(device)) == {OPTIC}
+
+    def test_the_rule_only_action_needs_the_add_permission(self):
+        from dcim.models import DeviceType
+
+        device = ixr_device("ixr-rule-only-denied")
+        user = user_with("ixr-rule-only-denied", ("change", DeviceType))
+        fields = modal_form(
+            device, SLOT_1, user=user_with("ixr-rule-only-admin", *TestMarkBuiltInPermissions._perms("add-rule"))
+        )
+        before = written(device)
+
+        assert controls(device, user=user) == {}
+        mark(device, fields, user=user)
+
+        assert written(device) == before
