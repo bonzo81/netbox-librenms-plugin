@@ -3715,7 +3715,8 @@ class _BuiltInPlan:
     """What "Mark built-in" writes: maybe the model as the part number of one device type, and the rule."""
 
     target: object
-    device_type_id: int
+    # The target's device type as the policy loaded it.
+    device_type: object
     manufacturer_id: int
     model: str
     records_part_number: bool
@@ -3793,7 +3794,7 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
             )
         return _BuiltInPlan(
             target=target,
-            device_type_id=device_type.pk,
+            device_type=device_type,
             manufacturer_id=device_type.manufacturer_id,
             model=candidate.model,
             records_part_number=candidate.records_part_number,
@@ -3802,7 +3803,7 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
         )
 
     def get(self, request, pk):
-        from dcim.models import Device, DeviceType
+        from dcim.models import Device
 
         self.required_object_permissions = {"GET": self._permissions()}
         if error := self.require_all_permissions("GET"):
@@ -3820,14 +3821,12 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
         self.required_object_permissions = {"GET": self._permissions(plan)}
         if error := self.require_object_permissions("GET"):
             return error
-        # The modal names the device type; the rule-only mark needs no grant on it.
-        device_type = DeviceType.objects.select_related("manufacturer").get(pk=plan.device_type_id)
         return render(
             request,
             "netbox_librenms_plugin/htmx/mark_built_in_modal.html",
             {
                 "device_pk": page_device.pk,
-                "device_type": device_type,
+                "device_type": plan.device_type,
                 "model": plan.model,
                 "records_part_number": plan.records_part_number,
                 "rule": plan.rule,
@@ -3844,8 +3843,8 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
 
         from netbox_librenms_plugin.models import BUILT_IN_UNITS_RULE, InventoryIgnoreRule
 
-        # An internal lock read: the refusal below names nothing the caller may not see.
-        locked = DeviceType.objects.select_for_update(of=("self",)).filter(pk=plan.device_type_id).first()
+        # The device type comes from the target device, which the request resolved through its scope.
+        locked = self.relock_scoped_row(DeviceType, pk=plan.device_type.pk)
         if locked is None or not plan.still_holds(locked):
             raise GrantRefused(GrantRefusal.STALE)
         if plan.records_part_number:
