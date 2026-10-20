@@ -514,6 +514,7 @@ def bulk_import_devices_shared(  # noqa: C901
                 # flags are stale or omitted.
                 include_vc_detection=True,
                 preloaded_device_type_rules=device_type_norm_rules,
+                serial_key_for=serial_key_for,
             )
 
             if validation.get("import_as_vm"):
@@ -1434,6 +1435,7 @@ def process_device_filters(  # noqa: C901
     # Validate each device
     validated_devices = []
     total = len(libre_devices)
+    serial_key_for = functools.cache(vc_serial_key)
     # Always pass api so validate_device_for_import can run hardware/chassis lookups.
     # vc_detection_enabled only gates VC-specific paths inside that function.
 
@@ -1495,6 +1497,7 @@ def process_device_filters(  # noqa: C901
             server_key=api.server_key,
             use_sysname=use_sysname,
             strip_domain=strip_domain,
+            serial_key_for=serial_key_for,
         )
 
         # Set VC detection metadata

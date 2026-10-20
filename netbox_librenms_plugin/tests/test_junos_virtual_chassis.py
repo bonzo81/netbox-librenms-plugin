@@ -280,3 +280,50 @@ def test_capture_download_replays_the_same_normalized_virtual_chassis(client, re
     ok, replay_device = replay_api.get_device_info(replay_id)
     assert ok
     assert identify_vc_master(detected["members"], replay_device["serial"], vc_serial_key()) is detected["members"][0]
+
+
+@pytest.mark.parametrize("rule_owner", ["global", "manufacturer"])
+def test_the_import_preview_names_the_members_that_the_import_creates(recording_server, rule_owner):
+    """A ``{serial}`` member name reads the serial through the serial rules in the preview and at creation."""
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+    from netbox_librenms_plugin.import_utils.virtual_chassis import (
+        create_virtual_chassis_with_members,
+        identify_vc_master,
+        vc_serial_key,
+    )
+    from netbox_librenms_plugin.models import LibreNMSSettings, NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import _shared_infra
+
+    site, manufacturer, device_type, role = _shared_infra()
+    NormalizationRule.objects.filter(scope="serial").delete()
+    NormalizationRule.objects.create(
+        scope="serial",
+        manufacturer=manufacturer if rule_owner == "manufacturer" else None,
+        match_pattern=r"^S/N\s+(.+)$",
+        replacement=r"\1",
+    )
+    LibreNMSSettings.objects.update_or_create(pk=1, defaults={"vc_member_name_pattern": "-{serial}"})
+    recording = copy.deepcopy(load_recording(_RECORDING))
+    _edit_rows(recording, 1, lambda row: row.update(entPhysicalSerialNum="S/N NAMED-A"))
+    _edit_rows(recording, 120, lambda row: row.update(entPhysicalSerialNum="S/N NAMED-A"))
+    _edit_rows(recording, 121, lambda row: row.update(entPhysicalSerialNum="S/N NAMED-B"))
+    libre_device = unwrap_response(recording["responses"][f"GET /api/v0/devices/{_DEVICE_ID}"])[1]["devices"][0]
+    libre_device.update(serial="S/N NAMED-A", hardware=device_type.model)
+    _server, api = recording_server(recording)
+
+    validation = validate_device_for_import(
+        libre_device, api=api, server_key=api.server_key, include_vc_detection=True, force_vc_refresh=True
+    )
+    members = validation["virtual_chassis"]["members"]
+    previewed = {member["position"]: member["suggested_name"] for member in members}
+    master = Device.objects.create(
+        name=validation["resolved_name"], device_type=device_type, role=role, site=site, serial="NAMED-A"
+    )
+    master_member = identify_vc_master(members, libre_device["serial"], vc_serial_key(manufacturer))
+    chassis = create_virtual_chassis_with_members(
+        master, members, libre_device, api.server_key, master_member=master_member
+    )
+
+    assert {device.vc_position: device.name for device in chassis.members.all()} == previewed

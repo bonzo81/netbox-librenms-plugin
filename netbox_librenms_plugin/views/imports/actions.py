@@ -1196,6 +1196,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 # Keep confirm modal aligned with import-time behavior: always
                 # detect VC membership so stack members are visible before import.
                 include_vc_detection=True,
+                serial_key_for=serial_key_for,
             )
             # Mark validation with VC detection flag for proper URL generation in table
             # Bulk confirm should respect the initial filter's VC detection preference
@@ -1203,17 +1204,15 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
 
             device_name = validation.get("resolved_name") or f"device-{device_id}"
 
-            if validation.get("virtual_chassis", {}).get("is_stack") and device_name:
-                validation["virtual_chassis"] = update_vc_member_suggested_names(
-                    validation["virtual_chassis"], device_name
-                )
             if validation.get("virtual_chassis", {}).get("is_stack"):
-                # Preview the master the way import will match it: with the resolved DeviceType's rules.
+                # Preview the names and the master the way import makes them: with the resolved DeviceType's rules.
                 device_type = effective_import_device_type((validation.get("device_type") or {}).get("device_type"))
+                serial_key = serial_key_for(getattr(device_type, "manufacturer", None))
+                validation["virtual_chassis"] = update_vc_member_suggested_names(
+                    validation["virtual_chassis"], device_name, serial_key
+                )
                 validation["virtual_chassis"] = vc_master_view(
-                    validation["virtual_chassis"],
-                    libre_device.get("serial"),
-                    serial_key_for(getattr(device_type, "manufacturer", None)),
+                    validation["virtual_chassis"], libre_device.get("serial"), serial_key
                 )
 
             from dcim.models import DeviceRole, Rack
