@@ -3198,9 +3198,16 @@ function handleVRFChange(select, value) {
 
     const csrfToken = getCsrfToken();
     if (!csrfToken) return;  // missing token → abort rather than throw on `.value`
+    // Only the latest VRF choice may repaint the row, as in handleInterfaceChange.
+    if (select._vrfVerifyController) {
+        select._vrfVerifyController.abort();
+    }
+    const controller = new AbortController();
+    select._vrfVerifyController = controller;
 
     fetch('/plugins/librenms_plugin/verify-ipaddress/', {
         method: 'POST',
+        signal: controller.signal,
         headers: {
             'Content-Type': 'application/json',
             'X-CSRFToken': csrfToken
@@ -3221,6 +3228,7 @@ function handleVRFChange(select, value) {
         })
         .then(data => {
             const row = select.closest('tr');
+            if (controller.signal.aborted) return;
 
             if (data.status === 'success' && row && data.formatted_row) {
                 const statusCell = row.querySelector('td[data-col="status"]');
@@ -3237,6 +3245,7 @@ function handleVRFChange(select, value) {
             }
         })
         .catch(error => {
+            if (error.name === 'AbortError') return;
             console.error('VRF verification failed:', error.message);
         });
 }
