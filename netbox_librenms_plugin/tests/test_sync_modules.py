@@ -7,7 +7,7 @@ import pytest
 from django.core.cache import cache
 from django.db import OperationalError, transaction
 
-from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.server_mappings import LibreNMSPortBindingBusy, read_mapping
 from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
 from netbox_librenms_plugin.tests.conftest import (
     bounded_executor,
@@ -38,7 +38,6 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
 )
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE, classify_conflict
 from netbox_librenms_plugin.utils import (
-    LibreNMSPortBindingBusy,
     module_inventory_binding_token,
     module_inventory_row_digest,
     module_inventory_snapshot_digest,
@@ -630,6 +629,172 @@ class TestInterfaceBinding:
 
         assert result["status"] == "skipped"
         assert "multiple module interfaces" in result["reason"]
+
+
+def _bind_paused_after(read, bind, concurrent):
+    """
+    Run *bind* on its own connection, pause it after its first query that *read* matches, and run *concurrent*.
+
+    *concurrent* runs and commits on the test's connection while the paused bind holds no row lock.
+    Return what *bind* returned.
+    """
+    from threading import Event
+
+    from django.db import close_old_connections, connection
+
+    paused = Event()
+    resume = Event()
+
+    def pause_after_the_read(execute, sql, params, many, context):
+        result = execute(sql, params, many, context)
+        if not paused.is_set() and read(sql):
+            paused.set()
+            assert resume.wait(timeout=10)
+        return result
+
+    def run():
+        close_old_connections()
+        try:
+            with connection.execute_wrapper(pause_after_the_read):
+                return bind()
+        finally:
+            connection.close()
+
+    with bounded_executor(max_workers=1) as executor:
+        future = executor.submit(run)
+        try:
+            for _ in range(100):
+                if paused.wait(timeout=0.1) or future.done():
+                    break
+            if not paused.is_set():
+                if future.done():
+                    raise AssertionError(f"bind finished before the paused read: {future.result()!r}")
+                raise AssertionError("bind never reached the paused read")
+            concurrent()
+        finally:
+            resume.set()
+        return future.result(timeout=30)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("raises", [False, True])
+def test_a_bind_worker_that_finishes_before_the_read_reports_its_outcome(raises):
+    """The pause helper must surface an early result or the original worker exception."""
+
+    def bind():
+        if raises:
+            raise RuntimeError("bind refused before its read")
+        return {"status": "skipped"}
+
+    exception = RuntimeError if raises else AssertionError
+    message = "bind refused before its read" if raises else "bind finished before the paused read"
+    with pytest.raises(exception, match=message):
+        _bind_paused_after(lambda sql: False, bind, lambda: pytest.fail("no read was paused"))
+
+
+def _candidate_read_by_name(sql):
+    return 'FROM "dcim_interface"' in sql and '"name" IN' in sql
+
+
+def _bind(device, port_id, name, server_key="default", module_pk=None):
+    from dcim.models import Interface
+
+    from netbox_librenms_plugin.views.sync.modules import _bind_interface_librenms_id
+
+    item = {"_librenms_port_id": port_id, "_librenms_ifname": name}
+    return _bind_interface_librenms_id(device, item, module_pk, server_key, Interface.objects.all())
+
+
+@transactional_db_with_all_apps()
+@pytest.mark.parametrize(
+    ("loser_server", "loser_port", "expected_status", "expected_mapping"),
+    [
+        ("secondary", 302, "bound", {"default": 301, "secondary": 302}),
+        ("default", 303, "conflict", {"default": 301}),
+    ],
+    ids=["another-server", "same-server"],
+)
+def test_a_bind_that_read_its_interface_before_a_concurrent_bind_keeps_the_winners_mapping(
+    loser_server, loser_port, expected_status, expected_mapping
+):
+    """Two module binds pick one unbound interface; the one that read it first must decide on the locked row."""
+    device = make_device(f"bind-race-{loser_server}")
+    interface = make_interface(device, "Ethernet30")
+    winner = {}
+
+    loser_result = _bind_paused_after(
+        _candidate_read_by_name,
+        lambda: _bind(device, loser_port, interface.name, loser_server),
+        lambda: winner.update(_bind(device, 301, interface.name)),
+    )
+
+    assert winner["status"] == "bound"
+    assert loser_result["status"] == expected_status
+    if expected_status == "conflict":
+        # The name chooses again under the lock, and the name now belongs to the winner's port.
+        assert loser_result["reason"] == "Ethernet30 is already bound to a different LibreNMS port; not overwriting"
+    interface.refresh_from_db()
+    assert interface.custom_field_data["librenms_id"] == expected_mapping
+
+
+@transactional_db_with_all_apps()
+def test_a_bind_whose_interface_was_renamed_and_its_name_reused_binds_nothing():
+    """The name chose the interface, so the name must still choose it once the row is locked."""
+    from dcim.models import Interface
+
+    device = make_device("bind-renamed-by-name")
+    original = make_interface(device, "Ethernet30")
+    replacement = {}
+
+    def rename_and_reuse_the_name():
+        renamed = Interface.objects.get(pk=original.pk)
+        renamed.name = "Ethernet31"
+        renamed.save()
+        replacement["interface"] = make_interface(device, "Ethernet30")
+
+    result = _bind_paused_after(
+        _candidate_read_by_name, lambda: _bind(device, 304, "Ethernet30"), rename_and_reuse_the_name
+    )
+
+    assert result["status"] == "skipped"
+    assert "changed" in result["reason"]
+    for interface in (Interface.objects.get(pk=original.pk), replacement["interface"]):
+        interface.refresh_from_db()
+        assert read_mapping(interface).own_id("default") is None
+
+
+@transactional_db_with_all_apps()
+def test_a_bind_whose_bound_interface_was_renamed_still_binds_it():
+    """The port mapping chose the interface, so a rename after the choice does not matter."""
+    from dcim.models import Interface, Module
+
+    device = make_device("bind-renamed-by-mapping")
+    module = Module.objects.create(
+        device=device,
+        module_bay=make_module_bay(device, "Renamed Bay"),
+        module_type=make_module_type("RENAMED-CARD"),
+        status="active",
+    )
+    interface = make_interface(device, "Ethernet30")
+    interface.custom_field_data["librenms_id"] = {"default": 305}
+    interface.save()
+
+    def rename():
+        renamed = Interface.objects.get(pk=interface.pk)
+        renamed.name = "Ethernet31"
+        renamed.save()
+
+    # The port owner search reads the VM interfaces last, so the owner is chosen when that read returns.
+    result = _bind_paused_after(
+        lambda sql: 'FROM "virtualization_vminterface"' in sql,
+        lambda: _bind(device, 305, "Ethernet30", module_pk=module.pk),
+        rename,
+    )
+
+    assert result == {"status": "bound", "interface": "Ethernet31", "port_id": 305, "changed": True}
+    interface.refresh_from_db()
+    assert (interface.name, interface.module_id) == ("Ethernet31", module.pk)
+    assert interface.custom_field_data["librenms_id"] == {"default": 305}
 
 
 class TestBranchCollection:
@@ -1586,7 +1751,7 @@ class TestInstallAndUpdateViews:
         from dcim.models import Device, Interface, Module
 
         from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleInterfaceView
 
         device = make_device("module-interface-scope", librenms_cf={"default": 2})
@@ -1594,7 +1759,7 @@ class TestInstallAndUpdateViews:
         module = install_module(device, bay.name, "INTERFACE-SCOPE-CARD")
         hidden = make_interface(device, "Te1/1/1")
         allowed = make_interface(device, "Te1/1/2")
-        set_librenms_device_id(hidden, 42, "default")
+        seed_own_mapping(hidden, 42, "default")
         hidden.save(update_fields=["custom_field_data"])
         user = make_user_with_perms("module-interface-scope", [("view", Device), ("view", Module)])
         user = grant(user, "change", Interface, constraints={"pk": allowed.pk})
@@ -3115,11 +3280,13 @@ def test_refresh_drops_out_of_spec_oob_inventory(live_librenms, oob_index, oob_p
     """Negative OOB index fields prevent the refresh from caching an inventory snapshot."""
     from django.core.cache import cache
 
-    from netbox_librenms_plugin.utils import set_librenms_oob
+    from netbox_librenms_plugin.server_mappings import attach_oob
+
+    from netbox_librenms_plugin.tests.conftest import apply_mapping_change
     from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
     device = make_device("signed-inventory", librenms_cf={"default": 777})
-    set_librenms_oob(device, 999, "default", oob_type="idrac9")
+    apply_mapping_change(device, attach_oob(device, "default", 999, oob_type="idrac9"))
     device.save(update_fields=["custom_field_data"])
     # RFC 2737 defines entPhysicalIndex as 1..2147483647.
     # The old offset would shift the negative OOB index onto main index 1500.

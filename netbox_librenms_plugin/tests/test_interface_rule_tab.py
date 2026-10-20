@@ -24,8 +24,9 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis_members,
     make_vm,
+    seed_own_mapping,
 )
-from netbox_librenms_plugin.utils import get_librenms_sync_device, set_librenms_device_id
+from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
 SERVER_KEY = "default"
@@ -196,7 +197,7 @@ class TestIgnoredRowsInTheTab:
         InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform, name_pattern="^Vlan")
         device = _device("rule-tab-netbox-only", platform)
         bound = make_interface(device, "Vlan10", iface_type="virtual")
-        set_librenms_device_id(bound, 101, SERVER_KEY)
+        seed_own_mapping(bound, 101, SERVER_KEY)
         bound.save()
         make_interface(device, "Vlan20", iface_type="virtual")
         make_interface(device, "stale0")

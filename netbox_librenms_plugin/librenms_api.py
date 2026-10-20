@@ -18,7 +18,15 @@ from netbox_librenms_plugin.constants import (
     LIBRENMS_PORTS_COLUMNS,
     RELATIONSHIP_KINDS,
 )
-from netbox_librenms_plugin.server_mappings import AmbiguousLibreNMSIdError, read_mapping
+from netbox_librenms_plugin.server_mappings import (
+    AmbiguousLibreNMSIdError,
+    assign_own,
+    can_store_device_mapping,
+    copy_persisted_mapping,
+    lock_librenms_id_assignment,
+    persist_mapping,
+    read_mapping,
+)
 
 # HTTP request timeout constants (in seconds)
 DEFAULT_API_TIMEOUT = 10
@@ -582,21 +590,7 @@ class LibreNMSAPI:
             None
 
         """
-        from dcim.models import Device
-        from virtualization.models import VirtualMachine
-
-        can_persist_mapping = (
-            isinstance(obj, (Device, VirtualMachine))
-            and obj.pk is not None
-            and not obj._state.adding
-            and "librenms_id" in obj.cf
-        )
-        if can_persist_mapping:
-            from netbox_librenms_plugin.utils import (
-                lock_librenms_id_assignment,
-                set_librenms_device_id,
-            )
-
+        if can_store_device_mapping(obj):
             with transaction.atomic():
                 try:
                     locked_obj, conflict = lock_librenms_id_assignment(
@@ -630,11 +624,14 @@ class LibreNMSAPI:
                         ),
                     )
                 locked_obj.snapshot()
-                set_librenms_device_id(locked_obj, librenms_id, self.server_key)
-                locked_obj.save(update_fields=["custom_field_data", "last_updated"])
+                persist_mapping(
+                    locked_obj,
+                    assign_own(locked_obj, self.server_key, librenms_id),
+                    write=lambda row, fields: row.save(update_fields=[*fields, "last_updated"]),
+                )
             # locked_obj is a second row read of the same object, so copying its whole field data
             # would discard every custom-field edit the caller has not saved yet.
-            obj.custom_field_data["librenms_id"] = locked_obj.custom_field_data.get("librenms_id")
+            copy_persisted_mapping(locked_obj, obj)
         else:
             # Use cache as fallback
             cache_key = self._get_cache_key(obj)

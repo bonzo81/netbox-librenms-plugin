@@ -1217,6 +1217,47 @@ class TestConvertLegacyLibreNMSIdView:
         assert device.custom_field_data["librenms_id"] == 6567
         assert any("ambiguous" in text for text in _messages(response, "error"))
 
+    @pytest.mark.parametrize(("converting", "owning"), [("device", "vm"), ("vm", "device")])
+    def test_an_owner_of_the_other_model_blocks_conversion(self, logged_in_client, librenms_server, converting, owning):
+        """A Device and a VM share one identity space, so an owner of either model refuses the conversion."""
+        from core.models import ObjectChange
+        from django.contrib.contenttypes.models import ContentType
+
+        librenms_id = 6570 if converting == "device" else 6571
+        if converting == "device":
+            obj = make_device(f"legacy-cross-{converting}", serial="LEGACY-CROSS", librenms_cf=librenms_id)
+        else:
+            obj = make_vm(f"legacy-cross-{converting}")
+            obj.custom_field_data["librenms_id"] = librenms_id
+            obj.save()
+        if owning == "device":
+            make_device(f"legacy-cross-owner-{owning}", librenms_cf={SERVER_KEY: librenms_id})
+        else:
+            owner = make_vm(f"legacy-cross-owner-{owning}")
+            owner.custom_field_data["librenms_id"] = {SERVER_KEY: librenms_id}
+            owner.save()
+        librenms_server.device_info_response(device_id=librenms_id, hostname=obj.name, serial="LEGACY-CROSS")
+        changes = ObjectChange.objects.filter(
+            changed_object_type=ContentType.objects.get_for_model(obj), changed_object_id=obj.pk
+        )
+        logged_before = changes.count()
+
+        response = _post(
+            logged_in_client,
+            "convert_legacy_librenms_id",
+            obj,
+            {"object_type": "device" if converting == "device" else "virtualmachine"},
+        )
+
+        obj.refresh_from_db()
+        assert obj.custom_field_data["librenms_id"] == librenms_id
+        assert _messages(response, "error") == [
+            f"LibreNMS ID {librenms_id} is already assigned to another NetBox object. "
+            f"Cannot convert the legacy ID for server '{SERVER_KEY}'."
+        ]
+        assert not _messages(response, "success")
+        assert changes.count() == logged_before
+
     def test_unsupported_object_type_is_a_400(self, logged_in_client, librenms_server):
         device = make_device("legacy-invalid-type")
 

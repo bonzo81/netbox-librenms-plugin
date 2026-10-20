@@ -26,6 +26,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_interface,
     make_vm,
+    seed_own_mapping,
     transactional_db_with_all_apps,
 )
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
@@ -38,7 +39,6 @@ from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
 )
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms, messages_on
-from netbox_librenms_plugin.utils import set_librenms_device_id
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
 IN_SCOPE = {"name__startswith": "eth"}
@@ -326,7 +326,7 @@ def _row_of(owner, name, *, description, port_id=None):
         row = VMInterface.objects.create(virtual_machine=owner, name=name)
     row.description = description
     if port_id is not None:
-        set_librenms_device_id(row, port_id, SERVER_KEY)
+        seed_own_mapping(row, port_id, SERVER_KEY)
     row.save()
     return row
 

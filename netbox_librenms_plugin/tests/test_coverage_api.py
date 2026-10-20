@@ -1001,6 +1001,51 @@ class TestStorelibrenmsId:
         assert device.custom_field_data["librenms_id"]["default"] == 42
         assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"]["default"] == 42
 
+    def test_the_store_builds_on_the_locked_row_not_the_callers_older_read(self, settings, librenms_server):
+        """A mapping that another operation added after the caller's read stays, and reaches the caller too."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("store-after-a-concurrent-link", librenms_cf={"default": None})
+        Device.objects.filter(pk=device.pk).update(
+            custom_field_data={"librenms_id": {"default": None, "secondary": 77}}
+        )
+        api = api_for(settings, librenms_server.url)
+
+        api._store_librenms_id(device, 42)
+
+        expected = {"default": 42, "secondary": 77}
+        assert Device.objects.get(pk=device.pk).custom_field_data["librenms_id"] == expected
+        assert device.custom_field_data["librenms_id"] == expected
+
+    @pytest.mark.parametrize(
+        ("stored", "librenms_id"),
+        [
+            ({"default": 42.0}, 42),
+            ({"default": True}, 1),
+            ({"default": {"id": 42.0, "oob": {"id": 7}}}, 42),
+        ],
+    )
+    def test_the_store_repairs_a_stored_id_that_only_compares_equal(
+        self, settings, librenms_server, stored, librenms_id
+    ):
+        """Python finds 42.0 == 42 and True == 1, but the reader rejects the stored float and bool."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.server_mappings import read_mapping
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        device = make_device("store-repairs-a-look-alike", librenms_cf={"default": None})
+        Device.objects.filter(pk=device.pk).update(custom_field_data={"librenms_id": stored})
+        device.refresh_from_db()
+        api = api_for(settings, librenms_server.url)
+
+        api._store_librenms_id(device, librenms_id)
+
+        assert read_mapping(Device.objects.get(pk=device.pk)).own_id("default") == librenms_id
+        assert read_mapping(device).own_id("default") == librenms_id
+
     def test_a_read_after_the_store_sees_the_mapping_on_the_callers_instance(self, settings, librenms_server):
         """The store copies the mapping onto the caller's object, and no earlier snapshot hides it."""
         from netbox_librenms_plugin.server_mappings import read_mapping
@@ -1099,6 +1144,7 @@ def test_discovered_mapping_and_vm_import_serialize_one_librenms_id_claim(settin
     from virtualization.models import VirtualMachine
 
     from netbox_librenms_plugin.import_utils.vm_operations import create_vm_from_librenms
+    from netbox_librenms_plugin.server_mappings import IDENTITY_BUSY_MESSAGE, IdentityBusy
     from netbox_librenms_plugin.tests.claim_race_helpers import run_librenms_id_claim_race
     from netbox_librenms_plugin.tests.conftest import make_cluster, make_device
 
@@ -1110,8 +1156,8 @@ def test_discovered_mapping_and_vm_import_serialize_one_librenms_id_claim(settin
     def store_discovered_mapping():
         try:
             api._store_librenms_id(device, librenms_id)
-        except ValueError as exc:
-            assert "already assigned" in str(exc)
+        except (ValueError, IdentityBusy) as exc:
+            refusals.append(str(exc))
             return False
         return True
 
@@ -1131,11 +1177,12 @@ def test_discovered_mapping_and_vm_import_serialize_one_librenms_id_claim(settin
                 validation,
                 server_key=api.server_key,
             )
-        except ValueError as exc:
-            assert "already assigned" in str(exc)
+        except (ValueError, IdentityBusy) as exc:
+            refusals.append(str(exc))
             return False
         return True
 
+    refusals = []
     outcomes, claim_keys = run_librenms_id_claim_race(store_discovered_mapping, import_vm)
 
     device.refresh_from_db()
@@ -1147,6 +1194,9 @@ def test_discovered_mapping_and_vm_import_serialize_one_librenms_id_claim(settin
     assert len(set(claim_keys)) == 1
     assert sorted(outcomes) == [False, True]
     assert sum(mapping.get(api.server_key) == librenms_id for mapping in mappings) == 1
+    # The claim does not wait: the loser is busy while the winner holds it, else it finds the owner.
+    assert len(refusals) == 1
+    assert refusals[0] == IDENTITY_BUSY_MESSAGE or "already assigned" in refusals[0]
 
 
 class TestParsePortVlanData:

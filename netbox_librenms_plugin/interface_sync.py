@@ -21,17 +21,18 @@ from netbox_librenms_plugin.interface_diff import (
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
+    MappingChange,
+    assign_own,
+    claim_librenms_port_binding,
     find_port_owner,
     name_match_may_be_port,
+    persist_mapping,
     read_mapping,
 )
 from netbox_librenms_plugin.utils import (
-    LibreNMSPortBindingConflict,
-    claim_librenms_port_binding,
     coerce_interface_mtu,
     convert_speed_to_kbps,
     interface_name_rejection_reason,
-    set_librenms_device_id,
 )
 from netbox_librenms_plugin.transactions import first_at_version, row_changed, save_at_version
 
@@ -45,6 +46,15 @@ class InterfaceWrite(NamedTuple):
     interface: Interface | VMInterface
     # Whether NetBox changed: the row, or a MAC address that the write attached.
     changed: bool
+
+
+class ApplicationResult(NamedTuple):
+    """What an ``apply`` callback of ``write_interface_row`` did to its row."""
+
+    # Whether it changed NetBox outside the row's columns, for example a MAC address.
+    changed_elsewhere: bool
+    # The row's mapping change, built on the row, or None.
+    mapping_change: MappingChange | None = None
 
 
 class NewInterfaceOutsideScope(ValueError):
@@ -250,17 +260,19 @@ def write_interface_row(interface, apply, *, fresh_read_queryset, created=False)
 
     A row that this sync did not create is read again, with its row version, from its pk and its
     owner, and only from *fresh_read_queryset*. Then ``apply(row)`` sets the values on the fresh
-    instance. With no changed column, nothing is locked, written or serialized. With a changed
-    column, the change log's before-state is the state of the fresh read, and the row is saved only
-    when no other operation changed it since the fresh read (``save_at_version``). A row that this
-    sync created is private to its transaction, so it is written without a fresh read, and its
-    before-state is its state as created. When the write renames the row, the channel children
-    that NetBox renames after the commit are recorded for the final check of the interface sync.
+    instance. A mapping change that it returns goes through ``persist_mapping``, which claims and
+    checks it and puts it on the row before the column diff. With no changed column, nothing is
+    locked, written or serialized. With a changed column, the change log's before-state is the
+    state of the fresh read, and the row is saved only when no other operation changed it since the
+    fresh read (``save_at_version``). A row that this sync created is private to its transaction,
+    so it is written without a fresh read, and its before-state is its state as created. When the
+    write renames the row, the channel children that NetBox renames after the commit are recorded
+    for the final check of the interface sync.
 
     Args:
         interface (Interface | VMInterface): The interface as the caller read it.
-        apply (Callable[[Interface | VMInterface], bool]): Sets the values on the row to write, and
-            returns whether it changed NetBox outside the row's columns.
+        apply (Callable[[Interface | VMInterface], ApplicationResult]): Sets the values on the row
+            to write, and returns what it did.
         fresh_read_queryset (QuerySet): The rows that the fresh read may find. The IP tab passes
             its change scope. The interface sync passes all rows of the model, because its final
             check reads the scope after the last write.
@@ -282,18 +294,26 @@ def write_interface_row(interface, apply, *, fresh_read_queryset, created=False)
             raise row_changed(interface.name)
     # A copy now, and a snapshot only for a changed row: a snapshot reads the database.
     fresh = copy_before_change(row)
-    changed_elsewhere = apply(row)
-    changed_columns = {field.column for field in changed_fields(row, fresh)}
-    if row.name != fresh.name:
-        _record_renamed_channel_children(row, fresh.name)
-    if changed_columns:
-        # A created row gets this second save too: its MAC needs the row's pk, and the row needs the MAC's pk.
-        keep_change_log_before_state(row, fresh)
-        if created:
-            row.save()
-        else:
-            save_at_version(row, version=version, changed_columns=changed_columns, name=interface.name)
-    return InterfaceWrite(row, bool(changed_columns) or changed_elsewhere)
+    result = apply(row)
+    if not isinstance(result, ApplicationResult):
+        raise TypeError(f"An interface row's apply returns an ApplicationResult, not {type(result).__name__}.")
+
+    def write(row, _mapping_fields=frozenset()):
+        changed_columns = {field.column for field in changed_fields(row, fresh)}
+        if row.name != fresh.name:
+            _record_renamed_channel_children(row, fresh.name)
+        if changed_columns:
+            # A created row gets this second save too: its MAC needs the row's pk, and the row needs the MAC's pk.
+            keep_change_log_before_state(row, fresh)
+            if created:
+                row.save()
+            else:
+                save_at_version(row, version=version, changed_columns=changed_columns, name=interface.name)
+        return InterfaceWrite(row, bool(changed_columns) or result.changed_elsewhere)
+
+    if result.mapping_change is None:
+        return write(row)
+    return persist_mapping(row, result.mapping_change, write=write)
 
 
 def _bound_interface_name_is_occupied(interface, synced_name, port_id, server_key):
@@ -367,7 +387,8 @@ def update_interface_from_port(  # noqa: C901
     one case where the planned type is written without a check against its links.
     ``fresh_read_queryset`` holds the rows that the write may read again, as in ``write_interface_row``.
 
-    Claim and re-read the cross-model port identity before changing any field.
+    The port's mapping change is persisted with the row, so the port is claimed again and its
+    owner read again right before the save, also when the mapping does not change.
 
     Returns:
         InterfaceWrite: The instance that holds the row as written, and whether NetBox changed.
@@ -379,15 +400,6 @@ def update_interface_from_port(  # noqa: C901
 
     """
     decision = rules.decide_interface_write(librenms_interface, platform_id=interface_owner_platform_id(interface))
-    port_id = normalize_librenms_port_id(librenms_interface.get("port_id"))
-    if port_id is not None:
-        claim_librenms_port_binding(port_id, server_key)
-        try:
-            existing_owner = find_port_owner(port_id, server=server_key)
-        except AmbiguousLibreNMSIdError:
-            raise LibreNMSPortBindingConflict("The LibreNMS port ID matches multiple NetBox interfaces.") from None
-        if existing_owner is not None and existing_owner != interface:
-            raise LibreNMSPortBindingConflict("The LibreNMS port ID is already assigned to another NetBox interface.")
     if "name" not in exclude_columns:
         rejection = interface_name_rejection_reason(
             {interface_name_field: synced_name}, interface_name_field, type(interface)
@@ -431,15 +443,14 @@ def update_interface_from_port(  # noqa: C901
                 value = synced_name if netbox_key == "name" else librenms_interface.get(librenms_key)
                 setattr(row, netbox_key, value)
 
-        if port_id is not None:
-            set_librenms_device_id(row, port_id, server_key)
+        mapping_change = assign_own(row, server_key, port_id) if port_id is not None else None
 
         if "enabled" not in exclude_columns:
             row.enabled = interface_enabled_from_port(librenms_interface)
 
         if "mac_address" in exclude_columns:
-            return False
-        return assign_interface_mac(row, librenms_interface.get("ifPhysAddress"))
+            return ApplicationResult(False, mapping_change)
+        return ApplicationResult(assign_interface_mac(row, librenms_interface.get("ifPhysAddress")), mapping_change)
 
     return write_interface_row(interface, apply_port, fresh_read_queryset=fresh_read_queryset, created=created)
 

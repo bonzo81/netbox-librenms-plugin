@@ -1,7 +1,6 @@
 """Device validation, import, and fetch operations."""
 
 import logging
-from types import SimpleNamespace
 
 from dcim.models import Device, DeviceRole, DeviceType, Rack, Site, VirtualChassis
 from django.core.cache import cache
@@ -27,12 +26,10 @@ from ..utils import (
     find_matching_location,
     find_matching_platform,
     find_matching_site,
-    lock_librenms_id_assignment,
     match_librenms_hardware_to_device_type,
     normalize_serial,
     parse_location_for_import,
     resolve_location_mapping,
-    set_librenms_device_id,
 )
 from .cache import get_import_device_cache_key
 from .naming import _name_candidates, _resolve_device_name
@@ -43,9 +40,14 @@ from .virtual_chassis import (
     update_vc_member_suggested_names,
 )
 from netbox_librenms_plugin.server_mappings import (
+    IDENTITY_BUSY_MESSAGE,
     AmbiguousLibreNMSIdError,
+    IdentityBusy,
     MappingRole,
+    assign_own,
     find_mapping,
+    lock_librenms_id_assignment,
+    persist_mapping,
     read_mapping,
 )
 
@@ -1628,6 +1630,13 @@ def validate_device_for_import(  # noqa: C901
         return result
 
 
+def _validate_and_insert(row, _mapping_fields=frozenset()):
+    """Validate the whole new row and insert it once, with its mapping already on it."""
+    row.full_clean()
+    row.save()
+    return row
+
+
 def import_single_device(  # noqa: C901
     device_id: int,
     server_key: str = None,
@@ -1849,8 +1858,6 @@ def import_single_device(  # noqa: C901
             # Generate import timestamp comment
             import_time = timezone.now().strftime("%Y-%m-%d %H:%M:%S %Z")
 
-            _cf_proxy = SimpleNamespace(custom_field_data={})
-            set_librenms_device_id(_cf_proxy, device_id, api.server_key)
             device_data = {
                 "name": device_name,
                 "site": site,
@@ -1858,7 +1865,6 @@ def import_single_device(  # noqa: C901
                 "role": device_role,
                 "status": "active" if libre_device.get("status") == 1 else "offline",
                 "comments": f"Imported from LibreNMS by netbox-librenms-plugin on {import_time}",
-                "custom_field_data": _cf_proxy.custom_field_data,
             }
 
             # Add optional fields
@@ -1902,10 +1908,9 @@ def import_single_device(  # noqa: C901
                 if tenant:
                     device_data["tenant"] = tenant
 
-            # Create the device
+            # Create the device with its mapping: the claim and the owner check come before the insert.
             device = Device(**device_data)
-            device.full_clean()
-            device.save()
+            persist_mapping(device, assign_own(device, api.server_key, device_id), write=_validate_and_insert)
 
         # Sync additional data based on options
         sync_options = sync_options or {}
@@ -1936,11 +1941,13 @@ def import_single_device(  # noqa: C901
 
     except Exception as e:
         logger.exception(f"Error importing device {device_id}")
+        # The import names a busy identity claim; every other lock conflict gets the try-again text.
+        detail = IDENTITY_BUSY_MESSAGE if isinstance(e, IdentityBusy) else exception_text_for(e, Device, text_viewer)
         return {
             "success": False,
             "device": None,
             "message": "",
-            "error": exception_text_for(e, Device, text_viewer),
+            "error": detail,
             "synced": {},
         }
 

@@ -24,12 +24,9 @@ from netbox_librenms_plugin.tests.conftest import (
     make_ip,
     make_superuser,
     make_vm,
+    seed_own_mapping,
 )
-from netbox_librenms_plugin.utils import (
-    reported_name_owners,
-    set_librenms_device_id,
-    synced_interface_names,
-)
+from netbox_librenms_plugin.utils import reported_name_owners, synced_interface_names
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
 
@@ -67,7 +64,7 @@ def _bound_interface(owner, name, port_id):
         interface = make_interface(owner, name)
     else:
         interface = VMInterface.objects.create(virtual_machine=owner, name=name)
-    set_librenms_device_id(interface, port_id, SERVER_KEY)
+    seed_own_mapping(interface, port_id, SERVER_KEY)
     interface.save()
     return interface
 
@@ -413,14 +410,15 @@ class TestRebind:
 
     def test_rebind_is_refused_for_a_migrated_chassis_member(self, client, settings):
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
-        from netbox_librenms_plugin.utils import mark_librenms_migrated
+        from netbox_librenms_plugin.server_mappings import mark_migrated
+        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
 
         configure_default_librenms_server(settings)
         _chassis, (viewed_member, target_member) = make_virtual_chassis_members("name-owner-rebind-migrated")
-        set_librenms_device_id(viewed_member, 86, SERVER_KEY)
+        seed_own_mapping(viewed_member, 86, SERVER_KEY)
         viewed_member.save()
         winner = make_device("name-owner-rebind-migrated-winner")
-        mark_librenms_migrated(target_member, winner.pk, SERVER_KEY)
+        apply_mapping_change(target_member, mark_migrated(target_member, winner.pk, SERVER_KEY))
         target_member.save()
         interface = _bound_interface(target_member, "eth0", STALE_PORT)
         _seed(viewed_member, [_port(HOST_PORT, "eth0")])

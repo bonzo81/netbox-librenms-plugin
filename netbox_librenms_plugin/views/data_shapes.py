@@ -20,8 +20,7 @@ from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording, fi
 from netbox_librenms_plugin.data_shapes.capture import capture_device_recording
 from netbox_librenms_plugin.data_shapes.compress import compress_recording
 from netbox_librenms_plugin.data_shapes.signature import classify_novelty, compute_shape_signature
-from netbox_librenms_plugin.server_mappings import read_mapping
-from netbox_librenms_plugin.utils import get_librenms_sync_device
+from netbox_librenms_plugin.server_mappings import get_librenms_sync_device, read_mapping
 from netbox_librenms_plugin.views.mixins import (
     LibreNMSAPIMixin,
     LibreNMSPermissionMixin,

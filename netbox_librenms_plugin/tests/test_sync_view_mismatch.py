@@ -273,7 +273,7 @@ class TestBuildAllServerMappings:
 
 class TestVirtualChassisLookup:
     def test_explicit_server_mapping_on_another_member_wins_over_legacy_id(self):
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         viewed = _netbox_device("vc-viewed")
         sync_member = _netbox_device("vc-sync")
@@ -286,7 +286,7 @@ class TestVirtualChassisLookup:
         assert get_librenms_sync_device(viewed, server_key="default") == sync_member
 
     def test_non_vc_device_is_its_own_lookup_device(self):
-        from netbox_librenms_plugin.utils import get_librenms_sync_device
+        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
 
         device = _netbox_device("standalone")
 

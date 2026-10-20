@@ -15,9 +15,9 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis_members,
     make_vm,
+    seed_own_mapping,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import assert_update_logged, make_view, missing_pk
-from netbox_librenms_plugin.utils import set_librenms_device_id
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
 
@@ -84,7 +84,7 @@ def _seed(obj, rows):
 
 def _set_librenms_id(obj, value):
     """Store a LibreNMS id on a real object through the production writer."""
-    set_librenms_device_id(obj, value, SERVER_KEY)
+    seed_own_mapping(obj, value, SERVER_KEY)
     obj.save(update_fields=["custom_field_data"])
 
 
@@ -250,6 +250,37 @@ class TestPrimaryIPFromManagementAddress:
         assert not any("Set as Primary IP" in text for text in _messages(response))
         device.refresh_from_db()
         assert device.primary_ip4_id == address.pk
+
+    def test_a_held_identity_claim_answers_try_again_and_writes_nothing(self, client, live_librenms):
+        """Discovery that meets another operation's claim stops the sync before its first write."""
+        from dcim.models import Interface
+        from ipam.models import IPAddress
+
+        from netbox_librenms_plugin.middleware import TRY_AGAIN_MESSAGE
+        from netbox_librenms_plugin.tests.claim_race_helpers import held_device_claim
+
+        device = make_device("ip-primary-busy.example.test")
+        interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
+        _set_librenms_id(interface, 9231)
+        live_librenms.server.register(
+            f"/api/v0/devices/{device.name}",
+            {"status": "ok", "devices": [{"device_id": 4231, "ip": "198.18.42.31"}]},
+        )
+        _serve_device_info(live_librenms, 4231, {"ip": "198.18.42.31"})
+        row = _row("198.18.42.31", 9231, interface.name)
+        _seed(device, [row])
+        _login(client, "ip-primary-busy-user")
+
+        with held_device_claim(SERVER_KEY, 4231):
+            response = client.post(_ip_url(device), _sync_payload([row]))
+
+        assert response.status_code == 302
+        assert _messages(response, "error") == [TRY_AGAIN_MESSAGE]
+        assert not IPAddress.objects.filter(address=row["ip_with_mask"]).exists()
+        assert list(Interface.objects.filter(device=device)) == [interface]
+        device.refresh_from_db()
+        assert device.primary_ip4_id is None
+        assert device.custom_field_data.get("librenms_id") is None
 
     def test_management_row_without_an_interface_reports_primary_not_set(self, client, live_librenms):
         """An unmatched management row is reported apart from an ordinary unmatched row."""

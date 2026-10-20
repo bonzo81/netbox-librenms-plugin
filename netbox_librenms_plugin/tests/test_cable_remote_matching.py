@@ -617,7 +617,7 @@ def test_the_link_context_reads_a_page_of_ids_with_one_regex_per_path():
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
 
-    from netbox_librenms_plugin.utils import set_librenms_device_id
+    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
     server_key = configured_server_key()
     local = make_device("regex-count-local")
@@ -626,8 +626,8 @@ def test_the_link_context_reads_a_page_of_ids_with_one_regex_per_path():
         remote = make_device(f"regex-count-peer-{index}")
         map_device_to_librenms(remote, 7300 + index, server_key=server_key)
         interface = make_interface(remote, "Gi0/1")
-        set_librenms_device_id(interface, 5300 + index, server_key)
-        interface.save(update_fields=["custom_field_data"])
+        seed_own_mapping(interface, 5300 + index, server_key)
+        interface.save()
         expected[(remote.pk, 5300 + index)] = [interface]
         links.append(
             _row(
@@ -930,7 +930,7 @@ class TestDuplicatesAreGoneFromTheRenderedRows:
 
     def test_two_protocols_grouped_by_the_port_record_resolve_one_interface(self):
         """The dedupe key and the table lookup read one far-end port: the matched record."""
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         server_key = configured_server_key()
         local_device = make_device("dedupe-ref-local")
@@ -938,10 +938,10 @@ class TestDuplicatesAreGoneFromTheRenderedRows:
         remote_device = make_device("dedupe-ref-remote")
         map_device_to_librenms(remote_device, 9, server_key=server_key)
         matched = make_interface(remote_device, "port-a")
-        set_librenms_device_id(matched, 500, server_key)
+        seed_own_mapping(matched, 500, server_key)
         matched.save()
         stale = make_interface(remote_device, "port-b")
-        set_librenms_device_id(stale, 501, server_key)
+        seed_own_mapping(stale, 501, server_key)
         stale.save()
 
         rows = _make_view().enrich_links_data(
@@ -1027,11 +1027,12 @@ class TestTheCreateAffordance:
         assert self._affordance(row, local_device)
 
     def test_a_migrated_owner_loses_the_remote_create_action(self):
-        from netbox_librenms_plugin.utils import mark_librenms_migrated
+        from netbox_librenms_plugin.server_mappings import mark_migrated
+        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
 
         server_key, local_device, _, remote_device, row = _create_setup("create-migrated")
         assert self._affordance(row, local_device)
-        mark_librenms_migrated(local_device, remote_device.pk, server_key)
+        apply_mapping_change(local_device, mark_migrated(local_device, remote_device.pk, server_key))
         local_device.save(update_fields=["custom_field_data"])
 
         _make_view()._disable_actions_for_migrated_owners([row], local_device, local_device, server_key)
@@ -1419,7 +1420,8 @@ class TestCheckAndCreateTheRemoteEnd:
         from dcim.models import Device, Interface
 
         from netbox_librenms_plugin.tests.conftest import make_superuser
-        from netbox_librenms_plugin.utils import mark_librenms_migrated
+        from netbox_librenms_plugin.server_mappings import mark_migrated
+        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
         from netbox_librenms_plugin.views.sync.cables import CableRemoteCreateView
 
         server_key, local_device, local_interface, remote_device, row_id = self._scenario(
@@ -1433,7 +1435,7 @@ class TestCheckAndCreateTheRemoteEnd:
                 Interface.objects.filter(pk=local_interface.pk).update(device=make_device("mk-owner-drift-other"))
             else:
                 fresh = Device.objects.get(pk=local_device.pk)
-                mark_librenms_migrated(fresh, remote_device.pk, server_key)
+                apply_mapping_change(fresh, mark_migrated(fresh, remote_device.pk, server_key))
                 fresh.save(update_fields=["custom_field_data"])
             return port
 
@@ -1475,12 +1477,13 @@ class TestCheckAndCreateTheRemoteEnd:
         from dcim.models import Interface
 
         from netbox_librenms_plugin.tests.conftest import make_superuser
-        from netbox_librenms_plugin.utils import mark_librenms_migrated
+        from netbox_librenms_plugin.server_mappings import mark_migrated
+        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
 
         server_key, local_device, local_interface, remote_device, row_id = self._scenario(
             "mk-migrated", librenms_server, settings
         )
-        mark_librenms_migrated(local_device, remote_device.pk, server_key)
+        apply_mapping_change(local_device, mark_migrated(local_device, remote_device.pk, server_key))
         local_device.save(update_fields=["custom_field_data"])
 
         response = _logged_in(make_superuser("remote-create-mk-migrated")).post(
@@ -1496,14 +1499,15 @@ class TestCheckAndCreateTheRemoteEnd:
         from dcim.models import Interface
 
         from netbox_librenms_plugin.tests.conftest import make_superuser
-        from netbox_librenms_plugin.utils import mark_librenms_migrated
+        from netbox_librenms_plugin.server_mappings import mark_migrated
+        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
         from netbox_librenms_plugin.views.sync.cables import CableRemoteCreateView
 
         server_key, local_device, local_interface, remote_device, row_id = self._scenario(
             "mk-cache-migrated", librenms_server, settings
         )
         cache_device = make_device("mk-cache-migrated-owner")
-        mark_librenms_migrated(cache_device, remote_device.pk, server_key)
+        apply_mapping_change(cache_device, mark_migrated(cache_device, remote_device.pk, server_key))
         cache_device.save(update_fields=["custom_field_data"])
         original = CableRemoteCreateView.get_cached_links_data
 
@@ -1681,8 +1685,7 @@ class TestCheckAndCreateTheRemoteEnd:
         """The created end is port 500. A binder that moves it to port 901 before the lock makes the row stale."""
         from dcim.models import Cable, Interface
 
-        from netbox_librenms_plugin.tests.conftest import make_superuser
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import make_superuser, seed_own_mapping
         from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 
         server_key, local_device, local_interface, remote_device, row_id = self._scenario(
@@ -1692,7 +1695,7 @@ class TestCheckAndCreateTheRemoteEnd:
 
         def rebind_then_lock(view, local_term, remote_term, **kwargs):
             rebound = Interface.objects.get(pk=remote_term.pk)
-            set_librenms_device_id(rebound, 901, server_key)
+            seed_own_mapping(rebound, 901, server_key)
             rebound.save()
             return real_lock(view, local_term, remote_term, **kwargs)
 
@@ -1709,11 +1712,11 @@ class TestCheckAndCreateTheRemoteEnd:
     def test_a_hidden_renamed_remote_port_cannot_be_bound_twice(self, librenms_server, settings):
         from dcim.models import Cable, Device, Interface
         from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
-        from netbox_librenms_plugin.utils import set_librenms_device_id
+        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         server_key, local, near, remote, row_id = self._scenario("hidden-bound-port", librenms_server, settings)
         existing = make_interface(remote, "renamed-port")
-        set_librenms_device_id(existing, 500, server_key)
+        seed_own_mapping(existing, 500, server_key)
         existing.save()
         user = make_user_with_perms(
             "hidden-bound-port",
@@ -2074,7 +2077,7 @@ class TestTheVerifiedRowRendersLikeTheTable:
 @pytest.mark.parametrize("patch_path", [False, True])
 def test_remote_port_identity_resolves_a_renamed_interface(client, advertised_id, patch_path):
     from netbox_librenms_plugin.tests.conftest import cable_together, make_patch_panel, make_superuser
-    from netbox_librenms_plugin.utils import set_librenms_device_id
+    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
     key = configured_server_key()
     local = make_device("port-identity-local")
@@ -2083,11 +2086,11 @@ def test_remote_port_identity_resolves_a_renamed_interface(client, advertised_id
     map_device_to_librenms(remote, 9, server_key=key)
     # The matched port record (key 500) names the far end; an advertised ID it overrides is stale.
     far = make_interface(remote, "renamed-interface")
-    set_librenms_device_id(far, 500, key)
+    seed_own_mapping(far, 500, key)
     far.save()
     if advertised_id is not None:
         other = make_interface(remote, "other-interface")
-        set_librenms_device_id(other, advertised_id, key)
+        seed_own_mapping(other, advertised_id, key)
         other.save()
     if patch_path:
         _panel, front, rear = make_patch_panel("port-identity-panel")
@@ -2472,13 +2475,13 @@ def test_remote_create_is_not_offered_for_a_chassis_member_out_of_view(librenms_
 def test_remote_create_refuses_a_port_already_bound_on_another_device(librenms_server, settings):
     from dcim.models import Interface
     from netbox_librenms_plugin.tests.conftest import make_superuser
-    from netbox_librenms_plugin.utils import set_librenms_device_id
+    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
     key, local, local_interface, remote, row_id = TestCheckAndCreateTheRemoteEnd()._scenario(
         "create-foreign-port", librenms_server, settings
     )
     holder = make_interface(make_device("create-foreign-holder"), "private-held-port")
-    set_librenms_device_id(holder, 500, key)
+    seed_own_mapping(holder, 500, key)
     holder.save()
     response = _logged_in(make_superuser("create-foreign-port-user")).post(
         _remote_create_url(local), {"expected_local_id": local_interface.pk, "row_id": row_id, "server_key": key}

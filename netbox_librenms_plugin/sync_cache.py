@@ -17,8 +17,8 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
 from netbox_librenms_plugin.librenms_api import configured_cache_timeout
-from netbox_librenms_plugin.server_mappings import mapped_device_servers
-from netbox_librenms_plugin.utils import cache_remaining_ttl, get_librenms_sync_device
+from netbox_librenms_plugin.server_mappings import get_librenms_sync_device, mapped_device_servers
+from netbox_librenms_plugin.utils import cache_remaining_ttl
 
 logger = logging.getLogger(__name__)
 

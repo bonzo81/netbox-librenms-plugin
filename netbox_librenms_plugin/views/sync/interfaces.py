@@ -48,8 +48,13 @@ from netbox_librenms_plugin.interface_sync import (
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
+    LibreNMSPortBindingConflict,
+    assign_own,
+    claim_librenms_port_binding,
     find_port_owner,
+    get_librenms_sync_device,
     name_match_may_be_port,
+    persist_mapping,
     read_mapping,
     read_mappings,
 )
@@ -61,20 +66,16 @@ from netbox_librenms_plugin.sync_cache import (
 )
 from netbox_librenms_plugin.transactions import CommittedFollowUpError, classify_conflict, run_transaction
 from netbox_librenms_plugin.utils import (
-    LibreNMSPortBindingConflict,
-    claim_librenms_port_binding,
     build_migrated_context,
     coerce_model_pk,
     convert_speed_to_kbps,
     get_interface_name_field,
     get_interface_port_identity_sets,
-    get_librenms_sync_device,
     is_list_of_dicts,
     netbox_interface_clean,
     normalize_relationship_maps,
     reported_name_owners,
     resolve_interface_row_device,
-    set_librenms_device_id,
     syncable_interface_name,
     synced_interface_names,
     validation_error_detail,
@@ -2045,6 +2046,12 @@ class _RebindRefusedError(Exception):
     """A rebind precondition failed; the message is safe to show the caller."""
 
 
+def _save_row(row, _mapping_fields=frozenset()):
+    """Save the whole rebound row, without the validation the rebind never ran."""
+    row.save()
+    return row
+
+
 class RebindInterfacePortView(SyncInterfacesView):
     """
     Move a stale LibreNMS binding to the host row whose reported name the bound interface holds.
@@ -2185,14 +2192,13 @@ class RebindInterfacePortView(SyncInterfacesView):
             port_is_bound = True
         if port_is_bound:
             raise _RebindRefusedError(f"LibreNMS port {port_id} is already bound to a NetBox interface.")
-        interface.snapshot()
-        set_librenms_device_id(interface, port_id, server_key)
-        if read_mapping(interface).own_id(server_key) != port_id:
+        change = assign_own(interface, server_key, port_id)
+        if change.after.own_id(server_key) != port_id:
             raise _RebindRefusedError(
                 f"NetBox interface '{owner.name}' stores its LibreNMS ID in the legacy format. Convert it first."
             )
-        interface.save()
-        return interface
+        interface.snapshot()
+        return persist_mapping(interface, change, write=_save_row)
 
 
 class DeleteNetBoxInterfacesView(

@@ -100,12 +100,13 @@ class TestRenderSyncPartial:
         from django.test import RequestFactory, override_settings
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
-        from netbox_librenms_plugin.utils import mark_librenms_migrated
+        from netbox_librenms_plugin.server_mappings import mark_migrated
+        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
         from netbox_librenms_plugin.views.mixins import LibreNMSAPIMixin, LibreNMSPermissionMixin
 
         winner = make_device("rsp-winner")
         donor = make_device("rsp-donor")
-        mark_librenms_migrated(donor, winner.pk, "prod")  # real _migrated_to marker under "prod"
+        apply_mapping_change(donor, mark_migrated(donor, winner.pk, "prod"))  # real _migrated_to marker under "prod"
         donor.save()
 
         # Real sync views combine both mixins (BaseLibreNMSSyncView / BaseIPAddressTableView); build a
@@ -153,11 +154,13 @@ class TestBuildMigratedContextLazyWinner:
         from django.test.utils import CaptureQueriesContext
 
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.utils import build_migrated_context, mark_librenms_migrated
+        from netbox_librenms_plugin.utils import build_migrated_context
+        from netbox_librenms_plugin.server_mappings import mark_migrated
+        from netbox_librenms_plugin.tests.conftest import apply_mapping_change
 
         winner = make_device("bmc-winner")
         donor = make_device("bmc-donor")
-        mark_librenms_migrated(donor, winner.pk, "default")
+        apply_mapping_change(donor, mark_migrated(donor, winner.pk, "default"))
         donor.save()
 
         # Building the context must NOT fetch the winner row (the boolean-only partials never read it).

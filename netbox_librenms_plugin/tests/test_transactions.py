@@ -32,13 +32,12 @@ from netbox_librenms_plugin.transactions import (
     run_transaction,
     update_existing_row,
 )
-from netbox_librenms_plugin.utils import (
-    DATABASE_ERROR_MESSAGE,
+from netbox_librenms_plugin.server_mappings import (
     LibreNMSPortBindingBusy,
     LibreNMSPortBindingConflict,
     claim_librenms_port_binding,
-    exception_text_for,
 )
+from netbox_librenms_plugin.utils import DATABASE_ERROR_MESSAGE, exception_text_for
 
 # Long enough for a blocked statement to be a real lock wait, short enough for two attempts.
 LOCK_TIMEOUT_MS = 200
@@ -330,6 +329,71 @@ def test_a_row_that_already_holds_the_values_is_neither_validated_nor_saved():
     assert _site_changes(site) == []
 
 
+def _device_updates(device):
+    from core.models import ObjectChange
+
+    return list(
+        ObjectChange.objects.filter(
+            changed_object_type=ContentType.objects.get_for_model(device), changed_object_id=device.pk, action="update"
+        )
+    )
+
+
+@pytest.mark.django_db
+def test_a_mapping_change_saves_with_the_other_fields_in_one_validated_save():
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.server_mappings import assign_own, read_mapping
+    from netbox_librenms_plugin.tests.conftest import make_device
+
+    device = make_device("existing-row-mapping")
+
+    def apply(row):
+        row.description = "linked"
+        return assign_own(row, "default", 7401)
+
+    with _netbox_request_context():
+        update_existing_row(Device.objects.filter(pk=device.pk), apply)
+
+    stored = Device.objects.get(pk=device.pk)
+    assert (stored.description, read_mapping(stored).own_id("default")) == ("linked", 7401)
+    [change] = _device_updates(device)
+    assert change.prechange_data["description"] == ""
+    assert change.postchange_data["custom_fields"]["librenms_id"] == {"default": 7401}
+
+
+@pytest.mark.django_db
+def test_a_mapping_change_on_an_invalid_row_saves_nothing():
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.server_mappings import assign_own, read_mapping
+    from netbox_librenms_plugin.tests.conftest import make_device
+
+    device = make_device("existing-row-mapping-invalid")
+
+    def apply(row):
+        row.status = "not-a-status"
+        return assign_own(row, "default", 7402)
+
+    with _netbox_request_context(), pytest.raises(ValidationError):
+        update_existing_row(Device.objects.filter(pk=device.pk), apply)
+
+    assert read_mapping(Device.objects.get(pk=device.pk)).own_id("default") is None
+    assert _device_updates(device) == []
+
+
+@pytest.mark.django_db
+def test_an_apply_result_that_is_neither_false_nor_a_change_is_refused():
+    from dcim.models import Site
+
+    site = _site("existing-row-truthy-result")
+
+    with pytest.raises(TypeError, match="MappingChange"):
+        update_existing_row(Site.objects.filter(pk=site.pk), lambda row: True)
+
+    assert _site_changes(site) == []
+
+
 @pytest.mark.django_db
 def test_a_missing_row_raises_does_not_exist_without_applying_the_change():
     from dcim.models import Site
@@ -571,6 +635,113 @@ def test_a_busy_port_claim_that_work_swallowed_is_still_retried():
         result = run_transaction(work)
 
     assert (result, calls) == ("claimed", [1, 2])
+
+
+@pytest.mark.django_db
+def test_a_busy_device_identity_claim_that_work_swallowed_is_still_retried():
+    """A held device identity claim records itself, so a broad handler cannot commit the attempt."""
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.server_mappings import assign_own, persist_mapping
+    from netbox_librenms_plugin.tests.claim_race_helpers import device_claim_key
+    from netbox_librenms_plugin.tests.conftest import make_device
+
+    device = make_device(f"runner-identity-{uuid4().hex[:8]}")
+    calls = []
+
+    def write(row, fields):
+        row.save()
+        return row
+
+    with second_connection() as other:
+        with other.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_xact_lock(%s)", [device_claim_key("default", 9402)])
+
+        def work():
+            calls.append(len(calls) + 1)
+            if len(calls) == 2:
+                other.rollback()
+            row = Device.objects.select_for_update().get(pk=device.pk)
+            try:
+                persist_mapping(row, assign_own(row, "default", 9402), write=write)
+            except Exception:
+                return "swallowed"
+            return "claimed"
+
+        result = run_transaction(work)
+
+    assert (result, calls) == ("claimed", [1, 2])
+
+
+@pytest.mark.django_db
+def test_a_stale_mapping_that_work_swallowed_is_still_retried():
+    """A mapping that changed after the read records its conflict, so a broad handler cannot commit the attempt."""
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.server_mappings import assign_own, persist_mapping, read_mapping
+    from netbox_librenms_plugin.tests.conftest import make_device
+
+    device = make_device(f"runner-stale-{uuid4().hex[:8]}")
+    calls = []
+
+    def write(row, fields):
+        row.save()
+        return row
+
+    def work():
+        calls.append(len(calls) + 1)
+        change = assign_own(Device.objects.get(pk=device.pk), "default", 9403)
+        if len(calls) == 1:
+            Device.objects.filter(pk=device.pk).update(custom_field_data={"librenms_id": {"default": 9404}})
+        row = Device.objects.select_for_update().get(pk=device.pk)
+        try:
+            persist_mapping(row, change, write=write)
+        except Exception:
+            return "swallowed"
+        return "assigned"
+
+    result = run_transaction(work)
+
+    assert (result, calls) == ("assigned", [1, 2])
+    device.refresh_from_db()
+    assert read_mapping(device).own_id("default") == 9403
+
+
+@pytest.mark.django_db
+def test_a_stale_merge_side_that_work_swallowed_is_still_retried():
+    """A merge side that changed after the build records its conflict, so a broad handler cannot commit the attempt."""
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.server_mappings import merge_links, persist_mapping, persist_merge, read_mapping
+    from netbox_librenms_plugin.tests.conftest import make_device
+
+    suffix = uuid4().hex[:8]
+    winner = make_device(f"runner-merge-winner-{suffix}", librenms_cf={"default": {"id": 9405}})
+    donor = make_device(f"runner-merge-donor-{suffix}", librenms_cf={"default": {"id": 9406}})
+    calls = []
+
+    def work():
+        calls.append(len(calls) + 1)
+        rows = [Device.objects.get(pk=winner.pk), Device.objects.get(pk=donor.pk)]
+        merge = merge_links(*rows, "default")
+        if len(calls) == 1:
+            Device.objects.filter(pk=donor.pk).update(custom_field_data={"librenms_id": {"default": {"id": 9407}}})
+
+        def save_both():
+            for row in rows:
+                persist_mapping(row, merge.change_for(row), write=lambda locked, fields: locked.save())
+
+        try:
+            persist_merge(merge, write=save_both)
+        except Exception:
+            return "swallowed"
+        return "merged"
+
+    result = run_transaction(work)
+
+    assert (result, calls) == ("merged", [1, 2])
+    winner.refresh_from_db()
+    assert read_mapping(winner).oob_id("default") == 9406
 
 
 @pytest.mark.django_db
