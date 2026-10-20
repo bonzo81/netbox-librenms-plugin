@@ -12,12 +12,14 @@ E2E_DIR = REPO_ROOT / "tests" / "e2e"
 SOURCE_SUFFIXES = {".py", ".sh", ".yml", ".ini", ".txt"}
 
 
-def _tracked_e2e_files() -> list[Path]:
+def _tracked_e2e_files(repo_root: Path = REPO_ROOT) -> list[Path]:
     """Return the git-tracked files under ``tests/e2e``; local output such as Playwright traces is not a source."""
     listing = subprocess.run(
-        ["git", "-C", str(REPO_ROOT), "ls-files", "-z", "--", "tests/e2e"], capture_output=True, check=True
+        ["git", "-C", str(repo_root), "ls-files", "-z", "--", "tests/e2e"], capture_output=True, check=True
     ).stdout.decode()
-    return [REPO_ROOT / name for name in listing.split("\0") if name]
+    paths = (repo_root / name for name in listing.split("\0") if name)
+    # The index still lists a file whose deletion is not staged.
+    return [path for path in paths if path.is_file()]
 
 
 # A container can mount a worktree whose .git file points at a host path that git cannot read.
@@ -46,3 +48,21 @@ def test_e2e_run_instructions_carry_no_developer_home_path():
     ]
 
     assert not leaks, f"absolute developer path in the e2e sources: {leaks}"
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
+def test_tracked_e2e_files_skip_a_deletion_that_is_not_staged(tmp_path):
+    """The index still lists a file that was deleted on disk; the scan must not try to read it."""
+
+    def git(*args):
+        subprocess.run(["git", "-C", str(tmp_path), *args], capture_output=True, check=True)
+
+    e2e = tmp_path / "tests" / "e2e"
+    e2e.mkdir(parents=True)
+    (e2e / "kept.py").write_text("")
+    (e2e / "deleted.py").write_text("")
+    git("init", "-q")
+    git("add", "tests/e2e")
+    (e2e / "deleted.py").unlink()
+
+    assert _tracked_e2e_files(tmp_path) == [e2e / "kept.py"]
