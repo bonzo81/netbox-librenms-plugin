@@ -20,7 +20,17 @@ def _tracked_e2e_files() -> list[Path]:
     return [REPO_ROOT / name for name in listing.split("\0") if name]
 
 
-@pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed, so the tracked e2e sources are unknown")
+# A container can mount a worktree whose .git file points at a host path that git cannot read.
+GIT_READS_CHECKOUT = (
+    shutil.which("git") is not None
+    and subprocess.run(["git", "-C", str(REPO_ROOT), "rev-parse", "--git-dir"], capture_output=True).returncode == 0
+)
+
+
+@pytest.mark.skipif(
+    not GIT_READS_CHECKOUT,
+    reason="git is not installed or cannot read this checkout, so the tracked e2e sources are unknown",
+)
 def test_e2e_run_instructions_carry_no_developer_home_path():
     """Every contributor must be able to run the documented command."""
     sources = sorted(
