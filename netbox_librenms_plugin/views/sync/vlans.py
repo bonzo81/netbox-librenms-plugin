@@ -19,6 +19,7 @@ from netbox_librenms_plugin.sync_cache import (
     apply_request_cache_transition,
     schedule_request_cache_mutation,
 )
+from netbox_librenms_plugin.transactions import saved_in_scope
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
     index_vlan_source_rows,
@@ -470,12 +471,12 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         return True
 
     @staticmethod
-    def _create_vlan(request, *, lookup, vid, name, addable_vlans, outcome):
+    def _create_vlan(request, *, lookup, vid, name, outcome):
         """Create one VLAN or resolve the row created by a concurrent request."""
         try:
             with transaction.atomic():
                 vlan = VLAN.objects.create(**lookup, name=name, status="active")
-                if not addable_vlans.filter(pk=vlan.pk).exists():
+                if not saved_in_scope(vlan, request.user, "add"):
                     raise PermissionsViolation()
             return vlan, True
         except PermissionsViolation:
@@ -502,7 +503,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                 outcome.concurrent_change_count += 1
             return None, False
 
-    def _find_or_create_vlan(self, request, *, vid, row_vlan_group, name, addable_vlans, outcome):
+    def _find_or_create_vlan(self, request, *, vid, row_vlan_group, name, outcome):
         """Resolve one scoped VLAN or create it under the caller's constraints."""
         lookup = {"vid": vid, "group": row_vlan_group}
         try:
@@ -520,7 +521,6 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                 lookup=lookup,
                 vid=vid,
                 name=name,
-                addable_vlans=addable_vlans,
                 outcome=outcome,
             )
 
@@ -555,7 +555,6 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         librenms_vlans,
         duplicate_source_vids,
         force_intents,
-        addable_vlans,
         changeable_vlans,
         obj,
         object_type,
@@ -598,7 +597,6 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             vid=vid,
             row_vlan_group=row_vlan_group,
             name=name,
-            addable_vlans=addable_vlans,
             outcome=outcome,
         )
         if vlan is None:
@@ -689,7 +687,6 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         duplicate_source_vids = {
             vid for row in invalid_rows if (vid := normalize_vlan_vid(row.get("vlan_vlan"))) is not None
         }
-        addable_vlans = self.restricted_queryset(VLAN, "add")
         changeable_vlans = self.restricted_queryset(VLAN, "change")
 
         with transaction.atomic():
@@ -702,7 +699,6 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                     librenms_vlans=librenms_vlans,
                     duplicate_source_vids=duplicate_source_vids,
                     force_intents=force_intents,
-                    addable_vlans=addable_vlans,
                     changeable_vlans=changeable_vlans,
                     obj=obj,
                     object_type=object_type,
