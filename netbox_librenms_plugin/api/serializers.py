@@ -1,4 +1,5 @@
 from drf_spectacular.utils import extend_schema_serializer
+from ipam.api.field_serializers import IPNetworkField
 from netbox.api.serializers import NetBoxModelSerializer
 from rest_framework import serializers
 
@@ -7,6 +8,7 @@ from netbox_librenms_plugin.models import (
     DeviceTypeMapping,
     InterfaceTypeMapping,
     InventoryIgnoreRule,
+    IPAddressMapping,
     LocationMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
@@ -40,6 +42,20 @@ class InterfaceTypeMappingSerializer(NetBoxModelSerializer):
         brief_fields = ("id", "url", "display", "action", "platform", "librenms_type", "netbox_type", "description")
         # Whitespace is part of a regex.
         extra_kwargs = {"name_pattern": {"trim_whitespace": False}}
+
+
+@extend_schema_serializer(component_name="LibreNMSIPAddressMapping")
+class IPAddressMappingSerializer(NetBoxModelSerializer):
+    """Serialize IPAddressMapping model for REST API."""
+
+    prefix = IPNetworkField()
+
+    class Meta:
+        """Meta options for IPAddressMappingSerializer."""
+
+        model = IPAddressMapping
+        fields = ["id", "url", "display", "prefix", "vrf", "action", "description"]
+        brief_fields = ("id", "url", "display", "prefix", "vrf", "action", "description")
 
 
 @extend_schema_serializer(component_name="LibreNMSDeviceTypeMapping")

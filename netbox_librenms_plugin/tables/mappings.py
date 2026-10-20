@@ -7,6 +7,7 @@ from netbox_librenms_plugin.models import (
     DeviceTypeMapping,
     InterfaceTypeMapping,
     InventoryIgnoreRule,
+    IPAddressMapping,
     LocationMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
@@ -57,6 +58,24 @@ class InterfaceTypeMappingTable(NetBoxTable):
             "description",
             "actions",
         )
+        attrs = {"class": "table table-hover table-headings table-striped"}
+
+
+class IPAddressMappingTable(NetBoxTable):
+    """Table for displaying IPAddressMapping data."""
+
+    prefix = tables.Column(verbose_name="Prefix", linkify=True)
+    vrf = tables.Column(verbose_name="VRF", linkify=True, default="All")
+    action = tables.Column(verbose_name="Action")
+    description = tables.Column(verbose_name="Description", linkify=False)
+    actions = columns.ActionsColumn(actions=("edit", "delete"))
+
+    class Meta:
+        """Meta options for IPAddressMappingTable."""
+
+        model = IPAddressMapping
+        fields = ("pk", "id", "prefix", "vrf", "action", "description", "actions")
+        default_columns = ("pk", "id", "prefix", "vrf", "action", "description", "actions")
         attrs = {"class": "table table-hover table-headings table-striped"}
 
 
