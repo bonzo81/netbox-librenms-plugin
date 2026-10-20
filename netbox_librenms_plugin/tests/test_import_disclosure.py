@@ -586,6 +586,7 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
     http_call = "import requests\nrequests.get(url)\n"
     mapping_write = 'device.custom_field_data["librenms_id"] = {"default": 5}\n'
     conflict_raise = 'raise MappingChanged("changed")\n'
+    titled_icon = '<i class="mdi mdi-alert" title="Missing"></i>'
     sources = {
         # Flagged: a direct HTTP call outside the client.
         "netbox_librenms_plugin/worker.py": http_call,
@@ -600,9 +601,13 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
             http_call + "from django.test import TestCase\n"
             "class TestWorker:\n    def check(self):\n        self.assertEqual(1, 1)\n"
         ),
-        # Flagged: tests and templates are in the scope of the mapping rules.
-        "netbox_librenms_plugin/tests/test_seed.py": mapping_write + conflict_raise,
-        "netbox_librenms_plugin/templates/netbox_librenms_plugin/seed.html": "{{ object.cf.librenms_id }}\n",
+        # Flagged: tests and templates are in the scope of the mapping rules. The icon rule excludes tests.
+        "netbox_librenms_plugin/tests/test_seed.py": mapping_write + conflict_raise + f"ICON = '{titled_icon}'\n",
+        "netbox_librenms_plugin/templates/netbox_librenms_plugin/seed.html": "{{ object.cf.librenms_id }}\n"
+        + titled_icon
+        + "\n",
+        # Flagged: the icon rule covers package scripts too.
+        "netbox_librenms_plugin/static/netbox_librenms_plugin/js/seed.js": f"const ICON = '{titled_icon}';\n",
         # Clean: the mapping module and migrations are the only places that may touch the storage.
         "netbox_librenms_plugin/server_mappings.py": mapping_write,
         "netbox_librenms_plugin/migrations/0099_seed.py": mapping_write,
@@ -625,5 +630,7 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
         ("netbox_librenms_plugin/tests/test_worker.py", "no-unittest-assertions"),
         ("netbox_librenms_plugin/tests/test_seed.py", "no-stored-mapping-access"),
         ("netbox_librenms_plugin/templates/netbox_librenms_plugin/seed.html", "no-stored-mapping-access-template"),
+        ("netbox_librenms_plugin/templates/netbox_librenms_plugin/seed.html", "titled-icon-needs-accessible-name"),
+        ("netbox_librenms_plugin/static/netbox_librenms_plugin/js/seed.js", "titled-icon-needs-accessible-name"),
         ("netbox_librenms_plugin/claims.py", "conflict-raised-without-record"),
     }, found
