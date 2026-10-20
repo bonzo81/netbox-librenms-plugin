@@ -824,16 +824,14 @@ def create_virtual_chassis_with_members(
     original_vc = master_device.virtual_chassis
     original_vc_position = master_device.vc_position
 
-    master_serial = normalize_stack_serial(master_device.serial)
-
     try:
         with transaction.atomic():
             master_device.snapshot()
             # Load naming pattern once to avoid a DB query per member
             vc_pattern = _load_vc_member_name_pattern()
-            # Rename the master device with its own position
-            master_device_new_name = _generate_vc_member_name(
-                original_master_name, master_pos, serial=master_serial, pattern=vc_pattern
+            # Rename the master device with its own position, from its member entry like every other member
+            master_device_new_name = _member_name(
+                original_master_name, master_pos, master_member.get("serial"), vc_pattern, member_serial
             )
 
             # Check if renamed master conflicts with existing device
