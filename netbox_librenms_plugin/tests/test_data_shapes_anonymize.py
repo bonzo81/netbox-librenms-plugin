@@ -828,6 +828,29 @@ def test_entity_descr_keeps_only_the_junos_virtual_chassis_markers():
     assert find_pii(first) == []
 
 
+def test_entity_descr_keeps_a_terminal_locator_after_the_junos_markers():
+    """A Junos description keeps its terminal locator, as the generic ENTITY text does."""
+    import re
+
+    key = "GET /api/v0/inventory/1/all"
+    rec = _ports()
+    rec["responses"][key] = {
+        "status": "ok",
+        "inventory": [
+            {"entPhysicalIndex": 4, "entPhysicalDescr": "FPC 1 Port 1/2/3"},
+            {"entPhysicalIndex": 5, "entPhysicalDescr": "FPC slot 2/1"},
+        ],
+    }
+
+    first = anonymize_recording(rec)
+    rows = _response(first, key)["inventory"]
+    token = "entity-[0-9a-f]{6}"
+    assert re.fullmatch(f"FPC 1 {token} 1/2/3", rows[0]["entPhysicalDescr"])
+    assert re.fullmatch(f"FPC {token} 2/1", rows[1]["entPhysicalDescr"])
+    assert _response(anonymize_recording(first), key)["inventory"] == rows
+    assert find_pii(first) == []
+
+
 def test_entity_text_preserves_only_supported_terminal_locators():
     """Entity text keeps hierarchy locators but not hostname-like slash labels."""
     rec = _ports()

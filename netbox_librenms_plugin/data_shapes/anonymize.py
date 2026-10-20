@@ -527,11 +527,13 @@ def _anon_serial_label(value, rules):
 
 
 def _entity_token(text, rules):
-    """Return the pseudonym for one piece of ENTITY text; a pseudonym or empty text is kept."""
+    """Return the pseudonym for one piece of ENTITY text, with its bounded terminal hierarchy locator."""
     text = text.strip()
-    if not text or _ENTITY_TOKEN_RE.fullmatch(text):
+    if not text or _ENTITY_TOKEN_RE.fullmatch(text) or _ENTITY_LOCATOR_RE.fullmatch(text):
         return text
-    return f"entity-{_hash(text, rules.salt)}"
+    token = f"entity-{_hash(text, rules.salt)}"
+    locator_match = _ENTITY_LOCATOR_SUFFIX_RE.search(text)
+    return f"{token} {locator_match.group('locator')}" if locator_match else token
 
 
 def _anon_junos_vc_descr(normalized, rules):
@@ -552,15 +554,9 @@ def _anon_junos_vc_descr(normalized, rules):
 def _anon_entity_text(value, rules, *, keep_vc_markers=False):
     """Replace private ENTITY text while keeping a bounded terminal hierarchy locator."""
     normalized = value.strip()
-    if not normalized or _ENTITY_TOKEN_RE.fullmatch(normalized) or _ENTITY_LOCATOR_RE.fullmatch(normalized):
-        return normalized
     if keep_vc_markers and (kept := _anon_junos_vc_descr(normalized, rules)) is not None:
         return kept
-    locator_match = _ENTITY_LOCATOR_SUFFIX_RE.search(normalized)
-    token = f"entity-{_hash(normalized, rules.salt)}"
-    if locator_match:
-        return f"{token} {locator_match.group('locator')}"
-    return token
+    return _entity_token(normalized, rules)
 
 
 def _anon_oid(value, salt):
