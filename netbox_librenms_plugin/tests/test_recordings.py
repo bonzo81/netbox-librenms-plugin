@@ -906,3 +906,60 @@ def test_timos_refresh_and_sync_put_each_ip_interface_under_its_port(client, set
     assert (interfaces["lag2"].parent_id, interfaces["lag2"].type) == (lag.pk, "virtual")
     assert interfaces["lag2"].lag_id is None
     assert interfaces["iface-91ad81"].parent_id == interfaces["1/1/c9/1"].pk
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("rule_owner", ["global", "manufacturer"])
+def test_the_junos_name_update_writes_the_member_name_that_stack_creation_gives(client, live_librenms, rule_owner):
+    """The name action reads the raw stored master serial through the same serial rules as stack creation."""
+    import copy
+
+    from dcim.models import Device
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.import_utils.virtual_chassis import (
+        create_virtual_chassis_with_members,
+        detect_virtual_chassis_from_inventory,
+        identify_vc_master,
+        vc_serial_key,
+    )
+    from netbox_librenms_plugin.models import LibreNMSSettings, NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+    from netbox_librenms_plugin.tests.recordings import load_recording
+    from netbox_librenms_plugin.tests.test_junos_virtual_chassis import _DEVICE_ID, _RECORDING, _edit_rows
+
+    recording = copy.deepcopy(load_recording(_RECORDING))
+    _edit_rows(recording, 1, lambda row: row.update(entPhysicalSerialNum="S/N NAMED-A"))
+    _edit_rows(recording, 120, lambda row: row.update(entPhysicalSerialNum="S/N NAMED-A"))
+    _edit_rows(recording, 121, lambda row: row.update(entPhysicalSerialNum="S/N NAMED-B"))
+    libre_device = unwrap_response(recording["responses"][f"GET /api/v0/devices/{_DEVICE_ID}"])[1]["devices"][0]
+    libre_device["serial"] = "S/N NAMED-A"
+    live_librenms.server.load_recording(recording)
+    # Import stores the raw LibreNMS serial, so the name action must apply the rules itself.
+    master = seed_mapping(make_device(libre_device["sysName"], serial="S/N NAMED-A"), "default", own=_DEVICE_ID)
+    manufacturer = master.device_type.manufacturer
+    NormalizationRule.objects.filter(scope="serial").delete()
+    NormalizationRule.objects.create(
+        scope="serial",
+        manufacturer=manufacturer if rule_owner == "manufacturer" else None,
+        match_pattern=r"^S/N\s+(.+)$",
+        replacement=r"\1",
+    )
+    LibreNMSSettings.objects.update_or_create(pk=1, defaults={"vc_member_name_pattern": "-{serial}"})
+    members = detect_virtual_chassis_from_inventory(live_librenms.api, _DEVICE_ID)["members"]
+    master_member = identify_vc_master(members, master.serial, vc_serial_key(manufacturer))
+    create_virtual_chassis_with_members(master, members, libre_device, "default", master_member=master_member)
+    master.refresh_from_db()
+    created_name = master.name
+    Device.objects.filter(pk=master.pk).update(name="stale-name")
+
+    client.force_login(make_superuser(f"junos-name-update-{rule_owner}"))
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:update_device_name", kwargs={"pk": master.pk}),
+        {"server_key": "default", "use_sysname": "on"},
+    )
+
+    assert response.status_code == 302
+    master.refresh_from_db()
+    assert master.name == created_name
