@@ -295,44 +295,69 @@ class DeviceIdentity:
 NO_DEVICE_IDENTITY = DeviceIdentity()
 
 
-def _sits_at_chassis_level(
-    item: dict, parent_item: dict | None, index_map: dict | None, *, through_containers: bool
-) -> bool:
-    """Return True when an item has no parent or hangs off the chassis, optionally through slot containers only."""
+def _is_built_in_unit(item: dict, device_identity: DeviceIdentity) -> bool:
+    """Return True when a non-chassis item reports the model or part number of the target device type."""
+    if _normalize_librenms_text(item.get("entPhysicalClass")) == "chassis":
+        return False
+    item_model = _clean_librenms_value(item.get("entPhysicalModelName")).casefold()
+    return bool(item_model) and item_model in device_identity.type_models
+
+
+def _sits_at_chassis_level(item: dict, parent_item: dict | None, index_map: dict | None, *, passes=None) -> bool:
+    """
+    Return True when an item has no parent or hangs off the chassis.
+
+    Args:
+        item (dict): The inventory item.
+        parent_item (dict | None): The item's direct parent, if it has one.
+        index_map (dict | None): Inventory items keyed by physical index.
+        passes (Callable[[dict], bool] | None): Whether the walk may look through an ancestor; None takes
+            direct chassis children only.
+
+    Returns:
+        bool: True when the item is top-level, or its parent chain reaches the chassis through ancestors that pass.
+
+    """
     if parent_item is None:
         # A parent index that the inventory does not hold is unknown topology, not the top level.
         return not item.get("entPhysicalContainedIn")
     current, seen = parent_item, set()
-    while through_containers and current is not None and current.get("entPhysicalClass") == "container":
+    while passes is not None and current is not None and passes(current):
         index = current.get("entPhysicalIndex")
         if index_map is None or index in seen:
             return False
         seen.add(index)
         current = index_map.get(current.get("entPhysicalContainedIn"))
     if current is None:
-        # Only a top-level item may skip the chassis; a container chain must end at one.
+        # Only a top-level item may skip the chassis; a chain of passed ancestors must end at one.
         return not seen
     return current.get("entPhysicalClass") == "chassis"
+
+
+def _passes_to_the_chassis(device_identity: DeviceIdentity):
+    """Return the ancestor test of the model rule: a slot container or another built-in unit."""
+    return lambda ancestor: (
+        ancestor.get("entPhysicalClass") == "container" or _is_built_in_unit(ancestor, device_identity)
+    )
 
 
 def _matches_target_device(
     rule, item: dict, parent_item: dict | None, index_map: dict | None, device_identity: DeviceIdentity
 ) -> bool:
     """Return True when a pattern-less rule matches a chassis-level item against the target device."""
-    # A line card that shares the device serial is a real FRU, so the serial rule takes direct chassis children only.
-    # A real line card never carries the chassis PID, so the model rule may look through slot containers (NX-OS).
-    through_containers = rule.match_type == rule.MATCH_MODEL_DEVICE_TYPE
-    if not _sits_at_chassis_level(item, parent_item, index_map, through_containers=through_containers):
-        return False
     if rule.match_type == rule.MATCH_SERIAL_DEVICE:
+        # A line card that shares the device serial is a real FRU, so the serial rule takes direct chassis children.
+        if not _sits_at_chassis_level(item, parent_item, index_map):
+            return False
         item_serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
         device_serial = "" if is_librenms_placeholder(device_identity.serial) else device_identity.serial
         return bool(item_serial and device_serial and item_serial == device_serial)
     if rule.match_type == rule.MATCH_MODEL_DEVICE_TYPE:
-        if _normalize_librenms_text(item.get("entPhysicalClass")) == "chassis":
-            return False
-        item_model = _clean_librenms_value(item.get("entPhysicalModelName")).casefold()
-        return bool(item_model) and item_model in device_identity.type_models
+        # A real line card never carries the chassis PID, so the walk passes slot containers and other built-ins.
+        passes = _passes_to_the_chassis(device_identity)
+        return _is_built_in_unit(item, device_identity) and _sits_at_chassis_level(
+            item, parent_item, index_map, passes=passes
+        )
     raise ValueError(f"Unhandled pattern-less match type {rule.match_type!r}")
 
 
@@ -372,10 +397,12 @@ def _check_ignore_rules(
         Matches an item that is not itself the chassis when its
         ``entPhysicalModelName`` equals the target device type's ``model`` or
         ``part_number``, ignoring case. The item must be chassis-level, or reach
-        the chassis through ``container`` entities only. Fixed IOS XE platforms
+        the chassis through ``container`` entities and other built-in units
+        (items that this rule would match by model). Fixed IOS XE platforms
         report their built-in units ("module 0", "module R0", "module F0") with
         the chassis PID; fixed NX-OS platforms put the built-in line card in a
-        slot container.
+        slot container; a Nokia 7250 IXR-X nests "MDA 1/1" below "Slot 1", and
+        both report the chassis part number.
 
     **Name-based types** (ends_with / starts_with / contains / regex):
         Matches on ``entPhysicalName``.  When ``require_serial_match_parent``
