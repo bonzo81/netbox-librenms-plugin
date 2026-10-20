@@ -1673,6 +1673,60 @@ rules:
                 ...
               except IntegrityError as $ERROR:
                 ...
+  - id: post-write-scope-through-helper
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This code reads a row that it just saved through an add or change scope inline. Call
+      transactions.saved_in_scope(obj, user, action), so every post-write read-back uses one rule.
+    metadata:
+      category: correctness
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/migrations/**"
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $OBJ.save(...)
+              ...
+          - pattern-inside: |
+              $OBJ = $MANAGER.create(...)
+              ...
+          - pattern-inside: |
+              try:
+                  ...
+                  $OBJ.save(...)
+              except $ERROR:
+                  ...
+              ...
+          - pattern-inside: |
+              try:
+                  ...
+                  $OBJ.save(...)
+              except $ERROR as $NAME:
+                  ...
+              ...
+          - pattern-inside: |
+              try:
+                  ...
+                  $OBJ = $MANAGER.create(...)
+              except $ERROR:
+                  ...
+              ...
+          - pattern-inside: |
+              try:
+                  ...
+                  $OBJ = $MANAGER.create(...)
+              except $ERROR as $NAME:
+                  ...
+              ...
+      - pattern-either:
+          - pattern: $MODEL.objects.restrict($USER, $ACTION).filter(pk=$OBJ.pk).exists()
+          - pattern: $VIEW.restricted_queryset($MODEL, $ACTION).filter(pk=$OBJ.pk).exists()
+      - metavariable-regex:
+          metavariable: $ACTION
+          regex: ^["'](add|change)["']$
 
   - id: batch-validation-needs-candidate-keys
     languages: [python]

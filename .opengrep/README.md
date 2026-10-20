@@ -72,6 +72,7 @@ unchecked until that review.
 | `posted-module-target-needs-resolver` | error | A read of the posted `selected_device_id` from `request.GET` or `request.POST` outside `_resolve_destination(...)` or a module grant's `require(device_id=...)`. |
 | `regex-error-must-raise` | error | A handler that catches `re.error` or `REGEX_COMPILE_ERRORS` and does not raise. A stored rule regex compiles through `models.compile_rule_regex`, which raises `RuleConfigurationError`. |
 | `rule-error-message-needs-projection` | error | A `str()` conversion of the rule error bound by the module-context walrus check, or the exception parameter in `RuleConfigurationErrorMiddleware.process_exception`. These paths use `public_message`. Other aliases and handlers are outside this check. |
+| `post-write-scope-through-helper` | error | An inline `restrict(user, "add"/"change")` or `restricted_queryset(model, "add"/"change")` existence check of a row that the same block saved or created before. Call `transactions.saved_in_scope()`. |
 
 ## Scope
 
@@ -91,6 +92,7 @@ import of the private storage adapter carries a suppression. Tests seed and insp
 through its helpers. The template rule applies to `.html` files.
 `conflict-raised-without-record` excludes tests and `transactions.py`, where the runner raises its
 own conflict after the last attempt.
+`post-write-scope-through-helper` excludes tests and migrations.
 The remaining rules apply to Python files in the scan target.
 
 Opengrep 1.30.0 skips test directories during directory scans. The scan script expands the default
@@ -253,6 +255,12 @@ not see the key in a variable, or a read through a name other than `GET` or `POS
 by `except Exception`, or a module alias other than `_re`. A handler that raises only inside a
 nested branch is reported, because its other branch swallows the error. A pattern that is not
 stored rule data, such as a form value or a derived pattern, carries a suppression with its reason.
+
+`post-write-scope-through-helper` reads the write and the check as one statement sequence. It
+reports the check when `obj.save(...)` or `obj = ....create(...)` comes before it, also in a `try`
+statement before the check. It does not see a write in another function, such as a helper that
+saves the row, or a write through `update_existing_row`: those read-backs call `saved_in_scope`
+by review. A check in the `view` scope, or of another row than the saved one, is not reported.
 
 ## `--taint-intrafile` is required
 
