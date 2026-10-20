@@ -192,7 +192,7 @@ class TestSyncPageRouting:
 
         assert response.status_code == 200
         assert response.context["librenms_sync_device"] == linked
-        assert response.context["object_has_recorded_mapping"] is not delegation_shown
+        assert response.context["object_has_recorded_mapping"] is (not delegation_shown)
         notice = "LibreNMS sync for this virtual chassis is managed by"
         assert (notice in response.content.decode()) is delegation_shown
 
