@@ -19,7 +19,7 @@ from django.db.models import Q
 from django.utils.text import slugify
 
 from netbox_librenms_plugin.models import LibreNMSSettings, PlatformMapping
-from netbox_librenms_plugin.transactions import classify_conflict, update_existing_row
+from netbox_librenms_plugin.transactions import classify_conflict, saved_in_scope, update_existing_row
 from netbox_librenms_plugin.utils import exception_text_for, write_failure_message
 
 _ADD_PLATFORM = "dcim.add_platform"
@@ -359,7 +359,7 @@ def _create_platform(actor, assessment, winner, **fields):
             platform.full_clean()
             platform.save()
             # A constrained grant decides on the saved row; a denial rolls this savepoint back.
-            if not Platform.objects.restrict(actor, "add").filter(pk=platform.pk).exists():
+            if not saved_in_scope(platform, actor, "add"):
                 raise _AddDenied
     except _AddDenied:
         raise _Stop(PlatformOutcome(OutcomeStatus.BLOCKED, PlatformReason.ADD_PLATFORM_DENIED, assessment)) from None
@@ -778,7 +778,7 @@ def _map_os_platform(librenms_os, platform, actor):
             mapping.full_clean()
             mapping.save()
             # A constrained grant decides on the saved row; a denial rolls this savepoint back.
-            if not PlatformMapping.objects.restrict(actor, "add").filter(pk=mapping.pk).exists():
+            if not saved_in_scope(mapping, actor, "add"):
                 raise _AddDenied
     except _AddDenied:
         return denied

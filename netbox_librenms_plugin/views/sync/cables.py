@@ -58,6 +58,7 @@ from netbox_librenms_plugin.transactions import (
     TransactionConflict,
     classify_conflict,
     run_transaction,
+    saved_in_scope,
 )
 from netbox_librenms_plugin.utils import (
     apply_cable_manual_picks,
@@ -319,7 +320,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 # The tag add merges into the create's change record only inside a NetBox request.
                 cable.snapshot()
                 cable.tags.add(self._get_provenance_tag(create=True, sync_settings=sync_settings))
-                if not self.restricted_queryset(Cable, "add").filter(pk=cable.pk).exists():
+                if not saved_in_scope(cable, self.request.user, "add"):
                     raise PermissionDenied("You may not add this cable.")
             return True
         except Exception as exc:
@@ -1840,7 +1841,7 @@ class CableRemoteCreateView(SyncCablesView):
         # The model-level grant says nothing about WHICH devices the user may add interfaces to.
         # Re-read the saved object through the user's own 'add' constraints, exactly as NetBox's
         # own object-permission mixin does, so a site-scoped grant cannot reach another site.
-        if not Interface.objects.restrict(request.user, "add").filter(pk=interface.pk).exists():
+        if not saved_in_scope(interface, request.user, "add"):
             raise _RemoteCreateAborted(f"You may not add interfaces to {remote_device.name}.")
         # The row resolves by LibreNMS port id from now on, never by name luck.
         interface.snapshot()

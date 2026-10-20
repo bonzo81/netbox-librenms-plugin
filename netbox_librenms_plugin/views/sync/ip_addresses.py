@@ -31,7 +31,7 @@ from netbox_librenms_plugin.sync_cache import (
     render_sync_cache_miss,
     schedule_request_cache_mutation,
 )
-from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, update_existing_row
+from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, saved_in_scope, update_existing_row
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
     build_migrated_context,
@@ -1586,6 +1586,6 @@ class CreateVRFFromIPRowView(SyncIPAddressesView):
             detail = exception_text_for(exc, VRF, request.user)
             raise _VRFCreateRefusedError(f"NetBox does not accept the LibreNMS VRF '{name}': {detail}") from exc
         # The model-level grant says nothing about WHICH VRFs the user may add; a constrained grant rolls back.
-        if not VRF.objects.restrict(request.user, "add").filter(pk=vrf.pk).exists():
+        if not saved_in_scope(vrf, request.user, "add"):
             raise _VRFCreateRefusedError(f"You may not add the NetBox VRF '{name}'.")
         return vrf
