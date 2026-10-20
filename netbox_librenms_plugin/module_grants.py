@@ -34,6 +34,7 @@ ACTION_UPDATE_INTERFACE = "update_module_interface"
 ACTION_REPLACE_MODULE = "replace_module"
 ACTION_MISMATCH_PREVIEW = "mismatch_preview"
 ACTION_VERIFY_MODULE = "verify_module"
+ACTION_MARK_BUILT_IN = "mark_built_in"
 
 # The batch rows each action signs: a branch entry is [index, target]; a manifest entry adds "selectable".
 # A verify entry is [index] of a row the page table shows in the verified row's subtree.
@@ -55,6 +56,7 @@ _ACTIONS = frozenset(
         ACTION_REPLACE_MODULE,
         ACTION_MISMATCH_PREVIEW,
         ACTION_VERIFY_MODULE,
+        ACTION_MARK_BUILT_IN,
     }
 )
 _PAYLOAD_KEYS = frozenset(

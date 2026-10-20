@@ -10,6 +10,7 @@ from netbox_librenms_plugin.module_grants import (
     ACTION_INSTALL_BRANCH,
     ACTION_INSTALL_MODULE,
     ACTION_INSTALL_SELECTED_ROW,
+    ACTION_MARK_BUILT_IN,
     ACTION_MISMATCH_PREVIEW,
     ACTION_UPDATE_INTERFACE,
     ACTION_UPDATE_SERIAL,
@@ -119,6 +120,9 @@ class LibreNMSModuleTable(tables.Table):
         can_add_module_bay_mapping=False,
         can_map_existing_bay=False,
         can_add_module_type_mapping=False,
+        can_change_device_type=False,
+        can_add_inventory_rule=False,
+        can_change_inventory_rule=False,
         **kwargs,
     ):
         """Initialize table with optional device context."""
@@ -140,6 +144,9 @@ class LibreNMSModuleTable(tables.Table):
         self.can_add_module_bay_mapping = can_add_module_bay_mapping
         self.can_map_existing_bay = can_map_existing_bay
         self.can_add_module_type_mapping = can_add_module_type_mapping
+        self.can_change_device_type = can_change_device_type
+        self.can_add_inventory_rule = can_add_inventory_rule
+        self.can_change_inventory_rule = can_change_inventory_rule
         super().__init__(*args, **kwargs)
         # Batch-load the installed modules (with module_type + interface templates) referenced by
         # the rows, so render_actions' VC "Report VC issue" diagnostic doesn't run a per-row
@@ -1233,6 +1240,9 @@ class LibreNMSModuleTable(tables.Table):
                 )
             )
 
+        if built_in_control := self._built_in_control(record):
+            buttons.append(built_in_control)
+
         # Report-VC-normalization-issue button: appears only on installed-module rows when
         # the page device is a VC member AND template-name VC rewriting would no-op for
         # the installed module's interface templates (typically: unsupported vendor naming).
@@ -1272,6 +1282,72 @@ class LibreNMSModuleTable(tables.Table):
             return ""
         return format_html(
             '<span class="d-inline-flex flex-wrap align-items-center gap-1">{}</span>', mark_safe("".join(buttons))
+        )
+
+    def _built_in_control(self, record):
+        """
+        Render the "Mark built-in" control of a candidate row, or None when the viewer may not use it.
+
+        A device type without a part number gets a confirm modal that records the row's model as the part
+        number. A device type with another part number keeps it, so the control opens the rule form instead,
+        pre-filled with a transparent class rule that matches this exact model.
+        """
+        built_in = record.get("built_in")
+        if not built_in:
+            return None
+        if not (built_in["part_number"] or "").strip():
+            rule_permission = self.can_change_inventory_rule if built_in["rule_id"] else self.can_add_inventory_rule
+            if not (self.can_change_device_type and rule_permission and self.grant_index(record)):
+                return None
+            modal_url = reverse("plugins:netbox_librenms_plugin:mark_built_in", kwargs={"pk": self.device.pk})
+            params = urlencode(
+                {
+                    "server_key": self.server_key or "",
+                    "selected_device_id": record.get("selected_device_id") or self.device.pk,
+                    "ent_index": record.get("ent_physical_index", ""),
+                    "inventory_binding": self.grant(
+                        ACTION_MARK_BUILT_IN, record, action_target={"device_type_id": built_in["device_type_id"]}
+                    ),
+                }
+            )
+            return module_action_control(
+                "button",
+                "mark-built-in",
+                "btn-outline-secondary",
+                format_html(
+                    ' type="button" hx-get="{}?{}" hx-target="#htmx-modal-content" hx-swap="innerHTML"'
+                    ' hx-sync="#htmx-modal-content:replace" hx-disabled-elt="this"',
+                    modal_url,
+                    params,
+                ),
+                "Mark this unit as built into the chassis: record its model as the device type's part number",
+                "mdi-chip",
+                "Mark Built-in",
+            )
+        if not self.can_add_inventory_rule:
+            return None
+        params = {
+            "name": f"Built-in {built_in['model']}"[:100],
+            "match_type": "class_is",
+            "pattern": record.get("item_class") or "",
+            "action": "transparent",
+            "model_pattern": f"^{re.escape(built_in['model'])}$",
+            # An empty value leaves the checkbox clear: the built-in unit can carry its own serial.
+            "require_serial_match_parent": "",
+            "manufacturer": built_in["manufacturer_id"],
+        }
+        if return_url := getattr(self, "return_url", ""):
+            params["return_url"] = return_url
+        return module_action_control(
+            "a",
+            "mark-built-in",
+            "btn-outline-secondary",
+            format_html(
+                ' href="{}?{}"', reverse("plugins:netbox_librenms_plugin:inventoryignorerule_add"), urlencode(params)
+            ),
+            "Mark this unit as built into the chassis: open a transparent rule for this class and exact model",
+            "mdi-chip",
+            "Mark Built-in",
         )
 
     def format_module_data(self, record):

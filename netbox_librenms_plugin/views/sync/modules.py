@@ -25,6 +25,7 @@ from netbox_librenms_plugin.module_grants import (
     ACTION_INSTALL_MODULE,
     ACTION_INSTALL_SELECTED,
     ACTION_INSTALL_SELECTED_ROW,
+    ACTION_MARK_BUILT_IN,
     ACTION_MISMATCH_PREVIEW,
     ACTION_REPLACE_MODULE,
     ACTION_UPDATE_INTERFACE,
@@ -72,10 +73,13 @@ from netbox_librenms_plugin.utils import (
 from netbox_librenms_plugin.utils import coerce_positive_int as _coerce_positive_int
 from netbox_librenms_plugin.views.base.modules_view import (
     BaseModuleTableView,
+    DeviceIdentity,
     _get_item_port_identity,
     _inventory_item_key,
     _is_holder,
     _normalize_librenms_text,
+    built_in_candidate_model,
+    reusable_built_in_rule,
     select_module_interface,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -3704,3 +3708,172 @@ class AddBayTemplateView(
             messages.error(request, f"Failed to add bay template: {detail}")
 
         return _modules_action_response(request, device, server_key)
+
+
+@dataclass(frozen=True)
+class _BuiltInPlan:
+    """What "Mark built-in" writes: the model as the part number of one device type, and the rule that uses it."""
+
+    target: object
+    device_type_id: int
+    model: str
+    rule: object
+    ent_index: int
+
+
+class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
+    """
+    Mark a chassis-level unit as built into its device type.
+
+    GET renders the confirm modal. POST records the unit's model as the part number of the target device
+    type and makes sure that an enabled, unfiltered ``model_matches_device_type`` transparent rule covers the
+    device type's manufacturer. The Modules table offers the action only for a candidate row of a device type
+    without a part number, see ``built_in_candidate_model``.
+    """
+
+    def _permissions(self, plan=None):
+        """Return the object permissions of the action; the rule permission depends on the plan."""
+        from dcim.models import Device, DeviceType
+
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+        required = [("view", Device), ("change", DeviceType)]
+        if plan is not None:
+            required.append(("change" if plan.rule else "add", InventoryIgnoreRule))
+        return required
+
+    def _plan(self, page_device, server_key, data, *, write):
+        """
+        Return the plan of a granted row, or raise GrantRefused or _ModuleActionRefused.
+
+        The grant binds the snapshot and the policy, which holds every rule and the model and part number of each
+        device type, so the candidate test below sees what the table saw. The grant also attests the bay match.
+        """
+        from dcim.models import Device
+
+        target = _resolve_destination(page_device, data.get("selected_device_id"), self.restricted_queryset(Device))
+        if target is None:
+            raise GrantRefused(GrantRefusal.DESTINATION)
+        if write:
+            # One writer per manufacturer at a time, so two marks cannot both create the rule.
+            acquire_advisory_transaction_lock(
+                f"netbox-librenms-plugin:built-in-rule:{target.device_type.manufacturer_id}"
+            )
+        granted = _authorize_module_grant(
+            self, page_device, server_key, ACTION_MARK_BUILT_IN, data.get("inventory_binding")
+        )
+        grant = granted.grant.require(device_id=target.pk, ent_index=data.get("ent_index", ""))
+        member = granted.policy.member(target.pk)
+        device_type = member.device_type
+        grant.require(action_target={"device_type_id": device_type.pk})
+        item = granted.row(grant.ent_index)
+        model = built_in_candidate_model(item, granted.index_map, DeviceIdentity.of(member), has_bay=False)
+        if not model:
+            raise GrantRefused(GrantRefusal.STALE)
+        if (device_type.part_number or "").strip():
+            raise _ModuleActionRefused(
+                f"Device type {device_type} already has a part number. Add an Inventory Ignore Rule instead."
+            )
+        return _BuiltInPlan(
+            target=target,
+            device_type_id=device_type.pk,
+            model=model,
+            rule=reusable_built_in_rule(granted.policy.rules_for(device_type.manufacturer)),
+            ent_index=grant.ent_index,
+        )
+
+    def get(self, request, pk):
+        from dcim.models import Device, DeviceType
+
+        self.required_object_permissions = {"GET": self._permissions()}
+        if error := self.require_all_permissions("GET"):
+            return error
+        page_device = self.restrict_object_or_404(Device, pk=pk)
+        server_key = self.resolve_posted_server_key_or_none(request.GET)
+        if server_key is None:
+            return HttpResponse(NO_LIBRENMS_SERVER_MESSAGE, status=400)
+        try:
+            plan = self._plan(page_device, server_key, request.GET, write=False)
+        except GrantRefused as exc:
+            return HttpResponse(exc.refusal.message, status=400)
+        except _ModuleActionRefused as exc:
+            return HttpResponse(exc.message, status=400)
+        self.required_object_permissions = {"GET": self._permissions(plan)}
+        if error := self.require_object_permissions("GET"):
+            return error
+        device_type = self.restrict_object_or_404(DeviceType, "change", pk=plan.device_type_id)
+        return render(
+            request,
+            "netbox_librenms_plugin/htmx/mark_built_in_modal.html",
+            {
+                "device_pk": page_device.pk,
+                "device_type": device_type,
+                "model": plan.model,
+                "rule": plan.rule,
+                "server_key": server_key,
+                "selected_device_id": plan.target.pk,
+                "ent_index": plan.ent_index,
+                "inventory_binding": request.GET.get("inventory_binding", ""),
+            },
+        )
+
+    def post(self, request, pk):
+        from dcim.models import Device, DeviceType
+
+        from netbox_librenms_plugin.models import BUILT_IN_UNITS_RULE, InventoryIgnoreRule
+
+        self.required_object_permissions = {"POST": self._permissions()}
+        if error := self.require_all_permissions("POST"):
+            return error
+        page_device = self.restrict_object_or_404(Device, pk=pk)
+        server_key = self.resolve_posted_server_key_or_none(request.POST)
+        if server_key is None:
+            messages.error(request, NO_LIBRENMS_SERVER_MESSAGE)
+            return _modules_action_response(request, page_device)
+
+        try:
+            with transaction.atomic():
+                plan = self._plan(page_device, server_key, request.POST, write=True)
+                self.required_object_permissions = {"POST": self._permissions(plan)}
+                if error := self.require_object_permissions("POST"):
+                    return error
+                device_type = (
+                    self.restricted_queryset(DeviceType, "change")
+                    .select_for_update(of=("self",))
+                    .select_related("manufacturer")
+                    .filter(pk=plan.device_type_id)
+                    .first()
+                )
+                rule = plan.rule
+                if device_type is None or (
+                    rule and not self.restricted_queryset(InventoryIgnoreRule, "change").filter(pk=rule.pk).exists()
+                ):
+                    raise _ModuleActionRefused("You may not change this device type or its Inventory Ignore Rule.")
+                if device_type.part_number.strip():
+                    raise _ModuleActionRefused(f"Device type {device_type} got a part number. Refresh Modules.")
+                device_type.snapshot()
+                device_type.part_number = plan.model
+                device_type.full_clean()
+                device_type.save()
+                if rule is None:
+                    rule = InventoryIgnoreRule(**BUILT_IN_UNITS_RULE, manufacturer=device_type.manufacturer)
+                    rule.full_clean()
+                    rule.save()
+        except GrantRefused as exc:
+            messages.error(request, exc.refusal.message)
+        except _ModuleActionRefused as exc:
+            exc.report(request)
+        except (ValidationError, IntegrityError) as exc:
+            if classify_conflict(exc):
+                raise
+            messages.error(
+                request, f"Failed to mark the unit built-in: {exception_text_for(exc, DeviceType, request.user)}"
+            )
+        else:
+            messages.success(
+                request,
+                f"Recorded {plan.model} as the part number of {device_type}. The rule '{rule.name}' hides its "
+                "built-in units.",
+            )
+            _schedule_module_cache_mutation(request, page_device, server_key)
+        return _modules_action_response(request, page_device, server_key)

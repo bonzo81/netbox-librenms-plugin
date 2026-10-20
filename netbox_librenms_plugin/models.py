@@ -878,6 +878,20 @@ def _filter_help(source):
     )
 
 
+# The rule that "Mark built-in" creates. Migration 0026 keeps its own copy, because a migration must not import app code.
+BUILT_IN_UNITS_RULE = {
+    "name": "Fixed-platform built-in units",
+    "match_type": "model_matches_device_type",
+    "pattern": "",
+    "action": "transparent",
+    "require_serial_match_parent": False,
+    "enabled": True,
+    "description": "Fixed-form routers report built-in units as chassis-level modules whose model equals the device "
+    "type's model or part number. Marking them transparent hides their rows and promotes their children to "
+    "device-level bay matching.",
+}
+
+
 class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
     """
     Rule-based filter for ENTITY-MIB inventory items during module sync.
@@ -1077,6 +1091,16 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
     def serial_guard_applies(self) -> bool:
         """Return True when ``require_serial_match_parent`` takes effect: a pattern-based skip or transparent rule."""
         return self.uses_pattern and self.action != self.ACTION_INCLUDE
+
+    @property
+    def hides_built_in_units(self) -> bool:
+        """Return True when this enabled rule hides every unit that reports its device type's model or part number."""
+        return (
+            self.enabled
+            and self.match_type == self.MATCH_MODEL_DEVICE_TYPE
+            and self.action == self.ACTION_TRANSPARENT
+            and not any(getattr(self, field) for field in self.FILTER_SOURCES)
+        )
 
     @functools.cached_property
     def _compiled_pattern(self):

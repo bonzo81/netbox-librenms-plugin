@@ -911,6 +911,13 @@ class DeviceModuleTableView(BaseModuleTableView):
             can_add_module_type_mapping=(
                 has_write_permission and user.has_perm("netbox_librenms_plugin.add_moduletypemapping")
             ),
+            can_change_device_type=has_write_permission and user.has_perm("dcim.change_devicetype"),
+            can_add_inventory_rule=(
+                has_write_permission and user.has_perm("netbox_librenms_plugin.add_inventoryignorerule")
+            ),
+            can_change_inventory_rule=(
+                has_write_permission and user.has_perm("netbox_librenms_plugin.change_inventoryignorerule")
+            ),
         )
         table.htmx_url = f"{self.request.path}?tab=modules" + (f"&server_key={server_key}" if server_key else "")
         return table
