@@ -39,6 +39,7 @@ from .virtual_chassis import (
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
     update_vc_member_suggested_names,
+    vc_serial_key,
 )
 from netbox_librenms_plugin.server_mappings import (
     IDENTITY_BUSY_MESSAGE,
@@ -571,6 +572,7 @@ def validate_device_for_import(  # noqa: C901
     use_sysname: bool = True,
     strip_domain: bool = False,
     preloaded_device_type_rules: dict | None = None,
+    serial_key_for=vc_serial_key,
 ) -> dict:
     """
     Validate if a LibreNMS device can be imported to NetBox.
@@ -595,6 +597,7 @@ def validate_device_for_import(  # noqa: C901
         use_sysname: If True, prefer sysName over hostname (matches import behavior).
         strip_domain: If True, strip domain suffix from device name.
         preloaded_device_type_rules: Optional device-type normalization rules keyed for lookup.
+        serial_key_for: Returns the :func:`vc_serial_key` of a Manufacturer; a batch passes one memoized callable.
 
     Returns:
         dict: Validation result with structure (the key set is pinned by
@@ -1607,7 +1610,10 @@ def validate_device_for_import(  # noqa: C901
                                 f"Virtual chassis CONFIRMED for device {hostname}: "
                                 f"{vc_detection['member_count']} members"
                             )
-                            result["virtual_chassis"] = update_vc_member_suggested_names(vc_detection, hostname)
+                            device_type = effective_import_device_type(result["device_type"].get("device_type"))
+                            result["virtual_chassis"] = update_vc_member_suggested_names(
+                                vc_detection, hostname, serial_key_for(getattr(device_type, "manufacturer", None))
+                            )
                 except Exception as e:
                     logger.exception("Exception during VC detection for device %s: %s", hostname, e)
                     # The validation result has no viewer: it is cached and shown to any import user.

@@ -621,11 +621,9 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int, *, c
         vc_name_pattern = _load_vc_member_name_pattern() if master_name else None
         for member in members:
             if master_name:
-                member["suggested_name"] = _generate_vc_member_name(
-                    master_name,
-                    member["position"],
-                    serial=normalize_stack_serial(member["serial"]),
-                    pattern=vc_name_pattern,
+                # The DeviceType is not known yet, so the global key (the first candidate) names the members.
+                member["suggested_name"] = _member_name(
+                    master_name, member["position"], member["serial"], vc_name_pattern, serial_keys[0]
                 )
             else:
                 member["suggested_name"] = f"Member-{member['position']}"
@@ -703,7 +701,12 @@ def _generate_vc_member_name(master_name: str, position: int, serial: str = None
         return f"{master_name}-M{position}"
 
 
-def update_vc_member_suggested_names(vc_data: dict, master_name: str) -> dict:
+def _member_name(master_name: str, position: int, serial, pattern: str, serial_key) -> str:
+    """Return the name of the stack member; the import preview and member creation both name members here."""
+    return _generate_vc_member_name(master_name, position, serial=serial_key(serial), pattern=pattern)
+
+
+def update_vc_member_suggested_names(vc_data: dict, master_name: str, serial_key=None) -> dict:
     """
     Regenerate suggested VC member names using the actual master device name.
 
@@ -713,6 +716,7 @@ def update_vc_member_suggested_names(vc_data: dict, master_name: str) -> dict:
     Args:
         vc_data: Virtual chassis detection data dict
         master_name: The actual name that will be used for master device in NetBox
+        serial_key: From :func:`vc_serial_key`, for the DeviceType the device imports as; None applies global rules.
 
     Returns:
         Updated vc_data dict with corrected suggested_name for each member
@@ -723,12 +727,11 @@ def update_vc_member_suggested_names(vc_data: dict, master_name: str) -> dict:
 
     # Load naming pattern once to avoid a DB query per member
     vc_pattern = _load_vc_member_name_pattern()
+    serial_key = serial_key or vc_serial_key()
     members = vc_data.get("members", [])
     for member, position in zip(members, _member_positions([m.get("position") for m in members]), strict=True):
         member["position"] = position
-        member["suggested_name"] = _generate_vc_member_name(
-            master_name, position, serial=normalize_stack_serial(member.get("serial")), pattern=vc_pattern
-        )
+        member["suggested_name"] = _member_name(master_name, position, member.get("serial"), vc_pattern, serial_key)
 
     return vc_data
 
@@ -912,7 +915,7 @@ def _create_member_devices(
         if serial and find_devices_by_serial(serial, limit=1):
             logger.warning(f"Device with serial '{serial}' already exists, skipping VC member creation")
             continue
-        member_name = _generate_vc_member_name(base_name, position, serial=serial, pattern=vc_pattern)
+        member_name = _member_name(base_name, position, member.get("serial"), vc_pattern, member_serial)
         if Device.objects.filter(name=member_name).exists():
             logger.warning(f"Device with name '{member_name}' already exists, skipping VC member creation")
             continue
