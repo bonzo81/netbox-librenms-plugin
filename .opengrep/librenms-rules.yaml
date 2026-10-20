@@ -1362,6 +1362,26 @@ rules:
         - "*.html"
     patterns:
       - pattern-regex: class=["']table-responsive["'][^>]*>\s*\{%\s*include\s+["']inc/table\.html["']
+  - id: titled-icon-needs-accessible-name
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      This icon gives its text only in a title, and a screen reader does not reliably announce the
+      title of an element that cannot get focus. Add role="img" and an aria-label equal to the
+      title. If visible text next to the icon says the same thing, add aria-hidden="true".
+    metadata:
+      category: accessibility
+    paths:
+      include:
+        - "*.py"
+        - "*.html"
+        - "*.js"
+      exclude:
+        - "**/tests/**"
+    patterns:
+      # The attribute set ends at the first ">", also across concatenated Python literals.
+      - pattern-regex: >-
+          <i\b(?=[^>]*[\s'"]title=)(?![^>]*[\s'"]aria-hidden=)(?!(?=[^>]*[\s'"]role=["']img["'])[^>]*[\s'"]aria-label=)[^>]*>
 
   - id: conflict-raised-without-record
     languages: [python]
