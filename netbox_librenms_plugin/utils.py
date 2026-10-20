@@ -2984,12 +2984,16 @@ def get_tagged_vlan_css_class(vid, netbox_tagged_vids, exists_in_netbox, missing
     return "text-danger"
 
 
+def note_icon(icon_classes, note):
+    """Return an icon whose note is both its title and its accessible name."""
+    return format_html('<i class="mdi {}" role="img" title="{}" aria-label="{}"></i>', icon_classes, note, note)
+
+
 def get_missing_vlan_warning(vid, missing_vlans):
     """Return warning icon HTML if VLAN is not found in any NetBox VLAN group."""
     if vid in missing_vlans:
-        return (
-            ' <i class="mdi mdi-alert text-danger" '
-            'title="VLAN not in NetBox\u2014use VLAN Sync first to create it"></i>'
+        return format_html(
+            " {}", note_icon("mdi-alert text-danger", "VLAN not in NetBox\u2014use VLAN Sync first to create it")
         )
     return ""
 
@@ -3194,8 +3198,6 @@ def oob_badge_html(record, leading_space=False):
     """
     if record.get("_source") != OOB_INVENTORY_SOURCE:
         return ""
-    # Static trusted markup — mark_safe, not format_html (which requires interpolation
-    # args and raises TypeError when given a bare string).
     # Static trusted markup, no interpolation.
     return mark_safe((" " if leading_space else "") + OOB_BADGE_HTML)
 
@@ -3247,9 +3249,8 @@ def remote_port_html(value, record):
         SafeString: The cell markup.
 
     """
-    # Static trusted markup, mirrors the Serial badge idiom.
     manual_badge = (
-        mark_safe(' <i class="mdi mdi-gesture-tap-button text-muted" title="Remote end picked manually"></i>')
+        format_html(" {}", note_icon("mdi-gesture-tap-button text-muted", "Remote end picked manually"))
         if record.get("manual_remote")
         else ""
     )
@@ -3258,8 +3259,11 @@ def remote_port_html(value, record):
     also = record.get("also_reported_by")
     protocol_badge = (
         format_html(
-            ' <i class="mdi mdi-lan-connect text-muted" title="Also reported over {}"></i>',
-            ", ".join(str(protocol).upper() for protocol in also),
+            " {}",
+            note_icon(
+                "mdi-lan-connect text-muted",
+                f"Also reported over {', '.join(str(protocol).upper() for protocol in also)}",
+            ),
         )
         if also
         else ""
