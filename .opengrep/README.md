@@ -66,6 +66,7 @@ unchecked until that review.
 | `no-scroll-wrapper-on-sync-table` | error | A `table-responsive` wrapper directly around `inc/table.html`. It clips a member dropdown that opens inside the table. A wrapper with another class, or one written with `{% if %}` in its class, is outside this check. |
 | `conflict-raised-without-record` | error | A raise of a `TransactionConflict` or `ConcurrentRowChange` class that does not go through `recorded_conflict(...)`. |
 | `no-lock-on-exists` | error | A `select_for_update()` chain that ends in `exists()` or `count()`. |
+| `assert-is-not-parametrized-flag` | error | A parametrized test asserts `value is not flag` on one of its parameters. That identity check also passes for `None`. |
 
 ## Scope
 
@@ -234,6 +235,9 @@ subclass, add its name to the rule and a fixture line.
 
 `no-lock-on-exists` checks one method chain. It does not see a locked queryset in a variable that a
 later statement ends with `exists()` or `count()`.
+
+`assert-is-not-parametrized-flag` reads a `pytest.mark.parametrize` decorator on the test function. It does
+not see a parameter that a class decorator or `pytestmark` sets.
 
 ## `--taint-intrafile` is required
 
