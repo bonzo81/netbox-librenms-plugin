@@ -1334,7 +1334,8 @@ class LibreNMSModuleTable(tables.Table):
             "match_type": "class_is",
             "pattern": record.get("item_class") or "",
             "action": "transparent",
-            "model_pattern": f"^{re.escape(built_in['model'])}$",
+            # A filter searches the raw model, which LibreNMS can pad with spaces.
+            "model_pattern": rf"^\s*{re.escape(built_in['model'])}\s*$",
             # An empty value leaves the checkbox clear: the built-in unit can carry its own serial.
             "require_serial_match_parent": "",
             "manufacturer": built_in["manufacturer_id"],
