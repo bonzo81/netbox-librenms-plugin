@@ -104,9 +104,7 @@ class TestTheReader:
         IPAddressMapping.objects.create(prefix="169.254.0.0/16")
         rules = IPRuleMatcher.load()
 
-        assert rules.decide(ip_address("fe80::1"), blue.pk).reason == (
-            "IP mapping fe80::/10 (VRF ip-mapping-blue) ignores this address"
-        )
+        assert rules.decide(ip_address("fe80::1"), blue.pk).reason == ("IP mapping fe80::/10 ignores this address")
         assert rules.decide(ip_address("fe80::1"), red.pk) is None
         assert rules.decide(ip_address("fe80::1"), None) is None
         assert (
