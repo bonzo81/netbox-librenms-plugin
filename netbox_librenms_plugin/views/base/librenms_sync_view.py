@@ -11,7 +11,7 @@ from netbox.views import generic
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.virtual_chassis import (
-    _generate_vc_member_name,
+    _member_name,
     chassis_serial_key,
     extract_vc_members,
     members_by_serial_key,
@@ -566,10 +566,8 @@ class BaseLibreNMSSyncView(
                         and obj.virtual_chassis is not None
                         and obj.vc_position is not None
                     ):
-                        resolved_name = _generate_vc_member_name(
-                            resolved_name,
-                            obj.vc_position,
-                            serial=getattr(obj, "serial", None),
+                        resolved_name = _member_name(
+                            resolved_name, obj.vc_position, obj.serial, None, chassis_serial_key(obj)
                         )
 
                 # Update device details regardless of match

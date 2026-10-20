@@ -35,7 +35,8 @@ from ..utils import (
 from .cache import get_import_device_cache_key
 from .naming import _name_candidates, _resolve_device_name
 from .virtual_chassis import (
-    _generate_vc_member_name,
+    _member_name,
+    chassis_serial_key,
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
     update_vc_member_suggested_names,
@@ -900,14 +901,14 @@ def validate_device_for_import(  # noqa: C901
 
                 # Check if name matches resolved name (VC-aware: compare against VC member name)
                 if hostname and existing_device.virtual_chassis and is_vc_position(existing_device.vc_position):
-                    incoming_serial = normalize_serial(libre_device.get("serial"))
-                    if incoming_serial == "-":
-                        incoming_serial = ""
-                    vc_expected_name = _generate_vc_member_name(
+                    serial_key = chassis_serial_key(existing_device)
+                    incoming_serial = libre_device.get("serial")
+                    vc_expected_name = _member_name(
                         hostname,
                         existing_device.vc_position,
-                        # Trim the stored fallback too, or a padded serial mints a bogus name.
-                        serial=incoming_serial or normalize_serial(existing_device.serial),
+                        incoming_serial if serial_key(incoming_serial) else existing_device.serial,
+                        None,
+                        serial_key,
                     )
                     if existing_device.name == vc_expected_name:
                         result["name_matches"] = True
