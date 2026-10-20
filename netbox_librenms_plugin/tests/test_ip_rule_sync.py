@@ -190,6 +190,32 @@ class TestTheWriterRefusesAnIgnoredAddress:
         assert existing.description == "kept"
         assert f"{LINK_LOCAL} (IP mapping fe80::/10 ignores this address)" in _messages(response)
 
+    @pytest.mark.parametrize("ignored", [True, False], ids=["ignored", "control"])
+    def test_a_confirmed_reassignment_is_refused(self, client, device, ignored):
+        existing = IPAddress.objects.create(address=LINK_LOCAL)
+        _seed(device, [_row(LINK_LOCAL)])
+        # The confirmation is signed while no mapping applies; the mapping then exists when it is used.
+        conflict = _sync(client, device, {LINK_LOCAL: ""}).context["conflicts"][0]
+        if ignored:
+            IPAddressMapping.objects.create(prefix="fe80::/10")
+
+        response = client.post(
+            reverse(
+                "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+                kwargs={"object_type": "device", "pk": device.pk},
+            ),
+            {"server_key": SERVER_KEY, "force_all": "1", "conflict_intent": conflict["intent"]},
+            HTTP_HX_REQUEST="true",
+        )
+
+        existing.refresh_from_db()
+        if ignored:
+            assert existing.assigned_object is None
+            assert f"{LINK_LOCAL} (IP mapping fe80::/10 ignores this address)" in _messages(response)
+        else:
+            # The control proves the confirmation reassigns the address when no mapping ignores it.
+            assert existing.assigned_object == device.interfaces.get(name="eth0")
+
     @pytest.mark.parametrize("posted", ["blue", "red", "global"])
     def test_a_vrf_mapping_refuses_only_an_address_posted_into_its_vrf(self, client, device, blue, red, posted):
         IPAddressMapping.objects.create(prefix="fe80::/10", vrf=blue)
