@@ -10,7 +10,7 @@ new dict format.
 
 Existing bare-integer **values** on devices/VMs/interfaces are left
 untouched — they are migrated to the dict format on a per-object basis
-through the admin UI / API (see ``migrate_legacy_librenms_id`` in utils).
+by the Convert action on the sync page (see ``convert_legacy`` in server_mappings).
 """
 
 from django.db import migrations
