@@ -64,6 +64,7 @@ unchecked until that review.
 | `no-stored-mapping-access-private` | error | An import or attribute access of a private name of `server_mappings`, or a patch target string that names one. |
 | `no-stored-mapping-access-template` | error | A template that reads `cf.librenms_id` or `custom_field_data.librenms_id`, or looks the key up with a filter. |
 | `no-scroll-wrapper-on-sync-table` | error | A `table-responsive` wrapper directly around `inc/table.html`. It clips a member dropdown that opens inside the table. A wrapper with another class, or one written with `{% if %}` in its class, is outside this check. |
+| `titled-icon-needs-accessible-name` | error | An `<i>` tag with a `title` and without `aria-hidden` or both `role="img"` and `aria-label`, in package Python, template or script source. |
 | `conflict-raised-without-record` | error | A raise of a `TransactionConflict` or `ConcurrentRowChange` class that does not go through `recorded_conflict(...)`. |
 | `no-lock-on-exists` | error | A `select_for_update()` chain that ends in `exists()` or `count()`. |
 | `no-monkeypatch-on-django-proxy` | error | A test calls a monkeypatch `setattr` or `delattr` on the Django cache, settings or connection proxy, or on a `cache` attribute of a module, also as a dotted-string target. |
@@ -93,6 +94,7 @@ through its helpers. The template rule applies to `.html` files.
 `conflict-raised-without-record` excludes tests and `transactions.py`, where the runner raises its
 own conflict after the last attempt.
 `post-write-scope-through-helper` excludes tests and migrations.
+`titled-icon-needs-accessible-name` applies to `.py`, `.html` and `.js` files and excludes tests.
 The remaining rules apply to Python files in the scan target.
 
 Opengrep 1.30.0 skips test directories during directory scans. The scan script expands the default
@@ -154,6 +156,13 @@ and selected `fuzzywuzzy.fuzz` and `rapidfuzz.fuzz` scorers. Imports and diff re
 Symbolic propagation covers simple local constructor bindings. Other method calls can invalidate
 those bindings. The rule does not track dynamically supplied scorers or prove exact-only selection.
 Runtime tests must cover the exact-only invariant.
+
+The icon rule reads the source text from `<i` to the next `>`, also across concatenated string
+literals. A `>` inside the tag, such as in `{% if a > b %}` or a script expression, ends that text
+early. The rule then can miss a title or report an icon that has its name. The rule does not check
+that the `aria-label` text equals the title: the Python renderers get both from `utils.note_icon`,
+and tests check the rendered markup. A title on an element other than `<i>`, such as a badge around
+an icon, a `data-bs-title` tooltip, and an icon built with `createElement` are outside this check.
 
 The disclosure rule accepts only manager calls through `.objects` and the exact fixed-wording
 linkage rendering. It does not trust a helper name. Its companion rule rejects local definitions,
