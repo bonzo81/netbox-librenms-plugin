@@ -171,7 +171,7 @@ class TestInterfacesTabIpamScoping:
         assert max(group_reads.values()) == 1, "The render repeated the same VLAN group query"
         assert context["hidden_ipam_permissions"] == ([] if superuser else [VLAN_GROUP_PERM, VLAN_PERM])
         assert list(context["vlan_groups"]) == ([group] if superuser else [])
-        assert context["vlan_scope_incomplete"] is not superuser
+        assert context["vlan_scope_incomplete"] is (not superuser)
 
     def test_superuser_render_skips_vlan_scope_count_queries(self, settings):
         from django.db import connection
