@@ -1511,7 +1511,8 @@ class CreateVRFFromIPRowView(SyncIPAddressesView):
             dict: The row's ``{"name", "rd"}`` LibreNMS VRF identity.
 
         Raises:
-            _VRFCreateRefusedError: When the row does not carry the Create VRF action.
+            _VRFCreateRefusedError: When the row does not carry the Create VRF action, or an IP mapping
+                ignores its address.
 
         """
         from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
@@ -1533,6 +1534,13 @@ class CreateVRFFromIPRowView(SyncIPAddressesView):
         )
         index, duplicates = index_ip_sync_rows(rows)
         row = index.get(row_id) if row_id not in duplicates else None
+        if row is not None and row.get("vrf_create_url"):
+            # As in the IP sync: the VRF does not exist yet, so only a mapping without a VRF can match.
+            ip_rule = ip_rules_for_request(self.request).decide(parse_address_with_prefix(row["ip_with_mask"]).ip, None)
+            if ip_rule is not None:
+                raise _VRFCreateRefusedError(
+                    f"IP row {row_id} is not synced, so the NetBox VRF is not created: {ip_rule.reason}."
+                )
         if row is None or not row.get("vrf_create_url"):
             raise _VRFCreateRefusedError(
                 f"IP row {row_id} has no LibreNMS VRF that NetBox lacks. Refresh the IP data and try again."
