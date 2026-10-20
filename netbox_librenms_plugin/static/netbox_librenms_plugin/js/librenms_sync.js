@@ -2659,6 +2659,9 @@ function initializeVRFSelects() {
                 // Skip already initialized selects by checking the data attribute
                 if (select.tomselect && !select.dataset.vrfSelectInitialized) {
                     select.dataset.vrfSelectInitialized = 'true';
+                    // NetBox's TomSelect drops the empty Global option, so read the options again and keep it.
+                    select.tomselect.settings.allowEmptyOption = true;
+                    select.tomselect.sync();
 
                     // Add TomSelect listener
                     select.tomselect.on('change', function (value) {
