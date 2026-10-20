@@ -398,6 +398,29 @@ class TestMarkBuiltIn:
         assert DeviceType.objects.get(pk=page.device_type_id).part_number == ""
         assert [rule.manufacturer_id for rule in built_in_rules()] == [vendor.pk]
 
+    def test_a_bay_mapped_after_render_refuses_the_mark(self):
+        """A bay mapping is not part of the grant, so the writer matches the row's bay again."""
+        from netbox_librenms_plugin.models import ModuleBayMapping
+        from netbox_librenms_plugin.module_grants import GrantRefusal
+        from netbox_librenms_plugin.tests.conftest import make_module_bay
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts
+
+        device = ixr_device("ixr-mapped-later", part_number="")
+        make_module_bay(device, "System Board")
+        # The new bay drops the cached snapshot, so cache it again before the render.
+        seed_snapshot(device, ixr_inventory())
+        fields = modal_form(device, SLOT_1)
+        ModuleBayMapping.objects.create(
+            librenms_name="Slot 1", librenms_class="ioModule", netbox_bay_name="System Board", is_regex=False
+        )
+        before = written(device)
+
+        refused = mark(device, fields)
+
+        assert message_texts(refused, "error") == [GrantRefusal.STALE.message]
+        assert written(device) == before
+        assert tab_rows(device)[SLOT_1]["module_bay"] == "System Board"
+
     def test_a_part_number_set_elsewhere_is_never_overwritten(self):
         """A grant signed for a device type that already has a part number still writes nothing."""
         from netbox_librenms_plugin.inventory_policy import load_inventory_policy

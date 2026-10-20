@@ -3765,7 +3765,7 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
         Return the plan of a granted row, or raise GrantRefused or _ModuleActionRefused.
 
         The grant binds the snapshot and the policy, which holds every rule and the model and part number of each
-        device type, so the candidate test below sees what the table saw. The grant also attests the bay match.
+        device type, so the candidate test below sees what the table saw. The bay is matched again.
         """
         from dcim.models import Device
 
@@ -3785,7 +3785,8 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
         device_type = member.device_type
         grant.require(action_target={"device_type_id": device_type.pk})
         item = granted.row(grant.ent_index)
-        candidate = built_in_candidate(item, granted.index_map, DeviceIdentity.of(member), has_bay=False)
+        has_bay = self._matches_a_bay(member, item, granted.index_map)
+        candidate = built_in_candidate(item, granted.index_map, DeviceIdentity.of(member), has_bay=has_bay)
         if candidate is None:
             raise GrantRefused(GrantRefusal.STALE)
         if candidate.records_part_number and (device_type.part_number or "").strip():
@@ -3801,6 +3802,47 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
             rule=reusable_built_in_rule(granted.policy.rules_for(device_type.manufacturer)),
             ent_index=grant.ent_index,
         )
+
+    @staticmethod
+    def _matches_a_bay(device, item, index_map):
+        """
+        Return whether *item* matches a bay of *device* now, as a bulk install resolves it.
+
+        Bay mappings are not part of the grant, and a mapping edit keeps the cached snapshot, so the
+        bay that the table found is matched again here.
+        """
+        from dcim.models import ModuleBay
+
+        from netbox_librenms_plugin.utils import (
+            load_bay_mappings,
+            module_type_lookup_candidates,
+            preload_normalization_rules,
+            resolve_module_type,
+        )
+
+        manufacturer = device.device_type.manufacturer
+        matched_type = resolve_module_type(
+            _normalize_librenms_text(item.get("entPhysicalModelName")),
+            get_module_types_indexed(),
+            manufacturer=manufacturer,
+            fallback_names=module_type_lookup_candidates(item),
+        )
+        exact_mappings, regex_mappings = load_bay_mappings()
+        bays = prefetch_module_bay_types(
+            ModuleBay.objects.filter(device=device).select_related("installed_module__module_type")
+        )
+        matched_bay = InstallBranchView._resolve_bay_for_item(
+            device,
+            item,
+            index_map,
+            bays,
+            exact_mappings,
+            regex_mappings,
+            manufacturer.pk,
+            preload_normalization_rules("module_bay"),
+            accepted_bay_types=module_type_bay_type_ids(matched_type, load_module_type_bay_types()),
+        )
+        return matched_bay is not None
 
     def get(self, request, pk):
         from dcim.models import Device
