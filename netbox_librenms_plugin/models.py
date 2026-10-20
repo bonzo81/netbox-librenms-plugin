@@ -899,7 +899,8 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
         sub-components.  Used for fixed-chassis devices whose RP or system board
         is the device itself: a board directly below the chassis that carries the
         device serial (``serial_matches_device``), or a built-in unit that reports
-        the chassis PID, also in a slot container (``model_matches_device_type``).
+        the chassis PID, also below a slot container or another built-in unit
+        (``model_matches_device_type``).
         Its children (transceivers, fans, PSUs) then match device-level bays.
 
     Optional regex filters on ``entPhysicalName``, ``entPhysicalDescr`` and
