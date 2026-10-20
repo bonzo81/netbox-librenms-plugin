@@ -62,6 +62,49 @@ def raises_a_validation_error(value):
         raise ValidationError({"pattern": "Invalid regex."}) from exc
 
 
+def raises_from_a_bare_handler(rule, field):
+    # ok: regex-error-must-raise
+    try:
+        return re.compile(getattr(rule, field))
+    except REGEX_COMPILE_ERRORS:
+        raise RuleConfigurationError(rule, field) from None
+
+
+def re_raises_from_a_bare_alias_handler(pattern):
+    # ok: regex-error-must-raise
+    try:
+        return _re.compile(pattern)
+    except _re.error:
+        logger.debug("Rejected pattern")
+        raise
+
+
+def re_raises_the_bound_error(pattern):
+    # ok: regex-error-must-raise
+    try:
+        return re.compile(pattern)
+    except re.error as exc:
+        logger.debug("Rejected pattern: %s", exc)
+        raise
+
+
+def re_raises_from_a_tuple_handler(pattern):
+    # ok: regex-error-must-raise
+    try:
+        return re.compile(pattern)
+    except (re.error, IndexError) as exc:
+        logger.debug("Rejected pattern: %s", exc)
+        raise
+
+
+def raises_without_a_cause_from_a_bare_handler(value):
+    # ok: regex-error-must-raise
+    try:
+        return re.compile(value)
+    except re.error:
+        raise ValidationError({"pattern": "Invalid regex."})
+
+
 def catches_another_error(value):
     # ok: regex-error-must-raise
     try:
