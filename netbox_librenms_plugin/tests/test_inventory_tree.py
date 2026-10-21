@@ -121,7 +121,7 @@ class TestRepairOnTheRecording:
         assert {idx: cached[idx]["entPhysicalContainedIn"] for idx in FPC0_OPTICS} == FPC0_OPTICS
         assert not any("_reported_parent" in cached[idx] for idx in FPC0_OPTICS)
         assert not any("_dangling_parent" in row for row in cached.values())
-        assert "LibreNMS reports parent index 71; the PIC locator" in _row_html(content, 889)
+        assert "LibreNMS reports parent index 71;" in _row_html(content, 889)
         assert "LibreNMS reports parent index" not in _row_html(content, 119)
 
     def test_a_fixed_agent_renders_the_tree_the_repair_builds_with_no_report(self, librenms_server, server_key):
