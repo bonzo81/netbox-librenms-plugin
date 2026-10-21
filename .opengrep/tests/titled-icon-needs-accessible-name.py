@@ -14,6 +14,8 @@ def badges(value, reason):
     format_html('<i class="mdi mdi-alert" title="{}" aria-hidden="false"></i>', reason)
     # ruleid: titled-icon-needs-accessible-name
     format_html('<i class="mdi mdi-alert" role="img" title="{}" aria-label=""></i>', reason)
+    # ruleid: titled-icon-needs-accessible-name
+    format_html('<i class="mdi mdi-alert" role="img" title="{}" aria-label=" "></i>', reason)
     # ok:titled-icon-needs-accessible-name
     format_html('{} <i class="mdi mdi-lock-outline" role="img" title="{}" aria-label="{}"></i>', value, reason, reason)
     format_html(
