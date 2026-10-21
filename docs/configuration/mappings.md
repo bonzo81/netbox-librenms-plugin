@@ -101,6 +101,8 @@ Two mappings cannot have the same `prefix` and `vrf`.
 
 The IP Addresses tab decides each row with the VRF that the row selects. A row that a mapping ignores shows **Ignored** and the mapping. It has no sync button, and you cannot select it. When you select another VRF, the row is decided again. The sync checks every selected address again with the VRF that you submit, and reports a refused address under **Skipped**. A mapping never deletes or changes an address that NetBox has. An address that NetBox has already synced still shows **Synced**.
 
+**Add as OOB** in the device import also reads the IP mappings. It sets the OOB IP in the global table, so only a mapping without a VRF applies. When a mapping ignores the controller's IP, the OOB link is still saved, the OOB IP is not set, and a warning names the mapping.
+
 ```yaml
 # Keep IPv6 link-local addresses out of NetBox.
 - prefix: fe80::/10

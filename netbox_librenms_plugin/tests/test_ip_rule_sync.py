@@ -271,3 +271,51 @@ class TestTheReasonNamesNoVrf:
         for text in (pill, verdict, message):
             assert "IP mapping fe80::/10 ignores this address" in text
             assert blue.name not in text
+
+
+class TestTheImportOobAttachReadsTheMappings:
+    """Add as OOB sets the device's OOB IP from LibreNMS; an Ignore mapping keeps that address out too."""
+
+    OOB_DEVICE_ID = 4343
+    OOB_IP = "192.0.2.77"
+
+    def _add_as_oob(self, client, live_librenms, target):
+        live_librenms.server.device_info_response(
+            device_id=self.OOB_DEVICE_ID,
+            hostname=f"{target.name}-idrac",
+            hardware="Integrated Remote Access Controller",
+            os="idrac",
+            serial=target.serial,
+            ip=self.OOB_IP,
+        )
+        live_librenms.server.vc_inventory_callable(self.OOB_DEVICE_ID, [], {})
+        return client.post(
+            reverse("plugins:netbox_librenms_plugin:device_add_as_oob", args=[self.OOB_DEVICE_ID]),
+            {
+                "existing_device_id": str(target.pk),
+                "server_key": SERVER_KEY,
+                "oob_interface_id": "__new__",
+                "oob_new_interface_name": "idrac",
+            },
+            HTTP_HX_REQUEST="true",
+        )
+
+    @pytest.mark.parametrize(("prefix", "ignored"), [("192.0.2.0/24", True), ("198.51.100.0/24", False)])
+    def test_an_ignored_oob_ip_is_not_set_and_the_link_still_commits(self, client, live_librenms, prefix, ignored):
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
+
+        IPAddressMapping.objects.create(prefix=prefix)
+        target = make_device(f"ip-rule-oob-{ignored}", serial=f"IP-RULE-OOB-{ignored}")
+        client.force_login(make_superuser("ip-rule-oob-user"))
+
+        response = self._add_as_oob(client, live_librenms, target)
+
+        device = Device.objects.get(pk=target.pk)
+        assert stored_mapping_for_test(device)[SERVER_KEY]["oob"]["id"] == self.OOB_DEVICE_ID
+        # The other prefix is the positive control: the same request sets the OOB IP.
+        assert (device.oob_ip is None) is ignored
+        assert IPAddress.objects.filter(address__net_host=self.OOB_IP).exists() is (not ignored)
+        assert device.interfaces.filter(name="idrac").exists() is (not ignored)
+        assert (f"IP mapping {prefix} ignores this address" in _messages(response)) is ignored
