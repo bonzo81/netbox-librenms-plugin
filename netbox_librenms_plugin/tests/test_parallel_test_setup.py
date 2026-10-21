@@ -768,6 +768,46 @@ def test_settings_module_exports_the_stripped_redis_host():
     assert "CACHE_HOST='redis'" in result.stdout, result.stdout
 
 
+def test_settings_module_takes_the_plugin_servers_from_the_ci_configuration(tmp_path):
+    """A developer's own NetBox configuration names other servers; the tests must still see CI's servers."""
+    import runpy
+
+    (tmp_path / "developer_configuration.py").write_text(
+        "import importlib, os\n"
+        "_base = importlib.import_module(os.environ['BASE_NETBOX_CONFIGURATION'])\n"
+        "globals().update({name: value for name, value in vars(_base).items() if name.isupper()})\n"
+        "PLUGINS_CONFIG = {'netbox_librenms_plugin': {'servers': {\n"
+        "    'production': {'librenms_url': 'https://librenms.invalid', 'api_token': 'x'},\n"
+        "    'stub': {'librenms_url': 'https://stub.invalid', 'api_token': 'x'},\n"
+        "}}}\n"
+    )
+    script = (
+        "import importlib; "
+        "settings = importlib.import_module('netbox_librenms_plugin.tests.isolated_settings'); "
+        "print(sorted(settings.PLUGINS_CONFIG['netbox_librenms_plugin']['servers']))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join([str(tmp_path), *(path for path in sys.path if path)]),
+            "BASE_NETBOX_CONFIGURATION": os.environ.get("NETBOX_CONFIGURATION", "netbox.configuration"),
+            "NETBOX_CONFIGURATION": "developer_configuration",
+            "DJANGO_SETTINGS_MODULE": "netbox_librenms_plugin.tests.isolated_settings",
+            "TEST_DB_NAME": "test_netbox_librenms",
+            "TEST_REDIS_HOST": "redis",
+        },
+        cwd=REPOSITORY_ROOT,
+        check=False,
+    )
+
+    ci_servers = runpy.run_path(str(REPOSITORY_ROOT / "media" / "configuration.testing.py"))["PLUGINS_CONFIG"]
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == repr(sorted(ci_servers["netbox_librenms_plugin"]["servers"])), result.stdout
+
+
 def test_playwright_state_machine_has_a_required_separate_ci_job():
     """Run browser behavior independently from the NetBox test matrix."""
     workflow = (REPOSITORY_ROOT / ".github/workflows/test.yaml").read_text()

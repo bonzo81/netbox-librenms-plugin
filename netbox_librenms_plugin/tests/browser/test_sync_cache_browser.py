@@ -2164,27 +2164,29 @@ SAVE_PREF_URL = "https://plugin.example.com/save-pref"
 
 
 def _ipaddress_toggle_fragment():
-    """Build an IP address fragment around the template's own "Set Primary IP" script."""
-    markup = (TEMPLATE_DIR / "_ipaddress_sync_content.html").read_text()
-    assert markup.count("<script") == 1, "the IP address template must carry exactly one inline script"
-    start = markup.index("<script")
-    end = markup.index("</script>", start) + len("</script>")
-    script = _replace_fixture_markup(
-        markup[start:end],
-        "{% url 'plugins:netbox_librenms_plugin:save_user_pref' %}",
-        SAVE_PREF_URL,
-    )
+    """Build an IP address fragment around the template's own "Sync options" menu."""
+    from django.template import Context, Engine, Library
+
+    urls = Library()
+
+    @urls.simple_tag(name="url")
+    def url(name):
+        assert name == "plugins:netbox_librenms_plugin:save_user_pref"
+        return SAVE_PREF_URL
+
+    engine = Engine()
+    engine.template_builtins.append(urls)
+    menu = engine.from_string((TEMPLATE_DIR / "inc" / "_ip_sync_options.html").read_text(encoding="utf-8"))
     return (
-        '<input type="checkbox" id="set-primary-ip-toggle-cb" checked>'
-        "<table><tbody>"
+        menu.render(Context({"ip_sync": {"set_primary_ip": True}}, use_l10n=False)) + "<table><tbody>"
         '<tr data-mgmt-ip="true"><td><input type="checkbox" name="select" value="10.0.0.1"></td></tr>'
         '<tr><td><input type="checkbox" name="select" value="10.0.0.2"></td></tr>'
-        "</tbody></table>" + script
+        "</tbody></table>"
     )
 
 
-def test_a_cache_fragment_runs_its_inline_script(page):
-    """A restored fragment must run its inline script, or the toggle it binds stays dead until a sync."""
+def test_a_cache_fragment_binds_the_primary_ip_toggle(page):
+    """A restored fragment must bind its "Set Primary IP" toggle, or the toggle stays dead until a sync."""
     initial = {
         "interfaces": _state("interfaces-ready"),
         "ipaddresses": _state("ipaddresses-ready"),

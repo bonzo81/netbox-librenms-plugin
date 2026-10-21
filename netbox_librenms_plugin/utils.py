@@ -1694,6 +1694,79 @@ def resolve_import_context_columns(request):
     return IMPORT_CONTEXT_COLUMNS_DEFAULT if validated is None else validated
 
 
+# The interface sync POST reads these values from its ``exclude_columns`` field; the dict order is the menu order.
+INTERFACE_SYNC_EXCLUDE_COLUMNS = {
+    "name": "Name",
+    "type": "Type",
+    "speed": "Speed",
+    "vlans": "VLANs",
+    "mac_address": "MAC",
+    "mtu": "MTU",
+    "enabled": "Enabled",
+    "description": "Description",
+}
+INTERFACE_SYNC_OPTIONS_DEFAULT = {"auto_select_lag_members": True, "exclude_columns": ()}
+INTERFACE_SYNC_OPTIONS_PREFERENCE = "plugins.netbox_librenms_plugin.interface_sync_options"
+
+
+def validate_interface_sync_options(value):
+    """
+    Validate and normalize an interface "Sync options" menu preference.
+
+    Args:
+        value (object): The stored or submitted preference value.
+
+    Returns:
+        dict | None: The value with its columns in menu order, or None when the value is invalid.
+
+    """
+    if not isinstance(value, dict) or value.keys() != INTERFACE_SYNC_OPTIONS_DEFAULT.keys():
+        return None
+    auto_select = value["auto_select_lag_members"]
+    columns = value["exclude_columns"]
+    if not isinstance(auto_select, bool) or not isinstance(columns, list):
+        return None
+    if any(not isinstance(column, str) or column not in INTERFACE_SYNC_EXCLUDE_COLUMNS for column in columns):
+        return None
+    if len(columns) != len(set(columns)):
+        return None
+    return {
+        "auto_select_lag_members": auto_select,
+        "exclude_columns": [column for column in INTERFACE_SYNC_EXCLUDE_COLUMNS if column in columns],
+    }
+
+
+def interface_sync_options_menu(request):
+    """
+    Build the interface "Sync options" menu state from the user's choice and the factory defaults.
+
+    A stored value that does not validate counts as absent, so the menu shows the factory defaults.
+
+    Args:
+        request (HttpRequest): Request for the user who owns the preference.
+
+    Returns:
+        dict: The switch state and one entry per exclude column, each with its factory default.
+
+    """
+    options = validate_interface_sync_options(get_user_pref(request, INTERFACE_SYNC_OPTIONS_PREFERENCE))
+    if options is None:
+        options = INTERFACE_SYNC_OPTIONS_DEFAULT
+    return {
+        "auto_select_lag_members": options["auto_select_lag_members"],
+        "auto_select_lag_members_default": INTERFACE_SYNC_OPTIONS_DEFAULT["auto_select_lag_members"],
+        "exclude_columns": [
+            {
+                "value": column,
+                "label": label,
+                "checked": column in options["exclude_columns"],
+                "default_checked": column in INTERFACE_SYNC_OPTIONS_DEFAULT["exclude_columns"],
+            }
+            for column, label in INTERFACE_SYNC_EXCLUDE_COLUMNS.items()
+        ],
+    }
+
+
 _TRUTHY_PARAMETER_VALUES = frozenset({"on", "true", "1"})
 
 
@@ -1778,23 +1851,40 @@ def same_host(a, b) -> bool:
         return False
 
 
+SET_PRIMARY_IP_PREFERENCE = "plugins.netbox_librenms_plugin.set_primary_ip"
+CREATE_MISSING_INTERFACES_PREFERENCE = "plugins.netbox_librenms_plugin.create_missing_interfaces"
+
+
+def _resolve_sync_toggle(request, keys, preference):
+    """Return the request toggle, else the user's saved boolean, else ``False``; a non-boolean saved value counts as absent."""
+    value = read_request_toggle(request, keys)
+    if value is not None:
+        return is_truthy_parameter(value)
+    pref = get_user_pref(request, preference)
+    return pref if isinstance(pref, bool) else False
+
+
 def resolve_create_missing_interfaces(request) -> bool:
     """
     Resolve the "create a missing NetBox interface before assigning the IP" flag.
 
-    POST wins, then GET, then ``False`` (opt-in). The IP-sync template renders the toggle
-    from this value, so a table refresh restores what the user selected instead of
-    silently reverting to off.
+    POST wins, then GET, then the user's saved preference
+    ``plugins.netbox_librenms_plugin.create_missing_interfaces``, then ``False`` (opt-in).
+    The IP-sync template renders the toggle from this value, so a table refresh restores
+    what the user selected instead of silently reverting to off.
 
     Args:
-        request (HttpRequest): Request used to resolve the toggle value.
+        request (HttpRequest): Request used to resolve the toggle and user preference values.
 
     Returns:
         bool: Whether missing NetBox interfaces can be created before IP assignment.
 
     """
-    value = read_request_toggle(request, ("create-missing-interfaces-toggle", "create_missing_interfaces"))
-    return is_truthy_parameter(value) if value is not None else False
+    return _resolve_sync_toggle(
+        request,
+        ("create-missing-interfaces-toggle", "create_missing_interfaces"),
+        CREATE_MISSING_INTERFACES_PREFERENCE,
+    )
 
 
 def resolve_set_primary_ip(request) -> bool:
@@ -1806,7 +1896,7 @@ def resolve_set_primary_ip(request) -> bool:
 
     1. POST/GET ``set-primary-ip-toggle`` (or ``set_primary_ip``) wins
        -- set by the IP-sync tab toggle.
-    2. Otherwise the user's saved preference
+    2. Otherwise the user's saved boolean preference
        ``plugins.netbox_librenms_plugin.set_primary_ip``.
     3. Otherwise ``False`` (opt-in).
 
@@ -1821,15 +1911,9 @@ def resolve_set_primary_ip(request) -> bool:
         bool: Whether the matching synced management IP can become the primary IP.
 
     """
-    value = read_request_toggle(request, ("set-primary-ip-toggle", "set_primary_ip-toggle", "set_primary_ip"))
-    if value is not None:
-        return is_truthy_parameter(value)
-
-    pref = get_user_pref(request, "plugins.netbox_librenms_plugin.set_primary_ip")
-    if pref is not None:
-        return is_truthy_parameter(pref) if isinstance(pref, str) else bool(pref)
-
-    return False
+    return _resolve_sync_toggle(
+        request, ("set-primary-ip-toggle", "set_primary_ip-toggle", "set_primary_ip"), SET_PRIMARY_IP_PREFERENCE
+    )
 
 
 INTERFACE_NAME_PREFERENCE_PATH = "plugins.netbox_librenms_plugin.interface_name_field"

@@ -28,12 +28,12 @@ from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
     MappingRole,
     find_port_owner,
-    get_librenms_sync_device,
     identity_q,
     name_match_may_be_port,
     read_mapping,
     resolve_device_port,
 )
+from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.utils import (
     apply_cable_manual_picks,
