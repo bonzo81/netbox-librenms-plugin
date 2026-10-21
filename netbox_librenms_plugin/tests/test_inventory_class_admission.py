@@ -17,6 +17,7 @@ from netbox_librenms_plugin.tests.test_modules_view import (
 pytestmark = pytest.mark.django_db
 
 # Rows [entPhysicalIndex, depth, name, class] per recording, rendered by the class constant before the rules.
+# The two ArcOS supplies are the exception: that constant hid a model-less entity with a serial by mistake.
 _ROWS_BEFORE_RULES = json.loads(Path(__file__).with_name("module_rows_by_recording.json").read_text(encoding="utf-8"))
 
 SCB_RULE_NAME = "Juniper MX switch control boards"
@@ -224,6 +225,34 @@ class TestClassRulesAreConfiguration:
         rows = _run_build_context_real(_make_view(), [_chassis(), carrier, nested, loose], make_device("nested-card"))
 
         assert {row["ent_physical_index"]: row["depth"] for row in rows} == {20: 0, 30: 1}
+
+
+class TestModelLessHardware:
+    """A missing model names no hardware, but a serial does: only a serial-less entity is a holder."""
+
+    def test_the_arcos_supplies_without_a_model_render(self, librenms_server, server_key):
+        recording = _recording("arcos-lag-transceivers")
+        supplies = [entity for entity in _inventory(recording) if entity["entPhysicalClass"] == "powerSupply"]
+        assert len(supplies) == 2
+        assert all(not entity["entPhysicalModelName"] and entity["entPhysicalSerialNum"] for entity in supplies)
+        librenms_server.load_recording(recording)
+        device = _mapped_device("arcos-model-less-supplies", recording, server_key)
+
+        depths = {row["ent_physical_index"]: row["depth"] for row in _rows(device, server_key)}
+
+        assert {depths.get(entity["entPhysicalIndex"]) for entity in supplies} == {0}
+
+    @pytest.mark.parametrize("entity_class", ["container", "port", "powerSupply", "fan"])
+    def test_a_model_less_entity_without_a_serial_stays_a_holder(self, entity_class):
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        holder = _entity(20, entity_class, "Slot 0", "Slot 0", model="", serial="")
+        card = _entity(30, "module", "Card", "Card", model="750-000030", contained_in=20)
+
+        rows = _run_build_context_real(_make_view(), [_chassis(), holder, card], make_device(f"holder-{entity_class}"))
+
+        # The card is the positive control: it reaches top level because its holder is no row.
+        assert {row["ent_physical_index"]: row["depth"] for row in rows} == {30: 0}
 
 
 class TestEmptyPolicy:

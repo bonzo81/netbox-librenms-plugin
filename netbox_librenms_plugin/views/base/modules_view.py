@@ -143,6 +143,7 @@ def _is_holder(item) -> bool:
     Return whether an inventory entity only holds hardware and is not hardware itself.
 
     Fans and built-in modules can lack a serial, so the serial test covers only containers and ports.
+    A missing model alone makes a holder only without a serial: a model-less supply with a serial is hardware.
 
     Args:
         item (dict): The inventory item to check.
@@ -152,13 +153,14 @@ def _is_holder(item) -> bool:
 
     """
     model = _normalize_librenms_text(item.get("entPhysicalModelName")).lower()
-    if model in GENERIC_CONTAINER_MODELS:
+    has_serial = bool(_clean_librenms_value(item.get("entPhysicalSerialNum")))
+    if model in GENERIC_CONTAINER_MODELS and (model or not has_serial):
         return True
     return (
         _normalize_librenms_text(item.get("entPhysicalClass")) in _SERIAL_HOLDER_CLASSES
         and not item.get("_from_transceiver_api")
         and not item.get(_TRANSCEIVER_API_MATCH)
-        and not _clean_librenms_value(item.get("entPhysicalSerialNum"))
+        and not has_serial
     )
 
 
