@@ -1381,7 +1381,7 @@ rules:
     patterns:
       # The attribute set ends at the first ">", also across concatenated Python literals.
       - pattern-regex: >-
-          <i\b(?=[^>]*[\s'"]title=)(?![^>]*[\s'"]aria-hidden=["']true["'])(?!(?=[^>]*[\s'"]role=["']img["'])[^>]*[\s'"]aria-label=["'](?!["']))[^>]*>
+          <i\b(?=[^>]*[\s'"]title=)(?![^>]*[\s'"]aria-hidden=["']true["'])(?!(?=[^>]*[\s'"]role=["']img["'])[^>]*[\s'"]aria-label=["'](?=\s*[^\s"']))[^>]*>
 
   - id: conflict-raised-without-record
     languages: [python]
