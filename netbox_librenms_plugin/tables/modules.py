@@ -400,7 +400,7 @@ class LibreNMSModuleTable(tables.Table):
                 f"LibreNMS reports parent index {dangling}, which is not in the inventory.",
             )
         if (reported := record.get("reported_parent")) is not None:
-            note = f"LibreNMS reports parent index {reported}; the PIC locator in the description sets the parent."
+            note = f"LibreNMS reports parent index {reported}; the @ locator in the description sets the parent."
             return format_html(
                 ' <i class="mdi mdi-information-outline text-muted" role="img" title="{}" aria-label="{}"></i>',
                 note,
