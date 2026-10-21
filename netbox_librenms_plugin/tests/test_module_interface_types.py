@@ -37,11 +37,10 @@ def _inventory_row(module, *, index=179):
 
 def _seed_module_tab(device, module, *, inventory_row=None, librenms_id=179):
     """Map the device and seed one real module-tab inventory snapshot."""
-    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
-    seed_own_mapping(device, librenms_id, "default")
-    device.save(update_fields=["custom_field_data"])
+    seed_mapping(device, own=librenms_id)
     device.__dict__.pop("cf", None)
     return seed_inventory(
         DeviceModuleTableView(),
@@ -704,11 +703,10 @@ class TestApplyModuleInterfaceTypes:
         from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
         from netbox_librenms_plugin.tests.cache_test_helpers import clear_snapshots, seed_every_tab
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
         page_device, member, module, interface = _vc_member_type_mismatch("type-apply-cache")
-        seed_own_mapping(page_device, 179, "default")
-        page_device.save(update_fields=["custom_field_data"])
+        seed_mapping(page_device, own=179)
         user = make_user_with_perms(
             "type-apply-cache-user",
             [("view", Device), ("view", Module), ("change", Interface)],

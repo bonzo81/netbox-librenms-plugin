@@ -143,12 +143,12 @@ def _run_vlan_scope_sync(*, move_target, suffix, settings):
     from ipam.models import VLAN, VLANGroup
 
     from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, post
-    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
     _vc, (page_device, target_device) = make_virtual_chassis_members(f"sync-vlan-scope-{suffix}")
     server_key = configure_default_librenms_server(settings)
-    seed_own_mapping(page_device, 1, server_key)
+    seed_mapping(page_device, server_key, own=1, save=False)
     page_device.save()
     new_site = Site.objects.create(
         name=f"Sync VLAN New Site {suffix}", slug=f"sync-vlan-new-site-{suffix}", status="active"
@@ -499,7 +499,7 @@ def test_relationship_write_locks_virtual_chassis_members_through_validation():
 
     from netbox_librenms_plugin.tests.conftest import make_interface
     from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, post
-    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
     server_key = configured_server_key()
@@ -507,8 +507,8 @@ def test_relationship_write_locks_virtual_chassis_members_through_validation():
     _vc, (aggregate_device, member_device) = make_virtual_chassis_members("relationship-scope-lock")
     aggregate = make_interface(aggregate_device, "Port-Channel1", iface_type="lag")
     member = make_interface(member_device, "Ethernet2")
-    seed_own_mapping(aggregate, 20, server_key)
-    seed_own_mapping(member, 10, server_key)
+    seed_mapping(aggregate, server_key, own=20, save=False)
+    seed_mapping(member, server_key, own=10, save=False)
     aggregate.save()
     member.save()
     user = make_superuser("relationship-scope-lock-user")
@@ -602,7 +602,8 @@ def test_inline_relationship_rechecks_migrated_donor_after_lock():
     from netbox_librenms_plugin.tests.conftest import make_device, make_interface
     from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, post
     from netbox_librenms_plugin.server_mappings import mark_migrated
-    from netbox_librenms_plugin.tests.conftest import apply_mapping_change, seed_own_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
     server_key = configured_server_key()
@@ -611,8 +612,8 @@ def test_inline_relationship_rechecks_migrated_donor_after_lock():
     winner = make_device("relationship-migrated-winner")
     child = make_interface(donor, "Ethernet1.100", iface_type="virtual")
     parent = make_interface(donor, "Ethernet1")
-    seed_own_mapping(child, 10, server_key)
-    seed_own_mapping(parent, 20, server_key)
+    seed_mapping(child, server_key, own=10, save=False)
+    seed_mapping(parent, server_key, own=20, save=False)
     child.save()
     parent.save()
     user = make_superuser("relationship-migrated-user")
@@ -692,7 +693,7 @@ def test_inline_relationship_does_not_lock_unrelated_interfaces():
 
     from netbox_librenms_plugin.tests.conftest import make_device, make_interface
     from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser, post
-    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
     server_key = configured_server_key()
@@ -701,8 +702,8 @@ def test_inline_relationship_does_not_lock_unrelated_interfaces():
     child = make_interface(device, "Ethernet1.100", iface_type="virtual")
     parent = make_interface(device, "Ethernet1")
     unrelated = make_interface(device, "Ethernet99")
-    seed_own_mapping(child, 10, server_key)
-    seed_own_mapping(parent, 20, server_key)
+    seed_mapping(child, server_key, own=10, save=False)
+    seed_mapping(parent, server_key, own=20, save=False)
     child.save()
     parent.save()
     user = make_superuser("targeted-inline-lock-user")
@@ -784,7 +785,7 @@ def test_bulk_relationship_pass_skips_scope_locks_without_selected_edges(client,
 
     from netbox_librenms_plugin.tests.conftest import make_device, make_interface
     from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
-    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
     from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
     server_key = configure_default_librenms_server(settings)
@@ -793,7 +794,7 @@ def test_bulk_relationship_pass_skips_scope_locks_without_selected_edges(client,
     child = make_interface(device, "Ethernet2.100", iface_type="virtual")
     parent = make_interface(device, "Ethernet2")
     for interface, port_id in ((selected, 10), (child, 20), (parent, 30)):
-        seed_own_mapping(interface, port_id, server_key)
+        seed_mapping(interface, server_key, own=port_id, save=False)
         interface.save()
     ports = [
         {**_PORT_KEYS_UNSET, "port_id": 10, "ifName": selected.name},
@@ -830,7 +831,7 @@ def test_bulk_relationship_pass_does_not_lock_unrelated_interfaces(settings):
 
     from netbox_librenms_plugin.tests.conftest import make_device, make_interface
     from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
-    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
     server_key = configure_default_librenms_server(settings)
 
@@ -839,7 +840,7 @@ def test_bulk_relationship_pass_does_not_lock_unrelated_interfaces(settings):
     parent = make_interface(device, "Ethernet1")
     unrelated = make_interface(device, "Ethernet99")
     for interface, port_id in ((child, 10), (parent, 20), (unrelated, 30)):
-        seed_own_mapping(interface, port_id, server_key)
+        seed_mapping(interface, server_key, own=port_id, save=False)
         interface.save()
     user = make_superuser("bulk-targeted-edge-user")
     ports = [

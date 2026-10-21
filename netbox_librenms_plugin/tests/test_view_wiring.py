@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from netbox_librenms_plugin.tests.conftest import configured_server_key
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
 from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
 
 
@@ -418,7 +419,7 @@ class TestStatusListsShowABusyClaimAsUnknown:
         prefix = f"status-busy-{object_type}"
         make = make_device if object_type == "device" else make_vm
         busy, found, missing = (make(f"{prefix}-{suffix}.example.test") for suffix in ("busy", "found", "missing"))
-        found.custom_field_data["librenms_id"] = {"default": 5302}
+        seed_mapping(found, "default", own=5302, save=False)
         found.save()
         live_librenms.server.register(
             f"/api/v0/devices/{busy.name}", {"status": "ok", "devices": [{"device_id": 5301}]}
@@ -437,7 +438,7 @@ class TestStatusListsShowABusyClaimAsUnknown:
             "Another operation is linking some of these objects. Refresh to see their status."
         ]
         busy.refresh_from_db()
-        assert busy.custom_field_data.get("librenms_id") is None
+        assert stored_mapping_for_test(busy) is None
 
 
 class TestRequiredObjectPermissionsWiring:

@@ -1,7 +1,7 @@
 # opengrep ruleset
 
 Custom [opengrep](https://github.com/opengrep/opengrep) rules enforce this project's import-preview and
-caught-error text invariants, and its coding guidelines.
+caught-error text invariants, the object server mapping seam, and its coding guidelines.
 
 ## Why opengrep
 
@@ -32,7 +32,7 @@ unchecked until that review.
 | Path | Purpose |
 | --- | --- |
 | `.opengrep/librenms-rules.yaml` | The ruleset. **Single source of truth.** |
-| `.opengrep/tests/*.py` | Annotated rule-test fixtures. |
+| `.opengrep/tests/*.py`, `.opengrep/tests/*.html` | Annotated rule-test fixtures. |
 | `scripts/opengrep-scan.sh` | Scan the source tree. Pre-push hook and manual use. Non-zero on any finding. |
 | `scripts/opengrep-test.sh` | Run the rule-tests against the ruleset. |
 | `netbox_librenms_plugin/tests/test_import_disclosure.py` | Check scan options and explicit targets with the real executable. |
@@ -58,6 +58,13 @@ unchecked until that review.
 | `barrier-needs-run-in-threads` | error | A test creates a `threading.Barrier` and then starts threads with `ThreadPoolExecutor` or `Thread`, not with `tests.conftest.run_in_threads`. |
 | `recorded-response-needs-envelope` | error | Code reads a recorded response as a bare `[status, body]` list instead of through `data_shapes.envelope.unwrap_response`. |
 | `no-selected-fuzzy-apis` | warning | Code calls selected approximate-selection APIs. This does not prove exact-only selection. |
+| `no-stored-mapping-access` | error | A read or write of the `librenms_id` key in `custom_field_data`, `cf` or serialized `custom_fields`, also through a local alias, a parameter or a key constant. |
+| `no-stored-mapping-access-container` | error | A `del` of the key; a replacement (`=`, `\|=`), copy, `clear()` or `popitem()` of the whole container; an `update()` that can set the key; a container built with the key. |
+| `no-stored-mapping-access-orm` | error | A `custom_field_data__librenms_id` lookup, projection or ordering, also across a relation such as `device__`; a `has_key`, `has_keys`, `has_any_keys` or `contains` lookup on the container whose value names the key; a projection of the whole container; or a `custom_fields.librenms_id` path. |
+| `no-stored-mapping-access-private` | error | An import or attribute access of a private name of `server_mappings`, or a patch target string that names one. |
+| `no-stored-mapping-access-template` | error | A template that reads `cf.librenms_id` or `custom_field_data.librenms_id`, or looks the key up with a filter. |
+| `conflict-raised-without-record` | error | A raise of a `TransactionConflict` or `ConcurrentRowChange` class that does not go through `recorded_conflict(...)`. |
+| `no-lock-on-exists` | error | A `select_for_update()` chain that ends in `exists()` or `count()`. |
 
 ## Scope
 
@@ -70,11 +77,18 @@ suppressions. The requests rule covers
 `netbox_librenms_plugin/`, except tests and migrations. The htmx header rule excludes tests,
 because a test sends the header to build an htmx request. The six test-convention
 rules (TestCase, unittest assertions, xfail, Barrier, synchronization timeout and executor) include only
-`netbox_librenms_plugin/tests/`. The remaining rules apply to Python files
-in the scan target.
+`netbox_librenms_plugin/tests/`.
+The `no-stored-mapping-access` rules exclude only `server_mappings.py` and `migrations/`. Tests and
+templates are in their scope. In tests, `tests/mapping_fixtures.py` is the one reviewed seam: its
+import of the private storage adapter carries a suppression. Tests seed and inspect a mapping only
+through its helpers. The template rule applies to `.html` files.
+`conflict-raised-without-record` excludes tests and `transactions.py`, where the runner raises its
+own conflict after the last attempt.
+The remaining rules apply to Python files in the scan target.
 
 Opengrep 1.30.0 skips test directories during directory scans. The scan script expands the default
-targets into the package directory and explicit Python test files, in the package and in `tests/`. Options alone keep these defaults.
+targets into the package directory, which includes the templates, and explicit Python test files, in the
+package and in `tests/`. Options alone keep these defaults.
 Pass options before the first `--`. The wrapper passes them to opengrep unchanged.
 Pass explicit targets after `--` to replace the defaults. With no `--`, the defaults apply.
 
@@ -82,6 +96,11 @@ The test script stages fixtures in a flat temporary directory. In opengrep 1.30.
 ignores rule `paths` filters. A path-scoped fixture still runs there. A flipped `ruleid:` annotation
 must fail with an unexpected finding on that line. Use separate scans at representative paths to
 verify path inclusion and exclusion; rule-tests alone do not test that scope.
+`test_each_rule_applies_to_its_declared_paths` in `tests/test_import_disclosure.py` does this.
+
+A fixture is a `.py` file with `#` markers or a `.html` file with `<!-- ruleid: ... -->` markers.
+`opengrep test` does not accept a `{# ... #}` marker. The script fails on a fixture with another
+extension, and on a fixture with no `ruleid:` marker: opengrep would check nothing in it and pass.
 
 ## Detection limits
 
@@ -176,6 +195,42 @@ The recorded-response rule checks the two legacy spellings of the `[status, body
 `x[1] if isinstance(x, list) else x` expression. It does not see tuple unpacking or a `type()`
 check. `data_shapes/envelope.py` is excluded because it owns the format.
 
+The `no-stored-mapping-access` rules check the key as the literal `"librenms_id"`, also through a
+local or module string constant. A key built at run time is outside the check. Their limits:
+
+- The access rule follows a container through assignments, also into a parameter of a function
+  in the same file. It does not follow it through a call result, such as `dict(...)` or
+  `.get("other")`; the container rule reports a copy itself. A value assigned from an expression
+  that holds the container, such as `{"cf": device.cf}`, counts as the container.
+- The access rule also reports `clear()`, `popitem()` and `|=` on an alias of the container. A
+  copy of an alias, such as `fields.copy()` or `dict(fields)`, is outside the check.
+- The container rule checks a direct `obj.custom_field_data` or `obj.cf` only, not a local alias.
+  It reports a container literal with the key only in a `custom_field_data=` or `cf=` keyword, in a
+  `"custom_field_data"` dict entry, or in an `==` comparison with the container. A dict with the
+  key in a local variable, such as `{**old_custom_fields, "librenms_id": ...}`, is outside the
+  check: it has the same shape as a LibreNMS API payload.
+- The container rule reports an `update()` with the key in a dict literal or a keyword, or with an
+  argument that is not a dict literal, because it cannot prove that such a value has no key. Only
+  an `update()` with a dict literal that has neither the key nor a `**` expansion is not reported.
+- The ORM rule matches the lookup path at the start of a string or a keyword name, after any
+  relation prefix. A path that code builds from parts is outside the check.
+- The ORM rule reports a `has_key`, `has_keys`, `has_any_keys` or `contains` lookup only as a
+  keyword argument whose value is a literal, a list, a tuple or a dict that holds the key. The same
+  lookup in a `**{...}` expansion, or with a key list or dict in a variable, is outside the check.
+- A raw SQL statement that writes `custom_field_data` is outside the check.
+- The private rule reports an import of a private name, and a dotted access through a module
+  import. It does not see `getattr()` with a computed name.
+- The template rule reads `cf` and `custom_field_data` by name. It does not see a container
+  that the view passes under another name. It skips a `{# ... #}` comment. It reports an HTML
+  comment, because Django renders the template code in it.
+
+`conflict-raised-without-record` knows the conflict classes by name, also with a module prefix.
+It does not see a conflict that is raised from a variable. When you add a `TransactionConflict`
+subclass, add its name to the rule and a fixture line.
+
+`no-lock-on-exists` checks one method chain. It does not see a locked queryset in a variable that a
+later statement ends with `exists()` or `count()`.
+
 ## `--taint-intrafile` is required
 
 Both scripts pass it. Taint has to cross into a module-private helper: three warnings in
@@ -225,7 +280,8 @@ its own, and build the message on the next line, where the rule still checks it.
 
 ## Adding a rule
 
-1. Add fixture cases to `.opengrep/tests/<rule-id>.py` with the match and clean markers.
+1. Add fixture cases to `.opengrep/tests/<rule-id>.py` (or `.html` for a template rule) with the
+   match and clean markers.
 2. Run `./scripts/opengrep-test.sh`. Confirm it reports the expected missing findings.
 3. Add the rule to `.opengrep/librenms-rules.yaml`. Run the rule-tests again and confirm they pass.
 4. Flip one `ruleid:` marker to `ok:`. Confirm the rule-test reports that line, then restore it.

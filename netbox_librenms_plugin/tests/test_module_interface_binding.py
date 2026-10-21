@@ -14,6 +14,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post as view_post
 from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
 
@@ -98,8 +99,7 @@ class TestInterfacePortBinding:
         """Ethernet1/1 is bound to port 8999, so the port's ifDescr Uplink1 must take port 8804."""
         device = make_device_with_module_bays("bind-name-rebound", ["Slot 1"])
         taken = make_interface(device, "Ethernet1/1")
-        taken.custom_field_data["librenms_id"] = {"default": 8999}
-        taken.save(update_fields=["custom_field_data"])
+        seed_mapping(taken, own=8999)
         module = _module_with_interfaces(device, "Slot 1", "BIND-REBOUND-CARD", ["Uplink1"])
         item = {"_librenms_port_id": 8804, "_librenms_ifname": "Ethernet1/1", "_librenms_ifdescr": "Uplink1"}
 
@@ -115,8 +115,7 @@ class TestInterfacePortBinding:
         """Ethernet1/1 names port 8805 but is bound to 8999, so the unrelated lone Uplink must stay unbound."""
         device = make_device_with_module_bays("bind-name-refused", ["Slot 1"])
         taken = make_interface(device, "Ethernet1/1")
-        taken.custom_field_data["librenms_id"] = {"default": 8999}
-        taken.save(update_fields=["custom_field_data"])
+        seed_mapping(taken, own=8999)
         module = _module_with_interfaces(device, "Slot 1", "BIND-REFUSED-CARD", ["Uplink"])
         item = {"_librenms_port_id": 8805, "_librenms_ifname": "Ethernet1/1"}
 
@@ -140,8 +139,7 @@ class TestInterfacePortBinding:
         device = make_device_with_module_bays(f"bind-name-out-of-scope-{bool(stored)}", ["Slot 1"])
         named = make_interface(device, "Ethernet1/1")
         if stored is not None:
-            named.custom_field_data["librenms_id"] = stored
-            named.save(update_fields=["custom_field_data"])
+            seed_stored_mapping(named, stored, save=True)
         module = _module_with_interfaces(device, "Slot 1", "BIND-SCOPE-CARD", ["Uplink"])
         item = {"_librenms_port_id": 8806, "_librenms_ifname": "Ethernet1/1"}
 
@@ -179,8 +177,7 @@ class TestModuleTableShowsTheWriterChoice:
 
         device = make_device_with_module_bays(f"table-choice-{tag}", ["Slot 1"])
         module = _module_with_interfaces(device, "Slot 1", f"TABLE-CHOICE-{tag.upper()}", interface_names)
-        device.custom_field_data["librenms_id"] = {"default": ADOPTION_LIBRENMS_ID}
-        device.save(update_fields=["custom_field_data"])
+        seed_mapping(device, own=ADOPTION_LIBRENMS_ID)
         device.__dict__.pop("cf", None)
         row = {**_adoption_inventory_row(module.module_type.model, "Slot 1"), "_librenms_port_id": 8811, **identity}
         cache_key = seed_inventory(DeviceModuleTableView(), device, [row], librenms_id=ADOPTION_LIBRENMS_ID)
@@ -272,8 +269,7 @@ class TestModuleTableShowsTheWriterChoice:
 
         device, module, row, cache_key = self._seed("oob", ["Uplink"], {"_librenms_ifdescr": "Unmatched Label"})
         uplink = module.interfaces.get(name="Uplink")
-        uplink.custom_field_data["librenms_id"] = {"default": {"oob": {"id": 8811}}}
-        uplink.save(update_fields=["custom_field_data"])
+        seed_stored_mapping(uplink, {"default": {"oob": {"id": 8811}}}, save=True)
         user = make_superuser()
         try:
             content = _render_module_tab(device, user)
@@ -298,8 +294,7 @@ class TestModuleTableShowsTheWriterChoice:
 
         device, module, _row, cache_key = self._seed("own", ["Uplink"], {"_librenms_ifdescr": "Unmatched Label"})
         uplink = module.interfaces.get(name="Uplink")
-        uplink.custom_field_data["librenms_id"] = stored
-        uplink.save(update_fields=["custom_field_data"])
+        seed_stored_mapping(uplink, stored, save=True)
         try:
             content = _render_module_tab(device, make_superuser())
         finally:
@@ -316,8 +311,7 @@ class TestModuleTableShowsTheWriterChoice:
 
         device, module, _row, cache_key = self._seed("held", ["Uplink"], {"_librenms_ifdescr": "Unmatched Label"})
         holder = make_interface(make_device("table-choice-holder"), "Ethernet9")
-        holder.custom_field_data["librenms_id"] = {"default": 8811}
-        holder.save(update_fields=["custom_field_data"])
+        seed_mapping(holder, own=8811)
         try:
             content = _render_module_tab(device, make_superuser())
         finally:
@@ -335,8 +329,7 @@ class TestModuleTableShowsTheWriterChoice:
 
         device, module, row, cache_key = self._seed("bound", ["Uplink"], {"_librenms_ifdescr": "Unmatched Label"})
         uplink = module.interfaces.get(name="Uplink")
-        uplink.custom_field_data["librenms_id"] = {"default": 8999}
-        uplink.save(update_fields=["custom_field_data"])
+        seed_mapping(uplink, own=8999)
         try:
             content = _render_module_tab(device, make_superuser())
         finally:
@@ -359,8 +352,7 @@ class TestModuleTableShowsTheWriterChoice:
         make_interface(device, "Uplink")
         if refusal == "held-elsewhere":
             holder = make_interface(make_device("table-choice-adopt-holder"), "Ethernet9")
-            holder.custom_field_data["librenms_id"] = {"default": 8811}
-            holder.save(update_fields=["custom_field_data"])
+            seed_mapping(holder, own=8811)
         else:
             make_module_bay(device, "Slot 2")
             _module_with_interfaces(device, "Slot 2", "TABLE-CHOICE-OTHER", ["Ethernet1/1"])
@@ -379,8 +371,8 @@ class TestModuleTableShowsTheWriterChoice:
         device, _module, _row, cache_key = self._seed("twice", ["Uplink"], {"_librenms_ifdescr": "Unmatched Label"})
         local = make_interface(device, "Ethernet9")
         for holder in (local, make_interface(make_device("table-choice-twice-other"), "Ethernet9")):
-            holder.custom_field_data["librenms_id"] = {"default": 8811}
-            holder.save(update_fields=["custom_field_data"])
+            # A duplicate binding: no writer can store it, so seed the raw state.
+            seed_stored_mapping(holder, {"default": 8811}, save=True)
         try:
             content = _render_module_tab(device, make_superuser())
         finally:

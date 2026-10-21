@@ -21,7 +21,11 @@ from netbox_librenms_plugin.tests.conftest import (
     make_interface,
     make_superuser,
     make_vm,
-    seed_own_mapping,
+)
+from netbox_librenms_plugin.tests.mapping_fixtures import (
+    custom_fields_without_mapping,
+    seed_mapping,
+    stored_mapping_for_test,
 )
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
@@ -30,6 +34,16 @@ SERVER_KEY = "default"
 PORT = 9301
 
 pytestmark = pytest.mark.django_db
+
+
+def _field_state(interface):
+    return (
+        interface.name,
+        interface.description,
+        interface.enabled,
+        stored_mapping_for_test(interface),
+        custom_fields_without_mapping(interface.custom_field_data),
+    )
 
 
 def _port(port_id, name):
@@ -47,7 +61,7 @@ def _port(port_id, name):
 
 
 def _bind(interface, port_id):
-    seed_own_mapping(interface, port_id, SERVER_KEY)
+    seed_mapping(interface, SERVER_KEY, own=port_id, save=False)
     interface.save()
     return interface
 
@@ -150,7 +164,7 @@ class TestTheSyncWriter:
         vm_interface = _vm_interface("writer", PORT)
         interface = make_interface(make_device("writer-device"), "eth0")
 
-        before = (interface.name, interface.description, interface.enabled, interface.custom_field_data.copy())
+        before = _field_state(interface)
         with pytest.raises(ValueError, match="already assigned"):
             update_interface_from_port(
                 interface,
@@ -162,9 +176,9 @@ class TestTheSyncWriter:
                 created=False,
                 fresh_read_queryset=Interface.objects.all(),
             )
-        assert (interface.name, interface.description, interface.enabled, interface.custom_field_data) == before
+        assert _field_state(interface) == before
         interface.refresh_from_db()
-        assert (interface.name, interface.description, interface.enabled, interface.custom_field_data) == before
+        assert _field_state(interface) == before
 
         assert _binding(interface) is None
         assert _binding(vm_interface) == PORT
@@ -268,7 +282,7 @@ def _hold_cable_port(name, holder, server_key):
         held_by = VMInterface.objects.create(virtual_machine=vm, name="Gi0/1")
     else:
         held_by = make_interface(make_device(f"{name}-third"), "Gi0/1")
-    seed_own_mapping(held_by, 500, server_key)
+    seed_mapping(held_by, server_key, own=500, save=False)
     held_by.save()
 
 

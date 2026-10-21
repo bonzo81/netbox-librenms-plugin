@@ -26,9 +26,9 @@ from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_interface,
     make_vm,
-    seed_own_mapping,
     transactional_db_with_all_apps,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
     SERVER_KEY,
     SYNCED,
@@ -326,7 +326,7 @@ def _row_of(owner, name, *, description, port_id=None):
         row = VMInterface.objects.create(virtual_machine=owner, name=name)
     row.description = description
     if port_id is not None:
-        seed_own_mapping(row, port_id, SERVER_KEY)
+        seed_mapping(row, SERVER_KEY, own=port_id, save=False)
     row.save()
     return row
 

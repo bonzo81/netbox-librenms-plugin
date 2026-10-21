@@ -14,6 +14,7 @@ from django.conf import settings
 from django.test import RequestFactory, override_settings
 
 from netbox_librenms_plugin.tests.conftest import configured_server_key, make_superuser
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 from netbox_librenms_plugin.views.base.cables_view import SingleCableVerifyView
 from netbox_librenms_plugin.views.object_sync.devices import SingleInterfaceVerifyView
@@ -260,11 +261,10 @@ class TestSingleInterfaceVerifyView:
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
         from netbox_librenms_plugin.tests.view_test_helpers import make_request
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         device = make_device("verify-conflicting-port-id")
         wrong_interface = make_interface(device, "Ethernet1")
-        seed_own_mapping(wrong_interface, 30, "default")
+        seed_mapping(wrong_interface, own=30, save=False)
         wrong_interface.save()
         view = SingleInterfaceVerifyView()
         api = object.__new__(LibreNMSAPI)
@@ -406,13 +406,12 @@ class TestSingleInterfaceVerifyView:
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
         from netbox_librenms_plugin.tests.view_test_helpers import make_request
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         device = make_device("verify-string-relationship-key")
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
-        seed_own_mapping(child, 10, "default")
-        seed_own_mapping(parent, 20, "default")
+        seed_mapping(child, own=10, save=False)
+        seed_mapping(parent, own=20, save=False)
         child.save()
         parent.save()
         view = SingleInterfaceVerifyView()
@@ -683,14 +682,13 @@ class TestSingleInterfaceVerifyView:
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_device, make_interface
         from netbox_librenms_plugin.tests.view_test_helpers import make_request
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         server_key = configure_default_librenms_server(settings)
         device = make_device("verify-table-resolution")
         stable_match = make_interface(device, "NetBoxStable")
         name_candidate = make_interface(device, "Ethernet1")
-        seed_own_mapping(stable_match, 10, server_key)
+        seed_mapping(stable_match, server_key, own=10, save=False)
         stable_match.mtu = 9000
         stable_match.save()
         name_candidate.mtu = 1500
@@ -763,13 +761,12 @@ class TestSingleInterfaceVerifyView:
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         device = make_device("verify-view-only-match")
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
-        seed_own_mapping(child, 10, "default")
-        seed_own_mapping(parent, 20, "default")
+        seed_mapping(child, own=10, save=False)
+        seed_mapping(parent, own=20, save=False)
         child.save()
         parent.save()
         user = make_user_with_perms(
@@ -845,14 +842,13 @@ class TestSingleInterfaceVerifyView:
             make_request,
             make_user_with_perms,
         )
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         device = make_device("verify-plugin-read-only")
         child = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
-        seed_own_mapping(child, 10, "default")
-        seed_own_mapping(parent, 20, "default")
+        seed_mapping(child, own=10, save=False)
+        seed_mapping(parent, own=20, save=False)
         child.save()
         parent.save()
         user = make_user_with_perms(
@@ -941,14 +937,14 @@ class TestSingleInterfaceVerifyView:
         )
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_superuser
         from netbox_librenms_plugin.server_mappings import mark_migrated
-        from netbox_librenms_plugin.tests.conftest import apply_mapping_change, seed_own_mapping
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
 
         _virtual_chassis, (page_device, selected_device) = make_virtual_chassis_members("verify-migrated-page")
         winner = make_device("verify-migrated-winner")
         child = make_interface(selected_device, "Ethernet2.100", iface_type="virtual")
         parent = make_interface(selected_device, "Ethernet2")
-        seed_own_mapping(child, 10, "default")
-        seed_own_mapping(parent, 20, "default")
+        seed_mapping(child, own=10, save=False)
+        seed_mapping(parent, own=20, save=False)
         child.save()
         parent.save()
         if migrated:
@@ -1102,7 +1098,6 @@ class TestSingleInterfaceVerifyView:
             make_user_with_perms,
             post,
         )
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceParentView
 
@@ -1112,8 +1107,8 @@ class TestSingleInterfaceVerifyView:
         child = make_interface(page_device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(hidden_parent_device, "Ethernet2")
         server_key = configure_default_librenms_server(settings)
-        seed_own_mapping(child, 10, server_key)
-        seed_own_mapping(parent, 20, server_key)
+        seed_mapping(child, server_key, own=10, save=False)
+        seed_mapping(parent, server_key, own=20, save=False)
         child.save()
         parent.save()
         user = make_user_with_perms("verify-hidden-parent-owner", [])
@@ -1258,7 +1253,6 @@ class TestSingleInterfaceVerifyView:
             make_user_with_perms,
             post,
         )
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfaceLagView
 
@@ -1266,8 +1260,8 @@ class TestSingleInterfaceVerifyView:
         device = make_device("verify-view-only-lag-target")
         member = make_interface(device, "Ethernet1")
         aggregate = make_interface(device, "Port-Channel1", iface_type="other")
-        seed_own_mapping(member, 10, server_key)
-        seed_own_mapping(aggregate, 20, server_key)
+        seed_mapping(member, server_key, own=10, save=False)
+        seed_mapping(aggregate, server_key, own=20, save=False)
         member.save()
         aggregate.save()
         user = make_user_with_perms("verify-view-only-lag-target", [("view", Device)])
@@ -1422,18 +1416,17 @@ class TestSingleInterfaceVerifyView:
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.tests.conftest import make_device, make_interface
         from netbox_librenms_plugin.tests.view_test_helpers import make_request
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         device = make_device("verify-candidate-scope")
         source = make_interface(device, "Ethernet1.100", iface_type="virtual")
         parent = make_interface(device, "Ethernet1")
-        seed_own_mapping(source, 10, "default")
-        seed_own_mapping(parent, 20, "default")
+        seed_mapping(source, own=10, save=False)
+        seed_mapping(parent, own=20, save=False)
         source.save()
         parent.save()
         for index in range(40):
             unrelated = make_interface(device, f"unrelated-{index}")
-            seed_own_mapping(unrelated, 1000 + index, "default")
+            seed_mapping(unrelated, own=1000 + index, save=False)
             unrelated.save()
         snapshot = {
             "ports": [
@@ -1708,7 +1701,7 @@ def _make_vc_member_device(name="srvkey-vc-dev"):
     device.vc_position = 1
     # A dict-form librenms_id mapping: get_librenms_sync_device reads this dict with the
     # caller's server_key, so an unhashable key actually reaches cf_dict.get(["a"]).
-    device.custom_field_data["librenms_id"] = {"alpha": 4242}
+    seed_mapping(device, "alpha", own=4242, save=False)
     device.save()
     return device
 

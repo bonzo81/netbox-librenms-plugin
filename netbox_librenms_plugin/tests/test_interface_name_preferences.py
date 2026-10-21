@@ -11,7 +11,8 @@ from django.urls import reverse
 
 from netbox_librenms_plugin.models import LibreNMSSettings
 from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncTab
-from netbox_librenms_plugin.tests.conftest import apply_mapping_change, make_device, make_superuser
+from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
 from netbox_librenms_plugin.utils import get_interface_name_field
 from netbox_librenms_plugin.server_mappings import mark_migrated
 

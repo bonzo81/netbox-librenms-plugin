@@ -13,6 +13,8 @@ must bind it (positive control proving the lookup is genuinely exercised).
 
 import pytest
 
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
 
 def _make_device(name):
     from dcim.models import Device, DeviceRole, DeviceType, Manufacturer, Site
@@ -21,14 +23,7 @@ def _make_device(name):
     dt, _ = DeviceType.objects.get_or_create(manufacturer=mfr, model="DT-116", slug="dt-116")
     role, _ = DeviceRole.objects.get_or_create(name="Role-116", slug="role-116")
     site, _ = Site.objects.get_or_create(name="Site-116", slug="site-116")
-    return Device.objects.create(
-        name=name,
-        device_type=dt,
-        role=role,
-        site=site,
-        status="active",
-        custom_field_data={"librenms_id": {"default": 42}},
-    )
+    return seed_mapping(Device(name=name, device_type=dt, role=role, site=site, status="active"), "default", own=42)
 
 
 @pytest.mark.django_db

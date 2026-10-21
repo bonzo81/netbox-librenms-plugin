@@ -824,6 +824,13 @@ def _same_stored(first, second) -> bool:
     return first == second
 
 
+def _put_stored_value(obj, value) -> frozenset:
+    """Set a copy of the raw stored *value* on *obj* with no check; return the storage fields a save writes."""
+    _space_of(type(obj))
+    obj.custom_field_data[_MAPPING_KEY] = copy.deepcopy(value)
+    return _STORAGE_FIELDS
+
+
 def _change(obj, stored_after, outcome=None, *, claims=(), group=None) -> MappingChange:
     stored_before = _stored_value(obj)
     changed = not _same_stored(stored_after, stored_before)
@@ -1179,13 +1186,12 @@ def mark_migrated(donor, winner_pk: int, server: str, *, at: str | None = None) 
     return _change(donor, value)
 
 
-def _normalize_merge_entry(entry, *, owner_label, owner_name, server_key, copy_dict):
+def _normalize_merge_entry(entry, *, owner_label, owner_name, server_key):
     """
     Coerce one side's entry on the merge server to a dict, failing closed on a corrupt shape.
 
     A bare int (or numeric string) becomes ``{"id": N}``; a blank or None entry becomes ``{}``. A
     non-blank unparseable string, or an unsupported type, is corrupt state and raises ValueError.
-    *copy_dict* returns a dict entry as a shallow copy (the winner's entry is changed later).
     """
     if isinstance(entry, int) and not isinstance(entry, bool):
         return {"id": entry}
@@ -1198,7 +1204,7 @@ def _normalize_merge_entry(entry, *, owner_label, owner_name, server_key, copy_d
             )
         return {"id": coerced} if coerced else {}
     if isinstance(entry, dict):
-        return dict(entry) if copy_dict else entry
+        return entry
     if entry is None:
         return {}
     raise ValueError(
@@ -1247,10 +1253,10 @@ def _merged_winner_value(winner_stored, donor_stored, winner, donor, server_key)
         raise ValueError("Cannot merge: one or both devices have a legacy bare-integer or corrupt librenms_id.")
 
     winner_entry = _normalize_merge_entry(
-        winner_cf.get(server_key), owner_label="winner", owner_name=winner.name, server_key=server_key, copy_dict=True
+        winner_cf.get(server_key), owner_label="winner", owner_name=winner.name, server_key=server_key
     )
     donor_entry = _normalize_merge_entry(
-        donor_cf.get(server_key), owner_label="donor", owner_name=donor.name, server_key=server_key, copy_dict=False
+        donor_cf.get(server_key), owner_label="donor", owner_name=donor.name, server_key=server_key
     )
     donor_oob = _extract_oob_entry("donor", donor.name, donor_entry, server_key)
     # Coerce both IDs first, so a malformed but truthy winner ID never takes the demote path.
@@ -1542,8 +1548,7 @@ def _put_on(row, change) -> frozenset:
     """Set only the mapping of *change* on *row*, and return the storage fields that a save must write."""
     if not change.changed:
         return frozenset()
-    row.custom_field_data[_MAPPING_KEY] = copy.deepcopy(change._stored)
-    return _STORAGE_FIELDS
+    return _put_stored_value(row, change._stored)
 
 
 def persist_merge(change: MergeChange, *, write: Callable[[], object]):
@@ -1598,4 +1603,4 @@ def copy_persisted_mapping(source, target) -> None:
     """
     if type(source) is not type(target) or source.pk is None or source.pk != target.pk:
         raise ValueError("A mapping copies only between two reads of one row.")
-    target.custom_field_data[_MAPPING_KEY] = copy.deepcopy(source.custom_field_data.get(_MAPPING_KEY))
+    _put_stored_value(target, _stored_value(source))
