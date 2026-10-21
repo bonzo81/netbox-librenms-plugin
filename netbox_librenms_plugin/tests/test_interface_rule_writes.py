@@ -25,7 +25,8 @@ from extras.validators import CustomValidator
 from ipam.models import IPAddress
 
 from netbox_librenms_plugin.models import InterfaceTypeMapping
-from netbox_librenms_plugin.server_mappings import get_librenms_sync_device, read_mapping
+from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import TAB_SPECS, SyncTab, sync_snapshot_key
 from netbox_librenms_plugin.tests.conftest import (
     configure_default_librenms_server,

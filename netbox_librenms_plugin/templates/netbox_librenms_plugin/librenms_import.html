@@ -16,6 +16,7 @@
 {% block javascript %}
 {{ block.super }}
 <script src="{% static 'netbox_librenms_plugin/js/librenms_import.js' %}"></script>
+<script src="{% static 'netbox_librenms_plugin/js/toasts.js' %}"></script>
 {% endblock %}
 
 
@@ -28,9 +29,6 @@
 {% endblock controls %}
 
 {% block content %}
-
-  {# Display Django messages #}
-  {% include 'inc/messages.html' %}
 
   {# LibreNMS Server Information #}
   {% if server_selection_error %}
@@ -117,8 +115,10 @@
                 {% endif %}
                 {% if show_filter_warning %}
                   <div class="alert alert-warning alert-dismissible fade show border-warning" role="alert" style="border-left: 4px solid #ffc107;">
-                    <i class="mdi mdi-alert text-warning"></i>
-                    <strong>Filter Required:</strong> {{ filter_warning }}
+                    <i class="mdi mdi-alert text-warning me-2"></i>
+                    <div>
+                      <strong>Filter Required:</strong> {{ filter_warning }}
+                    </div>
                     <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
                   </div>
                 {% endif %}
@@ -282,12 +282,14 @@
   {# Results Section #}
   {% if table.page.paginator.count == 0 %}
     <div class="alert alert-warning mb-3">
-        <h6 class="alert-heading">
-            <i class="mdi mdi-alert"></i> No Results Found
-        </h6>
-        <p class="mb-0">
-            No devices found matching your filters. Try adjusting your search criteria above.
-        </p>
+        <div>
+            <h6 class="alert-heading">
+                <i class="mdi mdi-alert"></i> No Results Found
+            </h6>
+            <p class="mb-0">
+                No devices found matching your filters. Try adjusting your search criteria above.
+            </p>
+        </div>
     </div>
   {% else %}
     <form method="post" class="form form-horizontal" id="import-selection-form">

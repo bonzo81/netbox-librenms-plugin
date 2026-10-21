@@ -33,7 +33,7 @@ from netbox_librenms_plugin.constants import (
     OOB_NAME_SUFFIX,
     PORT_ID_SOURCE_COLLISION_REASON,
     REPORTED_NAME_PORT_COLLISION_REASON,
-    is_module_model_placeholder,
+    is_librenms_placeholder,
     is_supported_interface_name_field,
 )
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_host_address
@@ -317,7 +317,13 @@ def cache_remaining_ttl(cache, key):
         return None
 
 
-_VC_MEMBER_INTERFACE_PATTERN = re.compile(r"^(?P<prefix>[A-Za-z][A-Za-z0-9]*)(?P<member>\d+)(?P<suffix>[/:].+)$")
+# The optional "-" admits Junos names such as xe-1/2/0, like get_virtual_chassis_member does.
+_VC_MEMBER_INTERFACE_PATTERN = re.compile(r"^(?P<prefix>[A-Za-z][A-Za-z0-9]*-?)(?P<member>\d+)(?P<suffix>[/:].+)$")
+
+
+def is_vc_position(value) -> bool:
+    """Return whether *value* is a Virtual Chassis position: an int, not a bool, 0 or more."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def convert_speed_to_kbps(speed_bps: int | None) -> int | None:
@@ -1223,7 +1229,7 @@ def get_vc_member_positions(device: Device) -> set[int]:
     positions = set()
 
     own_position = getattr(device, "vc_position", None)
-    if isinstance(own_position, int) and own_position > 0:
+    if is_vc_position(own_position):
         positions.add(own_position)
 
     vc = getattr(device, "virtual_chassis", None)
@@ -1246,7 +1252,7 @@ def get_vc_member_positions(device: Device) -> set[int]:
             parsed = int(raw_position)
         except (TypeError, ValueError):
             continue
-        if parsed > 0:
+        if is_vc_position(parsed):
             positions.add(parsed)
 
     return positions
@@ -1256,7 +1262,7 @@ def rewrite_interface_name_for_vc_member(
     interface_name: str, vc_position: int, member_positions: set[int] | None = None
 ) -> str | None:
     """Rewrite a template/interface name to the selected VC member position when appropriate."""
-    if not interface_name or not isinstance(vc_position, int) or vc_position < 1:
+    if not interface_name or not is_vc_position(vc_position):
         return None
     match = _VC_MEMBER_INTERFACE_PATTERN.match(interface_name)
     if not match:
@@ -1288,7 +1294,7 @@ def _instantiate_module_template_interface_specs(device: Device, module) -> list
     vc_position = getattr(device, "vc_position", None)
     vc_id = getattr(device, "virtual_chassis_id", None)
     member_positions = None
-    if isinstance(vc_position, int) and vc_position > 0 and isinstance(vc_id, int):
+    if is_vc_position(vc_position) and isinstance(vc_id, int):
         member_positions = get_vc_member_positions(device)
 
     template_specs = []
@@ -1480,9 +1486,9 @@ def detect_vc_normalization_noop(device: Device, module) -> Optional[dict]:
     vc_position = getattr(device, "vc_position", None)
     vc_id = getattr(device, "virtual_chassis_id", None)
     # bool is a subclass of int; reject explicitly so True/False can't masquerade.
-    if isinstance(vc_position, bool) or isinstance(vc_id, bool):
+    if isinstance(vc_id, bool):
         return None
-    if not (isinstance(vc_position, int) and vc_position > 0 and isinstance(vc_id, int)):
+    if not (is_vc_position(vc_position) and isinstance(vc_id, int)):
         return None
 
     template_manager = getattr(getattr(module, "module_type", None), "interfacetemplates", None)
@@ -1694,6 +1700,79 @@ def resolve_import_context_columns(request):
     return IMPORT_CONTEXT_COLUMNS_DEFAULT if validated is None else validated
 
 
+# The interface sync POST reads these values from its ``exclude_columns`` field; the dict order is the menu order.
+INTERFACE_SYNC_EXCLUDE_COLUMNS = {
+    "name": "Name",
+    "type": "Type",
+    "speed": "Speed",
+    "vlans": "VLANs",
+    "mac_address": "MAC",
+    "mtu": "MTU",
+    "enabled": "Enabled",
+    "description": "Description",
+}
+INTERFACE_SYNC_OPTIONS_DEFAULT = {"auto_select_lag_members": True, "exclude_columns": ()}
+INTERFACE_SYNC_OPTIONS_PREFERENCE = "plugins.netbox_librenms_plugin.interface_sync_options"
+
+
+def validate_interface_sync_options(value):
+    """
+    Validate and normalize an interface "Sync options" menu preference.
+
+    Args:
+        value (object): The stored or submitted preference value.
+
+    Returns:
+        dict | None: The value with its columns in menu order, or None when the value is invalid.
+
+    """
+    if not isinstance(value, dict) or value.keys() != INTERFACE_SYNC_OPTIONS_DEFAULT.keys():
+        return None
+    auto_select = value["auto_select_lag_members"]
+    columns = value["exclude_columns"]
+    if not isinstance(auto_select, bool) or not isinstance(columns, list):
+        return None
+    if any(not isinstance(column, str) or column not in INTERFACE_SYNC_EXCLUDE_COLUMNS for column in columns):
+        return None
+    if len(columns) != len(set(columns)):
+        return None
+    return {
+        "auto_select_lag_members": auto_select,
+        "exclude_columns": [column for column in INTERFACE_SYNC_EXCLUDE_COLUMNS if column in columns],
+    }
+
+
+def interface_sync_options_menu(request):
+    """
+    Build the interface "Sync options" menu state from the user's choice and the factory defaults.
+
+    A stored value that does not validate counts as absent, so the menu shows the factory defaults.
+
+    Args:
+        request (HttpRequest): Request for the user who owns the preference.
+
+    Returns:
+        dict: The switch state and one entry per exclude column, each with its factory default.
+
+    """
+    options = validate_interface_sync_options(get_user_pref(request, INTERFACE_SYNC_OPTIONS_PREFERENCE))
+    if options is None:
+        options = INTERFACE_SYNC_OPTIONS_DEFAULT
+    return {
+        "auto_select_lag_members": options["auto_select_lag_members"],
+        "auto_select_lag_members_default": INTERFACE_SYNC_OPTIONS_DEFAULT["auto_select_lag_members"],
+        "exclude_columns": [
+            {
+                "value": column,
+                "label": label,
+                "checked": column in options["exclude_columns"],
+                "default_checked": column in INTERFACE_SYNC_OPTIONS_DEFAULT["exclude_columns"],
+            }
+            for column, label in INTERFACE_SYNC_EXCLUDE_COLUMNS.items()
+        ],
+    }
+
+
 _TRUTHY_PARAMETER_VALUES = frozenset({"on", "true", "1"})
 
 
@@ -1778,23 +1857,40 @@ def same_host(a, b) -> bool:
         return False
 
 
+SET_PRIMARY_IP_PREFERENCE = "plugins.netbox_librenms_plugin.set_primary_ip"
+CREATE_MISSING_INTERFACES_PREFERENCE = "plugins.netbox_librenms_plugin.create_missing_interfaces"
+
+
+def _resolve_sync_toggle(request, keys, preference):
+    """Return the request toggle, else the user's saved boolean, else ``False``; a non-boolean saved value counts as absent."""
+    value = read_request_toggle(request, keys)
+    if value is not None:
+        return is_truthy_parameter(value)
+    pref = get_user_pref(request, preference)
+    return pref if isinstance(pref, bool) else False
+
+
 def resolve_create_missing_interfaces(request) -> bool:
     """
     Resolve the "create a missing NetBox interface before assigning the IP" flag.
 
-    POST wins, then GET, then ``False`` (opt-in). The IP-sync template renders the toggle
-    from this value, so a table refresh restores what the user selected instead of
-    silently reverting to off.
+    POST wins, then GET, then the user's saved preference
+    ``plugins.netbox_librenms_plugin.create_missing_interfaces``, then ``False`` (opt-in).
+    The IP-sync template renders the toggle from this value, so a table refresh restores
+    what the user selected instead of silently reverting to off.
 
     Args:
-        request (HttpRequest): Request used to resolve the toggle value.
+        request (HttpRequest): Request used to resolve the toggle and user preference values.
 
     Returns:
         bool: Whether missing NetBox interfaces can be created before IP assignment.
 
     """
-    value = read_request_toggle(request, ("create-missing-interfaces-toggle", "create_missing_interfaces"))
-    return is_truthy_parameter(value) if value is not None else False
+    return _resolve_sync_toggle(
+        request,
+        ("create-missing-interfaces-toggle", "create_missing_interfaces"),
+        CREATE_MISSING_INTERFACES_PREFERENCE,
+    )
 
 
 def resolve_set_primary_ip(request) -> bool:
@@ -1806,7 +1902,7 @@ def resolve_set_primary_ip(request) -> bool:
 
     1. POST/GET ``set-primary-ip-toggle`` (or ``set_primary_ip``) wins
        -- set by the IP-sync tab toggle.
-    2. Otherwise the user's saved preference
+    2. Otherwise the user's saved boolean preference
        ``plugins.netbox_librenms_plugin.set_primary_ip``.
     3. Otherwise ``False`` (opt-in).
 
@@ -1821,15 +1917,9 @@ def resolve_set_primary_ip(request) -> bool:
         bool: Whether the matching synced management IP can become the primary IP.
 
     """
-    value = read_request_toggle(request, ("set-primary-ip-toggle", "set_primary_ip-toggle", "set_primary_ip"))
-    if value is not None:
-        return is_truthy_parameter(value)
-
-    pref = get_user_pref(request, "plugins.netbox_librenms_plugin.set_primary_ip")
-    if pref is not None:
-        return is_truthy_parameter(pref) if isinstance(pref, str) else bool(pref)
-
-    return False
+    return _resolve_sync_toggle(
+        request, ("set-primary-ip-toggle", "set_primary_ip-toggle", "set_primary_ip"), SET_PRIMARY_IP_PREFERENCE
+    )
 
 
 INTERFACE_NAME_PREFERENCE_PATH = "plugins.netbox_librenms_plugin.interface_name_field"
@@ -2997,26 +3087,10 @@ def normalize_serial(value) -> str:
     return "" if value is None else str(value).strip()
 
 
-# "0" is deliberately absent: normalize_serial documents zero as a real-but-falsey serial.
-_STACK_SERIAL_PLACEHOLDERS = frozenset(
-    {
-        "-",
-        "n/a",
-        "na",
-        "none",
-        "not available",
-        "notavailable",
-        "null",
-        "unknown",
-        "unspecified",
-    }
-)
-
-
 def normalize_stack_serial(value) -> str:
     """Return a serial usable as stack identity evidence, preserving numeric zero."""
     serial = normalize_serial(value)
-    return "" if serial.casefold() in _STACK_SERIAL_PLACEHOLDERS else serial
+    return "" if is_librenms_placeholder(serial) else serial
 
 
 def find_devices_by_serial(serial: str, limit: int = 2) -> list:
@@ -4324,10 +4398,8 @@ def module_type_lookup_candidates(item):
     """
     candidates = []
     for key in ("entPhysicalModelName", "entPhysicalDescr"):
-        value = item.get(key)
-        if isinstance(value, str):
-            value = value.strip()
-        if not is_module_model_placeholder(value) and value not in candidates:
+        value = normalize_serial(item.get(key))
+        if not is_librenms_placeholder(value) and value not in candidates:
             candidates.append(value)
     return candidates
 
@@ -4376,10 +4448,10 @@ def resolve_module_type(
     # for every SFP the vendor declined to identify. The fallbacks apply only then. A real model
     # that resolves to nothing stays unresolved, because matching it on its own description
     # would be a guess, and a ModuleTypeMapping row is the supported way to teach that name.
-    if is_module_model_placeholder(model_name):
+    if is_librenms_placeholder(model_name):
         candidates = []
         for name in fallback_names:
-            if not is_module_model_placeholder(name) and name not in candidates:
+            if not is_librenms_placeholder(name) and name not in candidates:
                 candidates.append(name)
     else:
         candidates = [model_name]
@@ -4431,9 +4503,13 @@ def get_enabled_ignore_rules(manufacturer=None) -> list:
     Return the enabled InventoryIgnoreRule instances that apply to *manufacturer*.
 
     Scoping follows :func:`apply_normalization_rules`: a manufacturer takes its own rules plus
-    the unscoped ones, and no manufacturer takes only the unscoped ones. A rule that admits an
-    entPhysicalClass the built-in list omits is vendor-specific in practice, so leaving every
-    such rule global made one vendor's quirk change what every other vendor's sync admits.
+    the unscoped ones, and no manufacturer takes only the unscoped ones. A rule that admits a
+    vendor's own inventory class is vendor-specific in practice, so leaving every such rule
+    global made one vendor's quirk change what every other vendor's sync admits.
+
+    Raises:
+        InventoryRuleFilterError: When an enabled rule of any action stores a filter regex that does not compile.
+
     """
     from django.db.models import Q
 
@@ -4444,7 +4520,11 @@ def get_enabled_ignore_rules(manufacturer=None) -> list:
         rules = rules.filter(Q(manufacturer__isnull=True) | Q(manufacturer=manufacturer))
     else:
         rules = rules.filter(manufacturer__isnull=True)
-    return list(rules.order_by("pk"))
+    rules = list(rules.order_by("pk"))
+    for rule in rules:
+        # Compile now: a broken filter must stop the caller, not silently admit or hide nothing.
+        _ = rule.compiled_filters
+    return rules
 
 
 def load_bay_mappings() -> tuple:

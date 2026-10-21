@@ -260,6 +260,70 @@ def restore_inventory_rule_scoping():
     migration.scope_include_rule_to_juniper(global_apps, SimpleNamespace(connection=SimpleNamespace(alias="default")))
 
 
+def _class_rules_migration():
+    """Return migration 0025, the one source of the inventory class rules it seeds."""
+    import importlib
+
+    return importlib.import_module("netbox_librenms_plugin.migrations.0025_inventory_class_admission_rules")
+
+
+def default_inventory_include_rules():
+    """Return unsaved include rules for the built-in classes, built from migration 0025's seed data."""
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+    return [InventoryIgnoreRule(**rule) for rule in _class_rules_migration().CLASS_RULES]
+
+
+def seeded_class_rule_rows():
+    """Yield the field values of each rule row migration 0025 seeds, its manufacturer scope included."""
+    from dcim.models import Manufacturer
+
+    migration = _class_rules_migration()
+    yield from migration.CLASS_RULES
+    juniper = Manufacturer.objects.filter(slug__in=migration._SCOPING.JUNIPER_SLUGS).order_by("pk")
+    for manufacturer_id in list(juniper.values_list("pk", flat=True)) or [None]:
+        yield {**migration.SCB_RULE, "manufacturer_id": manufacturer_id}
+
+
+def restore_inventory_class_rules():
+    """Re-apply migration 0025's data step by running the migration's own function."""
+    from types import SimpleNamespace
+
+    from django.apps import apps as global_apps
+
+    _class_rules_migration().seed_inventory_class_rules(
+        global_apps, SimpleNamespace(connection=SimpleNamespace(alias="default"))
+    )
+
+
+def _fixed_platform_rule_migration():
+    """Return migration 0026, the one source of the Cisco fixed-platform rule it seeds."""
+    import importlib
+
+    return importlib.import_module("netbox_librenms_plugin.migrations.0026_seed_cisco_fixed_platform_rule")
+
+
+def seeded_fixed_platform_rule_rows():
+    """Yield the field values of each rule row migration 0026 seeds: one per Cisco manufacturer."""
+    from dcim.models import Manufacturer
+
+    migration = _fixed_platform_rule_migration()
+    cisco = Manufacturer.objects.filter(slug__in=migration.CISCO_SLUGS).order_by("pk")
+    for manufacturer_id in cisco.values_list("pk", flat=True):
+        yield {**migration.FIXED_PLATFORM_RULE, "manufacturer_id": manufacturer_id}
+
+
+def restore_fixed_platform_rules():
+    """Re-apply migration 0026's data step by running the migration's own function."""
+    from types import SimpleNamespace
+
+    from django.apps import apps as global_apps
+
+    _fixed_platform_rule_migration().seed_fixed_platform_rule(
+        global_apps, SimpleNamespace(connection=SimpleNamespace(alias="default"))
+    )
+
+
 def seed_migration_rows():
     """Recreate every row the plugin's data migrations seed, with its declared value."""
     import importlib
@@ -298,6 +362,10 @@ def seed_migration_rows():
     # Scope last, once every rule row is back: the declared rows carry no manufacturer, so a
     # restored include rule would stay vendor-agnostic while a fresh migrate scopes it.
     restore_inventory_rule_scoping()
+
+    # 0025 reads the include rules above: it converts their display flag and skips a class they admit.
+    restore_inventory_class_rules()
+    restore_fixed_platform_rules()
 
 
 _transactional_seed_restore_required = False
@@ -344,6 +412,13 @@ def _seeds_are_intact():
         .values_list("manufacturer_id", flat=True)
     )
     if not juniper_ids.issubset(scoped_ids):
+        return False
+    # Migration 0025 names the routing-engine rows by their description through this flag.
+    if migration._seeded_include_rules(global_apps, "default").filter(prefer_description=False).exists():
+        return False
+    if not all(InventoryIgnoreRule.objects.filter(**row).exists() for row in seeded_class_rule_rows()):
+        return False
+    if not all(InventoryIgnoreRule.objects.filter(**row).exists() for row in seeded_fixed_platform_rule_rows()):
         return False
     migration = importlib.import_module("netbox_librenms_plugin.migrations.0010_inventory_and_mapping_models")
     for defaults in migration.INITIAL_INVENTORY_IGNORE_RULES:
@@ -485,6 +560,45 @@ def make_virtual_chassis_members(tag, count=2):
         member.save()
         members.append(member)
     return virtual_chassis, members
+
+
+def junos_vc_inventory():
+    """Return the reporter's EX4400 VC rows plus one synthetic PIC under FPC 1."""
+
+    def row(index, entity_class, descr, *, serial="", position=0, contained_in=1, name="", model=""):
+        return {
+            "entPhysicalIndex": index,
+            "entPhysicalClass": entity_class,
+            "entPhysicalDescr": descr,
+            "entPhysicalName": name,
+            "entPhysicalModelName": model,
+            "entPhysicalSerialNum": serial,
+            "entPhysicalParentRelPos": position,
+            "entPhysicalContainedIn": contained_in,
+        }
+
+    psu = {"name": "JPSU-550-C-DC-AFO", "model": "640-107104"}
+    fpc = {"name": "EX4400-24X-S", "model": "650-151094"}
+    return [
+        row(1, "chassis", "Juniper Virtual Chassis Switch", serial="12345", contained_in=0),
+        row(2, "powerSupply", "FPC 0 Power Supply 0", serial="12346", position=0, **psu),
+        row(4, "powerSupply", "FPC 1 Power Supply 0", serial="12348", position=2, **psu),
+        row(30, "fan", "FPC 1 Fan Tray 0", position=10, name="Fan Module, Airflow Out (AFO)"),
+        row(120, "container", "FPC: EX4400-24X @ 0/*/*", serial="12345", position=0, **fpc),
+        row(121, "container", "FPC: EX4400-24X @ 1/*/*", serial="12350", position=1, **fpc),
+        row(1210, "module", "PIC: 4x10G SFP+ @ 1/2/*", position=2, contained_in=121, name="PIC 2", model="PIC-4X10G"),
+        row(271, "other", "Routing Engine 1", serial="12351", position=1, name="EX4400-24X-S", model="BUILTIN"),
+    ]
+
+
+def make_junos_vc_members(tag):
+    """Return a real two-member VC numbered like Junos: master at 0, member at 1."""
+    _chassis, (master, member) = make_virtual_chassis_members(tag, count=2)
+    for device, position, serial in ((master, 0, "12345"), (member, 1, "12350")):
+        device.vc_position = position
+        device.serial = serial
+        device.save(update_fields=["vc_position", "serial"])
+    return master, member
 
 
 def make_cluster(name):

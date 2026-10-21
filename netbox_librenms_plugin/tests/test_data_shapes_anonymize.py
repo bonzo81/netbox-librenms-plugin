@@ -1,7 +1,10 @@
 """Tests for data-shape anonymization: PII scrubbed, logic fields preserved, deterministic, replayable."""
 
+from copy import deepcopy
 from ipaddress import ip_address, ip_network
 import re
+
+import pytest
 
 from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording, find_pii, pseudonymize_os
 from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
@@ -73,9 +76,7 @@ def test_logic_bearing_fields_preserved():
     assert root["entPhysicalClass"] == "stack"
     assert root["entPhysicalIndex"] == 1
 
-    members = _response(
-        anon, f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalClass=chassis&entPhysicalContainedIn=1"
-    )["inventory"]
+    members = _response(anon, f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalContainedIn=1")["inventory"]
     # Positions and indices (drive VC member ordering) are untouched.
     assert [m["entPhysicalParentRelPos"] for m in members] == [1, 2, 3]
     assert [m["entPhysicalIndex"] for m in members] == [100, 200, 300]
@@ -88,7 +89,7 @@ def test_serials_pseudonymized_and_deterministic():
     a1 = anonymize_recording(rec)
     a2 = anonymize_recording(rec)
 
-    key = f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalClass=chassis&entPhysicalContainedIn=1"
+    key = f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalContainedIn=1"
     serials1 = [m["entPhysicalSerialNum"] for m in _response(a1, key)["inventory"]]
     serials2 = [m["entPhysicalSerialNum"] for m in _response(a2, key)["inventory"]]
 
@@ -104,7 +105,7 @@ def test_cross_reference_serial_preserved():
     rec = load_recording("cisco-stackwise-3member")
     # Sanity: the fixture's device serial equals member #100's serial.
     dev_serial = rec["responses"][f"GET /api/v0/devices/{_STACK_RECORDING_ID}"]["devices"][0]["serial"]
-    key = f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalClass=chassis&entPhysicalContainedIn=1"
+    key = f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalContainedIn=1"
     member_serial = rec["responses"][key]["inventory"][0]["entPhysicalSerialNum"]
     assert dev_serial == member_serial
 
@@ -148,7 +149,7 @@ def test_expected_member_serials_follow_anonymized_inventory():
 
     anon = anonymize_recording(rec)
 
-    key = "GET /api/v0/inventory/1001?entPhysicalClass=chassis&entPhysicalContainedIn=10"
+    key = "GET /api/v0/inventory/1001?entPhysicalContainedIn=10"
     inventory_serials = [row["entPhysicalSerialNum"] for row in _response(anon, key)["inventory"]]
     expected_serials = anon["expected"]["virtual_chassis"]["member_serials"]
     assert expected_serials == inventory_serials
@@ -192,9 +193,7 @@ def test_inventory_model_name_is_pseudonymized():
     rec = load_recording("cisco-stackwise-3member")
     anon = anonymize_recording(rec)
 
-    members = _response(
-        anon, f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalClass=chassis&entPhysicalContainedIn=1"
-    )["inventory"]
+    members = _response(anon, f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalContainedIn=1")["inventory"]
     model_names = [m.get("entPhysicalModelName") for m in members if m.get("entPhysicalModelName")]
     assert model_names
     assert all(re.fullmatch(r"MODEL-[0-9a-f]{6}", name) for name in model_names)
@@ -360,7 +359,7 @@ def test_vrf_join_keys_remapped_and_name_pseudonymized():
 
 
 def test_nokia_base_vrf_name_preserved_verbatim():
-    """ "Base is the global instance, not a VRF" is a logic rule a fixture has to express."""
+    """The rule that "Base" is the global instance and not a VRF is a logic rule a fixture has to express."""
     anon = anonymize_recording(_vrf_recording())
 
     vrfs = _response(anon, "GET /api/v0/routing/vrf")["vrfs"]
@@ -450,7 +449,8 @@ def test_documentation_addresses_are_unique_within_a_recording():
 
 
 def test_the_same_address_still_maps_to_one_pseudonym():
-    """Uniqueness must not break the join: equal inputs stay equal.
+    """
+    Uniqueness must not break the join: equal inputs stay equal.
 
     A real device does repeat an address — one fe80:: link-local sits on hundreds of sub-interfaces
     — so the allocator deduplicates by input, never by output position.
@@ -677,6 +677,45 @@ def test_find_pii_ipv6_no_false_positive_on_time_or_doc_range():
     assert not any(f["kind"] == "ipv6" for f in find_pii(rec))
 
 
+def test_find_pii_ipv6_ignores_a_mib_qualified_sensor_type():
+    """A "<NAME>-MIB::<table>" sensor type is not an IPv6 address."""
+    rec = _ports()
+    rec["responses"]["GET /api/v0/resources/sensors"] = {
+        "status": "ok",
+        "sensors": [
+            {"sensor_id": 1, "sensor_type": "OLD-CISCO-TS-MIB::tsLineTable"},
+            {"sensor_id": 2, "sensor_type": "CISCO-FAB-MIB::cDead"},
+        ],
+    }
+
+    assert not any(f["kind"] == "ipv6" for f in find_pii(rec))
+
+
+@pytest.mark.parametrize(
+    ("text", "address"),
+    [
+        ("uplink to 2001:4860::1", "2001:4860::1"),
+        ("full 2001:4860:0:0:0:0:0:8888 end", "2001:4860:0:0:0:0:0:8888"),
+        ("::1", "::1"),
+        ("peer=2001:4860::2", "2001:4860::2"),
+        ("next hop (2001:4860::3)", "2001:4860::3"),
+        ("addr 2001:4860:ABCD::FE", "2001:4860:ABCD::FE"),
+    ],
+)
+def test_find_pii_ipv6_still_flags_a_real_address(text, address):
+    """Real addresses after a space, "=", "(" or at the start of a value are reported."""
+    rec = _ports({"port_id": 1, "ifName": "Gi0/1", "entPhysicalName": text})
+
+    assert ("ipv6", address) in {(f["kind"], f["value"]) for f in find_pii(rec)}
+
+
+def test_find_pii_ipv6_flags_an_address_glued_to_a_word():
+    """An address directly after a word and a colon is still reported, so the check stays fail closed."""
+    rec = _ports({"port_id": 1, "ifName": "Gi0/1", "entPhysicalName": "ipv6:2001:4860::1"})
+
+    assert any(f["kind"] == "ipv6" for f in find_pii(rec))
+
+
 def test_find_pii_ipv6_documentation_exemption_has_a_network_boundary():
     """Only 2001:db8::/32 is documentation space, not adjacent db80 or db8f networks."""
     rec = _ports(
@@ -798,6 +837,219 @@ def test_entphysical_name_and_descr_are_pseudonymized():
     assert item["entPhysicalName"].startswith("entity-")
     assert item["entPhysicalDescr"].startswith("entity-")
     assert item["entPhysicalName"] != item["entPhysicalDescr"]
+
+
+def test_a_switch_control_board_name_keeps_only_the_scb_prefix():
+    """An inventory include rule matches ^SCB, so the prefix survives; the SKU after it never does."""
+    key = "GET /api/v0/inventory/1/all"
+    rec = _ports()
+    rec["responses"][key] = {
+        "status": "ok",
+        "inventory": [
+            {
+                "entPhysicalIndex": 114,
+                "entPhysicalClass": "backplane",
+                "entPhysicalName": "SCBE2-MX-S",
+                "entPhysicalDescr": "SCBE2-MX-S",
+                "entPhysicalModelName": "750-062572",
+            },
+            {"entPhysicalIndex": 115, "entPhysicalClass": "backplane", "entPhysicalName": "SCBE-MX-S"},
+            {"entPhysicalIndex": 116, "entPhysicalClass": "backplane", "entPhysicalName": "JNP10K-RE1"},
+            {"entPhysicalIndex": 117, "entPhysicalClass": "backplane", "entPhysicalName": "scbe2-mx-s"},
+        ],
+    }
+
+    first = anonymize_recording(rec, salt="scb")
+    second = anonymize_recording(first, salt="scb")
+
+    rows = _response(first, key)["inventory"]
+    names = [row["entPhysicalName"] for row in rows]
+    assert re.fullmatch(r"SCB entity-[0-9a-f]{6}", names[0])
+    assert re.fullmatch(r"SCB entity-[0-9a-f]{6}", names[1])
+    assert names[0] != names[1]
+    # Only the literal, case-sensitive prefix is kept, and only in the name.
+    assert re.fullmatch(r"entity-[0-9a-f]{6}", names[2])
+    assert re.fullmatch(r"entity-[0-9a-f]{6}", names[3])
+    assert re.fullmatch(r"entity-[0-9a-f]{6}", rows[0]["entPhysicalDescr"])
+    # The model goes through the shared MODEL-<hash> map like every other model field.
+    assert re.fullmatch(r"MODEL-[0-9a-f]{6}", rows[0]["entPhysicalModelName"])
+    assert not any(sku in str(first) for sku in ("SCBE2", "SCBE-", "MX-S", "750-062572", "JNP10K"))
+    assert [row["entPhysicalName"] for row in _response(second, key)["inventory"]] == names
+    assert find_pii(first) == []
+
+
+def test_entity_descr_keeps_only_the_junos_virtual_chassis_markers():
+    """VC detection reads these description markers, so they survive while the rest is replaced."""
+    import re
+
+    key = "GET /api/v0/inventory/1/all"
+    rec = _ports()
+    rec["responses"][key] = {
+        "status": "ok",
+        "inventory": [
+            {"entPhysicalIndex": 1, "entPhysicalDescr": "Juniper Virtual Chassis Switch"},
+            {"entPhysicalIndex": 4, "entPhysicalDescr": "FPC 1 Power Supply 0", "entPhysicalName": "FPC 1 PSU"},
+            {"entPhysicalIndex": 121, "entPhysicalDescr": "FPC: EX4400-24X @ 1/*/*", "entPhysicalName": "EX4400-24X-S"},
+            {"entPhysicalIndex": 271, "entPhysicalDescr": "Routing Engine 1"},
+        ],
+    }
+
+    first = anonymize_recording(rec)
+    second = anonymize_recording(first)
+
+    rows = _response(first, key)["inventory"]
+    token = "entity-[0-9a-f]{6}"
+    assert re.fullmatch(f"{token} Virtual Chassis", rows[0]["entPhysicalDescr"])
+    assert re.fullmatch(f"FPC 1 {token}", rows[1]["entPhysicalDescr"])
+    assert re.fullmatch(rf"FPC: {token} @ 1/\*/\*", rows[2]["entPhysicalDescr"])
+    assert re.fullmatch(token, rows[3]["entPhysicalDescr"])
+    # The markers are read from the description only; names stay fully replaced.
+    assert all(re.fullmatch(token, row["entPhysicalName"]) for row in rows if "entPhysicalName" in row)
+    assert not any(word in str(rows) for word in ("Juniper", "EX4400", "Power Supply", "Routing"))
+    assert _response(second, key)["inventory"] == rows
+    assert find_pii(first) == []
+
+
+def test_entity_descr_keeps_a_terminal_locator_after_the_junos_markers():
+    """A Junos description keeps its terminal locator, as the generic ENTITY text does."""
+    import re
+
+    key = "GET /api/v0/inventory/1/all"
+    rec = _ports()
+    rec["responses"][key] = {
+        "status": "ok",
+        "inventory": [
+            {"entPhysicalIndex": 4, "entPhysicalDescr": "FPC 1 Port 1/2/3"},
+            {"entPhysicalIndex": 5, "entPhysicalDescr": "FPC slot 2/1"},
+        ],
+    }
+
+    first = anonymize_recording(rec)
+    rows = _response(first, key)["inventory"]
+    token = "entity-[0-9a-f]{6}"
+    assert re.fullmatch(f"FPC 1 {token} 1/2/3", rows[0]["entPhysicalDescr"])
+    assert re.fullmatch(f"FPC {token} 2/1", rows[1]["entPhysicalDescr"])
+    assert _response(anonymize_recording(first), key)["inventory"] == rows
+    assert find_pii(first) == []
+
+
+def _junos_mx_rows():
+    """Return Juniper MX rows: an FPC, a PIC and an optic with the locators, plus free text and a malformed locator."""
+
+    def row(index, entity_class, descr, contained_in, name):
+        return {
+            "entPhysicalIndex": index,
+            "entPhysicalClass": entity_class,
+            "entPhysicalDescr": descr,
+            "entPhysicalName": name,
+            "entPhysicalModelName": f"750-00{index}",
+            "entPhysicalSerialNum": f"CANARY-SERIAL-{index}",
+            "entPhysicalContainedIn": contained_in,
+        }
+
+    return [
+        row(22, "container", "FPC: MPC7E 3D MRATE-12xQSFPP-XGE-XLGE-CGE @ 1/*/*", 1, "MPC7E-MRATE"),
+        row(67, "module", "PIC: MRATE-6xQSFPP-XGE-XLGE-CGE @ 1/0/*", 22, ""),
+        row(889, "port", "QSFP-100GBASE-LR4 @ 1/0/2", 71, "QSFP-100GBASE-LR4"),
+        row(890, "port", "QSFP-100GBASE-LR4 @ 1/0", 71, "QSFP-100GBASE-LR4"),
+        row(891, "port", "core-router-7 uplink @ 1/0/3 spare", 71, "core-router-7"),
+    ]
+
+
+def _anonymized_inventory(rows, salt=""):
+    rec = _ports()
+    rec["responses"]["GET /api/v0/inventory/1/all"] = {"status": "ok", "inventory": rows}
+    anonymized = anonymize_recording(rec, salt=salt)
+    return anonymized, _response(anonymized, "GET /api/v0/inventory/1/all")["inventory"]
+
+
+def test_entity_descr_keeps_the_junos_mx_locators_and_hashes_the_rest():
+    """The dangling-parent repair reads the "@ F/P/N" locators, so they survive and the free text does not."""
+    first, rows = _anonymized_inventory(_junos_mx_rows(), salt="mx-locators")
+    second, again = _anonymized_inventory(rows, salt="mx-locators")
+
+    token = "entity-[0-9a-f]{6}"
+    assert re.fullmatch(rf"FPC: {token} @ 1/\*/\*", rows[0]["entPhysicalDescr"])
+    assert re.fullmatch(rf"PIC: {token} @ 1/0/\*", rows[1]["entPhysicalDescr"])
+    assert re.fullmatch(rf"{token} @ 1/0/2", rows[2]["entPhysicalDescr"])
+    # A malformed locator gets the generic slash rule, and a non-terminal one keeps nothing.
+    assert re.fullmatch(rf"{token} 1/0", rows[3]["entPhysicalDescr"])
+    assert re.fullmatch(token, rows[4]["entPhysicalDescr"])
+    text = str(rows)
+    assert not any(word in text for word in ("MPC7E", "MRATE", "QSFP", "core-router", "uplink", "CANARY-SERIAL"))
+    text_fields = [(row["entPhysicalDescr"], row["entPhysicalName"]) for row in rows]
+    assert [(row["entPhysicalDescr"], row["entPhysicalName"]) for row in again] == text_fields
+    assert find_pii(first) == []
+    assert find_pii(second) == []
+
+
+# Each raw description and whether the IOS XE front-panel rule pattern finds it.
+_FRONT_PANEL_DESCRS = [
+    "Front Panel 6 ports Gigabitethernet Module",
+    "  Front Panel 3 ports Gigabitethernet Module",
+    "front panel 3 ports",
+    "Front Panelboard rev 2",
+    "Front Panel",
+    "Front Panel uplink card @ 1/0/2",
+    "16 ports Async Serial NIM",
+    "NIM with a Front Panel",
+]
+
+
+def test_entity_descr_keeps_a_leading_front_panel_as_typed_and_hashes_the_rest():
+    """A description rule on "^Front Panel" finds the same rows before and after anonymization."""
+    rows = [
+        {"entPhysicalIndex": index, "entPhysicalName": descr, "entPhysicalDescr": descr}
+        for index, descr in enumerate(_FRONT_PANEL_DESCRS, start=1)
+    ]
+    first, anonymized = _anonymized_inventory(deepcopy(rows), salt="front-panel")
+    second, again = _anonymized_inventory(deepcopy(anonymized), salt="front-panel")
+
+    token = "entity-[0-9a-f]{6}"
+    descrs = [row["entPhysicalDescr"] for row in anonymized]
+    assert re.fullmatch(rf"Front Panel {token}", descrs[0])
+    assert re.fullmatch(rf"  Front Panel {token}", descrs[1])
+    assert re.fullmatch(rf"front panel {token}", descrs[2])
+    assert re.fullmatch(rf"Front Panel{token}", descrs[3])
+    assert descrs[4] == "Front Panel"
+    assert re.fullmatch(rf"Front Panel {token} @ 1/0/2", descrs[5])
+    assert re.fullmatch(token, descrs[6])
+    assert re.fullmatch(token, descrs[7])
+    # Only the description keeps the prefix.
+    assert all(
+        re.fullmatch(rf"{token}(?: 1/0/2)?", row["entPhysicalName"]) for row in anonymized if row["entPhysicalName"]
+    )
+    for pattern in (r"^Front Panel", r"^Front Panel\b", r"(?i)^front panel", r"^\s*Front Panel "):
+        assert [bool(re.search(pattern, descr)) for descr in descrs] == [
+            bool(re.search(pattern, descr)) for descr in _FRONT_PANEL_DESCRS
+        ], pattern
+    assert [row["entPhysicalDescr"] for row in again] == descrs
+    assert "Gigabitethernet" not in str(anonymized)
+    assert find_pii(first) == []
+    assert find_pii(second) == []
+
+
+def test_a_junos_vc_marker_before_a_locator_keeps_its_member_attribution(db):
+    """The locator is parsed first and the VC marker rule then reads the prefix, so "FPC 1 " survives."""
+    from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory, chassis_serial_key
+    from netbox_librenms_plugin.tests.conftest import junos_vc_inventory, make_junos_vc_members
+
+    inventory = junos_vc_inventory()
+    inventory.append({**inventory[2], "entPhysicalIndex": 5, "entPhysicalDescr": "FPC 1 Power Supply 1 @ 1/0/0"})
+    _first, rows = _anonymized_inventory(inventory, salt="vc-locator")
+    _second, again = _anonymized_inventory(rows, salt="vc-locator")
+    # Serials are hashed on purpose; put them back so only the description decides the result.
+    for anonymized, raw in zip(rows, inventory, strict=True):
+        anonymized["entPhysicalSerialNum"] = raw["entPhysicalSerialNum"]
+    master, member = make_junos_vc_members("vc-locator")
+
+    raw_owners = attribute_inventory(inventory, [master, member], chassis_serial_key(master))
+    anonymized_owners = attribute_inventory(rows, [master, member], chassis_serial_key(master))
+
+    assert re.fullmatch(r"FPC 1 entity-[0-9a-f]{6} @ 1/0/0", rows[-1]["entPhysicalDescr"])
+    assert anonymized_owners == raw_owners
+    assert anonymized_owners[-1][0] == member
+    assert [row["entPhysicalDescr"] for row in again] == [row["entPhysicalDescr"] for row in rows]
 
 
 def test_entity_text_preserves_only_supported_terminal_locators():
@@ -949,7 +1201,7 @@ def test_find_pii_flags_nonempty_value_under_secret_looking_key():
 def test_salt_changes_pseudonyms():
     """Different salts produce different pseudonyms for the same input."""
     rec = load_recording("cisco-stackwise-3member")
-    key = f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalClass=chassis&entPhysicalContainedIn=1"
+    key = f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalContainedIn=1"
     s_a = _response(anonymize_recording(rec, salt="alpha"), key)["inventory"][0]["entPhysicalSerialNum"]
     s_b = _response(anonymize_recording(rec, salt="beta"), key)["inventory"][0]["entPhysicalSerialNum"]
     assert s_a != s_b
@@ -2020,3 +2272,11 @@ def test_device_dependency_absence_survives_anonymization(value):
 
     anonymized = anonymize_recording(recording, salt="absent-dependency")
     assert _response(anonymized, "GET /api/v0/devices/1")["devices"][0]["dependency_parent_id"] == value
+
+
+@pytest.mark.parametrize("address", ["fd12:3456::1", "fe80::1", "::1"])
+def test_find_pii_ipv6_flags_an_address_after_a_mib_prefix(address):
+    """A MIB separator must not hide an address suffix from the recording check."""
+    rec = _ports({"port_id": 1, "ifName": "Gi0/1", "entPhysicalName": f"EXAMPLE-MIB::{address}"})
+
+    assert ("ipv6", address) in {(finding["kind"], finding["value"]) for finding in find_pii(rec)}

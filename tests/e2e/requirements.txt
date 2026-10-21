@@ -1,0 +1,4 @@
+# The test driver for the end-to-end suite. NetBox and the plugin run in the compose stack.
+pytest>=8.3
+pytest-playwright>=0.7
+requests>=2.32

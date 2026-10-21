@@ -45,6 +45,7 @@ class LibreNMSVLANTable(tables.Table):
 
     def __init__(self, *args, vlan_groups=None, **kwargs):
         super().__init__(*args, **kwargs)
+        self.tab = "vlans"
         self.prefix = "vlans_"
         self.vlan_groups = vlan_groups or []
         # Donor "migrated mode" renders no form, so per-row submit buttons must become status text.

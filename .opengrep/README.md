@@ -54,7 +54,7 @@ unchecked until that review.
 | `no-unittest-assertions` | warning | A test calls a `self` method with a unittest assertion API name. |
 | `xfail-needs-raises` | error | A test marks an expected failure with `pytest.mark.xfail` and does not name the exception with `raises=`, or gives `raises=None`. An alias of the marker is not followed. |
 | `executor-needs-bounded-executor` | error | A test creates a `ThreadPoolExecutor` and does not use `tests.conftest.bounded_executor`. `tests/conftest.py` is excluded. |
-| `synchronization-needs-timeout` | error | A test creates a one-argument Barrier or calls `Event.wait()` without an argument on a local Event binding. |
+| `synchronization-needs-timeout` | error | A test creates a Barrier without a non-`None` timeout or calls `Event.wait()` with an omitted or `None` timeout on a local Event binding. |
 | `barrier-needs-run-in-threads` | error | A test creates a `threading.Barrier` and then starts threads with `ThreadPoolExecutor` or `Thread`, not with `tests.conftest.run_in_threads`. |
 | `recorded-response-needs-envelope` | error | Code reads a recorded response as a bare `[status, body]` list instead of through `data_shapes.envelope.unwrap_response`. |
 | `no-selected-fuzzy-apis` | warning | Code calls selected approximate-selection APIs. This does not prove exact-only selection. |
@@ -192,8 +192,11 @@ the same file. Its limits:
 
 The recorded-response rule checks the two legacy spellings of the `[status, body]` read: the
 `isinstance(..., list) and len(...) == 2 and isinstance(...[0], int)` test and the
-`x[1] if isinstance(x, list) else x` expression. It does not see tuple unpacking or a `type()`
-check. `data_shapes/envelope.py` is excluded because it owns the format.
+`x[1] if isinstance(x, list) else x` expression. The rule reports the expression only when `x` is
+assigned from an expression that contains `"responses"`, or is the loop variable of `for x in ...`
+or `for key, x in ...` over such an expression, because the expression alone is ordinary list
+selection. It does not see other tuple unpacking, a `type()` check, or a value passed in from
+another function. `data_shapes/envelope.py` is excluded because it owns the format.
 
 The `no-stored-mapping-access` rules check the key as the literal `"librenms_id"`, also through a
 local or module string constant. A key built at run time is outside the check. Their limits:
@@ -221,8 +224,8 @@ local or module string constant. A key built at run time is outside the check. T
 - The private rule reports an import of a private name, and a dotted access through a module
   import. It does not see `getattr()` with a computed name.
 - The template rule reads `cf` and `custom_field_data` by name. It does not see a container
-  that the view passes under another name. It skips a `{# ... #}` comment. It reports an HTML
-  comment, because Django renders the template code in it.
+  that the view passes under another name. The rule skips a `{# ... #}` comment. It reports an
+  HTML comment, because Django renders the template code in it.
 
 `conflict-raised-without-record` knows the conflict classes by name, also with a module prefix.
 It does not see a conflict that is raised from a variable. When you add a `TransactionConflict`

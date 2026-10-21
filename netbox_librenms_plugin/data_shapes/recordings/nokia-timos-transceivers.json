@@ -185,11 +185,6 @@
       ],
       "count": 4
     },
-    "GET /api/v0/inventory/309126529?entPhysicalClass=chassis&entPhysicalContainedIn=1": {
-      "status": "ok",
-      "inventory": [],
-      "count": 0
-    },
     "GET /api/v0/inventory/309126529/all": {
       "status": "ok",
       "inventory": [
@@ -2110,18 +2105,25 @@
           "channels": 4
         }
       ]
+    },
+    "GET /api/v0/inventory/309126529?entPhysicalContainedIn=1": {
+      "status": "ok",
+      "inventory": [],
+      "count": 0
     }
   },
   "expected": {
     "lag_members": {
-      "627424630": "711982042",
-      "1420560625": "100556220",
       "442471684": "412279298",
       "1689974010": "100556220",
       "1775758580": "711982042",
       "1901702767": "711982042"
     },
-    "sub_interfaces": {},
+    "sub_interfaces": {
+      "1354216783": "1461496686",
+      "627424630": "711982042",
+      "1420560625": "100556220"
+    },
     "transceivers": {
       "count": 1
     }

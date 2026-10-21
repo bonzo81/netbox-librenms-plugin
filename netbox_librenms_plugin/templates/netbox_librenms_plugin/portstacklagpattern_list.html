@@ -7,10 +7,12 @@
 
 {% block content %}
     <div class="alert alert-info">
-        <h4>Port Stack Patterns</h4>
-        <p>Define operating-system-specific patterns for LAG aggregates, bridge interfaces,
-           and service access points. Interface synchronization uses these patterns to classify
-           LibreNMS port-stack relationships.</p>
+        <div>
+            <h4>Port Stack Patterns</h4>
+            <p>Define operating-system-specific patterns for LAG aggregates, bridge interfaces,
+               and service access points. Interface synchronization uses these patterns to classify
+               LibreNMS port-stack relationships.</p>
+        </div>
     </div>
     {{ block.super }}
 {% endblock %}

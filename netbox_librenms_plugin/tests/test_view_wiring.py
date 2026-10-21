@@ -194,12 +194,12 @@ class TestMappingBulkImportViewsAreRegistered:
 
         registered = registry["views"]["netbox_librenms_plugin"]
 
-        def registered_names(model):
+        def registered_views(model):
             # Each entry is a list of {"name": ..., "view": ..., ...} records.
-            return {entry["name"] for entry in registered.get(model._meta.model_name, [])}
+            return {entry["name"]: entry["view"] for entry in registered.get(model._meta.model_name, [])}
 
-        missing = [name for name, view in views if "bulk_import" not in registered_names(view.queryset.model)]
-        assert not missing, f"bulk-import views missing @register_model_view: {missing}"
+        wrong = [name for name, view in views if registered_views(view.queryset.model).get("bulk_import") is not view]
+        assert not wrong, f"bulk-import views not registered as the model's bulk_import view: {wrong}"
 
 
 class TestSourceMarkerConvention:

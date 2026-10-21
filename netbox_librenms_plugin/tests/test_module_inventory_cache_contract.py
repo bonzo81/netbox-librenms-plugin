@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
 from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
 from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view, message_texts
@@ -78,6 +79,98 @@ class TestSeedInventoryMatchesTheReaderContract:
 
         with pytest.raises(TypeError, match="librenms_id"):
             seed_inventory(view, device, [])
+
+
+@pytest.mark.django_db
+class TestWritersCheckTheOobLinkOfTheSnapshot:
+    """A writer reads a snapshot only when the table would: the OOB controller link must match too."""
+
+    @staticmethod
+    def _link(device, link):
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
+
+        if link == "linked":
+            seed_mapping(device, "default", oob=999)
+        elif link == "corrupt":
+            # The custom field is editable in the NetBox UI and API, so a corrupt id is real state.
+            seed_stored_mapping(device, {"default": {"id": 7, "oob": {"id": "not-a-number", "type": "oob"}}}, save=True)
+
+    @pytest.mark.parametrize(
+        ("cached_oob", "link", "readable"),
+        [
+            (None, "none", True),
+            (999, "linked", True),
+            (None, "linked", False),
+            (999, "none", False),
+            (998, "linked", False),
+            (None, "corrupt", False),
+        ],
+    )
+    def test_the_reader_follows_the_table_fingerprint(self, cached_oob, link, readable):
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.views.sync.modules import _get_cached_inventory_for_device
+
+        view, device = TestSeedInventoryMatchesTheReaderContract._view_and_device(f"oob-reader-{link}", 7)
+        inventory = [{"entPhysicalIndex": 1, "entPhysicalName": "Bay 1"}]
+        cache.set(
+            view.get_cache_key(device, "inventory", server_key="default"),
+            module_inventory_cache_payload(inventory, 7, cached_oob),
+        )
+        self._link(device, link)
+
+        assert (_get_cached_inventory_for_device(device, "default", view.get_cache_key) == inventory) is readable
+
+    def test_install_selected_refuses_a_snapshot_built_before_an_oob_link(self):
+        from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
+
+        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type_with_bays
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+        from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
+
+        device = make_device_with_module_bays("oob-relinked-install", ["Slot 1"])
+        seed_mapping(device, "default", own=7)
+        make_module_type_with_bays("OOB-CARD")
+        inventory = [
+            {
+                "entPhysicalIndex": 2,
+                "entPhysicalClass": "module",
+                "entPhysicalName": "Slot 1",
+                "entPhysicalModelName": "OOB-CARD",
+                "entPhysicalSerialNum": "SN-OOB-CARD",
+                "entPhysicalContainedIn": 0,
+            }
+        ]
+        user = make_user_with_perms(
+            "oob-relinked-install",
+            [
+                ("view", Device),
+                ("view", ModuleBay),
+                ("view", ModuleType),
+                ("add", Module),
+                ("add", Interface),
+                ("change", Interface),
+                ("delete", Interface),
+            ],
+        )
+        request = make_request(
+            "post",
+            {
+                "select": ["2"],
+                "server_key": "default",
+                "inventory_binding": _inventory_binding(device, "install_selected", inventory),
+            },
+            user=user,
+        )
+        view = make_view(InstallSelectedView, request, librenms_api=SimpleNamespace(server_key="default"))
+        seed_inventory(view, device, inventory, librenms_id=7)
+        self._link(device, "linked")
+
+        _post(view, request, pk=device.pk)
+
+        assert CACHE_MISS_TEXT in message_texts(request)
+        assert not Module.objects.filter(device=device).exists()
 
 
 @pytest.mark.django_db
@@ -296,7 +389,7 @@ class TestTrustedPayloadMatchesTheDeviceMapping:
 
         payload = trusted_module_inventory_payload(device, [{"index": 1}], librenms_id=9)
 
-        assert payload == {"inventory": [{"index": 1}], "librenms_id": 9, "oob_librenms_id": None}
+        assert payload == module_inventory_cache_payload([{"index": 1}], 9, None)
 
     def test_a_written_mapping_refreshes_the_cached_custom_field_value(self):
         """The helper must verify a write against current custom field data."""
@@ -308,4 +401,4 @@ class TestTrustedPayloadMatchesTheDeviceMapping:
 
         payload = trusted_module_inventory_payload(device, [{"index": 1}], librenms_id=9)
 
-        assert payload == {"inventory": [{"index": 1}], "librenms_id": 9, "oob_librenms_id": None}
+        assert payload == module_inventory_cache_payload([{"index": 1}], 9, None)

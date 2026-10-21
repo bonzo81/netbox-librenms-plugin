@@ -21,7 +21,13 @@ pytestmark = pytest.mark.django_db
 # The row list each collection route answers with. An unregistered route must fall back to a
 # WELL-FORMED empty body for its own field, the way a real LibreNMS does — a bare {"status": "ok"}
 # is a malformed payload that the capture rightly refuses.
-_STUB_ROW_FIELDS = {"ip": "addresses", "links": "links", "ports": "ports", "transceivers": "transceivers"}
+_STUB_ROW_FIELDS = {
+    "all": "inventory",
+    "ip": "addresses",
+    "links": "links",
+    "ports": "ports",
+    "transceivers": "transceivers",
+}
 
 
 _STACK_RECORDING_ID = load_recording("cisco-stackwise-3member")["device_id"]
@@ -425,7 +431,7 @@ def test_capture_roundtrip_preserves_vc_outcome(recording_server):
     keys = list(captured["responses"])
     assert f"GET /api/v0/devices/{_STACK_RECORDING_ID}" in keys
     assert any(f"inventory/{_STACK_RECORDING_ID}?entPhysicalContainedIn=0" in k for k in keys)
-    assert any("entPhysicalClass=chassis" in k for k in keys)
+    assert f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalContainedIn=1" in keys
     # The seed serves real empty ports and port_stack responses. Both routes are required,
     # so an omitted route would abort capture instead of storing its 404 response.
     assert captured["responses"][f"GET /api/v0/devices/{_STACK_RECORDING_ID}/ports"] == {"status": "ok", "ports": []}
@@ -443,6 +449,26 @@ def test_capture_roundtrip_preserves_vc_outcome(recording_server):
     assert result is not None
     assert result["member_count"] == 3
     assert [m["serial"] for m in result["members"]] == seed["expected"]["virtual_chassis"]["member_serials"]
+
+
+def test_capture_roundtrip_preserves_a_junos_fpc_virtual_chassis(recording_server):
+    """The capture records the root's direct children, so the FPC members replay as a stack."""
+    from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
+
+    seed = load_recording("juniper-ex4400-vc-2member")
+    # The capture holds inventory only; capture also requires the port routes.
+    device_id = seed["device_id"]
+    seed["responses"][f"GET /api/v0/devices/{device_id}/ports"] = {"status": "ok", "ports": []}
+    seed["responses"][f"GET /api/v0/devices/{device_id}/port_stack"] = {"status": "ok", "mappings": []}
+    _server, api = recording_server(seed)
+
+    captured = capture_device_recording(api, seed["device_id"], name="captured-junos")
+
+    _server2, api2 = recording_server(captured)
+    result = detect_virtual_chassis_from_inventory(api2, seed["device_id"])
+    assert result is not None
+    assert [m["serial"] for m in result["members"]] == seed["expected"]["virtual_chassis"]["member_serials"]
+    assert [m["position"] for m in result["members"]] == seed["expected"]["virtual_chassis"]["member_positions"]
 
 
 def test_capture_roundtrip_preserves_port_relationships(recording_server):
@@ -501,7 +527,7 @@ def test_capture_mirrors_inventory_all_fallback_when_server_ignores_filters(reco
             "GET /api/v0/devices/1000": {"status": "ok", "devices": [{"device_id": 1000, "os": "ios"}]},
             # The server ignores the entPhysical* filter params → empty filtered inventory...
             "GET /api/v0/inventory/1000?entPhysicalContainedIn=0": {"status": "ok", "inventory": []},
-            "GET /api/v0/inventory/1000?entPhysicalClass=chassis&entPhysicalContainedIn=1": {
+            "GET /api/v0/inventory/1000?entPhysicalContainedIn=1": {
                 "status": "ok",
                 "inventory": [],
             },
@@ -522,6 +548,36 @@ def test_capture_mirrors_inventory_all_fallback_when_server_ignores_filters(reco
     sig = compute_shape_signature(captured)
     assert sig["virtual_chassis"]["present"] is True
     assert sig["virtual_chassis"]["member_count"] == 2
+
+
+def test_capture_records_the_full_inventory_the_modules_tab_reads(recording_server):
+    """A server that honors the inventory filters still gets /all recorded, because the Modules tab reads it."""
+    chassis = {"entPhysicalIndex": 1, "entPhysicalClass": "chassis", "entPhysicalContainedIn": 0}
+    psu = {
+        "entPhysicalIndex": 20,
+        "entPhysicalClass": "powerSupply",
+        "entPhysicalContainedIn": 1,
+        "entPhysicalModelName": "PWR-1",
+    }
+    seed = {
+        "schema_version": 1,
+        "name": "filter-srv",
+        "device_id": 1000,
+        "meta": {"os": "nxos"},
+        "responses": {
+            "GET /api/v0/devices/1000": {"status": "ok", "devices": [{"device_id": 1000, "os": "nxos"}]},
+            "GET /api/v0/inventory/1000?entPhysicalContainedIn=0": {"status": "ok", "inventory": [chassis]},
+            "GET /api/v0/inventory/1000?entPhysicalContainedIn=1": {"status": "ok", "inventory": [psu]},
+            "GET /api/v0/inventory/1000/all": {"status": "ok", "inventory": [chassis, psu]},
+            "GET /api/v0/devices/1000/ports": {"status": "ok", "ports": []},
+            "GET /api/v0/devices/1000/port_stack": {"status": "ok", "mappings": []},
+        },
+    }
+    _server, api = recording_server(seed)
+    captured = capture_device_recording(api, 1000)
+
+    _replay_server, replay_api = recording_server(captured)
+    assert replay_api.get_device_inventory(1000) == (True, [chassis, psu])
 
 
 def test_capture_raises_when_filtered_inventory_request_has_transport_error():

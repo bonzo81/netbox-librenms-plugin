@@ -1551,6 +1551,16 @@ class TestVirtualChassisInterfaceTable:
         }
         assert all("text-wrap" in th["class"].split() for th in headers.values())
 
+    def test_every_vc_member_column_opts_into_the_shared_width_class(self):
+        from netbox_librenms_plugin.tables.cables import VCCableTable
+        from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
+        from netbox_librenms_plugin.tables.modules import VCModuleTable
+
+        for table_class in (VCInterfaceTable, VCModuleTable, VCCableTable):
+            td = table_class.base_columns["device_selection"].attrs["td"]
+            assert "device-selection-col" in td.get("class", "").split(), table_class.__name__
+            assert td["data-col"] == "device_selection"
+
     def test_physical_rows_select_the_named_member_and_logical_rows_use_the_viewed_member(self):
         from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
 

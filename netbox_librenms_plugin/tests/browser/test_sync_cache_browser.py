@@ -1459,6 +1459,82 @@ def test_an_hx_confirm_question_asks_in_the_plugin_modal(page, accept):
     assert page.evaluate("window.confirmCalls") == []
 
 
+def _render_remove_mapping_form(page, server_key):
+    """Render the sync page's real remove-mapping form, cut out of its template, with the page script."""
+    from django.template import Context, Engine, Library
+
+    urls = Library()
+
+    @urls.simple_tag(name="url")
+    def url(name, **kwargs):
+        return "/remove-mapping/"
+
+    engine = Engine()
+    engine.template_builtins.append(urls)
+    source = (TEMPLATE_DIR / "librenms_sync_base.html").read_text(encoding="utf-8")
+    form = re.search(r"<form[^>]*remove_server_mapping.*?</form>", source, flags=re.S).group(0)
+    fragment = engine.from_string(form).render(
+        Context(
+            {
+                "mapping": {"server_key": server_key},
+                "server_key": "production",
+                "lookup_device_pk": 7,
+                "lookup_device_model_name": "device",
+                "csrf_token": "token",
+            },
+            use_l10n=False,
+        )
+    )
+    page.set_content(MODAL_CSS + fragment)
+    _add_page_scripts(page)
+    _spy_on_window_confirm(page)
+    page.evaluate(
+        """() => {
+            window.submitted = [];
+            document.querySelector('form').addEventListener('submit', event => {
+                event.preventDefault();
+                window.submitted.push(Array.from(new FormData(event.target, event.submitter).entries()));
+            });
+        }"""
+    )
+
+
+@pytest.mark.parametrize("dismiss", ["cancel", "escape", "backdrop"])
+def test_remove_mapping_asks_in_the_plugin_modal_and_a_dismissal_submits_nothing(page, dismiss):
+    _render_remove_mapping_form(page, "old-lab")
+
+    page.get_by_role("button", name="Remove").click()
+
+    modal = page.locator(CONFIRM_MODAL)
+    expect(modal.locator("[data-confirm-message]")).to_have_text(
+        "Remove mapping for server 'old-lab'? This cannot be undone."
+    )
+    if dismiss == "cancel":
+        modal.get_by_role("button", name="Cancel").click()
+    elif dismiss == "escape":
+        page.keyboard.press("Escape")
+    else:
+        page.mouse.click(5, 5)
+    expect(modal).to_be_hidden()
+    assert page.evaluate("window.submitted") == []
+    assert page.evaluate("window.confirmCalls") == []
+
+
+def test_remove_mapping_confirmed_in_the_modal_submits_once_and_shows_the_key_as_text(page):
+    _render_remove_mapping_form(page, "o'lab <b>x</b>")
+
+    page.get_by_role("button", name="Remove").click()
+    message = page.locator(f"{CONFIRM_MODAL} [data-confirm-message]")
+    expect(message).to_have_text("Remove mapping for server 'o'lab <b>x</b>'? This cannot be undone.")
+    assert message.locator("b").count() == 0
+    page.locator(CONFIRM_MODAL).get_by_role("button", name="Confirm").click()
+
+    [pairs] = page.evaluate("window.submitted")
+    assert ["server_key", "o'lab <b>x</b>"] in pairs
+    assert ["active_server_key", "production"] in pairs
+    assert page.evaluate("window.confirmCalls") == []
+
+
 def _modal_state(page):
     """Return which modals are open, how many backdrops exist, and whether the page scroll is locked."""
     return page.evaluate(
@@ -2164,27 +2240,29 @@ SAVE_PREF_URL = "https://plugin.example.com/save-pref"
 
 
 def _ipaddress_toggle_fragment():
-    """Build an IP address fragment around the template's own "Set Primary IP" script."""
-    markup = (TEMPLATE_DIR / "_ipaddress_sync_content.html").read_text()
-    assert markup.count("<script") == 1, "the IP address template must carry exactly one inline script"
-    start = markup.index("<script")
-    end = markup.index("</script>", start) + len("</script>")
-    script = _replace_fixture_markup(
-        markup[start:end],
-        "{% url 'plugins:netbox_librenms_plugin:save_user_pref' %}",
-        SAVE_PREF_URL,
-    )
+    """Build an IP address fragment around the template's own "Sync options" menu."""
+    from django.template import Context, Engine, Library
+
+    urls = Library()
+
+    @urls.simple_tag(name="url")
+    def url(name):
+        assert name == "plugins:netbox_librenms_plugin:save_user_pref"
+        return SAVE_PREF_URL
+
+    engine = Engine()
+    engine.template_builtins.append(urls)
+    menu = engine.from_string((TEMPLATE_DIR / "inc" / "_ip_sync_options.html").read_text(encoding="utf-8"))
     return (
-        '<input type="checkbox" id="set-primary-ip-toggle-cb" checked>'
-        "<table><tbody>"
+        menu.render(Context({"ip_sync": {"set_primary_ip": True}}, use_l10n=False)) + "<table><tbody>"
         '<tr data-mgmt-ip="true"><td><input type="checkbox" name="select" value="10.0.0.1"></td></tr>'
         '<tr><td><input type="checkbox" name="select" value="10.0.0.2"></td></tr>'
-        "</tbody></table>" + script
+        "</tbody></table>"
     )
 
 
-def test_a_cache_fragment_runs_its_inline_script(page):
-    """A restored fragment must run its inline script, or the toggle it binds stays dead until a sync."""
+def test_a_cache_fragment_binds_the_primary_ip_toggle(page):
+    """A restored fragment must bind its "Set Primary IP" toggle, or the toggle stays dead until a sync."""
     initial = {
         "interfaces": _state("interfaces-ready"),
         "ipaddresses": _state("ipaddresses-ready"),
@@ -4614,11 +4692,11 @@ FIT_TABLES = {
 def _render_fit_table(page, table_id, card_width):
     """Render one sync table inside a card of the given width, with the page script initialized."""
     spec = FIT_TABLES[table_id]
-    # The VC member column width comes from the interface template's style block.
-    vc_width = "width: 13rem; min-width: 13rem;"
     head = "".join(f'<th class="text-wrap" data-col="{col}">{label}</th>' for col, label in spec["headers"])
+    # The VC member column opts into the shared width class from librenms_sync.css, as the tables do.
     row = "".join(
-        f'<td data-col="{col}" style="{vc_width if col == "device_selection" else ""}">{spec["cells"][col]}</td>'
+        f'<td data-col="{col}" class="{"device-selection-col" if col == "device_selection" else ""}">'
+        f"{spec['cells'][col]}</td>"
         for col, _label in spec["headers"]
     )
     page.set_content(
@@ -4627,6 +4705,7 @@ def _render_fit_table(page, table_id, card_width):
         f'<table class="table" id="{table_id}"><thead><tr>{head}</tr></thead>'
         f"<tbody>{f'<tr>{row}</tr>' * 3}</tbody></table></div></div>"
     )
+    page.add_style_tag(path=str(STYLE_PATH))
     _add_page_scripts(page)
     page.evaluate("initializeScripts()")
 

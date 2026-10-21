@@ -201,16 +201,13 @@ def missing_pk(model, offset=1000):
 
 def trusted_module_inventory_payload(device, inventory, *, server_key="default", librenms_id=1):
     """Build a module inventory payload bound to the device's verified current LibreNMS mapping."""
+    from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
     seed_mapping(device, server_key, own=librenms_id)
     # cf is a cached_property over the applicable custom fields: drop it so the next read sees the write.
     device.__dict__.pop("cf", None)
-    return {
-        "inventory": inventory,
-        "librenms_id": librenms_id,
-        "oob_librenms_id": None,
-    }
+    return module_inventory_cache_payload(inventory, librenms_id, None)
 
 
 def assert_locked_before_update(captured, table):

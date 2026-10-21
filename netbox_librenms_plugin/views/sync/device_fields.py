@@ -14,21 +14,20 @@ from django.views import View
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.import_utils import _determine_device_name
-from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
+from netbox_librenms_plugin.import_utils.virtual_chassis import _member_name, chassis_serial_key
 from netbox_librenms_plugin.models import PlatformMapping
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
     ContainerStatus,
     IdentityOwned,
     convert_legacy,
-    get_librenms_sync_device,
     persist_mapping,
     read_mapping,
     release_server,
     require_server_key,
     set_preference,
 )
-from netbox_librenms_plugin.server_selection import build_server_mappings
+from netbox_librenms_plugin.server_selection import build_server_mappings, get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import SyncTab
 from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, update_existing_row
 from netbox_librenms_plugin.utils import (
@@ -252,10 +251,8 @@ class UpdateDeviceNameView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             and device.virtual_chassis is not None
             and device.vc_position is not None
         ):
-            resolved_name = _generate_vc_member_name(
-                resolved_name,
-                device.vc_position,
-                serial=getattr(device, "serial", None),
+            resolved_name = _member_name(
+                resolved_name, device.vc_position, device.serial, None, chassis_serial_key(device)
             )
 
         if not resolved_name:

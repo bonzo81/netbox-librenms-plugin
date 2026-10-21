@@ -31,13 +31,13 @@ from netbox_librenms_plugin.server_mappings import (
     assign_own,
     claim_librenms_port_binding,
     find_port_owner,
-    get_librenms_sync_device,
     identity_q,
     name_match_may_be_port,
     persist_mapping,
     read_mapping,
     resolve_device_port,
 )
+from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
