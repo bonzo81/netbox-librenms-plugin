@@ -171,9 +171,14 @@ def test_the_migration_cannot_be_reversed():
     _manufacturer("cisco")
     _run_data_step()
     before = InventoryIgnoreRule.objects.count()
+    executor = MigrationExecutor(connection)
+    key = ("netbox_librenms_plugin", "0026_seed_cisco_fixed_platform_rule")
+    # A migrate to 0025 would first reverse every later migration: unapply 0026 itself.
+    migration = executor.loader.get_migration(*key)
+    state = executor.loader.project_state(key)
 
-    with pytest.raises(IrreversibleError, match="0026_seed_cisco_fixed_platform_rule"):
-        MigrationExecutor(connection).migrate([("netbox_librenms_plugin", "0025_inventory_class_admission_rules")])
+    with connection.schema_editor() as editor, pytest.raises(IrreversibleError, match=key[1]):
+        migration.unapply(state, editor)
 
     assert InventoryIgnoreRule.objects.count() == before
     assert _model_rules().exists()
