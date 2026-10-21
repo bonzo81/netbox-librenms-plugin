@@ -76,6 +76,7 @@ from netbox_librenms_plugin.import_validation_helpers import (
     reset_cluster,
 )
 from netbox_librenms_plugin.ip_addressing import parse_host_address
+from netbox_librenms_plugin.ip_rules import ip_rules_for_request
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.server_mappings import (
@@ -499,6 +500,15 @@ def _lock_librenms_id_assignment_target(view, target_model, target_pk, librenms_
         )
 
     return locked_target, None
+
+
+def _oob_ip_rule(request, ip_str):
+    """Return the IP mapping that ignores *ip_str* in the global table, or None; an invalid address is refused later."""
+    try:
+        address = parse_host_address(ip_str)
+    except ValueError:
+        return None
+    return ip_rules_for_request(request).decide(address, None)
 
 
 class _OobIpClaimed(Exception):
@@ -3189,11 +3199,19 @@ class AddAsOOBView(
                 # operation actually needs; if missing, skip the IP-set (the link
                 # still commits) rather than hard-failing — a return here would
                 # roll back the whole transaction, including the linkage.
-                perm_warning = self._missing_oob_ip_permissions(request, oob_ip_str, device=sync_device)
-                oob_iface, iface_reason = (
-                    (None, None) if perm_warning else self._resolve_oob_interface(request, sync_device)
+                # The attach writes into the global table, so only a mapping without a VRF can ignore the address.
+                ip_rule = _oob_ip_rule(request, oob_ip_str)
+                perm_warning = (
+                    None if ip_rule else self._missing_oob_ip_permissions(request, oob_ip_str, device=sync_device)
                 )
-                if perm_warning:
+                oob_iface, iface_reason = (
+                    (None, None) if ip_rule or perm_warning else self._resolve_oob_interface(request, sync_device)
+                )
+                if ip_rule:
+                    deferred_messages.append(
+                        (messages.WARNING, f"OOB linked, but OOB IP {oob_ip_str} not set: {ip_rule.reason}.")
+                    )
+                elif perm_warning:
                     deferred_messages.append((messages.WARNING, perm_warning))
                 elif iface_reason == "permission_add":
                     # A concurrent delete turned an interface reuse into a create after the
