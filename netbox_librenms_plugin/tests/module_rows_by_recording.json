@@ -1,5 +1,7 @@
 {
   "arcos-lag-transceivers": [
+    [160128, 0, "entity-18fc1b", "powerSupply"],
+    [160129, 0, "entity-407662", "powerSupply"],
     [174209, 0, "entity-01a54d", "port"],
     [174210, 0, "entity-976fe3", "port"],
     [174211, 0, "entity-6219b2", "port"],
