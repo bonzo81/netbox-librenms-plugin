@@ -71,6 +71,9 @@ def aliases(device, change):
     logged = change.postchange_data["custom_fields"]
     # ruleid: no-stored-mapping-access
     value = logged["librenms_id"]
+    serialized = change.postchange_data.get("custom_fields", {})
+    # ruleid: no-stored-mapping-access
+    value = serialized.get("librenms_id")
     key = "librenms_id"
     # ruleid: no-stored-mapping-access
     value = device.custom_field_data[key]

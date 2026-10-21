@@ -1034,8 +1034,10 @@ function initializeCountdowns() {
  * @param {string} optionSelector - Selector for controls inside the dropdown
  * @param {string} countId - Changed-options badge element ID
  * @param {string} resetId - Reset button element ID
+ * @param {Object} [store] - Keeps the user's choice: save(root, options) runs once per user change
+ *     and once per Reset; restore(root, options) runs before the first count
  */
-function initializeSyncOptions(rootId, optionSelector, countId, resetId) {
+function initializeSyncOptions(rootId, optionSelector, countId, resetId, store) {
     const root = document.getElementById(rootId);
     if (!root || root.dataset.initialized === 'true') return;
 
@@ -1054,8 +1056,14 @@ function initializeSyncOptions(rootId, optionSelector, countId, resetId) {
         countBadge.classList.toggle('bg-primary-lt', changedCount > 0);
     };
 
-    options.forEach((option) => option.addEventListener('change', updateCount));
+    let resetting = false;
+    options.forEach((option) => option.addEventListener('change', () => {
+        updateCount();
+        if (store && !resetting) store.save(root, options);
+    }));
     resetButton?.addEventListener('click', () => {
+        // Reset saves the menu once below, not once per control it flips.
+        resetting = true;
         options.forEach((option) => {
             const defaultChecked = option.dataset.defaultChecked === 'true';
             if (option.checked !== defaultChecked) {
@@ -1063,25 +1071,184 @@ function initializeSyncOptions(rootId, optionSelector, countId, resetId) {
                 option.dispatchEvent(new Event('change', { bubbles: true }));
             }
         });
+        resetting = false;
         updateCount();
+        if (store) store.save(root, options);
     });
+    store?.restore(root, options);
     root.dataset.initialized = 'true';
     updateCount();
 }
+
+// Each preference save waits for the one before it, so the server stores the last state the user chose.
+let syncOptionSaving = Promise.resolve();
+
+/**
+ * Queue one user preference save.
+ *
+ * @param {HTMLElement} root - The menu root, which carries the save-pref URL
+ * @param {string} key - The preference key
+ * @param {*} value - The preference value
+ * @returns {Promise<boolean>} Resolves to false only when the POST was sent and failed
+ */
+function saveSyncOptionPreference(root, key, value) {
+    const savePrefUrl = root.dataset.savePrefUrl;
+    if (!savePrefUrl) return Promise.resolve(true);
+    const csrfToken = getCsrfToken();
+    if (!csrfToken) {
+        console.debug(`Failed to save ${key} pref: missing CSRF token`);
+        return Promise.resolve(true);
+    }
+    syncOptionSaving = syncOptionSaving.then(() => fetch(savePrefUrl, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrfToken},
+        body: JSON.stringify({key: key, value: value})
+    })).then(response => {
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        return true;
+    }).catch(error => {
+        console.debug(`Failed to save ${key} pref:`, error.message);
+        return false;
+    });
+    return syncOptionSaving;
+}
+
+/**
+ * Keep a sync options menu as user preferences.
+ *
+ * A tab swap can render the menu from a stored value that a queued save has not replaced yet,
+ * so the swapped-in menu gets the last choice made on this page.
+ * A key whose save failed is sent again, with its last choice, by the next save or restore.
+ *
+ * @param {Object<string, {read: Function, write: Function}>} preferences - Per preference key,
+ *     read(options) returns its value and write(options, value) applies it
+ * @returns {{restore: Function, save: Function}} The store for initializeSyncOptions
+ */
+function syncOptionStore(preferences) {
+    const chosen = {};
+    const failed = new Set();
+    let current = {};
+    const values = (options) => Object.fromEntries(
+        Object.entries(preferences).map(([key, preference]) => [key, preference.read(options)])
+    );
+    const send = (root, key) => {
+        // Saves finish in queue order, so the last save of a key decides whether it failed.
+        failed.delete(key);
+        saveSyncOptionPreference(root, key, chosen[key]).then((saved) => {
+            if (saved) failed.delete(key);
+            else failed.add(key);
+        });
+    };
+    return {
+        restore(root, options) {
+            Object.entries(chosen).forEach(([key, value]) => preferences[key].write(options, value));
+            current = values(options);
+            Array.from(failed).forEach((key) => send(root, key));
+        },
+        save(root, options) {
+            const next = values(options);
+            Object.keys(next).forEach((key) => {
+                if (JSON.stringify(next[key]) === JSON.stringify(current[key]) && !failed.has(key)) return;
+                chosen[key] = next[key];
+                send(root, key);
+            });
+            current = next;
+        }
+    };
+}
+
+/** A preference held by one checkbox, found by its ID. */
+function checkboxPreference(id) {
+    const find = (options) => options.find((option) => option.id === id);
+    return {
+        read: (options) => Boolean(find(options)?.checked),
+        write: (options, value) => {
+            const option = find(options);
+            if (option) option.checked = value;
+        }
+    };
+}
+
+const interfaceSyncOptionStore = syncOptionStore({
+    interface_sync_options: {
+        read: (options) => ({
+            auto_select_lag_members: Boolean(
+                options.find((option) => option.name === 'auto_select_lag_members')?.checked
+            ),
+            exclude_columns: options
+                .filter((option) => option.name === 'exclude_columns' && option.checked)
+                .map((option) => option.value)
+        }),
+        write: (options, value) => options.forEach((option) => {
+            option.checked = option.name === 'auto_select_lag_members'
+                ? value.auto_select_lag_members
+                : value.exclude_columns.includes(option.value);
+        })
+    }
+});
+
+const ipSyncOptionStore = syncOptionStore({
+    set_primary_ip: checkboxPreference('set-primary-ip-toggle-cb'),
+    create_missing_interfaces: checkboxPreference('create-missing-interfaces-toggle-cb')
+});
 
 function initializeSyncOptionMenus() {
     initializeSyncOptions(
         'interface-sync-options',
         '.interface-sync-option',
         'interface-sync-options-count',
-        'reset-interface-sync-options'
+        'reset-interface-sync-options',
+        interfaceSyncOptionStore
     );
     initializeSyncOptions(
         'ip-sync-options',
         '.ip-sync-option',
         'ip-sync-options-count',
-        'reset-ip-sync-options'
+        'reset-ip-sync-options',
+        ipSyncOptionStore
     );
+}
+
+/**
+ * Keep the management-IP row selected while "Set Primary IP" is on.
+ *
+ * Runs after the menu is restored, so the row follows the user's latest choice.
+ */
+function initializePrimaryIpToggle() {
+    const toggle = document.getElementById('set-primary-ip-toggle-cb');
+    if (!toggle || toggle.dataset.mgmtRowBound === 'true') return;
+    toggle.dataset.mgmtRowBound = 'true';
+    const selectManagementRow = () => {
+        document.querySelectorAll('tr[data-mgmt-ip="true"] input[name="select"]').forEach((box) => {
+            box.checked = toggle.checked;
+        });
+        const table = document.getElementById('librenms-ipaddress-table');
+        if (!table || !toggle.checked) return;
+        // A management row on another page has no checkbox, so it goes into the stored selection.
+        const visible = new Set(Array.from(table.querySelectorAll('td input[name="select"]'), (box) => box.value));
+        const selection = readStoredSelection(table);
+        JSON.parse(table.dataset.mgmtRows || '[]').forEach((key) => {
+            if (!visible.has(key)) selection[key] = {inputs: {}, auto: '', mgmt: true};
+        });
+        writeStoredSelection(table, selection);
+    };
+    selectManagementRow();
+    toggle.addEventListener('change', () => {
+        const table = document.getElementById('librenms-ipaddress-table');
+        if (table && !toggle.checked) {
+            // The management row can be selected on another page, where no checkbox can clear it.
+            const selection = readStoredSelection(table);
+            Object.keys(selection).forEach((key) => {
+                if (selection[key] && selection[key].mgmt) delete selection[key];
+            });
+            writeStoredSelection(table, selection);
+        }
+        selectManagementRow();
+        // Store the change too, or the next swap restores the row from the old selection.
+        commitSelectionChange(table);
+    });
 }
 
 // ============================================
@@ -1599,7 +1766,7 @@ function _selectionSnapshot(table) {
  * row restored after paging keeps the same standing it had before.
  *
  * @param {HTMLElement} table - The table element.
- * @returns {Object<string, {inputs: Object<string, string>, auto: string}>} Selected rows by key.
+ * @returns {Object<string, {inputs: Object<string, string>, auto: string, mgmt: boolean}>} Selected rows by key.
  */
 function readStoredSelection(table) {
     try {
@@ -1720,6 +1887,7 @@ function persistTableSelection(table) {
                     : checkbox.dataset[MEMBER_MARKER]
                       ? 'member'
                       : '',
+                mgmt: row.dataset.mgmtIp === 'true',
             };
         } else {
             // Only the visible page can retract a row: an absent checkbox means "another page",
@@ -4214,6 +4382,9 @@ document.body.addEventListener('closeModal', closeHtmxModal);
  */
 
 function initializeScripts() {
+    // The row selection restore reads the menu switches, so the menu is restored first.
+    initializeSyncOptionMenus();
+    initializePrimaryIpToggle();
     initializeCheckboxes();
     initializeVCMemberSelect();
     initializeVRFSelects();
@@ -4221,7 +4392,6 @@ function initializeScripts() {
     initializeVlanModalSave();
     initializeFilters();
     initializeCountdowns();
-    initializeSyncOptionMenus();
     initializeCheckboxListeners();
     initializeBulkEditApply();
     updateInterfaceNameField();

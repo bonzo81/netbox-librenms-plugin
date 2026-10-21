@@ -897,13 +897,14 @@ class TestSharedInstaller:
         assert result["reason"] == "bay already occupied"
         assert result["module_pk"] == occupant.pk
 
-    def test_placeholder_serial_is_stored_as_blank(self):
+    @pytest.mark.parametrize("placeholder", ["-", "BUILTIN", "none", "Not Available"])
+    def test_placeholder_serial_is_stored_as_blank(self, placeholder):
         from dcim.models import Module
 
-        device = make_device("installer-placeholder")
+        device = make_device(f"installer-placeholder-{len(placeholder)}")
         bay = make_module_bay(device, "Slot 1")
-        module_type = make_module_type("PLACEHOLDER-CARD")
-        item = _inventory_item(1, module_type.model, bay.name, serial="-")
+        module_type = make_module_type(f"PLACEHOLDER-CARD-{len(placeholder)}")
+        item = _inventory_item(1, module_type.model, bay.name, serial=placeholder)
 
         result = _run_install_single(device, item, {1: item}, {module_type.model: module_type})
 
@@ -3234,7 +3235,9 @@ def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint,
         for query in queries
         if "SELECT" in query["sql"] and "normalizationrule" in query["sql"] and "'serial'" in query["sql"]
     ]
-    assert len(serial_queries) <= (4 if mixed_manufacturers else 2), serial_queries
+    # A preload reads the manufacturer's rules and the global rules. A mixed install preloads up to three times:
+    # once for the stack's member attribution and once for each destination manufacturer.
+    assert len(serial_queries) <= (6 if mixed_manufacturers else 2), serial_queries
 
 
 @pytest.mark.django_db
@@ -3411,7 +3414,6 @@ def test_branch_install_uses_each_members_destination_and_ignore_policy(client, 
     _default, contexts = BaseModuleTableView()._build_inventory_ignore_contexts(
         page,
         rows,
-        {row["entPhysicalIndex"]: row for row in rows},
         [page, member],
         get_enabled_ignore_rules,
     )

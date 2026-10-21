@@ -17,7 +17,7 @@ from netbox_librenms_plugin.interface_relationships import (
     resolve_relationship_row,
 )
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
-from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
+from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.tables.cables import (
     LibreNMSCableTable,
     VCCableTable,

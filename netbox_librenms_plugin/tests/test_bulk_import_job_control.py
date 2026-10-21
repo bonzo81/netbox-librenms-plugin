@@ -195,7 +195,7 @@ class TestCollisionScanCancellation:
 
         job = _JobContext(rq_job(JobStatus.STOPPED), stop_after=99, logger=logging.getLogger("collision-scan"))
 
-        collisions, unresolved, _stack_ambiguities = detect_collisions_for_device_ids(
+        collisions, unresolved = detect_collisions_for_device_ids(
             [201, 202, 203], live_librenms.api, libre_devices_cache={}, job=job
         )
 
@@ -214,7 +214,7 @@ class TestCollisionScanCancellation:
             )
         job = _JobContext(rq_job(), stop_after=1)
 
-        collisions, unresolved, _stack_ambiguities = detect_collisions_for_device_ids(
+        collisions, unresolved = detect_collisions_for_device_ids(
             device_ids, live_librenms.api, libre_devices_cache={}, job=job
         )
 
@@ -246,7 +246,7 @@ class TestCollisionScanFetchFailure:
             },
         )
 
-        collisions, unresolved, _stack_ambiguities = detect_collisions_for_device_ids(
+        collisions, unresolved = detect_collisions_for_device_ids(
             [301], LibreNMSAPI(server_key="default"), libre_devices_cache={}
         )
 
@@ -264,9 +264,7 @@ class TestCollisionScanFetchFailure:
         )
 
         with caplog.at_level("WARNING", logger=_MODULE_LOGGER), override_settings(CACHES=_dead_cache_settings()):
-            collisions, unresolved, _stack_ambiguities = detect_collisions_for_device_ids(
-                [302], live_librenms.api, libre_devices_cache={}
-            )
+            collisions, unresolved = detect_collisions_for_device_ids([302], live_librenms.api, libre_devices_cache={})
 
         assert collisions == []
         assert unresolved == [302]
@@ -286,7 +284,7 @@ class TestCollisionScanFetchFailure:
         job = _JobContext(rq_job(), stop_after=99, logger=logging.getLogger("collision-scan-job"))
 
         with caplog.at_level("WARNING", logger="collision-scan-job"), override_settings(CACHES=_dead_cache_settings()):
-            _collisions, unresolved, _stack_ambiguities = detect_collisions_for_device_ids(
+            _collisions, unresolved = detect_collisions_for_device_ids(
                 [303], live_librenms.api, libre_devices_cache={}, job=job
             )
 
@@ -510,6 +508,7 @@ class TestStackImportPermission:
             device_id,
             f"stack-noperm-{device_id}",
             hardware=prerequisites["hardware"],
+            serial="SN-NP-A",
             location=prerequisites["location"],
         )
         _register_stack(
@@ -576,10 +575,12 @@ class TestStackImportCreatesTheVirtualChassis:
         mappings = {}
         cache_rows = {}
         for device_id, members in members_by_device.items():
+            # The LibreNMS device serial is the master member's serial.
             row = _libre_device(
                 device_id,
                 f"{tag}-{device_id}",
                 hardware=prerequisites["hardware"],
+                serial=members[0]["entPhysicalSerialNum"],
                 location=prerequisites["location"],
             )
             _register_stack(live_librenms, device_id, row, members)
@@ -607,8 +608,8 @@ class TestStackImportCreatesTheVirtualChassis:
         assert any("Created VC" in message for message in _messages_from(caplog, _MODULE_LOGGER))
         chassis = VirtualChassis.objects.get(domain="librenms-default-411")
         members_in_netbox = Device.objects.filter(virtual_chassis=chassis)
-        # The imported master keeps its blank serial; both detected members are created beside it.
-        assert set(members_in_netbox.values_list("serial", flat=True)) == {"", "SN-VC-A", "SN-VC-B"}
+        # The imported device is member A, so only member B is created beside it.
+        assert sorted(members_in_netbox.values_list("serial", flat=True)) == ["SN-VC-A", "SN-VC-B"]
 
     def test_one_serial_set_under_two_different_member_labels_creates_one_chassis(self, live_librenms):
         """The dedup key is the member SERIAL set, not the member names, models or positions."""
@@ -624,12 +625,14 @@ class TestStackImportCreatesTheVirtualChassis:
 
         result = self._import(live_librenms, {421: first_labels, 422: second_labels}, tag="stack-dedup")
 
-        assert len(result["success"]) == 2
+        # The second device's serial is now a member of the first chassis, so it is an existing row.
+        assert [entry["device_id"] for entry in result["success"]] == [421]
+        assert [entry["device_id"] for entry in result["skipped"]] == [422]
         assert result["virtual_chassis_created"] == 1
         assert VirtualChassis.objects.filter(domain__startswith="librenms-default-42").count() == 1
 
-    def test_members_without_serials_are_keyed_by_a_name_model_fingerprint(self, live_librenms):
-        """With no serials the key falls back to a member name/model/position fingerprint."""
+    def test_members_without_serials_import_standalone(self, live_librenms):
+        """With no member serial the master cannot be identified, so no row creates a chassis."""
         from dcim.models import VirtualChassis
 
         members = [_chassis(100, "-", position=1), _chassis(200, "", position=2)]
@@ -637,8 +640,9 @@ class TestStackImportCreatesTheVirtualChassis:
         result = self._import(live_librenms, {431: members, 432: list(members)}, tag="stack-fingerprint")
 
         assert len(result["success"]) == 2
-        assert result["virtual_chassis_created"] == 1
-        assert VirtualChassis.objects.filter(domain__startswith="librenms-default-43").count() == 1
+        assert result["virtual_chassis_created"] == 0
+        assert len(result["warnings"]) == 2
+        assert not VirtualChassis.objects.filter(domain__startswith="librenms-default-43").exists()
 
     def test_the_job_logger_reports_the_created_chassis(self, live_librenms, rq_job, caplog):
         job = _JobContext(rq_job(), stop_after=99, logger=logging.getLogger("stack-create-job"))

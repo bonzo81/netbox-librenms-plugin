@@ -459,12 +459,20 @@ rules:
     paths:
       include: ["**/netbox_librenms_plugin/tests/**"]
     pattern-either:
-      - pattern: threading.Barrier($PARTIES)
+      - patterns:
+          - pattern: threading.Barrier(...)
+          - pattern-not: threading.Barrier(..., timeout=$TIMEOUT, ...)
+          - pattern-not: threading.Barrier($PARTIES, $ACTION, $TIMEOUT)
+      - pattern: threading.Barrier(..., timeout=None, ...)
+      - pattern: threading.Barrier($PARTIES, $ACTION, None)
       - patterns:
           - pattern-inside: |
               $EVENT = threading.Event(...)
               ...
-          - pattern: $EVENT.wait()
+          - pattern-either:
+              - pattern: $EVENT.wait()
+              - pattern: $EVENT.wait(None)
+              - pattern: $EVENT.wait(timeout=None)
   - id: barrier-needs-run-in-threads
     languages: [python]
     severity: ERROR
@@ -1090,7 +1098,34 @@ rules:
       exclude: ["**/data_shapes/envelope.py"]
     pattern-either:
       - pattern: isinstance($V, list) and len($V) == 2 and isinstance($V[0], int)
-      - pattern: $V[1] if isinstance($V, list) else $V
+      # The ternary alone is ordinary list selection; report it only for a value read from "responses".
+      - patterns:
+          - pattern: $V[1] if isinstance($V, list) else $V
+          - pattern-either:
+              - pattern-inside: |
+                  $V = <... "responses" ...>
+                  ...
+              - pattern-inside: |
+                  for $K, $V in <... "responses" ...>:
+                    ...
+              - pattern-inside: |
+                  for $V in <... "responses" ...>:
+                    ...
+              # The same reads through a local alias of the "responses" mapping.
+              - patterns:
+                  - pattern-inside: |
+                      $R = <... "responses" ...>
+                      ...
+                  - pattern-either:
+                      - pattern-inside: |
+                          $V = <... $R ...>
+                          ...
+                      - pattern-inside: |
+                          for $K, $V in <... $R ...>:
+                            ...
+                      - pattern-inside: |
+                          for $V in <... $R ...>:
+                            ...
   - id: no-stored-mapping-access
     languages: [python]
     severity: ERROR
@@ -1116,6 +1151,7 @@ rules:
       - pattern: $OBJ.cf
       # The custom fields of a serialized object, such as a change record.
       - pattern: $DATA["custom_fields"]
+      - pattern: $DATA.get("custom_fields", ...)
     pattern-sinks:
       - patterns:
           - pattern-either:

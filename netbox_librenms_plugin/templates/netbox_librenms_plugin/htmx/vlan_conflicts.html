@@ -23,7 +23,7 @@
     <input type="hidden" name="action" value="create_vlans">
     <input type="hidden" name="confirm_conflicts" value="1">
 
-    {% include 'inc/messages.html' %}
+    {% if not full_page %}{% include 'inc/messages.html' %}{% endif %}
 
     <p>
       Any safe selected rows were synchronized. The following rows would rename an existing VLAN.

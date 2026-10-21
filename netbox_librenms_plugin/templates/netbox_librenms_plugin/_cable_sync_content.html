@@ -1,5 +1,5 @@
 {% load helpers %}
-{% include 'inc/messages.html' %}
+{% if sync_partial_response %}{% include 'inc/messages.html' %}{% endif %}
 {% if request.htmx %}
 {% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=cable_sync.cache_expiry cache_container_id="cable-cache-countdown" cache_countdown_id="cable-countdown-timer" cache_oob=True %}
 {% endif %}

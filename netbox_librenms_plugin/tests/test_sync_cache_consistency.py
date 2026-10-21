@@ -2625,9 +2625,10 @@ def test_status_fragment_and_invalidated_tab_navigation_never_call_librenms(
     primary_librenms,
     django_capture_on_commit_callbacks,
 ):
-    """Cache checks, fragment restoration, and tab navigation must remain cache-only."""
+    """Cache checks, fragment restoration, and tab navigation must not fetch tab data."""
     _configure_servers(settings)
     device = make_device("cache-browser-flows", librenms_cf={"primary": {"id": 654}})
+    _serve_device_info(primary_librenms, 654, device.name, "Flows Hardware 654")
     ports_payload = {
         "ports": [
             {
@@ -2668,7 +2669,8 @@ def test_status_fragment_and_invalidated_tab_navigation_never_call_librenms(
         },
     )
 
-    assert len(primary_librenms.requests) == request_count
+    # Only the page's device header reads LibreNMS; no tab data is fetched.
+    assert [r["path"] for r in list(primary_librenms.requests)[request_count:]] == ["/api/v0/devices/654"]
     assert status_response.status_code == 200
     assert fragment_response.status_code == 200
     assert b"Ethernet1" in fragment_response.content
@@ -2676,7 +2678,7 @@ def test_status_fragment_and_invalidated_tab_navigation_never_call_librenms(
     page_html = page_response.content.decode()
     assert "sync-cache-ready" in _tab_classes(page_html, "interfaces-tab")
     assert "sync-cache-unavailable" not in _tab_classes(page_html, "ipaddresses-tab")
-    assert b"Details unavailable" in page_response.content
+    assert b"Details unavailable" not in page_response.content
     assert b'id="add-device-modal"' not in page_response.content
     assert b'data-bs-target="#add-device-modal"' not in page_response.content
 
@@ -2942,12 +2944,13 @@ def test_virtual_machine_sync_page_omits_the_cables_pane(client, settings, prima
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("blocked_state", [SyncTabState.INVALIDATED, SyncTabState.REFRESH_FAILED])
-def test_blocked_active_tab_reads_device_info_from_cache_only(
+def test_blocked_active_tab_still_reads_the_device_header(
     client, settings, primary_librenms, django_capture_on_commit_callbacks, blocked_state
 ):
-    """Every blocked tab state must render device details without contacting LibreNMS."""
+    """A blocked tab must not hide the device header after its short device-info cache expires."""
     _configure_servers(settings)
     device = make_device(f"cache-blocked-{blocked_state.value}", librenms_cf={"primary": {"id": 7801}})
+    _serve_device_info(primary_librenms, 7801, device.name, "Header Hardware 7801")
     _seed_snapshot("ip_addresses", device, "primary")
     coordinator = SyncCacheConsistency(device)
     if blocked_state is SyncTabState.INVALIDATED:
@@ -2957,47 +2960,18 @@ def test_blocked_active_tab_reads_device_info_from_cache_only(
         coordinator.mark_refresh_failure(SyncTab.IP_ADDRESSES, "primary", actor_id=1)
     # Pin the seeding: a state that stopped matching would make the assertions below vacuous.
     assert coordinator.status("primary")[SyncTab.IP_ADDRESSES.value]["state"] == blocked_state.value
+    assert cache.get("librenms_device_info_primary_7801") is None
 
     client.force_login(make_superuser(f"cache-blocked-{blocked_state.value}-user"))
     url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
     request_count = len(primary_librenms.requests)
     response = client.get(url, {"server_key": "primary", "tab": SyncTab.IP_ADDRESSES.value})
 
-    assert len(primary_librenms.requests) == request_count
+    # The header reads the device; the blocked tab itself still fetches nothing.
+    assert [r["path"] for r in list(primary_librenms.requests)[request_count:]] == ["/api/v0/devices/7801"]
     assert response.status_code == 200
-    assert b"Details unavailable" in response.content
-
-
-@pytest.mark.django_db
-def test_blocked_tab_skips_the_virtual_chassis_inventory_lookup(
-    client,
-    settings,
-    primary_librenms,
-    django_capture_on_commit_callbacks,
-):
-    """A cache-only render must not fetch Virtual Chassis inventory, which has no snapshot."""
-    _configure_servers(settings)
-    _virtual_chassis, (member, _second) = make_virtual_chassis_members("cache-blocked-vc")
-    seed_mapping(member, "primary", own=7803)
-    cache.set(
-        "librenms_device_info_primary_7803",
-        (True, {"device_id": 7803, "sysName": member.name, "hostname": member.name}),
-        timeout=300,
-    )
-    _seed_snapshot("ip_addresses", member, "primary")
-    coordinator = SyncCacheConsistency(member)
-    with django_capture_on_commit_callbacks(execute=True):
-        coordinator.schedule_mutation(SyncTab.INTERFACES, "primary", actor_id=1)
-    # Pin the seeding: a state that stopped matching would make the assertion below vacuous.
-    assert coordinator.status("primary")[SyncTab.IP_ADDRESSES.value]["state"] == SyncTabState.INVALIDATED.value
-
-    client.force_login(make_superuser("cache-blocked-vc-user"))
-    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[member.pk])
-    request_count = len(primary_librenms.requests)
-    response = client.get(url, {"server_key": "primary", "tab": SyncTab.IP_ADDRESSES.value})
-
-    assert len(primary_librenms.requests) == request_count
-    assert response.status_code == 200
+    assert b"Details unavailable" not in response.content
+    assert b"Header Hardware 7801" in response.content
 
 
 @pytest.mark.django_db
@@ -3079,36 +3053,3 @@ def test_failed_duplicate_selection_keeps_the_committed_rows_invalidation(
     assert IPAddress.objects.filter(address=address, assigned_object_id=interface.pk).exists()
     assert cache.get(_cache_key("ip_addresses", device, "primary")) == ip_payload
     assert cache.get(_cache_key("ports", device, "primary")) is None
-
-
-@pytest.mark.django_db
-def test_a_cache_only_render_reports_the_vc_inventory_as_not_loaded(client, settings, primary_librenms):
-    """A cache-only Virtual Chassis render must not read as a chassis with no serials."""
-    _configure_servers(settings)
-    _virtual_chassis, members = make_virtual_chassis_members("cacheonly-vc-inventory")
-    device = members[0]
-    seed_mapping(device, "primary", own=7801)
-    user = make_superuser("cache-only-vc-inventory-user")
-    client.force_login(user)
-    url = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk])
-
-    _serve_device_info(primary_librenms, 7801, device.name, "VC Hardware 7801")
-    primary_librenms.register("/api/v0/inventory/7801/all", {"status": "ok", "inventory": []})
-
-    # Warm the device-info cache so the cache-only render still reports the device as found.
-    warm = client.get(url, {"server_key": "primary", "tab": SyncTab.INTERFACES.value})
-    assert warm.status_code == 200
-
-    SyncCacheConsistency(device).mark_refresh_failure(SyncTab.INTERFACES, "primary", actor_id=user.pk)
-
-    request_count = len(primary_librenms.requests)
-    response = client.get(url, {"server_key": "primary", "tab": SyncTab.INTERFACES.value})
-    assert len(primary_librenms.requests) == request_count
-
-    assert response.status_code == 200
-    html = response.content.decode()
-    # The device itself is still reported as found, which is why silence about the inventory
-    # is indistinguishable from a chassis that genuinely has no serials.
-    assert "VC Hardware 7801" in html
-    assert "Details unavailable" not in html
-    assert "VC Serials not loaded" in html

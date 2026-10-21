@@ -14,6 +14,7 @@
 {% block javascript %}
 {{ block.super }}
 <script src="{% static 'netbox_librenms_plugin/js/librenms_sync.js' %}"></script>
+<script src="{% static 'netbox_librenms_plugin/js/toasts.js' %}"></script>
 {% endblock %}
 
 {% block breadcrumbs %}
@@ -149,9 +150,9 @@
 {% if all_server_mappings %}
 <div class="card mb-3" id="librenms-connections"
      data-preferred-server-key="{{ server_selection_preferred_key|default:'' }}">
-    <div class="card-header d-flex justify-content-between align-items-center py-2">
+    <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2 py-2">
         <span><i class="mdi mdi-server-network text-primary me-1"></i><strong>LibreNMS Connections</strong></span>
-        <div class="d-flex gap-2 align-items-center">
+        <div class="d-flex flex-wrap gap-2 align-items-center">
             {% include "netbox_librenms_plugin/inc/_server_selector.html" %}
             {% if not server_selection_blocked and object|meta:"model_name" == "device" %}
             {# Capture an anonymized LibreNMS data shape for community-contributed outcome tests (issue #95). #}
@@ -610,11 +611,6 @@
                                                     title="View VC member serials from inventory">
                                                 <i class="mdi mdi-server-network"></i> VC Serials ({{ vc_inventory_serials|length }})
                                             </button>
-                                        {% elif vc_inventory_not_loaded %}
-                                            <span class="badge bg-secondary text-white"
-                                                  title="Refresh this tab to load the VC member serials from LibreNMS inventory.">
-                                                <i class="mdi mdi-server-network"></i> VC Serials not loaded
-                                            </span>
                                         {% else %}
                                             {% if librenms_device_serial != "-" %}
                                                 {% if object.serial != librenms_device_serial %}

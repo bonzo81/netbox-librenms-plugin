@@ -7,7 +7,8 @@
         "present": false,
         "root_class": "chassis",
         "member_count": 0,
-        "position_base": null
+        "position_base": null,
+        "member_shape": null
       },
       "lag": {
         "present": true,
@@ -36,7 +37,8 @@
         "present": false,
         "root_class": null,
         "member_count": 0,
-        "position_base": null
+        "position_base": null,
+        "member_shape": null
       },
       "lag": {
         "present": false,
@@ -63,7 +65,8 @@
         "present": false,
         "root_class": null,
         "member_count": 0,
-        "position_base": null
+        "position_base": null,
+        "member_shape": null
       },
       "lag": {
         "present": true,
@@ -92,7 +95,8 @@
         "present": true,
         "root_class": "stack",
         "member_count": 3,
-        "position_base": 1
+        "position_base": 1,
+        "member_shape": "chassis"
       },
       "lag": {
         "present": false,
@@ -119,7 +123,8 @@
         "present": false,
         "root_class": "chassis",
         "member_count": 0,
-        "position_base": null
+        "position_base": null,
+        "member_shape": null
       },
       "lag": {
         "present": true,
@@ -141,6 +146,34 @@
     }
   },
   {
+    "name": "juniper-ex4400-vc-2member",
+    "signature": {
+      "os": "os-990f10",
+      "virtual_chassis": {
+        "present": true,
+        "root_class": "chassis",
+        "member_count": 2,
+        "position_base": 0,
+        "member_shape": "junos-fpc"
+      },
+      "lag": {
+        "present": false,
+        "ieee8023ad": false,
+        "name_prefix": null
+      },
+      "sub_interfaces": {
+        "present": false,
+        "styles": []
+      },
+      "port_stack": false,
+      "vlans": false,
+      "transceivers": false,
+      "serial": false,
+      "vrf": false,
+      "oob": false
+    }
+  },
+  {
     "name": "juniper-vc-2member",
     "signature": {
       "os": "os-990f10",
@@ -148,7 +181,8 @@
         "present": true,
         "root_class": "chassis",
         "member_count": 2,
-        "position_base": 0
+        "position_base": 0,
+        "member_shape": "chassis"
       },
       "lag": {
         "present": false,
@@ -175,7 +209,8 @@
         "present": false,
         "root_class": "chassis",
         "member_count": 0,
-        "position_base": null
+        "position_base": null,
+        "member_shape": null
       },
       "lag": {
         "present": true,
@@ -204,7 +239,8 @@
         "present": false,
         "root_class": null,
         "member_count": 0,
-        "position_base": null
+        "position_base": null,
+        "member_shape": null
       },
       "lag": {
         "present": false,
@@ -231,7 +267,8 @@
         "present": false,
         "root_class": null,
         "member_count": 0,
-        "position_base": null
+        "position_base": null,
+        "member_shape": null
       },
       "lag": {
         "present": false,
@@ -258,7 +295,8 @@
         "present": false,
         "root_class": null,
         "member_count": 0,
-        "position_base": null
+        "position_base": null,
+        "member_shape": null
       },
       "lag": {
         "present": false,
@@ -285,7 +323,8 @@
         "present": false,
         "root_class": "chassis",
         "member_count": 0,
-        "position_base": null
+        "position_base": null,
+        "member_shape": null
       },
       "lag": {
         "present": true,

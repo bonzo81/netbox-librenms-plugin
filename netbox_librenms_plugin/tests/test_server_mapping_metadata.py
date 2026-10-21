@@ -9,10 +9,10 @@ from netbox_librenms_plugin import LibreNMSSyncConfig
 from netbox_librenms_plugin.server_mappings import (
     PREFERRED_SERVER_FIELD,
     assign_own,
-    get_librenms_sync_device,
     mapped_device_servers,
     read_mapping,
 )
+from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis_members
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
 
