@@ -19,6 +19,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
     stamp_rule_decision,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 
 def _import_record(device_id=4101, **validation):
@@ -97,12 +98,11 @@ class TestDeviceStatusTable:
 
     def test_virtual_chassis_member_links_to_the_real_sync_member(self):
         from netbox_librenms_plugin.tables.device_status import DeviceStatusTable
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         viewed = make_device("status-vc-viewed")
         sync_member = make_device("status-vc-sync")
         make_virtual_chassis("status-vc", viewed, sync_member)
-        seed_own_mapping(sync_member, 4102, "default")
+        seed_mapping(sync_member, own=4102, save=False)
         sync_member.save()
         table = DeviceStatusTable(type(viewed).objects.none())
 
@@ -879,7 +879,6 @@ class TestInterfaceTableFields:
     def test_complete_record_renders_against_a_real_interface(self):
         from dcim.models import MACAddress
         from netbox_librenms_plugin.models import InterfaceTypeMapping
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         device = make_device("interface-fields")
         interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
@@ -887,7 +886,7 @@ class TestInterfaceTableFields:
         interface.mtu = 1500
         interface.enabled = True
         interface.description = "Uplink"
-        seed_own_mapping(interface, 42, "default")
+        seed_mapping(interface, own=42, save=False)
         interface.save()
         mac = MACAddress.objects.create(mac_address="AA:BB:CC:DD:EE:FF")
         interface.mac_addresses.add(mac)
@@ -1100,7 +1099,6 @@ class TestInterfaceTableFields:
         assert html.count('<div class="lh-sm">') == 2, "each marker stacks like a relationship pill"
 
     def test_real_librenms_id_states(self):
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         device = make_device("interface-id-states")
         interface = make_interface(device, "Ethernet1")
@@ -1111,12 +1109,11 @@ class TestInterfaceTableFields:
             return _port(port_id=42, exists_in_netbox=True, netbox_interface=iface, synced_name="Ethernet1")
 
         missing = str(table.render_librenms_id(42, _row(interface)))
-        seed_own_mapping(interface, 99, "default")
+        seed_mapping(interface, own=99, save=False)
         interface.save()
         interface = type(interface).objects.get(pk=interface.pk)
         mismatch = str(table.render_librenms_id(42, _row(interface)))
-        interface.custom_field_data["librenms_id"] = {"default": 42}
-        interface.save()
+        seed_mapping(interface, "default", own=42)
         interface = type(interface).objects.get(pk=interface.pk)
         matched = str(table.render_librenms_id(42, _row(interface)))
 

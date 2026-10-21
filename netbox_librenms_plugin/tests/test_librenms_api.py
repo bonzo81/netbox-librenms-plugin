@@ -13,6 +13,7 @@ import pytest
 import requests
 
 from netbox_librenms_plugin.tests.conftest import typed_maps
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
 
 
 class TestApiTokenStaysOnItsHost:
@@ -503,8 +504,9 @@ class TestLibreNMSAPIDeviceLookup:
         from ipam.models import IPAddress
         from netaddr import IPNetwork
 
-        custom_field_data = {} if stored_id is None else {"librenms_id": stored_id}
-        device = Device(name=name, custom_field_data=custom_field_data)
+        device = Device(name=name)
+        if stored_id is not None:
+            seed_stored_mapping(device, stored_id)
         if ip_address is not None:
             device.primary_ip4 = IPAddress(address=IPNetwork(f"{ip_address}/32"), dns_name="")
         return device
@@ -522,7 +524,7 @@ class TestLibreNMSAPIDeviceLookup:
 
         result = mock_librenms_api.get_librenms_id(device)
         assert result == 42
-        assert device.custom_field_data == {"librenms_id": "42"}
+        assert stored_mapping_for_test(device) == "42"
 
     def test_get_librenms_id_empty_string_falls_through_to_discovery(
         self,
@@ -616,7 +618,7 @@ class TestLibreNMSAPIDeviceLookup:
 
         if owner_kind == "vm":
             owner = make_vm("discovery-claimed-by-vm")
-            owner.custom_field_data["librenms_id"] = {"default": 4242}
+            seed_mapping(owner, "default", own=4242, save=False)
             owner.save()
         else:
             owner = make_device("discovery-claimed-by-device", librenms_cf={"default": 4242})

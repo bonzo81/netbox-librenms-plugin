@@ -11,6 +11,7 @@ from django.db.transaction import TransactionManagementError
 from utilities.exceptions import AbortRequest
 
 from netbox_librenms_plugin.tests.conftest import make_superuser, transactional_db_with_all_apps
+from netbox_librenms_plugin.tests.mapping_fixtures import mapping_from_change_record, seed_stored_mapping_row
 from netbox_librenms_plugin.tests.lock_conflict_helpers import (
     failing_statement,
     hold_port_claim,
@@ -359,7 +360,7 @@ def test_a_mapping_change_saves_with_the_other_fields_in_one_validated_save():
     assert (stored.description, read_mapping(stored).own_id("default")) == ("linked", 7401)
     [change] = _device_updates(device)
     assert change.prechange_data["description"] == ""
-    assert change.postchange_data["custom_fields"]["librenms_id"] == {"default": 7401}
+    assert mapping_from_change_record(change, before=False) == {"default": 7401}
 
 
 @pytest.mark.django_db
@@ -692,7 +693,7 @@ def test_a_stale_mapping_that_work_swallowed_is_still_retried():
         calls.append(len(calls) + 1)
         change = assign_own(Device.objects.get(pk=device.pk), "default", 9403)
         if len(calls) == 1:
-            Device.objects.filter(pk=device.pk).update(custom_field_data={"librenms_id": {"default": 9404}})
+            seed_stored_mapping_row(device, {"default": 9404})
         row = Device.objects.select_for_update().get(pk=device.pk)
         try:
             persist_mapping(row, change, write=write)
@@ -725,7 +726,7 @@ def test_a_stale_merge_side_that_work_swallowed_is_still_retried():
         rows = [Device.objects.get(pk=winner.pk), Device.objects.get(pk=donor.pk)]
         merge = merge_links(*rows, "default")
         if len(calls) == 1:
-            Device.objects.filter(pk=donor.pk).update(custom_field_data={"librenms_id": {"default": {"id": 9407}}})
+            seed_stored_mapping_row(donor, {"default": {"id": 9407}})
 
         def save_both():
             for row in rows:

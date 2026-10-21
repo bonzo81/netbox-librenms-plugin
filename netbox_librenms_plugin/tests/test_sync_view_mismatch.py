@@ -3,6 +3,7 @@
 import pytest
 
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_virtual_chassis
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 
 
 pytestmark = pytest.mark.django_db
@@ -192,23 +193,21 @@ class TestBuildAllServerMappings:
     @pytest.mark.parametrize("stored", [42, None])
     def test_legacy_or_missing_mapping_has_no_server_rows(self, stored):
         device = _netbox_device(f"legacy-{stored}")
-        device.custom_field_data["librenms_id"] = stored
+        seed_stored_mapping(device, stored)
 
         assert self._mappings(device) is None
 
     def test_host_id_is_extracted_from_the_nested_mapping(self, configure_librenms):
         configure_librenms({"production": {"librenms_url": "https://production.example", "api_token": "token"}})
         device = _netbox_device("nested")
-        device.custom_field_data["librenms_id"] = {"production": {"id": 42, "oob": {"id": 99, "type": "controller"}}}
+        seed_stored_mapping(device, {"production": {"id": 42, "oob": {"id": 99, "type": "controller"}}})
 
         assert self._mappings(device)[0]["device_id"] == 42
 
     def test_migrated_only_mapping_has_no_server_row(self, configure_librenms):
         configure_librenms({"production": {"librenms_url": "https://production.example", "api_token": "token"}})
         device = _netbox_device("migrated")
-        device.custom_field_data["librenms_id"] = {
-            "production": {"_migrated_to": {"device_id": 7, "server_key": "production"}}
-        }
+        seed_stored_mapping(device, {"production": {"_migrated_to": {"device_id": 7, "server_key": "production"}}})
 
         assert self._mappings(device) is None
 
@@ -223,7 +222,7 @@ class TestBuildAllServerMappings:
             }
         )
         device = _netbox_device("configured")
-        device.custom_field_data["librenms_id"] = {"production": " 42 "}
+        seed_stored_mapping(device, {"production": " 42 "})
 
         mapping = self._mappings(device)[0]
 
@@ -237,11 +236,14 @@ class TestBuildAllServerMappings:
     def test_invalid_float_is_dropped_and_orphan_is_not_selectable(self, configure_librenms):
         configure_librenms({"production": {"librenms_url": "https://production.example", "api_token": "token"}})
         device = _netbox_device("invalid")
-        device.custom_field_data["librenms_id"] = {
-            "production": 42,
-            "staging": 1.9,
-            "deleted-server": 77,
-        }
+        seed_stored_mapping(
+            device,
+            {
+                "production": 42,
+                "staging": 1.9,
+                "deleted-server": 77,
+            },
+        )
 
         mappings = self._mappings(device)
 
@@ -258,11 +260,8 @@ class TestBuildAllServerMappings:
             }
         )
         device = _netbox_device("sort")
-        device.custom_field_data["librenms_id"] = {
-            "development": 99,
-            "production": 42,
-            "old-server": 11,
-        }
+        for server, librenms_id in (("development", 99), ("production", 42), ("old-server", 11)):
+            seed_mapping(device, server, own=librenms_id, save=False)
 
         assert [mapping["server_key"] for mapping in self._mappings(device)] == [
             "production",
@@ -278,10 +277,8 @@ class TestVirtualChassisLookup:
         viewed = _netbox_device("vc-viewed")
         sync_member = _netbox_device("vc-sync")
         make_virtual_chassis("mismatch-lookup", viewed, sync_member)
-        viewed.custom_field_data["librenms_id"] = 41
-        viewed.save(update_fields=["custom_field_data"])
-        sync_member.custom_field_data["librenms_id"] = {"default": 42}
-        sync_member.save(update_fields=["custom_field_data"])
+        seed_stored_mapping(viewed, 41, save=True)
+        seed_mapping(sync_member, "default", own=42)
 
         assert get_librenms_sync_device(viewed, server_key="default") == sync_member
 

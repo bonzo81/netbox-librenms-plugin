@@ -17,7 +17,6 @@ from contextlib import contextmanager
 from uuid import uuid4
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
-from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import make_superuser
 
 
@@ -202,30 +201,11 @@ def missing_pk(model, offset=1000):
 
 def trusted_module_inventory_payload(device, inventory, *, server_key="default", librenms_id=1):
     """Build a module inventory payload bound to the device's verified current LibreNMS mapping."""
-    from django.db.models import Model
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
-    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
-
-    if not isinstance(device.custom_field_data, dict):
-        device.custom_field_data = {}
-    seed_own_mapping(device, librenms_id, server_key)
-    device.save(update_fields=["custom_field_data"])
-    if isinstance(device, Model):
-        # cf is a cached_property over the APPLICABLE custom fields. Drop the cached value so the
-        # next read recomputes it from the write; assigning custom_field_data would cache the raw
-        # column in its place and alias the two attributes to one object.
-        device.__dict__.pop("cf", None)
-    else:
-        # A stub caller has no cached_property to invalidate, so give it the written mapping.
-        device.cf = device.custom_field_data
-    # assign_own() only logs and skips when it refuses a write (legacy bare
-    # integer, non-positive id), which would leave the payload claiming a mapping the device
-    # does not have; every caller would then fail on the production staleness guard instead.
-    stored = read_mapping(device).own_id(server_key)
-    assert stored == librenms_id, (
-        f"assign_own declined the write (stored {stored!r}, wanted {librenms_id!r}); "
-        "the payload fingerprint would not match the device mapping"
-    )
+    seed_mapping(device, server_key, own=librenms_id)
+    # cf is a cached_property over the applicable custom fields: drop it so the next read sees the write.
+    device.__dict__.pop("cf", None)
     return {
         "inventory": inventory,
         "librenms_id": librenms_id,

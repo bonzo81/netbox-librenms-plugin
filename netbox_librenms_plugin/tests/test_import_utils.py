@@ -9,6 +9,7 @@ from copy import deepcopy
 
 import pytest
 
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 
@@ -601,8 +602,7 @@ class TestDeviceValidation:
         from netbox_librenms_plugin.tests.conftest import make_vm
 
         existing_vm = make_vm("existing-vm")
-        existing_vm.custom_field_data["librenms_id"] = {"default": 42}
-        existing_vm.save()
+        seed_mapping(existing_vm, "default", own=42)
 
         result = validate_device_for_import(
             {"device_id": 42, "hostname": existing_vm.name},
@@ -1017,7 +1017,7 @@ class TestNameMatchesWithNamingPreferences:
         expected_name = _generate_vc_member_name(resolved_master_name, existing.vc_position, serial="VC-NAMING")
         existing.name = expected_name if existing_name_matches else "wrong-name"
         existing.serial = "VC-NAMING"
-        existing.custom_field_data["librenms_id"] = {"default": {"id": 44}}
+        seed_stored_mapping(existing, {"default": {"id": 44}})
         existing.save()
 
         result = validate_device_for_import(
@@ -1103,13 +1103,14 @@ class TestLegacyLibreNMSIdMigration:
     )
     def test_migration_helper_updates_real_shape(self, stored_value, expected_changed, expected_value):
         from netbox_librenms_plugin.server_mappings import convert_legacy
-        from netbox_librenms_plugin.tests.conftest import apply_mapping_change, make_device
+        from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
+        from netbox_librenms_plugin.tests.conftest import make_device
 
         device = make_device("legacy-shape-device", librenms_cf=stored_value)
         change = convert_legacy(device, "primary")
 
         assert change.changed is expected_changed
-        assert apply_mapping_change(device, change).custom_field_data.get("librenms_id") == expected_value
+        assert stored_mapping_for_test(apply_mapping_change(device, change)) == expected_value
 
     def test_migration_gate_and_writer_agree(self):
         from netbox_librenms_plugin.server_mappings import convert_legacy
@@ -1918,8 +1919,7 @@ class TestRefreshExistingDeviceCrossModelIdWins:
         libre_id = 778899
         # The id's true owner is a VirtualMachine (the cross model for a device import).
         vm = make_vm("b3-shared-name")
-        vm.custom_field_data["librenms_id"] = {"default": libre_id}
-        vm.save()
+        seed_mapping(vm, "default", own=libre_id)
         # A *different* Device shares the same name but holds no librenms_id link.
         device = make_device("b3-shared-name")
 
@@ -2481,7 +2481,7 @@ def test_device_and_vm_imports_serialize_one_librenms_id_claim(settings):
     assert len(set(claim_keys)) == 1
     assert sorted(outcomes) == [False, True]
     assert len(owners) == 1
-    assert owners[0].custom_field_data["librenms_id"]["primary"] == librenms_id
+    assert stored_mapping_for_test(owners[0])["primary"] == librenms_id
     # The claim does not wait: the loser is busy while the winner holds it, else it finds the owner.
     assert len(refusals) == 1
     assert refusals[0] == IDENTITY_BUSY_MESSAGE or "already assigned" in refusals[0]

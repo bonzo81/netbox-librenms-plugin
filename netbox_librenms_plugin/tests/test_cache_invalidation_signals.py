@@ -28,6 +28,7 @@ from netbox_librenms_plugin.tests.cache_test_helpers import (
 from netbox_librenms_plugin.tests.cache_test_helpers import (
     snapshot_state as _snapshot_state,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
 SERVER_KEY = "default"
 
@@ -464,8 +465,7 @@ class TestOneFlushPerObject:
         device = make_device("signal-failing-assignment-model", librenms_cf={SERVER_KEY: 7})
         interface = make_interface(device, "Ethernet1")
         virtual_machine = make_vm("signal-valid-assignment-model")
-        virtual_machine.custom_field_data["librenms_id"] = {SERVER_KEY: 8}
-        virtual_machine.save(update_fields=["custom_field_data"])
+        seed_mapping(virtual_machine, SERVER_KEY, own=8)
         vm_interface = VMInterface.objects.create(virtual_machine=virtual_machine, name="Ethernet1")
         keys = _seed_every_tab(virtual_machine)
         monkeypatch.setitem(cache_signals.OWNER_COLUMNS, "dcim.interface", ("missing_owner_id",))
@@ -624,11 +624,10 @@ class TestSharedSnapshotsFollowTheWholeChassis:
         )
         from netbox_librenms_plugin.tests.conftest import install_module, make_module_bay, make_virtual_chassis_members
         from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
-        from netbox_librenms_plugin.tests.conftest import seed_own_mapping
 
         _vc, (member_one, member_two) = make_virtual_chassis_members("shared-claim-vc")
         for member in (member_one, member_two):
-            seed_own_mapping(member, 11, SERVER_KEY)
+            seed_mapping(member, SERVER_KEY, own=11, save=False)
             member.save()
         make_module_bay(member_one, "Bay 1")
 

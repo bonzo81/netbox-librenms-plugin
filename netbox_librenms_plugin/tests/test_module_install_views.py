@@ -13,6 +13,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_module_type,
     make_superuser,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post as view_post
 from netbox_librenms_plugin.utils import (
     module_inventory_binding_token,
@@ -145,8 +146,7 @@ class TestInstallBranchView:
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
         device = make_device_with_module_bays("branch-install", ["Slot 1"])
-        device.custom_field_data["librenms_id"] = {"default": 65}
-        device.save(update_fields=["custom_field_data"])
+        seed_mapping(device, "default", own=65)
         module_type = make_module_type("BRANCH-CARD")
         interface = make_interface(device, "Te1/1/1")
         rows = [
@@ -193,8 +193,7 @@ class TestInstallBranchView:
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
         device = make_device_with_module_bays("branch-bind-miss", ["Slot 1"])
-        device.custom_field_data["librenms_id"] = {"default": 66}
-        device.save(update_fields=["custom_field_data"])
+        seed_mapping(device, "default", own=66)
         module_type = make_module_type("BRANCH-MISS-CARD")
         rows = [_item(10, module_type.model, "Slot 1", _librenms_port_id=6601, _librenms_ifname="No Such Interface")]
 
@@ -275,8 +274,7 @@ class TestUpdateModuleSerialView:
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
         device = make_device_with_module_bays("serial-placeholder", ["Slot 1"])
-        device.custom_field_data["librenms_id"] = {"default": 68}
-        device.save(update_fields=["custom_field_data"])
+        seed_mapping(device, "default", own=68)
         module = install_module(device, "Slot 1", "SERIAL-PLACEHOLDER-CARD", serial="OLD")
         rows = [_item(11, module.module_type.model, "Slot 1", entPhysicalSerialNum="N/A")]
 

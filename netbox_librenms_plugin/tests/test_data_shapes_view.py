@@ -11,6 +11,10 @@ from django.contrib.auth import get_user_model
 from django.test import RequestFactory, override_settings
 
 from netbox_librenms_plugin.tests.conftest import make_device
+from netbox_librenms_plugin.tests.mapping_fixtures import (
+    custom_fields_without_mapping,
+    stored_mapping_for_test,
+)
 from netbox_librenms_plugin.tests.recordings import load_recording
 from netbox_librenms_plugin.views.data_shapes import CaptureDataShapeView
 
@@ -309,7 +313,8 @@ def test_capture_get_with_view_permission_does_not_store_a_discovered_id(client,
 
     server, _api = recording_server(load_recording("cisco-stackwise-3member"))
     device = make_device("capture-unlinked.example.com", librenms_cf={"test": None})
-    before = deepcopy(device.custom_field_data)
+    before_mapping = stored_mapping_for_test(device)
+    before_other = custom_fields_without_mapping(device.custom_field_data)
     server.register(
         f"/api/v0/devices/{device.name}",
         {"status": "ok", "devices": [{"device_id": _STACK_RECORDING_ID}]},
@@ -336,7 +341,8 @@ def test_capture_get_with_view_permission_does_not_store_a_discovered_id(client,
 
     assert response.status_code == 200
     device.refresh_from_db()
-    assert device.custom_field_data == before
+    assert stored_mapping_for_test(device) == before_mapping
+    assert custom_fields_without_mapping(device.custom_field_data) == before_other
     assert b"not linked to LibreNMS" in response.content
     assert b"Anonymized recording" not in response.content
     assert not any(request["path"] == f"/api/v0/devices/{device.name}" for request in server.requests)

@@ -3,7 +3,7 @@
 # Run the repo's custom opengrep ruleset (.opengrep/librenms-rules.yaml) over the source tree.
 # Used by the pre-push hook and for manual scans. Exits non-zero on any finding.
 # Pass opengrep options before the first -- and targets after it.
-# Without targets after --, scan the default package and test tree.
+# Without targets after --, scan the default package (its templates included) and test tree.
 #
 # --taint-intrafile is required, not optional: taint must cross into a module-private helper, which
 # is where a per-function analysis loses the serial-match branch.
@@ -27,7 +27,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ ${#targets[@]} -eq 0 ]]; then
-  # opengrep's default ignores skip test directories, so name the test files explicitly.
+  # opengrep's default ignores skip test directories, so name the test files explicitly. The package
+  # directory target also covers the templates.
   shopt -s globstar nullglob
   targets=("$repo_root/netbox_librenms_plugin" "$repo_root"/netbox_librenms_plugin/tests/**/*.py "$repo_root"/tests/**/*.py)
 fi

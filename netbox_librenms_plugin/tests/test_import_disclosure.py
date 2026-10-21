@@ -297,14 +297,14 @@ def test_a_withheld_match_does_not_disclose_its_role(client, librenms_server, se
 @pytest.mark.django_db
 def test_a_withheld_match_does_not_disclose_its_librenms_linkage(client, librenms_server, settings):
     """The modal must not render the LibreNMS host ID of a withheld hostname match."""
-    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
     stale_host_id = 987654
     server_key = _point_plugin_at(settings, librenms_server.url)
     hidden_match = make_device("disclosure-import-host.example.net")
     # Linked to a DIFFERENT LibreNMS host than the one being imported, so the row still matches by
     # hostname while carrying a linkage of its own to disclose.
-    seed_own_mapping(hidden_match, stale_host_id, server_key)
+    seed_mapping(hidden_match, server_key, own=stale_host_id, save=False)
     hidden_match.save()
     elsewhere = make_device("disclosure-unrelated-link-scope")
     _register_device(librenms_server)
@@ -323,11 +323,11 @@ def test_a_withheld_match_does_not_disclose_its_librenms_linkage(client, librenm
 def test_a_withheld_match_leaves_no_match_state_behind(client, librenms_server, settings):
     """The teardown must demote the match itself, not only the fields today's templates render."""
     from netbox_librenms_plugin.import_utils.disclosure import OUT_OF_SCOPE_MATCH_MESSAGE
-    from netbox_librenms_plugin.tests.conftest import seed_own_mapping
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
     server_key = _point_plugin_at(settings, librenms_server.url)
     hidden_match = make_device("disclosure-import-host.example.net")
-    seed_own_mapping(hidden_match, 987654, server_key)
+    seed_mapping(hidden_match, server_key, own=987654, save=False)
     hidden_match.save()
     elsewhere = make_device("disclosure-unrelated-teardown-scope")
     _register_device(librenms_server)
@@ -526,8 +526,11 @@ def test_an_option_only_scan_keeps_the_default_targets():
     tests = set((REPOSITORY_ROOT / "netbox_librenms_plugin" / "tests").rglob("*.py"))
     # Precondition: there is a test tree to lose in the first place.
     assert tests, "no test files found to scan"
+    templates = set((REPOSITORY_ROOT / "netbox_librenms_plugin" / "templates").rglob("*.html"))
+    assert templates, "no templates found to scan"
     scanned = _scanned(_scan("--json"))
     assert not tests - scanned, f"the option-only scan omitted {len(tests - scanned)} test files"
+    assert not templates - scanned, f"the option-only scan omitted {len(templates - scanned)} templates"
 
 
 def test_an_explicit_target_replaces_the_defaults():
@@ -548,6 +551,8 @@ def test_an_exclude_option_accepts_an_existing_path():
 def test_each_rule_applies_to_its_declared_paths(tmp_path):
     """The path scoping is the rules' real boundary, so pin it against a staged tree, not fixtures."""
     http_call = "import requests\nrequests.get(url)\n"
+    mapping_write = 'device.custom_field_data["librenms_id"] = {"default": 5}\n'
+    conflict_raise = 'raise MappingChanged("changed")\n'
     sources = {
         # Flagged: a direct HTTP call outside the client.
         "netbox_librenms_plugin/worker.py": http_call,
@@ -562,6 +567,15 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
             http_call + "from django.test import TestCase\n"
             "class TestWorker:\n    def check(self):\n        self.assertEqual(1, 1)\n"
         ),
+        # Flagged: tests and templates are in the scope of the mapping rules.
+        "netbox_librenms_plugin/tests/test_seed.py": mapping_write + conflict_raise,
+        "netbox_librenms_plugin/templates/netbox_librenms_plugin/seed.html": "{{ object.cf.librenms_id }}\n",
+        # Clean: the mapping module and migrations are the only places that may touch the storage.
+        "netbox_librenms_plugin/server_mappings.py": mapping_write,
+        "netbox_librenms_plugin/migrations/0099_seed.py": mapping_write,
+        # Flagged: a conflict raised without its record. Clean: the runner's own raise.
+        "netbox_librenms_plugin/claims.py": conflict_raise,
+        "netbox_librenms_plugin/transactions.py": conflict_raise,
     }
     for name, source in sources.items():
         staged = tmp_path / name
@@ -576,4 +590,7 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
         ("netbox_librenms_plugin/worker.py", "no-requests-outside-http-client"),
         ("netbox_librenms_plugin/tests/test_worker.py", "no-django-testcase-in-tests"),
         ("netbox_librenms_plugin/tests/test_worker.py", "no-unittest-assertions"),
+        ("netbox_librenms_plugin/tests/test_seed.py", "no-stored-mapping-access"),
+        ("netbox_librenms_plugin/templates/netbox_librenms_plugin/seed.html", "no-stored-mapping-access-template"),
+        ("netbox_librenms_plugin/claims.py", "conflict-raised-without-record"),
     }, found

@@ -15,8 +15,8 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
     make_virtual_chassis_members,
     make_vm,
-    seed_own_mapping,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
 from netbox_librenms_plugin.tests.view_test_helpers import assert_update_logged, make_view, missing_pk
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
@@ -84,8 +84,7 @@ def _seed(obj, rows):
 
 def _set_librenms_id(obj, value):
     """Store a LibreNMS id on a real object through the production writer."""
-    seed_own_mapping(obj, value, SERVER_KEY)
-    obj.save(update_fields=["custom_field_data"])
+    seed_mapping(obj, SERVER_KEY, own=value)
 
 
 def _serve_device_info(live_librenms, device_id, payload):
@@ -280,7 +279,7 @@ class TestPrimaryIPFromManagementAddress:
         assert list(Interface.objects.filter(device=device)) == [interface]
         device.refresh_from_db()
         assert device.primary_ip4_id is None
-        assert device.custom_field_data.get("librenms_id") is None
+        assert stored_mapping_for_test(device) is None
 
     def test_management_row_without_an_interface_reports_primary_not_set(self, client, live_librenms):
         """An unmatched management row is reported apart from an ordinary unmatched row."""

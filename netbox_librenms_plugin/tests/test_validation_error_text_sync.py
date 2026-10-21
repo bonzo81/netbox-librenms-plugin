@@ -14,7 +14,8 @@ from extras.validators import CustomValidator
 from ipam.models import VRF
 
 from netbox_librenms_plugin.server_mappings import AmbiguousLibreNMSIdError, MappingRole, find_mapping, mark_migrated
-from netbox_librenms_plugin.tests.conftest import apply_mapping_change, make_device, make_interface, make_superuser
+from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_superuser
+from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change
 from netbox_librenms_plugin.tests.test_ip_row_vrf_create import RD_ROWS, _create, seeded  # noqa: F401
 from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 
