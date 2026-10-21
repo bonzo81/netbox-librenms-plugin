@@ -452,10 +452,16 @@ def _serial_matches_an_ancestor(item_serial: str, parent_item: dict | None, inde
     return False
 
 
-def _installed_module_may_own(row, interface):
+def _adoptable_names(names_by_module, module):
+    """Return the module's adoptable interface names, predicted once per module in *names_by_module*."""
+    if module.pk not in names_by_module:
+        names_by_module[module.pk] = get_module_adoptable_interface_names(module.device, module)
+    return names_by_module[module.pk]
+
+
+def _installed_module_may_own(row, interface, names_by_module):
     """Return whether the bind would move *interface* into the row's installed module."""
-    module = row["installed_module"]
-    return get_module_adoptable_interface_names(module.device, module).may_move(interface.name)
+    return _adoptable_names(names_by_module, row["installed_module"]).may_move(interface.name)
 
 
 def _get_item_port_identity(item):
@@ -673,7 +679,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         if not standalone_exists[device.pk]:
             return 0
 
-        template_names = get_module_adoptable_interface_names(device, module).names
+        template_names = _adoptable_names(self.__dict__.setdefault("_adoptable_names_by_module", {}), module).names
         if not template_names:
             return 0
 
@@ -1654,6 +1660,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 # The writer skips a choice outside the change scope, and then its template adoption too.
                 "changeable_interface_ids": frozenset(changeable_ids_by_member[member.id]),
                 "server_key": server_key,
+                "adoptable_names_by_module": self.__dict__.setdefault("_adoptable_names_by_module", {}),
             }
         return member_contexts
 
@@ -1759,7 +1766,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             row.pop("can_update_interface_binding", None)
             return
         if current_port_id == port_id and (
-            candidate_module_id == installed_module_id or not _installed_module_may_own(row, interface)
+            candidate_module_id == installed_module_id
+            or not _installed_module_may_own(row, interface, target_context["adoptable_names_by_module"])
         ):
             return
 

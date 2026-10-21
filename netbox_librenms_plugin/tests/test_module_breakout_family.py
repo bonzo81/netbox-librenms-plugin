@@ -129,3 +129,36 @@ class TestUpdateInterfaceAdoption:
         assert parent.module_id == module.pk
         assert [type(row).objects.get(pk=row.pk).module_id for row in channels] == [None] * 4
         assert any("adopted 1 existing standalone interface(s)" in text for text in message_texts(request, "success"))
+
+
+class TestOneRender:
+    """The Modules table predicts the names of an installed module once per render."""
+
+    def test_the_bind_check_and_the_adoptable_count_share_one_prediction(self):
+        from unittest.mock import patch
+
+        from dcim.models import InterfaceTemplate, Module
+
+        from netbox_librenms_plugin.views.base import modules_view
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        device = make_device_with_module_bays("adoptable-once", ["Slot 1"])
+        seed_mapping(device, "default", own=84)
+        module_type = make_module_type("ADOPTABLE-ONCE-OPTIC")
+        module = Module.objects.create(
+            device=device, module_bay=device.modulebays.get(name="Slot 1"), module_type=module_type, status="active"
+        )
+        # Added after the install, so the rows stay standalone.
+        InterfaceTemplate.objects.create(module_type=module_type, name=PARENT, type="10gbase-x-sfpp")
+        bound = make_interface(device, PARENT)
+        seed_mapping(bound, "default", own=6704)
+        row = _item(30, module_type.model, "Slot 1", _librenms_port_id=6704, _librenms_ifname=PARENT)
+        seed_inventory(DeviceModuleTableView(), device, [row], librenms_id=84)
+        real = modules_view.get_module_adoptable_interface_names
+
+        with patch.object(modules_view, "get_module_adoptable_interface_names", wraps=real) as predicted:
+            table_row = next(row for row in _table_rows(device) if row.get("ent_physical_index") == 30)
+
+        assert table_row["can_update_interface_binding"]
+        assert table_row["adoptable_interface_count"] == 1
+        assert [call.args[1] for call in predicted.call_args_list] == [module]
