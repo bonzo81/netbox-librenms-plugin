@@ -1,4 +1,5 @@
 {% load helpers %}
+{% load librenms_sync_query %}
 {% if sync_partial_response %}{% include 'inc/messages.html' %}{% endif %}
 {% if request.htmx %}
 {% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=vlan_sync.cache_expiry cache_container_id="vlan-cache-countdown" cache_countdown_id="vlan-countdown-timer" cache_oob=True %}
@@ -26,9 +27,10 @@
 <div>
 {% else %}
 {% with model_name=vlan_sync.object|meta:"model_name" %}
+{% url 'plugins:netbox_librenms_plugin:sync_selected_vlans' object_type=model_name object_id=vlan_sync.object.pk as vlan_sync_url_path %}{% sync_tab_url vlan_sync_url_path as vlan_sync_url %}
 <form method="post"
-      action="{% url 'plugins:netbox_librenms_plugin:sync_selected_vlans' object_type=model_name object_id=vlan_sync.object.pk %}"
-      hx-post="{% url 'plugins:netbox_librenms_plugin:sync_selected_vlans' object_type=model_name object_id=vlan_sync.object.pk %}"
+      action="{{ vlan_sync_url }}"
+      hx-post="{{ vlan_sync_url }}"
       hx-target="#htmx-modal-content"
       hx-swap="innerHTML">
 {% endwith %}

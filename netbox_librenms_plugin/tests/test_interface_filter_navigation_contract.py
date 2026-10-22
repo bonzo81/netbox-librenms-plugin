@@ -145,15 +145,10 @@ def _classify(hop, page_path, routes):
         assert query["tab"] == ["interfaces"], url
         _assert_keeps(query, (*PAGE_FILTERS, "interfaces_show_ignored"), url)
         return "page link"
-    if path == routes["refresh"]:
-        # Refresh from LibreNMS: the filters stay, the page goes.
-        assert "interfaces_page" not in query, url
-        _assert_keeps(query, KEEP_ALL_BUT_PAGE, url)
-        return "refresh"
-    if path in (routes["sync"], routes["rebind"]):
-        # A sync or Rebind comes back to the same filters and page.
+    if path in (routes["refresh"], routes["sync"], routes["rebind"]):
+        # A refresh, sync or Rebind comes back to the same filters and page, clamped to the last page.
         _assert_keeps(query, KEEP_ALL, url)
-        return "rebind" if path == routes["rebind"] else "sync"
+        return {routes["refresh"]: "refresh", routes["sync"]: "sync", routes["rebind"]: "rebind"}[path]
     pytest.fail(f"An unclassified hop in the interfaces pane: <{hop['tag']}> {url}")
 
 

@@ -1,4 +1,5 @@
 {% load helpers %}
+{% load librenms_sync_query %}
 {% if sync_partial_response %}{% include 'inc/messages.html' %}{% endif %}
 {% if request.htmx %}
 {% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=ip_sync.cache_expiry cache_container_id="ip-cache-countdown" cache_countdown_id="ip-countdown-timer" cache_oob=True %}
@@ -11,9 +12,10 @@
 {% if migrated_to_marker %}
 <div>
 {% else %}
+{% url 'plugins:netbox_librenms_plugin:sync_device_ip_addresses' object_type=model_name pk=ip_sync.object.pk as ip_sync_url_path %}{% sync_tab_url ip_sync_url_path as ip_sync_url %}
 <form method="post"
-      action="{% url 'plugins:netbox_librenms_plugin:sync_device_ip_addresses' object_type=model_name pk=ip_sync.object.pk %}"
-      hx-post="{% url 'plugins:netbox_librenms_plugin:sync_device_ip_addresses' object_type=model_name pk=ip_sync.object.pk %}"
+      action="{{ ip_sync_url }}"
+      hx-post="{{ ip_sync_url }}"
       hx-target="#htmx-modal-content"
       hx-swap="innerHTML">
 {% endif %}

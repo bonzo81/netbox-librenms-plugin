@@ -477,7 +477,7 @@ class TestInterfaceSyncRefreshButtonDeduped:
         assert "hx-vals=" in button and "server_key" in button
         assert vm_path not in html
 
-    def test_the_refresh_url_carries_the_page_query_without_the_page(self):
+    def test_the_refresh_url_carries_the_page_query(self):
         from django.urls import reverse
 
         device = make_device("refresh-btn-query")
@@ -485,8 +485,8 @@ class TestInterfaceSyncRefreshButtonDeduped:
         html = self._render(device, query)
         device_path = reverse("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": device.pk})
 
-        # A refresh keeps the filters and the page size, and starts at page 1.
-        assert f'hx-post="{device_path}?interfaces_per_page=7&amp;interfaces_q=eth"' in html
+        # A refresh keeps the filters, the page size and the page.
+        assert f'hx-post="{device_path}?interfaces_per_page=7&amp;interfaces_page=3&amp;interfaces_q=eth"' in html
 
     def test_vm_refresh_button_single_with_vm_url(self):
         from django.urls import reverse
