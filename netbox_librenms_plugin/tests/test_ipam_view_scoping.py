@@ -187,8 +187,13 @@ class TestInterfacesTabIpamScoping:
         with CaptureQueriesContext(connection) as queries:
             context = self._context(user, device, server_key)
 
+        # The interface rows cache counts every VLAN for its change fingerprint, which is not a scope count.
         vlan_counts = [
-            query["sql"] for query in queries if 'FROM "ipam_vlan"' in query["sql"] and "COUNT(" in query["sql"]
+            query["sql"]
+            for query in queries
+            if 'FROM "ipam_vlan"' in query["sql"]
+            and "COUNT(" in query["sql"]
+            and "rows_cache_count" not in query["sql"]
         ]
         assert vlan_counts == []
         assert context["vlan_scope_incomplete"] is False

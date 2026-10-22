@@ -427,8 +427,10 @@ class TestWholeSnapshotData:
         assert list(_rows(filtered)) == [peer_b]
         assert f'name="select" value="{peer_b}"' in filtered
         assert _table_attr(filtered, "data-filter-active") == "true"
-        assert _table_attr(filtered, "data-filter-signature") == (
-            "cables_filter_remote_device=peer-b&interface_name_field=ifName&server_key=default"
+        # The selection belongs to the tab, so a filter keeps the rows already selected.
+        assert _table_attr(filtered, "data-selection-scope") == "interface_name_field=ifName&server_key=default"
+        assert _table_attr(filtered, "data-selection-scope") == _table_attr(
+            _tab(client, device), "data-selection-scope"
         )
 
     def test_the_selection_signature_changes_with_the_interface_name_field(self, client, settings):
@@ -439,7 +441,7 @@ class TestWholeSnapshotData:
         signatures = {
             field: _table_attr(
                 _tab(client, device, cables_filter_local_port="uplink", interface_name_field=field),
-                "data-filter-signature",
+                "data-selection-scope",
             )
             for field in ("ifName", "ifDescr")
         }
