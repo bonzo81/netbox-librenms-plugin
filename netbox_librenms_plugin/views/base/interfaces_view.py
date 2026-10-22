@@ -26,6 +26,7 @@ from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.server_mappings import read_mapping, read_mappings
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
+from netbox_librenms_plugin.sync_filters import filter_sync_rows, parse_sync_filters
 from netbox_librenms_plugin.utils import (
     apply_lag_vlan_fill,
     build_migrated_context,
@@ -652,7 +653,10 @@ class BaseInterfaceTableView(
         netbox_only_interfaces = []
         ignored_count = 0
         blocked_port_ids = []
-        show_ignored = "1" in (request.GET.get("interfaces_show_ignored"), request.POST.get("interfaces_show_ignored"))
+        filters = None
+        filtered_from = None
+        # Every hop of the tab carries the page query, so the toggle is read from it only.
+        show_ignored = request.GET.get("interfaces_show_ignored") == "1"
 
         if interface_name_field is None:
             interface_name_field = get_interface_name_field(request, obj)
@@ -978,12 +982,32 @@ class BaseInterfaceTableView(
                 for port in ports_data
                 if port["rule_decision"] is None or decision_reason(port["rule_decision"]) is not None
             ]
-            table = self.get_table(table_rows, obj, interface_name_field, vlan_groups=vlan_groups)
-            table.allowed_vc_member_ids = actionable_owner_ids
             # Propagate donor "migrated mode" so the table suppresses per-row relationship sync
             # buttons (the bulk form is already hidden by the template; the row buttons POST
             # directly, so they must be stripped here too to keep a migrated donor read-only).
-            table.migrated_to_marker = bool(build_migrated_context(obj, server_key).get("migrated_to_marker"))
+            migrated = bool(build_migrated_context(obj, server_key).get("migrated_to_marker"))
+
+            def build_table(rows):
+                built = self.get_table(rows, obj, interface_name_field, vlan_groups=vlan_groups)
+                built.allowed_vc_member_ids = actionable_owner_ids
+                built.migrated_to_marker = migrated
+                return built
+
+            # The filter runs after every whole-snapshot step above, so the counts, the ignored
+            # split and the blocked IDs describe the whole device. The cell text functions belong to
+            # the table, so a table of every row does the matching and a second table shows the matches.
+            table = build_table(table_rows)
+            spec = table.filter_spec()
+            filters = parse_sync_filters(request.GET, spec)
+            if filters.active:
+                filtered_from = len(table_rows)
+                table = build_table(filter_sync_rows(table_rows, filters, spec))
+                table.empty_text = "No rows match these filters"
+            table.attrs["data-filter-active"] = "true" if filters.active else "false"
+            # A new filter, name field or ignored toggle starts an empty browser selection.
+            table.attrs["data-filter-signature"] = filters.signature(
+                interfaces_show_ignored=int(show_ignored), interface_name_field=interface_name_field
+            )
             table.configure(request)
 
             netbox_only_interfaces = []
@@ -1049,6 +1073,9 @@ class BaseInterfaceTableView(
             "vlan_scope_incomplete": vlan_scope_incomplete,
             "show_ignored": show_ignored,
             "ignored_count": ignored_count,
+            "filters": filters,
+            # The row count before the filter, shown only while a filter narrows the table.
+            "filtered_from": filtered_from,
             "sync_options": interface_sync_options_menu(request),
             # The browser's related-row walk skips these, on this page and on every other.
             "blocked_port_ids_json": json.dumps([str(port_id) for port_id in blocked_port_ids if port_id is not None]),

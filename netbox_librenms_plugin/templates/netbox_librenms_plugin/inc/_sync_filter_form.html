@@ -1,0 +1,70 @@
+{% load librenms_sync_query %}
+{% comment %}
+The server-side filter of one sync tab table. It is a GET form outside the tab's sync form, so
+Enter in a filter field never submits a sync. The hidden inputs carry the rest of the page query;
+the tab's page is left out, so a new filter starts at page 1.
+Takes: filters (SyncFilters), prefix, tab, section_id, label.
+{% endcomment %}
+{% with form=filters.form %}
+<form method="get" class="sync-filter-form noprint mb-3" role="search" aria-label="{{ label }}" data-sync-filter-tab="{{ tab }}">
+    {% sync_tab_query_items prefix=prefix tab=tab reset="page filters" as hidden_items %}
+    {% for key, value in hidden_items %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}
+    {% if form.errors %}
+    <div class="alert alert-danger" role="alert" id="{{ prefix }}filter-errors">
+        <div>
+            <div>The filters are not valid, so the table is not shown. Correct them, or clear the filters.</div>
+            <ul class="mb-0">
+                {% for error in form.non_field_errors %}<li>{{ error }}</li>{% endfor %}
+                {% for field in form %}{% for error in field.errors %}<li>{{ field.label }}: {{ error }}</li>{% endfor %}{% endfor %}
+            </ul>
+        </div>
+    </div>
+    {% endif %}
+    <div class="d-flex flex-wrap align-items-end gap-2">
+        {% with field=form.q %}
+        <div>
+            <label class="form-label small mb-1" for="{{ field.auto_id }}">{{ field.label }}</label>
+            <input type="search" name="{{ field.html_name }}" id="{{ field.auto_id }}" value="{{ field.value|default:'' }}"
+                class="form-control form-control-sm{% if field.errors %} is-invalid{% endif %}"
+                {% if field.errors %}aria-invalid="true" aria-describedby="{{ field.auto_id }}-error"{% endif %}>
+            {% if field.errors %}<div class="invalid-feedback" id="{{ field.auto_id }}-error">{{ field.errors|join:" " }}</div>{% endif %}
+        </div>
+        {% endwith %}
+        {% with field=form.sync_state %}
+        <div>
+            <label class="form-label small mb-1" for="{{ field.auto_id }}">{{ field.label }}</label>
+            <select name="{{ field.html_name }}" id="{{ field.auto_id }}"
+                class="form-select form-select-sm no-ts{% if field.errors %} is-invalid{% endif %}"
+                {% if field.errors %}aria-invalid="true" aria-describedby="{{ field.auto_id }}-error"{% endif %}>
+                {% for value, choice_label in field.field.choices %}
+                <option value="{{ value }}"{% if field.value == value %} selected{% endif %}>{{ choice_label }}</option>
+                {% endfor %}
+            </select>
+            {% if field.errors %}<div class="invalid-feedback" id="{{ field.auto_id }}-error">{{ field.errors|join:" " }}</div>{% endif %}
+        </div>
+        {% endwith %}
+        <button class="btn btn-sm btn-secondary sync-filter-toggle" type="button" data-bs-toggle="collapse"
+            data-bs-target="#{{ section_id }}" aria-expanded="{% if form.columns_have_input %}true{% else %}false{% endif %}"
+            aria-controls="{{ section_id }}">
+            <i class="mdi mdi-filter-outline" aria-hidden="true"></i> Columns
+        </button>
+        <button type="submit" class="btn btn-sm btn-primary">Apply</button>
+        {% if filters.active or form.errors %}
+        <a class="btn btn-sm btn-link" href="{% sync_tab_url prefix=prefix tab=tab reset='page filters' %}">Clear filters</a>
+        {% endif %}
+    </div>
+    <div class="collapse mt-2{% if form.columns_have_input %} show{% endif %}" id="{{ section_id }}"{% if form.columns_have_input %} data-filter-open="true"{% endif %}>
+        <div class="row g-2">
+            {% for field in form.column_fields %}
+            <div class="col-6 col-md-4 col-xl-2">
+                <label class="form-label small mb-1" for="{{ field.auto_id }}">{{ field.label }}</label>
+                <input type="text" name="{{ field.html_name }}" id="{{ field.auto_id }}" value="{{ field.value|default:'' }}"
+                    class="form-control form-control-sm{% if field.errors %} is-invalid{% endif %}"
+                    {% if field.errors %}aria-invalid="true" aria-describedby="{{ field.auto_id }}-error"{% endif %}>
+                {% if field.errors %}<div class="invalid-feedback" id="{{ field.auto_id }}-error">{{ field.errors|join:" " }}</div>{% endif %}
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</form>
+{% endwith %}

@@ -1,5 +1,6 @@
 {% load helpers %}
 {% load static %}
+{% load librenms_sync_query %}
 
 <!-- Action Buttons -->
 <div class="d-flex justify-content-end align-items-center mb-0 sync-tab-refresh-toolbar">
@@ -16,8 +17,8 @@
             {% if has_librenms_id %}
                 {% with model_name=object|meta:"model_name" %}
                     {% comment %}
-                    Resolve the refresh URL per object type, then render ONE button so the shared
-                    hx-vals (pagination + server_key forwarding) lives in a single place.
+                    Resolve the refresh URL per object type, then render ONE button. Its URL carries the
+                    page query without the page, so a refresh keeps the filters and starts at page 1.
                     {% endcomment %}
                     {% if model_name == "device" %}
                         {% url 'plugins:netbox_librenms_plugin:device_interface_sync' pk=object.pk as interface_sync_url %}
@@ -26,10 +27,10 @@
                     {% endif %}
                     {% if interface_sync_url %}
                         <button type="button"
-                                hx-post="{{ interface_sync_url }}"
+                                hx-post="{% sync_tab_url interface_sync_url prefix='interfaces_' reset='page' %}"
                                 hx-target="#interface-sync-content"
                                 hx-include="[name='interface_name_field']"
-                                hx-vals="js:{interfaces_per_page: new URLSearchParams(window.location.search).get('interfaces_per_page') || '', server_key: new URLSearchParams(window.location.search).get('server_key') || '{{ librenms_server_info.server_key|default:''|escapejs }}'}"
+                                hx-vals="js:{server_key: new URLSearchParams(window.location.search).get('server_key') || '{{ librenms_server_info.server_key|default:''|escapejs }}'}"
                                 class="btn btn-outline-primary">
                             Refresh Interfaces
                         </button>
