@@ -263,7 +263,8 @@ def type_change_refusal(interface, new_type):
         # _first_refusal returns a TypeRefusal, and TypeRefusal.text_for applies the superuser rule.
         # nosemgrep: caught-error-text  # noqa: ERA001
         return _first_refusal(exc)
-    if new_type != InterfaceTypeChoices.TYPE_LAG and Interface.objects.filter(lag=interface).exists():
+    # A prefetched member_interfaces (the interface tab) answers from its cache; a fresh row queries.
+    if new_type != InterfaceTypeChoices.TYPE_LAG and interface.member_interfaces.exists():
         return TypeRefusal("An interface with LAG members must keep type lag.", "type", plugin_rule=True)
     try:
         netbox_interface_clean(candidate)
