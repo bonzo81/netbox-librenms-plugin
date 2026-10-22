@@ -423,6 +423,29 @@ class TestMarkBuiltIn:
         assert written(device) == before
         assert tab_rows(device)[SLOT_1]["module_bay"] == "System Board"
 
+    def test_a_bay_that_two_modules_add_after_render_refuses_the_mark(self):
+        """The table matches a chassis-level row against every bay, a name that two modules define included."""
+        from netbox_librenms_plugin.module_grants import GrantRefusal
+        from netbox_librenms_plugin.tests.conftest import install_module, make_module_bay
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts
+
+        device = ixr_device("ixr-shared-bay-later", part_number="")
+        for carrier in ("Carrier A", "Carrier B"):
+            make_module_bay(device, carrier)
+        seed_snapshot(device, ixr_inventory())
+        fields = modal_form(device, SLOT_1)
+        for carrier in ("Carrier A", "Carrier B"):
+            install_module(device, carrier, f"CARRIER-{carrier[-1]}", child_bays=["Slot 1"])
+        # The new bays drop the cached snapshot, so cache the same inventory again.
+        seed_snapshot(device, ixr_inventory())
+        before = written(device)
+
+        refused = mark(device, fields)
+
+        assert message_texts(refused, "error") == [GrantRefusal.STALE.message]
+        assert written(device) == before
+        assert tab_rows(device)[SLOT_1]["module_bay"] == "Slot 1"
+
     def test_a_part_number_set_elsewhere_is_never_overwritten(self):
         """A grant signed for a device type that already has a part number still writes nothing."""
         from netbox_librenms_plugin.inventory_policy import load_inventory_policy
