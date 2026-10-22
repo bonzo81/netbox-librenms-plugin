@@ -511,7 +511,13 @@ class LibreNMSAPI:
 
     def get_cached_librenms_id(self, obj, server_key=None):
         """Return the LibreNMS ID cached for *obj* on the server, or None."""
-        return cache.get(librenms_id_cache_key(obj, server_key or self.server_key))
+        return self.get_cached_librenms_ids([obj], server_key)[0]
+
+    def get_cached_librenms_ids(self, objs, server_key=None):
+        """Return the LibreNMS ID cached for each of *objs* on the server, or None, in one cache read."""
+        keys = [librenms_id_cache_key(obj, server_key or self.server_key) for obj in objs]
+        cached = cache.get_many(keys)
+        return [cached.get(key) for key in keys]
 
     def get_librenms_id(self, obj):
         """

@@ -283,19 +283,22 @@ def test_filter_controls_need_a_snapshot_even_with_filter_input(page, tab, key):
 def test_filter_controls_submit_the_get_form(page, field, value):
     load_tab(page, "interface", "interface_sync")
     page.clock.pause_at(NOW + timedelta(seconds=1))
-    initial_url = page.url
-    page.route("**/browser-fixture?*", lambda route: route.fulfill(body="<p id='filtered'></p>"))
+    posted = []
+    page.route(
+        "**/endpoint/sync_tab_filter/**",
+        lambda route: (posted.append(route.request), route.fulfill(body="<p id='filtered'></p>"))[-1],
+    )
     _add_page_scripts(page)
     page.evaluate("initializeScripts()")
-    with page.expect_navigation() as navigation:
-        if field == "q":
-            page.locator("input[type=search]").fill(value)
-            page.clock.fast_forward(399)
-            assert page.url == initial_url
-            page.clock.fast_forward(1)
-        else:
-            page.locator(".sync-filter-controls select").select_option(value)
-    query = parse_qs(navigation.value.url.split("?", 1)[1])
+    if field == "q":
+        page.locator("input[type=search]").fill(value)
+        page.clock.fast_forward(399)
+        assert posted == []
+        page.clock.fast_forward(1)
+    else:
+        page.locator(".sync-filter-controls select").select_option(value)
+    expect(page.locator("#filtered")).to_have_count(1)
+    query = parse_qs(posted[0].url.split("?", 1)[1])
     assert query[f"interface_{field}"] == [value]
     assert query["server_key"] == ["secondary"]
     assert query["tab"] == ["interfaces"]

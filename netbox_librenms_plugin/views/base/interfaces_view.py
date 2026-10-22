@@ -15,6 +15,7 @@ from netbox_librenms_plugin.constants import (
 )
 from netbox_librenms_plugin.interface_diff import interface_enabled_from_port
 from netbox_librenms_plugin.interface_rules import RuleDecisionKind, decision_reason, interface_rules_for_request
+from netbox_librenms_plugin.interface_rows_cache import cached_rows, netbox_fingerprint, rows_key
 from netbox_librenms_plugin.interface_relationships import (
     RelationshipResolutionContext,
     build_relationship_maps,
@@ -159,14 +160,21 @@ class BaseInterfaceTableView(
         """
         raise NotImplementedError("Subclasses must implement get_table()")
 
-    def _get_object_librenms_id(self, obj, mapping):
-        """Resolve the stored or cached LibreNMS ID of an interface from its mapping snapshot."""
-        librenms_id = mapping.own_id(self.librenms_api.server_key)
-        if librenms_id is None:
-            librenms_id = self.librenms_api.get_cached_librenms_id(obj)
-        if not isinstance(librenms_id, (int, str)) or isinstance(librenms_id, bool):
-            return None
-        return normalize_librenms_port_id(librenms_id)
+    def _get_object_librenms_ids(self, interfaces):
+        """Resolve the stored or cached LibreNMS ID of each ``(interface, mapping)`` pair, in one cache read."""
+        server_key = self.librenms_api.server_key
+        ids = [mapping.own_id(server_key) for _, mapping in interfaces]
+        # One device can have thousands of interfaces, so the cache is read once for all of them.
+        unmapped = [index for index, librenms_id in enumerate(ids) if librenms_id is None]
+        cached = self.librenms_api.get_cached_librenms_ids([interfaces[index][0] for index in unmapped])
+        for index, librenms_id in zip(unmapped, cached, strict=True):
+            ids[index] = librenms_id
+        return [
+            normalize_librenms_port_id(librenms_id)
+            if isinstance(librenms_id, (int, str)) and not isinstance(librenms_id, bool)
+            else None
+            for librenms_id in ids
+        ]
 
     def _build_interface_lookup_maps(self, obj, *, metadata_only=False):
         """
@@ -210,9 +218,9 @@ class BaseInterfaceTableView(
                     related_field, "untagged_vlan", *extra_related
                 ).prefetch_related("tagged_vlans", "tagged_vlans__group", "mac_addresses", *extra_prefetch)
             )
-        for interface, mapping in interfaces:
+        interfaces = list(interfaces)
+        for (interface, _), librenms_id in zip(interfaces, self._get_object_librenms_ids(interfaces), strict=True):
             by_name[interface.name] = interface
-            librenms_id = self._get_object_librenms_id(interface, mapping)
             if librenms_id is None:
                 continue
             librenms_id_counts[librenms_id] = librenms_id_counts.get(librenms_id, 0) + 1
@@ -620,114 +628,82 @@ class BaseInterfaceTableView(
             port["reported_name_owner_changeable"] = owner_visible and owner_interface.pk in changeable_interface_ids
         return claimable_names_by_device
 
-    def get_context_data(self, request, obj, interface_name_field, server_key=None, fresh_data=None, sync_device=None):  # noqa: C901
+    def _interface_rows(
+        self,
+        request,
+        obj,
+        interface_name_field,
+        server_key,
+        cache_device,
+        cached_data,
+        virtual_chassis_members,
+        *,
+        oob_incomplete,
+        show_ignored,
+        last_fetched,
+    ):
+        """Return the computed rows, reused while the snapshot, the viewer and the NetBox rows they read are unchanged."""
+
+        def compute():
+            return self._compute_interface_rows(
+                request,
+                obj,
+                interface_name_field,
+                server_key,
+                cache_device,
+                cached_data,
+                virtual_chassis_members,
+                oob_incomplete=oob_incomplete,
+                show_ignored=show_ignored,
+            )
+
+        if not isinstance(cached_data, dict) or last_fetched is None:
+            # Only a cached snapshot has a fetch time to key the rows on.
+            return compute()
+        owner_ids = [owner.pk for owner in virtual_chassis_members or [obj]]
+        owner_field = self.get_select_related_field(obj)
+        interfaces = self.get_interfaces(obj).model.objects.filter(**{f"{owner_field}_id__in": owner_ids})
+        key = rows_key(
+            cache_device.pk,
+            server_key,
+            last_fetched,
+            request.user.pk,
+            interface_name_field,
+            show_ignored,
+            cache.get(self.get_vlan_overrides_key(cache_device, server_key)),
+            netbox_fingerprint(type(obj).objects.filter(pk__in=owner_ids), interfaces),
+        )
+        return cached_rows(key, compute)
+
+    def _compute_interface_rows(  # noqa: C901
+        self,
+        request,
+        obj,
+        interface_name_field,
+        server_key,
+        cache_device,
+        cached_data,
+        virtual_chassis_members,
+        *,
+        oob_incomplete,
+        show_ignored,
+    ):
         """
-        Build the context data for the interface sync view.
+        Compute the rows of the interface table and the device-wide state around them.
 
-        ``fresh_data`` is a render-from-snapshot escape hatch: when given, the view
-        renders from that in-memory dict instead of reading the ports cache (for a
-        caller that built a response without a preceding cache write). No in-tree
-        caller currently passes it.
-
-        The OOB-ports-fetch-failure path does *not* use it: ``post()`` caches the
-        host-only snapshot tagged ``oob_incomplete=True`` and renders from the cache
-        like the normal flow; an inline banner (driven by that tag) surfaces the
-        missing OOB rows.
-
-        Args:
-            request: The current HTTP request.
-            obj: The NetBox device (or VC member) being synced.
-            interface_name_field: The interface name field preference; resolved from
-                the request when None.
-            server_key: The LibreNMS server key; resolved from the API client when
-                None.
-            fresh_data: Optional in-memory ports snapshot to render from instead of
-                the cache.
-            sync_device: Device that owns the LibreNMS identity and cache entry.
+        This reads every NetBox interface of the device (and of each Virtual Chassis member) and compares
+        it with the LibreNMS snapshot, so it is the expensive part of a render.
 
         Returns:
-            dict: The template context (object, table, vlan_groups, server_key,
-                oob_incomplete and related render state).
+            dict: The VLAN scope, the table rows (None without a snapshot), the counts and the NetBox-only list.
 
         """
-        ports_data = []
-        table = None
+        table_rows = None
         netbox_only_interfaces = []
         ignored_count = 0
         blocked_port_ids = []
-        filtered_from = None
-        # Every hop of the tab carries the page query, so the toggle is read from it only.
-        show_ignored = request.GET.get("interfaces_show_ignored") == "1"
-
-        if interface_name_field is None:
-            interface_name_field = get_interface_name_field(request, obj)
-        # The filters show their errors also when no snapshot is cached.
-        filters = parse_table_filters(request.GET, lambda rows: self.get_table(rows, obj, interface_name_field))
-
-        unresolved = False
-        if server_key is None:
-            # GET render (no POST-resolved key threaded in): rebind + scope the ports-cache read
-            # to ?server_key (shared helper) so a non-default-server tab reads that server's
-            # cache, not the default's. An unresolved non-blank key scopes to that key (miss).
-            server_key, unresolved = self.resolve_get_render_server_key(request)
-
-        # Scope the ports cache to the VC sync device (not the viewed member) so all VC
-        # members share one entry instead of fragmenting / re-fetching per member. Mirrors
-        # cables_view; resolves to obj itself for non-VC devices. Must match post()'s key.
-        # Reuse the device post() already resolved (passed as sync_device) to avoid a second
-        # get_librenms_sync_device() VC-members query per refresh; the GET path passes None.
-        cache_device = sync_device or get_librenms_sync_device(obj, server_key=server_key) or obj
-
-        if fresh_data is not None:
-            cached_data = fresh_data
-            last_fetched = timezone.now()
-        elif unresolved:
-            # ?server_key named a server that no longer resolves (deleted/misconfigured). Its ports
-            # snapshot may still be cached, but the failed rebind left self.librenms_api bound to the
-            # DEFAULT server, so the per-interface librenms_id index (_get_object_librenms_id) is
-            # keyed on a different server than this cache read would be — mismatching an
-            # already-synced port as a new "NetBox only" row. Render empty, scoped to the requested
-            # key, instead (mirrors modules_view.get_context_data's unresolved guard).
-            cached_data = None
-            last_fetched = None
-        else:
-            cached_data = cache.get(self.get_cache_key(cache_device, "ports", server_key))
-            last_fetched = cache.get(self.get_last_fetched_key(cache_device, "ports", server_key))
-
-        # Fail closed on a stale/corrupt cache entry: the enrichment below assumes a dict with a
-        # list of dict ports (same contract post() validates before caching), so a malformed
-        # snapshot would 500 the sync tab before the user could refresh. Purge it so a later render
-        # re-fetches. A dict envelope with a malformed "ports" is kept so the isinstance(dict) block
-        # below degrades ports_data to [] and still builds an empty table. A non-dict snapshot
-        # has no envelope to render and drops to None.
-        if cached_data is not None and not is_valid_ports_payload(cached_data):
-            if fresh_data is None:
-                cache.delete(self.get_cache_key(cache_device, "ports", server_key))
-                cache.delete(self.get_last_fetched_key(cache_device, "ports", server_key))
-            if not isinstance(cached_data, dict):
-                cached_data = None
-            last_fetched = None
-
-        # A snapshot tagged oob_incomplete is host-only because the linked OOB controller's
-        # ports could not be fetched on the last refresh. Surface it on every render of that
-        # snapshot (via an inline banner) so the missing OOB rows are never silently absent.
-        oob_incomplete = bool(cached_data.get("oob_incomplete")) if isinstance(cached_data, dict) else False
-
-        # The refresh path tags a cached snapshot when its port_stack request fails. Keep that
-        # warning attached to the snapshot so later cached renders do not silently show an
-        # incomplete Relationships column after the one-shot Django message has disappeared.
-        relationship_data_incomplete = (
-            bool(cached_data.get("relationship_data_incomplete")) if isinstance(cached_data, dict) else False
-        )
-
-        # What the device's port_stack held and what each rule made of it. Read from the same
-        # snapshot the table renders, so the report cannot describe rows the table is not showing.
-        relationship_diagnostics = relationship_diagnostics_report(cached_data, interface_name_field)
-
-        virtual_chassis_members = []
-        if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-            virtual_chassis_members = list(obj.virtual_chassis.members.all())
-
+        actionable_owner_ids = set()
+        migrated = False
         # Include every member's scope so rows owned by another member can resolve their VLANs.
         vlan_scope_devices = virtual_chassis_members or [obj]
         # The tab gate checks the object's own view permission only, and the table serialises VLAN
@@ -979,6 +955,10 @@ class BaseInterfaceTableView(
                 if show_ignored
                 else [port for port, is_ignored in zip(ports_data, ignored, strict=True) if not is_ignored]
             )
+            # Each row keeps its sync state (``_sync_state``), so the rows cache holds it and a filter reads it.
+            state_table = self.get_table([], obj, interface_name_field, vlan_groups=vlan_groups)
+            for port in table_rows:
+                state_table.row_sync_state(port)
             # Every row the write check refuses, or that has no owner: the browser walk skips them.
             blocked_port_ids = [
                 normalize_librenms_port_id(port.get("port_id"))
@@ -989,25 +969,6 @@ class BaseInterfaceTableView(
             # buttons (the bulk form is already hidden by the template; the row buttons POST
             # directly, so they must be stripped here too to keep a migrated donor read-only).
             migrated = bool(build_migrated_context(obj, server_key).get("migrated_to_marker"))
-
-            def build_table(rows):
-                built = self.get_table(rows, obj, interface_name_field, vlan_groups=vlan_groups)
-                built.allowed_vc_member_ids = actionable_owner_ids
-                built.migrated_to_marker = migrated
-                return built
-
-            # The filter runs after every whole-snapshot step above, so the counts, the ignored
-            # split and the blocked IDs describe the whole device. A new name field or ignored
-            # toggle starts an empty browser selection too.
-            table, filters, filtered_from = filter_sync_table(
-                request,
-                obj,
-                table_rows,
-                build_table,
-                server_key=server_key,
-                interfaces_show_ignored=int(show_ignored),
-            )
-            table.configure(request)
 
             netbox_only_interfaces = []
             for device_id, device_interface_maps in interfaces_by_device.items():
@@ -1042,6 +1003,166 @@ class BaseInterfaceTableView(
                                 "url": interface.get_absolute_url(),
                             }
                         )
+
+        return {
+            "vlan_groups": vlan_groups,
+            "hidden_ipam_permissions": hidden_ipam_permissions,
+            "vlan_scope_incomplete": vlan_scope_incomplete,
+            "table_rows": table_rows,
+            "ignored_count": ignored_count,
+            "blocked_port_ids": blocked_port_ids,
+            "netbox_only_interfaces": netbox_only_interfaces,
+            "actionable_owner_ids": actionable_owner_ids,
+            "migrated": migrated,
+        }
+
+    def get_context_data(self, request, obj, interface_name_field, server_key=None, fresh_data=None, sync_device=None):
+        """
+        Build the context data for the interface sync view.
+
+        ``fresh_data`` is a render-from-snapshot escape hatch: when given, the view
+        renders from that in-memory dict instead of reading the ports cache (for a
+        caller that built a response without a preceding cache write). No in-tree
+        caller currently passes it.
+
+        The OOB-ports-fetch-failure path does *not* use it: ``post()`` caches the
+        host-only snapshot tagged ``oob_incomplete=True`` and renders from the cache
+        like the normal flow; an inline banner (driven by that tag) surfaces the
+        missing OOB rows.
+
+        Args:
+            request: The current HTTP request.
+            obj: The NetBox device (or VC member) being synced.
+            interface_name_field: The interface name field preference; resolved from
+                the request when None.
+            server_key: The LibreNMS server key; resolved from the API client when
+                None.
+            fresh_data: Optional in-memory ports snapshot to render from instead of
+                the cache.
+            sync_device: Device that owns the LibreNMS identity and cache entry.
+
+        Returns:
+            dict: The template context (object, table, vlan_groups, server_key,
+                oob_incomplete and related render state).
+
+        """
+        table = None
+        filtered_from = None
+        # Every hop of the tab carries the page query, so the toggle is read from it only.
+        show_ignored = request.GET.get("interfaces_show_ignored") == "1"
+
+        if interface_name_field is None:
+            interface_name_field = get_interface_name_field(request, obj)
+        # The filters show their errors also when no snapshot is cached.
+        filters = parse_table_filters(request.GET, lambda rows: self.get_table(rows, obj, interface_name_field))
+
+        unresolved = False
+        if server_key is None:
+            # GET render (no POST-resolved key threaded in): rebind + scope the ports-cache read
+            # to ?server_key (shared helper) so a non-default-server tab reads that server's
+            # cache, not the default's. An unresolved non-blank key scopes to that key (miss).
+            server_key, unresolved = self.resolve_get_render_server_key(request)
+
+        # Scope the ports cache to the VC sync device (not the viewed member) so all VC
+        # members share one entry instead of fragmenting / re-fetching per member. Mirrors
+        # cables_view; resolves to obj itself for non-VC devices. Must match post()'s key.
+        # Reuse the device post() already resolved (passed as sync_device) to avoid a second
+        # get_librenms_sync_device() VC-members query per refresh; the GET path passes None.
+        cache_device = sync_device or get_librenms_sync_device(obj, server_key=server_key) or obj
+
+        if fresh_data is not None:
+            cached_data = fresh_data
+            last_fetched = timezone.now()
+        elif unresolved:
+            # ?server_key named a server that no longer resolves (deleted/misconfigured). Its ports
+            # snapshot may still be cached, but the failed rebind left self.librenms_api bound to the
+            # DEFAULT server, so the per-interface librenms_id index (_get_object_librenms_ids) is
+            # keyed on a different server than this cache read would be — mismatching an
+            # already-synced port as a new "NetBox only" row. Render empty, scoped to the requested
+            # key, instead (mirrors modules_view.get_context_data's unresolved guard).
+            cached_data = None
+            last_fetched = None
+        else:
+            cached_data = cache.get(self.get_cache_key(cache_device, "ports", server_key))
+            last_fetched = cache.get(self.get_last_fetched_key(cache_device, "ports", server_key))
+
+        # Fail closed on a stale/corrupt cache entry: the enrichment below assumes a dict with a
+        # list of dict ports (same contract post() validates before caching), so a malformed
+        # snapshot would 500 the sync tab before the user could refresh. Purge it so a later render
+        # re-fetches. A dict envelope with a malformed "ports" is kept so the isinstance(dict) block
+        # below degrades ports_data to [] and still builds an empty table. A non-dict snapshot
+        # has no envelope to render and drops to None.
+        if cached_data is not None and not is_valid_ports_payload(cached_data):
+            if fresh_data is None:
+                cache.delete(self.get_cache_key(cache_device, "ports", server_key))
+                cache.delete(self.get_last_fetched_key(cache_device, "ports", server_key))
+            if not isinstance(cached_data, dict):
+                cached_data = None
+            last_fetched = None
+
+        # A snapshot tagged oob_incomplete is host-only because the linked OOB controller's
+        # ports could not be fetched on the last refresh. Surface it on every render of that
+        # snapshot (via an inline banner) so the missing OOB rows are never silently absent.
+        oob_incomplete = bool(cached_data.get("oob_incomplete")) if isinstance(cached_data, dict) else False
+
+        # The refresh path tags a cached snapshot when its port_stack request fails. Keep that
+        # warning attached to the snapshot so later cached renders do not silently show an
+        # incomplete Relationships column after the one-shot Django message has disappeared.
+        relationship_data_incomplete = (
+            bool(cached_data.get("relationship_data_incomplete")) if isinstance(cached_data, dict) else False
+        )
+
+        # What the device's port_stack held and what each rule made of it. Read from the same
+        # snapshot the table renders, so the report cannot describe rows the table is not showing.
+        relationship_diagnostics = relationship_diagnostics_report(cached_data, interface_name_field)
+
+        virtual_chassis_members = []
+        if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+            virtual_chassis_members = list(obj.virtual_chassis.members.all())
+
+        rows = self._interface_rows(
+            request,
+            obj,
+            interface_name_field,
+            server_key,
+            cache_device,
+            cached_data,
+            virtual_chassis_members,
+            oob_incomplete=oob_incomplete,
+            show_ignored=show_ignored,
+            last_fetched=last_fetched,
+        )
+        vlan_groups = rows["vlan_groups"]
+        hidden_ipam_permissions = rows["hidden_ipam_permissions"]
+        vlan_scope_incomplete = rows["vlan_scope_incomplete"]
+        ignored_count = rows["ignored_count"]
+        blocked_port_ids = rows["blocked_port_ids"]
+        netbox_only_interfaces = rows["netbox_only_interfaces"]
+        if rows["table_rows"] is not None:
+            table_rows, actionable_owner_ids, migrated = (
+                rows["table_rows"],
+                rows["actionable_owner_ids"],
+                rows["migrated"],
+            )
+
+            def build_table(rows):
+                built = self.get_table(rows, obj, interface_name_field, vlan_groups=vlan_groups)
+                built.allowed_vc_member_ids = actionable_owner_ids
+                built.migrated_to_marker = migrated
+                return built
+
+            # The filter runs after every whole-snapshot step above, so the counts, the ignored
+            # split and the blocked IDs describe the whole device. A new name field or ignored
+            # toggle starts an empty browser selection too.
+            table, filters, filtered_from = filter_sync_table(
+                request,
+                obj,
+                table_rows,
+                build_table,
+                server_key=server_key,
+                interfaces_show_ignored=int(show_ignored),
+            )
+            table.configure(request)
 
         # ``ttl()`` is Redis-specific; the Django cache API doesn't guarantee it. Guard with
         # getattr so non-Redis backends return None instead of raising AttributeError at render

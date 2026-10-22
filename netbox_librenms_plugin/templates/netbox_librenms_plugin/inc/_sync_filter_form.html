@@ -1,11 +1,27 @@
+{% load helpers %}
 {% load librenms_sync_query %}
-{# The GET form owns the toolbar fields and the column filters. #}
+{% comment %}
+The server-side filter of one sync tab table. The GET form holds only the rest of the page query, so it
+can sit before the tab's sync form. The visible fields join it with the form attribute: the search line
+(_sync_filter_controls.html) sits on the sync toolbar, and the column panel (_sync_filter_panel.html)
+below it. The tab's page is left out, so a new filter starts at page 1.
+Search and Sync state filter as they change, and the column panel has its own Apply.
+The tab filter endpoint (SyncTabFilterView) answers with the tab content, the tab links and the Refresh
+button, and puts the page URL with the new query in the address bar.
+Takes: filters (SyncFilters), prefix, tab, owner, content_id, server_key.
+{% endcomment %}
 {% with form=filters.form %}
-<form method="get" id="{{ prefix }}filter-form" class="sync-filter-form noprint" role="search" aria-label="{{ label }}" data-sync-filter-tab="{{ tab }}">
-    {% sync_tab_query_items prefix=prefix tab=tab reset="page filters" as hidden_items %}
+{# The server cannot stop a request the browser drops, so a new filter waits for the running one (queue last). #}
+{% url 'plugins:netbox_librenms_plugin:sync_tab_filter' object_type=owner|meta:"model_name" pk=owner.pk tab=tab as filter_url %}
+<form method="get" id="{{ prefix }}filter-form" class="sync-filter-form noprint" data-sync-filter-tab="{{ tab }}"
+    hx-get="{{ filter_url }}" hx-trigger="submit, input delay:500ms from:#{{ form.q.auto_id }}, change from:#{{ form.sync_state.auto_id }}"
+    hx-target="#{{ content_id }}" hx-swap="innerHTML" hx-sync="#librenms-sync-tabs:queue last"
+    hx-vals='{"server_key": "{{ server_key|escapejs }}"}'>
+    {# No server_key input: the sync scripts read the first one on the page, which must be the sync form's. #}
+    {% sync_tab_query_items prefix=prefix tab=tab reset="page filters server_key" as hidden_items %}
     {% for key, value in hidden_items %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}
     {% if form.errors %}
-    <div class="alert alert-danger" role="alert" id="{{ prefix }}filter-errors">
+    <div class="alert alert-danger mb-3" role="alert" id="{{ prefix }}filter-errors">
         <div>
             <div>The filters are not valid, so the table is not shown. Correct them, or clear the filters.</div>
             <ul class="mb-0">
@@ -15,20 +31,5 @@
         </div>
     </div>
     {% endif %}
-
-    <div class="collapse mt-2{% if form.columns_have_input %} show{% endif %}" id="{{ section_id }}"{% if form.columns_have_input %} data-filter-open="true"{% endif %}>
-        <div class="row g-2">
-            {% for field in form.column_fields %}
-            <div class="col-6 col-md-4 col-xl-2">
-                <label class="form-label small mb-1" for="{{ field.auto_id }}">{{ field.label }}</label>
-                <input type="text" name="{{ field.html_name }}" id="{{ field.auto_id }}" value="{{ field.value|default:'' }}"
-                    class="form-control form-control-sm{% if field.errors %} is-invalid{% endif %}"
-                    {% if field.errors %}aria-invalid="true" aria-describedby="{{ field.auto_id }}-error"{% endif %}>
-                {% if field.errors %}<div class="invalid-feedback" id="{{ field.auto_id }}-error">{{ field.errors|join:" " }}</div>{% endif %}
-            </div>
-            {% endfor %}
-        </div>
-        <button type="submit" class="btn btn-primary mt-2">Apply</button>
-    </div>
 </form>
 {% endwith %}

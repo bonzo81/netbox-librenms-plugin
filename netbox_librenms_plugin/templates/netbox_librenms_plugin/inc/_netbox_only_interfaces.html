@@ -1,0 +1,69 @@
+{% comment %}
+The rows of the NetBox-only interfaces dialog. The dialog loads them when it opens
+(NetBoxOnlyInterfacesView), so a render of the interfaces tab, for example for a filter, leaves out a list
+that can hold thousands of interfaces.
+{% endcomment %}
+{% if interface_sync.netbox_only_interfaces %}
+<form id="delete-netbox-interfaces-form">
+    {% csrf_token %}
+    <div class="table-responsive">
+        <table class="table table-hover">
+            <thead>
+                <tr>
+                    {# In migrated mode the bulk-delete button is hidden, so the #}
+                    {# select-all column is a dead control — drop it entirely. #}
+                    {% if not migrated_to_marker %}
+                    <th>
+                        <input type="checkbox" id="select-all-netbox-interfaces"
+                            class="form-check-input"
+                            aria-label="Select all NetBox-only interfaces">
+                    </th>
+                    {% endif %}
+                    <th>Interface Name</th>
+                    <th>Type</th>
+                    <th>Status</th>
+                    <th>Description</th>
+                    {% if migrated_to_marker %}<th class="text-end">Migrate</th>{% endif %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for interface in interface_sync.netbox_only_interfaces %}
+                <tr>
+                    {# Per-row bulk-select checkbox: only meaningful for the bulk #}
+                    {# delete path, which is hidden in migrated mode. #}
+                    {% if not migrated_to_marker %}
+                    <td>
+                        <input type="checkbox" name="interface_ids" value="{{ interface.id }}"
+                            class="form-check-input netbox-interface-checkbox"
+                            aria-label="Select interface {{ interface.name }}">
+                    </td>
+                    {% endif %}
+                    <td>
+                        <a href="{{ interface.url }}" target="_blank">{{ interface.name }}</a>
+                    </td>
+                    <td>{{ interface.type }}</td>
+                    <td>
+                        {% if interface.enabled %}
+                        <span class="text-success">Enabled</span>
+                        {% else %}
+                        <span class="text-danger">Disabled</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ interface.description|default:"-" }}</td>
+                    {% if migrated_to_marker %}
+                    <td class="text-end">
+                        {% include "netbox_librenms_plugin/inc/_migrate_move_button.html" with move_url_name="plugins:netbox_librenms_plugin:interface_move_to_winner" obj_id=interface.id obj_label=interface.name entity_word="interface" winner=migrated_to_winner server_key=migrated_to_marker.server_key|default:interface_sync.server_key %}
+                    </td>
+                    {% endif %}
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</form>
+{% else %}
+<div class="alert alert-info">
+    <i class="mdi mdi-information me-2"></i>
+    No interfaces found that exist only in NetBox.
+</div>
+{% endif %}
