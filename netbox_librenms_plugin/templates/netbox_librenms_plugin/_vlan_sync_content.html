@@ -13,8 +13,10 @@
     <i class="mdi mdi-alert-circle"></i> {{ vlan_sync.error_message }}
 </div>
 {# An active or invalid filter keeps its form, so it can be cleared even when the snapshot is empty. #}
-{% elif not vlan_sync.vlan_table or not vlan_sync.vlan_table.rows and not vlan_sync.filters.active and vlan_sync.filters.is_valid %}
+{% elif not vlan_sync.vlan_table or not vlan_sync.vlan_table.rows and not vlan_sync.filters.in_use %}
 <!-- No VLAN Data -->
+{# A filter in the URL keeps its form with its errors and Clear link, also when no snapshot is cached. #}
+{% if vlan_sync.filters.in_use %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=vlan_sync.filters prefix="vlans_" tab="vlans" section_id="vlanFilterSection" label="Filter VLANs" %}{% endif %}
 <div class="card">
     <div class="card-body text-center text-muted py-4">
         <i class="mdi mdi-sync-off mdi-48px"></i>

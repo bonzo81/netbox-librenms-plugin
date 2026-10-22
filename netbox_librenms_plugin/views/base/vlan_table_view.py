@@ -5,7 +5,7 @@ from django.views import View
 
 from netbox_librenms_plugin.constants import LIBRENMS_VLAN_STATE_ACTIVE
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
-from netbox_librenms_plugin.sync_filters import filter_sync_table
+from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_filters
 from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
@@ -188,6 +188,8 @@ class BaseVLANTableView(
 
         """
         vlan_table = None
+        # The filters show their errors also when no snapshot is cached.
+        filters = parse_table_filters(request.GET, lambda rows: LibreNMSVLANTable(rows, vlan_groups=[]))
         # The tab gate checks the object's own view permission only, and the table serialises VLAN
         # ids plus each group's id and name, so read IPAM as the caller.
         vlan_scope_user = self.vlan_scope_user(request)
@@ -213,6 +215,7 @@ class BaseVLANTableView(
                 return {
                     "object": obj,
                     "vlan_table": None,
+                    "filters": filters,
                     "vlan_groups": vlan_groups,
                     "last_fetched": None,
                     "cache_expiry": None,
@@ -261,7 +264,6 @@ class BaseVLANTableView(
         # Build lookup maps for VLAN matching
         lookup_maps = self._build_vlan_lookup_maps(vlan_groups, user=vlan_scope_user)
 
-        filters = None
         filtered_from = None
         # `is not None` (not a bare truthiness check): an empty list is a valid successful refresh
         # (a device with no VLANs) and must still render an empty table — a truthy check would skip

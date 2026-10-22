@@ -73,6 +73,8 @@
 </form>
 {% endif %}
 {% else %}
+{# A filter in the URL keeps its form with its errors and Clear link, also when no snapshot is cached. #}
+{% if ip_sync.filters.in_use %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=ip_sync.filters prefix="ipaddresses_" tab="ipaddresses" section_id="ipFilterSection" label="Filter IP addresses" %}{% endif %}
 <div class="card">
     <div class="card-body text-center text-muted py-4">
         <i class="mdi mdi-sync-off mdi-48px"></i>
