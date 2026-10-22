@@ -3223,6 +3223,20 @@ def oob_badge_html(record, leading_space=False):
     return mark_safe((" " if leading_space else "") + OOB_BADGE_HTML)
 
 
+def _rule_block_pill(rule_block):
+    """Return the colour, icon and label of the pill that ``rule_block_html`` renders."""
+    from netbox_librenms_plugin.interface_rules import RuleDecisionKind  # interface_rules imports utils
+
+    if rule_block["kind"] == RuleDecisionKind.IGNORE.value:
+        return "secondary", "mdi-eye-off", "Ignored"
+    return "warning", "mdi-refresh", "Refresh needed"
+
+
+def rule_block_label(rule_block):
+    """Return the visible text of the pill that ``rule_block_html`` renders for *rule_block*."""
+    return _rule_block_pill(rule_block)[2]
+
+
 def rule_block_html(rule_block):
     """
     Return the pill that says why the interface rules or an IP mapping refuse a row's write.
@@ -3238,12 +3252,7 @@ def rule_block_html(rule_block):
         SafeString: The pill markup.
 
     """
-    from netbox_librenms_plugin.interface_rules import RuleDecisionKind  # interface_rules imports utils
-
-    if rule_block["kind"] == RuleDecisionKind.IGNORE.value:
-        color, icon, label = "secondary", "mdi-eye-off", "Ignored"
-    else:
-        color, icon, label = "warning", "mdi-refresh", "Refresh needed"
+    color, icon, label = _rule_block_pill(rule_block)
     return format_html(
         '<span class="badge bg-{}-lt fw-normal d-inline-flex align-items-center gap-1" title="Not synced: {}">'
         '<i class="mdi {}"></i>{}</span>',

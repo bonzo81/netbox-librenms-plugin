@@ -3336,6 +3336,7 @@ function handleVRFChange(select, value) {
                 if (statusCell) {
                     statusCell.innerHTML = data.formatted_row.status;
                 }
+                markFilterStaleRow(row);
                 // An IP mapping can ignore the address in the chosen VRF, so the selection follows the verdict.
                 const checkbox = row.querySelector('input[name="select"]');
                 if (checkbox) {
@@ -3995,7 +3996,8 @@ function markFilterStaleRow(row) {
     const table = row?.closest('table');
     if (!table || table.dataset.filterActive !== 'true') return;
     row.dataset.filterStale = 'true';
-    const cell = row.querySelector('td[data-col="name"]');
+    // The badge goes in the cell that names the row: the interface name or the IP address.
+    const cell = row.querySelector('td[data-col="name"], td[data-col="address"]');
     if (cell && !cell.querySelector('.filter-stale-badge')) {
         const badge = document.createElement('span');
         badge.className = 'badge bg-warning-lt filter-stale-badge ms-1';
@@ -4147,7 +4149,7 @@ function initializeFilterDisclosures() {
     });
 }
 
-// Initialize filters for different tables. The interface tables filter on the server.
+// Initialize filters for different tables. The interface and IP address tables filter on the server.
 function initializeFilters() {
     initializeFilterDisclosures();
 
@@ -4170,16 +4172,6 @@ function initializeFilters() {
             'local-port': { name: 'local_port' },
             'remote-port': { name: 'remote_port' },
             'remote-device': { name: 'remote_device' }
-        }
-    );
-    initializeTableFilters(
-        'librenms-ipaddress-table',
-        ['address', 'prefix', 'device', 'interface'],
-        {
-            address: { name: 'address' },
-            prefix: { name: 'prefix' },
-            device: { name: 'device' },
-            interface: { name: 'interface' }
         }
     );
     initializeTableFilters(

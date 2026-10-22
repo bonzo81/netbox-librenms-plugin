@@ -1,5 +1,4 @@
 import logging
-from urllib.parse import quote_plus
 
 import netaddr
 
@@ -31,6 +30,7 @@ from netbox_librenms_plugin.sync_cache import (
     render_sync_cache_miss,
     schedule_request_cache_mutation,
 )
+from netbox_librenms_plugin.sync_query import page_query_url
 from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, saved_in_scope, update_existing_row
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
@@ -205,7 +205,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         raise Http404("Invalid object type.")
 
     def get_ip_tab_url(self, obj):
-        """Return the URL for the IP addresses sync tab."""
+        """Return the URL for the IP addresses sync tab, with the page query the request carries."""
         if isinstance(obj, Device):
             url_name = "plugins:netbox_librenms_plugin:device_librenms_sync"
         else:
@@ -222,10 +222,10 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 server_key = self.librenms_api.server_key
             except Exception:  # a redirect helper must degrade, never 500 (misconfigured default)
                 server_key = None
-        url = f"{reverse(url_name, args=[obj.pk])}?tab=ipaddresses"
-        if server_key:
-            url += f"&server_key={quote_plus(server_key)}"
-        return url
+        # The action URL carries the page query, so the tab comes back with every tab's filters and page.
+        return page_query_url(
+            self.request, reverse(url_name, args=[obj.pk]), {"tab": "ipaddresses", "server_key": server_key}
+        )
 
     def redirect_to_ip_tab(self, request, obj):
         """Reload the full sync page for HTMX requests, or redirect a normal request."""
