@@ -93,13 +93,16 @@ def _rows(html):
     return {int(match.group(1)): match.group(0) for match in ROW.finditer(html)}
 
 
+def _selected_label(select):
+    """Return the label a select shows: its selected option, else its first one."""
+    options = OPTION.findall(select.group(0))
+    chosen = next((label for attrs, label in options if re.search(r"\bselected\b", attrs)), None)
+    return f" {chosen if chosen is not None else options[0][1] if options else ''} "
+
+
 def _visible_text(cell):
-    """Return the text a browser shows for a cell: a select shows its selected option, a block tag breaks words."""
-    select = re.search(r"<select\b.*?</select>", cell, re.S)
-    if select:
-        options = OPTION.findall(select.group(0))
-        chosen = next((label for attrs, label in options if re.search(r"\bselected\b", attrs)), None)
-        return normalize_filter_text(unescape(chosen if chosen is not None else options[0][1] if options else ""))
+    """Return the text a browser shows for a cell: each select shows its selected option, a block tag breaks words."""
+    cell = re.sub(r"<select\b.*?</select>", _selected_label, cell, flags=re.S)
     return normalize_filter_text(unescape(TAG.sub("", BLOCK_TAG.sub(" ", cell))))
 
 
