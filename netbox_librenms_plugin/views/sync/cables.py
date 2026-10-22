@@ -4,7 +4,6 @@ import hashlib
 import json
 import logging
 from collections import defaultdict
-from urllib.parse import quote_plus
 
 from dcim.models import Cable, CableTermination, ConsolePort, ConsoleServerPort, Device, Interface
 from django.contrib import messages
@@ -1418,15 +1417,6 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             # Cache genuinely gone (e.g. TTL elapsed between refresh and sync): render an empty
             # table but keep the sync flash messages.
             context = {"table": None, "object": obj, "cache_expiry": None, "server_key": resolved_key}
-        elif context.get("table") is not None:
-            # _prepare_context derives the table's pagination/sort htmx_url from request.path, which
-            # here is the sync POST endpoint. Repoint it at the cable-table refresh endpoint (a GET
-            # there returns the same fragment) so paging/sorting still works after a sync swap —
-            # matching the URL the "Refresh Cables" action produces.
-            tab_url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[obj.pk])
-            context["table"].htmx_url = f"{tab_url}?tab=cables" + (
-                f"&server_key={quote_plus(resolved_key)}" if resolved_key else ""
-            )
 
         # Overwrite-protected conflicts: surface them for the force-confirm modal, which the partial
         # injects into the shared #htmx-modal via an out-of-band swap (auto-shown by the page JS).
