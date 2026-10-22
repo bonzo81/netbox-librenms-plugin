@@ -293,10 +293,12 @@ class TestCandidate:
     def test_other_rows_are_not_candidates(self, index, kwargs):
         assert self._candidate(index, **kwargs) is None
 
-    def test_a_unit_below_a_built_in_unit_is_a_candidate(self):
-        """A unit of another model below the built-in board sits at chassis level."""
-        found = self._candidate(MDA, type_models={PART_NUMBER.casefold()}, entPhysicalModelName="3HE16474AA")
-        assert found == ("3HE16474AA", True)
+    def test_a_unit_of_another_model_below_a_built_in_unit_is_no_candidate(self):
+        """Below the built-in board the device type already names the chassis: another model is no part number."""
+        assert self._candidate(MDA, type_models={PART_NUMBER.casefold()}, entPhysicalModelName="3HE16474AA") is None
+
+    def test_a_unit_of_the_device_type_below_a_built_in_unit_needs_only_the_rule(self):
+        assert self._candidate(MDA, type_models={PART_NUMBER.casefold()}) == (PART_NUMBER, False)
 
 
 class TestMarkBuiltIn:
@@ -458,6 +460,37 @@ class TestMarkBuiltIn:
         seeded = importlib.import_module("netbox_librenms_plugin.migrations.0026_seed_cisco_fixed_platform_rule")
 
         assert seeded.FIXED_PLATFORM_RULE == BUILT_IN_UNITS_RULE
+
+
+class TestMarkBuiltInBelowABuiltInUnit:
+    """The device type model names the chassis; a unit of another model below the built-in board is a real card."""
+
+    @staticmethod
+    def _device(name):
+        device = ixr_device(name, part_number="")
+        device.device_type.model = PART_NUMBER
+        device.device_type.save()
+        inventory = [
+            {**item, "entPhysicalModelName": "3HE16474AA"} if item["entPhysicalIndex"] == MDA else item
+            for item in ixr_inventory()
+        ]
+        seed_snapshot(device, inventory)
+        model_rule()
+        return device, inventory
+
+    def test_the_card_is_a_row_without_the_action(self):
+        device, _inventory = self._device("ixr-below-built-in")
+
+        assert MDA in tab_rows(device)
+        assert controls(device) == {}
+
+    def test_a_signed_mark_of_the_card_records_no_part_number(self):
+        device, inventory = self._device("ixr-below-built-in-signed")
+        before = written(device)
+
+        mark(device, signed_mark_query(device, MDA, inventory))
+
+        assert written(device) == before
 
 
 class TestMarkBuiltInWithAPartNumber:
