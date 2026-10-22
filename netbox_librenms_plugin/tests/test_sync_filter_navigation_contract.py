@@ -21,6 +21,7 @@ from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.tests.conftest import (
     bind_librenms_server,
+    configure_librenms_servers,
     make_device,
     make_interface,
     make_superuser,
@@ -459,3 +460,29 @@ def test_every_ip_vlan_and_cable_tab_hop_keeps_the_page_query_or_applies_its_res
     _check_tab_filter_form(hops, tab, page_query)
     required = {"fragment", "clear", "page link", "refresh", "sync"} | ({"picker loader"} if tab == "cables" else set())
     assert required <= kinds, kinds
+
+
+@pytest.mark.django_db
+def test_a_server_switch_keeps_only_the_tab_page_sizes_and_sorts(client, settings, librenms_server):
+    owner, _object_type = _contract_owner("device")
+    _seed(owner, _contract_ports())
+    serve_sync_page(client, settings, librenms_server, owner)
+    configure_librenms_servers(
+        settings,
+        {
+            SERVER_KEY: {"librenms_url": librenms_server.url, "api_token": "test-token"},
+            "secondary": {"librenms_url": librenms_server.url, "api_token": "test-token"},
+        },
+    )
+    seed_stored_mapping(owner, {SERVER_KEY: {"id": LIBRENMS_ID}, "secondary": {"id": LIBRENMS_ID + 1}}, save=True)
+    page_query = {**PAGE_QUERY, "interface_name_field": "ifDescr", "cables_page": "3", "cables_per_page": "25"}
+
+    response = client.get(reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[owner.pk]), page_query)
+
+    assert response.status_code == 200
+    (url,) = [hop["url"] for hop in _hops(response.content.decode(), "librenms-server-selector").urls]
+    query = _query(url)
+    assert query["server_key"] == ["secondary"]
+    kept = ("tab", "interfaces_per_page", "interfaces_sort", "cables_per_page")
+    _assert_keeps(query, kept, url, page_query)
+    assert set(query) == {*kept, "server_key"}, url
