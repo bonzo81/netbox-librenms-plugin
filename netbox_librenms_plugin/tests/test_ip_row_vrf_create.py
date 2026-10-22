@@ -131,6 +131,31 @@ class TestTheCreateAffordance:
         assert formaction.path == create_url
         assert parse_qs(formaction.query) == {"server_key": [SERVER_KEY]}
 
+    def test_a_quick_search_finds_the_row_by_its_create_button_label(self, client, seeded):
+        from netbox_librenms_plugin.tests.test_interface_sync_filters import CELL, _visible_text
+
+        owner = seeded("quick-search")
+        client = _superuser_client(client)
+        rows = _rows(client, owner)
+        assert _offers_create(rows[NO_RD_ROW])
+        vrf_cell = dict(CELL.findall(rows[NO_RD_ROW]))["vrf"]
+
+        response = client.get(
+            reverse(
+                "plugins:netbox_librenms_plugin:sync_cache_fragment",
+                kwargs={"object_type": "device", "pk": owner.pk, "tab": "ipaddresses"},
+            ),
+            {"server_key": SERVER_KEY, "ipaddresses_q": "VRF"},
+        )
+
+        # The cell shows the selected option and the button label, and the search reads both.
+        assert _visible_text(vrf_cell).endswith(" vrf")
+        found = dict(
+            re.findall(r"<tr[^>]*data-interface=\"([^\"]+)\"[^>]*>(.*?)</tr>", response.content.decode(), re.S)
+        )
+        assert {*RD_ROWS, NO_RD_ROW} <= set(found)
+        assert UNTAGGED_ROW not in found
+
     def test_the_create_keeps_the_page_query_of_every_tab(self, client, seeded):
         owner = seeded("vrf-page-query")
         page_query = {

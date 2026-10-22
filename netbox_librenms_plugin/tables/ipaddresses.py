@@ -11,6 +11,9 @@ from netbox_librenms_plugin.utils import paginate_sync_table, rule_block_html, r
 # The sync-state filter value of each row status; every other status is unclassified.
 _FILTER_SYNC_STATE = {"matched": MATCHING, "update": MISMATCHED, "sync": NOT_IN_NETBOX}
 
+# The visible label of the button that creates the LibreNMS VRF of a row.
+CREATE_VRF_LABEL = "VRF"
+
 # The values a plain column shows as the table default ("—") instead of calling its render method.
 _EMPTY_VALUES = (None, "")
 
@@ -133,15 +136,16 @@ class IPAddressTable(tables.Table):
                    title="Suggested from LibreNMS VRF {{ record.vrf_suggested_from.name }} by {{ record.vrf_suggested_from.matched_by }} match"
                    aria-label="Suggested from LibreNMS VRF {{ record.vrf_suggested_from.name }} by {{ record.vrf_suggested_from.matched_by }} match"></i>
             {% endif %}
-            {% if record.vrf_create_url and not record.ip_rule_block %}
+            {% if record.offers_vrf_create %}
                 <button type="submit" class="btn btn-sm btn-outline-primary text-nowrap" name="create_vrf" value="{{ record.row_id }}"
                         formaction="{% sync_tab_url record.vrf_create_url %}"
                         data-confirm="Create NetBox VRF '{{ record.librenms_vrf.name }}' with {% if record.librenms_vrf.rd %}route distinguisher {{ record.librenms_vrf.rd }}{% else %}no route distinguisher{% endif %}? The IP address is not synced."
                         title="LibreNMS VRF {{ record.librenms_vrf.name }} is not in NetBox. Create it."
-                        aria-label="Create NetBox VRF {{ record.librenms_vrf.name }}"><i class="mdi mdi-plus-thick" aria-hidden="true"></i> VRF</button>
+                        aria-label="Create NetBox VRF {{ record.librenms_vrf.name }}"><i class="mdi mdi-plus-thick" aria-hidden="true"></i> {{ create_vrf_label }}</button>
             {% endif %}
         </div>
         """,
+        extra_context={"create_vrf_label": CREATE_VRF_LABEL},
         attrs={"td": {"data-col": "vrf"}},
         verbose_name="VRF",
     )
@@ -192,11 +196,27 @@ class IPAddressTable(tables.Table):
         return self._cell_text(record.get("interface_name"))
 
     def text_vrf(self, record):
-        """Return the visible text of the VRF cell: the option its select shows."""
+        """Return the visible text of the VRF cell: the option its select shows, and the create button label."""
         chosen = record.get("vrf_id"), record.get("suggested_vrf_id")
         names = [vrf.name for vrf in record.get("vrfs") or () if vrf.pk in chosen]
         # The template marks each matching option selected, and a browser shows the last one.
-        return names[-1] if names else "Global"
+        selected = names[-1] if names else "Global"
+        return f"{selected} {CREATE_VRF_LABEL}" if self.offers_vrf_create(record) else selected
+
+    @staticmethod
+    def offers_vrf_create(record):
+        """Return whether the VRF cell shows the button that creates the LibreNMS VRF."""
+        return bool(record.get("vrf_create_url")) and not record.get("ip_rule_block")
+
+    def render_vrf(self, column, record, table, value, bound_column, bound_row):
+        """Render the VRF cell; the create button follows the rule that the text function reads."""
+        return column.render(
+            record={**record, "offers_vrf_create": self.offers_vrf_create(record)},
+            table=table,
+            value=value,
+            bound_column=bound_column,
+            bound_row=bound_row,
+        )
 
     def text_status(self, record):
         """Return the visible text of the status cell: the action, the rule pill or the row state."""
