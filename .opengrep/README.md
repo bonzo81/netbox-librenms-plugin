@@ -246,7 +246,7 @@ as a string, a comma-separated string, or a tuple or list of strings. Its values
 or `False` literal. With several argument names, the rule does not check which argument has that literal.
 
 `posted-module-target-needs-resolver` excludes tests. It reads the key by its literal name. It does
-not see the key in a variable, or a read through another name than `GET` or `POST`.
+not see the key in a variable, or a read through a name other than `GET` or `POST`.
 
 `regex-error-must-raise` reads the class list of the handler. It does not see a regex error caught
 by `except Exception`, or a module alias other than `_re`. A handler that raises only inside a
