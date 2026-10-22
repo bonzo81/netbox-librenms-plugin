@@ -1,4 +1,5 @@
 {% load helpers %}
+{% load librenms_sync_query %}
 <div class="modal-header">
   <h5 class="modal-title">
     <i class="mdi mdi-alert-outline text-warning me-1"></i>
@@ -10,10 +11,11 @@
     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
   {% endif %}
 </div>
+{% url 'plugins:netbox_librenms_plugin:sync_device_ip_addresses' object_type=object_type pk=object.pk as ip_sync_url_path %}{% sync_tab_url ip_sync_url_path as ip_sync_url %}
 <form method="post"
-      action="{% url 'plugins:netbox_librenms_plugin:sync_device_ip_addresses' object_type=object_type pk=object.pk %}"
+      action="{{ ip_sync_url }}"
       {% if not full_page %}
-      hx-post="{% url 'plugins:netbox_librenms_plugin:sync_device_ip_addresses' object_type=object_type pk=object.pk %}"
+      hx-post="{{ ip_sync_url }}"
       hx-target="#htmx-modal-content"
       hx-swap="innerHTML"
       {% endif %}>
