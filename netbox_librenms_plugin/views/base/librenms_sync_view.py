@@ -189,7 +189,18 @@ class BaseLibreNMSSyncView(
 
         context = self.get_context_data(request, obj)
 
-        return render(request, self.template_name, context)
+        # A filter only decides what a table shows, so only a full page load answers an invalid one
+        # with 400. An htmx tab swap keeps its status, and every tab renders as usual.
+        tab_contexts = [(spec, context.get(spec.context_name)) for spec in TAB_SPECS.values()]
+        invalid_filter = any(
+            isinstance(tab_context, dict)
+            and tab_context.get(spec.table_context_key) is not None
+            and tab_context.get("filters") is not None
+            and not tab_context["filters"].is_valid
+            for spec, tab_context in tab_contexts
+        )
+        status = 400 if invalid_filter and not request.htmx else 200
+        return render(request, self.template_name, context, status=status)
 
     def _can_manage_server_preference(self, selection):
         """Check plugin write and object change scope for the mapping owner."""
