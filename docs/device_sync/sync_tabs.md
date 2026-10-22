@@ -8,11 +8,11 @@ Each tab remembers the **Per Page** size that you select, for your user and for 
 
 ## Filters
 
-The Interfaces, Cables, IP Addresses and VLANs tabs have a filter above the table. The server filters all rows of the device before it makes the pages, so a match on another page shows too, and the row count reads "Showing x-y of N (filtered from M)".
+The Interfaces, Cables, IP Addresses and VLANs tabs have a filter on the right of the sync buttons. The server filters all rows of the device before it makes the pages, so a match on another page shows too, and the row count reads "Showing x-y of N (filtered from M)".
 
 - **Search** finds the rows where any column shows the text: the cell text, the selected option of a dropdown, and the status and action labels. It does not search tooltips or options that are not selected. Upper and lower case and extra spaces do not matter.
-- **Sync state** shows the matching, the mismatched, or the not-in-NetBox rows. Each tab below says what these states mean for its rows. A row in no state shows only under **All**.
-- **Columns** opens one field for each column. Search, Sync state and the column fields must all match.
+- **Sync state** shows the matching, the mismatched, or the not-in-NetBox rows. Each tab below says what these states mean for its rows. A row in no state shows only under **All sync states**.
+- **Filters** opens one field for each column. Search, Sync state and the column fields must all match.
 
 Search submits the filters automatically 400 ms after your last input. Sync state submits the filters when you select a state. Select **Apply** or press Enter to apply column filters. Enter in a filter field never starts a sync. **Clear filters** removes the filters of that tab.
 
@@ -22,9 +22,11 @@ The filters are part of the page URL. Paging, sorting, the page size, refreshing
 - A change of the interface name field loads the page again with the same filters, at the first page of every tab.
 - A page load (paging, a filter change or a name field change) loses the changes in the table that you did not submit.
 
-A row that changes after the page loads, for example when you select another Virtual Chassis member, is marked **Changed since filtering**, because it can be outside the filter now. Select **Apply** to filter again. A row selection belongs to one filter. A filter that you did not use before starts with no rows selected. When you go back to a filter that you used before, its selected rows are selected again, also the rows on other pages, and **Sync Selected** includes them. Selected rows that the page does not show, on another page or outside the filter, stay selected, and the notice above the table counts them.
+A row that changes after the page loads, for example when you select another Virtual Chassis member, is marked **Changed since filtering**, because it can be outside the filter now. Change a filter or load the page again to filter again. A row selection belongs to the tab, so a filter change keeps the selected rows. Selected rows that the page does not show, on another page or outside the filter, stay selected: the notice above the table counts them, and **Sync Selected** includes them. A change of the interface name field or of the ignored toggle starts with no rows selected.
 
 A filter that is not valid, for example text longer than 256 characters, shows its errors in place of the table of that tab. The other tabs and the sync actions work as usual.
+
+A tab with no data loaded shows no filter, as it shows no sync buttons. The filters stay in the page URL, so a refresh shows the table with them.
 
 ## Interfaces
 
