@@ -4043,57 +4043,8 @@ function showFilterStaleNotice(table) {
 }
 
 // ============================================
-// TABLE FILTERING
+// FILTER PANELS
 // ============================================
-
-/**
- * Initialize column-based filtering for a sync comparison table.
- * Creates filter inputs that hide rows not matching the filter text.
- *
- * @param {string} tableId - DOM element ID of the table
- * @param {string[]} filterKeys - Array of column identifiers to filter
- * @param {Object} dataCols - Configuration mapping column IDs to data attributes or selectors
- */
-function initializeTableFilters(tableId, filterKeys, dataCols) {
-    const table = document.getElementById(tableId);
-    if (!table) return;
-
-    filterKeys.forEach(filterKey => {
-        const filterElement = document.getElementById(`filter-${filterKey}`);
-        if (filterElement) {
-            filterElement.addEventListener('input', () => filterTable(tableId, filterKeys, dataCols));
-        }
-    });
-}
-
-// Generic function to filter a table
-function filterTable(tableId, filterKeys, dataCols) {
-    const table = document.getElementById(tableId);
-    if (!table) return;
-
-    const filters = {};
-    filterKeys.forEach(key => {
-        filters[key] = document.getElementById(`filter-${key}`)?.value.toLowerCase() || '';
-    });
-
-    const rows = table.querySelectorAll(
-        ':scope > tbody > tr[data-interface], :scope > tbody > tr[data-vlan-id]'
-    );
-    rows.forEach(row => {
-        const matches = filterKeys.map(key => {
-            let cellText = '';
-            if (dataCols[key].selector) {
-                cellText = row.querySelector(dataCols[key].selector)?.textContent.toLowerCase() || '';
-            } else {
-                const cell = row.querySelector(`td[data-col="${dataCols[key].name}"]`);
-                cellText = (cell.querySelector('span')?.textContent || cell.textContent).toLowerCase();
-            }
-            return cellText.includes(filters[key]);
-        });
-
-        row.style.display = matches.every(Boolean) ? '' : 'none';
-    });
-}
 
 const FILTER_DISCLOSURE_STORAGE_PREFIX = 'netbox-librenms:sync-filter';
 const filterDisclosureState = new Map();
@@ -4164,11 +4115,6 @@ function initializeFilterDisclosures() {
         });
         initializedFilterDisclosures.add(section);
     });
-}
-
-// Initialize the filter panels. Every sync table filters on the server.
-function initializeFilters() {
-    initializeFilterDisclosures();
 }
 
 // ============================================
@@ -4851,7 +4797,7 @@ function initializeScripts() {
     initializeVRFSelects();
     initializeVlanGroupSelects();
     initializeVlanModalSave();
-    initializeFilters();
+    initializeFilterDisclosures();
     initializeCountdowns();
     initializeCheckboxListeners();
     initializeBulkEditApply();

@@ -67,7 +67,8 @@ class SyncSomeResourceView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
   - Verification: `handleInterfaceChange()`, `handleCableChange()`, `handleVRFChange()` — POST to single-item verify endpoints.
   - VLAN modals: `openVlanDetailModal()`, `verifyVlanInGroup()`, `verifyVlanSyncGroup()` — per-interface VLAN detail editing.
   - Bulk operations: `initializeBulkEditApply()`, `deleteSelectedInterfaces()`.
-  - Table filtering: `initializeTableFilters()`, `filterTable()` — client-side row filtering.
+  - Table filters: the server filters each sync table (`sync_filters.py`, `sync_query.py`). The script keeps the
+    filter panel state (`initializeFilterDisclosures()`) and marks a repainted row of a filtered table (`markFilterStaleRow()`).
   - URL/tab state: `activeSyncTab()`, `getDeviceIdFromUrl()`, `setInterfaceNameFieldFromURL()`.
     Tab activation is server-rendered: the swapped container carries `data-active-tab`, and
     `activeSyncTab()` reads it. There is no client-side tab initializer.
