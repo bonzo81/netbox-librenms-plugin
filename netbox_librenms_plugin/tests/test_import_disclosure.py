@@ -605,6 +605,7 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
     titled_icon = '<i class="mdi mdi-alert" title="Missing"></i>'
     server_key_lookup = "document.querySelector('[name=server_key]');\n"
     serial_compare = "def same(row, serial):\n    return row.serial == serial\n"
+    tab_url = 'url = f"{path}?tab=vlans"\n'
     sources = {
         # Flagged: a direct HTTP call outside the client.
         "netbox_librenms_plugin/worker.py": http_call,
@@ -642,12 +643,17 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
         # Flagged: a serial comparison anywhere in the package goes through serial_identity.
         "netbox_librenms_plugin/views/sync/device_seed.py": serial_compare,
         "netbox_librenms_plugin/import_utils/seed.py": serial_compare,
-        "netbox_librenms_plugin/views/sync/modules.py": serial_compare,
+        # Clean for the tab query rule: the Modules tab redirect keeps its own query.
+        "netbox_librenms_plugin/views/sync/modules.py": serial_compare + tab_url,
         "netbox_librenms_plugin/sync_seed.py": serial_compare,
         # Clean: the owner itself, migrations and tests.
         "netbox_librenms_plugin/serial_identity.py": serial_compare,
         "netbox_librenms_plugin/migrations/0098_serial_seed.py": serial_compare,
         "netbox_librenms_plugin/tests/test_serial_seed.py": serial_compare,
+        # Flagged: a hand-built tab query. Clean: the query module, the Modules tab redirect and tests.
+        "netbox_librenms_plugin/views/sync/vlans_redirect.py": tab_url,
+        "netbox_librenms_plugin/sync_query.py": tab_url,
+        "netbox_librenms_plugin/tests/test_tab_url.py": tab_url,
     }
     for name, source in sources.items():
         staged = tmp_path / name
@@ -674,4 +680,5 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
         ("netbox_librenms_plugin/import_utils/seed.py", "serial-identity-through-owner"),
         ("netbox_librenms_plugin/views/sync/modules.py", "serial-identity-through-owner"),
         ("netbox_librenms_plugin/sync_seed.py", "serial-identity-through-owner"),
+        ("netbox_librenms_plugin/views/sync/vlans_redirect.py", "sync-tab-url-through-sync-query"),
     }, found
