@@ -185,7 +185,7 @@ class LibreNMSVLANTable(tables.Table):
 
         select_html = format_html(
             '<select name="vlan_group_{}" class="form-select form-select-sm vlan-sync-group-select"'
-            ' data-vlan-id="{}" data-vlan-name="{}" style="min-width: 180px;">{}</select>',
+            ' data-vlan-id="{}" data-vlan-name="{}">{}</select>',
             vlan_id,
             vlan_id,
             record.get("name", ""),
