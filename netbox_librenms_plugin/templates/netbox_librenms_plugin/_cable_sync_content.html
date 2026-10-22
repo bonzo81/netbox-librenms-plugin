@@ -13,6 +13,8 @@
     Refresh cables to retry the missing sources.
 </div>
 {% endif %}
+{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=cable_sync.filters prefix="cables_" tab="cables" section_id="cableFilterSection" label="Filter cables" %}
+
 {# Migrated donors must not sync: hiding only the button leaves the POST form live (Enter in a filter still submits), so drop the form in migrated mode. #}
 {% if migrated_to_marker %}
 <div data-cable-verify-url="{% url 'plugins:netbox_librenms_plugin:verify_cable' %}"
@@ -57,30 +59,15 @@
 
     <div class="row mb-3">
         <div class="col col-md-12">
-            <div class="d-flex justify-content-end align-items-center mb-3">
-                <button class="btn btn-sm btn-secondary sync-filter-toggle" type="button" data-bs-toggle="collapse" data-bs-target="#cableFilterSection" aria-expanded="false" aria-controls="cableFilterSection">
-                    <i class="mdi mdi-filter-outline"></i> Filters
-                </button>
-            </div>
-            <div class="collapse mb-3" id="cableFilterSection">
-                <div class="mb-2">
-                    <small class="text-muted">
-                        <i class="mdi mdi-information"></i> Filters apply to currently displayed cables.
-                    </small>
-                </div>
-                <div class="filter-container d-flex gap-2">
-                    {% if cable_sync.table.attrs.id == "librenms-cable-table-vc" %}
-                    <input type="text" id="filter-vc-member" placeholder="Filter by VC Member" class="form-control">
-                    {% endif %}
-                    <input type="text" id="filter-local-port" placeholder="Filter by Local Port" class="form-control">
-                    <input type="text" id="filter-remote-port" placeholder="Filter by Remote Port" class="form-control">
-                    <input type="text" id="filter-remote-device" placeholder="Filter by Remote Device" class="form-control">
-                </div>
-            </div>
             <div class="card">
-                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=cable_sync.table %}
+                {% if cable_sync.filters.is_valid %}
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=cable_sync.table placement="top" filtered_from=cable_sync.filtered_from %}
                 {% include 'inc/table.html' with table=cable_sync.table %}
-                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=cable_sync.table %}
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=cable_sync.table filtered_from=cable_sync.filtered_from %}
+                {% else %}
+                {# The error summary above the form says what to correct; no row is shown for an invalid filter. #}
+                <div class="card-body text-center text-muted py-4" data-filter-invalid="true">Correct the filters to show the cables.</div>
+                {% endif %}
             </div>
         </div>
     </div>

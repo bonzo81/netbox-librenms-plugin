@@ -18,10 +18,13 @@ from django.test import RequestFactory
 from django.urls import reverse
 
 from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.tests.conftest import (
     bind_librenms_server,
     make_device,
+    make_interface,
     make_superuser,
+    make_virtual_chassis_members,
     make_vm,
     map_device_to_librenms,
 )
@@ -36,7 +39,9 @@ from netbox_librenms_plugin.tests.test_interface_sync_filters import (
     _virtual_machine,
     serve_sync_page,
 )
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
 from netbox_librenms_plugin.tests.test_ip_address_sync_filters import _refresh
+from netbox_librenms_plugin.views.sync.cables import SyncCablesView
 from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
 URL_ATTRIBUTES = ("href", "action", "formaction", "hx-get", "hx-post", "hx-put", "hx-patch", "hx-delete")
@@ -271,6 +276,13 @@ TAB_PAGE_QUERIES = {
         "vlans_page": "2",
         "vlans_sort": "name",
     },
+    "cables": {
+        "cables_q": "a&b+c  é",
+        "cables_filter_local_port": "Gi",
+        "cables_per_page": "2",
+        "cables_page": "2",
+        "cables_sort": "local_port",
+    },
 }
 # An object detail link leaves the sync page, so it carries no page state.
 OBJECT_LINK = re.compile(r"^/(?:ipam|dcim|virtualization)/[\w-]+/\d+/$")
@@ -288,6 +300,11 @@ def _tab_routes(owner, tab):
             plugin_url(f"{kind}_ipaddress_sync", pk=owner.pk): "refresh",
             plugin_url("sync_device_ip_addresses", object_type=object_type, pk=owner.pk): "sync",
             plugin_url("create_ip_row_vrf", object_type=object_type, pk=owner.pk): "create vrf",
+        }
+    elif tab == "cables":
+        posts = {
+            plugin_url("device_cable_sync", pk=owner.pk): "refresh",
+            plugin_url("sync_device_cables", pk=owner.pk): "sync",
         }
     else:
         posts = {
@@ -310,6 +327,9 @@ def _classify_tab_hop(hop, page_path, tab, owner, page_query):
     if path == fragment:
         # The loader states only its tab; the browser adds the page query.
         return "fragment"
+    if tab == "cables" and path == reverse("plugins:netbox_librenms_plugin:cable_remote_picker", args=[owner.pk]):
+        # The picker loader takes each row's picker URL, and the browser adds the page query (the browser test checks it).
+        return "picker loader"
     if OBJECT_LINK.match(path):
         return "object link"
     if on_page and hop["in_get_form"]:
@@ -366,9 +386,54 @@ def _vlan_owner(client, settings, server):
     return serve_sync_page(client, settings, server, device)
 
 
+def _cable_owner(kind, client, settings, server):
+    """Return a device or VC member with cable rows whose remote device and local ports match the cable filters."""
+    if kind == "device":
+        owner = make_device("contract-cables", librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID}})
+        members = [owner]
+    else:
+        _vc, members = make_virtual_chassis_members("contract-cables", 2)
+        owner = members[0]
+        seed_stored_mapping(owner, {SERVER_KEY: {"id": LIBRENMS_ID}}, save=True)
+    peer = make_device("contract-cables-peer")
+    links = []
+    for n in range(1, 13):
+        member = members[(n - 1) % len(members)]
+        local = make_interface(member, f"Gi{member.vc_position or 1}/0/{n}")
+        make_interface(peer, f"Ethernet{n}")
+        links.append(
+            {
+                "_source": "main",
+                "local_port_id": 9600 + n,
+                "local_port": local.name,
+                "remote_device": f"Peer a&b+c É {n}" if n % 3 else peer.name,
+                "remote_port": f"Ethernet{n}",
+            }
+        )
+    links.append(
+        {
+            "_source": "main",
+            "local_port_id": 9699,
+            "local_port": "xe-9",
+            "remote_device": "Peer a&b+c É",
+            "remote_port": "xe-9",
+        }
+    )
+    sync_device = get_librenms_sync_device(owner, server_key=SERVER_KEY) or owner
+    cache.set(
+        object.__new__(SyncCablesView).get_cache_key(sync_device, "links", SERVER_KEY),
+        {"links": links, "snapshot_token": "contract-cables", "incomplete_sources": []},
+        timeout=300,
+    )
+    return serve_sync_page(client, settings, server, owner)
+
+
 @pytest.mark.django_db
-@pytest.mark.parametrize("variant", ["ipaddresses-device", "ipaddresses-virtual_machine", "vlans-device"])
-def test_every_ip_and_vlan_tab_hop_keeps_the_page_query_or_applies_its_reset(
+@pytest.mark.parametrize(
+    "variant",
+    ["ipaddresses-device", "ipaddresses-virtual_machine", "vlans-device", "cables-device", "cables-virtual_chassis"],
+)
+def test_every_ip_vlan_and_cable_tab_hop_keeps_the_page_query_or_applies_its_reset(
     client, settings, librenms_server, variant
 ):
     tab, kind = variant.split("-")
@@ -376,6 +441,8 @@ def test_every_ip_and_vlan_tab_hop_keeps_the_page_query_or_applies_its_reset(
         bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
         client.force_login(make_superuser("contract-ip-user"))
         owner = _ip_owner(kind, client, librenms_server)
+    elif tab == "cables":
+        owner = _cable_owner(kind, client, settings, librenms_server)
     else:
         owner = _vlan_owner(client, settings, librenms_server)
     page_query = {"tab": tab, "server_key": SERVER_KEY, **OTHER_TAB_FILTER, **TAB_PAGE_QUERIES[tab]}
@@ -390,4 +457,5 @@ def test_every_ip_and_vlan_tab_hop_keeps_the_page_query_or_applies_its_reset(
     hops = _hops(html, tab)
     kinds = {_classify_tab_hop(hop, page_path, tab, owner, page_query) for hop in hops.urls}
     _check_tab_filter_form(hops, tab, page_query)
-    assert {"fragment", "clear", "page link", "refresh", "sync"} <= kinds, kinds
+    required = {"fragment", "clear", "page link", "refresh", "sync"} | ({"picker loader"} if tab == "cables" else set())
+    assert required <= kinds, kinds
