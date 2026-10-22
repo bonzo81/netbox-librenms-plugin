@@ -918,6 +918,30 @@ def test_an_os_that_differs_from_the_form_creates_and_maps_nothing(client, libre
     assert not PlatformMapping.objects.exists()
 
 
+@pytest.mark.parametrize("posted_os", ["junos", None], ids=["posted-os", "no-posted-os"])
+def test_a_device_gone_from_librenms_creates_no_platform(client, librenms_server, posted_os):
+    """The import row names a LibreNMS device that LibreNMS no longer has."""
+    from dcim.models import Platform
+
+    from netbox_librenms_plugin.models import PlatformMapping
+
+    _tracking(False)
+    device = make_device(f"gone-{posted_os}")
+    client.force_login(make_superuser(f"gone-{posted_os}"))
+    data = {"platform_name": "Juniper Junos", "create_mapping": "1"}
+    if posted_os is not None:
+        data["librenms_os"] = posted_os
+    count = Platform.objects.count()
+
+    errors = _import_error(_import_post(client, device, 7421, data))
+
+    device.refresh_from_db()
+    assert "Device not found in LibreNMS." in errors
+    assert device.platform is None
+    assert Platform.objects.count() == count
+    assert not PlatformMapping.objects.exists()
+
+
 @transactional_db_with_all_apps()
 class TestANamedPlatformRaceWinnerNeedsViewScope:
     def test_a_winner_created_between_preflight_and_apply_is_not_reused_without_view(self, client, librenms_server):
