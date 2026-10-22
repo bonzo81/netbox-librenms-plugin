@@ -17,6 +17,7 @@ from django.core.cache import cache
 from django.db import connection
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
+from extras.models import customfields
 from virtualization.models import VMInterface
 
 from netbox_librenms_plugin.models import InterfaceTypeMapping
@@ -480,6 +481,9 @@ def _full_page_device(client, settings, librenms_server, tag):
 # 1024 rows each cost 44 queries). It was 1 (143 and 1067) before the LAG members were prefetched.
 QUERIES_PER_TYPE_CHANGE = 0
 
+# Before NetBox caches custom fields per request, its own Interface validation looks them up on every row.
+NETBOX_UNCACHED_LOOKUPS = () if hasattr(customfields, "query_cache") else ('"extras_customfield"', '"core_objecttype"')
+
 
 @pytest.mark.django_db
 def test_interface_filter_query_budget_with_refused_type_changes(client, settings, librenms_server):
@@ -525,7 +529,8 @@ def test_interface_filter_query_budget_with_refused_type_changes(client, setting
         assert response.status_code == 200
         assert 'data-filter-active="true"' in response.content.decode()
         # NetBox reloads its config revision when its process cache expires, whatever the page holds.
-        return len([query for query in queries.captured_queries if "core_configrevision" not in query["sql"]])
+        ignored = ("core_configrevision", *NETBOX_UNCACHED_LOOKUPS)
+        return len([query for query in queries.captured_queries if not any(name in query["sql"] for name in ignored)])
 
     # The first page load of a test process fills process-wide caches, so it is not measured.
     page_queries(10)
