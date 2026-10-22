@@ -47,6 +47,7 @@ from netbox_librenms_plugin.server_mappings import (
     name_match_may_be_port,
     read_mapping,
 )
+from netbox_librenms_plugin.sync_filters import MATCHING, MISMATCHED, NOT_IN_NETBOX
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE, classify_conflict, nearest_database_error
 
 logger = logging.getLogger(__name__)
@@ -2852,6 +2853,30 @@ def parse_location_for_import(location_string: str) -> dict:
     return parsed
 
 
+# The colour of each VLAN comparison on the VLAN sync tab.
+_VLAN_SYNC_CSS_CLASS = {MATCHING: "text-success", MISMATCHED: "text-warning", NOT_IN_NETBOX: "text-danger"}
+
+
+def vlan_sync_comparison(exists_in_netbox: bool, name_matches: bool = True) -> str:
+    """
+    Return how a LibreNMS VLAN compares to the NetBox VLAN it resolved to.
+
+    The row colours, the row action and the sync-state filter of the VLAN sync tab all read this
+    value, so they always agree.
+
+    Args:
+        exists_in_netbox: Whether the VLAN exists in NetBox (in the selected group or globally).
+        name_matches: Whether the VLAN name in NetBox matches the LibreNMS name.
+
+    Returns:
+        str: ``MATCHING``, ``MISMATCHED`` or ``NOT_IN_NETBOX`` from ``sync_filters``.
+
+    """
+    if not exists_in_netbox:
+        return NOT_IN_NETBOX
+    return MATCHING if name_matches else MISMATCHED
+
+
 def get_vlan_sync_css_class(exists_in_netbox: bool, name_matches: bool = True) -> str:
     """
     Determine CSS class for a VLAN row on the VLAN sync tab.
@@ -2868,11 +2893,37 @@ def get_vlan_sync_css_class(exists_in_netbox: bool, name_matches: bool = True) -
         CSS class string: 'text-success', 'text-warning', or 'text-danger'.
 
     """
-    if not exists_in_netbox:
-        return "text-danger"
-    if name_matches:
-        return "text-success"
-    return "text-warning"
+    return _VLAN_SYNC_CSS_CLASS[vlan_sync_comparison(exists_in_netbox, name_matches)]
+
+
+def _vlan_sync_action(vid, exists_in_netbox, name_matches, actions_enabled):
+    """Return the visible text and the markup of a VLAN row's status cell."""
+    comparison = vlan_sync_comparison(exists_in_netbox, name_matches)
+    canonical_vid = normalize_vlan_vid(vid)
+    can_submit = actions_enabled and canonical_vid is not None
+    css_class = _VLAN_SYNC_CSS_CLASS[comparison]
+    if comparison == NOT_IN_NETBOX:
+        if not can_submit:
+            return "Not in NetBox", format_html('<span class="{}">Not in NetBox</span>', css_class)
+        return "Create", format_html(
+            '<button type="submit" class="btn btn-sm btn-primary" name="sync_one" value="{}"'
+            ' title="Create this VLAN in NetBox"><i class="mdi mdi-plus-thick" aria-hidden="true"></i>'
+            " Create</button>",
+            canonical_vid,
+        )
+    if comparison == MISMATCHED:
+        if not can_submit:
+            return "Name differs", format_html('<span class="{}">Name differs</span>', css_class)
+        return "Update", format_html(
+            '<button type="submit" class="btn btn-sm btn-warning" name="sync_one" value="{}"'
+            ' title="Update this VLAN\'s name in NetBox"><i class="mdi mdi-pencil" aria-hidden="true"></i>'
+            " Update</button>",
+            canonical_vid,
+        )
+    return "Synced", format_html(
+        '<span class="{}"><i class="mdi mdi-check-circle"></i> Synced</span>',
+        css_class,
+    )
 
 
 def render_vlan_sync_action(vid, exists_in_netbox, name_matches, *, actions_enabled=True):
@@ -2882,31 +2933,12 @@ def render_vlan_sync_action(vid, exists_in_netbox, name_matches, *, actions_enab
     Shared by the table renderer and the verify endpoint so the row action always matches
     the current VLAN synchronization state.
     """
-    canonical_vid = normalize_vlan_vid(vid)
-    can_submit = actions_enabled and canonical_vid is not None
-    css_class = get_vlan_sync_css_class(exists_in_netbox, name_matches)
-    if not exists_in_netbox:
-        if not can_submit:
-            return format_html('<span class="{}">Not in NetBox</span>', css_class)
-        return format_html(
-            '<button type="submit" class="btn btn-sm btn-primary" name="sync_one" value="{}"'
-            ' title="Create this VLAN in NetBox"><i class="mdi mdi-plus-thick" aria-hidden="true"></i>'
-            " Create</button>",
-            canonical_vid,
-        )
-    if not name_matches:
-        if not can_submit:
-            return format_html('<span class="{}">Name differs</span>', css_class)
-        return format_html(
-            '<button type="submit" class="btn btn-sm btn-warning" name="sync_one" value="{}"'
-            ' title="Update this VLAN\'s name in NetBox"><i class="mdi mdi-pencil" aria-hidden="true"></i>'
-            " Update</button>",
-            canonical_vid,
-        )
-    return format_html(
-        '<span class="{}"><i class="mdi mdi-check-circle"></i> Synced</span>',
-        css_class,
-    )
+    return _vlan_sync_action(vid, exists_in_netbox, name_matches, actions_enabled)[1]
+
+
+def vlan_sync_action_label(vid, exists_in_netbox, name_matches, *, actions_enabled=True):
+    """Return the visible text of the status cell that ``render_vlan_sync_action`` renders."""
+    return _vlan_sync_action(vid, exists_in_netbox, name_matches, actions_enabled)[0]
 
 
 # ============================================

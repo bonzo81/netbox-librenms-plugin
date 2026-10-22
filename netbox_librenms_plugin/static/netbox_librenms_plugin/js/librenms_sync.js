@@ -3269,6 +3269,7 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
             if (statusCell && data.status_html) {
                 statusCell.innerHTML = data.status_html;
             }
+            markFilterStaleRow(row);
         })
         .catch(error => {
             console.error('VLAN sync group verification error:', error);
@@ -3996,7 +3997,7 @@ function markFilterStaleRow(row) {
     const table = row?.closest('table');
     if (!table || table.dataset.filterActive !== 'true') return;
     row.dataset.filterStale = 'true';
-    // The badge goes in the cell that names the row: the interface name or the IP address.
+    // The badge goes in the cell that names the row: the interface or VLAN name, or the IP address.
     const cell = row.querySelector('td[data-col="name"], td[data-col="address"]');
     if (cell && !cell.querySelector('.filter-stale-badge')) {
         const badge = document.createElement('span');
@@ -4149,7 +4150,7 @@ function initializeFilterDisclosures() {
     });
 }
 
-// Initialize filters for different tables. The interface and IP address tables filter on the server.
+// Initialize filters for different tables. The interface, IP address and VLAN tables filter on the server.
 function initializeFilters() {
     initializeFilterDisclosures();
 
@@ -4172,20 +4173,6 @@ function initializeFilters() {
             'local-port': { name: 'local_port' },
             'remote-port': { name: 'remote_port' },
             'remote-device': { name: 'remote_device' }
-        }
-    );
-    initializeTableFilters(
-        'librenms-vlan-table',
-        ['vlan-id', 'vlan-name', 'vlan-group', 'vlan-type', 'vlan-state'],
-        {
-            'vlan-id': { name: 'vlan_id' },
-            'vlan-name': { name: 'name' },
-            'vlan-group': {
-                selector: 'td[data-col="vlan_group_selection"] .ts-control .item, '
-                    + 'td[data-col="vlan_group_selection"] option:checked'
-            },
-            'vlan-type': { name: 'type' },
-            'vlan-state': { name: 'state' }
         }
     );
 }

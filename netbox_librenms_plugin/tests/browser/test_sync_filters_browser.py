@@ -261,3 +261,87 @@ def test_a_vrf_verification_without_a_filter_marks_nothing(page):
 
     assert page.locator("[data-filter-stale]").count() == 0
     assert page.locator("#librenms-ipaddress-table-filter-stale-notice").count() == 0
+
+
+def _vlan_row_page(filter_active):
+    return f"""<!doctype html><html><body>
+        <input type="hidden" name="csrfmiddlewaretoken" value="token">
+        <form><table id="librenms-vlan-table" data-filter-active="{"true" if filter_active else "false"}"><tbody>
+          <tr data-vlan-id="501">
+            <td data-col="vlan_id"><span class="text-danger">501</span></td>
+            <td data-col="name"><span class="text-danger">Users</span></td>
+            <td data-col="vlan_group_selection"><select class="vlan-sync-group-select" name="vlan_group_501"
+                data-vlan-id="501" data-vlan-name="Users">
+              <option value="" selected>Global</option><option value="1">Group A</option></select></td>
+            <td data-col="status">Not in NetBox</td>
+          </tr>
+          <tr data-vlan-id="502"><td data-col="name"><span>Voice</span></td></tr>
+        </tbody></table></form></body></html>"""
+
+
+def _verify_vlan_group(page):
+    page.route(
+        "**/plugins/librenms_plugin/verify-vlan-sync-group/",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {
+                    "status": "success",
+                    "css_class": "text-success",
+                    "exists_in_netbox": True,
+                    "name_matches": True,
+                    "status_html": '<span id="group-a-status">Synced</span>',
+                }
+            ),
+        ),
+    )
+    page.evaluate("initializeVlanSyncGroupSelects()")
+    page.locator(".vlan-sync-group-select").select_option("1")
+    page.locator("#group-a-status").wait_for()
+
+
+def test_a_vlan_group_verification_of_a_filtered_vlan_row_marks_it_stale(page):
+    _serve(page, _vlan_row_page(filter_active=True))
+
+    _verify_vlan_group(page)
+
+    expect(page.locator('tr[data-vlan-id="501"][data-filter-stale="true"]')).to_have_count(1)
+    # The badge follows the name text, so the repaint of the name colour still finds the name.
+    expect(page.locator('td[data-col="name"] .filter-stale-badge')).to_have_count(1)
+    expect(page.locator('td[data-col="name"] span').first).to_have_class("text-success")
+    assert page.locator('tr[data-vlan-id="502"][data-filter-stale]').count() == 0
+    expect(page.locator('#librenms-vlan-table-filter-stale-notice[role="status"]')).to_have_count(1)
+
+
+def test_a_vlan_group_verification_without_a_filter_marks_nothing(page):
+    _serve(page, _vlan_row_page(filter_active=False))
+
+    _verify_vlan_group(page)
+
+    assert page.locator("[data-filter-stale]").count() == 0
+    assert page.locator("#librenms-vlan-table-filter-stale-notice").count() == 0
+
+
+def test_apply_to_all_on_a_filtered_table_saves_the_groups_for_the_whole_device(page):
+    saved = []
+
+    def save(route):
+        saved.append(json.loads(route.request.post_data))
+        route.fulfill(status=200, content_type="application/json", body="{}")
+
+    page.route("**/plugins/librenms_plugin/save-vlan-group-overrides/", save)
+    html = _vlan_modal_page().replace(
+        'id="vlanDetailModal" data-current-row-key="101"',
+        'id="vlanDetailModal" data-current-row-key="101" data-current-device-id="1"',
+    )
+    _serve(page, html.replace("<body>", '<body><input type="hidden" name="csrfmiddlewaretoken" value="token">'))
+    page.evaluate("initializeVlanModalSave()")
+
+    page.check("#applyVlanGroupToAll")
+    page.click("#saveVlanGroups")
+
+    # The option covers every page and filter: the server stores the groups for the device, not for the shown rows.
+    page.wait_for_function("document.querySelectorAll('.filter-stale-badge').length === 1")
+    assert saved == [{"device_id": "1", "vid_group_map": {"100": "7"}, "server_key": None}]
+    expect(page.locator('tr[data-port-id="101"][data-filter-stale="true"]')).to_have_count(1)

@@ -40,6 +40,7 @@ Available for Devices. This tab creates VLANs reported by LibreNMS. Each VLAN ca
 
 Interface VLAN assignments are handled by the Interfaces tab rather than this tab.
 
+The filter above the table works as on the Interfaces tab and searches every VLAN of the device. **Sync state** shows the VLANs that NetBox has with the same name, with another name, or does not have; a VLAN with an invalid or duplicate VID is in no state. A row whose VLAN group you change is marked **Changed since filtering**. On the Interfaces tab, the VLAN modal option that applies the groups to all interfaces saves them for the whole device, on every page and in every filter.
 
 ## Modules
 

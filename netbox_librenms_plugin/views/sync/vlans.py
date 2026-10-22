@@ -1,5 +1,4 @@
 from dataclasses import dataclass, field
-from urllib.parse import quote_plus
 
 from dcim.models import Device
 from django.contrib import messages
@@ -19,6 +18,7 @@ from netbox_librenms_plugin.sync_cache import (
     apply_request_cache_transition,
     schedule_request_cache_mutation,
 )
+from netbox_librenms_plugin.sync_query import page_query_url
 from netbox_librenms_plugin.transactions import saved_in_scope
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
@@ -213,17 +213,17 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         return redirect(url)
 
     def get_vlan_tab_url(self, object_type: str, object_id: int) -> str:
-        """Return the URL for the VLAN synchronization tab."""
+        """Return the URL for the VLAN synchronization tab, with the page query the request carries."""
         url_name = (
             "dcim:device_librenms_sync"
             if object_type == "device"
             else "plugins:netbox_librenms_plugin:vm_librenms_sync"
         )
         server_key = getattr(self, "_post_server_key", None) or self.librenms_api.server_key
-        url = reverse(url_name, kwargs={"pk": object_id}) + "?tab=vlans"
-        if server_key:
-            url += f"&server_key={quote_plus(server_key)}"
-        return url
+        # The action URL carries the page query, so the tab comes back with every tab's filters and page.
+        return page_query_url(
+            self.request, reverse(url_name, kwargs={"pk": object_id}), {"tab": "vlans", "server_key": server_key}
+        )
 
     @staticmethod
     def _vlan_state(vlan: VLAN) -> dict:

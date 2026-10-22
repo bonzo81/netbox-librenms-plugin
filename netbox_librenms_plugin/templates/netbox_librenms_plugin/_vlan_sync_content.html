@@ -12,7 +12,7 @@
 <div class="alert alert-danger">
     <i class="mdi mdi-alert-circle"></i> {{ vlan_sync.error_message }}
 </div>
-{% elif not vlan_sync.vlan_table or not vlan_sync.vlan_table.rows %}
+{% elif not vlan_sync.vlan_table or not vlan_sync.vlan_table.rows and not vlan_sync.filtered_from and vlan_sync.filters.is_valid %}
 <!-- No VLAN Data -->
 <div class="card">
     <div class="card-body text-center text-muted py-4">
@@ -21,6 +21,7 @@
     </div>
 </div>
 {% else %}
+{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=vlan_sync.filters prefix="vlans_" tab="vlans" section_id="vlanFilterSection" label="Filter VLANs" %}
 
 {# Migrated donors must not sync: hiding only the button leaves the POST form live (Enter in a filter still submits), so drop the form in migrated mode. #}
 {% if migrated_to_marker %}
@@ -70,49 +71,20 @@
                 <span class="badge text-warning text-white">Mismatched values</span>
                 <span class="badge text-danger text-white">Not present in NetBox</span>
             </div>
-            <button class="btn btn-sm btn-secondary sync-filter-toggle" type="button" data-bs-toggle="collapse"
-                data-bs-target="#vlanFilterSection" aria-expanded="false" aria-controls="vlanFilterSection">
-                <i class="mdi mdi-filter-outline"></i> Filters
-            </button>
-        </div>
-    </div>
-
-    <div class="collapse mb-3" id="vlanFilterSection">
-        <div class="mb-2">
-            <small class="text-muted">
-                <i class="mdi mdi-information"></i> Filters apply to currently displayed VLANs.
-            </small>
-        </div>
-        <div class="row row-cols-1 row-cols-sm-2 row-cols-xl-5 g-2">
-            <div class="col">
-                <label class="visually-hidden" for="filter-vlan-id">Filter by VLAN ID</label>
-                <input type="text" id="filter-vlan-id" placeholder="Filter by VLAN ID" class="form-control">
-            </div>
-            <div class="col">
-                <label class="visually-hidden" for="filter-vlan-name">Filter by Name</label>
-                <input type="text" id="filter-vlan-name" placeholder="Filter by Name" class="form-control">
-            </div>
-            <div class="col">
-                <label class="visually-hidden" for="filter-vlan-group">Filter by VLAN Group</label>
-                <input type="text" id="filter-vlan-group" placeholder="Filter by VLAN Group" class="form-control">
-            </div>
-            <div class="col">
-                <label class="visually-hidden" for="filter-vlan-type">Filter by Type</label>
-                <input type="text" id="filter-vlan-type" placeholder="Filter by Type" class="form-control">
-            </div>
-            <div class="col">
-                <label class="visually-hidden" for="filter-vlan-state">Filter by State</label>
-                <input type="text" id="filter-vlan-state" placeholder="Filter by State" class="form-control">
-            </div>
         </div>
     </div>
 
     <div class="row mb-3">
         <div class="col col-md-12">
             <div class="card">
-                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=vlan_sync.vlan_table %}
+                {% if vlan_sync.filters.is_valid %}
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=vlan_sync.vlan_table placement="top" filtered_from=vlan_sync.filtered_from %}
                 {% include 'inc/table.html' with table=vlan_sync.vlan_table %}
-                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=vlan_sync.vlan_table %}
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=vlan_sync.vlan_table filtered_from=vlan_sync.filtered_from %}
+                {% else %}
+                {# The error summary above the form says what to correct; no row is shown for an invalid filter. #}
+                <div class="card-body text-center text-muted py-4" data-filter-invalid="true">Correct the filters to show the VLANs.</div>
+                {% endif %}
             </div>
         </div>
     </div>
