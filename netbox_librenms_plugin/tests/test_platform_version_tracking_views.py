@@ -927,6 +927,8 @@ class TestANamedPlatformRaceWinnerNeedsViewScope:
 
         _tracking(False)
         device = _linked("named-race", librenms_server, 7431)
+        # A root that sorts after the new platform, so its insert shifts the later root trees first.
+        Platform.objects.create(name="Zz later root", slug="zz-later-root")
         client.force_login(make_user_with_perms("named-race-actor", [("change", Device), ("add", Platform)]))
         winners = []
 
@@ -937,7 +939,8 @@ class TestANamedPlatformRaceWinnerNeedsViewScope:
                 connections.close_all()
 
         def insert_after_the_winner(execute, sql, params, many, context):
-            if sql.startswith('INSERT INTO "dcim_platform"') and not winners:
+            # Before NetBox 4.7, the MPTT tree UPDATE (indented SQL) comes first and locks the tree rows.
+            if sql.lstrip().startswith(('UPDATE "dcim_platform"', 'INSERT INTO "dcim_platform"')) and not winners:
                 with bounded_executor(1) as executor:
                     executor.submit(create_winner).result(timeout=10)
             return execute(sql, params, many, context)
