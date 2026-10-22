@@ -37,6 +37,7 @@ from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     sync_cache_browser_contract,
 )
+from netbox_librenms_plugin.sync_query import SyncQuery
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_user_pref,
@@ -229,6 +230,7 @@ class BaseLibreNMSSyncView(
                 "object": obj,
                 "tab": self.tab,
                 "active_sync_tab": active_sync_tab,
+                "server_switch_query": SyncQuery.from_request(request).server_switch_query(active_sync_tab),
                 "server_key": selection.active_key,
                 "all_server_mappings": selection.mappings,
                 "server_selection_state": selection.state,
@@ -280,6 +282,7 @@ class BaseLibreNMSSyncView(
                 "object": obj,
                 "tab": self.tab,
                 "active_sync_tab": active_sync_tab,
+                "server_switch_query": SyncQuery.from_request(request).server_switch_query(active_sync_tab),
                 "sync_tab_urls": sync_tab_urls,
                 "interface_name_selector_visible": active_sync_tab in INTERFACE_NAME_SELECTOR_TABS,
                 # self.librenms_id is normalised to a positive int or None at assignment
