@@ -5,6 +5,7 @@ from django.views import View
 
 from netbox_librenms_plugin.constants import LIBRENMS_VLAN_STATE_ACTIVE
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
+from netbox_librenms_plugin.sync_filters import filter_sync_table
 from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
@@ -260,15 +261,23 @@ class BaseVLANTableView(
         # Build lookup maps for VLAN matching
         lookup_maps = self._build_vlan_lookup_maps(vlan_groups, user=vlan_scope_user)
 
+        filters = None
+        filtered_from = None
         # `is not None` (not a bare truthiness check): an empty list is a valid successful refresh
         # (a device with no VLANs) and must still render an empty table — a truthy check would skip
         # construction and make a VLAN-less device look like it never loaded.
         if cached_vlans is not None:
             # Compare VLANs with NetBox (against all device-available VLANs)
             compared_vlans = self.compare_vlans(cached_vlans, lookup_maps, device=obj)
+            migrated = bool(build_migrated_context(obj, server_key).get("migrated_to_marker"))
 
-            vlan_table = LibreNMSVLANTable(compared_vlans, vlan_groups=vlan_groups)
-            vlan_table.migrated_to_marker = bool(build_migrated_context(obj, server_key).get("migrated_to_marker"))
+            def build_table(rows):
+                table = LibreNMSVLANTable(rows, vlan_groups=vlan_groups)
+                table.migrated_to_marker = migrated
+                return table
+
+            # The comparison ran over every row, so duplicate and invalid VIDs describe the whole device.
+            vlan_table, filters, filtered_from = filter_sync_table(request.GET, compared_vlans, build_table)
             vlan_table.configure(request)
 
         # Calculate cache TTL
@@ -278,6 +287,9 @@ class BaseVLANTableView(
         return {
             "object": obj,
             "vlan_table": vlan_table,
+            "filters": filters,
+            # The row count before the filter, shown only while a filter narrows the table.
+            "filtered_from": filtered_from,
             "vlan_groups": vlan_groups,
             "last_fetched": last_fetched,
             "cache_expiry": cache_expiry,

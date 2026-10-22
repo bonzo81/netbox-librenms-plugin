@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from django.contrib.auth.models import AnonymousUser
+from django.core.cache import cache
 from django.template.loader import render_to_string
 from django.test import RequestFactory
 from django.urls import reverse
@@ -36,6 +37,7 @@ from netbox_librenms_plugin.tests.test_interface_sync_filters import (
     serve_sync_page,
 )
 from netbox_librenms_plugin.tests.test_ip_address_sync_filters import _refresh
+from netbox_librenms_plugin.views.sync.vlans import SyncVLANsView
 
 URL_ATTRIBUTES = ("href", "action", "formaction", "hx-get", "hx-post", "hx-put", "hx-patch", "hx-delete")
 VOID_TAGS = frozenset({"input", "br", "img", "hr", "meta", "link", "source", "wbr"})
@@ -252,7 +254,7 @@ def test_the_module_paginator_keeps_the_interface_filters():
         _assert_keeps(query, (*PAGE_FILTERS, "interfaces_page", "interfaces_per_page"), url)
 
 
-# The IP Addresses tab: this tab's filters and another tab's, on page 2 of a sorted table.
+# The IP Addresses and VLANs tabs: this tab's filters and another tab's, on page 2 of a sorted table.
 OTHER_TAB_FILTER = {"interfaces_q": "keep  this & that"}
 TAB_PAGE_QUERIES = {
     "ipaddresses": {
@@ -261,6 +263,13 @@ TAB_PAGE_QUERIES = {
         "ipaddresses_per_page": "2",
         "ipaddresses_page": "2",
         "ipaddresses_sort": "address",
+    },
+    "vlans": {
+        "vlans_q": "a&b+c  é",
+        "vlans_filter_type": "ethernet",
+        "vlans_per_page": "2",
+        "vlans_page": "2",
+        "vlans_sort": "name",
     },
 }
 # An object detail link leaves the sync page, so it carries no page state.
@@ -274,16 +283,22 @@ def _tab_routes(owner, tab):
     object_type = owner._meta.model_name
     kind = "device" if object_type == "device" else "vm"
     fragment = plugin_url("sync_cache_fragment", object_type=object_type, pk=owner.pk, tab=tab)
-    posts = {
-        plugin_url(f"{kind}_ipaddress_sync", pk=owner.pk): "refresh",
-        plugin_url("sync_device_ip_addresses", object_type=object_type, pk=owner.pk): "sync",
-        plugin_url("create_ip_row_vrf", object_type=object_type, pk=owner.pk): "create vrf",
-    }
+    if tab == "ipaddresses":
+        posts = {
+            plugin_url(f"{kind}_ipaddress_sync", pk=owner.pk): "refresh",
+            plugin_url("sync_device_ip_addresses", object_type=object_type, pk=owner.pk): "sync",
+            plugin_url("create_ip_row_vrf", object_type=object_type, pk=owner.pk): "create vrf",
+        }
+    else:
+        posts = {
+            plugin_url("device_vlan_sync", pk=owner.pk): "refresh",
+            plugin_url("sync_selected_vlans", object_type=object_type, object_id=owner.pk): "sync",
+        }
     return fragment, posts
 
 
 def _classify_tab_hop(hop, page_path, tab, owner, page_query):
-    """Check one hop of the IP Addresses pane against the transition table and return its kind."""
+    """Check one hop of the IP Addresses or VLANs pane against the transition table and return its kind."""
     url = hop["url"]
     path, query = urlsplit(url).path, _query(url)
     prefix = f"{tab}_"
@@ -339,13 +354,30 @@ def _ip_owner(kind, client, server):
     return _refresh(client, owner, server, rows)
 
 
+def _vlan_owner(client, settings, server):
+    """Return a device with VLAN rows whose names match the VLAN filters of the page query."""
+    device = make_device("contract-vlan", librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID}})
+    rows = [
+        {"vlan_vlan": 100 + n, "vlan_name": f"v{n:02d} a&b+c É", "vlan_type": "ethernet", "vlan_state": 1}
+        for n in range(12)
+    ]
+    rows.append({"vlan_vlan": 999, "vlan_name": "v99 a&b+c É", "vlan_type": "tokenring", "vlan_state": 1})
+    cache.set(SyncVLANsView().get_cache_key(device, "vlans", SERVER_KEY), rows, timeout=300)
+    return serve_sync_page(client, settings, server, device)
+
+
 @pytest.mark.django_db
-@pytest.mark.parametrize("variant", ["ipaddresses-device", "ipaddresses-virtual_machine"])
-def test_every_ip_tab_hop_keeps_the_page_query_or_applies_its_reset(client, settings, librenms_server, variant):
+@pytest.mark.parametrize("variant", ["ipaddresses-device", "ipaddresses-virtual_machine", "vlans-device"])
+def test_every_ip_and_vlan_tab_hop_keeps_the_page_query_or_applies_its_reset(
+    client, settings, librenms_server, variant
+):
     tab, kind = variant.split("-")
-    bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
-    client.force_login(make_superuser("contract-ip-user"))
-    owner = _ip_owner(kind, client, librenms_server)
+    if tab == "ipaddresses":
+        bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
+        client.force_login(make_superuser("contract-ip-user"))
+        owner = _ip_owner(kind, client, librenms_server)
+    else:
+        owner = _vlan_owner(client, settings, librenms_server)
     page_query = {"tab": tab, "server_key": SERVER_KEY, **OTHER_TAB_FILTER, **TAB_PAGE_QUERIES[tab]}
     name = "vm_librenms_sync" if owner._meta.model_name == "virtualmachine" else "device_librenms_sync"
     page_path = reverse(f"plugins:netbox_librenms_plugin:{name}", args=[owner.pk])
