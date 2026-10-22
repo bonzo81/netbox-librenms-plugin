@@ -1,36 +1,35 @@
 {% load librenms_sync_query %}
-{% with form=filters.form %}
-    <div class="sync-filter-controls d-flex flex-wrap align-items-center gap-2">
-        {% with field=form.q %}
-        <div>
-            <label class="visually-hidden" for="{{ field.auto_id }}">{{ field.label }}</label>
-            <input type="search" form="{{ prefix }}filter-form" placeholder="{{ field.label }}" name="{{ field.html_name }}" id="{{ field.auto_id }}" value="{{ field.value|default:'' }}"
-                class="form-control{% if field.errors %} is-invalid{% endif %}"
-                {% if field.errors %}aria-invalid="true" aria-describedby="{{ field.auto_id }}-error"{% endif %}>
-            {% if field.errors %}<div class="invalid-feedback" id="{{ field.auto_id }}-error">{{ field.errors|join:" " }}</div>{% endif %}
-        </div>
-        {% endwith %}
-        {% with field=form.sync_state %}
-        <div>
-            <label class="visually-hidden" for="{{ field.auto_id }}">{{ field.label }}</label>
-            <select form="{{ prefix }}filter-form" name="{{ field.html_name }}" id="{{ field.auto_id }}"
-                class="form-select no-ts{% if field.errors %} is-invalid{% endif %}"
-                {% if field.errors %}aria-invalid="true" aria-describedby="{{ field.auto_id }}-error"{% endif %}>
-                {% for value, choice_label in field.field.choices %}
-                <option value="{{ value }}"{% if field.value == value %} selected{% endif %}>{{ choice_label }}</option>
-                {% endfor %}
-            </select>
-            {% if field.errors %}<div class="invalid-feedback" id="{{ field.auto_id }}-error">{{ field.errors|join:" " }}</div>{% endif %}
-        </div>
-        {% endwith %}
-        <button class="btn btn-secondary sync-filter-toggle" type="button" data-bs-toggle="collapse"
-            data-bs-target="#{{ section_id }}" aria-expanded="{% if form.columns_have_input %}true{% else %}false{% endif %}"
-            aria-controls="{{ section_id }}">
-            <i class="mdi mdi-filter-outline" aria-hidden="true"></i> Filters
-        </button>
-
-        {% if filters.active or form.errors %}
-        <a class="btn btn-link sync-filter-clear" href="{% sync_tab_url prefix=prefix tab=tab reset='page filters' %}">Clear filters</a>
-        {% endif %}
-    </div>
+{% comment %}
+The search line of one sync tab filter, on the right of the sync toolbar. Its fields belong to the GET form
+of _sync_filter_form.html through the form attribute, so they are never part of the sync POST.
+Takes: filters (SyncFilters), prefix, tab, section_id, label.
+{% endcomment %}
+{% with form=filters.form form_id=prefix|add:"filter-form" %}
+<div class="sync-filter-controls d-flex flex-wrap align-items-center gap-2" role="search" aria-label="{{ label }}">
+    {% with field=form.q %}
+    <label class="visually-hidden" for="{{ field.auto_id }}">{{ field.label }}</label>
+    <input type="search" form="{{ form_id }}" name="{{ field.html_name }}" id="{{ field.auto_id }}" value="{{ field.value|default:'' }}"
+        placeholder="{{ field.label }}" autocomplete="off"
+        class="form-control sync-filter-search{% if field.errors %} is-invalid{% endif %}"
+        {% if field.errors %}aria-invalid="true" aria-describedby="{{ prefix }}filter-errors"{% endif %}>
+    {% endwith %}
+    {% with field=form.sync_state %}
+    <label class="visually-hidden" for="{{ field.auto_id }}">{{ field.label }}</label>
+    <select form="{{ form_id }}" name="{{ field.html_name }}" id="{{ field.auto_id }}"
+        class="form-select w-auto no-ts{% if field.errors %} is-invalid{% endif %}"
+        {% if field.errors %}aria-invalid="true" aria-describedby="{{ prefix }}filter-errors"{% endif %}>
+        {% for value, choice_label in field.field.choices %}
+        <option value="{{ value }}"{% if field.value == value %} selected{% endif %}>{{ choice_label }}</option>
+        {% endfor %}
+    </select>
+    {% endwith %}
+    <button class="btn btn-secondary sync-filter-toggle" type="button" data-bs-toggle="collapse"
+        data-bs-target="#{{ section_id }}" aria-expanded="{% if form.columns_have_input %}true{% else %}false{% endif %}"
+        aria-controls="{{ section_id }}">
+        <i class="mdi mdi-filter-outline" aria-hidden="true"></i> Filters
+    </button>
+    {% if filters.active or form.errors %}
+    <a class="btn btn-link sync-filter-clear" href="{% sync_tab_url prefix=prefix tab=tab reset='page filters' %}">Clear filters</a>
+    {% endif %}
+</div>
 {% endwith %}

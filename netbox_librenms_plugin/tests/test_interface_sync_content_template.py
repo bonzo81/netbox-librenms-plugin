@@ -63,7 +63,10 @@ class TestInterfaceSyncContentTemplateMigratedMode:
             "migrated_to_winner": winner,
             "has_write_permission": has_write,
         }
-        return render_to_string("netbox_librenms_plugin/_interface_sync_content.html", ctx, request=request)
+        # The NetBox-only dialog loads its rows when it opens, so the tab is shown with them loaded.
+        return render_to_string(
+            "netbox_librenms_plugin/_interface_sync_content.html", ctx, request=request
+        ) + render_to_string("netbox_librenms_plugin/inc/_netbox_only_interfaces.html", ctx, request=request)
 
     def test_migrated_mode_drops_form_but_keeps_csrf(self):
         html = self._render(

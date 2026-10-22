@@ -153,6 +153,60 @@
     margin-bottom: 1rem;
 }
 
+/* The column filters: small text, and each field about as wide as the values of its column. */
+.sync-filter-panel {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 0.375rem 0.5rem;
+}
+
+.sync-filter-field {
+    flex: 0 0 8rem;
+}
+
+/* A label stays on one line, and a narrow field grows to its label. */
+.sync-filter-panel .form-label {
+    margin-bottom: 0.125rem;
+    font-size: 0.75rem;
+    white-space: nowrap;
+}
+
+.sync-filter-panel .form-control,
+.sync-filter-panel .btn {
+    min-height: 0;
+    padding-block: 0.125rem;
+    font-size: 0.75rem;
+}
+
+:is(
+    [data-filter-field="interfaces_filter_mtu"],
+    [data-filter-field="interfaces_filter_enabled"],
+    [data-filter-field="ipaddresses_filter_prefix"],
+    [data-filter-field="vlans_filter_vlan_id"],
+    [data-filter-field="vlans_filter_type"]
+) {
+    flex-basis: 4.5rem;
+}
+
+:is(
+    [data-filter-field="interfaces_filter_speed"],
+    [data-filter-field="interfaces_filter_librenms_id"],
+    [data-filter-field="vlans_filter_state"]
+) {
+    flex-basis: 6rem;
+}
+
+:is(
+    [data-filter-field="interfaces_filter_type"],
+    [data-filter-field="interfaces_filter_description"],
+    [data-filter-field="cables_filter_remote_device"],
+    [data-filter-field="vlans_filter_name"],
+    [data-filter-field="vlans_filter_group"]
+) {
+    flex-basis: 11rem;
+}
+
 @media (max-width: 575.98px) {
     .sync-tab-filter-refresh {
         flex: 0 1 auto;
@@ -170,6 +224,14 @@
     .interface-sync-options-menu,
     .ip-sync-options-menu {
         min-width: min(23rem, calc(100vw - 2rem));
+    }
+
+    .sync-filter-controls {
+        flex-wrap: wrap;
+    }
+
+    .sync-filter-search {
+        flex-grow: 1;
     }
 }
 
@@ -203,6 +265,60 @@
 }
 
 /* At phone width, the sync tables wrap their cell content, so that they fit their card without a scroll wrapper. */
+/* The column filters: small text, and each field about as wide as the values of its column. */
+.sync-filter-panel {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: 0.375rem 0.5rem;
+}
+
+.sync-filter-field {
+    flex: 0 0 8rem;
+}
+
+/* A label stays on one line, and a narrow field grows to its label. */
+.sync-filter-panel .form-label {
+    margin-bottom: 0.125rem;
+    font-size: 0.75rem;
+    white-space: nowrap;
+}
+
+.sync-filter-panel .form-control,
+.sync-filter-panel .btn {
+    min-height: 0;
+    padding-block: 0.125rem;
+    font-size: 0.75rem;
+}
+
+:is(
+    [data-filter-field="interfaces_filter_mtu"],
+    [data-filter-field="interfaces_filter_enabled"],
+    [data-filter-field="ipaddresses_filter_prefix"],
+    [data-filter-field="vlans_filter_vlan_id"],
+    [data-filter-field="vlans_filter_type"]
+) {
+    flex-basis: 4.5rem;
+}
+
+:is(
+    [data-filter-field="interfaces_filter_speed"],
+    [data-filter-field="interfaces_filter_librenms_id"],
+    [data-filter-field="vlans_filter_state"]
+) {
+    flex-basis: 6rem;
+}
+
+:is(
+    [data-filter-field="interfaces_filter_type"],
+    [data-filter-field="interfaces_filter_description"],
+    [data-filter-field="cables_filter_remote_device"],
+    [data-filter-field="vlans_filter_name"],
+    [data-filter-field="vlans_filter_group"]
+) {
+    flex-basis: 11rem;
+}
+
 @media (max-width: 575.98px) {
     .librenms-info-sync-table .d-flex,
     #librenms-cable-table .d-flex,

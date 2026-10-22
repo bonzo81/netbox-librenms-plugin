@@ -69,6 +69,16 @@ def _seed(owner, ports, relationships=None):
     cache.set(SyncInterfacesView().get_cache_key(cache_owner, "ports", SERVER_KEY), payload, timeout=300)
 
 
+def _netbox_only(client, owner):
+    """Return the NetBox-only rows that the interfaces tab dialog loads when it opens."""
+    url = reverse(
+        "plugins:netbox_librenms_plugin:netbox_only_interfaces", kwargs={"object_type": "device", "pk": owner.pk}
+    )
+    response = client.get(url, {"server_key": SERVER_KEY, "interface_name_field": "ifName"})
+    assert response.status_code == 200
+    return response.content.decode()
+
+
 def _tab(client, owner, object_type="device", **params):
     url = reverse(
         "plugins:netbox_librenms_plugin:sync_cache_fragment",
@@ -232,7 +242,7 @@ class TestIgnoredRowsInTheTab:
         html = _tab(superuser_client, device)
 
         assert "1 NetBox only interfaces" in html
-        assert "stale0" in html
+        assert "stale0" in _netbox_only(superuser_client, device)
         assert sorted(_rows(html)) == [100]
 
     def test_a_virtual_machine_reads_its_own_platform(self, superuser_client):

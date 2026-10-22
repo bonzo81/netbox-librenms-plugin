@@ -1,0 +1,30 @@
+{% comment %}
+The sync tab links: one per tab of the subject (sync_tab_urls). The sync page renders them, and a filter
+response renders them again out of band, so every link carries the new page query.
+Takes: active_sync_tab, sync_tab_urls, sync_cache_status, interface_name_field.
+{% endcomment %}
+{% if sync_tab_urls.interfaces %}
+<li class="nav-item" role="presentation">
+    {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='interfaces' tab_label='Interfaces' tab_url=sync_tab_urls.interfaces tab_status=sync_cache_status.interfaces interface_name_field=interface_name_field only %}
+</li>
+{% endif %}
+{% if sync_tab_urls.cables %}
+<li class="nav-item" role="presentation">
+    {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='cables' tab_label='Cables' tab_url=sync_tab_urls.cables tab_status=sync_cache_status.cables interface_name_field=interface_name_field only %}
+</li>
+{% endif %}
+{% if sync_tab_urls.ipaddresses %}
+<li class="nav-item" role="presentation">
+    {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='ipaddresses' tab_label='IP Addresses' tab_url=sync_tab_urls.ipaddresses tab_status=sync_cache_status.ipaddresses interface_name_field=interface_name_field only %}
+</li>
+{% endif %}
+{% if sync_tab_urls.vlans %}
+<li class="nav-item" role="presentation">
+    {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='vlans' tab_label='VLANs' tab_url=sync_tab_urls.vlans tab_status=sync_cache_status.vlans interface_name_field=interface_name_field only %}
+</li>
+{% endif %}
+{% if sync_tab_urls.modules %}
+<li class="nav-item" role="presentation">
+    {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='modules' tab_label='Modules' tab_url=sync_tab_urls.modules tab_status=sync_cache_status.modules interface_name_field=interface_name_field only %}
+</li>
+{% endif %}
