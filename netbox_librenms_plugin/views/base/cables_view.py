@@ -2229,7 +2229,8 @@ class BaseCableTableView(
             # Trust rule: a plugin-tagged cable was placed deliberately; the wrong-name label
             # must not flip it to a mismatch offering a re-point. Display where it
             # really goes (overriding the label-device link the caller set).
-            _set_cable_state(link, "Cable Found", MATCHING)
+            # The trace does not reach the label device, and the tag does not prove another endpoint.
+            _set_cable_state(link, "Cable Found", UNCLASSIFIED)
             self._display_serial_cable_far_end(
                 link,
                 csp,
