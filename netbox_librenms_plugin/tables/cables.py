@@ -130,7 +130,6 @@ class LibreNMSCableTable(tables.Table):
         self.device = device
         super().__init__(*args, **kwargs)
         self.tab = "cables"
-        self.htmx_url = None
         self.prefix = "cables_"
 
     def filter_spec(self):
