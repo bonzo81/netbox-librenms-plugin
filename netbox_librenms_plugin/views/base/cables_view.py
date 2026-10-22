@@ -3083,7 +3083,7 @@ class BaseCableTableView(
 
         """
         table, filters, filtered_from = filter_sync_table(
-            request.GET, links_data, lambda rows: self.get_table(rows, obj)
+            request, obj, links_data, lambda rows: self.get_table(rows, obj)
         )
         table.configure(request)
         return table, filters, filtered_from

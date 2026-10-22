@@ -408,7 +408,26 @@ class TestWholeSnapshotData:
         assert list(_rows(filtered)) == [peer_b]
         assert f'name="select" value="{peer_b}"' in filtered
         assert _table_attr(filtered, "data-filter-active") == "true"
-        assert _table_attr(filtered, "data-filter-signature") == "cables_filter_remote_device=peer-b"
+        assert _table_attr(filtered, "data-filter-signature") == (
+            "cables_filter_remote_device=peer-b&interface_name_field=ifName"
+        )
+
+    def test_the_selection_signature_changes_with_the_interface_name_field(self, client, settings):
+        client = _superuser_client(client, settings, "cable-signature")
+        device = _device("signature")
+        _seed(device, [_link(6101, "uplink", "peer-a", "xe-1")])
+
+        signatures = {
+            field: _table_attr(
+                _tab(client, device, cables_filter_local_port="uplink", interface_name_field=field),
+                "data-filter-signature",
+            )
+            for field in ("ifName", "ifDescr")
+        }
+
+        # The local port names follow the name field, so one filter can hold other rows under each field.
+        assert signatures["ifName"] != signatures["ifDescr"]
+        assert all(f"interface_name_field={field}" in signature for field, signature in signatures.items())
 
     def test_whole_device_data_does_not_change_under_a_filter(self, client, settings):
         client = _superuser_client(client, settings, "cable-whole-device")

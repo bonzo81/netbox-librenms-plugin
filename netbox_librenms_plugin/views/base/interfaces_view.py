@@ -999,11 +999,7 @@ class BaseInterfaceTableView(
             # split and the blocked IDs describe the whole device. A new name field or ignored
             # toggle starts an empty browser selection too.
             table, filters, filtered_from = filter_sync_table(
-                request.GET,
-                table_rows,
-                build_table,
-                interfaces_show_ignored=int(show_ignored),
-                interface_name_field=interface_name_field,
+                request, obj, table_rows, build_table, interfaces_show_ignored=int(show_ignored)
             )
             table.configure(request)
 

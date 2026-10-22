@@ -227,20 +227,22 @@ def filter_sync_rows(rows, filters, spec):
     return [row for row in rows if matches(row)]
 
 
-def filter_sync_table(query, rows, build_table, **signature_context):
+def filter_sync_table(request, owner, rows, build_table, **signature_context):
     """
-    Return the table of the rows that match the tab's filters in *query*, its filters, and the row count before them.
+    Return the table of the rows that match the tab's filters in the request query, its filters, and the row count before them.
 
     The table owns the cell text functions, so a table of every row gives the filter spec, and a
     second table shows the matches. The table attributes tell the browser whether a filter is active
-    and which selection store the table uses.
+    and which selection store the table uses. The selection store always names the interface name
+    field: the port names of every tab can follow it, so a new name field starts an empty selection.
 
     Args:
-        query (QueryDict): The request query.
+        request (HttpRequest): The request; its query holds the filters.
+        owner (Device | VirtualMachine): The object of the sync page, which scopes the name field preference.
         rows (list[dict]): Every row of the whole snapshot, prepared for display.
         build_table (Callable[[list[dict]], Table]): Returns a table of the given rows. The table has
             ``filter_spec()``.
-        **signature_context: Other page state that decides which rows the table holds (see
+        **signature_context: Other page state of one tab that decides which rows the table holds (see
             ``SyncFilters.signature``).
 
     Returns:
@@ -248,9 +250,11 @@ def filter_sync_table(query, rows, build_table, **signature_context):
             before the filter (None when no filter narrows the table).
 
     """
+    from netbox_librenms_plugin.utils import get_interface_name_field  # utils imports this module
+
     table = build_table(rows)
     spec = table.filter_spec()
-    filters = parse_sync_filters(query, spec)
+    filters = parse_sync_filters(request.GET, spec)
     filtered_from = None
     if filters.active:
         filtered_from = len(rows)
@@ -258,5 +262,7 @@ def filter_sync_table(query, rows, build_table, **signature_context):
         table.empty_text = NO_MATCH_TEXT
     table.attrs["data-filter-active"] = "true" if filters.active else "false"
     # A new filter starts an empty browser selection.
-    table.attrs["data-filter-signature"] = filters.signature(**signature_context)
+    table.attrs["data-filter-signature"] = filters.signature(
+        interface_name_field=get_interface_name_field(request, owner), **signature_context
+    )
     return table, filters, filtered_from

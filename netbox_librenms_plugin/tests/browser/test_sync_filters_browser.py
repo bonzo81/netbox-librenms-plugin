@@ -492,3 +492,41 @@ def test_the_cable_picker_request_carries_the_page_query(page):
         "cables_page": ["2"],
         "interfaces_q": ["eth"],
     }
+
+
+CABLE_SUBMIT_PATH = "https://plugin.example.com/plugins/librenms_plugin/device/1/cables/sync/"
+
+
+def _cable_selection_page(signature, row_ids):
+    rows = "".join(
+        f'<tr data-interface="{row_id}"><td data-col="selection">'
+        f'<input type="checkbox" name="select" value="{row_id}" id="cb-{row_id}"></td></tr>'
+        for row_id in row_ids
+    )
+    return f"""<!doctype html><html><body>
+        <input type="hidden" name="server_key" value="default">
+        <form method="post" action="{CABLE_SUBMIT_PATH}">
+          <table id="librenms-cable-table" data-filter-signature="{signature}"><tbody>{rows}</tbody></table>
+          <button type="submit" id="sync">Sync</button>
+        </form></body></html>"""
+
+
+def test_a_name_field_change_drops_the_cable_selection_from_the_next_bulk_sync(page):
+    # The server signs every tab with the name field (sync_filters.filter_sync_table).
+    _serve(page, _cable_selection_page("cables_filter_local_port=uplink&interface_name_field=ifName", ["7301"]))
+    page.evaluate("initializeCheckboxes()")
+    page.check("#cb-7301")
+
+    # Under ifDescr the row's local port no longer matches the filter, so another row shows.
+    _serve(page, _cable_selection_page("cables_filter_local_port=uplink&interface_name_field=ifDescr", ["7302"]))
+    page.evaluate("initializeCheckboxes()")
+    page.check("#cb-7302")
+
+    posted = []
+    page.route(
+        CABLE_SUBMIT_PATH,
+        lambda route: (posted.append(route.request.post_data), route.fulfill(status=200, body="ok")),
+    )
+    page.click("#sync")
+    page.wait_for_function("document.body.textContent.trim() === 'ok'")
+    assert sorted(parse_qs(posted[0]).get("select", [])) == ["7302"]
