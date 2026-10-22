@@ -12,7 +12,8 @@
 <div class="alert alert-danger">
     <i class="mdi mdi-alert-circle"></i> {{ vlan_sync.error_message }}
 </div>
-{% elif not vlan_sync.vlan_table or not vlan_sync.vlan_table.rows and not vlan_sync.filtered_from and vlan_sync.filters.is_valid %}
+{# An active or invalid filter keeps its form, so it can be cleared even when the snapshot is empty. #}
+{% elif not vlan_sync.vlan_table or not vlan_sync.vlan_table.rows and not vlan_sync.filters.active and vlan_sync.filters.is_valid %}
 <!-- No VLAN Data -->
 <div class="card">
     <div class="card-body text-center text-muted py-4">
