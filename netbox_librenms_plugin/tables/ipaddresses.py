@@ -53,9 +53,7 @@ class IPAddressTable(tables.Table):
         # Set Primary IP selects the management row also from a page or a filter that does not show it, with its VRF.
         self.attrs["data-mgmt-rows"] = json.dumps(list(mgmt_row_vrfs))
         self.attrs["data-mgmt-row-vrfs"] = json.dumps(mgmt_row_vrfs)
-        # Identify the owning sync tab so the paginator links (inc/paginator.html builds
-        # ?tab={{ table.tab }}) keep the user on the IP Addresses tab. Without this, table.tab
-        # renders empty and paging falls back to the default (Interfaces) tab.
+        # The paginator links state table.tab, so paging keeps the user on the IP Addresses tab.
         self.tab = "ipaddresses"
         # Give this table its own pagination namespace. configure() passes self.prefix to
         # paginate_sync_table() and get_table_paginate_count(), which key per_page on

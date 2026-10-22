@@ -74,6 +74,7 @@ unchecked until that review.
 | `posted-module-target-needs-resolver` | error | A read of the posted `selected_device_id` from `request.GET` or `request.POST` outside `_resolve_destination(...)` or a module grant's `require(device_id=...)`. |
 | `regex-error-must-raise` | error | A handler that catches `re.error` or `REGEX_COMPILE_ERRORS` and does not raise. A stored rule regex compiles through `models.compile_rule_regex`, which raises `RuleConfigurationError`. |
 | `rule-error-message-needs-projection` | error | A `str()` conversion of the rule error bound by the module-context walrus check, or the exception parameter in `RuleConfigurationErrorMiddleware.process_exception`. These paths use `public_message`. Other aliases and handlers are outside this check. |
+| `sync-tab-url-through-sync-query` | error | A hand-built `?tab=`, `&tab=` or `&amp;tab=` query string, or a `?{% ... %}tab=` one, in package Python or a template, outside `sync_query.py`. |
 | `post-write-scope-through-helper` | error | An inline `restrict(user, "add"/"change")` or `restricted_queryset(model, "add"/"change")` existence check of a row that the same block saved or created before. Call `transactions.saved_in_scope()`. |
 | `sync-script-reads-page-server-key` | error | A package script calls `document.querySelector`, `querySelectorAll` or `getElementsByName` for `server_key`. A lookup inside one form is allowed. Vendored and minified files are excluded. |
 
@@ -97,6 +98,9 @@ through its helpers. The template rule applies to `.html` files.
 own conflict after the last attempt.
 `post-write-scope-through-helper` excludes tests and migrations.
 `titled-icon-needs-accessible-name` applies to `.py`, `.html` and `.js` files and excludes tests.
+`sync-tab-url-through-sync-query` applies to `.py` and `.html` files. It excludes tests,
+`sync_query.py`, which builds the sync page URLs, and `views/sync/modules.py`: the Modules tab
+redirect keeps its own query and is outside the filter work.
 The remaining rules apply to Python files in the scan target.
 
 Opengrep 1.30.0 skips test directories during directory scans. The scan script expands the default
@@ -251,6 +255,12 @@ local or module string constant. A key built at run time is outside the check. T
 `conflict-raised-without-record` knows the conflict classes by name, also with a module prefix.
 It does not see a conflict that is raised from a variable. When you add a `TransactionConflict`
 subclass, add its name to the rule and a fixture line.
+
+`sync-tab-url-through-sync-query` reads the source text, so it also reports a comment that
+writes such a query. It does not see a query that code builds from parts, such as `"?" + "tab="`,
+a key in a variable, or a URL that a script builds. The navigation contract tests
+(`tests/test_sync_filter_navigation_contract.py`) render each sync tab and check every link, form
+and `hx-*` URL; they cover those cases, and a missing page key in a URL that `sync_query` builds.
 
 `no-lock-on-exists` checks one method chain. It does not see a locked queryset in a variable that a
 later statement ends with `exists()` or `count()`.

@@ -1789,6 +1789,27 @@ rules:
       - pattern: document.querySelector("=~/server_key/")
       - pattern: document.querySelectorAll("=~/server_key/")
       - pattern: document.getElementsByName("server_key")
+  - id: sync-tab-url-through-sync-query
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      This code writes a sync tab query string by hand, so the link drops the filters, pages and
+      other state of the sync page. Build it with the sync_tab_url tag, SyncQuery or
+      page_query_url from sync_query.py. The Modules tab is outside this check: its module action
+      redirect keeps its own query.
+    metadata:
+      category: correctness
+    paths:
+      include:
+        - "*.py"
+        - "*.html"
+      exclude:
+        - "**/tests/**"
+        - "**/sync_query.py"
+        - "**/views/sync/modules.py"
+    patterns:
+      # A tab key right after "?", "&", "&amp;" or a template tag that follows "?".
+      - pattern-regex: (?:[?&]|&amp;|\?\{%[^%]*%\})tab=
 
   - id: batch-validation-needs-candidate-keys
     languages: [python]
