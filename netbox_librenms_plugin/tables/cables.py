@@ -7,7 +7,8 @@ from django.utils.safestring import mark_safe
 from netbox.tables.columns import ToggleColumn
 
 from netbox_librenms_plugin.constants import SERIAL_INVENTORY_SOURCE
-from netbox_librenms_plugin.sync_filters import UNCLASSIFIED, FilterColumn, FilterSpec
+from netbox_librenms_plugin.constants import UNCLASSIFIED
+from netbox_librenms_plugin.sync_filters import FilterColumn, FilterSpec
 from netbox_librenms_plugin.utils import (
     oob_badge_html,
     paginate_sync_table,

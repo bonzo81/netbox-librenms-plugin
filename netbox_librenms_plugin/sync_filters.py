@@ -13,22 +13,18 @@ from urllib.parse import urlencode
 
 from django import forms
 
+from netbox_librenms_plugin.constants import MATCHING, MISMATCHED, NOT_IN_NETBOX
+from netbox_librenms_plugin.utils import get_interface_name_field
+
 # The text one filter field accepts, in characters.
 MAX_FILTER_TEXT = 256
 
-# The sync-state values every tab maps its own row states onto.
-MATCHING = "matching"
-MISMATCHED = "mismatched"
-NOT_IN_NETBOX = "not_in_netbox"
 SYNC_STATE_CHOICES = (
     ("", "All"),
     (MATCHING, "Matching"),
     (MISMATCHED, "Mismatched"),
     (NOT_IN_NETBOX, "Not in NetBox"),
 )
-# The state of a row that no sync-state choice shows, for a tab that stores the state on the row.
-UNCLASSIFIED = "unclassified"
-
 # The empty text of a filtered table that has no row.
 NO_MATCH_TEXT = "No rows match these filters"
 
@@ -270,8 +266,6 @@ def filter_sync_table(request, owner, rows, build_table, **signature_context):
             before the filter (None when no filter narrows the table).
 
     """
-    from netbox_librenms_plugin.utils import get_interface_name_field  # utils imports this module
-
     table = build_table(rows)
     spec = table.filter_spec()
     filters = parse_sync_filters(request.GET, spec)
