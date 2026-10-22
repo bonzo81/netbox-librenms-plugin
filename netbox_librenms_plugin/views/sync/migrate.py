@@ -13,7 +13,7 @@ appropriate NetBox model permission on the object being moved.
 """
 
 import logging
-from urllib.parse import quote_plus
+from urllib.parse import urlencode
 
 from dcim.models import CableTermination, Device, Interface
 from django.contrib import messages
@@ -165,14 +165,14 @@ def _sync_tab_url(device_pk, tab, server_key):
     Returns:
         str: The sync URL with ``tab`` (and a validated ``server_key``) query params.
     """
-    url = f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[device_pk])}?tab={tab}"
+    query = {"tab": tab}
     # Re-source the key from the trusted config rather than reflecting the raw POST value: append it
     # only when it matches a configured server (a stale/tampered key resolves to None and is dropped).
     # The allowlist policy is shared with device_fields._sync_redirect via resolve_configured_server_key.
     configured_key = resolve_configured_server_key(server_key)
     if configured_key:
-        url += f"&server_key={quote_plus(configured_key)}"
-    return url
+        query["server_key"] = configured_key
+    return f"{reverse('plugins:netbox_librenms_plugin:device_librenms_sync', args=[device_pk])}?{urlencode(query)}"
 
 
 def _safe_referer(request, fallback=None):
