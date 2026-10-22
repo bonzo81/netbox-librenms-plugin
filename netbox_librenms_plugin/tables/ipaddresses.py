@@ -7,6 +7,7 @@ from netbox.tables.columns import ToggleColumn
 
 from netbox_librenms_plugin.constants import MATCHING, MISMATCHED, NOT_IN_NETBOX
 from netbox_librenms_plugin.sync_filters import FilterColumn, FilterSpec
+from netbox_librenms_plugin.sync_query import SyncQuery
 from netbox_librenms_plugin.utils import paginate_sync_table, rule_block_html, rule_block_label
 
 # The sync-state filter value of each row status; every other status is unclassified.
@@ -122,7 +123,6 @@ class IPAddressTable(tables.Table):
     )
     vrf = tables.TemplateColumn(
         template_code="""
-        {% load librenms_sync_query %}
         <div class="d-flex align-items-center gap-1">
             <select id="vrf_select_{{ record.row_id }}" class="form-select vrf-select" data-ip="{{ record.ip_address }}" data-prefix="{{ record.prefix_length }}" data-row-id="{{ record.row_id }}" name="vrf_{{ record.row_id }}">
                 <option value="">Global</option>
@@ -139,7 +139,7 @@ class IPAddressTable(tables.Table):
             {% endif %}
             {% if record.offers_vrf_create %}
                 <button type="submit" class="btn btn-sm btn-outline-primary text-nowrap" name="create_vrf" value="{{ record.row_id }}"
-                        formaction="{% sync_tab_url record.vrf_create_url %}"
+                        formaction="{{ record.vrf_create_action }}"
                         data-confirm="Create NetBox VRF '{{ record.librenms_vrf.name }}' with {% if record.librenms_vrf.rd %}route distinguisher {{ record.librenms_vrf.rd }}{% else %}no route distinguisher{% endif %}? The IP address is not synced."
                         title="LibreNMS VRF {{ record.librenms_vrf.name }} is not in NetBox. Create it."
                         aria-label="Create NetBox VRF {{ record.librenms_vrf.name }}"><i class="mdi mdi-plus-thick" aria-hidden="true"></i> {{ create_vrf_label }}</button>
@@ -211,8 +211,11 @@ class IPAddressTable(tables.Table):
 
     def render_vrf(self, column, record, table, value, bound_column, bound_row):
         """Render the VRF cell; the create button follows the rule that the text function reads."""
+        offers = self.offers_vrf_create(record)
+        # Built here: django-tables2 before 2.8 does not give a TemplateColumn the request.
+        action = SyncQuery.from_request(table.request).url(record["vrf_create_url"]) if offers else ""
         return column.render(
-            record={**record, "offers_vrf_create": self.offers_vrf_create(record)},
+            record={**record, "offers_vrf_create": offers, "vrf_create_action": action},
             table=table,
             value=value,
             bound_column=bound_column,
