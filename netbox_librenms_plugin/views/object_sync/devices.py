@@ -3,7 +3,6 @@ import copy
 from dcim.models import Device, Interface
 from django.core.cache import cache
 from django.http import JsonResponse
-from django.urls import reverse
 from django.views import View
 from ipam.models import VLAN, VLANGroup
 from utilities.permissions import get_permission_for_model
@@ -108,10 +107,6 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
     def get_interfaces(self, obj):
         """Return all interfaces for the device."""
         return obj.interfaces.all()
-
-    def get_redirect_url(self, obj):
-        """Return the device interface sync redirect URL."""
-        return reverse("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": obj.pk})
 
     def get_table(self, data, obj, interface_name_field, vlan_groups=None):
         """Return the appropriate interface table, selecting VC variant if needed."""
