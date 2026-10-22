@@ -27,6 +27,9 @@ SYNC_STATE_CHOICES = (
     (NOT_IN_NETBOX, "Not in NetBox"),
 )
 
+# The empty text of a filtered table that has no row.
+NO_MATCH_TEXT = "No rows match these filters"
+
 QUERY_FIELD = "q"
 SYNC_STATE_FIELD = "sync_state"
 COLUMN_FIELD_PREFIX = "filter_"
@@ -39,7 +42,7 @@ class FilterColumn:
     name: str
     label: str
     text: Callable[[dict], str]
-    # A column that has no header (for example the actions column) is searched by ``q`` only.
+    # A column without its own field (for example an actions column) is searched by ``q`` only.
     has_field: bool = True
 
 
@@ -220,3 +223,38 @@ def filter_sync_rows(rows, filters, spec):
         return not query or any(query in normalize_filter_text(column.text(row)) for column in spec.columns)
 
     return [row for row in rows if matches(row)]
+
+
+def filter_sync_table(query, rows, build_table, **signature_context):
+    """
+    Return the table of the rows that match the tab's filters in *query*, its filters, and the row count before them.
+
+    The table owns the cell text functions, so a table of every row gives the filter spec, and a
+    second table shows the matches. The table attributes tell the browser whether a filter is active
+    and which selection store the table uses.
+
+    Args:
+        query (QueryDict): The request query.
+        rows (list[dict]): Every row of the whole snapshot, prepared for display.
+        build_table (Callable[[list[dict]], Table]): Returns a table of the given rows. The table has
+            ``filter_spec()``.
+        **signature_context: Other page state that decides which rows the table holds (see
+            ``SyncFilters.signature``).
+
+    Returns:
+        tuple[Table, SyncFilters, int | None]: The table to show, the bound filters, and the row count
+            before the filter (None when no filter narrows the table).
+
+    """
+    table = build_table(rows)
+    spec = table.filter_spec()
+    filters = parse_sync_filters(query, spec)
+    filtered_from = None
+    if filters.active:
+        filtered_from = len(rows)
+        table = build_table(filter_sync_rows(rows, filters, spec))
+        table.empty_text = NO_MATCH_TEXT
+    table.attrs["data-filter-active"] = "true" if filters.active else "false"
+    # A new filter starts an empty browser selection.
+    table.attrs["data-filter-signature"] = filters.signature(**signature_context)
+    return table, filters, filtered_from
