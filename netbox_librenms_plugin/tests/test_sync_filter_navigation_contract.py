@@ -488,23 +488,12 @@ def test_a_server_switch_keeps_only_the_tab_page_sizes_and_sorts(client, setting
     assert set(query) == {*kept, "server_key"}, url
 
 
-def _signatures(client, owner, field):
-    """Return the selection signature of each tab table that the full sync page renders, by table ID."""
-    response = client.get(
-        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[owner.pk]),
-        {"server_key": SERVER_KEY, "interface_name_field": field},
-    )
-    assert response.status_code == 200
-    return dict(re.findall(r'<table[^>]*id="([^"]+)"[^>]*data-filter-signature="([^"]*)"', response.content.decode()))
-
-
-@pytest.mark.django_db
-def test_every_tab_signs_its_selection_with_the_interface_name_field(client, settings, librenms_server):
-    """A name field change is a new selection on every tab, so no tab can keep rows that its filter now drops."""
+def _four_tab_owner(client, settings, librenms_server):
+    """Return a device with a cached snapshot on the Interfaces, Cables, IP Addresses and VLANs tabs, and log in."""
     bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
-    client.force_login(make_superuser("signature-user"))
+    client.force_login(make_superuser("four-tab-user"))
     # The IP rows come from a refresh against the loopback LibreNMS, which serves the device as ID 42.
-    owner = make_device("signature-device", librenms_cf={SERVER_KEY: {"id": 42}})
+    owner = make_device("four-tab-device", librenms_cf={SERVER_KEY: {"id": 42}})
     _seed(owner, _contract_ports())
     cache.set(
         SyncVLANsView().get_cache_key(owner, "vlans", SERVER_KEY),
@@ -534,6 +523,23 @@ def test_every_tab_signs_its_selection_with_the_interface_name_field(client, set
         librenms_server,
         [{"address": "198.18.0.1", "prefix_length": 24, "port_id": 9100, "interface": "eth0"}],
     )
+    return owner
+
+
+def _signatures(client, owner, field):
+    """Return the selection signature of each tab table that the full sync page renders, by table ID."""
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[owner.pk]),
+        {"server_key": SERVER_KEY, "interface_name_field": field},
+    )
+    assert response.status_code == 200
+    return dict(re.findall(r'<table[^>]*id="([^"]+)"[^>]*data-filter-signature="([^"]*)"', response.content.decode()))
+
+
+@pytest.mark.django_db
+def test_every_tab_signs_its_selection_with_the_interface_name_field(client, settings, librenms_server):
+    """A name field change is a new selection on every tab, so no tab can keep rows that its filter now drops."""
+    owner = _four_tab_owner(client, settings, librenms_server)
 
     signatures = {field: _signatures(client, owner, field) for field in ("ifName", "ifDescr")}
 
@@ -541,3 +547,37 @@ def test_every_tab_signs_its_selection_with_the_interface_name_field(client, set
     assert set(signatures["ifName"]) == tables
     for table in tables:
         assert signatures["ifName"][table] != signatures["ifDescr"][table], table
+
+
+# The table of each tab, the cache data type of its snapshot, and its filter prefix.
+TAB_TABLES = {
+    "interfaces": ("librenms-interface-table", "ports"),
+    "cables": ("librenms-cable-table", "links"),
+    "ipaddresses": ("librenms-ipaddress-table", "ip_addresses"),
+    "vlans": ("librenms-vlan-table", "vlans"),
+}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("tab", sorted(TAB_TABLES))
+def test_an_invalid_filter_shows_its_errors_when_the_tab_has_no_snapshot(client, settings, librenms_server, tab):
+    owner = _four_tab_owner(client, settings, librenms_server)
+    table_id, data_type = TAB_TABLES[tab]
+    cache.delete(object.__new__(SyncCablesView).get_cache_key(owner, data_type, SERVER_KEY))
+    page_path = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[owner.pk])
+    query = {"tab": tab, "server_key": SERVER_KEY, f"{tab}_sync_state": "bogus"}
+
+    full = client.get(page_path, query)
+    swapped = client.get(page_path, query, HTTP_HX_REQUEST="true")
+
+    assert (full.status_code, swapped.status_code) == (400, 200)
+    for response in (full, swapped):
+        html = response.content.decode()
+        assert f'id="{tab}_filter-errors"' in html
+        assert re.search(rf'id="id_{tab}_sync_state"[^>]*aria-invalid="true"', html, re.S)
+        # The form keeps its Clear link, which drops the invalid filter.
+        clear = [hop["url"] for hop in _hops(html, tab).urls if hop["in_get_form"] and hop["tag"] == "a"]
+        assert clear and f"{tab}_sync_state" not in _query(clear[0])
+        # The target tab shows no table; every sibling tab renders its table.
+        tables = set(re.findall(r'<table[^>]*id="(librenms-[a-z]+-table)"', html))
+        assert tables == {table for table, _ in TAB_TABLES.values()} - {table_id}
