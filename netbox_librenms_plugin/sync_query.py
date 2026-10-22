@@ -7,6 +7,8 @@ follow-up request starts from the query of the page it was rendered for and stat
 changes. ``SyncQuery`` owns the reset rules: which keys a transition drops.
 """
 
+from django.utils.http import url_has_allowed_host_and_scheme
+
 from netbox_librenms_plugin.sync_filters import COLUMN_FIELD_PREFIX, QUERY_FIELD, SYNC_STATE_FIELD
 
 # Keys the whole page shares. Any other name a caller gives is relative to the tab prefix.
@@ -77,3 +79,25 @@ class SyncQuery:
         """Return the (key, value) pairs of the changed query, a repeated key once per value; see ``url``."""
         query = self._changed(changes, reset, prefix)
         return [(key, value) for key in query for value in query.getlist(key)]
+
+
+def page_query_url(request, path, changes=None):
+    """
+    Return *path* with the request's page query and *changes*, for a redirect back to the sync page.
+
+    The query comes from the request, so the URL must pass the open-redirect barrier (CWE-601).
+    A URL that does not pass gives the bare *path*, a trusted ``reverse()`` result.
+
+    Args:
+        request (HttpRequest): The request whose query is the page query.
+        path (str): The sync page path.
+        changes (dict | None): Page keys to set, such as ``tab`` and ``server_key``; see ``SyncQuery.url``.
+
+    Returns:
+        str: The local URL.
+
+    """
+    target = SyncQuery.from_request(request).url(path, changes)
+    if url_has_allowed_host_and_scheme(target, allowed_hosts={request.get_host()}, require_https=request.is_secure()):
+        return target
+    return path

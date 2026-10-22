@@ -10,7 +10,6 @@ from django.db import IntegrityError, transaction
 from django.http import Http404, JsonResponse
 from django.shortcuts import redirect
 from django.urls import reverse
-from django.utils.http import url_has_allowed_host_and_scheme
 from django.views import View
 from virtualization.models import VirtualMachine, VMInterface
 
@@ -64,7 +63,7 @@ from netbox_librenms_plugin.sync_cache import (
     apply_transition_to_response,
     schedule_request_cache_mutation,
 )
-from netbox_librenms_plugin.sync_query import SyncQuery
+from netbox_librenms_plugin.sync_query import page_query_url
 from netbox_librenms_plugin.transactions import CommittedFollowUpError, classify_conflict, run_transaction
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
@@ -524,15 +523,8 @@ class SyncInterfacesView(
                 if object_type == "device"
                 else "plugins:netbox_librenms_plugin:vm_librenms_sync"
             )
-            tab_path = reverse(url_name, kwargs={"pk": obj.pk})
             changes = {"tab": "interfaces", "interface_name_field": interface_name_field, "server_key": server_key}
-            target = SyncQuery.from_request(request).url(tab_path, changes)
-            # The query comes from the request, so the target passes the open-redirect barrier (CWE-601).
-            if url_has_allowed_host_and_scheme(
-                target, allowed_hosts={request.get_host()}, require_https=request.is_secure()
-            ):
-                return redirect(target)
-            return redirect(tab_path)
+            return redirect(page_query_url(request, reverse(url_name, kwargs={"pk": obj.pk}), changes))
 
         # Imported here: the object_sync views import this module's view stack.
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
