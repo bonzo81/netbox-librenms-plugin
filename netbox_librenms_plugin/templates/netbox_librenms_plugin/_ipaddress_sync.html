@@ -1,5 +1,6 @@
 {% load helpers %}
 {% load static %}
+{% load librenms_sync_query %}
 
 <!-- Action Buttons -->
 <div class="d-flex justify-content-end align-items-center mb-0 sync-tab-refresh-toolbar">
@@ -12,14 +13,16 @@
                 {% if has_librenms_id %}
                     {% with model_name=object|meta:"model_name" %}
                         {% if model_name == "device" %}
-                            <button hx-post="{% url 'plugins:netbox_librenms_plugin:device_ipaddress_sync' pk=object.pk %}"
+                            {% url 'plugins:netbox_librenms_plugin:device_ipaddress_sync' pk=object.pk as device_ipaddress_sync_path %}{% sync_tab_url device_ipaddress_sync_path as device_ipaddress_sync_url %}
+                            <button hx-post="{{ device_ipaddress_sync_url }}"
                                     hx-target="#ipaddress-sync-content"
                                     hx-include="[name='interface_name_field'], #ipaddress-sync-content [name='set-primary-ip-toggle'], #ipaddress-sync-content [name='create-missing-interfaces-toggle']"
                                     class="btn btn-outline-primary">
                                 Refresh IP Addresses
                             </button>
                         {% elif model_name == "virtualmachine" %}
-                            <button hx-post="{% url 'plugins:netbox_librenms_plugin:vm_ipaddress_sync' pk=object.pk %}"
+                            {% url 'plugins:netbox_librenms_plugin:vm_ipaddress_sync' pk=object.pk as vm_ipaddress_sync_path %}{% sync_tab_url vm_ipaddress_sync_path as vm_ipaddress_sync_url %}
+                            <button hx-post="{{ vm_ipaddress_sync_url }}"
                                     hx-target="#ipaddress-sync-content"
                                     hx-include="[name='interface_name_field'], #ipaddress-sync-content [name='set-primary-ip-toggle'], #ipaddress-sync-content [name='create-missing-interfaces-toggle']"
                                     class="btn btn-outline-primary">
