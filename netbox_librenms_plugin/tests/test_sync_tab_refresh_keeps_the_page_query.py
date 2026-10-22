@@ -13,7 +13,7 @@ import pytest
 from django.urls import reverse
 
 from netbox_librenms_plugin.tests.conftest import bind_librenms_server, make_device, make_superuser
-from netbox_librenms_plugin.tests.test_interface_filter_navigation_contract import _hops
+from netbox_librenms_plugin.tests.test_sync_filter_navigation_contract import _hops
 from netbox_librenms_plugin.tests.test_interface_sync_filters import _port
 from netbox_librenms_plugin.tests.test_interface_sync_filters import _seed as _seed_interfaces
 from netbox_librenms_plugin.tests.test_ip_address_sync_safety import _serve_librenms_ip_rows
