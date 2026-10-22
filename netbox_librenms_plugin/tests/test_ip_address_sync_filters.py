@@ -240,7 +240,23 @@ class TestWholeSnapshotData:
         assert _table_attr(filtered, "data-mgmt-rows") == _table_attr(unfiltered, "data-mgmt-rows")
         assert _table_attr(filtered, "data-filter-active") == "true"
         assert _table_attr(unfiltered, "data-filter-active") == "false"
-        assert _table_attr(filtered, "data-filter-signature") == "ipaddresses_q=eth6"
+        assert _table_attr(filtered, "data-filter-signature") == "interface_name_field=ifName&ipaddresses_q=eth6"
+
+    def test_the_selection_signature_changes_with_the_interface_name_field(self, client, settings, librenms_server):
+        bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
+        client = _client(client, "signature")
+        device = _mixed_owner("device", "signature", client, librenms_server)
+
+        signatures = {
+            field: _table_attr(
+                _tab(client, device, ipaddresses_q="eth", interface_name_field=field), "data-filter-signature"
+            )
+            for field in ("ifName", "ifDescr")
+        }
+
+        # The interface column follows the name field, so one filter can hold other rows under each field.
+        assert signatures["ifName"] != signatures["ifDescr"]
+        assert all(f"interface_name_field={field}" in signature for field, signature in signatures.items())
 
 
 def _sync_page_url(owner):
