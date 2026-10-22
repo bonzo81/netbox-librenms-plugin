@@ -2939,7 +2939,7 @@ class BaseCableTableView(
             self._disable_actions_for_migrated_owners(links_data, obj, cache_device, server_key)
 
         cache_expiry = self._cable_cache_expiry(cache_key)
-        table, filters, filtered_from = self._build_cable_table(request, links_data, obj, server_key)
+        table, filters, filtered_from = self._build_cable_table(request, links_data, obj)
         return {
             "table": table,
             "filters": filters,
@@ -3072,9 +3072,9 @@ class BaseCableTableView(
             return None
         return timezone.now() + timezone.timedelta(seconds=cache_ttl)
 
-    def _build_cable_table(self, request, links_data, obj, server_key):
+    def _build_cable_table(self, request, links_data, obj):
         """
-        Build the table of the rows that match the tab's filters, scoping its pagination/sort URL to the RESOLVED server.
+        Build the table of the rows that match the tab's filters, ordered and paginated for the request.
 
         The rows carry their row IDs and comparisons from the whole snapshot, so the filter runs after them.
 
@@ -3085,13 +3085,6 @@ class BaseCableTableView(
         table, filters, filtered_from = filter_sync_table(
             request.GET, links_data, lambda rows: self.get_table(rows, obj)
         )
-        # Build the follow-up HTMX URL (pagination/sorting) on the RESOLVED server scope —
-        # not the lazy session client, which can point at a different server after a failed
-        # rebind or a global switch, silently swapping the dataset mid-view. Set here rather
-        # than in a get_table override: DeviceCableTableView overrides get_table without
-        # calling super, so a base-class override never ran for the device tab (htmx_url
-        # stayed None). quote_plus mirrors ip_addresses_view (a key isn't a guaranteed slug).
-        table.htmx_url = f"{request.path}?tab=cables" + (f"&server_key={quote_plus(server_key)}" if server_key else "")
         table.configure(request)
         return table, filters, filtered_from
 
@@ -3810,10 +3803,5 @@ class CableRemotePickerView(BaseCableTableView):
         context = view._prepare_context(request, obj, fetch_fresh=False, server_key=resolved_key)
         if context is None:
             context = {"table": None, "object": obj, "cache_expiry": None, "server_key": resolved_key}
-        elif context.get("table") is not None:
-            tab_url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[obj.pk])
-            context["table"].htmx_url = f"{tab_url}?tab=cables" + (
-                f"&server_key={quote_plus(resolved_key)}" if resolved_key else ""
-            )
         context["close_modal"] = True
         return view.render_sync_partial(request, obj, resolved_key, {"cable_sync": context})

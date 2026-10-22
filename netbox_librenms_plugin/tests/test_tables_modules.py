@@ -660,7 +660,6 @@ class TestTableLifecycle:
         assert table.device == device
         assert table.tab == "modules"
         assert table.prefix == "modules_"
-        assert table.htmx_url is None
         assert table.columns["selection"].column.visible is True
         assert read_only.columns["selection"].column.visible is False
 

@@ -211,7 +211,6 @@ class LibreNMSInterfaceTable(tables.Table):
             **kwargs,
         )
         self.tab = "interfaces"
-        self.htmx_url = None
         self.prefix = "interfaces_"
 
     selection = ToggleColumn(

@@ -130,7 +130,6 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
                 server_key=server_key,
                 user=self.request.user,
             )
-        table.htmx_url = f"{self.request.path}?tab=interfaces" + (f"&server_key={server_key}" if server_key else "")
         return table
 
 
@@ -922,5 +921,4 @@ class DeviceModuleTableView(BaseModuleTableView):
                 has_write_permission and user.has_perm("netbox_librenms_plugin.change_inventoryignorerule")
             ),
         )
-        table.htmx_url = f"{self.request.path}?tab=modules" + (f"&server_key={server_key}" if server_key else "")
         return table
