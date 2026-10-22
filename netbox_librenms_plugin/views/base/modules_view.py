@@ -334,6 +334,11 @@ def _sits_at_chassis_level(item: dict, parent_item: dict | None, index_map: dict
     return current.get("entPhysicalClass") == "chassis"
 
 
+def _passes_through_slot_containers(ancestor: dict) -> bool:
+    """Return whether the walk to the chassis may look through *ancestor*: only a slot container."""
+    return ancestor.get("entPhysicalClass") == "container"
+
+
 def _passes_to_the_chassis(device_identity: DeviceIdentity):
     """Return the ancestor test of the model rule: a slot container or another built-in unit."""
     return lambda ancestor: (
@@ -378,10 +383,11 @@ def built_in_candidate(item: dict, index_map: dict, device_identity: DeviceIdent
     """
     Return the "Mark built-in" candidate of a row, or None.
 
-    A candidate is a main-inventory unit of a module class that matched no bay and reports a model. It sits at
-    chassis level as the model rule walks: directly below the chassis, or through slot containers and other
-    built-in units. When its model is not the model or part number of the target device type, the mark records
-    the model as the part number; otherwise the mark only adds the rule.
+    A candidate is a main-inventory unit of a module class that matched no bay and reports a model. When its model
+    is the model or part number of the target device type, it sits at chassis level as the model rule walks:
+    directly below the chassis, or through slot containers and other built-in units; the mark only adds the rule.
+    Otherwise the mark records the model as the part number, so the unit must reach the chassis through slot
+    containers only: below a built-in unit, the device type already names the chassis.
 
     Args:
         item (dict): The inventory item of the row.
@@ -401,10 +407,12 @@ def built_in_candidate(item: dict, index_map: dict, device_identity: DeviceIdent
         return None
     model = _clean_librenms_value(item.get("entPhysicalModelName"))
     parent = index_map.get(item.get("entPhysicalContainedIn"))
-    passes = _passes_to_the_chassis(device_identity)
+    records_part_number = model.casefold() not in device_identity.type_models
+    # Below a built-in unit the device type already names the chassis, so another model is no chassis part number.
+    passes = _passes_through_slot_containers if records_part_number else _passes_to_the_chassis(device_identity)
     if not model or not _sits_at_chassis_level(item, parent, index_map, passes=passes):
         return None
-    return BuiltInCandidate(model, records_part_number=model.casefold() not in device_identity.type_models)
+    return BuiltInCandidate(model, records_part_number=records_part_number)
 
 
 def reusable_built_in_rule(rules):
