@@ -1,6 +1,8 @@
 """Browser checks for the server-side sync tab filters: the selection store, repaint marks and navigation."""
 
 import json
+from pathlib import Path
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 from playwright.sync_api import expect
@@ -20,7 +22,7 @@ def _serve(page, html, url=PAGE_URL):
     _add_page_scripts(page)
 
 
-def _selection_page(signature, port_ids):
+def _selection_page(scope, port_ids):
     rows = "".join(
         f'<tr data-port-id="{port_id}"><td data-col="selection">'
         f'<input type="checkbox" name="select" value="{port_id}" id="cb-{port_id}"></td></tr>'
@@ -28,26 +30,32 @@ def _selection_page(signature, port_ids):
     )
     return f"""<!doctype html><html><body>
         <input type="hidden" name="server_key" value="default">
-        <form method="post"><table id="{TABLE}" data-filter-signature="{signature}"><tbody>{rows}</tbody></table></form>
+        <form method="post"><table id="{TABLE}" data-selection-scope="{scope}"><tbody>{rows}</tbody></table></form>
         </body></html>"""
 
 
-def test_a_new_filter_starts_an_empty_selection_and_the_old_filter_keeps_its_own(page):
-    _serve(page, _selection_page("interfaces_q=eth", ["101", "102"]))
+def test_the_selection_follows_the_user_across_filters_and_a_new_name_field_starts_an_empty_one(page):
+    # The server renders one scope for every filter of the tab: only the name field and the ignored toggle change it.
+    _serve(page, _selection_page("interface_name_field=ifName", ["101", "102"]))
     page.evaluate("initializeCheckboxes()")
     page.check("#cb-101")
 
-    # Another filter renders other rows; the row checked under the first filter is not carried over.
-    _serve(page, _selection_page("interfaces_q=po", ["201"]))
-    page.evaluate("initializeCheckboxes()")
-    assert page.evaluate(f"offPageSelectionKeys(document.getElementById('{TABLE}'))") == []
-    assert page.locator(f"#{TABLE}-offpage-selection").count() == 0
-
-    # The first filter on another page still holds its row, and the notice counts it.
-    _serve(page, _selection_page("interfaces_q=eth", ["103"]))
+    # Another filter shows other rows: the checked row stays selected, and the notice counts it.
+    _serve(page, _selection_page("interface_name_field=ifName", ["201"]))
     page.evaluate("initializeCheckboxes()")
     assert page.evaluate(f"offPageSelectionKeys(document.getElementById('{TABLE}'))") == ["101"]
     expect(page.locator(f"#{TABLE}-offpage-selection")).to_be_visible()
+
+    # A filter that shows the row again shows it checked.
+    _serve(page, _selection_page("interface_name_field=ifName", ["101", "201"]))
+    page.evaluate("initializeCheckboxes()")
+    expect(page.locator("#cb-101")).to_be_checked()
+
+    # Another name field names other rows, so it starts an empty selection.
+    _serve(page, _selection_page("interface_name_field=ifDescr", ["101"]))
+    page.evaluate("initializeCheckboxes()")
+    expect(page.locator("#cb-101")).not_to_be_checked()
+    assert page.locator(f"#{TABLE}-offpage-selection").count() == 0
 
 
 CELLS = ("name", "type", "speed", "mac_address", "mtu", "enabled", "description", "vlans", "librenms_id")
@@ -405,7 +413,7 @@ def _ip_selection_page(signature, row_ids):
     return f"""<!doctype html><html><body>
         <input type="hidden" name="server_key" value="default">
         <form method="post" action="{IP_SUBMIT_PATH}">
-          <table id="{IP_TABLE}" data-mgmt-rows="[]" data-filter-signature="{signature}"><tbody>{rows}</tbody></table>
+          <table id="{IP_TABLE}" data-mgmt-rows="[]" data-selection-scope="{signature}"><tbody>{rows}</tbody></table>
           <button type="submit" id="sync">Sync</button>
         </form></body></html>"""
 
@@ -551,7 +559,7 @@ def _cable_selection_page(signature, row_ids):
     return f"""<!doctype html><html><body>
         <input type="hidden" name="server_key" value="default">
         <form method="post" action="{CABLE_SUBMIT_PATH}">
-          <table id="librenms-cable-table" data-filter-signature="{signature}"><tbody>{rows}</tbody></table>
+          <table id="librenms-cable-table" data-selection-scope="{signature}"><tbody>{rows}</tbody></table>
           <button type="submit" id="sync">Sync</button>
         </form></body></html>"""
 
@@ -600,3 +608,217 @@ def test_apply_clears_the_stale_marks_and_a_later_repaint_marks_again(page):
     expect(page.locator('tr[data-port-id="101"][data-filter-stale="true"]')).to_have_count(1)
     expect(page.locator(".filter-stale-badge")).to_have_count(1)
     expect(page.locator(f"#{TABLE}-filter-stale-notice")).to_have_count(1)
+
+
+TEMPLATES_ROOT = Path(__file__).parents[2] / "templates"
+# The rest of the page query but the server key, which the form sends in hx-vals.
+OTHER_STATE = [("tab", "interfaces"), ("cables_q", "keep")]
+FILTER_ENDPOINT = "https://plugin.example.com/plugins/librenms_plugin/device/1/sync-tab-filter/interfaces/"
+
+
+def _filter_form_class():
+    from django import forms
+
+    class InterfaceFilterForm(forms.Form):
+        """The shape of SyncFilterForm for the interfaces tab, which the browser suite cannot import."""
+
+        q = forms.CharField(label="Search", required=False)
+        sync_state = forms.ChoiceField(
+            label="Sync state", required=False, choices=[("", "All sync states"), ("mismatched", "Mismatched")]
+        )
+        filter_name = forms.CharField(label="Name", required=False)
+
+        def add_prefix(self, field_name):
+            return f"{self.prefix}{field_name}"
+
+        @property
+        def column_fields(self):
+            return [self["filter_name"]]
+
+        @property
+        def columns_have_input(self):
+            return bool(self["filter_name"].value())
+
+    return InterfaceFilterForm
+
+
+def _filter_tab(query):
+    """Render the interfaces tab head with the real filter templates for *query*, a dict of the filter values."""
+    from django.conf import settings
+    from django.template import Context, Engine, Library
+
+    if not settings.configured:
+        settings.configure(USE_I18N=False, USE_TZ=True)
+    sync_query = Library()
+    sync_query.simple_tag(lambda *args, **kwargs: OTHER_STATE, name="sync_tab_query_items")
+    sync_query.simple_tag(lambda *args, **kwargs: "?tab=interfaces", name="sync_tab_url")
+    # The browser suite has no URLconf and no NetBox, so the filter endpoint URL and ``meta`` are stubs.
+    stubs = Library()
+    stubs.simple_tag(lambda *args, **kwargs: FILTER_ENDPOINT, name="url")
+    helpers = Library()
+    helpers.filter("meta", lambda owner, name: "device")
+    engine = Engine(dirs=[str(TEMPLATES_ROOT)])
+    engine.template_builtins.append(stubs)
+    engine.template_libraries["librenms_sync_query"] = sync_query
+    engine.template_libraries["helpers"] = helpers
+
+    form = _filter_form_class()(query, prefix="interfaces_")
+    form.is_valid()
+    filters = SimpleNamespace(form=form, active=any(query.values()), in_use=any(query.values()))
+    context = Context(
+        {
+            "filters": filters,
+            "prefix": "interfaces_",
+            "tab": "interfaces",
+            "section_id": "interfaceFilterSection",
+            "label": "Filter interfaces",
+            "owner": SimpleNamespace(pk=1),
+            "content_id": "interface-sync-content",
+            "server_key": "primary",
+        }
+    )
+
+    def render(name):
+        return engine.get_template(f"netbox_librenms_plugin/inc/{name}.html").render(context)
+
+    return f"""{render("_sync_filter_form")}
+        <form method="post" id="sync-form" action="/sync/">
+          <input type="hidden" name="csrfmiddlewaretoken" value="token">
+          <div class="sync-tab-primary-toolbar"><button type="submit" id="sync">Sync</button>
+            {render("_sync_filter_controls")}</div>
+          {render("_sync_filter_panel")}
+          <table id="{TABLE}" data-rendered-q="{query.get("interfaces_q", "")}"></table>
+        </form>"""
+
+
+def _filter_page(query):
+    tab = f'<div id="librenms-sync-tabs"><div id="interface-sync-content">{_filter_tab(query)}</div></div>'
+    return f"<!doctype html><html><body>{tab}</body></html>"
+
+
+def _serve_filter_tab(page):
+    """Serve the tab, and hold each filter request until the test answers it with the tab for its query."""
+    held = []
+    page.route(
+        f"{PAGE_URL}**", lambda route: route.fulfill(status=200, content_type="text/html", body=_filter_page({}))
+    )
+    page.route(f"{FILTER_ENDPOINT}**", lambda route: held.append(route))
+    page.goto(f"{PAGE_URL}?tab=interfaces&server_key=primary&cables_q=keep")
+    _add_page_scripts(page)
+    return held
+
+
+def _next_request(page, held, count):
+    for _ in range(100):
+        if len(held) >= count:
+            return held[count - 1]
+        page.wait_for_timeout(50)
+    raise AssertionError(f"no filter request {count}: {[route.request.url for route in held]}")
+
+
+def _answer(route):
+    """Answer like the filter endpoint: the tab content, and the page URL with the request query to push."""
+    split = urlsplit(route.request.url)
+    query = {key: values[0] for key, values in parse_qs(split.query).items()}
+    route.fulfill(
+        status=200,
+        content_type="text/html",
+        headers={"HX-Push-Url": f"{PAGE_URL}?{split.query}"},
+        body=_filter_tab(query),
+    )
+
+
+def test_typing_in_the_search_filters_the_tab_without_a_submit(page):
+    held = _serve_filter_tab(page)
+    search = page.locator("#id_interfaces_q")
+    search.press_sequentially("et")
+
+    route = _next_request(page, held, 1)
+    # The request goes to the tab filter endpoint, with the rest of the page query, no page number and no empty field.
+    assert route.request.url == f"{FILTER_ENDPOINT}?tab=interfaces&cables_q=keep&interfaces_q=et&server_key=primary"
+    assert route.request.headers["hx-request"] == "true"
+
+    # A character typed while the request runs stays in the search and filters again.
+    search.press_sequentially("h")
+    _answer(route)
+    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "et")
+    expect(search).to_have_value("eth")
+    expect(search).to_be_focused()
+    _answer(_next_request(page, held, 2))
+    assert parse_qs(urlsplit(held[1].request.url).query)["interfaces_q"] == ["eth"]
+    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "eth")
+    assert parse_qs(urlsplit(page.url).query)["interfaces_q"] == ["eth"]
+    expect(search).to_have_value("eth")
+
+
+def test_a_sync_state_choice_filters_the_tab_at_once(page):
+    held = _serve_filter_tab(page)
+    page.select_option("#id_interfaces_sync_state", "mismatched")
+
+    route = _next_request(page, held, 1)
+    assert parse_qs(urlsplit(route.request.url).query)["interfaces_sync_state"] == ["mismatched"]
+    _answer(route)
+    expect(page.locator("#id_interfaces_sync_state")).to_have_value("mismatched")
+    assert parse_qs(urlsplit(page.url).query)["interfaces_sync_state"] == ["mismatched"]
+
+
+def test_the_column_filters_wait_for_apply(page):
+    held = _serve_filter_tab(page)
+    page.fill("#id_interfaces_filter_name", "xe")
+    page.wait_for_timeout(700)
+    assert held == []
+
+    page.click("#interfaceFilterSection button[type=submit]")
+    route = _next_request(page, held, 1)
+    assert parse_qs(urlsplit(route.request.url).query)["interfaces_filter_name"] == ["xe"]
+
+
+def test_the_sync_form_never_posts_the_filter_fields(page):
+    _serve_filter_tab(page)
+    page.fill("#id_interfaces_q", "eth")
+    page.fill("#id_interfaces_filter_name", "xe")
+
+    posted = page.evaluate("[...new FormData(document.getElementById('sync-form')).keys()]")
+    assert posted == ["csrfmiddlewaretoken"]
+
+
+def test_text_typed_between_the_swap_and_the_settle_is_kept(page):
+    held = _serve_filter_tab(page)
+    search = page.locator("#id_interfaces_q")
+    search.press_sequentially("et")
+    route = _next_request(page, held, 1)
+    # A key press after the swap and before htmx settles it, the moment the old restore used.
+    page.evaluate(
+        """() => document.addEventListener('htmx:afterSwap', () => setTimeout(() => {
+            const search = document.getElementById('id_interfaces_q');
+            search.value += 'x';
+            search.dispatchEvent(new Event('input', { bubbles: true }));
+        }, 0), { once: true })"""
+    )
+
+    _answer(route)
+
+    expect(search).to_have_value("etx")
+    assert parse_qs(urlsplit(_next_request(page, held, 2).request.url).query)["interfaces_q"] == ["etx"]
+
+
+def test_a_search_waits_for_the_running_request_and_then_sends_only_the_latest_text(page):
+    """The server cannot stop a request the browser drops, so the search never runs two at once."""
+    held = _serve_filter_tab(page)
+    search = page.locator("#id_interfaces_q")
+    search.press_sequentially("et")
+    first = _next_request(page, held, 1)
+
+    # Slow typing: each pause is longer than the delay, and the first request still runs.
+    for character in "-0/":
+        search.press_sequentially(character)
+        page.wait_for_timeout(700)
+    assert len(held) == 1
+
+    _answer(first)
+    second = _next_request(page, held, 2)
+    assert parse_qs(urlsplit(second.request.url).query)["interfaces_q"] == ["et-0/"]
+    _answer(second)
+    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "et-0/")
+    page.wait_for_timeout(700)
+    assert [parse_qs(urlsplit(route.request.url).query).get("interfaces_q") for route in held] == [["et"], ["et-0/"]]

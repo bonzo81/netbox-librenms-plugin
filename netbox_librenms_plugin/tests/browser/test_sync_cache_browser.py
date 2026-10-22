@@ -2919,6 +2919,24 @@ def test_refresh_forms_and_countdowns_live_in_the_swapped_content(tab):
     assert "_hidden_server_key.html" in refresh
 
 
+def test_the_search_line_shares_the_sync_row_and_clears_the_refresh_controls(page):
+    """Rendered live-search controls share the toolbar and wrap without overflow."""
+    from test_sync_toolbar_browser import load_tab
+
+    load_tab(page, "interface", "interface_sync")
+    page.set_viewport_size({"width": 1440, "height": 900})
+    actions = page.locator(".sync-tab-actions").bounding_box()
+    search = page.locator(".sync-filter-search").bounding_box()
+    refresh = page.locator(".sync-tab-refresh-toolbar button").bounding_box()
+    assert search["y"] == pytest.approx(actions["y"], abs=1)
+    assert refresh["y"] == pytest.approx(actions["y"], abs=1)
+    assert search["x"] + search["width"] < refresh["x"]
+    diagnostics = page.locator(".sync-tab-lead-row").bounding_box()
+    assert diagnostics["y"] >= refresh["y"] + refresh["height"]
+    page.set_viewport_size({"width": 390, "height": 900})
+    assert page.evaluate("document.documentElement.scrollWidth") <= 390
+
+
 def test_vlan_group_verification_ignores_a_late_response_for_an_old_selection(page):
     """A late group response must not replace the selected group's row state."""
     page.set_content(
@@ -5135,3 +5153,44 @@ def test_vlan_modal_warning_icons_are_named_by_their_titles(page):
         icon = icons.nth(index)
         assert icon.get_attribute("role") == "img"
         assert icon.get_attribute("aria-label") == icon.get_attribute("title")
+
+
+NETBOX_ONLY_URL = "https://plugin.example.com/netbox-only-interfaces/?server_key=primary"
+
+
+def _netbox_only_rows():
+    from django.conf import settings
+    from django.template import Context, Engine
+
+    if not settings.configured:
+        settings.configure(USE_I18N=False, USE_TZ=True)
+    engine = Engine(dirs=[str(TEMPLATE_DIR.parent)])
+    interfaces = [{"id": pk, "name": f"eth{pk}", "type": "Other", "enabled": True, "url": f"/i/{pk}/"} for pk in (1, 2)]
+    return engine.get_template("netbox_librenms_plugin/inc/_netbox_only_interfaces.html").render(
+        Context({"interface_sync": {"netbox_only_interfaces": interfaces}, "migrated_to_marker": None})
+    )
+
+
+def test_the_netbox_only_dialog_loads_its_rows_when_it_opens(page):
+    requests = []
+    page.route(
+        NETBOX_ONLY_URL,
+        lambda route: (requests.append(route.request.url), route.fulfill(body=_netbox_only_rows()))[-1],
+    )
+    page.set_content(
+        f"""<div id="netboxOnlyInterfacesModal" style="display: none">
+              <div id="netbox-only-interfaces-rows" hx-get="{NETBOX_ONLY_URL}" hx-trigger="intersect once"
+                   hx-swap="innerHTML">Loading interfaces</div>
+            </div>"""
+    )
+    _add_page_scripts(page)
+    page.wait_for_timeout(300)
+    # A closed dialog loads nothing: a filter render can leave thousands of rows out.
+    assert requests == []
+
+    page.locator("#netboxOnlyInterfacesModal").evaluate("dialog => { dialog.style.display = 'block'; }")
+
+    expect(page.locator(".netbox-interface-checkbox")).to_have_count(2)
+    page.check("#select-all-netbox-interfaces")
+    expect(page.locator(".netbox-interface-checkbox:checked")).to_have_count(2)
+    assert requests == [NETBOX_ONLY_URL]

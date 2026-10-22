@@ -18,7 +18,8 @@
         {% include "netbox_librenms_plugin/inc/_vlan_sync_refresh.html" with object=vlan_sync.object server_key=refresh_server_key %}
     </div>
 </div>
-{% if vlan_sync.vlan_table %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=vlan_sync.filters prefix="vlans_" tab="vlans" section_id="vlanFilterSection" label="Filter VLANs" %}{% endif %}
+{% if vlan_sync.vlan_table %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with owner=vlan_sync.object content_id="vlan-sync-content" server_key=vlan_sync.server_key filters=vlan_sync.filters prefix="vlans_" tab="vlans" section_id="vlanFilterSection" label="Filter VLANs" %}{% endif %}
+{% if vlan_sync.vlan_table %}{% include "netbox_librenms_plugin/inc/_sync_filter_panel.html" with owner=vlan_sync.object content_id="vlan-sync-content" server_key=vlan_sync.server_key filters=vlan_sync.filters prefix="vlans_" tab="vlans" section_id="vlanFilterSection" label="Filter VLANs" %}{% endif %}
 
 {% include "netbox_librenms_plugin/inc/_ipam_permission_notice.html" with hidden_ipam_permissions=vlan_sync.hidden_ipam_permissions vlan_scope_incomplete=vlan_sync.vlan_scope_incomplete %}
 

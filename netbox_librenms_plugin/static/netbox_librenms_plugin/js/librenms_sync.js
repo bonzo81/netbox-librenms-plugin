@@ -1875,10 +1875,10 @@ const SELECTABLE_TABLE_IDS = [
 /**
  * Build the sessionStorage key for one table.
  *
- * Scoped to the object being synced (the path), the table, the LibreNMS server, and the filter
- * signature the server renders on a filtered table, so two devices, two tabs, two servers or two
- * filters never share a selection. The page number, sort and page size are deliberately left out:
- * carrying the selection across pages is the whole point.
+ * Scoped to the object being synced (the path), the table, the LibreNMS server, and the selection
+ * scope the server renders on the table (the name field and the ignored toggle), so two devices, two
+ * tabs or two servers never share a selection. The page number, sort, page size and filters are left
+ * out: the selection follows the user across pages and filters.
  *
  * @param {HTMLElement} table - The table element.
  * @returns {string} The storage key.
@@ -1886,8 +1886,8 @@ const SELECTABLE_TABLE_IDS = [
 function _selectionStorageKey(table) {
     const serverKey = syncServerKey();
     const key = 'lnmsSelection:' + window.location.pathname + ':' + table.id + ':' + serverKey;
-    const signature = table.dataset.filterSignature;
-    return signature ? key + ':' + signature : key;
+    const scope = table.dataset.selectionScope;
+    return scope ? key + ':' + scope : key;
 }
 
 /**
@@ -4022,7 +4022,7 @@ function updateBulkActionButton() {
  *
  * The server chose the rows at the last load. A client-side repaint can change the text or the
  * state that the filter matched, and the cells alone cannot prove a match, so the row is marked
- * and never hidden or moved. Apply reloads the table and clears every mark.
+ * and never hidden or moved. A filter load renders the table again and clears every mark.
  *
  * @param {?HTMLTableRowElement} row - The repainted row.
  * @returns {void}
@@ -4057,7 +4057,7 @@ function showFilterStaleNotice(table) {
     notice.setAttribute('role', 'status');
     table.parentNode.insertBefore(notice, table);
     // The live region is in the page before its text changes, so a screen reader announces it.
-    notice.textContent = 'Results reflect the last load. Apply to update.';
+    notice.textContent = 'Results reflect the last load. Filter again or reload the page to update.';
 }
 
 // ============================================
@@ -4112,25 +4112,41 @@ function applyFilterDisclosureState(section, button, expanded) {
     }
 }
 
-function initializeSyncFilters() {
-    document.querySelectorAll('.sync-filter-form').forEach((form) => {
-        if (form.dataset.liveSearchBound) return;
-        form.dataset.liveSearchBound = 'true';
-        let timer;
-        const submit = () => { clearTimeout(timer); form.requestSubmit(); };
-        Array.from(form.elements).forEach((field) => {
-            if (field.type === 'search') {
-                field.addEventListener('input', () => {
-                    clearTimeout(timer);
-                    timer = setTimeout(submit, 400);
-                });
-            } else if (field.name.endsWith('_sync_state')) {
-                field.addEventListener('change', submit);
-            }
-        });
-        form.addEventListener('submit', () => clearTimeout(timer));
-    });
-}
+// An empty field means no filter, so it stays out of the page URL that the response pushes.
+document.addEventListener('htmx:configRequest', function (event) {
+    if (event.detail.elt instanceof HTMLFormElement && event.detail.elt.matches('.sync-filter-form')) {
+        const parameters = event.detail.parameters;
+        [...parameters.keys()].filter(key => parameters.getAll(key).every(value => value === '')).forEach(key => parameters.delete(key));
+    }
+});
+
+// The swap renders the search with the value the request sent; text typed during the request comes back.
+let typedFilterSearch = null;
+
+document.addEventListener('htmx:beforeSwap', function () {
+    const active = document.activeElement;
+    typedFilterSearch = active?.matches?.('.sync-filter-search')
+        ? { id: active.id, value: active.value, start: active.selectionStart, end: active.selectionEnd }
+        : null;
+});
+
+// afterSwap runs in the task of the swap, so no key press comes between the swap and this restore.
+document.addEventListener('htmx:afterSwap', function () {
+    const typed = typedFilterSearch;
+    typedFilterSearch = null;
+    const search = typed && document.getElementById(typed.id);
+    if (!search || search.value === typed.value) return;
+    search.value = typed.value;
+    search.setSelectionRange(typed.start, typed.end);
+});
+
+// htmx binds the new filter form at settle, so a search that differs from the rendered one filters again then.
+document.addEventListener('htmx:afterSettle', function () {
+    const search = document.activeElement;
+    if (search?.matches?.('.sync-filter-search') && search.value !== search.defaultValue) {
+        search.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+});
 
 function initializeFilterDisclosures() {
     document.querySelectorAll('.sync-filter-toggle[aria-controls]').forEach((button) => {
@@ -4869,7 +4885,6 @@ function initializeScripts() {
     initializeVlanGroupSelects();
     initializeVlanModalSave();
     initializeFilterDisclosures();
-    initializeSyncFilters();
     initializeCountdowns();
     initializeCheckboxListeners();
     initializeBulkEditApply();

@@ -120,7 +120,7 @@ class TestMatching:
         assert list(_rows(html)) == ["vlan-057"]
         # The browser keys the selection on this text, so a selection never carries to another server.
         assert re.search(
-            r'<table[^>]*id="librenms-vlan-table"[^>]*data-filter-signature="[^"]*server_key=default', html
+            r'<table[^>]*id="librenms-vlan-table"[^>]*data-selection-scope="[^"]*server_key=default', html
         )
         assert re.search(r"Showing 1-1 of 1\s*\(filtered from 60\)", html)
 

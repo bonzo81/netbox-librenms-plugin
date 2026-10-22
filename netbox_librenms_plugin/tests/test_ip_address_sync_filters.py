@@ -240,9 +240,9 @@ class TestWholeSnapshotData:
         assert _table_attr(filtered, "data-mgmt-rows") == _table_attr(unfiltered, "data-mgmt-rows")
         assert _table_attr(filtered, "data-filter-active") == "true"
         assert _table_attr(unfiltered, "data-filter-active") == "false"
-        assert _table_attr(filtered, "data-filter-signature") == (
-            "interface_name_field=ifName&ipaddresses_q=eth6&server_key=default"
-        )
+        # The selection belongs to the tab, so a filter keeps the rows already selected.
+        assert _table_attr(filtered, "data-selection-scope") == "interface_name_field=ifName&server_key=default"
+        assert _table_attr(filtered, "data-selection-scope") == _table_attr(unfiltered, "data-selection-scope")
 
     def test_the_selection_signature_changes_with_the_interface_name_field(self, client, settings, librenms_server):
         bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
@@ -251,7 +251,7 @@ class TestWholeSnapshotData:
 
         signatures = {
             field: _table_attr(
-                _tab(client, device, ipaddresses_q="eth", interface_name_field=field), "data-filter-signature"
+                _tab(client, device, ipaddresses_q="eth", interface_name_field=field), "data-selection-scope"
             )
             for field in ("ifName", "ifDescr")
         }

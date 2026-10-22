@@ -21,7 +21,8 @@
         {% include "netbox_librenms_plugin/inc/_cable_sync_refresh.html" with object=cable_sync.object server_key=refresh_server_key %}
     </div>
 </div>
-{% if cable_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=cable_sync.filters prefix="cables_" tab="cables" section_id="cableFilterSection" label="Filter cables" %}{% endif %}
+{% if cable_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with owner=cable_sync.object content_id="cable-sync-content" server_key=cable_sync.server_key filters=cable_sync.filters prefix="cables_" tab="cables" section_id="cableFilterSection" label="Filter cables" %}{% endif %}
+{% if cable_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_panel.html" with owner=cable_sync.object content_id="cable-sync-content" server_key=cable_sync.server_key filters=cable_sync.filters prefix="cables_" tab="cables" section_id="cableFilterSection" label="Filter cables" %}{% endif %}
 
 <!-- Cable Sync Table -->
 {% if cable_sync.table %}

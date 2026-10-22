@@ -179,6 +179,8 @@ from .views import (
     CreateVRFFromIPRowView,
     SyncCablesView,
     SyncCacheFragmentView,
+    NetBoxOnlyInterfacesView,
+    SyncTabFilterView,
     SyncCacheStatusView,
     SyncInterfaceBridgeView,
     SyncInterfaceLagView,
@@ -221,6 +223,16 @@ urlpatterns = [
         "<str:object_type>/<int:pk>/sync-cache-fragment/<str:tab>/",
         SyncCacheFragmentView.as_view(),
         name="sync_cache_fragment",
+    ),
+    path(
+        "<str:object_type>/<int:pk>/sync-tab-filter/<str:tab>/",
+        SyncTabFilterView.as_view(),
+        name="sync_tab_filter",
+    ),
+    path(
+        "<str:object_type>/<int:pk>/netbox-only-interfaces/",
+        NetBoxOnlyInterfacesView.as_view(),
+        name="netbox_only_interfaces",
     ),
     path(
         "device/<int:device_id>/capture-data-shape/",
