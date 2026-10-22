@@ -22,6 +22,8 @@ Available for Devices. This tab uses LibreNMS link data to create NetBox cable c
 
 The `librenms_id` custom field on interfaces improves matching when interface names differ between NetBox and LibreNMS.
 
+The filter above the table works as on the Interfaces tab and searches every cable row of the device. **Sync state** shows the rows whose cable NetBox has, directly or through a patch path; the rows whose cable goes to another port, or still needs the LibreNMS cable tag; and the rows whose cable NetBox does not have. A row whose cable state you cannot view, whose far end is not in NetBox, or that a rule or the breakout check refuses is in no state. A sync, a remote-end pick or a remote-end create comes back to the same filters and page. A row whose Virtual Chassis member you change is marked **Changed since filtering**.
+
 ## IP Addresses
 
 Available for Devices and Virtual Machines. This tab creates IP addresses and assigns them to matching interfaces. It can also create a missing interface before assigning an address.
