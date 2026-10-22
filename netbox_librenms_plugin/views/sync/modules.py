@@ -14,6 +14,7 @@ from django.db import IntegrityError, models, transaction
 from django.http import HttpResponse, QueryDict
 from django.shortcuts import redirect, render
 from django.urls import reverse
+from django.utils.html import escape
 from django.views import View
 from utilities.exceptions import AbortRequest
 
@@ -3857,7 +3858,8 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
         except GrantRefused as exc:
             return HttpResponse(exc.refusal.message, status=400)
         except _ModuleActionRefused as exc:
-            return HttpResponse(exc.message, status=400)
+            # The refusal names the device type, which a user can edit.
+            return HttpResponse(escape(exc.message), status=400)
         self.required_object_permissions = {"GET": self._permissions(plan)}
         if error := self.require_object_permissions("GET"):
             return error

@@ -532,6 +532,47 @@ class TestMarkBuiltInWithAPartNumber:
         assert str(form["manufacturer"].value()) == str(device.device_type.manufacturer_id)
 
 
+def signed_mark_query(device, index, inventory=None):
+    """Return the query of a "Mark built-in" request for row *index* with a grant signed for the current state."""
+    from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+    from netbox_librenms_plugin.module_grants import (
+        ACTION_MARK_BUILT_IN,
+        RENDER_ATTRIBUTED,
+        module_inventory_snapshot_digest,
+        sign_module_grant,
+    )
+
+    token = sign_module_grant(
+        page_device_id=device.pk,
+        device_id=device.pk,
+        server_key=SERVER_KEY,
+        action=ACTION_MARK_BUILT_IN,
+        ent_index=index,
+        action_target={"device_type_id": device.device_type_id},
+        inventory_digest=module_inventory_snapshot_digest(inventory or ixr_inventory()),
+        policy_fingerprint=load_inventory_policy(device.pk).fingerprint,
+        render_mode=RENDER_ATTRIBUTED,
+    )
+    return {"server_key": SERVER_KEY, "selected_device_id": device.pk, "ent_index": index, "inventory_binding": token}
+
+
+class TestMarkBuiltInRefusalText:
+    def test_the_modal_refusal_escapes_the_device_type_name(self):
+        from netbox_librenms_plugin.tests.view_test_helpers import get, make_request
+        from netbox_librenms_plugin.views.sync.modules import MarkBuiltInView
+
+        device = ixr_device("ixr-refusal-markup", part_number="3HE00000AAAA01")
+        device.device_type.model = "IXR <img src=x onerror=alert(1)>"
+        device.device_type.save()
+
+        response = get(MarkBuiltInView(), make_request("get", signed_mark_query(device, SLOT_1)), pk=device.pk)
+
+        body = response.content.decode()
+        assert response.status_code == 400
+        assert "<img" not in body
+        assert "&lt;img src=x onerror=alert(1)&gt;" in body
+
+
 class TestMarkBuiltInPermissions:
     """The writer needs change on the device type and add (or change, when it reuses one) on the rule."""
 
@@ -573,6 +614,23 @@ class TestMarkBuiltInPermissions:
         mark(device, fields, user=user)
 
         assert (written(device) != before) is allowed
+
+    def test_every_object_permission_without_plugin_write_writes_nothing(self):
+        from dcim.models import Device, Interface, ModuleBay
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        device = ixr_device("ixr-perm-no-plugin-write", part_number="")
+        perms = [("view", Device), ("view", Interface), ("view", ModuleBay)]
+        perms += self._perms("change-device-type", "add-rule", "change-rule")
+        user = make_user_with_perms("ixr-perm-no-plugin-write", perms, plugin_write=False)
+        fields = modal_form(device, SLOT_1, user=make_superuser("ixr-perm-no-plugin-write-admin"))
+        before = written(device)
+
+        mark(device, fields, user=user)
+
+        assert written(device) == before
 
     @pytest.mark.parametrize(
         ("reuse", "perms"),
