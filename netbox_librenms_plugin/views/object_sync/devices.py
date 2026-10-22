@@ -111,7 +111,7 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
 
     def get_table(self, data, obj, interface_name_field, vlan_groups=None):
         """Return the appropriate interface table, selecting VC variant if needed."""
-        server_key = self.librenms_api.server_key
+        server_key = self._render_server_key()
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             table = VCInterfaceTable(
                 data,
