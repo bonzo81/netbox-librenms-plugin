@@ -486,3 +486,58 @@ def test_a_server_switch_keeps_only_the_tab_page_sizes_and_sorts(client, setting
     kept = ("tab", "interfaces_per_page", "interfaces_sort", "cables_per_page")
     _assert_keeps(query, kept, url, page_query)
     assert set(query) == {*kept, "server_key"}, url
+
+
+def _signatures(client, owner, field):
+    """Return the selection signature of each tab table that the full sync page renders, by table ID."""
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[owner.pk]),
+        {"server_key": SERVER_KEY, "interface_name_field": field},
+    )
+    assert response.status_code == 200
+    return dict(re.findall(r'<table[^>]*id="([^"]+)"[^>]*data-filter-signature="([^"]*)"', response.content.decode()))
+
+
+@pytest.mark.django_db
+def test_every_tab_signs_its_selection_with_the_interface_name_field(client, settings, librenms_server):
+    """A name field change is a new selection on every tab, so no tab can keep rows that its filter now drops."""
+    bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
+    client.force_login(make_superuser("signature-user"))
+    # The IP rows come from a refresh against the loopback LibreNMS, which serves the device as ID 42.
+    owner = make_device("signature-device", librenms_cf={SERVER_KEY: {"id": 42}})
+    _seed(owner, _contract_ports())
+    cache.set(
+        SyncVLANsView().get_cache_key(owner, "vlans", SERVER_KEY),
+        [{"vlan_vlan": 100, "vlan_name": "v100", "vlan_type": "ethernet", "vlan_state": 1}],
+        timeout=300,
+    )
+    cache.set(
+        object.__new__(SyncCablesView).get_cache_key(owner, "links", SERVER_KEY),
+        {
+            "links": [
+                {
+                    "_source": "main",
+                    "local_port_id": 9601,
+                    "local_port": "eth0",
+                    "remote_device": "peer",
+                    "remote_port": "xe-1",
+                }
+            ],
+            "snapshot_token": "signature",
+            "incomplete_sources": [],
+        },
+        timeout=300,
+    )
+    _refresh(
+        client,
+        owner,
+        librenms_server,
+        [{"address": "198.18.0.1", "prefix_length": 24, "port_id": 9100, "interface": "eth0"}],
+    )
+
+    signatures = {field: _signatures(client, owner, field) for field in ("ifName", "ifDescr")}
+
+    tables = {"librenms-interface-table", "librenms-cable-table", "librenms-ipaddress-table", "librenms-vlan-table"}
+    assert set(signatures["ifName"]) == tables
+    for table in tables:
+        assert signatures["ifName"][table] != signatures["ifDescr"][table], table
