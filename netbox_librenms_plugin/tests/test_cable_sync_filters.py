@@ -331,6 +331,25 @@ class TestCableComparison:
         assert {records[row_id]["cable_comparison"] for row_id in hidden} == {"unclassified"}
         assert records["1001"]["cable_comparison"] == NOT_IN_NETBOX
 
+    def test_a_tagged_serial_cable_whose_path_ends_at_a_panel_is_in_no_state(self, client, settings):
+        client = _superuser_client(client, settings, "cable-open-path")
+        device = _device("open-path")
+        console = make_device("cables-open-path-console")
+        ConsolePort.objects.create(device=console, name="con1")
+        csp = ConsoleServerPort.objects.create(device=device, name="ttyS1")
+        # The tagged cable ends at a patch panel whose rear port has no cable, so no console is reached.
+        _panel, front, _rear = make_patch_panel("cables-open-path-panel")
+        cable_together(csp, front).tags.add(librenms_cable_tag())
+        _seed(device, [make_serial_row(csp, console.name, device)])
+
+        record = _records(_fragment(client, device))[f"serial:{csp.pk}"]
+
+        assert record["cable_comparison"] == "unclassified"
+        # The tag still keeps the cable: the row offers no sync that re-points it.
+        assert (record["cable_status"], record["can_create_cable"]) == ("Cable Found", False)
+        assert record.get("netbox_remote_interface_id") is None
+        assert _rows(_tab(client, device, cables_sync_state=MATCHING)) == {}
+
     def test_a_row_the_rules_refuse_is_in_no_state(self, client, settings):
         client = _superuser_client(client, settings, "cable-rule-refused")
         device = _device("rule-refused")
