@@ -4843,7 +4843,7 @@ PHONE_WIDTH = 375
 # The Bootstrap utilities and TomSelect bootstrap5 rules that set how far the phone fixtures can shrink.
 PHONE_UTILITY_CSS = """
 *, ::before, ::after { box-sizing: border-box; }
-.container-fluid { padding: 0 12px; }
+.container-fluid { padding: 0 .5rem; }
 .card { border: 1px solid #ccc; }
 .d-flex { display: flex !important; }
 .align-items-center { align-items: center !important; }
@@ -4996,17 +4996,7 @@ PHONE_TABLES = {
 }
 
 
-@pytest.mark.parametrize(
-    "table_id",
-    [
-        pytest.param(
-            table_id,
-            # The VC member column keeps its 13rem minimum at phone width, so this table still overflows.
-            marks=pytest.mark.xfail(strict=True) if table_id == "librenms-cable-table-vc" else (),
-        )
-        for table_id in sorted(PHONE_TABLES)
-    ],
-)
+@pytest.mark.parametrize("table_id", sorted(PHONE_TABLES))
 def test_sync_table_fits_the_page_at_phone_width(page, table_id):
     """The phone rules are a viewport media query, so the viewport itself is 375 px wide."""
     spec = PHONE_TABLES[table_id]
