@@ -669,6 +669,19 @@ function syncCacheTabForContent(element) {
     return Object.entries(controller.contract || {}).find(([, spec]) => spec.content_id === element.id)?.[0];
 }
 
+/**
+ * Return the page query as htmx values: each key once, and a repeated key as an array of its values.
+ *
+ * @returns {Object<string, (string|string[])>} The query values by key.
+ */
+function pageQueryValues() {
+    const values = Object.create(null);
+    new URLSearchParams(window.location.search).forEach((value, key) => {
+        values[key] = key in values ? [].concat(values[key], value) : value;
+    });
+    return values;
+}
+
 // NetBox imports htmx as a module, so there is no htmx global and HTML written with innerHTML keeps
 // no hx- bindings. The pane's hidden [data-fragment-loader] lets htmx request and swap the fragment,
 // which binds the restored forms like every other swap.
@@ -688,7 +701,8 @@ function loadSyncCacheFragment(tab, statusGeneration = null, signal = null) {
     if (!pane || !content || !controller || !loader) return Promise.resolve();
     if (signal?.aborted) return Promise.reject(new Error('Cache fragment request aborted'));
     const requestGeneration = statusGeneration ?? controller.statusGeneration;
-    loader.setAttribute('hx-vals', JSON.stringify({ server_key: controller.root.dataset.serverKey }));
+    // The fragment renders for the page query, so it keeps the tab's filters, page and sort.
+    loader.setAttribute('hx-vals', JSON.stringify({ ...pageQueryValues(), server_key: controller.root.dataset.serverKey }));
     // The fragment carries return_url links built from HX-Current-URL (tables/modules.py), which htmx sends itself.
     // The generation header tells the body's htmx:afterSwap handler this swap answers a status check.
     const fragmentHeaders = {
@@ -1828,16 +1842,19 @@ const SELECTABLE_TABLE_IDS = [
 /**
  * Build the sessionStorage key for one table.
  *
- * Scoped to the object being synced (the path), the table, and the LibreNMS server, so two
- * devices, two tabs, or two servers never share a selection. The page number is deliberately
- * left out: carrying the selection across pages is the whole point.
+ * Scoped to the object being synced (the path), the table, the LibreNMS server, and the filter
+ * signature the server renders on a filtered table, so two devices, two tabs, two servers or two
+ * filters never share a selection. The page number, sort and page size are deliberately left out:
+ * carrying the selection across pages is the whole point.
  *
  * @param {HTMLElement} table - The table element.
  * @returns {string} The storage key.
  */
 function _selectionStorageKey(table) {
     const serverKey = syncServerKey();
-    return 'lnmsSelection:' + window.location.pathname + ':' + table.id + ':' + serverKey;
+    const key = 'lnmsSelection:' + window.location.pathname + ':' + table.id + ':' + serverKey;
+    const signature = table.dataset.filterSignature;
+    return signature ? key + ':' + signature : key;
 }
 
 /**
@@ -2319,8 +2336,9 @@ function updateOffPageSelectionNotice(table) {
         table.parentNode.insertBefore(notice, table);
     }
 
-    notice.querySelector('span').textContent =
-        count === 1 ? '1 more row is selected on another page.' : count + ' more rows are selected on other pages.';
+    notice.querySelector('span').textContent = count === 1
+        ? '1 more selected row is not shown on this page (another page, or excluded by the filter).'
+        : count + ' more selected rows are not shown on this page (another page, or excluded by the filter).';
 }
 
 /**
@@ -2582,7 +2600,7 @@ document.addEventListener('htmx:confirm', function (e) {
 });
 
 /**
- * Show a brief inline notice when a row's parent or aggregate is on another page.
+ * Show a brief inline notice when a row's parent or aggregate is not on the visible page.
  *
  * The relationship is applied when that interface already exists in NetBox, but an interface
  * NetBox does not have yet is only created by syncing its own row, so the notice says where to
@@ -2624,7 +2642,8 @@ function _showRequiredRowCrossPageNotice(relatedName, kind) {
     notice.appendChild(strong);
     notice.appendChild(
         document.createTextNode(
-            ' is on another page. Select it there if it is not in NetBox yet; this page keeps your selection.'
+            ' is not shown on this page (another page, or excluded by the filter). If it is not in NetBox yet,'
+            + ' show it and select it too; this page keeps your selection.'
         )
     );
     const closeBtn = document.createElement('button');
@@ -3077,6 +3096,7 @@ function initializeVlanModalSave() {
 
                     if (changed) {
                         btn.dataset.vlans = JSON.stringify(btnVlans);
+                        markFilterStaleRow(btn.closest('tr'));
                         // Update the tooltip and re-render inline summary colors
                         const summarySpan = btn.previousElementSibling;
                         if (summarySpan && summarySpan.tagName === 'SPAN') {
@@ -3423,7 +3443,8 @@ function handleInterfaceChange(select, value) {
         if (row) commitSelectionChange(row.closest('table'));
     };
 
-    fetch('/plugins/librenms_plugin/verify-interface/', {
+    // The page query rides along, so a repainted Rebind button posts back with the same filters and page.
+    fetch('/plugins/librenms_plugin/verify-interface/' + window.location.search, {
         method: 'POST',
         signal: controller.signal,
         headers: {
@@ -3504,8 +3525,8 @@ function handleInterfaceChange(select, value) {
                     row.dataset[datasetKey] = formattedRow[responseKey] ?? '';
                 });
                 initializeVlanGroupSelects();
-                initializeFilters();
                 initializeCheckboxListeners();
+                markFilterStaleRow(row);
                 // This member is now server-confirmed: record it as the rollback target and
                 // re-enable the relationship controls (the row HTML now matches this member).
                 select._lastVerifiedMember = value;
@@ -3957,6 +3978,52 @@ function updateBulkActionButton() {
 }
 
 // ============================================
+// FILTER STALE MARKS
+// ============================================
+
+/**
+ * Mark a repainted row of a filtered table as one that can now be outside its filter.
+ *
+ * The server chose the rows at the last load. A client-side repaint can change the text or the
+ * state that the filter matched, and the cells alone cannot prove a match, so the row is marked
+ * and never hidden or moved. Apply reloads the table and clears every mark.
+ *
+ * @param {?HTMLTableRowElement} row - The repainted row.
+ * @returns {void}
+ */
+function markFilterStaleRow(row) {
+    const table = row?.closest('table');
+    if (!table || table.dataset.filterActive !== 'true') return;
+    row.dataset.filterStale = 'true';
+    const cell = row.querySelector('td[data-col="name"]');
+    if (cell && !cell.querySelector('.filter-stale-badge')) {
+        const badge = document.createElement('span');
+        badge.className = 'badge bg-warning-lt filter-stale-badge ms-1';
+        badge.textContent = 'Changed since filtering';
+        cell.appendChild(badge);
+    }
+    showFilterStaleNotice(table);
+}
+
+/**
+ * Show, once per table, the polite notice that the filtered rows reflect the last load.
+ *
+ * @param {HTMLElement} table - The filtered table.
+ * @returns {void}
+ */
+function showFilterStaleNotice(table) {
+    const noticeId = table.id + '-filter-stale-notice';
+    if (document.getElementById(noticeId)) return;
+    const notice = document.createElement('div');
+    notice.id = noticeId;
+    notice.className = 'alert alert-warning py-1 px-2 small mb-1';
+    notice.setAttribute('role', 'status');
+    table.parentNode.insertBefore(notice, table);
+    // The live region is in the page before its text changes, so a screen reader announces it.
+    notice.textContent = 'Results reflect the last load. Apply to update.';
+}
+
+// ============================================
 // TABLE FILTERING
 // ============================================
 
@@ -4062,8 +4129,10 @@ function initializeFilterDisclosures() {
         const section = document.getElementById(button.getAttribute('aria-controls'));
         if (!section) return;
 
+        // A server-side filter panel with a value or an error opens whatever state the user saved.
+        const forcedOpen = section.dataset.filterOpen === 'true';
         const storedState = readFilterDisclosureState(section.id);
-        applyFilterDisclosureState(section, button, storedState ?? section.classList.contains('show'));
+        applyFilterDisclosureState(section, button, forcedOpen || (storedState ?? section.classList.contains('show')));
         if (initializedFilterDisclosures.has(section)) return;
 
         section.addEventListener('shown.bs.collapse', () => {
@@ -4078,37 +4147,10 @@ function initializeFilterDisclosures() {
     });
 }
 
-// Initialize filters for different tables
+// Initialize filters for different tables. The interface tables filter on the server.
 function initializeFilters() {
     initializeFilterDisclosures();
 
-    // Interface table
-    initializeTableFilters(
-        'librenms-interface-table',
-        ['name', 'type', 'speed', 'mac', 'mtu', 'enabled', 'description'],
-        {
-            name: { name: 'name' },
-            type: { name: 'type' },
-            speed: { name: 'speed' },
-            mac: { name: 'mac_address' },
-            mtu: { name: 'mtu' },
-            enabled: { name: 'enabled' },
-            description: { name: 'description' }
-        }
-    );
-
-    // VM Interface table
-    initializeTableFilters(
-        'librenms-interface-table-vm',
-        ['name', 'mac', 'mtu', 'enabled', 'description'],
-        {
-            name: { name: 'name' },
-            mac: { name: 'mac_address' },
-            mtu: { name: 'mtu' },
-            enabled: { name: 'enabled' },
-            description: { name: 'description' }
-        }
-    );
     // Non Virtual Chassis Cable table (without 'vc-member' filter)
     initializeTableFilters(
         'librenms-cable-table',
@@ -4309,53 +4351,80 @@ function openBulkVCModal() {
     showModal(document.getElementById('bulkVCMemberModal'));
 }
 
-// Function to update the interface_name_field radio button
+// The longest wait for the preference save before the page loads with the other name field.
+const NAME_FIELD_SAVE_TIMEOUT_MS = 3000;
+
+/**
+ * Bind the interface name field radios: a change saves the preference, then loads the page again.
+ *
+ * Every row has another name under the other field, so the whole page renders again with a full
+ * GET. The URL keeps the filters and drops every page number. Unsubmitted edits on the page are
+ * lost, the same as when the user goes to another page of a table.
+ *
+ * @returns {void}
+ */
 function updateInterfaceNameField() {
     document.querySelectorAll('.interface-name-field').forEach(radio => {
+        // The initializer runs again after every htmx swap, so each radio binds once.
+        if (radio.dataset.nameFieldBound) return;
+        radio.dataset.nameFieldBound = 'true';
         radio.addEventListener('change', function () {
-            const url = new URL(window.location);
-            url.searchParams.set('interface_name_field', this.value);
-            window.history.pushState({}, '', url);
-
-            // Set HTMX headers for subsequent requests
-            if (typeof htmx !== 'undefined') {
-                htmx.config.defaultHeaders['X-Interface-Name-Field'] = this.value;
-            }
-
-            // Persist to user preferences via API
-            const preferenceSelector = this.closest('[data-save-pref-url]');
-            const savePrefUrl = preferenceSelector?.dataset.savePrefUrl;
-            if (savePrefUrl) {
-                const csrfToken = getCsrfToken();
-                if (!csrfToken) {
-                    console.debug('Failed to save interface_name_field pref: missing CSRF token');
-                } else {
-                    const platformId = preferenceSelector.dataset.platformId || null;
-                    fetch(savePrefUrl, {
-                        method: 'POST',
-                        keepalive: true,
-                        headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrfToken},
-                        body: JSON.stringify({
-                            key: 'interface_name_field',
-                            value: this.value,
-                            platform_id: platformId
-                        })
-                    }).then(response => {
-                        if (!response.ok) {
-                            throw new Error(`HTTP ${response.status}`);
-                        }
-                    }).catch(error => console.debug('Failed to save interface_name_field pref:', error.message));
-                }
-            }
-
-            // Refresh current tab content
-            const activeTab = document.querySelector('.tab-pane.active');
-            if (activeTab && typeof htmx !== 'undefined') {
-                htmx.trigger(activeTab, 'htmx:refresh');
-            }
+            const target = interfaceNameFieldUrl(this.value);
+            saveInterfaceNameFieldPreference(this.closest('[data-save-pref-url]'), this.value)
+                .then(() => window.location.assign(target));
         });
     });
 }
+
+/**
+ * Return the page URL for another interface name field: the filters stay, and every page resets.
+ *
+ * @param {string} value - The selected name field.
+ * @returns {string} The URL to load.
+ */
+function interfaceNameFieldUrl(value) {
+    const url = new URL(window.location.href);
+    url.searchParams.set('interface_name_field', value);
+    Array.from(url.searchParams.keys()).forEach(key => {
+        if (/(^|_)page$/.test(key) && !/(^|_)per_page$/.test(key)) url.searchParams.delete(key);
+    });
+    return url.toString();
+}
+
+/**
+ * Save the interface name field preference, and wait at most NAME_FIELD_SAVE_TIMEOUT_MS for it.
+ *
+ * @param {?HTMLElement} preferenceSelector - The selector element that names the save URL and platform.
+ * @param {string} value - The selected name field.
+ * @returns {Promise<void>} Resolves when the save ends, fails or times out.
+ */
+function saveInterfaceNameFieldPreference(preferenceSelector, value) {
+    const savePrefUrl = preferenceSelector?.dataset.savePrefUrl;
+    if (!savePrefUrl) return Promise.resolve();
+    const csrfToken = getCsrfToken();
+    if (!csrfToken) {
+        console.debug('Failed to save interface_name_field pref: missing CSRF token');
+        return Promise.resolve();
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), NAME_FIELD_SAVE_TIMEOUT_MS);
+    return fetch(savePrefUrl, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrfToken},
+        body: JSON.stringify({
+            key: 'interface_name_field',
+            value: value,
+            platform_id: preferenceSelector.dataset.platformId || null
+        }),
+        signal: controller.signal
+    }).then(response => {
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+    }).catch(error => console.debug('Failed to save interface_name_field pref:', error.message))
+        .finally(() => clearTimeout(timer));
+}
+
 // Function to set the interface_name_field from the URL
 function setInterfaceNameFieldFromURL() {
     const urlParams = new URLSearchParams(window.location.search);

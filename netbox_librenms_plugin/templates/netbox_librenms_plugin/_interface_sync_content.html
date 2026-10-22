@@ -1,4 +1,5 @@
 {% load helpers %}
+{% load librenms_sync_query %}
 {% if sync_partial_response %}{% include 'inc/messages.html' %}{% endif %}
 {% if request.htmx %}
 {% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=interface_sync.cache_expiry cache_container_id="cache-countdown" cache_countdown_id="countdown-timer" cache_oob=True %}
@@ -25,6 +26,8 @@
 
 {% include "netbox_librenms_plugin/inc/_relationship_diagnostics.html" with diagnostics=interface_sync.relationship_diagnostics %}
 
+{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=interface_sync.filters prefix="interfaces_" tab="interfaces" section_id="interfaceFilterSection" label="Filter interfaces" %}
+
 {# Migrated donors must not sync: hiding only the button leaves the POST form live (Enter in a filter still submits), so drop the form in migrated mode. #}
 {% with model_name=interface_sync.object|meta:"model_name" %}
 {% if migrated_to_marker %}
@@ -39,21 +42,18 @@
     <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
 {% else %}
 {% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_type=model_name object_id=interface_sync.object.pk as sync_url %}
-{# htmx swaps the tab in place, so the page, page size and scroll position survive; method/action stay as the no-JS fallback. #}
+{# htmx swaps the tab in place, so the scroll position survives; method/action stay as the no-JS fallback. #}
+{# The URL carries the page query, so the tab comes back with the same filters, page and page size. #}
+{% sync_tab_url sync_url interface_name_field=interface_name_field as sync_action_url %}
 <form method="post"
     data-interface-origin-device-id="{{ interface_sync.object.pk }}"
     data-blocked-port-ids="{{ interface_sync.blocked_port_ids_json }}"
-    action="{{ sync_url }}?interface_name_field={{ interface_name_field }}"
-    hx-post="{{ sync_url }}?interface_name_field={{ interface_name_field }}"
+    action="{{ sync_action_url }}"
+    hx-post="{{ sync_action_url }}"
     hx-target="#interface-sync-content" hx-swap="innerHTML" hx-sync="#interface-sync-content:drop">
     {# Form-only inputs live inside the form branch so migrated (donor) mode, which renders a plain <div> wrapper, never emits hidden fields outside any <form>. #}
     {% csrf_token %}
     {% if interface_sync.server_key %}<input type="hidden" name="server_key" value="{{ interface_sync.server_key }}">{% endif %}
-    {% with table=interface_sync.table %}{% if table.page %}
-    <input type="hidden" name="{{ table.prefix }}page" value="{{ table.page.number }}">
-    <input type="hidden" name="{{ table.prefix }}per_page" value="{{ table.paginator.per_page }}">
-    {% endif %}{% endwith %}
-    {% if interface_sync.show_ignored %}<input type="hidden" name="interfaces_show_ignored" value="1">{% endif %}
 {% endif %}
     {% endwith %}
     {% block table_actions %}
@@ -84,8 +84,8 @@
                     </button>
                     {% endif %}
                     {% if interface_sync.ignored_count or interface_sync.show_ignored %}
-                    {# The toggle starts again at page 1: the page count changes with it. #}
-                    <a href="?tab=interfaces{% if interface_sync.server_key %}&server_key={{ interface_sync.server_key|urlencode }}{% endif %}&interfaces_per_page={{ interface_sync.table.paginator.per_page }}&interface_name_field={{ interface_name_field }}{% if not interface_sync.show_ignored %}&interfaces_show_ignored=1{% endif %}"
+                    {# The toggle keeps the filters and starts again at page 1: the page count changes with it. #}
+                    <a href="{% if interface_sync.show_ignored %}{% sync_tab_url prefix='interfaces_' tab='interfaces' reset='page show_ignored' %}{% else %}{% sync_tab_url prefix='interfaces_' tab='interfaces' reset='page' show_ignored='1' %}{% endif %}"
                         class="btn btn-sm btn-outline-secondary ms-2{% if interface_sync.show_ignored %} active{% endif %}"
                         id="interfaces-show-ignored-toggle" aria-pressed="{% if interface_sync.show_ignored %}true{% else %}false{% endif %}"
                         title="{% if interface_sync.show_ignored %}Hide the ports that interface rules ignore{% else %}Show the ports that interface rules ignore{% endif %}">
@@ -107,30 +107,6 @@
                         <span class="badge text-warning text-white">Mismatched values</span>
                         <span class="badge text-danger text-white">Not present in NetBox</span>
                     </div>
-                    <button class="btn btn-sm btn-secondary sync-filter-toggle" type="button" data-bs-toggle="collapse"
-                        data-bs-target="#interfaceFilterSection" aria-expanded="false"
-                        aria-controls="interfaceFilterSection">
-                        <i class="mdi mdi-filter-outline"></i> Filters
-                    </button>
-                </div>
-            </div>
-            <div class="collapse mb-3" id="interfaceFilterSection">
-                <div class="mb-2">
-                    <small class="text-muted">
-                        <i class="mdi mdi-information"></i> Filters apply to currently displayed interfaces. Adjust the
-                        "per page" setting to apply the filters to more interfaces.
-                    </small>
-                </div>
-                <div class="filter-container d-flex gap-2">
-                    <input type="text" id="filter-name" placeholder="Filter by Name" class="form-control">
-                    {% if interface_sync.table.attrs.id == 'librenms-interface-table' %}
-                    <input type="text" id="filter-type" placeholder="Filter by Type" class="form-control">
-                    <input type="text" id="filter-speed" placeholder="Filter by Speed" class="form-control">
-                    {% endif %}
-                    <input type="text" id="filter-mac" placeholder="Filter by MAC" class="form-control">
-                    <input type="text" id="filter-mtu" placeholder="Filter by MTU" class="form-control">
-                    <input type="text" id="filter-enabled" placeholder="Filter by Status" class="form-control">
-                    <input type="text" id="filter-description" placeholder="Filter by Description" class="form-control">
                 </div>
             </div>
             <style>
@@ -153,9 +129,14 @@
             </style>
 
             <div class="card">
-                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=interface_sync.table show_ignored=interface_sync.show_ignored %}
+                {% if interface_sync.filters.is_valid %}
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=interface_sync.table placement="top" filtered_from=interface_sync.filtered_from %}
                 {% include 'inc/table.html' with table=interface_sync.table %}
-                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=interface_sync.table show_ignored=interface_sync.show_ignored %}
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=interface_sync.table filtered_from=interface_sync.filtered_from %}
+                {% else %}
+                {# The error summary above the form says what to correct; no row is shown for an invalid filter. #}
+                <div class="card-body text-center text-muted py-4" data-filter-invalid="true">Correct the filters to show the interfaces.</div>
+                {% endif %}
             </div>
         </div>
     </div>

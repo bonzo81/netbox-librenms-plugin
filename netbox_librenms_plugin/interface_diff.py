@@ -74,6 +74,18 @@ _REQUIRED_ATTRIBUTE = {
 }
 
 
+class VlanRowContext(NamedTuple):
+    """One row's VLAN evidence plus the NetBox assignment it is compared against."""
+
+    group_map: dict
+    missing: list
+    exists_in_netbox: bool
+    netbox_untagged_vid: int | None
+    netbox_untagged_group_id: int | None
+    netbox_tagged_vids: set
+    netbox_tagged_group_ids: dict
+
+
 class DiffContext(NamedTuple):
     """Everything a row comparison needs beyond the row and the NetBox interface itself."""
 
@@ -397,6 +409,67 @@ _RULES = {
 }
 
 
+def vlan_row_context(record):
+    """Bundle the row's VLAN evidence with the NetBox assignments it is compared against."""
+    netbox_untagged_vid = None
+    netbox_untagged_group_id = None
+    netbox_tagged_vids = set()
+    netbox_tagged_group_ids = {}
+    netbox_interface = record.get("netbox_interface")
+    if netbox_interface:
+        if netbox_interface.untagged_vlan:
+            netbox_untagged_vid = netbox_interface.untagged_vlan.vid
+            netbox_untagged_group_id = netbox_interface.untagged_vlan.group_id
+        for vlan in netbox_interface.tagged_vlans.all():
+            netbox_tagged_vids.add(vlan.vid)
+            netbox_tagged_group_ids[vlan.vid] = vlan.group_id
+    return VlanRowContext(
+        group_map=record.get("vlan_group_map", {}),
+        missing=record.get("missing_vlans", []),
+        exists_in_netbox=record.get("exists_in_netbox", False),
+        netbox_untagged_vid=netbox_untagged_vid,
+        netbox_untagged_group_id=netbox_untagged_group_id,
+        netbox_tagged_vids=netbox_tagged_vids,
+        netbox_tagged_group_ids=netbox_tagged_group_ids,
+    )
+
+
+def blocked_row_state(decision):
+    """Return the blocked row state of a rule *decision* (None means no resolved owner), or None when a sync may write."""
+    return ROW_OWNER_UNRESOLVED if decision is None else _BLOCKED_ROW_STATE_BY_KIND.get(decision.kind)
+
+
+def row_sync_state(record, *, interface_name_field, server_key):
+    """
+    Return how one interface table row compares to the NetBox interface it resolved to.
+
+    Computed once per row and kept on the row as ``_sync_state``, because every coloured column, the
+    row's sync button and the sync-state filter read the same verdict. ``format_interface_data`` drops
+    the cached value when it re-resolves a row, so a member switch cannot repaint against the
+    previous member.
+
+    Args:
+        record (dict): The interface table row, with its ``rule_decision``.
+        interface_name_field (str): The LibreNMS port field currently acting as the interface name.
+        server_key (str): The LibreNMS server the row's port_id belongs to.
+
+    Returns:
+        RowSyncState: The row state and each field's verdict.
+
+    """
+    state = record.get("_sync_state")
+    if state is None:
+        state = compute_row_sync_state(
+            record,
+            interface_name_field=interface_name_field,
+            server_key=server_key,
+            decision=record["rule_decision"],
+            vlan_context=vlan_row_context(record),
+        )
+        record["_sync_state"] = state
+    return state
+
+
 def compute_row_sync_state(port, *, interface_name_field, server_key, decision, vlan_context=None):
     """
     Return the sync state of one LibreNMS row against the NetBox interface it resolved to.
@@ -416,7 +489,7 @@ def compute_row_sync_state(port, *, interface_name_field, server_key, decision, 
 
     """
     # A blocked row is decided before absence: no sync may create it either.
-    blocked_state = ROW_OWNER_UNRESOLVED if decision is None else _BLOCKED_ROW_STATE_BY_KIND.get(decision.kind)
+    blocked_state = blocked_row_state(decision)
     if blocked_state is not None:
         return RowSyncState(blocked_state, dict.fromkeys(SYNC_FIELDS, NOT_SYNCED))
 

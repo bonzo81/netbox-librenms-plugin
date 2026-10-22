@@ -5,7 +5,10 @@ SyncInterfacesView + DeleteNetBoxInterfacesView
 Target: 95%+ coverage
 """
 
+from urllib.parse import urlencode
+
 import pytest
+from django.http import QueryDict
 
 from netbox_librenms_plugin.interface_relationships import (
     build_interface_index,
@@ -48,7 +51,9 @@ def _make_request(post_data=None, get_data=None, user=None):
     if post_data is None and get_data:
         return make_request("get", get_data, user=user)
     request = make_request("post", post_data or {}, user=user)
-    request.GET = get_data or request.GET
+    if get_data:
+        # The action URL carries this query, so it is a QueryDict as on a real request.
+        request.GET = QueryDict(urlencode(get_data, doseq=True))
     return request
 
 
