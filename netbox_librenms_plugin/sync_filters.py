@@ -26,6 +26,8 @@ SYNC_STATE_CHOICES = (
     (MISMATCHED, "Mismatched"),
     (NOT_IN_NETBOX, "Not in NetBox"),
 )
+# The state of a row that no sync-state choice shows, for a tab that stores the state on the row.
+UNCLASSIFIED = "unclassified"
 
 # The empty text of a filtered table that has no row.
 NO_MATCH_TEXT = "No rows match these filters"

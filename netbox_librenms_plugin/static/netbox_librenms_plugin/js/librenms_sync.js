@@ -682,6 +682,21 @@ function pageQueryValues() {
     return values;
 }
 
+/**
+ * Add the page query to a URL, for the keys that the URL does not state itself.
+ *
+ * @param {string} url - A same-origin URL that can carry its own query.
+ * @returns {string} The absolute URL with the page query.
+ */
+function withPageQuery(url) {
+    const target = new URL(url, window.location.href);
+    const ownKeys = new Set(target.searchParams.keys());
+    new URLSearchParams(window.location.search).forEach((value, key) => {
+        if (!ownKeys.has(key)) target.searchParams.append(key, value);
+    });
+    return target.href;
+}
+
 // NetBox imports htmx as a module, so there is no htmx global and HTML written with innerHTML keeps
 // no hx- bindings. The pane's hidden [data-fragment-loader] lets htmx request and swap the fragment,
 // which binds the restored forms like every other swap.
@@ -3733,6 +3748,7 @@ function handleCableChange(select, value) {
                     });
                 }
                 select._lastVerifiedMember = value;
+                markFilterStaleRow(row);
                 restoreControls();
                 commitSelectionChange(row.closest('table'));
             } else {
@@ -4132,8 +4148,8 @@ function markFilterStaleRow(row) {
     const table = row?.closest('table');
     if (!table || table.dataset.filterActive !== 'true') return;
     row.dataset.filterStale = 'true';
-    // The badge goes in the cell that names the row: the interface or VLAN name, or the IP address.
-    const cell = row.querySelector('td[data-col="name"], td[data-col="address"]');
+    // The badge goes in the cell that names the row: the interface or VLAN name, the IP address, or the local port.
+    const cell = row.querySelector('td[data-col="name"], td[data-col="address"], td[data-col="local_port"]');
     if (cell && !cell.querySelector('.filter-stale-badge')) {
         const badge = document.createElement('span');
         badge.className = 'badge bg-warning-lt filter-stale-badge ms-1';
@@ -4285,31 +4301,9 @@ function initializeFilterDisclosures() {
     });
 }
 
-// Initialize filters for different tables. The interface, IP address and VLAN tables filter on the server.
+// Initialize the filter panels. Every sync table filters on the server.
 function initializeFilters() {
     initializeFilterDisclosures();
-
-    // Non Virtual Chassis Cable table (without 'vc-member' filter)
-    initializeTableFilters(
-        'librenms-cable-table',
-        ['local-port', 'remote-port', 'remote-device'],
-        {
-            'local-port': { name: 'local_port' },
-            'remote-port': { name: 'remote_port' },
-            'remote-device': { name: 'remote_device' }
-        }
-    );
-    // VC Cable table (with 'vc-member' filter)
-    initializeTableFilters(
-        'librenms-cable-table-vc',
-        ['vc-member', 'local-port', 'remote-port', 'remote-device'],
-        {
-            'vc-member': { selector: '.ts-control .item' },
-            'local-port': { name: 'local_port' },
-            'remote-port': { name: 'remote_port' },
-            'remote-device': { name: 'remote_device' }
-        }
-    );
 }
 
 // ============================================
@@ -5020,7 +5014,8 @@ document.addEventListener('DOMContentLoaded', function () {
                 event.preventDefault();
                 return;
             }
-            event.detail.path = loaderUrl;
+            // The picker answers for the filtered page; a modal loader keeps the URL of its control.
+            event.detail.path = event.detail.elt.matches('[data-cable-picker-loader]') ? withPageQuery(loaderUrl) : loaderUrl;
             // A routed row form posts its own fields.
             const rowForm = event.detail.triggeringEvent.detail.form;
             if (rowForm) new FormData(rowForm).forEach((value, name) => event.detail.parameters.append(name, value));
