@@ -19,7 +19,8 @@
         {% include "netbox_librenms_plugin/inc/_ipaddress_sync_refresh.html" with object=ip_sync.object server_key=refresh_server_key %}
     </div>
 </div>
-{% if ip_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=ip_sync.filters prefix="ipaddresses_" tab="ipaddresses" section_id="ipFilterSection" label="Filter IP addresses" %}{% endif %}
+{% if ip_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with owner=ip_sync.object content_id="ipaddress-sync-content" server_key=ip_sync.server_key filters=ip_sync.filters prefix="ipaddresses_" tab="ipaddresses" section_id="ipFilterSection" label="Filter IP addresses" %}{% endif %}
+{% if ip_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_panel.html" with owner=ip_sync.object content_id="ipaddress-sync-content" server_key=ip_sync.server_key filters=ip_sync.filters prefix="ipaddresses_" tab="ipaddresses" section_id="ipFilterSection" label="Filter IP addresses" %}{% endif %}
 
 <!-- IP Address Sync Table -->
 {% if ip_sync.table %}

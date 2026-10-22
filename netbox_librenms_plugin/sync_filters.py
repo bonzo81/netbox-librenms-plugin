@@ -20,7 +20,7 @@ from netbox_librenms_plugin.utils import get_interface_name_field
 MAX_FILTER_TEXT = 256
 
 SYNC_STATE_CHOICES = (
-    ("", "All"),
+    ("", "All sync states"),
     (MATCHING, "Matching"),
     (MISMATCHED, "Mismatched"),
     (NOT_IN_NETBOX, "Not in NetBox"),
@@ -147,21 +147,22 @@ class SyncFilters:
         """Return whether the query holds a filter of the tab, valid or not, so the tab shows its filter form."""
         return self.active or not self.is_valid
 
-    def signature(self, **context):
-        """
-        Return a stable text that names this filter and *context*, for the browser's selection store.
 
-        Args:
-            **context: Other page state that decides which rows the table holds, such as the name field.
+def selection_scope(**context):
+    """
+    Return a stable text that names the rows a tab table can hold, for the browser's selection store.
 
-        Returns:
-            str: The filter parameters and *context*, sorted and URL-encoded.
+    The filters are left out: the selection belongs to the tab, so a filter change keeps the rows the
+    user selected, and the notice above the table counts the ones the filter hides.
 
-        """
-        items = [(self.spec.param(QUERY_FIELD), self.query), (self.spec.param(SYNC_STATE_FIELD), self.sync_state)]
-        items.extend((self.spec.param(f"{COLUMN_FIELD_PREFIX}{name}"), text) for name, text in self.columns)
-        items.extend((key, str(value)) for key, value in context.items())
-        return urlencode(sorted((key, value) for key, value in items if value))
+    Args:
+        **context: Page state that decides which rows the table holds, such as the name field.
+
+    Returns:
+        str: The context, sorted and URL-encoded.
+
+    """
+    return urlencode(sorted((key, str(value)) for key, value in context.items() if value))
 
 
 def parse_sync_filters(query, spec):
@@ -248,7 +249,7 @@ def filter_sync_rows(rows, filters, spec):
     return [row for row in rows if matches(row)]
 
 
-def filter_sync_table(request, owner, rows, build_table, *, server_key, **signature_context):
+def filter_sync_table(request, owner, rows, build_table, *, server_key, **scope_context):
     """
     Return the table of the rows that match the tab's filters in the request query, its filters, and the row count before them.
 
@@ -264,8 +265,8 @@ def filter_sync_table(request, owner, rows, build_table, *, server_key, **signat
         build_table (Callable[[list[dict]], Table]): Returns a table of the given rows. The table has
             ``filter_spec()``.
         server_key (str | None): The LibreNMS server of the tab. Each server has its own selection.
-        **signature_context: Other page state of one tab that decides which rows the table holds (see
-            ``SyncFilters.signature``).
+        **scope_context: Other page state of one tab that decides which rows the table holds (see
+            ``selection_scope``).
 
     Returns:
         tuple[Table, SyncFilters, int | None]: The table to show, the bound filters, and the row count
@@ -281,8 +282,8 @@ def filter_sync_table(request, owner, rows, build_table, *, server_key, **signat
         table = build_table(filter_sync_rows(rows, filters, spec))
         table.empty_text = NO_MATCH_TEXT
     table.attrs["data-filter-active"] = "true" if filters.active else "false"
-    # A new filter starts an empty browser selection.
-    table.attrs["data-filter-signature"] = filters.signature(
-        interface_name_field=get_interface_name_field(request, owner), server_key=server_key, **signature_context
+    # A filter keeps the browser selection; another name field or ignored toggle starts an empty one.
+    table.attrs["data-selection-scope"] = selection_scope(
+        interface_name_field=get_interface_name_field(request, owner), server_key=server_key, **scope_context
     )
     return table, filters, filtered_from

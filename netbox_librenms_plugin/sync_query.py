@@ -71,6 +71,26 @@ class SyncQuery:
         encoded = self._changed(changes, reset, prefix).urlencode()
         return f"{path}?{encoded}" if encoded else (path or "?")
 
+    def tab_url(self, page_path, tab):
+        """
+        Return the sync page URL that opens *tab* with this query.
+
+        The query loses ``interface_name_field``: the tab link adds the selected one itself, so a copy
+        here would grow by one per click.
+
+        Args:
+            page_path (str): The path of the sync page.
+            tab (str): The tab to open.
+
+        Returns:
+            str: The URL.
+
+        """
+        query = self._query.copy()
+        query["tab"] = tab
+        query.pop("interface_name_field", None)
+        return f"{page_path}?{query.urlencode()}"
+
     def server_switch_query(self, tab):
         """
         Return the encoded page query that a server switch keeps, without the server key.

@@ -267,13 +267,10 @@ class BaseLibreNMSSyncView(
         # overwrite the choice, and an unchanged choice must not cost a write per page view.
         if posted_sync_tab in applicable_tab_names and active_sync_tab != remembered_sync_tab:
             save_user_pref(request, SYNC_TAB_PREFERENCE, active_sync_tab)
-        sync_tab_urls = {}
-        for sync_tab in applicable_tabs:
-            query = request.GET.copy()
-            query["tab"] = sync_tab.value
-            # The tab link adds the selected name field itself, so a copy here would grow per click.
-            query.pop("interface_name_field", None)
-            sync_tab_urls[sync_tab.value] = f"{request.path}?{query.urlencode()}"
+        page_query = SyncQuery.from_request(request)
+        sync_tab_urls = {
+            sync_tab.value: page_query.tab_url(request.path, sync_tab.value) for sync_tab in applicable_tabs
+        }
 
         # Add our specific context
         context.update(

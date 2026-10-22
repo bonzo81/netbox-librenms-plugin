@@ -154,6 +154,11 @@ def _platform_subtrees(platforms) -> dict:
     return subtrees
 
 
+def rule_tables():
+    """Return a queryset of each table that :meth:`InterfaceRuleMatcher.load` reads."""
+    return InterfaceTypeMapping.objects.all(), Platform.objects.all()
+
+
 class InterfaceRuleMatcher:
     """Decide ports against one snapshot of the interface rules, with no database access."""
 
