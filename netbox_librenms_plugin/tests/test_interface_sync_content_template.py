@@ -31,6 +31,7 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         from django.test import RequestFactory
         from django_tables2 import RequestConfig
 
+        from netbox_librenms_plugin.sync_filters import parse_sync_filters
         from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.utils import interface_sync_options_menu
@@ -43,6 +44,7 @@ class TestInterfaceSyncContentTemplateMigratedMode:
         interface_sync = {
             "object": device,
             "table": table,
+            "filters": parse_sync_filters(request.GET, table.filter_spec()),
             "server_key": server_key,
             # Caller-controlled: an item makes the NetBox-only modal (and its trigger link, whose
             # title we assert) render. Kept empty by default so form-presence tests aren't perturbed
@@ -68,14 +70,15 @@ class TestInterfaceSyncContentTemplateMigratedMode:
             migrated={"server_key": "prod", "device_id": 1, "at": "now"},
             server_key="prod",
         )
-        # The live POST form must be gone in migrated mode (a donor must not POST a sync).
-        assert "<form" not in html
+        # The live POST form must be gone in migrated mode (a donor must not POST a sync). The
+        # filter form is a GET form, so it cannot submit a sync.
+        assert '<form method="post"' not in html
         # ...but the CSRF token must remain so JS-driven verify-interface / LAG-sync POSTs authenticate.
         assert re.search(r'name="csrfmiddlewaretoken" value="[^"]+"', html)
 
     def test_normal_mode_emits_form_with_csrf_and_server_key(self):
         html = self._render(migrated=None)
-        assert "<form" in html
+        assert '<form method="post"' in html
         assert re.search(r'name="csrfmiddlewaretoken" value="[^"]+"', html)
         assert 'name="server_key"' in html
 

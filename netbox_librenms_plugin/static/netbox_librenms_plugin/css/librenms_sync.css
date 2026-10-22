@@ -68,6 +68,13 @@
         min-height: 1.875rem;
         padding-inline-end: 21rem;
     }
+
+    /* A filter form is the first row of its tab, so the refresh controls sit beside its first rows. */
+    .sync-tab-refresh-toolbar:has(~ [id$="-sync-content"] .sync-tab-primary-toolbar):not(
+        :has(~ [id$="-sync-content"] > .alert)
+    ) ~ [id$="-sync-content"] .sync-filter-form > :not(.collapse) {
+        margin-inline-end: 21rem;
+    }
 }
 
 @media (max-width: 575.98px) {

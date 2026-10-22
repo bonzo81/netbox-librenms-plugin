@@ -18,6 +18,7 @@ from netbox_librenms_plugin.interface_relationships import (
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.module_grants import ACTION_VERIFY_MODULE, GrantRefusal, GrantRefused, read_module_grant
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+from netbox_librenms_plugin.sync_query import SyncQuery
 from netbox_librenms_plugin.tables.cables import (
     LibreNMSCableTable,
     VCCableTable,
@@ -290,6 +291,8 @@ class SingleInterfaceVerifyView(
                 table.migrated_to_marker = bool(
                     build_migrated_context(origin_device, server_key).get("migrated_to_marker")
                 )
+                # The verify request carries the page query, so a repainted Rebind posts back to the same view.
+                table.sync_query = SyncQuery.from_request(request)
                 raw_port_id = port_data.get("port_id")
                 port_id = normalize_librenms_port_id(raw_port_id)
                 if port_id is not None:
