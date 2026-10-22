@@ -56,7 +56,7 @@ class VMInterfaceTableView(BaseInterfaceTableView):
             data,
             device=obj,
             vlan_groups=vlan_groups,
-            server_key=self.librenms_api.server_key,
+            server_key=self._render_server_key(),
             interface_name_field=interface_name_field,
         )
 
