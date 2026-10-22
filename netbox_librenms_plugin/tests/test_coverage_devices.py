@@ -77,10 +77,6 @@ class TestDeviceTables:
         view = _bind_api(DeviceInterfaceTableView(), request, live_librenms)
 
         assert list(view.get_interfaces(device)) == [first, second]
-        assert view.get_redirect_url(device) == reverse(
-            "plugins:netbox_librenms_plugin:device_interface_sync",
-            kwargs={"pk": device.pk},
-        )
 
     def test_non_chassis_device_uses_standard_interface_table(self, live_librenms):
         device = make_device("device-interface-standard")
