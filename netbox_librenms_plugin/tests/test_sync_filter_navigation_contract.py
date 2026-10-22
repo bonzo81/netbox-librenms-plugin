@@ -1,11 +1,12 @@
 """
-The navigation contract of the interfaces tab: every hop keeps the page query or applies a documented reset.
+The navigation contract of the filtered sync tabs: every hop keeps the page query or applies a documented reset.
 
-The test renders the real sync page with distinctive filter values (spaces, ``&``, ``+`` and
-non-ASCII text), finds every link, form, ``formaction`` and ``hx-*`` URL in the interfaces pane,
-and checks each one. A URL the test does not know fails, so a new hop must be classified here.
+Each test renders the real sync page with distinctive filter values (spaces, ``&``, ``+`` and
+non-ASCII text), finds every link, form, ``formaction`` and ``hx-*`` URL in one tab pane, and
+checks each one. A URL the test does not know fails, so a new hop must be classified here.
 """
 
+import re
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlsplit
 
@@ -16,7 +17,13 @@ from django.test import RequestFactory
 from django.urls import reverse
 
 from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
-from netbox_librenms_plugin.tests.conftest import make_device
+from netbox_librenms_plugin.tests.conftest import (
+    bind_librenms_server,
+    make_device,
+    make_superuser,
+    make_vm,
+    map_device_to_librenms,
+)
 from netbox_librenms_plugin.tests.test_interface_sync_filters import (
     LIBRENMS_ID,
     SERVER_KEY,
@@ -28,6 +35,7 @@ from netbox_librenms_plugin.tests.test_interface_sync_filters import (
     _virtual_machine,
     serve_sync_page,
 )
+from netbox_librenms_plugin.tests.test_ip_address_sync_filters import _refresh
 
 URL_ATTRIBUTES = ("href", "action", "formaction", "hx-get", "hx-post", "hx-put", "hx-patch", "hx-delete")
 VOID_TAGS = frozenset({"input", "br", "img", "hr", "meta", "link", "source", "wbr"})
@@ -100,8 +108,8 @@ def _query(url):
     return parse_qs(urlsplit(url).query, keep_blank_values=True)
 
 
-def _assert_keeps(query, keys, where):
-    assert {key: query.get(key) for key in keys} == {key: [PAGE_QUERY[key]] for key in keys}, where
+def _assert_keeps(query, keys, where, page_query=PAGE_QUERY):
+    assert {key: query.get(key) for key in keys} == {key: [page_query[key]] for key in keys}, where
 
 
 def _routes(owner, object_type):
@@ -242,3 +250,112 @@ def test_the_module_paginator_keeps_the_interface_filters():
         query = _query(url)
         assert query["tab"] == ["modules"], url
         _assert_keeps(query, (*PAGE_FILTERS, "interfaces_page", "interfaces_per_page"), url)
+
+
+# The IP Addresses tab: this tab's filters and another tab's, on page 2 of a sorted table.
+OTHER_TAB_FILTER = {"interfaces_q": "keep  this & that"}
+TAB_PAGE_QUERIES = {
+    "ipaddresses": {
+        "ipaddresses_q": "a&b+c  é",
+        "ipaddresses_filter_address": "198.18",
+        "ipaddresses_per_page": "2",
+        "ipaddresses_page": "2",
+        "ipaddresses_sort": "address",
+    },
+}
+# An object detail link leaves the sync page, so it carries no page state.
+OBJECT_LINK = re.compile(r"^/(?:ipam|dcim|virtualization)/[\w-]+/\d+/$")
+
+
+def _tab_routes(owner, tab):
+    def plugin_url(name, **kwargs):
+        return reverse(f"plugins:netbox_librenms_plugin:{name}", kwargs=kwargs)
+
+    object_type = owner._meta.model_name
+    kind = "device" if object_type == "device" else "vm"
+    fragment = plugin_url("sync_cache_fragment", object_type=object_type, pk=owner.pk, tab=tab)
+    posts = {
+        plugin_url(f"{kind}_ipaddress_sync", pk=owner.pk): "refresh",
+        plugin_url("sync_device_ip_addresses", object_type=object_type, pk=owner.pk): "sync",
+        plugin_url("create_ip_row_vrf", object_type=object_type, pk=owner.pk): "create vrf",
+    }
+    return fragment, posts
+
+
+def _classify_tab_hop(hop, page_path, tab, owner, page_query):
+    """Check one hop of the IP Addresses pane against the transition table and return its kind."""
+    url = hop["url"]
+    path, query = urlsplit(url).path, _query(url)
+    prefix = f"{tab}_"
+    own_filters = [key for key in page_query if key.startswith(prefix) and ("_filter_" in key or key.endswith("_q"))]
+    fragment, posts = _tab_routes(owner, tab)
+    on_page = path in ("", page_path)
+    if url.startswith("#"):
+        return "anchor"
+    if path == fragment:
+        # The loader states only its tab; the browser adds the page query.
+        return "fragment"
+    if OBJECT_LINK.match(path):
+        return "object link"
+    if on_page and hop["in_get_form"]:
+        # Clear filters: this tab's filters and page go, every other state stays.
+        assert not any(key in query for key in (*own_filters, f"{prefix}page")), url
+        _assert_keeps(query, (*OTHER_TAB_FILTER, f"{prefix}per_page", f"{prefix}sort"), url, page_query)
+        return "clear"
+    if on_page:
+        # Paging, page size and sort: each states its own key, and every filter stays.
+        assert query["tab"] == [tab], url
+        _assert_keeps(query, (*OTHER_TAB_FILTER, *own_filters), url, page_query)
+        return "page link"
+    if path in posts:
+        # A refresh, sync or VRF create comes back to the same filters and page, clamped to the last page.
+        _assert_keeps(query, tuple(page_query), url, page_query)
+        return posts[path]
+    pytest.fail(f"An unclassified hop in the {tab} pane: <{hop['tag']}> {url}")
+
+
+def _check_tab_filter_form(hops, tab, page_query):
+    (form,) = [form for form in hops.get_forms if "sync-filter-form" in (form["attrs"].get("class") or "")]
+    submitted = {}
+    for key, value in form["fields"]:
+        if value:
+            submitted.setdefault(key, []).append(value)
+    # A filter change keeps every other state and starts at page 1.
+    assert f"{tab}_page" not in submitted
+    _assert_keeps(submitted, tuple(key for key in page_query if key != f"{tab}_page"), form, page_query)
+
+
+def _ip_owner(kind, client, server):
+    """Return a device or VM with IP rows whose interface names match the IP filters of the page query."""
+    if kind == "device":
+        owner = make_device(f"contract-ip-{kind}", librenms_cf={"default": {"id": 42}})
+    else:
+        owner = map_device_to_librenms(make_vm(f"contract-ip-{kind}"), 42, server_key=SERVER_KEY)
+    rows = [
+        {"address": f"198.18.8.{n}", "prefix_length": 24, "port_id": 7700 + n, "interface": f"Gi a&b+c É{n}"}
+        for n in range(1, 13)
+    ]
+    rows.append({"address": "203.0.113.1", "prefix_length": 24, "port_id": 7799, "interface": "Gi a&b+c É99"})
+    return _refresh(client, owner, server, rows)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("variant", ["ipaddresses-device", "ipaddresses-virtual_machine"])
+def test_every_ip_tab_hop_keeps_the_page_query_or_applies_its_reset(client, settings, librenms_server, variant):
+    tab, kind = variant.split("-")
+    bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
+    client.force_login(make_superuser("contract-ip-user"))
+    owner = _ip_owner(kind, client, librenms_server)
+    page_query = {"tab": tab, "server_key": SERVER_KEY, **OTHER_TAB_FILTER, **TAB_PAGE_QUERIES[tab]}
+    name = "vm_librenms_sync" if owner._meta.model_name == "virtualmachine" else "device_librenms_sync"
+    page_path = reverse(f"plugins:netbox_librenms_plugin:{name}", args=[owner.pk])
+
+    response = client.get(page_path, page_query)
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    assert 'data-filter-active="true"' in html
+    hops = _hops(html, tab)
+    kinds = {_classify_tab_hop(hop, page_path, tab, owner, page_query) for hop in hops.urls}
+    _check_tab_filter_form(hops, tab, page_query)
+    assert {"fragment", "clear", "page link", "refresh", "sync"} <= kinds, kinds
