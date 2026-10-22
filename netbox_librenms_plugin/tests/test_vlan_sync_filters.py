@@ -246,6 +246,22 @@ class TestInvalidFilters:
 
         assert 'id="vlans_filter-errors"' in html
 
+    def test_an_active_filter_on_an_empty_snapshot_keeps_its_controls(self, client, settings):
+        client = _client(client, settings, "active-empty")
+        device = make_device("vlan-filters-active-empty", librenms_cf={SERVER_KEY: {"id": LIBRENMS_ID}})
+        _seed(device, [])
+
+        html = _tab(client, device, vlans_q="voice")
+
+        # The bound form, its Clear link and the filtered (empty) table stay, so the filter can be removed.
+        assert re.search(r'<input type="search" name="vlans_q" id="id_vlans_q" value="voice"', html)
+        (form,) = re.findall(r'<form method="get" class="sync-filter-form.*?</form>', html, re.S)
+        clear = [unescape(href) for href in re.findall(r'<a class="btn btn-sm btn-link" href="([^"]*)"', form)]
+        assert len(clear) == 1 and "vlans_q" not in parse_qs(urlsplit(clear[0]).query)
+        assert re.search(r'<table[^>]*id="librenms-vlan-table"[^>]*data-filter-active="true"', html)
+        assert _rows(html) == {}
+        assert "mdi-sync-off" not in html
+
     def test_full_page_get_answers_400_and_shows_the_errors_on_that_tab_only(self, client, settings, librenms_server):
         device = serve_sync_page(client, settings, librenms_server, _mixed_device("full-page"))
 
