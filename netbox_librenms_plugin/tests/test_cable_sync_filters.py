@@ -560,6 +560,28 @@ class TestInvalidFilters:
         assert 'id="cables_filter-errors"' not in html
         assert list(_rows(html)) == ["1006"]
 
+    def test_a_sync_with_an_invalid_filter_of_another_tab_writes_and_shows_its_own_table(self, client, settings):
+        client = _superuser_client(client, settings, "cable-post-prefix")
+        device, _expected = _mixed_device("post-prefix")
+        data = _sync_data(_fragment(client, device), "1001")
+        query = urlencode(
+            {
+                "tab": "cables",
+                "server_key": SERVER_KEY,
+                "ipaddresses_sync_state": "bogus",
+                "interfaces_q": "x" * 300,
+                "cables_filter_local_port": "Gi0/1",
+            }
+        )
+
+        response = client.post(f"{_sync_url(device)}?{query}", data, HTTP_HX_REQUEST="true")
+
+        assert response.status_code == 200
+        assert Interface.objects.get(device=device, name="Gi0/1").cable is not None
+        html = response.content.decode()
+        assert 'id="cables_filter-errors"' not in html
+        assert list(_rows(html)) == ["1001"]
+
     def test_invalid_filter_does_not_refuse_the_sync_action(self, client, settings):
         client = _superuser_client(client, settings, "cable-sync-action")
         device, _expected = _mixed_device("sync-action")
