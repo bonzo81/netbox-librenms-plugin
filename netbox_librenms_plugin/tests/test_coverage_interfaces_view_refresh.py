@@ -128,35 +128,34 @@ class TestInterfaceRefreshStaleServerKey:
 
 @pytest.mark.django_db
 class TestInterfaceRefreshFailClosedExits:
-    def test_unmapped_device_redirects_and_records_a_failed_refresh(self, librenms_server, settings):
-        """No LibreNMS mapping: error, refresh_failed state, and a server_key-preserving redirect."""
+    def test_unmapped_device_renders_the_tab_and_records_a_failed_refresh(self, librenms_server, settings):
+        """No LibreNMS mapping: error, refresh_failed state, and the tab on the POSTed server."""
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         device = make_device("iface-unmapped")
 
         response, _view, request = _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
 
-        assert response.status_code == 302
-        assert response["Location"] == (
-            f"/plugins/librenms_plugin/devices/{device.pk}/interface-sync/?server_key={SERVER_KEY}"
-        )
+        assert response.status_code == 200
+        assert "Location" not in response
         assert message_texts(request, "error") == ["Device not found in LibreNMS."]
         assert _tab_state(device)["state"] == "refresh_failed"
 
     def test_ports_fetch_failure_surfaces_the_librenms_error(self, librenms_server, settings):
-        """A 404 on the ports endpoint redirects with the client's error text."""
+        """A 404 on the ports endpoint renders the tab with the client's error text."""
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         device = _map_device(make_device("iface-ports-404"), 11)
 
         response, _view, request = _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
 
-        assert response.status_code == 302
+        assert response.status_code == 200
+        assert "Location" not in response
         assert message_texts(request, "error") == ["Device not found in LibreNMS"]
         assert _tab_state(device)["state"] == "refresh_failed"
 
     def test_malformed_ports_payload_fails_closed(self, librenms_server, settings):
-        """A 200 whose "ports" is not a list of dicts must redirect, not 500 on enrichment."""
+        """A 200 whose "ports" is not a list of dicts must render the tab, not 500 on enrichment."""
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         device = _map_device(make_device("iface-ports-malformed"), 12)
@@ -164,9 +163,41 @@ class TestInterfaceRefreshFailClosedExits:
 
         response, view, request = _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
 
-        assert response.status_code == 302
+        assert response.status_code == 200
+        assert "Location" not in response
         assert message_texts(request, "error") == ["Unexpected response from LibreNMS (malformed ports payload)."]
         assert _cached_ports(view, device) is None
+
+
+@pytest.mark.django_db
+class TestInterfaceRefreshFailureThroughTheUrl:
+    @pytest.mark.parametrize(
+        ("url_name", "make_owner"),
+        [("device_interface_sync", make_device), ("vm_interface_sync", make_vm)],
+    )
+    def test_failed_refresh_answers_the_htmx_post_with_the_tab(
+        self, client, librenms_server, settings, url_name, make_owner
+    ):
+        """The refresh URL accepts only POST, so a failed refresh must answer with the tab, not a redirect to it."""
+        from django.urls import reverse
+
+        owner = make_owner(f"iface-refresh-fail-{url_name}")
+        _bind_server(settings, librenms_server)
+        client.force_login(make_superuser())
+
+        response = client.post(
+            reverse(f"plugins:netbox_librenms_plugin:{url_name}", kwargs={"pk": owner.pk}),
+            {"server_key": SERVER_KEY},
+            HTTP_HX_REQUEST="true",
+            follow=True,
+        )
+
+        assert response.redirect_chain == []
+        assert response.status_code == 200
+        assert "netbox_librenms_plugin/_interface_sync_content.html" in [t.name for t in response.templates]
+        assert response.context["interface_sync"]["table"] is None
+        assert response.context["interface_sync"]["server_key"] == SERVER_KEY
+        assert _tab_state(owner)["state"] == "refresh_failed"
 
 
 @pytest.mark.django_db

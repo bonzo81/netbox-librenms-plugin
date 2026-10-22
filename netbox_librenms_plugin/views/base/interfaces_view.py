@@ -46,7 +46,6 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
     VlanAssignmentMixin,
-    redirect_with_server_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -91,40 +90,44 @@ class BaseInterfaceTableView(
         """
         raise NotImplementedError
 
-    def get_redirect_url(self, obj):
+    def _render_tab(self, request, obj, interface_name_field, server_key, sync_device):
         """
-        Get the redirect URL for the object.
-
-        Should be implemented in subclasses.
+        Render the interfaces tab partial from the current cache, which is the answer to every refresh POST.
 
         Args:
-            obj (Device | VirtualMachine): Object whose redirect URL to retrieve.
-
-        Raises:
-            NotImplementedError: Always, because subclasses must implement this method.
-
-        """
-        raise NotImplementedError
-
-    def _failure_redirect(self, request, obj, server_key):
-        """
-        Redirect to the sync tab after a refresh failure, preserving the POST-scoped server_key.
-
-        Preserving server_key keeps the user on the server they were working in (otherwise the next
-        retry/sync can target the session/default LibreNMS instance instead).
-
-        server_key is POST-derived, so the candidate URL is gated by Django's
-        ``url_has_allowed_host_and_scheme`` (sink inside the validated branch) — the open-redirect
-        barrier CodeQL recognises for py/url-redirection (CWE-601). The bare ``url`` fallback is a
-        pure ``reverse()`` path with no user input.
-
-        Args:
-            request (HttpRequest): Current request, used for the host-allowlist check.
-            obj (Device | VirtualMachine): Object whose sync tab to return to.
-            server_key (str | None): POST-scoped server key to carry on the redirect URL.
+            request (HttpRequest): Current request.
+            obj (Device | VirtualMachine): Object of the sync page.
+            interface_name_field (str): Name field of the LibreNMS ports.
+            server_key (str): POST-scoped server key; the tab stays on this server.
+            sync_device (Device | VirtualMachine): Object that owns the cache, the VC sync device for a member.
 
         Returns:
-            HttpResponseRedirect: Redirect to the sync tab (with server_key when it validates).
+            HttpResponse: The rendered partial.
+
+        """
+        context = {
+            "interface_sync": self.get_context_data(
+                request, obj, interface_name_field, server_key, sync_device=sync_device
+            ),
+            "interface_name_field": interface_name_field,
+        }
+        return self.render_sync_partial(request, obj, server_key, context)
+
+    def _failure_response(self, request, obj, interface_name_field, server_key, sync_device):
+        """
+        Record a failed refresh and render the tab, which has no snapshot now.
+
+        The refresh URL accepts only POST, so a redirect to it would answer 405.
+
+        Args:
+            request (HttpRequest): Current request.
+            obj (Device | VirtualMachine): Object of the sync page.
+            interface_name_field (str): Name field of the LibreNMS ports.
+            server_key (str): POST-scoped server key; the tab stays on this server.
+            sync_device (Device | VirtualMachine): Object that owns the cache, the VC sync device for a member.
+
+        Returns:
+            HttpResponse: The rendered partial.
 
         """
         SyncCacheConsistency(obj).mark_refresh_failure(
@@ -132,8 +135,7 @@ class BaseInterfaceTableView(
             server_key,
             actor_id=request_actor_id(request),
         )
-        url = self.get_redirect_url(obj)
-        return redirect_with_server_key(request, url, server_key)
+        return self._render_tab(request, obj, interface_name_field, server_key, sync_device)
 
     def get_select_related_field(self, obj):
         """Determine the appropriate select_related field based on object type."""
@@ -287,13 +289,13 @@ class BaseInterfaceTableView(
                 request,
                 self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS.",
             )
-            return self._failure_redirect(request, obj, _server_key)
+            return self._failure_response(request, obj, interface_name_field, _server_key, lookup_device)
 
         success, librenms_data = self.librenms_api.get_ports(self.librenms_id)
 
         if not success:
             messages.error(request, librenms_data)
-            return self._failure_redirect(request, obj, _server_key)
+            return self._failure_response(request, obj, interface_name_field, _server_key, lookup_device)
 
         # get_ports is an external boundary: a truthy success doesn't guarantee a dict with a list
         # of dict port rows (the OOB branch below guards the same way). The old cache was already
@@ -301,7 +303,7 @@ class BaseInterfaceTableView(
         # enrichment below.
         if not is_valid_ports_payload(librenms_data):
             messages.error(request, "Unexpected response from LibreNMS (malformed ports payload).")
-            return self._failure_redirect(request, obj, _server_key)
+            return self._failure_response(request, obj, interface_name_field, _server_key, lookup_device)
 
         # The guard above already proved a dict whose "ports" is a list of dicts, so index directly.
         ports = librenms_data["ports"]
@@ -457,18 +459,7 @@ class BaseInterfaceTableView(
                 "Refresh again; see server logs for details.",
             )
 
-        context = self.get_context_data(
-            request,
-            obj,
-            interface_name_field,
-            _server_key,
-            sync_device=lookup_device,
-        )
-        context = {"interface_sync": context}
-        context["interface_name_field"] = interface_name_field
-        # render_sync_partial injects the migrated-donor flags (hidden sync button + Migrate
-        # column) so the HTMX tab refresh stays consistent with the full page.
-        return self.render_sync_partial(request, obj, _server_key, context)
+        return self._render_tab(request, obj, interface_name_field, _server_key, lookup_device)
 
     def _enrich_port_stack_relationships(self, request, librenms_data, host_ports, interface_name_field):
         """Fetch and resolve the host port relationships LibreNMS reports for this device."""
