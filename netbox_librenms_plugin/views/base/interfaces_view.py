@@ -26,7 +26,7 @@ from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.server_mappings import read_mapping, read_mappings
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
-from netbox_librenms_plugin.sync_filters import filter_sync_table
+from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_filters
 from netbox_librenms_plugin.utils import (
     apply_lag_vlan_fill,
     build_migrated_context,
@@ -655,13 +655,14 @@ class BaseInterfaceTableView(
         netbox_only_interfaces = []
         ignored_count = 0
         blocked_port_ids = []
-        filters = None
         filtered_from = None
         # Every hop of the tab carries the page query, so the toggle is read from it only.
         show_ignored = request.GET.get("interfaces_show_ignored") == "1"
 
         if interface_name_field is None:
             interface_name_field = get_interface_name_field(request, obj)
+        # The filters show their errors also when no snapshot is cached.
+        filters = parse_table_filters(request.GET, lambda rows: self.get_table(rows, obj, interface_name_field))
 
         unresolved = False
         if server_key is None:

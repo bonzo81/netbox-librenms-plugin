@@ -195,7 +195,6 @@ class BaseLibreNMSSyncView(
         tab_contexts = [(spec, context.get(spec.context_name)) for spec in TAB_SPECS.values()]
         invalid_filter = any(
             isinstance(tab_context, dict)
-            and tab_context.get(spec.table_context_key) is not None
             and tab_context.get("filters") is not None
             and not tab_context["filters"].is_valid
             for spec, tab_context in tab_contexts

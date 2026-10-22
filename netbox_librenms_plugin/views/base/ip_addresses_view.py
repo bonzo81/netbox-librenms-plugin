@@ -24,7 +24,7 @@ from netbox_librenms_plugin.librenms_ids import (
 )
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
-from netbox_librenms_plugin.sync_filters import filter_sync_table
+from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_filters
 from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable, management_row_vrfs
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
@@ -996,6 +996,8 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
     def get_context_data(self, request, obj):
         """Get the context data for the IP address sync view."""
         interface_name_field = get_interface_name_field(request, obj)
+        # The filters show their errors also when no snapshot is cached.
+        filters = parse_table_filters(request.GET, lambda rows: IPAddressTable(rows, mgmt_row_vrfs={}))
         # GET render: scope the cache read to ?server_key (mirrors the interfaces/cables/VLAN/
         # module tabs) so a non-default-server tab reads that server's IP cache, not the
         # default's — without this the IP tab renders empty after a successful refresh on a
@@ -1009,6 +1011,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             # stale server's cached IPs (mirrors modules_view.get_context_data's unresolved guard).
             return {
                 "table": None,
+                "filters": filters,
                 "object": obj,
                 "cache_expiry": None,
                 "server_key": scoped,
@@ -1028,6 +1031,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 "create_missing_interfaces": resolve_create_missing_interfaces(request),
                 "movable_ips": self._movable_ips_for_migration(obj, scoped),
             }
+        context.setdefault("filters", filters)
         return context
 
     def post(self, request, pk):

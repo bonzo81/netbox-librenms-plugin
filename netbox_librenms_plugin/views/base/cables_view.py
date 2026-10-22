@@ -44,7 +44,14 @@ from netbox_librenms_plugin.server_mappings import (
 )
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
-from netbox_librenms_plugin.sync_filters import MATCHING, MISMATCHED, NOT_IN_NETBOX, UNCLASSIFIED, filter_sync_table
+from netbox_librenms_plugin.sync_filters import (
+    MATCHING,
+    MISMATCHED,
+    NOT_IN_NETBOX,
+    UNCLASSIFIED,
+    filter_sync_table,
+    parse_table_filters,
+)
 from netbox_librenms_plugin.sync_query import SyncQuery
 from netbox_librenms_plugin.tables.cables import SYNC_CABLE_LABEL
 from netbox_librenms_plugin.utils import (
@@ -3091,6 +3098,8 @@ class BaseCableTableView(
 
     def get_context_data(self, request, obj):
         """Get the context data for the cable sync view."""
+        # The filters show their errors also when no snapshot is cached.
+        filters = parse_table_filters(request.GET, lambda rows: self.get_table(rows, obj))
         # GET render: rebind + scope the cache read to ?server_key (shared helper) so a
         # non-default-server tab reads that server's cache, not the default's.
         scoped, unresolved = self.resolve_get_render_server_key(request)
@@ -3099,11 +3108,12 @@ class BaseCableTableView(
             # links snapshot may still be cached until TTL — render empty scoped to the
             # requested key instead of serving a removed server's cable rows as a live table
             # (mirrors the interfaces/modules/IP tabs' unresolved guards).
-            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped}
+            return {"table": None, "filters": filters, "object": obj, "cache_expiry": None, "server_key": scoped}
         context = self._prepare_context(request, obj, fetch_fresh=False, server_key=scoped)
         if context is None:
             # No data found; return context with empty table
             context = {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped}
+        context.setdefault("filters", filters)
         return context
 
     def post(self, request, pk):

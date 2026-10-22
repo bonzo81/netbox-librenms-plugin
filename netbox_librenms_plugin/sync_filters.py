@@ -141,6 +141,11 @@ class SyncFilters:
         """Return whether a valid filter narrows the rows."""
         return self.is_valid and bool(self.query or self.sync_state or self.columns)
 
+    @property
+    def in_use(self):
+        """Return whether the query holds a filter of the tab, valid or not, so the tab shows its filter form."""
+        return self.active or not self.is_valid
+
     def signature(self, **context):
         """
         Return a stable text that names this filter and *context*, for the browser's selection store.
@@ -194,6 +199,21 @@ def parse_sync_filters(query, spec):
         sync_state=data[SYNC_STATE_FIELD],
         columns=columns,
     )
+
+
+def parse_table_filters(query, build_table):
+    """
+    Bind the filters of one tab table from *query*, also when the tab has no snapshot to show.
+
+    Args:
+        query (QueryDict): The request query.
+        build_table (Callable[[list[dict]], Table]): Returns a table of the given rows; it gets no row.
+
+    Returns:
+        SyncFilters: The bound form and, when it is valid, the accepted values.
+
+    """
+    return parse_sync_filters(query, build_table([]).filter_spec())
 
 
 def filter_sync_rows(rows, filters, spec):
