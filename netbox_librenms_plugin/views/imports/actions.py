@@ -2755,9 +2755,11 @@ class CreatePlatformFromImportView(
                 device_id,
             )
             return _htmx_error_response("Unable to confirm the target object for platform assignment.")
+        if validated_device is None:
+            return _htmx_error_response("Device not found in LibreNMS.")
         target_model, target_pk = self._assignment_target(request, validation)
         # The facts come from the validated LibreNMS device, never from the posted form.
-        facts = PlatformFacts.from_librenms((validated_device or {}).get("os"), (validated_device or {}).get("version"))
+        facts = PlatformFacts.from_librenms(validated_device.get("os"), validated_device.get("version"))
 
         if error := self._require_create_permissions(request, target_model):
             return error
