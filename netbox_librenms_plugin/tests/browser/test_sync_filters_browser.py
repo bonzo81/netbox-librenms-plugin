@@ -388,3 +388,107 @@ def test_a_name_field_change_drops_the_ip_selection_from_the_next_bulk_sync(page
     page.check("#cb-198-18-0-2-24")
 
     assert _submitted(page) == ["198.18.0.2/24"]
+
+
+CABLE_TABLE = "librenms-cable-table-vc"
+
+
+def _cable_row_page(filter_active):
+    return f"""<!doctype html><html><body>
+        <input type="hidden" name="csrfmiddlewaretoken" value="token">
+        <input type="hidden" name="server_key" value="default">
+        <div data-cable-verify-url="https://plugin.example.com/verify" data-cable-origin-device-id="7">
+          <table id="{CABLE_TABLE}" data-filter-active="{"true" if filter_active else "false"}"><tbody>
+            <tr data-interface="row-1">
+              <td data-col="selection"><input type="checkbox" name="select" value="row-1"></td>
+              <td data-col="device_selection"><select id="member-select" data-interface="row-1">
+                <option value="7" selected>m1</option><option value="8">m2</option></select></td>
+              <td data-col="local_port">Ethernet1/1</td>
+              <td data-col="remote_port">xe-1</td>
+              <td data-col="remote_device">peer</td>
+              <td data-col="cable_status">No Cable</td>
+              <td data-col="actions"></td>
+            </tr>
+            <tr data-interface="row-2"><td data-col="local_port">Ethernet1/2</td></tr>
+          </tbody></table>
+        </div></body></html>"""
+
+
+def _verify_cable_member(page):
+    formatted_row = {
+        "local_port": "<a href='/dcim/interfaces/9/'>Ethernet2/1</a>",
+        "remote_port": "xe-1",
+        "remote_device": "peer",
+        "cable_status": "Cable Mismatch",
+        "actions": "",
+        "can_create_cable": True,
+    }
+    page.route(
+        "https://plugin.example.com/verify",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"status": "success", "formatted_row": formatted_row}),
+        ),
+    )
+    page.evaluate("handleCableChange(document.getElementById('member-select'), '8')")
+    page.locator('td[data-col="cable_status"]', has_text="Cable Mismatch").wait_for()
+
+
+def test_a_cable_member_verification_of_a_filtered_row_marks_it_stale(page):
+    _serve(page, _cable_row_page(filter_active=True), f"{PAGE_URL}?tab=cables&cables_q=Ethernet1")
+
+    _verify_cable_member(page)
+
+    expect(page.locator('tr[data-interface="row-1"][data-filter-stale="true"]')).to_have_count(1)
+    # The repaint replaced the local port cell, and the badge follows in the new cell.
+    expect(page.locator('td[data-col="local_port"] a')).to_have_text("Ethernet2/1")
+    expect(page.locator('td[data-col="local_port"] .filter-stale-badge')).to_have_count(1)
+    assert page.locator('tr[data-interface="row-2"][data-filter-stale]').count() == 0
+    expect(page.locator(f'#{CABLE_TABLE}-filter-stale-notice[role="status"]')).to_have_count(1)
+
+    # A second repaint draws the cell again and keeps one badge and one notice.
+    _verify_cable_member(page)
+    page.wait_for_function("document.querySelectorAll('.filter-stale-badge').length === 1")
+    expect(page.locator(f"#{CABLE_TABLE}-filter-stale-notice")).to_have_count(1)
+
+
+def test_a_cable_member_verification_without_a_filter_marks_nothing(page):
+    _serve(page, _cable_row_page(filter_active=False))
+
+    _verify_cable_member(page)
+
+    assert page.locator("[data-filter-stale]").count() == 0
+    assert page.locator(f"#{CABLE_TABLE}-filter-stale-notice").count() == 0
+
+
+def test_the_cable_picker_request_carries_the_page_query(page):
+    html = """<!doctype html><html><body>
+        <input type="hidden" name="csrfmiddlewaretoken" value="token">
+        <div id="cables">
+          <span class="d-none" data-cable-picker-loader hx-get="/plugins/librenms_plugin/picker/1/"
+              hx-trigger="librenms:open-cable-picker" hx-target="#htmx-modal-content" hx-swap="innerHTML"></span>
+          <button id="pick" type="button"
+              data-cable-picker-url="/plugins/librenms_plugin/picker/1/?row_id=row-1&amp;server_key=default">Pick</button>
+        </div>
+        <div id="htmx-modal"><div id="htmx-modal-content"></div></div></body></html>"""
+    query = "tab=cables&server_key=default&cables_q=a%26b&cables_q=again&cables_page=2&interfaces_q=eth"
+    _serve(page, html, f"{PAGE_URL}?{query}")
+    page.route(
+        "https://plugin.example.com/plugins/librenms_plugin/picker/1/?*",
+        lambda route: route.fulfill(status=200, content_type="text/html", body='<div class="modal-header"></div>'),
+    )
+    page.evaluate("document.dispatchEvent(new Event('DOMContentLoaded'))")
+
+    with page.expect_request("**/plugins/librenms_plugin/picker/1/?*") as request_info:
+        page.locator("#pick").click()
+
+    # The row's own keys stay once; every page key is added, a repeated one with each value.
+    assert parse_qs(urlsplit(request_info.value.url).query) == {
+        "row_id": ["row-1"],
+        "server_key": ["default"],
+        "tab": ["cables"],
+        "cables_q": ["a&b", "again"],
+        "cables_page": ["2"],
+        "interfaces_q": ["eth"],
+    }
