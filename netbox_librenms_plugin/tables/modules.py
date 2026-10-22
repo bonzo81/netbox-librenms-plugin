@@ -186,7 +186,6 @@ class LibreNMSModuleTable(tables.Table):
         if not (has_write_permission and can_add_module) and hasattr(self, "columns"):
             self.columns["selection"].column.visible = False
         self.tab = "modules"
-        self.htmx_url = None
         self.prefix = "modules_"
 
     @property
