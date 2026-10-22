@@ -345,3 +345,46 @@ def test_apply_to_all_on_a_filtered_table_saves_the_groups_for_the_whole_device(
     page.wait_for_function("document.querySelectorAll('.filter-stale-badge').length === 1")
     assert saved == [{"device_id": "1", "vid_group_map": {"100": "7"}, "server_key": None}]
     expect(page.locator('tr[data-port-id="101"][data-filter-stale="true"]')).to_have_count(1)
+
+
+IP_TABLE = "librenms-ipaddress-table"
+IP_SUBMIT_PATH = "https://plugin.example.com/plugins/librenms_plugin/sync-ip/"
+
+
+def _ip_selection_page(signature, row_ids):
+    rows = "".join(
+        f'<tr data-interface="{row_id}"><td data-col="selection">'
+        f'<input type="checkbox" name="select" value="{row_id}" id="cb-{row_id.replace(".", "-").replace("/", "-")}"></td></tr>'
+        for row_id in row_ids
+    )
+    return f"""<!doctype html><html><body>
+        <input type="hidden" name="server_key" value="default">
+        <form method="post" action="{IP_SUBMIT_PATH}">
+          <table id="{IP_TABLE}" data-mgmt-rows="[]" data-filter-signature="{signature}"><tbody>{rows}</tbody></table>
+          <button type="submit" id="sync">Sync</button>
+        </form></body></html>"""
+
+
+def _submitted(page):
+    posted = []
+    page.route(
+        IP_SUBMIT_PATH,
+        lambda route: (posted.append(route.request.post_data), route.fulfill(status=200, body="ok")),
+    )
+    page.click("#sync")
+    page.wait_for_function("document.body.textContent.trim() === 'ok'")
+    return sorted(parse_qs(posted[0]).get("select", []))
+
+
+def test_a_name_field_change_drops_the_ip_selection_from_the_next_bulk_sync(page):
+    # The server signs the IP table with its filter and name field (views/base/ip_addresses_view.py).
+    _serve(page, _ip_selection_page("interface_name_field=ifName&ipaddresses_q=eth", ["198.18.0.1/24"]))
+    page.evaluate("initializeCheckboxes()")
+    page.check("#cb-198-18-0-1-24")
+
+    # Under ifDescr the row's interface no longer matches the filter, so another row shows.
+    _serve(page, _ip_selection_page("interface_name_field=ifDescr&ipaddresses_q=eth", ["198.18.0.2/24"]))
+    page.evaluate("initializeCheckboxes()")
+    page.check("#cb-198-18-0-2-24")
+
+    assert _submitted(page) == ["198.18.0.2/24"]
