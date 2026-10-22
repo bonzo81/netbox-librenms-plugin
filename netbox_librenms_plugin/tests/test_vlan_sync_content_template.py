@@ -84,5 +84,8 @@ class TestVlanSyncContentTemplateMigratedMode:
         # The filter is a GET form before the sync form, so Enter in a field never submits a sync.
         assert html.index('<form method="get"') < html.index('<form method="post"')
         for field in ("vlan_id", "name", "group", "type", "state"):
-            assert re.search(rf'<input type="text" name="vlans_filter_{field}" id="id_vlans_filter_{field}"', html)
-            assert f'<label class="form-label small mb-1" for="id_vlans_filter_{field}">' in html
+            assert re.search(
+                rf'<input type="text" form="vlans_filter-form" name="vlans_filter_{field}" id="id_vlans_filter_{field}"',
+                html,
+            )
+            assert f'<label class="form-label" for="id_vlans_filter_{field}">' in html
