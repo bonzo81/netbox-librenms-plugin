@@ -7,8 +7,10 @@ follow-up request starts from the query of the page it was rendered for and stat
 changes. ``SyncQuery`` owns the reset rules: which keys a transition drops.
 """
 
+from django.http import QueryDict
 from django.utils.http import url_has_allowed_host_and_scheme
 
+from netbox_librenms_plugin.sync_cache import SyncTab
 from netbox_librenms_plugin.sync_filters import COLUMN_FIELD_PREFIX, QUERY_FIELD, SYNC_STATE_FIELD
 
 # Keys the whole page shares. Any other name a caller gives is relative to the tab prefix.
@@ -74,6 +76,28 @@ class SyncQuery:
         """
         encoded = self._changed(changes, reset, prefix).urlencode()
         return f"{path}?{encoded}" if encoded else (path or "?")
+
+    def server_switch_query(self, tab):
+        """
+        Return the encoded page query that a server switch keeps, without the server key.
+
+        A switch shows the data of another server, so it keeps only the tab and each tab's page size
+        and sort. The filters, the pages and the other page state go.
+
+        Args:
+            tab (str): The active tab.
+
+        Returns:
+            str: The query, for the caller to append the new ``server_key``.
+
+        """
+        kept = {f"{sync_tab}_{name}" for sync_tab in SyncTab for name in ("per_page", "sort")}
+        query = QueryDict(mutable=True)
+        query["tab"] = tab
+        for key in self._query:
+            if key in kept:
+                query.setlist(key, self._query.getlist(key))
+        return query.urlencode()
 
     def items(self, changes=None, reset=(), prefix=""):
         """Return the (key, value) pairs of the changed query, a repeated key once per value; see ``url``."""
