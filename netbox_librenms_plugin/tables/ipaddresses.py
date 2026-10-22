@@ -5,7 +5,8 @@ import django_tables2 as tables
 from django.utils.html import format_html, mark_safe
 from netbox.tables.columns import ToggleColumn
 
-from netbox_librenms_plugin.sync_filters import MATCHING, MISMATCHED, NOT_IN_NETBOX, FilterColumn, FilterSpec
+from netbox_librenms_plugin.constants import MATCHING, MISMATCHED, NOT_IN_NETBOX
+from netbox_librenms_plugin.sync_filters import FilterColumn, FilterSpec
 from netbox_librenms_plugin.utils import paginate_sync_table, rule_block_html, rule_block_label
 
 # The sync-state filter value of each row status; every other status is unclassified.

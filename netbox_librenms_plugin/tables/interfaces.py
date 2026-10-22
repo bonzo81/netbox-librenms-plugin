@@ -33,7 +33,8 @@ from netbox_librenms_plugin.interface_diff import (
 from netbox_librenms_plugin.interface_rules import RuleDecisionKind, decision_reason, rule_names
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.server_mappings import read_mapping
-from netbox_librenms_plugin.sync_filters import MATCHING, MISMATCHED, NOT_IN_NETBOX, FilterColumn, FilterSpec
+from netbox_librenms_plugin.constants import MATCHING, MISMATCHED, NOT_IN_NETBOX
+from netbox_librenms_plugin.sync_filters import FilterColumn, FilterSpec
 from netbox_librenms_plugin.sync_query import SyncQuery
 from netbox_librenms_plugin.utils import (
     SYNC_TABLE_HEADER_ATTRS,
