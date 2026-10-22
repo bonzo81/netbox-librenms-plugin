@@ -3805,7 +3805,7 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
     @staticmethod
     def _matches_a_bay(device, item, index_map):
         """
-        Return whether *item* matches a bay of *device* now, as a bulk install resolves it.
+        Return whether *item* matches a bay of *device* now, as the table matches a chassis-level row.
 
         Bay mappings are not part of the grant, and a mapping edit keeps the cached snapshot, so the
         bay that the table found is matched again here.
@@ -3830,15 +3830,21 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
         bays = prefetch_module_bay_types(
             ModuleBay.objects.filter(device=device).select_related("installed_module__module_type")
         )
-        matched_bay = InstallBranchView._resolve_bay_for_item(
-            device,
+        device_bays, module_scoped_bays = {}, {}
+        for bay in bays:
+            if bay.module_id:
+                module_scoped_bays.setdefault(bay.module_id, {})[bay.name] = bay
+            else:
+                device_bays[bay.name] = bay
+        # The install resolver drops a bay name that two modules define; the table keeps it, so a match hides the mark.
+        matched_bay = BaseModuleTableView._match_bay_for_item(
             item,
             index_map,
-            bays,
-            exact_mappings,
-            regex_mappings,
-            manufacturer.pk,
-            preload_normalization_rules("module_bay"),
+            BaseModuleTableView._compute_all_bays(device_bays, module_scoped_bays),
+            exact_mappings=exact_mappings,
+            regex_mappings=regex_mappings,
+            manufacturer_id=manufacturer.pk,
+            norm_rules_bay=preload_normalization_rules("module_bay"),
             accepted_bay_types=module_type_bay_type_ids(matched_type, load_module_type_bay_types()),
         )
         return matched_bay is not None
