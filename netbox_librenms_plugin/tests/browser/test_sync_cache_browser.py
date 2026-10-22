@@ -5040,9 +5040,9 @@ PHONE_TABLES = {
         * 3
         + "</tbody></table>",
     },
-    "device-info-sync-table": {
+    "librenms-info-sync-table": {
         "toolbar": "",
-        "table": '<table class="table table-sm table-hover mb-0 device-info-sync-table" id="device-info-sync-table">'
+        "table": '<table class="table table-sm table-hover mb-0 librenms-info-sync-table" id="librenms-info-sync-table">'
         '<thead><tr><th style="width: 20%; padding-left: 1rem;">Field</th><th style="width: 40%;">NetBox Value</th>'
         '<th style="width: 40%;">LibreNMS Value</th></tr></thead><tbody>'
         '<tr><td style="padding-left: 1rem;">Name <i class="mdi mdi-information-outline text-muted ms-1"></i></td>'
