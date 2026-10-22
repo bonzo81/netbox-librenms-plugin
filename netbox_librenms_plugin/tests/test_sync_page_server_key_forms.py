@@ -440,12 +440,12 @@ class TestUpdateDeviceLocationRebindsServer:
 class TestInterfaceSyncRefreshButtonDeduped:
     """Verify that one Refresh Interfaces button uses the object-specific URL and shared pagination and server values."""
 
-    def _render(self, obj):
+    def _render(self, obj, query=None):
         from django.template.loader import render_to_string
 
         # A real request (with a user) so {% csrf_token %} and the context processors the
         # template relies on resolve instead of rendering empty with a warning.
-        request = RequestFactory().get("/")
+        request = RequestFactory().get("/", query or {})
         request.user = make_superuser("interface-refresh-renderer")
         return render_to_string(
             "netbox_librenms_plugin/_interface_sync.html",
@@ -474,8 +474,19 @@ class TestInterfaceSyncRefreshButtonDeduped:
         assert html.count("hx-post=") == 1
         assert f'hx-post="{device_path}"' in html
         button = self._refresh_button_tag(html, device_path)
-        assert "hx-vals=" in button and "interfaces_per_page" in button and "server_key" in button
+        assert "hx-vals=" in button and "server_key" in button
         assert vm_path not in html
+
+    def test_the_refresh_url_carries_the_page_query_without_the_page(self):
+        from django.urls import reverse
+
+        device = make_device("refresh-btn-query")
+        query = {"interfaces_per_page": "7", "interfaces_page": "3", "interfaces_q": "eth"}
+        html = self._render(device, query)
+        device_path = reverse("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": device.pk})
+
+        # A refresh keeps the filters and the page size, and starts at page 1.
+        assert f'hx-post="{device_path}?interfaces_per_page=7&amp;interfaces_q=eth"' in html
 
     def test_vm_refresh_button_single_with_vm_url(self):
         from django.urls import reverse
@@ -490,5 +501,5 @@ class TestInterfaceSyncRefreshButtonDeduped:
         assert html.count("hx-post=") == 1
         assert f'hx-post="{vm_path}"' in html
         button = self._refresh_button_tag(html, vm_path)
-        assert "hx-vals=" in button and "interfaces_per_page" in button and "server_key" in button
+        assert "hx-vals=" in button and "server_key" in button
         assert device_path not in html
