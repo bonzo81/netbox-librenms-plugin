@@ -219,7 +219,7 @@ class TestIPAddressTableSelectionColumn:
         from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
         from netbox_librenms_plugin.utils import identify_ip_sync_rows
 
-        table = IPAddressTable(identify_ip_sync_rows(rows))
+        table = IPAddressTable(identify_ip_sync_rows(rows), mgmt_row_vrfs={})
         return [row.get_cell("selection") for row in table.rows]
 
     @staticmethod

@@ -1,4 +1,4 @@
-"""Browser checks for the server-side interface filter: the selection store, repaint marks and navigation."""
+"""Browser checks for the server-side sync tab filters: the selection store, repaint marks and navigation."""
 
 import json
 from urllib.parse import parse_qs, urlsplit
@@ -208,3 +208,56 @@ def test_a_cache_restore_loads_the_fragment_for_the_page_query(page):
         "interfaces_page": ["2"],
         "server_key": ["primary"],
     }
+
+
+def _ip_row_page(filter_active):
+    return f"""<!doctype html><html><body>
+        <input type="hidden" name="csrfmiddlewaretoken" value="token">
+        <form method="post"><input type="hidden" name="server_key" value="default">
+          <table id="librenms-ipaddress-table" data-filter-active="{"true" if filter_active else "false"}"><tbody>
+            <tr data-interface="198.18.0.1/24">
+              <td data-col="selection"><input type="checkbox" name="select" value="198.18.0.1/24"></td>
+              <td data-col="address"><a href="/ipam/ip-addresses/1/">198.18.0.1</a></td>
+              <td data-col="vrf"><select class="form-select vrf-select" data-ip="198.18.0.1" data-prefix="24"
+                  data-row-id="198.18.0.1/24" name="vrf_198.18.0.1/24">
+                <option value="" selected>Global</option><option value="1">blue</option></select></td>
+              <td data-col="status">Synced</td>
+            </tr>
+            <tr data-interface="198.18.0.2/24"><td data-col="address">198.18.0.2</td></tr>
+          </tbody></table>
+        </form></body></html>"""
+
+
+def _verify_vrf(page):
+    page.route(
+        "**/plugins/librenms_plugin/verify-ipaddress/",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(
+                {"status": "success", "formatted_row": {"status": "<span>Update</span>", "selectable": True}}
+            ),
+        ),
+    )
+    page.evaluate("handleVRFChange(document.querySelector('.vrf-select'), '1')")
+    page.locator('td[data-col="status"]', has_text="Update").wait_for()
+
+
+def test_a_vrf_verification_of_a_filtered_ip_row_marks_it_stale(page):
+    _serve(page, _ip_row_page(filter_active=True))
+
+    _verify_vrf(page)
+
+    expect(page.locator('tr[data-interface="198.18.0.1/24"][data-filter-stale="true"]')).to_have_count(1)
+    expect(page.locator('td[data-col="address"] .filter-stale-badge')).to_have_count(1)
+    assert page.locator('tr[data-interface="198.18.0.2/24"][data-filter-stale]').count() == 0
+    expect(page.locator('#librenms-ipaddress-table-filter-stale-notice[role="status"]')).to_have_count(1)
+
+
+def test_a_vrf_verification_without_a_filter_marks_nothing(page):
+    _serve(page, _ip_row_page(filter_active=False))
+
+    _verify_vrf(page)
+
+    assert page.locator("[data-filter-stale]").count() == 0
+    assert page.locator("#librenms-ipaddress-table-filter-stale-notice").count() == 0

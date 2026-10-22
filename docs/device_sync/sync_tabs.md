@@ -32,11 +32,14 @@ An [IP Mapping](../configuration/mappings.md#ip-mappings) keeps the addresses in
 
 When LibreNMS reports the address in a VRF, the row selects the NetBox VRF with the same route distinguisher, or else the same name. If no NetBox VRF has that route distinguisher or name, the row shows **+ VRF**. It creates the VRF with the LibreNMS name and route distinguisher, after a confirmation. It does not sync the address: every row in that VRF then selects the new VRF, and you sync them as usual.
 
+The filter above the table works as on the Interfaces tab: it searches every address of the device, and a sync, a VRF create or a confirmation comes back to the same filters and page. **Sync state** shows the synced addresses, the addresses to update, or the addresses that NetBox does not have; an ignored address is in no state. **Set Primary IP** still selects the management address when the filter does not show it, and the notice above the table counts it. A row whose VRF you change is marked **Changed since filtering**.
+
 ## VLANs
 
 Available for Devices. This tab creates VLANs reported by LibreNMS. Each VLAN can use a suitable VLAN group based on NetBox scope, or remain global when no group is selected.
 
 Interface VLAN assignments are handled by the Interfaces tab rather than this tab.
+
 
 ## Modules
 
