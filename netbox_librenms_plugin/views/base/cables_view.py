@@ -28,8 +28,12 @@ from netbox_librenms_plugin.breakout_cables import (
 )
 from netbox_librenms_plugin.constants import (
     INTERFACE_NAME_FIELDS,
+    MATCHING,
+    MISMATCHED,
+    NOT_IN_NETBOX,
     OOB_INVENTORY_SOURCE,
     SERIAL_INVENTORY_SOURCE,
+    UNCLASSIFIED,
 )
 from netbox_librenms_plugin.interface_rules import PORT_RECORD_KEYS, interface_rules_for_request, row_rule_block
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
@@ -44,14 +48,7 @@ from netbox_librenms_plugin.server_mappings import (
 )
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
-from netbox_librenms_plugin.sync_filters import (
-    MATCHING,
-    MISMATCHED,
-    NOT_IN_NETBOX,
-    UNCLASSIFIED,
-    filter_sync_table,
-    parse_table_filters,
-)
+from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_filters
 from netbox_librenms_plugin.sync_query import SyncQuery
 from netbox_librenms_plugin.tables.cables import SYNC_CABLE_LABEL
 from netbox_librenms_plugin.utils import (

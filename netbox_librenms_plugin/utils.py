@@ -26,9 +26,12 @@ from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 from netbox_librenms_plugin.constants import (
     DEFAULT_INTERFACE_NAME_FIELD,
     HOST_NAME_COLLISION_REASON,
+    MATCHING,
+    MISMATCHED,
     NAME_OWNER_LIVE,
     NAME_OWNER_STALE,
     NAME_OWNER_UNKNOWN,
+    NOT_IN_NETBOX,
     OOB_BADGE_HTML,
     OOB_INVENTORY_SOURCE,
     OOB_NAME_SUFFIX,
@@ -47,7 +50,6 @@ from netbox_librenms_plugin.server_mappings import (
     name_match_may_be_port,
     read_mapping,
 )
-from netbox_librenms_plugin.sync_filters import MATCHING, MISMATCHED, NOT_IN_NETBOX
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE, classify_conflict, nearest_database_error
 
 logger = logging.getLogger(__name__)

@@ -182,3 +182,11 @@ def normalize_oob_type(os_str: str, hardware_str: str = "") -> str | None:
                 return token  # vendor-specific match wins immediately
             generic = generic or "oob"  # remember the generic fallback, keep scanning
     return generic
+
+
+# The sync-state values every sync tab maps its own row states onto.
+MATCHING = "matching"
+MISMATCHED = "mismatched"
+NOT_IN_NETBOX = "not_in_netbox"
+# The state of a row that no sync-state choice shows, for a tab that stores the state on the row.
+UNCLASSIFIED = "unclassified"

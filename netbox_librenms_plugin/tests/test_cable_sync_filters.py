@@ -19,7 +19,7 @@ from django.urls import reverse
 
 from netbox_librenms_plugin.models import InterfaceTypeMapping, LibreNMSSettings
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
-from netbox_librenms_plugin.sync_filters import MATCHING, MISMATCHED, NOT_IN_NETBOX
+from netbox_librenms_plugin.constants import MATCHING, MISMATCHED, NOT_IN_NETBOX
 from netbox_librenms_plugin.tests.conftest import (
     cable_together,
     librenms_cable_tag,
