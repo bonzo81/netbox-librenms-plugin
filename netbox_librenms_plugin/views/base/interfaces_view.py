@@ -26,7 +26,7 @@ from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.server_mappings import read_mapping, read_mappings
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
-from netbox_librenms_plugin.sync_filters import filter_sync_rows, parse_sync_filters
+from netbox_librenms_plugin.sync_filters import filter_sync_table
 from netbox_librenms_plugin.utils import (
     apply_lag_vlan_fill,
     build_migrated_context,
@@ -996,19 +996,14 @@ class BaseInterfaceTableView(
                 return built
 
             # The filter runs after every whole-snapshot step above, so the counts, the ignored
-            # split and the blocked IDs describe the whole device. The cell text functions belong to
-            # the table, so a table of every row does the matching and a second table shows the matches.
-            table = build_table(table_rows)
-            spec = table.filter_spec()
-            filters = parse_sync_filters(request.GET, spec)
-            if filters.active:
-                filtered_from = len(table_rows)
-                table = build_table(filter_sync_rows(table_rows, filters, spec))
-                table.empty_text = "No rows match these filters"
-            table.attrs["data-filter-active"] = "true" if filters.active else "false"
-            # A new filter, name field or ignored toggle starts an empty browser selection.
-            table.attrs["data-filter-signature"] = filters.signature(
-                interfaces_show_ignored=int(show_ignored), interface_name_field=interface_name_field
+            # split and the blocked IDs describe the whole device. A new name field or ignored
+            # toggle starts an empty browser selection too.
+            table, filters, filtered_from = filter_sync_table(
+                request.GET,
+                table_rows,
+                build_table,
+                interfaces_show_ignored=int(show_ignored),
+                interface_name_field=interface_name_field,
             )
             table.configure(request)
 
