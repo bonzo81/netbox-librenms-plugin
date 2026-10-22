@@ -202,11 +202,13 @@ class BaseInterfaceTableView(
             )
         else:
             extra_related = ["parent", "bridge"] if related_field == "virtual_machine" else ["lag", "parent", "bridge"]
+            # The planned type check asks each device interface whether it has LAG members.
+            extra_prefetch = [] if related_field == "virtual_machine" else ["member_interfaces"]
             interfaces = (
                 (interface, read_mapping(interface))
                 for interface in queryset.select_related(
                     related_field, "untagged_vlan", *extra_related
-                ).prefetch_related("tagged_vlans", "tagged_vlans__group", "mac_addresses")
+                ).prefetch_related("tagged_vlans", "tagged_vlans__group", "mac_addresses", *extra_prefetch)
             )
         for interface, mapping in interfaces:
             by_name[interface.name] = interface
