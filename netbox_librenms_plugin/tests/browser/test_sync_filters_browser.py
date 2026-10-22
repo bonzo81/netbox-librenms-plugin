@@ -530,3 +530,28 @@ def test_a_name_field_change_drops_the_cable_selection_from_the_next_bulk_sync(p
     page.click("#sync")
     page.wait_for_function("document.body.textContent.trim() === 'ok'")
     assert sorted(parse_qs(posted[0]).get("select", [])) == ["7302"]
+
+
+def test_apply_clears_the_stale_marks_and_a_later_repaint_marks_again(page):
+    page.route(
+        VERIFY_ROUTE, lambda route: route.fulfill(status=200, content_type="application/json", body=_formatted_row())
+    )
+    apply_form = '<form method="get" class="sync-filter-form"><button type="submit" id="apply">Apply</button></form>'
+    html = _member_row_page(filter_active=True).replace("<body>", f"<body>{apply_form}", 1)
+    _serve(page, html, f"{PAGE_URL}?tab=interfaces&interfaces_q=eth")
+    _verify_member(page)
+    expect(page.locator(".filter-stale-badge")).to_have_count(1)
+    expect(page.locator(f"#{TABLE}-filter-stale-notice")).to_have_count(1)
+
+    # Apply loads the page again: the server chose the rows afresh, so no mark is left.
+    with page.expect_navigation():
+        page.click("#apply")
+    _add_page_scripts(page)
+    assert page.locator("[data-filter-stale]").count() == 0
+    assert page.locator(".filter-stale-badge").count() == 0
+    assert page.locator(f"#{TABLE}-filter-stale-notice").count() == 0
+
+    _verify_member(page)
+    expect(page.locator('tr[data-port-id="101"][data-filter-stale="true"]')).to_have_count(1)
+    expect(page.locator(".filter-stale-badge")).to_have_count(1)
+    expect(page.locator(f"#{TABLE}-filter-stale-notice")).to_have_count(1)
