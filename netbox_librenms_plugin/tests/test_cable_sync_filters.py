@@ -655,3 +655,34 @@ class TestFollowUpsKeepThePageQuery:
         assert 'id="cables_filter-errors"' in html
         assert re.search(r'id="id_cables_sync_state"[^>]*aria-invalid="true"', html, re.S)
         assert _records(_fragment(client, device))["7003"]["netbox_remote_interface_id"] == free.pk
+
+
+@pytest.mark.django_db
+def test_the_remote_create_modal_posts_with_the_page_query(client, librenms_server, settings):
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from netbox_librenms_plugin.tests.test_cable_remote_matching import TestCheckAndCreateTheRemoteEnd
+
+    server_key, device, local, remote, row_id = TestCheckAndCreateTheRemoteEnd()._scenario(
+        "filters-create", librenms_server, settings
+    )
+    client.force_login(make_superuser("cable-filter-remote-create"))
+    page_query = {"tab": "cables", "server_key": server_key, "interfaces_q": "a&b  é", "cables_q": "eth0"}
+    create_path = reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[device.pk])
+    # The page adds the page query to the row's create URL.
+    modal = client.get(create_path, {**page_query, "row_id": row_id, "expected_local_id": local.pk})
+    assert modal.status_code == 200
+    (post_url,) = re.findall(r'<form hx-post="([^"]*)"', modal.content.decode())
+    post_url = unescape(post_url)
+    _assert_keeps_the_page_query(post_url, create_path, page_query)
+    assert not {"row_id", "expected_local_id"} & set(parse_qs(urlsplit(post_url).query))
+
+    response = client.post(
+        post_url, {"expected_local_id": local.pk, "row_id": row_id, "server_key": server_key}, HTTP_HX_REQUEST="true"
+    )
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    assert "closeHtmxModal()" in html
+    assert Interface.objects.filter(device=remote).count() == 1
+    assert _table_attr(html, "data-filter-active") == "true"
+    assert re.search(r'name="cables_q" id="id_cables_q" value="eth0"', html)
