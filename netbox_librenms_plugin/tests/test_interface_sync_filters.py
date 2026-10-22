@@ -470,14 +470,20 @@ def _full_page_device(client, settings, librenms_server, tag):
     return serve_sync_page(client, settings, librenms_server, _mixed_device(tag))
 
 
+# Measured queries per row whose rule type differs from its NetBox type, under a filter: 0 (100 and
+# 1024 rows each cost 44 queries). It was 1 (143 and 1067) before the LAG members were prefetched.
+QUERIES_PER_TYPE_CHANGE = 0
+
+
 @pytest.mark.django_db
 def test_interface_filter_query_budget_with_refused_type_changes(client, settings, librenms_server):
     """
-    A search computes every row's state, and only a refused type change costs queries per row.
+    A filter computes every row's state, so every planned type change is checked on every row.
 
-    Each size has the same five LAG aggregates whose rule type NetBox refuses; every other row is
-    bound and in sync. The page renders with the VLAN tab active, so the search runs on a tab the
-    user does not see. Measured: 100 ports and 300 ports each cost 46 queries.
+    Every row's rule type differs from its NetBox type: one row in ten is a LAG aggregate whose
+    change NetBox refuses, the rest take the change. The search matches no row, so the cost is the
+    filter's alone. The page renders with the VLAN tab active, so the search runs on a tab the user
+    does not see. The assertion fixes the growth per row at QUERIES_PER_TYPE_CHANGE.
     """
     bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
     InterfaceTypeMapping.objects.get_or_create(
@@ -495,26 +501,28 @@ def test_interface_filter_query_budget_with_refused_type_changes(client, setting
         for index in range(size):
             interface = Interface(
                 device=device,
-                name=f"eth{index:03d}",
-                type="lag" if index < 5 else "1000base-t",
+                name=f"eth{index:04d}",
+                type="lag" if index % 10 == 0 else "virtual",
                 speed=1_000_000,
                 mtu=1500,
             )
             seed_mapping(interface, SERVER_KEY, own=7000 + index, save=False)
             interfaces.append(interface)
         Interface.objects.bulk_create(interfaces)
-        for index, aggregate in enumerate(Interface.objects.filter(device=device, type="lag")):
-            Interface.objects.create(device=device, name=f"member{index}", type="1000base-t", lag=aggregate)
-        _seed(device, [_port(7000 + index, f"eth{index:03d}") for index in range(size)])
+        Interface.objects.bulk_create(
+            Interface(device=device, name=f"member{index}", type="1000base-t", lag=aggregate)
+            for index, aggregate in enumerate(Interface.objects.filter(device=device, type="lag"))
+        )
+        _seed(device, [_port(7000 + index, f"eth{index:04d}") for index in range(size)])
         with CaptureQueriesContext(connection) as queries:
-            response = client.get(_sync_url(device), {"tab": "vlans", "interfaces_q": "eth0"})
+            response = client.get(_sync_url(device), {"tab": "vlans", "interfaces_q": "no such port"})
         assert response.status_code == 200
-        assert "eth000" in response.content.decode()
+        assert 'data-filter-active="true"' in response.content.decode()
         # NetBox reloads its config revision when its process cache expires, whatever the page holds.
         return len([query for query in queries.captured_queries if "core_configrevision" not in query["sql"]])
 
     # The first page load of a test process fills process-wide caches, so it is not measured.
     page_queries(10)
-    small, large = page_queries(100), page_queries(300)
+    small, large = page_queries(100), page_queries(1024)
 
-    assert small == large, (small, large)
+    assert large - small == QUERIES_PER_TYPE_CHANGE * (1024 - 100), (small, large)
