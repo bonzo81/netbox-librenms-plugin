@@ -191,13 +191,21 @@ def test_a_second_name_field_choice_waits_for_the_first_save(page):
     page.evaluate("updateInterfaceNameField()")
 
     page.check("#if-descr")
-    # A click on a disabled radio changes nothing, so this is how a user tries the other choice.
-    page.evaluate("document.getElementById('if-name').click()")
+    # A tab swap renders the radios again, enabled and unbound, and the initializer runs on them.
+    page.evaluate(
+        """() => {
+            const selector = document.getElementById('interface-name-field-selector');
+            selector.outerHTML = selector.outerHTML.replaceAll(/ (disabled|data-name-field-bound)="[^"]*"/g, '');
+            updateInterfaceNameField();
+        }"""
+    )
+    # The swapped radios show the page's name field again. A click on a disabled radio changes nothing.
+    page.evaluate("document.getElementById('if-descr').click()")
     page.wait_for_timeout(300)
 
     # Only the first choice saves and navigates; a later save could otherwise finish first.
     assert len(held) == 1
-    assert page.locator("#if-name").is_disabled()
+    assert page.locator("#if-descr").is_disabled() and page.locator("#if-name").is_disabled()
     with page.expect_navigation() as navigation:
         held[0].fulfill(status=200, content_type="application/json", body="{}")
     assert parse_qs(urlsplit(navigation.value.url).query)["interface_name_field"] == ["ifDescr"]
