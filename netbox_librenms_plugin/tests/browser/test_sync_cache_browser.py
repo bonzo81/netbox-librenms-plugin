@@ -5194,3 +5194,23 @@ def test_the_netbox_only_dialog_loads_its_rows_when_it_opens(page):
     page.check("#select-all-netbox-interfaces")
     expect(page.locator(".netbox-interface-checkbox:checked")).to_have_count(2)
     assert requests == [NETBOX_ONLY_URL]
+
+
+@pytest.mark.parametrize("failure", ["not found", "network"])
+def test_a_failed_load_of_the_netbox_only_rows_replaces_the_spinner(page, failure):
+    # An expired snapshot answers 404, which htmx does not swap; a dropped connection answers nothing.
+    page.route(
+        NETBOX_ONLY_URL,
+        lambda route: route.fulfill(status=404, body="gone") if failure == "not found" else route.abort(),
+    )
+    page.set_content(
+        f"""<div id="netboxOnlyInterfacesModal" style="display: none">
+              <div id="netbox-only-interfaces-rows" hx-get="{NETBOX_ONLY_URL}" hx-trigger="intersect once"
+                   hx-swap="innerHTML"><div role="status"><span class="spinner-border"></span>Loading</div></div>
+            </div>"""
+    )
+    _add_page_scripts(page)
+    page.locator("#netboxOnlyInterfacesModal").evaluate("dialog => { dialog.style.display = 'block'; }")
+
+    expect(page.locator("#netbox-only-interfaces-rows [role=alert]")).to_have_count(1)
+    expect(page.locator("#netbox-only-interfaces-rows .spinner-border")).to_have_count(0)

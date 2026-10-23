@@ -4444,6 +4444,19 @@ function setInterfaceNameFieldFromURL() {
     }
 }
 
+// The dialog loads its rows once, and htmx swaps no error answer, so a failed load replaces the spinner here.
+HTMX_FAILURE_EVENTS.forEach(name => {
+    document.body.addEventListener(name, function (event) {
+        const rows = event.target;
+        if (rows?.id !== 'netbox-only-interfaces-rows') return;
+        const alert = document.createElement('div');
+        alert.className = 'alert alert-warning mb-0';
+        alert.setAttribute('role', 'alert');
+        alert.textContent = 'The NetBox-only interfaces could not load. Refresh the Interfaces tab, then open this dialog again.';
+        rows.replaceChildren(alert);
+    });
+});
+
 
 // NetBox-only interfaces functionality
 function initializeNetBoxOnlyInterfaces() {
