@@ -184,6 +184,26 @@ def test_a_name_field_change_saves_once_then_loads_the_page_with_the_filters_and
     assert len(held) == 1
 
 
+def test_a_second_name_field_choice_waits_for_the_first_save(page):
+    held = []
+    page.route(SAVE_PREF_URL, lambda route: held.append(route))
+    _serve(page, _name_field_page(), f"{PAGE_URL}?tab=interfaces")
+    page.evaluate("updateInterfaceNameField()")
+
+    page.check("#if-descr")
+    # A click on a disabled radio changes nothing, so this is how a user tries the other choice.
+    page.evaluate("document.getElementById('if-name').click()")
+    page.wait_for_timeout(300)
+
+    # Only the first choice saves and navigates; a later save could otherwise finish first.
+    assert len(held) == 1
+    assert page.locator("#if-name").is_disabled()
+    with page.expect_navigation() as navigation:
+        held[0].fulfill(status=200, content_type="application/json", body="{}")
+    assert parse_qs(urlsplit(navigation.value.url).query)["interface_name_field"] == ["ifDescr"]
+    assert len(held) == 1
+
+
 def test_a_cache_restore_loads_the_fragment_for_the_page_query(page):
     initial = {"interfaces": _state("before"), "ipaddresses": _state("before-ip")}
     current = {"interfaces": _state("after"), "ipaddresses": initial["ipaddresses"]}
