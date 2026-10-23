@@ -15,7 +15,12 @@ from netbox_librenms_plugin.constants import (
 )
 from netbox_librenms_plugin.interface_diff import interface_enabled_from_port
 from netbox_librenms_plugin.interface_rules import RuleDecisionKind, decision_reason, interface_rules_for_request
-from netbox_librenms_plugin.interface_rows_cache import cached_rows, netbox_fingerprint, rows_key
+from netbox_librenms_plugin.interface_rows_cache import (
+    cached_rows,
+    netbox_fingerprint,
+    permission_fingerprint,
+    rows_key,
+)
 from netbox_librenms_plugin.interface_relationships import (
     RelationshipResolutionContext,
     build_relationship_maps,
@@ -670,6 +675,7 @@ class BaseInterfaceTableView(
             server_key,
             last_fetched,
             request.user.pk,
+            permission_fingerprint(request.user),
             interface_name_field,
             show_ignored,
             cache.get(self.get_vlan_overrides_key(cache_device, server_key)),
