@@ -16,10 +16,13 @@ from django.urls import reverse
 from django.utils import timezone
 from ipam.models import VLAN
 
+from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.models import InterfaceTypeMapping
 from netbox_librenms_plugin.tests.test_interface_sync_filters import (
     SERVER_KEY,
+    _chassis,
     _mixed_device,
+    _port,
     _rows,
     _superuser_client,
     _tab,
@@ -142,6 +145,24 @@ def test_another_viewer_does_not_reuse_the_rows(tab, computations, client):
     rows()
 
     assert len(computations) == 2
+
+
+def test_each_chassis_member_page_computes_its_own_rows(client, settings, computations):
+    client = _superuser_client(client, settings, "rows-cache-vc")
+    first, second = _chassis("rows-cache-vc")
+    key = SyncInterfacesView().get_cache_key(first, "ports", SERVER_KEY)
+    snapshot = cache.get(key)
+    snapshot["ports"].append(_port(2009, "iDRAC-NIC", _source=OOB_INVENTORY_SOURCE))
+    cache.set(key, snapshot, timeout=300)
+    _refreshed(first)
+
+    first_rows = _rows(_tab(client, first))
+    second_rows = _rows(_tab(client, second))
+
+    # An OOB row belongs to the member whose page shows it.
+    assert f'<option value="{first.pk}" selected>' in first_rows[2009]
+    assert f'<option value="{second.pk}" selected>' in second_rows[2009]
+    assert computations == [first.pk, second.pk]
 
 
 def _netbox_only(client, device):
