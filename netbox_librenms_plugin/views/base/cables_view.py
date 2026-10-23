@@ -2944,7 +2944,7 @@ class BaseCableTableView(
             self._disable_actions_for_migrated_owners(links_data, obj, cache_device, server_key)
 
         cache_expiry = self._cable_cache_expiry(cache_key)
-        table, filters, filtered_from = self._build_cable_table(request, links_data, obj)
+        table, filters, filtered_from = self._build_cable_table(request, links_data, obj, server_key)
         return {
             "table": table,
             "filters": filters,
@@ -3077,7 +3077,7 @@ class BaseCableTableView(
             return None
         return timezone.now() + timezone.timedelta(seconds=cache_ttl)
 
-    def _build_cable_table(self, request, links_data, obj):
+    def _build_cable_table(self, request, links_data, obj, server_key):
         """
         Build the table of the rows that match the tab's filters, ordered and paginated for the request.
 
@@ -3088,7 +3088,7 @@ class BaseCableTableView(
 
         """
         table, filters, filtered_from = filter_sync_table(
-            request, obj, links_data, lambda rows: self.get_table(rows, obj)
+            request, obj, links_data, lambda rows: self.get_table(rows, obj), server_key=server_key
         )
         table.configure(request)
         return table, filters, filtered_from
