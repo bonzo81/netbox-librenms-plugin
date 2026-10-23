@@ -7,6 +7,7 @@ rows. A spy counts the row computations; the real computation always runs.
 """
 
 import re
+from dataclasses import replace
 
 import pytest
 from dcim.models import Interface, MACAddress
@@ -131,6 +132,17 @@ def test_a_refresh_computes_the_rows_again(tab, computations):
     rows()
 
     _refreshed(device)
+    rows()
+
+    assert len(computations) == 2
+
+
+def test_another_netbox_release_does_not_read_the_rows(tab, computations, settings):
+    _, rows = tab
+    rows()
+
+    # An upgrade can change the cached model classes, so rows another release wrote are never unpickled.
+    settings.RELEASE = replace(settings.RELEASE, version="99.0.0")
     rows()
 
     assert len(computations) == 2
