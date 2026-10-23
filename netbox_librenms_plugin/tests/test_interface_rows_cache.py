@@ -151,6 +151,23 @@ def test_a_revoked_interface_grant_computes_the_rows_again(client, settings, com
     assert revoked != granted
 
 
+def test_a_change_that_a_grant_constraint_reads_computes_the_rows_again(client, settings, computations):
+    configure_default_librenms_server(settings)
+    device = _refreshed(_mixed_device("rows-cache-constraint"))
+    site = device.site
+    user = make_user_with_perms("rows-cache-constraint", [("view", Device)])
+    client.force_login(grant(user, "view", Interface, constraints={"device__site__slug": site.slug}))
+    granted = _rows(_tab(client, device))[1001]
+
+    # The grant text stays the same, but it no longer matches the interfaces once the site has another slug.
+    site.slug = f"{site.slug}-moved"
+    site.save()
+    revoked = _rows(_tab(client, device))[1001]
+
+    assert len(computations) == 2
+    assert revoked != granted
+
+
 def test_a_new_rule_computes_the_rows_again(tab, computations):
     _, rows = tab
     assert 1001 in rows(interfaces_show_ignored="0")
