@@ -3333,6 +3333,41 @@ def test_filter_disclosure_state_survives_fragment_replacement(page):
     assert button.locator("i").evaluate("icon => icon.classList.contains('mdi-filter-outline')")
 
 
+def test_a_closed_filter_panel_stays_closed_when_the_server_opened_it(page):
+    """The server opens a panel that holds a filter value once; a later settle keeps the user's close."""
+    markup = """
+      <div id="filter-host">
+        <button class="btn btn-sm btn-secondary sync-filter-toggle" type="button"
+                data-bs-target="#interfaceFilterSection" aria-expanded="false"
+                aria-controls="interfaceFilterSection">
+          <i class="mdi mdi-filter-outline"></i> Filters
+        </button>
+        <div class="collapse show" id="interfaceFilterSection" data-filter-open="true"></div>
+      </div>
+    """
+    page.set_content(markup)
+    _add_page_scripts(page)
+    page.evaluate("initializeScripts()")
+    section = page.locator("#interfaceFilterSection")
+    assert section.evaluate("section => section.classList.contains('show')")
+
+    section.evaluate(
+        """section => {
+            section.classList.remove('show');
+            section.dispatchEvent(new Event('hidden.bs.collapse', { bubbles: true }));
+        }"""
+    )
+    page.evaluate("document.body.dispatchEvent(new CustomEvent('htmx:afterSettle'))")
+
+    assert not section.evaluate("section => section.classList.contains('show')")
+    assert page.locator(".sync-filter-toggle").get_attribute("aria-expanded") == "false"
+
+    # A new render with a filter value opens the panel again.
+    page.locator("#filter-host").evaluate("(host, markup) => { host.innerHTML = markup; }", markup)
+    page.evaluate("initializeScripts()")
+    assert section.evaluate("section => section.classList.contains('show')")
+
+
 def test_available_status_without_a_usable_fragment_keeps_modal_controls_disabled(page):
     """A status response alone must not restore controls after fail-closed content loss."""
     initial = {

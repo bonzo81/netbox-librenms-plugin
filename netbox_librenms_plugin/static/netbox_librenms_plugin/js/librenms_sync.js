@@ -4099,11 +4099,12 @@ function initializeFilterDisclosures() {
         const section = document.getElementById(button.getAttribute('aria-controls'));
         if (!section) return;
 
-        // A server-side filter panel with a value or an error opens whatever state the user saved.
-        const forcedOpen = section.dataset.filterOpen === 'true';
+        // A new filter panel with a value or an error opens whatever state the user saved, and the state follows it.
+        const isNew = !initializedFilterDisclosures.has(section);
+        if (isNew && section.dataset.filterOpen === 'true') writeFilterDisclosureState(section.id, true);
         const storedState = readFilterDisclosureState(section.id);
-        applyFilterDisclosureState(section, button, forcedOpen || (storedState ?? section.classList.contains('show')));
-        if (initializedFilterDisclosures.has(section)) return;
+        applyFilterDisclosureState(section, button, storedState ?? section.classList.contains('show'));
+        if (!isNew) return;
 
         section.addEventListener('shown.bs.collapse', () => {
             applyFilterDisclosureState(section, button, true);
