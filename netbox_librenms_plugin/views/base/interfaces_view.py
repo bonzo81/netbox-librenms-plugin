@@ -19,6 +19,7 @@ from netbox_librenms_plugin.interface_rows_cache import (
     cached_rows,
     netbox_fingerprint,
     permission_fingerprint,
+    permission_scope,
     rows_key,
 )
 from netbox_librenms_plugin.interface_relationships import (
@@ -668,6 +669,7 @@ class BaseInterfaceTableView(
         owner_ids = [owner.pk for owner in virtual_chassis_members or [obj]]
         owner_field = self.get_select_related_field(obj)
         interfaces = self.get_interfaces(obj).model.objects.filter(**{f"{owner_field}_id__in": owner_ids})
+        owners = type(obj).objects.filter(pk__in=owner_ids)
         key = rows_key(
             cache_device.pk,
             # A row with no resolved member belongs to the viewed member, so each member page has its own rows.
@@ -676,10 +678,11 @@ class BaseInterfaceTableView(
             last_fetched,
             request.user.pk,
             permission_fingerprint(request.user),
+            permission_scope(request.user, owners, interfaces),
             interface_name_field,
             show_ignored,
             cache.get(self.get_vlan_overrides_key(cache_device, server_key)),
-            netbox_fingerprint(type(obj).objects.filter(pk__in=owner_ids), interfaces),
+            netbox_fingerprint(owners, interfaces),
         )
         return cached_rows(key, compute)
 
