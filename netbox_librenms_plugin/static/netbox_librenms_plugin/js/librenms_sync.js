@@ -4289,11 +4289,30 @@ function updateInterfaceNameField() {
         radio.dataset.nameFieldBound = 'true';
         radio.addEventListener('change', function () {
             const target = interfaceNameFieldUrl(this.value);
+            // One choice loads the page, so an earlier save cannot navigate after a later choice.
+            setInterfaceNameFieldsDisabled(true);
             saveInterfaceNameFieldPreference(this.closest('[data-save-pref-url]'), this.value)
                 .then(() => window.location.assign(target));
         });
     });
 }
+
+/**
+ * Enable or disable every interface name field radio.
+ *
+ * @param {boolean} disabled - Whether the radios refuse a change.
+ * @returns {void}
+ */
+function setInterfaceNameFieldsDisabled(disabled) {
+    document.querySelectorAll('.interface-name-field').forEach(radio => {
+        radio.disabled = disabled;
+    });
+}
+
+// A page that the back button restores from the back-forward cache still has the radios disabled.
+window.addEventListener('pageshow', event => {
+    if (event.persisted) setInterfaceNameFieldsDisabled(false);
+});
 
 /**
  * Return the page URL for another interface name field: the filters stay, and every page resets.
