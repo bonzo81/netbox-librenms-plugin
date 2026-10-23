@@ -428,7 +428,7 @@ class TestWholeSnapshotData:
         assert f'name="select" value="{peer_b}"' in filtered
         assert _table_attr(filtered, "data-filter-active") == "true"
         assert _table_attr(filtered, "data-filter-signature") == (
-            "cables_filter_remote_device=peer-b&interface_name_field=ifName"
+            "cables_filter_remote_device=peer-b&interface_name_field=ifName&server_key=default"
         )
 
     def test_the_selection_signature_changes_with_the_interface_name_field(self, client, settings):

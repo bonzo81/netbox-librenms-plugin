@@ -222,6 +222,10 @@ class TestMatching:
 
         html = _tab(client, device, interfaces_per_page="25", interfaces_q="ETH117")
         assert list(_rows(html)) == [5117]
+        # The browser keys the selection on this text, so a selection never carries to another server.
+        assert re.search(
+            r'<table[^>]*id="librenms-interface-table"[^>]*data-filter-signature="[^"]*server_key=default', html
+        )
         assert re.search(r"Showing 1-1 of 1\s*\(filtered from 120\)", html)
 
         first_page = _tab(client, device, interfaces_per_page="25", interfaces_q="eth0")

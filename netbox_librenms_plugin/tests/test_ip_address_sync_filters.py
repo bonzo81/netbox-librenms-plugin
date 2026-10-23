@@ -240,7 +240,9 @@ class TestWholeSnapshotData:
         assert _table_attr(filtered, "data-mgmt-rows") == _table_attr(unfiltered, "data-mgmt-rows")
         assert _table_attr(filtered, "data-filter-active") == "true"
         assert _table_attr(unfiltered, "data-filter-active") == "false"
-        assert _table_attr(filtered, "data-filter-signature") == "interface_name_field=ifName&ipaddresses_q=eth6"
+        assert _table_attr(filtered, "data-filter-signature") == (
+            "interface_name_field=ifName&ipaddresses_q=eth6&server_key=default"
+        )
 
     def test_the_selection_signature_changes_with_the_interface_name_field(self, client, settings, librenms_server):
         bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
