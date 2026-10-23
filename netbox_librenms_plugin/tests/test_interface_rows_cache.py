@@ -10,15 +10,17 @@ import re
 from dataclasses import replace
 
 import pytest
-from dcim.models import Interface, MACAddress
+from dcim.models import Device, Interface, MACAddress
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.urls import reverse
 from django.utils import timezone
 from ipam.models import VLAN
+from users.models import ObjectPermission
 
 from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.models import InterfaceTypeMapping
+from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
 from netbox_librenms_plugin.tests.test_interface_sync_filters import (
     SERVER_KEY,
     _chassis,
@@ -28,6 +30,7 @@ from netbox_librenms_plugin.tests.test_interface_sync_filters import (
     _superuser_client,
     _tab,
 )
+from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
 from netbox_librenms_plugin.views.base.interfaces_view import BaseInterfaceTableView
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
@@ -112,6 +115,40 @@ def test_a_vlan_change_computes_the_rows_again(tab, computations):
     rows()
 
     assert len(computations) == 2
+
+
+def test_a_tagged_vlan_change_computes_the_rows_again(tab, computations):
+    device, rows = tab
+    vlan, other = (VLAN.objects.create(vid=vid, name=f"vlan-{vid}") for vid in (200, 300))
+    interface = Interface.objects.get(device=device, name="eth0")
+    interface.mode = "tagged"
+    interface.save()
+    rows()
+
+    # The VLAN sync sets the tagged VLANs without a save of the interface, so its last change stays.
+    interface.tagged_vlans.add(vlan)
+    rows()
+    interface.tagged_vlans.remove(vlan)
+    interface.tagged_vlans.add(other)
+    rows()
+
+    assert len(computations) == 3
+
+
+def test_a_revoked_interface_grant_computes_the_rows_again(client, settings, computations):
+    configure_default_librenms_server(settings)
+    device = _refreshed(_mixed_device("rows-cache-revoke"))
+    user = make_user_with_perms("rows-cache-revoke", [("view", Device)])
+    user = grant(user, "view", Interface, name="rows-cache-revoke-interfaces")
+    client.force_login(user)
+    granted = _rows(_tab(client, device))[1001]
+
+    ObjectPermission.objects.get(name="rows-cache-revoke-interfaces").delete()
+    revoked = _rows(_tab(client, device))[1001]
+
+    # Rows computed under the old grant show the NetBox interface that the viewer can no longer see.
+    assert len(computations) == 2
+    assert revoked != granted
 
 
 def test_a_new_rule_computes_the_rows_again(tab, computations):
