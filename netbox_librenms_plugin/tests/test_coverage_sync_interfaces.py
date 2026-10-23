@@ -435,11 +435,14 @@ def test_interface_bulk_selection_ignores_disabled_rows():
     """Client bulk actions must match the browser form contract for disabled controls."""
     source = _js_source()
     table_handler = _js_block(source, "function initializeTableCheckboxes(tableId)", "function initializeCheckboxes()")
-    bulk_handler = _js_block(source, "function initializeBulkEditApply()", "// FILTER PANELS")
+    bulk_handler = _js_block(source, "function initializeBulkEditApply()", "function initializeCheckboxListeners()")
+    listeners = _js_block(source, "function initializeCheckboxListeners()", "function updateBulkActionButton()")
+    button_state = _js_block(source, "function updateBulkActionButton()", "// FILTER STALE MARKS")
 
     assert 'td input[name="select"]:not(:disabled)' in table_handler
     assert 'input[name="select"]:checked:not(:disabled)' in bulk_handler
-    assert 'input[name="select"]:not(:disabled)' in bulk_handler
+    assert 'input[name="select"]:not(:disabled)' in listeners
+    assert 'input[name="select"]:checked:not(:disabled)' in button_state
 
 
 # ===========================================================================
