@@ -5,8 +5,9 @@ Computing the rows reads every NetBox interface of the device and compares each 
 LibreNMS snapshot. That takes seconds on a device with thousands of interfaces, and a filter
 request needs the same rows again. The key holds every input the rows read: the snapshot, the
 viewer, the tab options, and a fingerprint (row count and last change) of each NetBox table
-involved, of the tagged VLAN links, and of the viewer's object permissions. A save, a create or a
-delete in one of those tables, and a grant or a revoke, gives a new key. The timeout limits how long
+involved, of the tagged VLAN links, the viewer's object permissions, and the objects those
+permissions let the viewer see or change. A save, a create or a delete in one of those tables, and a
+grant, a revoke or a change that a grant constraint reads, gives a new key. The timeout limits how long
 a change that leaves no trace in the fingerprint (a queryset ``update()``) can stay unseen.
 """
 
@@ -64,6 +65,37 @@ def permission_fingerprint(user):
         for name, constraints in backend.get_all_permissions(user).items()
     )
     return (user.is_superuser, *permissions)
+
+
+def permission_scope(user, owners, interfaces):
+    """
+    Return the primary keys of the objects that *user* can see or change, as the rows read them.
+
+    A grant constraint can read a table that no fingerprint covers, such as the site of a device, so
+    the permission text alone does not show when its result changes.
+
+    Args:
+        user: The viewer.
+        owners: Queryset of the devices or virtual machines whose interfaces the tab shows.
+        interfaces: Queryset of those interfaces.
+
+    Returns:
+        tuple | None: The keys of each scope in order, or None for a superuser, who sees every row.
+
+    """
+    if user.is_superuser:
+        return None
+    scopes = (
+        (owners, "view"),
+        (interfaces, "view"),
+        (interfaces, "change"),
+        (VLAN.objects.all(), "view"),
+        (VLANGroup.objects.all(), "view"),
+    )
+    return tuple(
+        tuple(queryset.restrict(user, action).order_by("pk").values_list("pk", flat=True))
+        for queryset, action in scopes
+    )
 
 
 def netbox_fingerprint(owners, interfaces):
