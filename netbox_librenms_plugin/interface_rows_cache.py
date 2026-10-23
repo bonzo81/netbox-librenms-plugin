@@ -5,9 +5,9 @@ Computing the rows reads every NetBox interface of the device and compares each 
 LibreNMS snapshot. That takes seconds on a device with thousands of interfaces, and a filter
 request needs the same rows again. The key holds every input the rows read: the snapshot, the
 viewer, the tab options, and a fingerprint (row count and last change) of each NetBox table
-involved. A save, a create or a delete in one of those tables gives a new key. The timeout limits
-how long a change that leaves no trace in the fingerprint (an object permission edit, a queryset
-``update()``) can stay unseen.
+involved, of the tagged VLAN links, and of the viewer's object permissions. A save, a create or a
+delete in one of those tables, and a grant or a revoke, gives a new key. The timeout limits how long
+a change that leaves no trace in the fingerprint (a queryset ``update()``) can stay unseen.
 """
 
 import hashlib
@@ -15,11 +15,13 @@ import pickle
 import zlib
 
 from django.conf import settings
+from django.contrib.auth import get_backends
 from django.contrib.contenttypes.models import ContentType
 from django.core.cache import cache
-from django.db.models import Count, Max
+from django.db.models import Count, Max, Sum
 from dcim.models import MACAddress
 from ipam.models import VLAN, VLANGroup
+from netbox.authentication import ObjectPermissionMixin
 
 from netbox_librenms_plugin import __version__
 from netbox_librenms_plugin.interface_rules import rule_tables
@@ -35,6 +37,35 @@ def _table_fingerprint(queryset):
     return state["rows_cache_count"], changed.isoformat() if changed else None
 
 
+def _tagged_vlan_fingerprint(interfaces):
+    """Return the count and the primary key sum of the tagged VLAN links of *interfaces*."""
+    field = interfaces.model._meta.get_field("tagged_vlans")
+    links = field.remote_field.through.objects.filter(**{f"{field.m2m_field_name()}_id__in": interfaces.values("pk")})
+    # A new link gets a higher primary key than every link it replaces, so the sum moves when the count does not.
+    state = links.aggregate(rows_cache_count=Count("pk"), rows_cache_sum=Sum("pk"))
+    return state["rows_cache_count"], state["rows_cache_sum"]
+
+
+def permission_fingerprint(user):
+    """
+    Return the superuser flag and the object permissions of *user*, with their constraints.
+
+    Args:
+        user: The viewer.
+
+    Returns:
+        tuple: The flag, then each (permission, constraints) pair in sorted order.
+
+    """
+    permissions = sorted(
+        (name, repr(constraints))
+        for backend in get_backends()
+        if isinstance(backend, ObjectPermissionMixin)
+        for name, constraints in backend.get_all_permissions(user).items()
+    )
+    return (user.is_superuser, *permissions)
+
+
 def netbox_fingerprint(owners, interfaces):
     """
     Return the state of the NetBox rows that the computed interface rows read.
@@ -44,14 +75,14 @@ def netbox_fingerprint(owners, interfaces):
         interfaces: Queryset of those interfaces.
 
     Returns:
-        tuple: One (count, last change) pair per table.
+        tuple: One (count, last change) pair per table, then the (count, key sum) pair of the tagged VLAN links.
 
     """
     interface_type = ContentType.objects.get_for_model(interfaces.model)
     macs = MACAddress.objects.filter(
         assigned_object_type=interface_type, assigned_object_id__in=interfaces.values("pk")
     )
-    return tuple(
+    tables = tuple(
         _table_fingerprint(queryset)
         for queryset in (
             owners,
@@ -62,6 +93,7 @@ def netbox_fingerprint(owners, interfaces):
             *rule_tables(),
         )
     )
+    return (*tables, _tagged_vlan_fingerprint(interfaces))
 
 
 def rows_key(*parts):
