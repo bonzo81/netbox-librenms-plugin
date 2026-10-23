@@ -14,6 +14,7 @@ import hashlib
 import pickle
 import zlib
 
+from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from django.core.cache import cache
 from django.db.models import Count, Max
@@ -65,7 +66,8 @@ def netbox_fingerprint(owners, interfaces):
 
 def rows_key(*parts):
     """Return the cache key of the rows computed from *parts*, every input the rows read."""
-    digest = hashlib.sha256(repr((__version__, *parts)).encode()).hexdigest()
+    # The rows hold pickled model instances, so only the code that wrote them reads them back.
+    digest = hashlib.sha256(repr((__version__, settings.RELEASE.version, *parts)).encode()).hexdigest()
     return f"librenms_interface_rows_{digest}"
 
 
