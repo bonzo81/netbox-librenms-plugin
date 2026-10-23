@@ -665,6 +665,8 @@ class BaseInterfaceTableView(
         interfaces = self.get_interfaces(obj).model.objects.filter(**{f"{owner_field}_id__in": owner_ids})
         key = rows_key(
             cache_device.pk,
+            # A row with no resolved member belongs to the viewed member, so each member page has its own rows.
+            obj.pk,
             server_key,
             last_fetched,
             request.user.pk,
