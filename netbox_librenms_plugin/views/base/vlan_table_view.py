@@ -279,7 +279,9 @@ class BaseVLANTableView(
                 return table
 
             # The comparison ran over every row, so duplicate and invalid VIDs describe the whole device.
-            vlan_table, filters, filtered_from = filter_sync_table(request, obj, compared_vlans, build_table)
+            vlan_table, filters, filtered_from = filter_sync_table(
+                request, obj, compared_vlans, build_table, server_key=server_key
+            )
             vlan_table.configure(request)
 
         # Calculate cache TTL
