@@ -814,7 +814,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             item["_source"] = MAIN_INVENTORY_SOURCE
 
         # Fetch ports once and reuse in subsequent enrichment steps.
-        ports_success, ports_data = self.librenms_api.get_ports(self.librenms_id)
+        ports_success, ports_data = self.librenms_api.get_ports(self.librenms_id, with_vlans=False)
         ports_error = None
         # A success flag is not enough: a dict whose "ports" is missing/None or carries
         # non-dict entries makes _enrich_inventory_port_identity()/_merge_transceiver_data()
@@ -2226,7 +2226,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
     def _enrich_inventory_port_identity(self, inventory_data, ports_data=None):  # noqa: C901
         """Backfill `_librenms_port_id` / labels for port-class inventory rows from LibreNMS ports data."""
         if ports_data is None:
-            success, ports_data = self.librenms_api.get_ports(self.librenms_id)
+            success, ports_data = self.librenms_api.get_ports(self.librenms_id, with_vlans=False)
             if not success or not isinstance(ports_data, dict):
                 return
         elif not isinstance(ports_data, dict):
@@ -2315,7 +2315,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             return {}
 
         if ports_data is None:
-            success, ports_data = self.librenms_api.get_ports(self.librenms_id)
+            success, ports_data = self.librenms_api.get_ports(self.librenms_id, with_vlans=False)
             if not success or not isinstance(ports_data, dict):
                 return {}
         elif not isinstance(ports_data, dict):
