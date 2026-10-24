@@ -52,12 +52,10 @@
 {% elif migrated_to_marker %}
 {% comment %}
 Install form is dropped in migrated mode, but module VC-member changes still POST
-/verify-module/ via handleModuleChange(), which reads csrfmiddlewaretoken + server_key.
-Emit them as standalone hidden inputs so the verify fetch keeps working — mirrors the
-interface/IP/VLAN fragments.
+/verify-module/ via handleModuleChange(), which reads csrfmiddlewaretoken. Emit it as a
+standalone hidden input so the verify fetch keeps working.
 {% endcomment %}
 <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
-{% include "netbox_librenms_plugin/inc/_hidden_server_key.html" with server_key=module_sync.server_key %}
 {% endif %}
 <div class="noprint text-secondary mb-3">
     Showing inventory items from LibreNMS matched against NetBox module bays and module types.

@@ -796,7 +796,7 @@ that may well be correct.
 {{ sync_cache_status|json_script:"librenms-sync-cache-initial" }}
 {{ sync_cache_contract|json_script:"librenms-sync-cache-contract" }}
 {% endif %}
-<div id="librenms-sync-tabs" data-active-tab="{{ active_sync_tab }}">
+<div id="librenms-sync-tabs" data-active-tab="{{ active_sync_tab }}" data-server-key="{{ server_key|default:'' }}">
 {{ sync_cache_status|json_script:"librenms-sync-rendered-status" }}
 <!-- Tab Navigation -->
 <div class="d-flex justify-content-between align-items-center">
