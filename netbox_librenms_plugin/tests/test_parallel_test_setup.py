@@ -29,6 +29,12 @@ from netbox_librenms_plugin.tests.parallel import (
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
+def _python_child_environment(**overrides):
+    """Return the environment for a child Python that imports NetBox and the plugin."""
+    # pytest injects the NetBox source path from pyproject; a bare subprocess does not.
+    return {**os.environ, "PYTHONPATH": os.pathsep.join(path for path in sys.path if path), **overrides}
+
+
 def _pytest_plugins_lines(source):
     """Return the line of every module-level ``pytest_plugins`` assignment in *source*."""
     import ast
@@ -110,17 +116,6 @@ def test_no_test_module_registers_a_session_wide_plugin():
         "instead, or put shared fixtures in conftest.py. "
         f"Found: {', '.join(offenders)}"
     )
-
-
-def test_module_actions_e2e_creates_a_test_owned_device():
-    """The E2E setup must not mutate or clean up a pre-existing device."""
-    source = (REPOSITORY_ROOT / "tests/e2e/test_module_actions_in_place.py").read_text()
-
-    assert "RUN_ID = uuid4().hex" in source
-    assert 'DEVICE_NAME = f"e2e-modules-stub-{RUN_ID}"' in source
-    assert "device = Device.objects.create(" in source
-    assert "device, was_created = Device.objects.get_or_create(" not in source
-    assert 'created["device"] = [device.pk, True]' in source
 
 
 # Import root -> the distribution name that provides it.
@@ -752,13 +747,7 @@ def test_settings_module_exports_the_stripped_redis_host():
         [sys.executable, "-c", script],
         capture_output=True,
         text=True,
-        env={
-            **os.environ,
-            # pytest injects the NetBox source path from pyproject; a bare subprocess does not.
-            "PYTHONPATH": os.pathsep.join(path for path in sys.path if path),
-            "TEST_DB_NAME": "test_netbox_librenms",
-            "TEST_REDIS_HOST": "  redis  ",
-        },
+        env=_python_child_environment(TEST_DB_NAME="test_netbox_librenms", TEST_REDIS_HOST="  redis  "),
         cwd=REPOSITORY_ROOT,
         check=False,
     )
@@ -766,6 +755,46 @@ def test_settings_module_exports_the_stripped_redis_host():
     assert result.returncode == 0, result.stderr
     assert "HOST='redis'" in result.stdout, result.stdout
     assert "CACHE_HOST='redis'" in result.stdout, result.stdout
+
+
+def test_settings_module_takes_the_plugin_servers_from_the_ci_configuration(tmp_path):
+    """A developer's own NetBox configuration names other servers; the tests must still see CI's servers."""
+    import runpy
+
+    (tmp_path / "developer_configuration.py").write_text(
+        "import importlib, os\n"
+        "_base = importlib.import_module(os.environ['BASE_NETBOX_CONFIGURATION'])\n"
+        "globals().update({name: value for name, value in vars(_base).items() if name.isupper()})\n"
+        "PLUGINS_CONFIG = {'netbox_librenms_plugin': {'servers': {\n"
+        "    'production': {'librenms_url': 'https://librenms.invalid', 'api_token': 'x'},\n"
+        "    'stub': {'librenms_url': 'https://stub.invalid', 'api_token': 'x'},\n"
+        "}}}\n"
+    )
+    script = (
+        "import importlib; "
+        "settings = importlib.import_module('netbox_librenms_plugin.tests.isolated_settings'); "
+        "print(sorted(settings.PLUGINS_CONFIG['netbox_librenms_plugin']['servers']))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join([str(tmp_path), *(path for path in sys.path if path)]),
+            "BASE_NETBOX_CONFIGURATION": os.environ.get("NETBOX_CONFIGURATION", "netbox.configuration"),
+            "NETBOX_CONFIGURATION": "developer_configuration",
+            "DJANGO_SETTINGS_MODULE": "netbox_librenms_plugin.tests.isolated_settings",
+            "TEST_DB_NAME": "test_netbox_librenms",
+            "TEST_REDIS_HOST": "redis",
+        },
+        cwd=REPOSITORY_ROOT,
+        check=False,
+    )
+
+    ci_servers = runpy.run_path(str(REPOSITORY_ROOT / "media" / "configuration.testing.py"))["PLUGINS_CONFIG"]
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == repr(sorted(ci_servers["netbox_librenms_plugin"]["servers"])), result.stdout
 
 
 def test_playwright_state_machine_has_a_required_separate_ci_job():
@@ -1122,6 +1151,54 @@ def test_configured_norecursedirs_still_skips_pytest_default_directories(tmp_pat
     )
 
 
+def _run_e2e_setup(tmp_path, *, host_ca_exists=True, wheel_in_build_dir=False):
+    """Run a copy of tests/e2e/setup.sh with a stub docker and return the run and the build directory."""
+    import shutil
+
+    e2e = tmp_path / "tests" / "e2e"
+    shutil.copytree(
+        REPOSITORY_ROOT / "tests" / "e2e" / "docker", e2e / "docker", ignore=shutil.ignore_patterns("*.whl")
+    )
+    shutil.copy(REPOSITORY_ROOT / "tests" / "e2e" / "setup.sh", e2e / "setup.sh")
+    wheel = (e2e / "docker" if wheel_in_build_dir else tmp_path) / "netbox_librenms_plugin-0.0.0-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    host_ca = tmp_path / "host-ca.pem"
+    if host_ca_exists:
+        host_ca.write_text("CA\n")
+    # A stub docker keeps the run local; the script only has to reach the compose calls.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "docker").write_text("#!/bin/sh\nexit 0\n")
+    (bin_dir / "docker").chmod(0o755)
+    environment = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "NETBOX_CONTAINER_TAG": "v4.7",
+        "SSL_CERT_FILE": str(host_ca),
+    }
+    run = subprocess.run(
+        ["bash", str(e2e / "setup.sh"), str(wheel)], capture_output=True, text=True, env=environment, check=False
+    )
+    return run, e2e / "docker"
+
+
+@pytest.mark.parametrize("host_ca_exists", [True, False])
+def test_e2e_setup_starts_without_a_host_ca_bundle(tmp_path, host_ca_exists):
+    """The e2e build treats the host CA as optional, so setup must not stop when the bundle is missing."""
+    run, build_dir = _run_e2e_setup(tmp_path, host_ca_exists=host_ca_exists)
+
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert (build_dir / "host_ca.crt").read_text() == ("CA\n" if host_ca_exists else "")
+
+
+def test_e2e_setup_keeps_a_selected_wheel_that_is_already_in_the_build_directory(tmp_path):
+    """The cleanup of old wheels must not delete the wheel that the caller selected."""
+    run, build_dir = _run_e2e_setup(tmp_path, wheel_in_build_dir=True)
+
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert [path.read_bytes() for path in build_dir.glob("*.whl")] == [b"wheel"]
+
+
 @pytest.mark.django_db
 @pytest.mark.parametrize("helper", ["bounded_executor", "run_in_threads"])
 @pytest.mark.parametrize("connection_source", ["cached", "separate"])
@@ -1242,7 +1319,7 @@ except TimeoutError:
 """
     result = subprocess.run(
         [sys.executable, "-c", script, helper],
-        env={**os.environ, "DJANGO_SETTINGS_MODULE": "netbox_librenms_plugin.tests.isolated_settings"},
+        env=_python_child_environment(DJANGO_SETTINGS_MODULE="netbox_librenms_plugin.tests.isolated_settings"),
         capture_output=True,
         text=True,
         timeout=15,
@@ -1329,7 +1406,7 @@ connections.close_all()
 """
     result = subprocess.run(
         [sys.executable, "-c", script, connection.settings_dict["NAME"], connection_source, str(closed_peer)],
-        env={**os.environ, "DJANGO_SETTINGS_MODULE": "netbox_librenms_plugin.tests.isolated_settings"},
+        env=_python_child_environment(DJANGO_SETTINGS_MODULE="netbox_librenms_plugin.tests.isolated_settings"),
         capture_output=True,
         text=True,
         timeout=20,

@@ -4,6 +4,8 @@ The **LibreNMS Sync** page compares LibreNMS data with the selected NetBox Devic
 
 The Interfaces and Modules tables always fit the window. When the cells cannot wrap enough, the table hides its least important columns first (for example, LibreNMS ID and Description) and names them above the table. Widen the window to show them again.
 
+Each tab remembers the **Per Page** size that you select, for your user and for that tab only. Until you select a size on a tab, the tab uses your NetBox page size.
+
 ## Interfaces
 
 Available for Devices and Virtual Machines. This tab creates or updates interfaces and can synchronize descriptions, status, type, speed, VLAN assignments, MAC addresses, and MTU values.
@@ -21,6 +23,8 @@ The `librenms_id` custom field on interfaces improves matching when interface na
 ## IP Addresses
 
 Available for Devices and Virtual Machines. This tab creates IP addresses and assigns them to matching interfaces. It can also create a missing interface before assigning an address.
+
+An [IP Mapping](../configuration/mappings.md#ip-mappings) keeps the addresses in a prefix out of the sync, for example the IPv6 link-local prefix `fe80::/10`. Such a row shows **Ignored** and cannot be synced.
 
 **Set Primary IP** sets the NetBox Primary IP when the synchronized address matches the LibreNMS management address. Existing assignments or conflicting addresses require confirmation before they are changed.
 

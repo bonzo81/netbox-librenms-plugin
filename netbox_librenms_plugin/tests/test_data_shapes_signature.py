@@ -22,9 +22,61 @@ def test_signature_cisco_stackwise():
         "root_class": "stack",
         "member_count": 3,
         "position_base": 1,
+        "member_shape": "chassis",
     }
     assert sig["lag"]["present"] is False
     assert sig["sub_interfaces"]["present"] is False
+
+
+def test_signature_junos_fpc_virtual_chassis():
+    """A Junos VC fingerprints its FPC members the way VC detection counts them."""
+    sig = compute_shape_signature(load_recording("juniper-ex4400-vc-2member"))
+    assert sig["os"] == pseudonymize_os("junos")
+    assert sig["virtual_chassis"] == {
+        "present": True,
+        "root_class": "chassis",
+        "member_count": 2,
+        "position_base": 0,
+        "member_shape": "junos-fpc",
+    }
+
+
+def test_signature_separates_the_two_virtual_chassis_member_shapes():
+    """A Junos FPC stack and a chassis-member stack of the same size must not share a signature."""
+    fpc = compute_shape_signature(load_recording("juniper-ex4400-vc-2member"))
+    chassis = compute_shape_signature(load_recording("juniper-vc-2member"))
+
+    assert chassis["virtual_chassis"]["member_shape"] == "chassis"
+    assert fpc != chassis
+
+
+def test_novelty_reports_an_fpc_stack_as_new_against_a_chassis_member_manifest():
+    """The member shape is a structural axis, so a first FPC-shape capture is not covered by a chassis one."""
+    manifest = build_manifest([load_recording("juniper-vc-2member")])
+
+    verdict = classify_novelty(compute_shape_signature(load_recording("juniper-ex4400-vc-2member")), manifest)
+
+    assert verdict["verdict"] == "new"
+
+
+def test_signature_member_shape_is_null_without_a_stack():
+    assert compute_shape_signature(load_recording("linux-host"))["virtual_chassis"]["member_shape"] is None
+
+
+@pytest.mark.parametrize("value", [1, True, ["chassis"]])
+def test_signature_schema_rejects_a_non_string_member_shape(value):
+    sig = compute_shape_signature(load_recording("juniper-vc-2member"))
+    sig["virtual_chassis"]["member_shape"] = value
+
+    assert any("member_shape" in error for error in signature_schema_errors(sig))
+
+
+def test_signature_schema_rejects_a_signature_without_a_member_shape():
+    """A manifest built before the axis existed is stale and must not load."""
+    sig = compute_shape_signature(load_recording("juniper-vc-2member"))
+    del sig["virtual_chassis"]["member_shape"]
+
+    assert any("member_shape" in error for error in signature_schema_errors(sig))
 
 
 def _vrf_signature_recording(vrfs, *, ports=None):
@@ -73,7 +125,7 @@ def test_signature_vrf_axis_ignores_a_failed_response():
 
 
 def test_novelty_separates_a_vrf_shape_from_an_otherwise_identical_one():
-    """VRF must be a structural axis, or a VRF capture reads as covered by a non-VRF sibling."""
+    """The vrf axis must be structural, or a VRF capture reads as covered by a non-VRF sibling."""
     with_vrf = _vrf_signature_recording([{"vrf_id": 7, "vrf_name": "vrf-abc", "device_id": 5}])
     without_vrf = _vrf_signature_recording([])
     manifest = build_manifest([{**without_vrf, "name": "plain"}])

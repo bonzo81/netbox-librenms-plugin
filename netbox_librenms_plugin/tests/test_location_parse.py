@@ -6,7 +6,10 @@ ImportSettingsForm validation. Follows the repo convention of mocked DB access
 (no @pytest.mark.django_db).
 """
 
+import re
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 
 # =============================================================================
@@ -83,11 +86,11 @@ class TestParseLibrenmsLocation:
         result = parse_librenms_location("prefix site=NYC end", r"site=(?P<site>\w+)", is_regex=True)
         assert result["site"] == "NYC"
 
-    def test_invalid_regex_returns_all_none(self):
+    def test_invalid_regex_raises(self):
         from netbox_librenms_plugin.utils import parse_librenms_location
 
-        result = parse_librenms_location("NYC", "(?P<site>[", is_regex=True)
-        assert all(v is None for v in result.values())
+        with pytest.raises(re.error):
+            parse_librenms_location("NYC", "(?P<site>[", is_regex=True)
 
     def test_input_longer_than_cap_is_truncated_before_matching(self):
         from netbox_librenms_plugin.utils import (

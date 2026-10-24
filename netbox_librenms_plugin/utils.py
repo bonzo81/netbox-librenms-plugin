@@ -5,12 +5,13 @@ import re
 import threading
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Optional
+from typing import NamedTuple, Optional
 
+import django_tables2 as tables
 import psycopg
 from dcim.models import Device, Interface
-from django.core import signing
-from django.core.exceptions import FieldDoesNotExist, ObjectDoesNotExist, ValidationError
+from django.core.exceptions import NON_FIELD_ERRORS, FieldDoesNotExist, ObjectDoesNotExist, ValidationError
+from django.core.paginator import EmptyPage, PageNotAnInteger
 from django.db import DatabaseError, IntegrityError
 from django.db.models import Count, Max
 from django.http import HttpRequest
@@ -20,6 +21,7 @@ from django.utils.safestring import mark_safe
 from netbox.config import get_config
 from netbox.plugins import get_plugin_config
 from utilities.exceptions import AbortRequest
+from utilities.paginator import EnhancedPaginator
 from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 
 from netbox_librenms_plugin.constants import (
@@ -33,7 +35,7 @@ from netbox_librenms_plugin.constants import (
     OOB_NAME_SUFFIX,
     PORT_ID_SOURCE_COLLISION_REASON,
     REPORTED_NAME_PORT_COLLISION_REASON,
-    is_module_model_placeholder,
+    is_librenms_placeholder,
     is_supported_interface_name_field,
 )
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_host_address
@@ -49,91 +51,6 @@ from netbox_librenms_plugin.server_mappings import (
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE, classify_conflict, nearest_database_error
 
 logger = logging.getLogger(__name__)
-
-_MODULE_INVENTORY_BINDING_SALT = "netbox_librenms_plugin.module_inventory_binding"
-
-
-def module_inventory_row_digest(inventory_item) -> str:
-    """Return a canonical digest for one cached LibreNMS inventory row."""
-    if not isinstance(inventory_item, dict):
-        raise TypeError("inventory_item must be a dictionary")
-    serialized = json.dumps(inventory_item, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(serialized.encode()).hexdigest()
-
-
-def module_inventory_snapshot_digest(inventory) -> str:
-    """Return a canonical digest for a complete cached LibreNMS inventory snapshot."""
-    if not isinstance(inventory, list) or any(not isinstance(item, dict) for item in inventory):
-        raise TypeError("inventory must be a list of dictionaries")
-    return module_inventory_row_digest({"inventory": inventory})
-
-
-def _module_inventory_binding_payload(
-    device_id,
-    server_key,
-    action,
-    action_target,
-    ent_index,
-    inventory_digest,
-):
-    """Return the canonical fields that bind one rendered action to inventory state."""
-    return {
-        "device_id": coerce_positive_int(device_id),
-        "server_key": server_key,
-        "action": action,
-        "action_target": {key: coerce_positive_int(value) for key, value in sorted(action_target.items())},
-        "ent_index": coerce_positive_int(ent_index),
-        "inventory_digest": inventory_digest,
-    }
-
-
-def module_inventory_binding_token(
-    device_id,
-    server_key,
-    action,
-    action_target,
-    ent_index,
-    inventory_digest,
-) -> str:
-    """Sign one rendered module action and its exact inventory state."""
-    return signing.dumps(
-        _module_inventory_binding_payload(
-            device_id,
-            server_key,
-            action,
-            action_target,
-            ent_index,
-            inventory_digest,
-        ),
-        salt=_MODULE_INVENTORY_BINDING_SALT,
-    )
-
-
-def module_inventory_binding_matches(
-    token,
-    device_id,
-    server_key,
-    action,
-    action_target,
-    ent_index,
-    inventory_digest,
-) -> bool:
-    """Return whether a signed action still matches its target and inventory state."""
-    if not isinstance(token, str) or not token:
-        return False
-    try:
-        payload = signing.loads(token, salt=_MODULE_INVENTORY_BINDING_SALT)
-    except signing.BadSignature:
-        return False
-    return payload == _module_inventory_binding_payload(
-        device_id,
-        server_key,
-        action,
-        action_target,
-        ent_index,
-        inventory_digest,
-    )
-
 
 _CABLE_ROW_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
@@ -317,7 +234,13 @@ def cache_remaining_ttl(cache, key):
         return None
 
 
-_VC_MEMBER_INTERFACE_PATTERN = re.compile(r"^(?P<prefix>[A-Za-z][A-Za-z0-9]*)(?P<member>\d+)(?P<suffix>[/:].+)$")
+# The optional "-" admits Junos names such as xe-1/2/0, like get_virtual_chassis_member does.
+_VC_MEMBER_INTERFACE_PATTERN = re.compile(r"^(?P<prefix>[A-Za-z][A-Za-z0-9]*-?)(?P<member>\d+)(?P<suffix>[/:].+)$")
+
+
+def is_vc_position(value) -> bool:
+    """Return whether *value* is a Virtual Chassis position: an int, not a bool, 0 or more."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def convert_speed_to_kbps(speed_bps: int | None) -> int | None:
@@ -798,7 +721,15 @@ def cable_has_librenms_tag(cable, provenance_tag=_PROVENANCE_TAG_UNSET) -> bool:
 
 
 def cable_is_point_to_point(cable) -> bool:
-    """Return whether *cable* has exactly one termination on each end."""
+    """Return whether *cable* has one termination on each end, and a profile (if any) of one connector per end."""
+    # A breakout or trunk profile has more connectors and takes more far ends later, so plain sync never takes it.
+    if getattr(cable, "profile", ""):
+        # NetBox's profile_class property is None for a stored value that is no known profile.
+        if (profile_class := cable.profile_class) is None:
+            return False
+        profile = profile_class()
+        if len(profile.a_connectors) != 1 or len(profile.b_connectors) != 1:
+            return False
     prefetched = getattr(cable, "_prefetched_objects_cache", {}).get("terminations")
     if prefetched is not None:
         end_counts = {"A": 0, "B": 0}
@@ -882,6 +813,12 @@ def cable_far_terminations(cable, near_termination) -> list:
             the A side, else ``a_terminations``).
 
     """
+    from netbox_librenms_plugin.breakout_cables import breakout_far_end, is_channel
+
+    # A channel is no termination: its far end is the one at its connector of the parent's cable.
+    if is_channel(near_termination):
+        far_end = breakout_far_end(near_termination, near_termination.parent, cable)
+        return [] if far_end is None else [far_end]
     # Serial table enrichment prefetches the generic CableTermination rows and their concrete
     # objects for the whole page. Use that cache when present. The a_terminations/b_terminations
     # properties otherwise issue one concrete-object query per cable.
@@ -1223,7 +1160,7 @@ def get_vc_member_positions(device: Device) -> set[int]:
     positions = set()
 
     own_position = getattr(device, "vc_position", None)
-    if isinstance(own_position, int) and own_position > 0:
+    if is_vc_position(own_position):
         positions.add(own_position)
 
     vc = getattr(device, "virtual_chassis", None)
@@ -1246,7 +1183,7 @@ def get_vc_member_positions(device: Device) -> set[int]:
             parsed = int(raw_position)
         except (TypeError, ValueError):
             continue
-        if parsed > 0:
+        if is_vc_position(parsed):
             positions.add(parsed)
 
     return positions
@@ -1256,7 +1193,7 @@ def rewrite_interface_name_for_vc_member(
     interface_name: str, vc_position: int, member_positions: set[int] | None = None
 ) -> str | None:
     """Rewrite a template/interface name to the selected VC member position when appropriate."""
-    if not interface_name or not isinstance(vc_position, int) or vc_position < 1:
+    if not interface_name or not is_vc_position(vc_position):
         return None
     match = _VC_MEMBER_INTERFACE_PATTERN.match(interface_name)
     if not match:
@@ -1288,7 +1225,7 @@ def _instantiate_module_template_interface_specs(device: Device, module) -> list
     vc_position = getattr(device, "vc_position", None)
     vc_id = getattr(device, "virtual_chassis_id", None)
     member_positions = None
-    if isinstance(vc_position, int) and vc_position > 0 and isinstance(vc_id, int):
+    if is_vc_position(vc_position) and isinstance(vc_id, int):
         member_positions = get_vc_member_positions(device)
 
     template_specs = []
@@ -1348,10 +1285,29 @@ def get_module_template_interface_specs(device: Device, module) -> list[tuple[st
     return predicted_specs
 
 
-def get_module_template_interface_names(device: Device, module) -> list[str]:
-    """Return unique instantiated interface-template names, rewritten for VC members when needed."""
-    template_names = [name for name, _template_type in _instantiate_module_template_interface_specs(device, module)]
+class ModuleInterfaceNames(NamedTuple):
+    """The interface names of a module that this plugin may move into the module."""
 
+    names: list[str]
+    # True when the prediction expands the templates into a family: the naming plugin owns its other rows.
+    family: bool
+
+    def may_move(self, name: str) -> bool:
+        """Return whether this plugin may set the module on the interface row named *name*."""
+        return not self.family or name in self.names
+
+
+def get_module_adoptable_interface_names(device: Device, module) -> ModuleInterfaceNames:
+    """Return the predicted template names, or only the raw ones when the prediction expands them into a family."""
+    template_names = [name for name, _template_type in _instantiate_module_template_interface_specs(device, module)]
+    predicted_names = _predict_template_interface_names(device, module, template_names)
+    if len(predicted_names) > len(template_names):
+        return ModuleInterfaceNames(template_names, True)
+    return ModuleInterfaceNames(predicted_names, False)
+
+
+def _predict_template_interface_names(device: Device, module, template_names: list[str]) -> list[str]:
+    """Return the names the prediction receivers give for the instantiated template names."""
     from netbox_librenms_plugin.signals import predict_module_interface_names
 
     # Adoption accepts a receiver's whole-list answer, while typed specs require one result per template.
@@ -1390,7 +1346,7 @@ def predict_module_interface_rename(device: Device, module, names) -> list[str]:
     """
     Return the INR-predicted post-rename names for an explicit list of *names*.
 
-    Same receiver semantics as :func:`get_module_template_interface_names`
+    Same receiver semantics as :func:`get_module_adoptable_interface_names`
     (``send_robust`` isolates a failing receiver and the last non-None list return
     wins), but the input is a caller-supplied list of names rather than template
     instantiations. Used to recognise when a standalone interface is the renamed
@@ -1480,9 +1436,9 @@ def detect_vc_normalization_noop(device: Device, module) -> Optional[dict]:
     vc_position = getattr(device, "vc_position", None)
     vc_id = getattr(device, "virtual_chassis_id", None)
     # bool is a subclass of int; reject explicitly so True/False can't masquerade.
-    if isinstance(vc_position, bool) or isinstance(vc_id, bool):
+    if isinstance(vc_id, bool):
         return None
-    if not (isinstance(vc_position, int) and vc_position > 0 and isinstance(vc_id, int)):
+    if not (is_vc_position(vc_position) and isinstance(vc_id, int)):
         return None
 
     template_manager = getattr(getattr(module, "module_type", None), "interfacetemplates", None)
@@ -1589,9 +1545,16 @@ def build_vc_normalization_report(diagnostic: dict) -> str:
     return "\n".join(lines)
 
 
+SYNC_TAB_PAGE_SIZE_PREFERENCE = "plugins.netbox_librenms_plugin.per_page"
+
+
 def get_table_paginate_count(request: HttpRequest, table_prefix: str) -> int:
     """
-    Extend NetBox pagination for multiple tables with table-specific prefixes.
+    Return the page size of one sync tab table, and remember a requested size for that tab.
+
+    The order is: a valid ``<prefix>per_page`` request value, the size saved for the tab, then
+    NetBox's own page size. A request value is saved when it differs from the size the tab
+    shows without it. Every size is clamped to MAX_PAGE_SIZE.
 
     Args:
         request: HTTP request object
@@ -1601,24 +1564,46 @@ def get_table_paginate_count(request: HttpRequest, table_prefix: str) -> int:
         int: Number of items to display per page
 
     """
-    config = get_config()
     # An HTMX refresh sends the new page size in POST while the URL can retain an old value.
     param_key = f"{table_prefix}per_page"
     param_value = request.POST.get(param_key) if param_key in request.POST else request.GET.get(param_key)
-    if param_value:
-        try:
-            per_page = int(param_value)
-            # Guard against 0/negative input, which would break the paginator.
-            if per_page < 1:
-                return netbox_get_paginate_count(request)
-            max_page_size = config.MAX_PAGE_SIZE
-            # MAX_PAGE_SIZE 0/None disables the NetBox ceiling; don't clamp to it (min() with 0
-            # would zero the page size, and with None it TypeErrors).
-            return min(per_page, max_page_size) if max_page_size else per_page
-        except ValueError:
-            pass
+    preference = f"{SYNC_TAB_PAGE_SIZE_PREFERENCE}.{table_prefix.rstrip('_')}"
+    max_page_size = get_config().MAX_PAGE_SIZE
 
-    return netbox_get_paginate_count(request)
+    def clamp(per_page):
+        # MAX_PAGE_SIZE 0/None disables the NetBox ceiling; don't clamp to it (min() with 0
+        # would zero the page size, and with None it TypeErrors).
+        return min(per_page, max_page_size) if max_page_size else per_page
+
+    saved = coerce_positive_int(get_user_pref(request, preference))
+    current = clamp(saved) if saved is not None else netbox_get_paginate_count(request)
+    requested = coerce_positive_int(param_value)
+    if requested is None:
+        return current
+    per_page = clamp(requested)
+    # Page links and the sync form carry the rendered size, so only a different size is a choice.
+    if per_page != current:
+        save_user_pref(request, preference, per_page)
+    return per_page
+
+
+def paginate_sync_table(table, request, page=None):
+    """
+    Order and paginate a sync tab table, with the page size from get_table_paginate_count().
+
+    RequestConfig would take a raw ``<prefix>per_page`` from GET past the size checks, so it only orders the table.
+    """
+    tables.RequestConfig(request, paginate=False).configure(table)
+    if page is None:
+        page = request.GET.get(table.prefixed_page_field, 1)
+    try:
+        table.paginate(
+            paginator_class=EnhancedPaginator, per_page=get_table_paginate_count(request, table.prefix), page=page
+        )
+    except PageNotAnInteger:
+        table.page = table.paginator.page(1)
+    except EmptyPage:
+        table.page = table.paginator.page(table.paginator.num_pages)
 
 
 def get_user_pref(request, path, default=None):
@@ -1692,6 +1677,79 @@ def resolve_import_context_columns(request):
     stored = get_user_pref(request, IMPORT_CONTEXT_COLUMNS_PREFERENCE, list(IMPORT_CONTEXT_COLUMNS_DEFAULT))
     validated = validate_import_context_columns(stored)
     return IMPORT_CONTEXT_COLUMNS_DEFAULT if validated is None else validated
+
+
+# The interface sync POST reads these values from its ``exclude_columns`` field; the dict order is the menu order.
+INTERFACE_SYNC_EXCLUDE_COLUMNS = {
+    "name": "Name",
+    "type": "Type",
+    "speed": "Speed",
+    "vlans": "VLANs",
+    "mac_address": "MAC",
+    "mtu": "MTU",
+    "enabled": "Enabled",
+    "description": "Description",
+}
+INTERFACE_SYNC_OPTIONS_DEFAULT = {"auto_select_lag_members": True, "exclude_columns": ()}
+INTERFACE_SYNC_OPTIONS_PREFERENCE = "plugins.netbox_librenms_plugin.interface_sync_options"
+
+
+def validate_interface_sync_options(value):
+    """
+    Validate and normalize an interface "Sync options" menu preference.
+
+    Args:
+        value (object): The stored or submitted preference value.
+
+    Returns:
+        dict | None: The value with its columns in menu order, or None when the value is invalid.
+
+    """
+    if not isinstance(value, dict) or value.keys() != INTERFACE_SYNC_OPTIONS_DEFAULT.keys():
+        return None
+    auto_select = value["auto_select_lag_members"]
+    columns = value["exclude_columns"]
+    if not isinstance(auto_select, bool) or not isinstance(columns, list):
+        return None
+    if any(not isinstance(column, str) or column not in INTERFACE_SYNC_EXCLUDE_COLUMNS for column in columns):
+        return None
+    if len(columns) != len(set(columns)):
+        return None
+    return {
+        "auto_select_lag_members": auto_select,
+        "exclude_columns": [column for column in INTERFACE_SYNC_EXCLUDE_COLUMNS if column in columns],
+    }
+
+
+def interface_sync_options_menu(request):
+    """
+    Build the interface "Sync options" menu state from the user's choice and the factory defaults.
+
+    A stored value that does not validate counts as absent, so the menu shows the factory defaults.
+
+    Args:
+        request (HttpRequest): Request for the user who owns the preference.
+
+    Returns:
+        dict: The switch state and one entry per exclude column, each with its factory default.
+
+    """
+    options = validate_interface_sync_options(get_user_pref(request, INTERFACE_SYNC_OPTIONS_PREFERENCE))
+    if options is None:
+        options = INTERFACE_SYNC_OPTIONS_DEFAULT
+    return {
+        "auto_select_lag_members": options["auto_select_lag_members"],
+        "auto_select_lag_members_default": INTERFACE_SYNC_OPTIONS_DEFAULT["auto_select_lag_members"],
+        "exclude_columns": [
+            {
+                "value": column,
+                "label": label,
+                "checked": column in options["exclude_columns"],
+                "default_checked": column in INTERFACE_SYNC_OPTIONS_DEFAULT["exclude_columns"],
+            }
+            for column, label in INTERFACE_SYNC_EXCLUDE_COLUMNS.items()
+        ],
+    }
 
 
 _TRUTHY_PARAMETER_VALUES = frozenset({"on", "true", "1"})
@@ -1778,23 +1836,40 @@ def same_host(a, b) -> bool:
         return False
 
 
+SET_PRIMARY_IP_PREFERENCE = "plugins.netbox_librenms_plugin.set_primary_ip"
+CREATE_MISSING_INTERFACES_PREFERENCE = "plugins.netbox_librenms_plugin.create_missing_interfaces"
+
+
+def _resolve_sync_toggle(request, keys, preference):
+    """Return the request toggle, else the user's saved boolean, else ``False``; a non-boolean saved value counts as absent."""
+    value = read_request_toggle(request, keys)
+    if value is not None:
+        return is_truthy_parameter(value)
+    pref = get_user_pref(request, preference)
+    return pref if isinstance(pref, bool) else False
+
+
 def resolve_create_missing_interfaces(request) -> bool:
     """
     Resolve the "create a missing NetBox interface before assigning the IP" flag.
 
-    POST wins, then GET, then ``False`` (opt-in). The IP-sync template renders the toggle
-    from this value, so a table refresh restores what the user selected instead of
-    silently reverting to off.
+    POST wins, then GET, then the user's saved preference
+    ``plugins.netbox_librenms_plugin.create_missing_interfaces``, then ``False`` (opt-in).
+    The IP-sync template renders the toggle from this value, so a table refresh restores
+    what the user selected instead of silently reverting to off.
 
     Args:
-        request (HttpRequest): Request used to resolve the toggle value.
+        request (HttpRequest): Request used to resolve the toggle and user preference values.
 
     Returns:
         bool: Whether missing NetBox interfaces can be created before IP assignment.
 
     """
-    value = read_request_toggle(request, ("create-missing-interfaces-toggle", "create_missing_interfaces"))
-    return is_truthy_parameter(value) if value is not None else False
+    return _resolve_sync_toggle(
+        request,
+        ("create-missing-interfaces-toggle", "create_missing_interfaces"),
+        CREATE_MISSING_INTERFACES_PREFERENCE,
+    )
 
 
 def resolve_set_primary_ip(request) -> bool:
@@ -1806,7 +1881,7 @@ def resolve_set_primary_ip(request) -> bool:
 
     1. POST/GET ``set-primary-ip-toggle`` (or ``set_primary_ip``) wins
        -- set by the IP-sync tab toggle.
-    2. Otherwise the user's saved preference
+    2. Otherwise the user's saved boolean preference
        ``plugins.netbox_librenms_plugin.set_primary_ip``.
     3. Otherwise ``False`` (opt-in).
 
@@ -1821,15 +1896,9 @@ def resolve_set_primary_ip(request) -> bool:
         bool: Whether the matching synced management IP can become the primary IP.
 
     """
-    value = read_request_toggle(request, ("set-primary-ip-toggle", "set_primary_ip-toggle", "set_primary_ip"))
-    if value is not None:
-        return is_truthy_parameter(value)
-
-    pref = get_user_pref(request, "plugins.netbox_librenms_plugin.set_primary_ip")
-    if pref is not None:
-        return is_truthy_parameter(pref) if isinstance(pref, str) else bool(pref)
-
-    return False
+    return _resolve_sync_toggle(
+        request, ("set-primary-ip-toggle", "set_primary_ip-toggle", "set_primary_ip"), SET_PRIMARY_IP_PREFERENCE
+    )
 
 
 INTERFACE_NAME_PREFERENCE_PATH = "plugins.netbox_librenms_plugin.interface_name_field"
@@ -2288,8 +2357,8 @@ def get_interface_name_field(request: Optional[HttpRequest] = None, obj=None) ->
     """
     Get interface name field with request override support.
 
-    Checks in order: GET/POST params, platform-specific user preference, global
-    user preference, plugin config default. Platform-specific storage is used
+    Checks in order: GET/POST params, platform-specific user preference (the object's platform,
+    then its nearest ancestor with a choice), global user preference, plugin config default. Platform-specific storage is used
     only when the installation setting is enabled and the object has a platform.
 
     Args:
@@ -2311,10 +2380,15 @@ def get_interface_name_field(request: Optional[HttpRequest] = None, obj=None) ->
 
         if platform_id is not None and _remember_interface_name_per_platform(request):
             platform_preferences = get_user_pref(request, INTERFACE_NAME_PLATFORM_PREFERENCES_PATH, {})
-            if isinstance(platform_preferences, dict):
+            if isinstance(platform_preferences, dict) and platform_preferences:
                 platform_value = platform_preferences.get(str(platform_id))
                 if is_supported_interface_name_field(platform_value):
                     return platform_value
+                # A version platform reads the choice of its nearest ancestor that has one.
+                for ancestor in obj.platform.get_ancestors(ascending=True):
+                    platform_value = platform_preferences.get(str(ancestor.pk))
+                    if is_supported_interface_name_field(platform_value):
+                        return platform_value
 
         # Check user preference
         pref_val = get_user_pref(request, INTERFACE_NAME_PREFERENCE_PATH)
@@ -2648,6 +2722,9 @@ def parse_librenms_location(location_string: str, pattern: str, is_regex: bool =
     Returns:
         dict: Mapping of each supported token to its parsed value (or None).
 
+    Raises:
+        re.error: When ``pattern`` does not compile (OverflowError for a too-large repeat count).
+
     """
     result = {name: None for name in LOCATION_PARSE_TOKENS}
     if not location_string or not pattern:
@@ -2656,16 +2733,10 @@ def parse_librenms_location(location_string: str, pattern: str, is_regex: bool =
     if len(location_string) > LOCATION_PARSE_MAX_INPUT_LEN:
         location_string = location_string[:LOCATION_PARSE_MAX_INPUT_LEN]
 
-    try:
-        if is_regex:
-            compiled = re.compile(pattern)
-            match = compiled.search(location_string)
-        else:
-            compiled = re.compile(_placeholder_pattern_to_regex(pattern))
-            match = compiled.match(location_string)
-    except REGEX_COMPILE_ERRORS:
-        logger.warning("Invalid LibreNMS location parse pattern: %r", pattern)
-        return result
+    if is_regex:
+        match = re.compile(pattern).search(location_string)
+    else:
+        match = re.compile(_placeholder_pattern_to_regex(pattern)).match(location_string)
 
     if not match:
         return result
@@ -2714,6 +2785,9 @@ def parse_location_for_import(location_string: str) -> dict:
     Returns:
         dict: Mapping of each supported token to its parsed value (or None).
 
+    Raises:
+        RuleConfigurationError: When the stored parse pattern does not compile.
+
     """
     location_string = _normalise_location_value(location_string)
     pattern, is_regex = get_location_parse_settings()
@@ -2726,7 +2800,12 @@ def parse_location_for_import(location_string: str) -> dict:
             "rack": None,
             "tenant": None,
         }
-    parsed = parse_librenms_location(location_string, pattern, is_regex)
+    try:
+        parsed = parse_librenms_location(location_string, pattern, is_regex)
+    except REGEX_COMPILE_ERRORS as exc:
+        from netbox_librenms_plugin.models import LibreNMSSettings, RuleConfigurationError
+
+        raise RuleConfigurationError(LibreNMSSettings.objects.order_by("pk").first(), "location_parse_pattern") from exc
     # A global parse pattern is best-effort: if this particular location does
     # not match the pattern (no site token resolved), fall back to whole-string
     # matching so locations that don't fit the pattern still resolve a site.
@@ -2735,67 +2814,6 @@ def parse_location_for_import(location_string: str) -> dict:
         if not parsed.get("location"):
             parsed["location"] = whole
     return parsed
-
-
-def find_matching_platform(librenms_os: str) -> dict:
-    """
-    Find matching NetBox platform for a LibreNMS OS.
-
-    Tries exact case-insensitive name match first, then falls back to
-    PlatformMapping for when the platform name differs from the LibreNMS OS string.
-
-    Args:
-        librenms_os (str): OS string from LibreNMS (e.g., 'ios', 'linux', 'junos')
-
-    Returns:
-        dict: Dictionary containing:
-            - found (bool): Whether a match was found
-            - platform (Platform|None): The matched Platform object
-            - match_type (str|None): 'mapping', 'exact', 'ambiguous', or None.
-              'ambiguous' means multiple PlatformMapping entries matched, or
-              multiple Platform objects share the same name, and a single
-              Platform could not be determined.
-
-    """
-    from dcim.models import Platform
-
-    if not librenms_os or librenms_os == "-":
-        return {"found": False, "platform": None, "match_type": None}
-
-    # Try case-insensitive exact name match first.  We defer the "ambiguous"
-    # short-circuit so that an explicit PlatformMapping can still disambiguate
-    # the LibreNMS OS in exactly the case where multiple Platform rows share
-    # the name and the user added a mapping to break the tie.
-    platform_ambiguous = False
-    try:
-        platform = Platform.objects.get(name__iexact=librenms_os)
-        return {"found": True, "platform": platform, "match_type": "exact"}
-    except Platform.DoesNotExist:
-        pass
-    except Platform.MultipleObjectsReturned:
-        platform_ambiguous = True
-
-    # Fall back to PlatformMapping for when the platform name differs from the LibreNMS OS string
-    try:
-        from netbox_librenms_plugin.models import PlatformMapping as _PlatformMapping
-
-        _has_platform_mapping = True
-    except ImportError:
-        _has_platform_mapping = False
-
-    if _has_platform_mapping:
-        try:
-            mapping = _PlatformMapping.objects.get(librenms_os__iexact=librenms_os)
-            return {"found": True, "platform": mapping.netbox_platform, "match_type": "mapping"}
-        except _PlatformMapping.DoesNotExist:
-            pass
-        except _PlatformMapping.MultipleObjectsReturned:
-            return {"found": False, "platform": None, "match_type": "ambiguous", "ambiguity_source": "mapping"}
-
-    if platform_ambiguous:
-        return {"found": False, "platform": None, "match_type": "ambiguous", "ambiguity_source": "platform"}
-
-    return {"found": False, "platform": None, "match_type": None}
 
 
 def get_vlan_sync_css_class(exists_in_netbox: bool, name_matches: bool = True) -> str:
@@ -2997,26 +3015,10 @@ def normalize_serial(value) -> str:
     return "" if value is None else str(value).strip()
 
 
-# "0" is deliberately absent: normalize_serial documents zero as a real-but-falsey serial.
-_STACK_SERIAL_PLACEHOLDERS = frozenset(
-    {
-        "-",
-        "n/a",
-        "na",
-        "none",
-        "not available",
-        "notavailable",
-        "null",
-        "unknown",
-        "unspecified",
-    }
-)
-
-
 def normalize_stack_serial(value) -> str:
     """Return a serial usable as stack identity evidence, preserving numeric zero."""
     serial = normalize_serial(value)
-    return "" if serial.casefold() in _STACK_SERIAL_PLACEHOLDERS else serial
+    return "" if is_librenms_placeholder(serial) else serial
 
 
 def find_devices_by_serial(serial: str, limit: int = 2) -> list:
@@ -3164,13 +3166,14 @@ def oob_badge_html(record, leading_space=False):
 
 def rule_block_html(rule_block):
     """
-    Return the pill that says why the interface rules refuse a row's write.
+    Return the pill that says why the interface rules or an IP mapping refuse a row's write.
 
     Shared by the IP and cable tables and the cable-verify formatter. It uses the badge language
     of the interfaces table's rule pill.
 
     Args:
-        rule_block (dict): The row data from ``interface_rules.row_rule_block``.
+        rule_block (dict): The row data from ``interface_rules.row_rule_block`` or
+            ``ip_rules.row_ip_rule_block``.
 
     Returns:
         SafeString: The pill markup.
@@ -3560,7 +3563,8 @@ def load_module_type_bay_types():
 
 
 def module_type_bay_type_ids(module_type, preloaded=None):
-    """Return the module bay types *module_type* installs into; an empty set fits any bay.
+    """
+    Return the module bay types *module_type* installs into; an empty set fits any bay.
 
     *preloaded* is the result of ``load_module_type_bay_types``; without it, this reads one query.
     """
@@ -3743,6 +3747,37 @@ def exception_text_for(exc: Exception, model, user) -> str:
     keys = exc.error_dict if hasattr(exc, "error_dict") else ()
     fields = [name for name in dict.fromkeys(refused_model_field(model, key) for key in keys) if name]
     return hidden_refusal_text(model, fields)
+
+
+# This is the failure text that caught-error-text trusts.
+# nosemgrep: caught-error-text-shadow  # noqa: ERA001
+def write_failure_message(exc, action, written_field, model, user):
+    """
+    Describe a failed single-field write to *user*, and say when the failure is on another field.
+
+    Args:
+        exc (Exception): The caught error of the write.
+        action (str): The write, for example "update serial to 'X'".
+        written_field (str): The field that the write changed.
+        model (type[Model]): The model that NetBox validated.
+        user (User | None): The viewer.
+
+    Returns:
+        str: The failure text; its detail comes from ``exception_text_for``.
+
+    """
+    detail = exception_text_for(exc, model, user)
+    # full_clean() validates the whole object, so the failure can sit on a field this write never
+    # touched. Whether the write caused the failure is not knowable from the error keys alone:
+    # a custom validator can add any key, so the wording states what failed, never when it broke.
+    # The keys only choose the wording; the text comes from exception_text_for.
+    # nosemgrep: caught-error-text  # noqa: ERA001
+    keys = exc.error_dict if hasattr(exc, "error_dict") else ()
+    # nosemgrep: caught-error-text  # noqa: ERA001
+    elsewhere = [key for key in keys if key not in (written_field, NON_FIELD_ERRORS)]
+    if elsewhere and len(elsewhere) == len(keys):
+        return f"Cannot {action}: another field fails validation. {detail.rstrip('.')}. Resolve that, then retry."
+    return f"Failed to {action}: {detail}"
 
 
 # The device-level IP foreign keys this plugin re-homes during OOB linking, merges, and the
@@ -4229,6 +4264,9 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, prel
     Returns:
         The normalized string after all matching rules have been applied.
 
+    Raises:
+        RuleConfigurationError: When a rule in the chain stores a pattern or replacement that does not work.
+
     """
     from netbox_librenms_plugin.models import NormalizationRule
 
@@ -4237,12 +4275,7 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, prel
 
     def _apply_rules(val, rules_qs):
         for rule in rules_qs:
-            try:
-                val = re.sub(rule.match_pattern, rule.replacement, val)
-            except (*REGEX_COMPILE_ERRORS, IndexError):
-                logger.error(
-                    "Invalid regex in NormalizationRule pk=%s pattern=%r — skipping", rule.pk, rule.match_pattern
-                )
+            val = rule.apply(val)
         return val
 
     if preloaded_rules is not None:
@@ -4324,10 +4357,8 @@ def module_type_lookup_candidates(item):
     """
     candidates = []
     for key in ("entPhysicalModelName", "entPhysicalDescr"):
-        value = item.get(key)
-        if isinstance(value, str):
-            value = value.strip()
-        if not is_module_model_placeholder(value) and value not in candidates:
+        value = normalize_serial(item.get(key))
+        if not is_librenms_placeholder(value) and value not in candidates:
             candidates.append(value)
     return candidates
 
@@ -4376,10 +4407,10 @@ def resolve_module_type(
     # for every SFP the vendor declined to identify. The fallbacks apply only then. A real model
     # that resolves to nothing stays unresolved, because matching it on its own description
     # would be a guess, and a ModuleTypeMapping row is the supported way to teach that name.
-    if is_module_model_placeholder(model_name):
+    if is_librenms_placeholder(model_name):
         candidates = []
         for name in fallback_names:
-            if not is_module_model_placeholder(name) and name not in candidates:
+            if not is_librenms_placeholder(name) and name not in candidates:
                 candidates.append(name)
     else:
         candidates = [model_name]
@@ -4424,27 +4455,6 @@ def slashless_route_aliases(patterns):
             continue
         aliases.append(path(route[:-1], entry.callback, kwargs=entry.default_args))
     return aliases
-
-
-def get_enabled_ignore_rules(manufacturer=None) -> list:
-    """
-    Return the enabled InventoryIgnoreRule instances that apply to *manufacturer*.
-
-    Scoping follows :func:`apply_normalization_rules`: a manufacturer takes its own rules plus
-    the unscoped ones, and no manufacturer takes only the unscoped ones. A rule that admits an
-    entPhysicalClass the built-in list omits is vendor-specific in practice, so leaving every
-    such rule global made one vendor's quirk change what every other vendor's sync admits.
-    """
-    from django.db.models import Q
-
-    from netbox_librenms_plugin.models import InventoryIgnoreRule
-
-    rules = InventoryIgnoreRule.objects.filter(enabled=True)
-    if manufacturer is not None and getattr(manufacturer, "pk", None) is not None:
-        rules = rules.filter(Q(manufacturer__isnull=True) | Q(manufacturer=manufacturer))
-    else:
-        rules = rules.filter(manufacturer__isnull=True)
-    return list(rules.order_by("pk"))
 
 
 def load_bay_mappings() -> tuple:

@@ -64,7 +64,7 @@ The test suite covers all major plugin functionality. Tests are organized by the
 | [test_coverage_sync_views.py](../../netbox_librenms_plugin/tests/test_coverage_sync_views.py) | Sync action views—cables, IP addresses, VLAN sync action handlers |
 | [test_coverage_sync_views2.py](../../netbox_librenms_plugin/tests/test_coverage_sync_views2.py) | Additional sync action view coverage—device fields, device name/type sync |
 | [test_coverage_sync_views3.py](../../netbox_librenms_plugin/tests/test_coverage_sync_views3.py) | Further sync action view coverage—location sync, VLAN assignment edge cases |
-| [test_coverage_actions.py](../../netbox_librenms_plugin/tests/test_coverage_actions.py) | Import action views—bulk import, device role/cluster/rack update, validation details |
+| [test_coverage_actions.py](../../netbox_librenms_plugin/tests/test_coverage_actions.py) | Import action views—bulk import, import-row plan update, validation details |
 | [test_coverage_filters.py](../../netbox_librenms_plugin/tests/test_coverage_filters.py) | Import filter logic—filter form processing and device count helpers |
 | [test_init.py](../../netbox_librenms_plugin/tests/test_init.py) | Plugin startup—`_ensure_librenms_id_custom_field` creation, type migration, and multi-DB alias handling |
 | [test_coverage_tables.py](../../netbox_librenms_plugin/tests/test_coverage_tables.py) | Sync tables—column rendering, row data, interface and cable table helpers |
@@ -79,7 +79,7 @@ The test suite covers all major plugin functionality. Tests are organized by the
 | [test_integration_sync.py](../../netbox_librenms_plugin/tests/test_integration_sync.py) | Integration tests—API client against local mock HTTP server |
 | [test_integration_virtual_chassis.py](../../netbox_librenms_plugin/tests/test_integration_virtual_chassis.py) | Integration tests—VC detection, negative cache, multi-server cache isolation |
 | [test_view_wiring.py](../../netbox_librenms_plugin/tests/test_view_wiring.py) | Smoke tests—view class MRO, mixin wiring, permission contracts, and template syntax |
-| [test_platform_mapping.py](../../netbox_librenms_plugin/tests/test_platform_mapping.py) | PlatformMapping model—clean validation, YAML serialization, table/form/filterset, and find_matching_platform integration |
+| [test_platform_mapping.py](../../netbox_librenms_plugin/tests/test_platform_mapping.py) | PlatformMapping model—clean validation, YAML serialization, table/form/filterset, and the OS platform rule |
 | [test_module_replace.py](../../netbox_librenms_plugin/tests/test_module_replace.py) | Module replacement—module swapping, bay reindexing, and replacement validation |
 
 Supporting files:
@@ -151,6 +151,27 @@ pytest netbox_librenms_plugin/tests/ -v --lf
 # Re-run only failed browser tests from last run
 pytest -c netbox_librenms_plugin/tests/browser/pytest.ini netbox_librenms_plugin/tests/browser --lf
 ```
+
+### End-to-End Suite
+
+The suite in `tests/e2e` drives a real NetBox through its web UI and REST API. The Compose stack in `tests/e2e/docker` runs NetBox with the plugin wheel, an RQ worker, PostgreSQL, Redis, and the LibreNMS stub. The stub serves the recordings of this checkout. The suite needs Docker. It does not need a test database or the devcontainer.
+
+```bash
+uv build --wheel
+export NETBOX_PORT=8000
+NETBOX_CONTAINER_TAG=v4.7 tests/e2e/setup.sh
+uv run --no-project --with-requirements tests/e2e/requirements.txt playwright install chromium
+uv run --no-project --with-requirements tests/e2e/requirements.txt \
+    pytest -c tests/e2e/pytest.ini tests/e2e
+docker compose -f tests/e2e/docker/docker-compose.yml down -v
+```
+
+- `setup.sh` installs the one wheel in `dist/`, or the wheel path that you give as its argument. `NETBOX_CONTAINER_TAG` is a `netboxcommunity/netbox` image tag.
+- `NETBOX_PORT` sets the host port of NetBox (default 8000). `setup.sh` and the test run both read it, so export it once before the two commands, as above. `COMPOSE_PROJECT_NAME` gives the stack its own name and its own NetBox image, `<project name>-netbox:<NETBOX_CONTAINER_TAG>`. Give each concurrent stack its own project name. `setup.sh` writes both to `tests/e2e/docker/.env`, so later `docker compose` commands use the same values.
+- Behind a TLS-intercepting proxy, `setup.sh` passes the proxy variables to the image build and gives the build the CA bundle in `SSL_CERT_FILE`.
+- The `uv` and `playwright` commands run on the host, so behind such a proxy they need the CA too. Add `--system-certs` to each `uv` command, or export `SSL_CERT_FILE`. Export `NODE_EXTRA_CA_CERTS` with the CA bundle path before `playwright install`.
+- A failed test keeps its Playwright trace in `test-results/<test>/trace.zip`. Open it through the same environment:
+  `uv run --no-project --with-requirements tests/e2e/requirements.txt playwright show-trace test-results/<test>/trace.zip`.
 
 ## Testing Philosophy
 

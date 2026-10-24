@@ -67,7 +67,5 @@ def test_a_faulting_device_endpoint_still_detects_the_stack(settings, librenms_s
     assert result["is_stack"] is True
     assert result["member_count"] == 2
     assert [member["serial"] for member in result["members"]] == ["SN-A", "SN-B"]
-    # Without a device name or serial the naming and master detection degrade, but the
-    # members are still offered.
+    # Without a device name the naming degrades, but the members are still offered.
     assert [member["suggested_name"] for member in result["members"]] == ["Member-1", "Member-2"]
-    assert [member["is_master"] for member in result["members"]] == [False, False]

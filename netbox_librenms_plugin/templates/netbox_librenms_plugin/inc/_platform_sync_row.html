@@ -1,0 +1,62 @@
+{% comment %}
+The platform row of the sync page comparison table, for a device or a virtual machine.
+Requires: object, platform_info, update_url (the subject's platform sync endpoint).
+{% endcomment %}
+<tr>
+    <td style="padding-left: 1rem;">Platform</td>
+    <td>
+        <div class="d-flex flex-wrap align-items-center column-gap-3 row-gap-1">
+            <div>
+                {% if object.platform %}
+                    <a href="{{ object.platform.get_absolute_url }}">
+                        {{ object.platform }}
+                    </a>
+                {% else %}
+                    <span class="text-muted">Not set</span>
+                {% endif %}
+            </div>
+            <div>
+                {% with assessment=platform_info.assessment %}
+                {% if assessment and assessment.reason != "no_os" %}
+                    {% if assessment.state == "current" %}
+                        <span class="text-success" title="Synced with LibreNMS">
+                            <i class="mdi mdi-check-circle"></i>
+                        </span>
+                    {% elif assessment.operation == "create_os_platform" %}
+                        <button type="button" class="btn btn-sm btn-warning"
+                                onclick="showModal(document.getElementById('create-platform-modal'))"
+                                title="Platform doesn't exist - create and sync">
+                            <i class="mdi mdi-plus"></i> Create & Sync
+                        </button>
+                    {% elif assessment.state == "proposed" %}
+                        <form method="post"
+                              action="{{ update_url }}"
+                              style="display: inline;">
+                            {% csrf_token %}
+                            {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
+                            <button type="submit" class="btn btn-sm btn-outline-primary"
+                                    title="{% if assessment.operation == 'create_version_platform' %}Create version platform {{ platform_info.target_label }} and set it{% else %}Set platform to {{ platform_info.target_label }}{% endif %}">
+                                <i class="mdi mdi-sync"></i> Sync to NetBox
+                            </button>
+                        </form>
+                    {% else %}
+                        <span class="text-danger small" data-platform-blocked="{{ assessment.reason }}">
+                            <i class="mdi mdi-alert-circle"></i> {{ platform_info.reason_text }}
+                        </span>
+                    {% endif %}
+                {% endif %}
+                {% endwith %}
+            </div>
+        </div>
+    </td>
+    <td>
+        <div class="d-flex flex-wrap align-items-center column-gap-2 row-gap-1">
+            <span>{{ platform_info.librenms_os }}{% if platform_info.assessment.tracks_version %} {{ platform_info.librenms_version }}{% endif %}</span>
+            {% if platform_info.assessment.reason == "os_platform_missing" %}
+                <span class="badge bg-warning bg-opacity-75 text-dark" style="font-size: 0.7rem;" title="Platform doesn't exist in NetBox">
+                    <i class="mdi mdi-alert"></i> Not in NetBox
+                </span>
+            {% endif %}
+        </div>
+    </td>
+</tr>

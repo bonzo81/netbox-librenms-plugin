@@ -52,12 +52,12 @@ from netbox_librenms_plugin.server_mappings import (
     assign_own,
     claim_librenms_port_binding,
     find_port_owner,
-    get_librenms_sync_device,
     name_match_may_be_port,
     persist_mapping,
     read_mapping,
     read_mappings,
 )
+from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,
@@ -2211,7 +2211,7 @@ class DeleteNetBoxInterfacesView(
     """Delete interfaces that exist only in NetBox."""
 
     DROP_SYNC_SUBJECT_CLAIM_WITHOUT_SERVER = True
-    # A fetch() caller parses JSON, so the lock-conflict middleware answers with a JSON error.
+    # A fetch() caller reads the answer, so the middleware answers with a JSON error.
     answers_json = True
 
     def get_required_permissions_for_object_type(self, object_type):
@@ -2672,7 +2672,7 @@ class _BaseRelationshipSyncView(
     source_label: str
     related_label: str
     supports_vm: bool = False
-    # A fetch() caller parses JSON, so the lock-conflict middleware answers with a JSON error.
+    # A fetch() caller reads the answer, so the middleware answers with a JSON error.
     answers_json = True
 
     @staticmethod

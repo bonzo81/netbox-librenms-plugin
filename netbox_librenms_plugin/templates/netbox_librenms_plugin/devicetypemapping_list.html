@@ -7,11 +7,13 @@
 
 {% block content %}
     <div class="alert alert-info">
-        <h4>Device Type Mapping</h4>
-        <p>Map LibreNMS hardware strings to NetBox device types.
-           When importing devices from LibreNMS, these mappings are checked first before
-           falling back to exact part number / model matching.</p>
-        <p>Example: Map "Juniper MX480 Internet Backbone Router" to device type "MX480"</p>
+        <div>
+            <h4>Device Type Mapping</h4>
+            <p>Map LibreNMS hardware strings to NetBox device types.
+               When importing devices from LibreNMS, these mappings are checked first before
+               falling back to exact part number / model matching.</p>
+            <p>Example: Map "Juniper MX480 Internet Backbone Router" to device type "MX480"</p>
+        </div>
     </div>
     {{ block.super }}
 {% endblock %}

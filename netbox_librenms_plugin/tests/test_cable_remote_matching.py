@@ -2595,7 +2595,7 @@ def test_committed_cable_follow_up_failure_reports_saved_and_invalidates_cache(c
     from django.urls import reverse
 
     from netbox_librenms_plugin.middleware import FOLLOW_UP_FAILED_MESSAGE
-    from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
+    from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
     from netbox_librenms_plugin.tests.conftest import configured_server_key, make_serial_device, make_superuser
     from netbox_librenms_plugin.tests.test_cable_overwrite import _rendered_sync_data
     from netbox_librenms_plugin.views.sync.cables import SyncCablesView
@@ -2622,6 +2622,8 @@ def test_committed_cable_follow_up_failure_reports_saved_and_invalidates_cache(c
     data = _rendered_sync_data(client, local, row_id, key)
     consistency = SyncCacheConsistency(local)
     before = cache.get(consistency.state_key(SyncTab.CABLES, key))
+    interfaces_key = consistency.snapshot_key(SyncTab.INTERFACES, key)
+    cache.set(interfaces_key, {"ports": []}, timeout=300)
     callbacks = []
 
     def fail_follow_up():
@@ -2651,4 +2653,8 @@ def test_committed_cable_follow_up_failure_reports_saved_and_invalidates_cache(c
     assert any(FOLLOW_UP_FAILED_MESSAGE in message for message in messages)
     assert not any("Failed to sync cables" in message for message in messages)
     after = cache.get(consistency.state_key(SyncTab.CABLES, key))
-    assert after is not None and after != before
+    assert after["revision"] != (before or {}).get("revision")
+    assert (after["state"], after["source_tab"]) == (SyncTabState.LOCALLY_CHANGED, SyncTab.CABLES)
+    assert not cache.has_key(interfaces_key)
+    interfaces_state = cache.get(consistency.state_key(SyncTab.INTERFACES, key))
+    assert (interfaces_state["state"], interfaces_state["source_tab"]) == (SyncTabState.INVALIDATED, SyncTab.CABLES)

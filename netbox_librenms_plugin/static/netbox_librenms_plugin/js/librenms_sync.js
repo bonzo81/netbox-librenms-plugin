@@ -178,6 +178,36 @@ function fetchErrorMessage(response) {
 }
 
 /**
+ * Reject a failed fetch() answer; only a JSON response supplies a refusal reason.
+ *
+ * @param {Response} response
+ * @param {string} label - The prefix of the logged message
+ * @returns {Promise<never>}
+ */
+function rejectWithRefusal(response, label) {
+    const contentType = (response.headers.get('Content-Type') || '').toLowerCase();
+    if (!contentType.includes('application/json')) {
+        return Promise.reject(new Error(`${label} ${response.status}`));
+    }
+    return fetchErrorMessage(response).then(msg => {
+        const error = new Error(`${label} ${response.status}: ${msg}`);
+        error.refusal = msg;
+        throw error;
+    });
+}
+
+/**
+ * Return *text* trimmed and ending in a full stop, so a next sentence does not run into it.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function withFullStop(text) {
+    const sentence = String(text).trim();
+    return /[.!?]$/.test(sentence) ? sentence : sentence + '.';
+}
+
+/**
  * Show an error in NetBox's standard Django-message toast area.
  *
  * @param {string} message
@@ -1034,8 +1064,10 @@ function initializeCountdowns() {
  * @param {string} optionSelector - Selector for controls inside the dropdown
  * @param {string} countId - Changed-options badge element ID
  * @param {string} resetId - Reset button element ID
+ * @param {Object} [store] - Keeps the user's choice: save(root, options) runs once per user change
+ *     and once per Reset; restore(root, options) runs before the first count
  */
-function initializeSyncOptions(rootId, optionSelector, countId, resetId) {
+function initializeSyncOptions(rootId, optionSelector, countId, resetId, store) {
     const root = document.getElementById(rootId);
     if (!root || root.dataset.initialized === 'true') return;
 
@@ -1054,8 +1086,14 @@ function initializeSyncOptions(rootId, optionSelector, countId, resetId) {
         countBadge.classList.toggle('bg-primary-lt', changedCount > 0);
     };
 
-    options.forEach((option) => option.addEventListener('change', updateCount));
+    let resetting = false;
+    options.forEach((option) => option.addEventListener('change', () => {
+        updateCount();
+        if (store && !resetting) store.save(root, options);
+    }));
     resetButton?.addEventListener('click', () => {
+        // Reset saves the menu once below, not once per control it flips.
+        resetting = true;
         options.forEach((option) => {
             const defaultChecked = option.dataset.defaultChecked === 'true';
             if (option.checked !== defaultChecked) {
@@ -1063,25 +1101,184 @@ function initializeSyncOptions(rootId, optionSelector, countId, resetId) {
                 option.dispatchEvent(new Event('change', { bubbles: true }));
             }
         });
+        resetting = false;
         updateCount();
+        if (store) store.save(root, options);
     });
+    store?.restore(root, options);
     root.dataset.initialized = 'true';
     updateCount();
 }
+
+// Each preference save waits for the one before it, so the server stores the last state the user chose.
+let syncOptionSaving = Promise.resolve();
+
+/**
+ * Queue one user preference save.
+ *
+ * @param {HTMLElement} root - The menu root, which carries the save-pref URL
+ * @param {string} key - The preference key
+ * @param {*} value - The preference value
+ * @returns {Promise<boolean>} Resolves to false only when the POST was sent and failed
+ */
+function saveSyncOptionPreference(root, key, value) {
+    const savePrefUrl = root.dataset.savePrefUrl;
+    if (!savePrefUrl) return Promise.resolve(true);
+    const csrfToken = getCsrfToken();
+    if (!csrfToken) {
+        console.debug(`Failed to save ${key} pref: missing CSRF token`);
+        return Promise.resolve(true);
+    }
+    syncOptionSaving = syncOptionSaving.then(() => fetch(savePrefUrl, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrfToken},
+        body: JSON.stringify({key: key, value: value})
+    })).then(response => {
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        return true;
+    }).catch(error => {
+        console.debug(`Failed to save ${key} pref:`, error.message);
+        return false;
+    });
+    return syncOptionSaving;
+}
+
+/**
+ * Keep a sync options menu as user preferences.
+ *
+ * A tab swap can render the menu from a stored value that a queued save has not replaced yet,
+ * so the swapped-in menu gets the last choice made on this page.
+ * A key whose save failed is sent again, with its last choice, by the next save or restore.
+ *
+ * @param {Object<string, {read: Function, write: Function}>} preferences - Per preference key,
+ *     read(options) returns its value and write(options, value) applies it
+ * @returns {{restore: Function, save: Function}} The store for initializeSyncOptions
+ */
+function syncOptionStore(preferences) {
+    const chosen = {};
+    const failed = new Set();
+    let current = {};
+    const values = (options) => Object.fromEntries(
+        Object.entries(preferences).map(([key, preference]) => [key, preference.read(options)])
+    );
+    const send = (root, key) => {
+        // Saves finish in queue order, so the last save of a key decides whether it failed.
+        failed.delete(key);
+        saveSyncOptionPreference(root, key, chosen[key]).then((saved) => {
+            if (saved) failed.delete(key);
+            else failed.add(key);
+        });
+    };
+    return {
+        restore(root, options) {
+            Object.entries(chosen).forEach(([key, value]) => preferences[key].write(options, value));
+            current = values(options);
+            Array.from(failed).forEach((key) => send(root, key));
+        },
+        save(root, options) {
+            const next = values(options);
+            Object.keys(next).forEach((key) => {
+                if (JSON.stringify(next[key]) === JSON.stringify(current[key]) && !failed.has(key)) return;
+                chosen[key] = next[key];
+                send(root, key);
+            });
+            current = next;
+        }
+    };
+}
+
+/** A preference held by one checkbox, found by its ID. */
+function checkboxPreference(id) {
+    const find = (options) => options.find((option) => option.id === id);
+    return {
+        read: (options) => Boolean(find(options)?.checked),
+        write: (options, value) => {
+            const option = find(options);
+            if (option) option.checked = value;
+        }
+    };
+}
+
+const interfaceSyncOptionStore = syncOptionStore({
+    interface_sync_options: {
+        read: (options) => ({
+            auto_select_lag_members: Boolean(
+                options.find((option) => option.name === 'auto_select_lag_members')?.checked
+            ),
+            exclude_columns: options
+                .filter((option) => option.name === 'exclude_columns' && option.checked)
+                .map((option) => option.value)
+        }),
+        write: (options, value) => options.forEach((option) => {
+            option.checked = option.name === 'auto_select_lag_members'
+                ? value.auto_select_lag_members
+                : value.exclude_columns.includes(option.value);
+        })
+    }
+});
+
+const ipSyncOptionStore = syncOptionStore({
+    set_primary_ip: checkboxPreference('set-primary-ip-toggle-cb'),
+    create_missing_interfaces: checkboxPreference('create-missing-interfaces-toggle-cb')
+});
 
 function initializeSyncOptionMenus() {
     initializeSyncOptions(
         'interface-sync-options',
         '.interface-sync-option',
         'interface-sync-options-count',
-        'reset-interface-sync-options'
+        'reset-interface-sync-options',
+        interfaceSyncOptionStore
     );
     initializeSyncOptions(
         'ip-sync-options',
         '.ip-sync-option',
         'ip-sync-options-count',
-        'reset-ip-sync-options'
+        'reset-ip-sync-options',
+        ipSyncOptionStore
     );
+}
+
+/**
+ * Keep the management-IP row selected while "Set Primary IP" is on.
+ *
+ * Runs after the menu is restored, so the row follows the user's latest choice.
+ */
+function initializePrimaryIpToggle() {
+    const toggle = document.getElementById('set-primary-ip-toggle-cb');
+    if (!toggle || toggle.dataset.mgmtRowBound === 'true') return;
+    toggle.dataset.mgmtRowBound = 'true';
+    const selectManagementRow = () => {
+        document.querySelectorAll('tr[data-mgmt-ip="true"] input[name="select"]').forEach((box) => {
+            box.checked = toggle.checked;
+        });
+        const table = document.getElementById('librenms-ipaddress-table');
+        if (!table || !toggle.checked) return;
+        // A management row on another page has no checkbox, so it goes into the stored selection.
+        const visible = new Set(Array.from(table.querySelectorAll('td input[name="select"]'), (box) => box.value));
+        const selection = readStoredSelection(table);
+        JSON.parse(table.dataset.mgmtRows || '[]').forEach((key) => {
+            if (!visible.has(key)) selection[key] = {inputs: {}, auto: '', mgmt: true};
+        });
+        writeStoredSelection(table, selection);
+    };
+    selectManagementRow();
+    toggle.addEventListener('change', () => {
+        const table = document.getElementById('librenms-ipaddress-table');
+        if (table && !toggle.checked) {
+            // The management row can be selected on another page, where no checkbox can clear it.
+            const selection = readStoredSelection(table);
+            Object.keys(selection).forEach((key) => {
+                if (selection[key] && selection[key].mgmt) delete selection[key];
+            });
+            writeStoredSelection(table, selection);
+        }
+        selectManagementRow();
+        // Store the change too, or the next swap restores the row from the old selection.
+        commitSelectionChange(table);
+    });
 }
 
 // ============================================
@@ -1599,7 +1796,7 @@ function _selectionSnapshot(table) {
  * row restored after paging keeps the same standing it had before.
  *
  * @param {HTMLElement} table - The table element.
- * @returns {Object<string, {inputs: Object<string, string>, auto: string}>} Selected rows by key.
+ * @returns {Object<string, {inputs: Object<string, string>, auto: string, mgmt: boolean}>} Selected rows by key.
  */
 function readStoredSelection(table) {
     try {
@@ -1695,6 +1892,7 @@ function _isSelectionCompanionName(name) {
     return (
         Boolean(name) &&
         (name.startsWith('device_selection_') ||
+            name.startsWith('selection_grant_') ||
             name.startsWith('vlan_group_') ||
             cableSnapshotPrefixes.some((prefix) => name.startsWith(prefix)))
     );
@@ -1720,6 +1918,7 @@ function persistTableSelection(table) {
                     : checkbox.dataset[MEMBER_MARKER]
                       ? 'member'
                       : '',
+                mgmt: row.dataset.mgmtIp === 'true',
             };
         } else {
             // Only the visible page can retract a row: an absent checkbox means "another page",
@@ -1748,10 +1947,13 @@ function restoreTableSelection(table) {
     const selection = readStoredSelection(table);
     const blocked = _blockedPortIds();
     let cleared = 0;
+    const reverified = [];
     table.querySelectorAll('td input[name="select"]:not(:disabled)').forEach(function (checkbox) {
         const entry = selection[checkbox.value];
         const row = checkbox.closest('tr');
         if (!entry || !row) return;
+        // A row whose member verify is in flight belongs to that request, which stores the row when it settles.
+        if (row.dataset.verifyPending) return;
         const companionInputs = (entry && entry.inputs) || {};
         // The commit below drops a cleared row from storage, with its member value.
         if (_storedMemberDiffers(table, row, checkbox.value, companionInputs)) {
@@ -1760,9 +1962,14 @@ function restoreTableSelection(table) {
         }
         // A row the cascade added is re-derived by the closure; it is never restored onto a blocked row.
         if (entry.auto && blocked.has(row.dataset.portId)) return;
+        // The rendered module row holds the controls of its rendered member, so another member is verified again.
+        const reverify = _restoredModuleMemberSelect(table, row, checkbox.value, companionInputs);
+        if (reverify) _rememberRenderedModuleMember(reverify);
         row.querySelectorAll('select[name], input[type="hidden"][name]').forEach(function (input) {
             if (!_isSelectionCompanionName(input.name)) return;
             if (!Object.hasOwn(companionInputs, input.name)) return;
+            // The verify of the restored member issues its grant; a stored grant is never reused.
+            if (reverify && input.name.startsWith('selection_grant_')) return;
             const renderedValue = input.value;
             if (input.tomselect) {
                 input.tomselect.setValue(companionInputs[input.name], true);
@@ -1775,9 +1982,45 @@ function restoreTableSelection(table) {
         });
         checkbox.checked = true;
         _applySelectionMarker(checkbox, entry.auto);
+        if (reverify) reverified.push(reverify);
     });
     commitSelectionChange(table);
     _showClearedSelectionNotice(table, cleared);
+    reverified.forEach((select) => handleModuleChange(select, select.value, {restored: true}));
+}
+
+/**
+ * Return the member select of a restored module row when the stored member is not the rendered one.
+ *
+ * The row's action forms and its grants name the rendered member, so the restored member needs its
+ * own verify before any control of the row may write.
+ *
+ * @param {HTMLElement} table - The table the restore pass reads.
+ * @param {HTMLTableRowElement} row - The rendered row.
+ * @param {string} rowKey - The row's selection key.
+ * @param {Object<string, string>} companionInputs - The stored companion values of the row.
+ * @returns {HTMLSelectElement|null}
+ */
+function _restoredModuleMemberSelect(table, row, rowKey, companionInputs) {
+    if (table.id !== 'librenms-module-table') return null;
+    const name = 'device_selection_' + rowKey;
+    // Compare names instead of building a selector: no row key may reach a selector.
+    const select = Array.from(row.querySelectorAll('select')).find((field) => field.name === name);
+    if (!select || !Object.hasOwn(companionInputs, name) || companionInputs[name] === select.value) return null;
+    return select;
+}
+
+/**
+ * Keep the member the page rendered as the verified one, which a failed verify rolls back to.
+ *
+ * Call it before any change of the select: with no option[selected], the browser shows its first option.
+ *
+ * @param {HTMLSelectElement} select - VC member dropdown for a module row
+ */
+function _rememberRenderedModuleMember(select) {
+    if (typeof select._lastVerifiedMember !== 'undefined') return;
+    const selectedOption = select.querySelector('option[selected]');
+    select._lastVerifiedMember = selectedOption ? selectedOption.value : select.value;
 }
 
 /** Tables whose rows carry a Virtual Chassis member that the row's verify request decided. */
@@ -2057,9 +2300,12 @@ document.addEventListener('htmx:configRequest', function (e) {
 });
 
 document.addEventListener('submit', function (e) {
-    // An htmx form never navigates, and the configRequest listener above handles it.
-    if (!(e.target instanceof HTMLFormElement) || e.target.hasAttribute('hx-post')) return;
-    if (!SINGLE_ROW_SUBMITTERS.includes(e.submitter?.name)) {
+    // htmx cancels the native submit of a form it sends, and the configRequest listener above handles it.
+    // A form keeps its hx-post when htmx is absent or disabled, so only the cancel tells the two apart.
+    if (!(e.target instanceof HTMLFormElement) || e.defaultPrevented) return;
+    if (e.target.id === 'install-selected-form') {
+        injectModuleSelection(e.target);
+    } else if (!SINGLE_ROW_SUBMITTERS.includes(e.submitter?.name)) {
         injectOffPageSelections(e.target);
     }
 });
@@ -2255,6 +2501,7 @@ function initializeVCMemberSelect() {
         if (moduleTable) {
             const moduleSelects = moduleTable.querySelectorAll('.vc-member-select');
             moduleSelects.forEach(select => {
+                if (!select.dataset.moduleSelectInitialized) _rememberRenderedModuleMember(select);
                 if (select.tomselect && !select.dataset.moduleSelectInitialized) {
                     select.dataset.moduleSelectInitialized = 'true';
                     select.tomselect.on('change', function (value) {
@@ -2287,6 +2534,9 @@ function initializeVRFSelects() {
                 // Skip already initialized selects by checking the data attribute
                 if (select.tomselect && !select.dataset.vrfSelectInitialized) {
                     select.dataset.vrfSelectInitialized = 'true';
+                    // NetBox's TomSelect drops the empty Global option, so read the options again and keep it.
+                    select.tomselect.settings.allowEmptyOption = true;
+                    select.tomselect.sync();
 
                     // Add TomSelect listener
                     select.tomselect.on('change', function (value) {
@@ -2487,7 +2737,7 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
     })
         .then(response => {
             if (!response.ok) {
-                return fetchErrorMessage(response).then(msg => { throw new Error(msg); });
+                return rejectWithRefusal(response, 'HTTP');
             }
             return response.json();
         })
@@ -2538,6 +2788,7 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
         })
         .catch(err => {
             console.error('VLAN group verify failed:', err && err.message ? err.message : String(err));
+            showErrorToast(withFullStop(`The VLAN group check failed: ${err?.refusal || err?.message || err}`));
         })
         .finally(() => {
             const saveBtn = document.getElementById('saveVlanGroups');
@@ -2761,7 +3012,7 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
     })
         .then(response => {
             if (!response.ok) {
-                return fetchErrorMessage(response).then(msg => { throw new Error(`HTTP ${response.status}: ${msg}`); });
+                return rejectWithRefusal(response, 'HTTP');
             }
             return response.json();
         })
@@ -2800,6 +3051,7 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
         })
         .catch(error => {
             console.error('VLAN sync group verification error:', error);
+            showErrorToast(withFullStop(`The VLAN group check failed: ${error.refusal || error.message}`));
         });
 }
 
@@ -2824,9 +3076,16 @@ function handleVRFChange(select, value) {
 
     const csrfToken = getCsrfToken();
     if (!csrfToken) return;  // missing token → abort rather than throw on `.value`
+    // Only the latest VRF choice may repaint the row, as in handleInterfaceChange.
+    if (select._vrfVerifyController) {
+        select._vrfVerifyController.abort();
+    }
+    const controller = new AbortController();
+    select._vrfVerifyController = controller;
 
     fetch('/plugins/librenms_plugin/verify-ipaddress/', {
         method: 'POST',
+        signal: controller.signal,
         headers: {
             'Content-Type': 'application/json',
             'X-CSRFToken': csrfToken
@@ -2841,22 +3100,32 @@ function handleVRFChange(select, value) {
     })
         .then(response => {
             if (!response.ok) {
-                return fetchErrorMessage(response).then(msg => { throw new Error(msg); });
+                return rejectWithRefusal(response, 'HTTP');
             }
             return response.json();
         })
         .then(data => {
             const row = select.closest('tr');
+            if (controller.signal.aborted) return;
 
             if (data.status === 'success' && row && data.formatted_row) {
                 const statusCell = row.querySelector('td[data-col="status"]');
                 if (statusCell) {
                     statusCell.innerHTML = data.formatted_row.status;
                 }
+                // An IP mapping can ignore the address in the chosen VRF, so the selection follows the verdict.
+                const checkbox = row.querySelector('input[name="select"]');
+                if (checkbox) {
+                    checkbox.disabled = !data.formatted_row.selectable;
+                    if (checkbox.disabled) checkbox.checked = false;
+                    commitSelectionChange(row.closest('table'));
+                }
             }
         })
         .catch(error => {
+            if (error.name === 'AbortError') return;
             console.error('VRF verification failed:', error.message);
+            showErrorToast(withFullStop(`The VRF check failed: ${error.refusal || error.message}`));
         });
 }
 
@@ -2972,7 +3241,7 @@ function handleInterfaceChange(select, value) {
     })
         .then(response => {
             if (!response.ok) {
-                return fetchErrorMessage(response).then(msg => { throw new Error(`Server error ${response.status}: ${msg}`); });
+                return rejectWithRefusal(response, 'Server error');
             }
             return response.json();
         })
@@ -3059,7 +3328,18 @@ function handleInterfaceChange(select, value) {
             // stranding the user on an unverified selection with locked controls.
             console.error('Error verifying interface:', error.message);
             rollbackToLastVerified();
+            showErrorToast(memberCheckFailure(error));
         });
+}
+
+/**
+ * Return the toast text for a member check that failed: the server's reason, then what the row keeps.
+ *
+ * @param {Error} error - The failure; `refusal` holds the server's reason when it answered
+ * @returns {string}
+ */
+function memberCheckFailure(error) {
+    return withFullStop(error.refusal || `The member check failed: ${error.message}`) + ' The row keeps its previous member.';
 }
 
 /**
@@ -3135,7 +3415,7 @@ function handleCableChange(select, value) {
     })
         .then(response => {
             if (!response.ok) {
-                return fetchErrorMessage(response).then(msg => { throw new Error(`Server error ${response.status}: ${msg}`); });
+                return rejectWithRefusal(response, 'Server error');
             }
             return response.json();
         })
@@ -3195,6 +3475,7 @@ function handleCableChange(select, value) {
             if (error.name === 'AbortError' || !_isLiveRow(row)) return;
             console.error('Error verifying cable:', error.message);
             rollbackToLastVerified();
+            showErrorToast(memberCheckFailure(error));
         });
 }
 
@@ -3216,15 +3497,63 @@ document.addEventListener('click', function (event) {
 });
 
 /**
+ * Lock or release a module row's writes while its member verify is in flight.
+ *
+ * The row's action forms and its install grant were signed for the previous member, so a click or
+ * a selected install before the answer would act on the wrong member. Install Selected waits too.
+ *
+ * @param {HTMLTableRowElement} row - The module row.
+ * @param {boolean} pending - True while the verify request is in flight.
+ * @returns {void}
+ */
+function _setModuleRowPending(row, pending) {
+    if (pending) {
+        row.dataset.verifyPending = 'true';
+        row.querySelectorAll('td[data-col="actions"] button:not([disabled]), td[data-col="selection"] input[name="select"]:not([disabled])')
+            .forEach((control) => {
+                control.disabled = true;
+                control.dataset.verifyLocked = '1';
+            });
+    } else {
+        delete row.dataset.verifyPending;
+        row.querySelectorAll('[data-verify-locked]').forEach((control) => {
+            delete control.dataset.verifyLocked;
+            control.disabled = false;
+        });
+    }
+    _syncInstallSelectedLock();
+}
+
+/**
+ * Disable Install Selected while any module row waits for its member verify.
+ *
+ * @returns {void}
+ */
+function _syncInstallSelectedLock() {
+    const button = document.getElementById('install-selected-btn');
+    const table = document.getElementById('librenms-module-table');
+    if (!button) return;
+    const pending = Boolean(table && table.querySelector('tr[data-verify-pending]'));
+    if (pending && !button.disabled) {
+        button.disabled = true;
+        button.dataset.verifyLocked = '1';
+    } else if (!pending && button.dataset.verifyLocked) {
+        delete button.dataset.verifyLocked;
+        button.disabled = false;
+    }
+}
+
+/**
  * Handle VC member selection change for module verification.
- * Fetches recalculated matching status for one module row and updates cells inline.
+ * Fetches the row the table pinned to the new member, with that member's grants, and updates cells inline.
  *
  * @param {HTMLSelectElement} select - VC member dropdown for a module row
  * @param {string} value - Selected NetBox device ID
  */
-function handleModuleChange(select, value) {
-    const row = document.querySelector(`tr[data-ent-index="${select.dataset.rowId}"]`);
+function handleModuleChange(select, value, options = {}) {
+    const row = select.closest('tr') || document.querySelector(`tr[data-ent-index="${select.dataset.rowId}"]`);
     const rowDepth = row?.dataset?.depth || 0;
+    const table = row?.closest('table');
 
     // Abort any in-flight verify for this select so a slower earlier response
     // can't clobber a faster later one when the user changes the dropdown rapidly.
@@ -3234,8 +3563,45 @@ function handleModuleChange(select, value) {
     const controller = new AbortController();
     select._moduleVerifyController = controller;
 
+    // The install grant names the previous member, so it is withdrawn until the new member is verified.
+    const grantField = row ? Array.from(row.querySelectorAll('input[type="hidden"]')).find(
+        (field) => field.name === 'selection_grant_' + select.dataset.module
+    ) : null;
+    if (grantField && typeof select._lastVerifiedGrant === 'undefined') {
+        select._lastVerifiedGrant = grantField.value;
+    }
+    if (grantField) grantField.value = '';
+    if (row) _setModuleRowPending(row, true);
+
+    // The operator sees why the member was refused, and that the row went back to its verified member.
+    const rollbackToLastVerified = (reason) => {
+        if (select._lastVerifiedMember != null) {
+            if (select.tomselect && typeof select.tomselect.setValue === 'function') {
+                select.tomselect.setValue(select._lastVerifiedMember, true);
+            } else {
+                select.value = select._lastVerifiedMember;
+            }
+            if (grantField) grantField.value = select._lastVerifiedGrant || '';
+        }
+        // Without a baseline the grant stays cleared, so the released row cannot write for the refused member.
+        if (row) _setModuleRowPending(row, false);
+        // A restored selection named the refused member, so it is not kept for the previous one.
+        const checkbox = options.restored && row ? row.querySelector('td[data-col="selection"] input[name="select"]') : null;
+        if (checkbox) checkbox.checked = false;
+        if (table) commitSelectionChange(table);
+        showErrorToast(
+            withFullStop(reason) + (options.restored
+                ? ' The saved selection of this row is cleared.'
+                : ' The row keeps its previous member.')
+        );
+    };
+
     const csrfToken = getCsrfToken();
-    if (!csrfToken) return;  // missing token → abort rather than throw on `.value`
+    if (!csrfToken) {
+        // Without the token no verify can run, so no control of the row may name the new member.
+        rollbackToLastVerified('The member check could not run because the page has no CSRF token.');
+        return;
+    }
 
     fetch('/plugins/librenms_plugin/verify-module/', {
         method: 'POST',
@@ -3246,6 +3612,8 @@ function handleModuleChange(select, value) {
         },
         body: JSON.stringify({
             device_id: value,
+            page_device_id: table?.dataset?.pageDevice || null,
+            verify_binding: select.dataset.verifyBinding || null,
             ent_physical_index: select.dataset.module,
             depth: rowDepth,
             server_key: document.querySelector('input[name="server_key"]')?.value || null
@@ -3254,14 +3622,26 @@ function handleModuleChange(select, value) {
     })
         .then(response => {
             if (!response.ok) {
-                return fetchErrorMessage(response).then(msg => { throw new Error(`Server error ${response.status}: ${msg}`); });
+                return rejectWithRefusal(response, 'Server error');
             }
             return response.json();
         })
         .then(data => {
-            if (!_isLiveRow(row) || data.status !== 'success' || !data.formatted_row) return;
+            if (!_isLiveRow(row)) return;
+            if (data.status !== 'success' || !data.formatted_row) {
+                rollbackToLastVerified(data.message || 'The member check refused this row.');
+                return;
+            }
 
             const formattedRow = data.formatted_row;
+            // The member decides whether a selected install may take the row, so the checkbox follows it.
+            const selectionCell = row.querySelector('td[data-col="selection"]');
+            if (selectionCell && typeof formattedRow.selection !== 'undefined') {
+                const wasChecked = Boolean(selectionCell.querySelector('input[name="select"]:checked'));
+                selectionCell.innerHTML = formattedRow.selection;
+                const checkbox = selectionCell.querySelector('input[name="select"]');
+                if (checkbox) checkbox.checked = wasChecked && !checkbox.disabled;
+            }
             const deviceSelCell = row.querySelector('td[data-col="device_selection"]');
             if (deviceSelCell) {
                 deviceSelCell.innerHTML = formattedRow.device_selection || '';
@@ -3288,15 +3668,19 @@ function handleModuleChange(select, value) {
                 }
             }
 
+            // The replaced cells carry the new member's grants, so the row may write again.
+            _setModuleRowPending(row, false);
             // Re-bind listeners because row controls (select/buttons/forms) were replaced.
             initializeVCMemberSelect();
             initializeVCReportButtons();
             // The member select was replaced, so the stored selection takes its value again.
-            commitSelectionChange(row.closest('table'));
+            commitSelectionChange(table);
         })
         .catch(error => {
-            if (error.name === 'AbortError') return;
+            // A superseded request was aborted on purpose: the newer request owns the row lock.
+            if (error.name === 'AbortError' || !_isLiveRow(row)) return;
             console.error('Error verifying module:', error.message);
+            rollbackToLastVerified(error.refusal || `The member check failed: ${error.message}.`);
         });
 }
 
@@ -3789,16 +4173,16 @@ function initializeNetBoxOnlyInterfaces() {
     const interfaceCheckboxes = document.querySelectorAll('.netbox-interface-checkbox');
 
     if (selectAllCheckbox) {
-        selectAllCheckbox.addEventListener('change', function () {
+        selectAllCheckbox.onchange = function () {
             interfaceCheckboxes.forEach(checkbox => {
                 checkbox.checked = this.checked;
             });
-        });
+        };
     }
 
     // Update select all checkbox when individual checkboxes change
     interfaceCheckboxes.forEach(checkbox => {
-        checkbox.addEventListener('change', function () {
+        checkbox.onchange = function () {
             const checkedCount = document.querySelectorAll('.netbox-interface-checkbox:checked').length;
             const totalCount = interfaceCheckboxes.length;
 
@@ -3806,14 +4190,14 @@ function initializeNetBoxOnlyInterfaces() {
                 selectAllCheckbox.checked = checkedCount === totalCount;
                 selectAllCheckbox.indeterminate = checkedCount > 0 && checkedCount < totalCount;
             }
-        });
+        };
     });
 
     // Delete interfaces functionality
     const deleteButton = document.getElementById('confirm-delete-interfaces');
 
     if (deleteButton) {
-        deleteButton.addEventListener('click', function () {
+        deleteButton.onclick = function () {
             const selectedCheckboxes = document.querySelectorAll('.netbox-interface-checkbox:checked');
 
             if (selectedCheckboxes.length === 0) {
@@ -3821,7 +4205,7 @@ function initializeNetBoxOnlyInterfaces() {
             }
 
             deleteSelectedInterfaces(selectedCheckboxes);
-        });
+        };
     }
 }
 
@@ -3969,54 +4353,53 @@ function initializeSyncFormSpinners() {
 
 
 /**
- * Wire the "Install Selected" form to collect checked module-table rows before submit.
- * The form is separate from the table (to avoid nested forms), so we copy the
- * selected checkbox values into hidden inputs just before the form is submitted.
- * Guard against duplicate listeners on repeated HTMX swaps via a data attribute.
+ * Add the module selection to a native Install Selected submit, then forget the stored rows.
  *
- * NOTE: this submit-phase injection only reliably covers the NATIVE (no-htmx) submit
- * fallback. When htmx drives the POST, its own submit listener can be registered on the
- * form BEFORE this one (fresh page load: htmx's DOMContentLoaded processNode runs before
- * initializeScripts), so it serializes the form first and these hidden inputs arrive too
- * late. The htmx path is therefore injected at htmx:configRequest (see the
- * DOMContentLoaded handler), which fires after serialization and replaces any
- * select/device_selection values this handler managed to add.
+ * The module table sits outside its form, so its checked rows and the rows selected on other pages
+ * are injected as hidden inputs. A submit that htmx takes never reaches this: the htmx:configRequest
+ * listener (see the DOMContentLoaded handler) adds the same rows to the request.
+ *
+ * @param {HTMLFormElement} form - The Install Selected form being submitted natively.
+ * @returns {void}
  */
-function handleInstallSelectedSubmit() {
-    // Remove any previously-injected hidden inputs to avoid duplicates
-    const form = document.getElementById('install-selected-form');
-    if (!form) return;
+function injectModuleSelection(form) {
     form.querySelectorAll('input[data-injected-select]').forEach(el => { el.remove(); });
-
     const table = document.getElementById('librenms-module-table');
     if (!table) return;
 
-    table.querySelectorAll('input[name="select"]:checked').forEach(cb => {
-        const hidden = document.createElement('input');
-        hidden.type = 'hidden';
-        hidden.name = 'select';
-        hidden.value = cb.value;
-        hidden.dataset.injectedSelect = '1';
-        form.appendChild(hidden);
-
-        const selectedDevice = table.querySelector(`#device_selection_${cb.value}`);
-        if (selectedDevice) {
-            const hiddenDevice = document.createElement('input');
-            hiddenDevice.type = 'hidden';
-            hiddenDevice.name = `device_selection_${cb.value}`;
-            hiddenDevice.value = selectedDevice.value;
-            hiddenDevice.dataset.injectedSelect = '1';
-            form.appendChild(hiddenDevice);
-        }
+    const rows = _checkedModuleRows(table);
+    const records = offPageRecords(table, readStoredSelection(table));
+    Object.keys(records).forEach((rowKey) => {
+        const companions = (records[rowKey] && records[rowKey].inputs) || {};
+        rows.push({
+            value: rowKey,
+            companions: Object.fromEntries(Object.entries(companions).filter(([name]) => _isSelectionCompanionName(name))),
+        });
     });
+    rows.forEach(({value, companions}) => {
+        [['select', value], ...Object.entries(companions)].forEach(([name, fieldValue]) => {
+            const hidden = document.createElement('input');
+            hidden.type = 'hidden';
+            hidden.name = name;
+            hidden.value = fieldValue;
+            hidden.dataset.injectedSelect = '1';
+            form.appendChild(hidden);
+        });
+    });
+    clearStoredSelection(table);
 }
 
-function initializeInstallSelectedForm() {
-    const form = document.getElementById('install-selected-form');
-    if (!form) return;
-    if (form.dataset.installInit) return;
-    form.dataset.installInit = 'true';
-    form.addEventListener('submit', handleInstallSelectedSubmit);
+/**
+ * Return the checked module rows with the companion fields each submits: its member and its install grant.
+ *
+ * @param {HTMLElement} table - The module table.
+ * @returns {Array<{value: string, companions: Object<string, string>}>}
+ */
+function _checkedModuleRows(table) {
+    return Array.from(table.querySelectorAll('input[name="select"]:checked')).map((checkbox) => {
+        const row = checkbox.closest('tr');
+        return {value: checkbox.value, companions: row ? _rowCompanionInputs(row) : {}};
+    });
 }
 
 /**
@@ -4214,6 +4597,9 @@ document.body.addEventListener('closeModal', closeHtmxModal);
  */
 
 function initializeScripts() {
+    // The row selection restore reads the menu switches, so the menu is restored first.
+    initializeSyncOptionMenus();
+    initializePrimaryIpToggle();
     initializeCheckboxes();
     initializeVCMemberSelect();
     initializeVRFSelects();
@@ -4221,7 +4607,6 @@ function initializeScripts() {
     initializeVlanModalSave();
     initializeFilters();
     initializeCountdowns();
-    initializeSyncOptionMenus();
     initializeCheckboxListeners();
     initializeBulkEditApply();
     updateInterfaceNameField();
@@ -4229,7 +4614,6 @@ function initializeScripts() {
     initializeNetBoxOnlyInterfaces();
     initializeSyncFormSpinners();
     initializeVlanSyncGroupSelects();
-    initializeInstallSelectedForm();
     initializeVCReportButtons();
     initializeSyncCacheConsistency();
     initializeSyncTableFit();
@@ -4254,30 +4638,21 @@ document.addEventListener('DOMContentLoaded', function () {
         if (csrfToken) {
             event.detail.headers['X-CSRFToken'] = csrfToken;
         }
-        // Install Selected: the checked rows live in the table OUTSIDE the form, and htmx's
-        // own submit listener (attached to the form at ITS DOMContentLoaded processNode,
-        // which on a fresh page load runs before initializeScripts registers the
-        // submit-phase injector on the same element — listener ORDER, not event phase,
-        // decides) serializes the form BEFORE the hidden inputs are injected. The first
-        // click after a full page load then POSTs no 'select' values and the view warns
-        // "No modules selected." while wiping the selection. configRequest fires AFTER
-        // htmx serialization, exactly to let listeners amend the outgoing parameters, so
-        // injecting here is ordering-independent. Replace (not append to) any
-        // select/device_selection values the submit-phase injector already serialized so
-        // rows are never posted twice.
+        // Install Selected: the checked rows live in the table OUTSIDE the form, so htmx
+        // serializes none of them. configRequest fires after that serialization, exactly to
+        // let listeners amend the outgoing parameters, so the rows are added here; a native
+        // submit takes them in injectModuleSelection instead. Replace (not append to) any
+        // select/companion values already in the request so rows are never posted twice.
         if (event.detail.elt && event.detail.elt.id === 'install-selected-form') {
             const params = event.detail.parameters;
             Array.from(params.keys())
-                .filter((k) => k === 'select' || k.startsWith('device_selection_'))
+                .filter((k) => k === 'select' || _isSelectionCompanionName(k))
                 .forEach((k) => params.delete(k));
             const table = document.getElementById('librenms-module-table');
             if (table) {
-                table.querySelectorAll('input[name="select"]:checked').forEach((cb) => {
-                    params.append('select', cb.value);
-                    const selectedDevice = table.querySelector(`#device_selection_${cb.value}`);
-                    if (selectedDevice) {
-                        params.append(`device_selection_${cb.value}`, selectedDevice.value);
-                    }
+                _checkedModuleRows(table).forEach(({value, companions}) => {
+                    params.append('select', value);
+                    Object.entries(companions).forEach(([name, fieldValue]) => params.append(name, fieldValue));
                 });
                 // Modules the user selected on another page of this table: the rows are gone
                 // from the DOM, so their target device travels with them out of the store.

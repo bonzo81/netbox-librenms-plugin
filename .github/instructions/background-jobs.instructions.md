@@ -67,7 +67,7 @@ Filter fields: `librenms_location`, `librenms_type`, `librenms_os`, `librenms_ho
 - **`BulkImportDevicesView`** (POST) — executes import. Background mode enqueues `ImportDevicesJob`; sync mode calls `bulk_import_devices()` + `bulk_import_vms()` and returns OOB row swaps with `HX-Trigger: closeModal`.
 - **`DeviceValidationDetailsView`** (GET) — renders expandable validation details via `htmx/device_validation_details.html`.
 - **`DeviceVCDetailsView`** (GET) — renders VC member details via `htmx/device_vc_details.html`.
-- **`DeviceRoleUpdateView`**, **`DeviceClusterUpdateView`**, **`DeviceRackUpdateView`** (POST) — per-device dropdown updates. Apply selection to validation state and return re-rendered row via `render_device_row()`.
+- **`DeviceImportPlanUpdateView`** (POST) — per-device dropdown updates (role, cluster, rack, placement). Apply selection to validation state and return re-rendered row via `render_device_row()`.
 
 ## Key Import Utilities (`import_utils/` package)
 `import_utils/` is a package; the `__init__.py` re-exports key functions so callers can still use `from import_utils import ...`.
@@ -81,7 +81,7 @@ Filter fields: `librenms_location`, `librenms_type`, `librenms_os`, `librenms_ho
 
 ## Import Validation and Plans
 
-`import_validation_helpers.py` centralizes validation state mutation used by the role, placement, and rack update views:
+`import_validation_helpers.py` centralizes validation state mutation used by `DeviceImportPlanUpdateView`:
 - `apply_role_to_validation()`, `apply_cluster_to_validation()`, `apply_host_to_validation()`, and `apply_rack_to_validation()` update validation state when a user changes an import selection.
 - `remove_validation_issue()` and `recalculate_validation_status()` maintain the issue list and overall status.
 - `fetch_model_by_id()` reads model selections.

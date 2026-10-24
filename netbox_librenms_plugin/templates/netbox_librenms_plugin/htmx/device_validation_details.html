@@ -376,53 +376,63 @@
               <tr>
                 <td style="padding-left: 0.75rem;">Platform</td>
                 <td>
-                  {% if validation.existing_device and validation.existing_device.platform %}
-                    {{ validation.existing_device.platform }}
-                    {% if sync_info and not sync_info.platform_synced %}
-                      {% if sync_info.platform_info.platform_exists %}
-                        <form style="display:inline" class="ms-1"
-                              hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
-                              hx-swap="none">
-                          {% csrf_token %}
-                          {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
-                          <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
-                          <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
-                          <input type="hidden" name="action" value="sync_platform">
-                          <button type="submit" class="btn btn-sm btn-outline-primary py-0 px-1" title="Sync platform" aria-label="Sync platform">
-                            <i class="mdi mdi-sync"></i>
-                          </button>
-                        </form>
-                      {% else %}
-                        <span class="text-muted ms-1" title="Platform '{{ sync_info.platform_info.librenms_os }}' not in NetBox">
-                          <i class="mdi mdi-alert-outline"></i>
-                        </span>
-                      {% endif %}
-                    {% elif sync_info and sync_info.platform_synced %}
-                      <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                  {% if validation.existing_device %}
+                    {% if validation.existing_device.platform %}
+                      {{ validation.existing_device.platform }}
+                    {% else %}
+                      <span class="text-muted">Not set</span>
                     {% endif %}
-                    {% include "netbox_librenms_plugin/htmx/_platform_manage_icon.html" %}
-                  {% elif validation.existing_device %}
-                    {# Existing device with no platform assigned #}
-                    <span class="text-muted">Not set</span>
-                    {% if validation.platform.platform or sync_info and sync_info.platform_info.platform_exists %}
-                    <form style="display:inline" class="ms-1"
-                          hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
-                          hx-swap="none">
-                      {% csrf_token %}
-                      {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
-                      <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
-                      <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
-                      <input type="hidden" name="action" value="sync_platform">
-                      <button type="submit" class="btn btn-sm btn-outline-primary py-0 px-1" title="Sync platform" aria-label="Sync platform">
-                        <i class="mdi mdi-sync"></i>
-                      </button>
-                    </form>
+                    {% with assessment=sync_info.platform_info.assessment %}
+                    {% if assessment.state == "current" %}
+                      {% if validation.existing_device.platform %}<span class="text-success"><i class="mdi mdi-check-circle"></i></span>{% endif %}
+                    {% elif assessment.state == "proposed" and assessment.operation != "create_os_platform" %}
+                      <form style="display:inline" class="ms-1"
+                            hx-post="{% url 'plugins:netbox_librenms_plugin:device_conflict_action' device_id=libre_device.device_id %}"
+                            hx-swap="none">
+                        {% csrf_token %}
+                        {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
+                        <input type="hidden" name="existing_device_id" value="{{ validation.existing_device.pk }}">
+                        <input type="hidden" name="existing_device_type" value="{{ existing_device_model_name|default:'device' }}">
+                        <input type="hidden" name="action" value="sync_platform">
+                        <button type="submit" class="btn btn-sm btn-outline-primary py-0 px-1"
+                                title="{% if assessment.operation == 'create_version_platform' %}Create version platform {{ sync_info.platform_info.target_label }} and set it{% else %}Set platform to {{ sync_info.platform_info.target_label }}{% endif %}"
+                                aria-label="Sync platform">
+                          <i class="mdi mdi-sync"></i>
+                        </button>
+                      </form>
+                    {% elif assessment.reason == "os_platform_missing" %}
+                      <span class="text-muted ms-1" title="Platform '{{ sync_info.platform_info.librenms_os }}' not in NetBox">
+                        <i class="mdi mdi-alert-outline"></i>
+                      </span>
+                    {% elif assessment %}
+                      <span class="text-danger ms-1" title="{{ sync_info.platform_info.reason_text }}" data-platform-blocked="{{ assessment.reason }}">
+                        <i class="mdi mdi-alert-circle-outline"></i>
+                      </span>
                     {% endif %}
+                    {% endwith %}
                     {% include "netbox_librenms_plugin/htmx/_platform_manage_icon.html" %}
                   {% elif validation.platform.platform %}
-                    {# New import — platform will be assigned on import #}
-                    {{ validation.platform.platform.name }}
-                    <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                    {# New import: the platform is assigned on import #}
+                    {% with assessment=validation.platform.assessment %}
+                    {% if assessment.operation == "create_version_platform" and can_add_platform %}
+                      {{ platform_display.target }}
+                      <span class="badge bg-info text-dark ms-1" data-version-platform="create">Created on import</span>
+                    {% elif assessment.operation == "create_version_platform" %}
+                      {{ platform_display.platform }}
+                      <span class="text-warning ms-1" data-version-platform="missing"
+                            title="Version platform {{ platform_display.target }} is missing, and you do not have permission to add platforms. The import assigns the OS platform.">
+                        <i class="mdi mdi-alert-outline"></i> {{ platform_display.target }} missing
+                      </span>
+                    {% elif assessment.state == "blocked" %}
+                      {{ platform_display.platform }}
+                      <span class="text-warning ms-1" title="{{ platform_display.reason }} The import assigns the OS platform." data-platform-blocked="{{ assessment.reason }}">
+                        <i class="mdi mdi-alert-outline"></i>
+                      </span>
+                    {% else %}
+                      {{ platform_display.platform }}
+                      <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
+                    {% endif %}
+                    {% endwith %}
                     {% include "netbox_librenms_plugin/htmx/_platform_manage_icon.html" %}
                   {% else %}
                     {% if not libre_device.os or libre_device.os == "-" %}
@@ -431,7 +441,7 @@
                     {% include "netbox_librenms_plugin/htmx/_platform_manage_icon.html" %}
                   {% endif %}
                 </td>
-                <td>{{ libre_device.os|default:"—" }}</td>
+                <td>{{ libre_device.os|default:"—" }}{% if validation.platform.assessment.tracks_version %} {{ libre_device.version }}{% endif %}</td>
               </tr>
 
               {% if validation.import_as_vm and not validation.existing_device or validation.existing_device and existing_device_model_name == "virtualmachine" %}
@@ -475,12 +485,11 @@
               <tr>
                 <td style="padding-left: 0.75rem;">Primary IP</td>
                 <td>
+                  {# An import sets no primary IP, so only a matched device's own value is shown. #}
                   {% if validation.existing_device and validation.existing_device.primary_ip %}
                     {{ validation.existing_device.primary_ip }}
-                  {% elif libre_device.ip %}
-                    {{ libre_device.ip }}
                   {% else %}
-                    <span class="text-muted">No primary IP</span>
+                    <span class="text-muted">-</span>
                   {% endif %}
                 </td>
                 <td>{{ libre_device.ip|default:"—" }}</td>
@@ -504,19 +513,21 @@
         </span>
       </div>
       <div class="alert alert-info py-2 mb-3 small">
-        <div class="mb-1">
-          <i class="mdi mdi-information-outline"></i>
-          <strong>Pick the device to keep (winner).</strong>
-          The other one becomes the <em>donor</em> and is absorbed.
-        </div>
-        <ul class="mb-1 ps-3">
-          <li><strong>Moved to winner:</strong> LibreNMS link (host id, OOB id, OOB type) and OOB IP <span class="text-muted">(only if the winner has no OOB IP and the IP is already on a winner interface; otherwise re-home it later from the donor's migrated tab)</span>.</li>
-          <li><strong>Stays on donor:</strong> interfaces, cables, primary IP. Re-home them later from the donor's <em>"Migrated to ..."</em> tab.</li>
-        </ul>
-        <div class="text-muted">
-          <i class="mdi mdi-alert-outline"></i>
-          The donor device is <strong>not deleted</strong>. After you have re-homed its
-          child objects, you can delete it from NetBox manually if no longer needed.
+        <div>
+          <div class="mb-1">
+            <i class="mdi mdi-information-outline"></i>
+            <strong>Pick the device to keep (winner).</strong>
+            The other one becomes the <em>donor</em> and is absorbed.
+          </div>
+          <ul class="mb-1 ps-3">
+            <li><strong>Moved to winner:</strong> LibreNMS link (host id, OOB id, OOB type) and OOB IP <span class="text-muted">(only if the winner has no OOB IP and the IP is already on a winner interface; otherwise re-home it later from the donor's migrated tab)</span>.</li>
+            <li><strong>Stays on donor:</strong> interfaces, cables, primary IP. Re-home them later from the donor's <em>"Migrated to ..."</em> tab.</li>
+          </ul>
+          <div class="text-muted">
+            <i class="mdi mdi-alert-outline"></i>
+            The donor device is <strong>not deleted</strong>. After you have re-homed its
+            child objects, you can delete it from NetBox manually if no longer needed.
+          </div>
         </div>
       </div>
       <form
@@ -736,13 +747,15 @@
       <div id="serial-role-host-{{ libre_device.device_id }}"
            {% if validation.serial_role_choice_available and validation.serial_action != 'promote_to_host' %}style="display:none"{% endif %}>
         <div class="alert alert-info py-2 mb-3 small">
-          <i class="mdi mdi-server"></i>
-          <strong>Host detected:</strong>
-          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>
-          is currently linked to LibreNMS device #{{ validation.promote_to_host.existing_libre_id }}
-          ({{ validation.promote_to_host.existing_oob_type }}); this LibreNMS device
-          (#{{ libre_device.device_id }}) appears to be the real host.
-          <em>Update &amp; Link</em> re-points the NetBox device at it.
+          <i class="mdi mdi-server me-2"></i>
+          <div>
+            <strong>Host detected:</strong>
+            <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>
+            is currently linked to LibreNMS device #{{ validation.promote_to_host.existing_libre_id }}
+            ({{ validation.promote_to_host.existing_oob_type }}); this LibreNMS device
+            (#{{ libre_device.device_id }}) appears to be the real host.
+            <em>Update &amp; Link</em> re-points the NetBox device at it.
+          </div>
         </div>
         <div class="mb-3">
           <form style="display:inline"
@@ -775,39 +788,41 @@
       <div id="serial-role-oob-{{ libre_device.device_id }}"
            {% if validation.serial_role_choice_available and validation.serial_action != 'oob_candidate' %}style="display:none"{% endif %}>
         <div class="alert alert-info py-2 mb-3 small">
-          <div class="d-flex align-items-center gap-2 mb-1">
-            <i class="mdi mdi-swap-horizontal"></i>
-            <strong>OOB attach effect on
-              <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>
-            </strong>
-          </div>
-          <table class="table table-sm table-borderless mb-1" style="width:auto;">
-            <thead>
-              <tr class="text-muted">
-                <th class="py-0 pe-3 fw-normal">Slot</th>
-                <th class="py-0 pe-3 fw-normal">Before</th>
-                <th class="py-0 pe-3 fw-normal"></th>
-                <th class="py-0 fw-normal">After</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td class="py-0 pe-3"><span class="badge bg-info-lt"><i class="mdi mdi-server"></i> Host</span></td>
-                <td class="py-0 pe-3 text-muted">{% if validation.existing_librenms_link.host_id %}#{{ validation.existing_librenms_link.host_id }}{% else %}--{% endif %}</td>
-                <td class="py-0 pe-3 text-muted"><i class="mdi mdi-arrow-right"></i></td>
-                <td class="py-0 text-muted">{% if validation.existing_librenms_link.host_id %}#{{ validation.existing_librenms_link.host_id }} <span class="text-muted">(unchanged)</span>{% else %}-- <span class="text-muted">(unchanged)</span>{% endif %}</td>
-              </tr>
-              <tr>
-                <td class="py-0 pe-3"><span class="badge bg-purple-lt"><i class="mdi mdi-chip"></i> OOB</span></td>
-                <td class="py-0 pe-3 text-muted">--</td>
-                <td class="py-0 pe-3 text-muted"><i class="mdi mdi-arrow-right"></i></td>
-                <td class="py-0">#{{ libre_device.device_id }} <span class="text-muted">({{ validation.oob_candidate.type }}{% if validation.oob_candidate.ip %}, {{ validation.oob_candidate.ip }}{% endif %})</span></td>
-              </tr>
-            </tbody>
-          </table>
-          <div class="text-muted">
-            <i class="mdi mdi-information-outline"></i>
-            Existing device is updated in place -- no new NetBox device is created.
+          <div>
+            <div class="d-flex align-items-center gap-2 mb-1">
+              <i class="mdi mdi-swap-horizontal"></i>
+              <strong>OOB attach effect on
+                <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>
+              </strong>
+            </div>
+            <table class="table table-sm table-borderless mb-1" style="width:auto;">
+              <thead>
+                <tr class="text-muted">
+                  <th class="py-0 pe-3 fw-normal">Slot</th>
+                  <th class="py-0 pe-3 fw-normal">Before</th>
+                  <th class="py-0 pe-3 fw-normal"></th>
+                  <th class="py-0 fw-normal">After</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td class="py-0 pe-3"><span class="badge bg-info-lt"><i class="mdi mdi-server"></i> Host</span></td>
+                  <td class="py-0 pe-3 text-muted">{% if validation.existing_librenms_link.host_id %}#{{ validation.existing_librenms_link.host_id }}{% else %}--{% endif %}</td>
+                  <td class="py-0 pe-3 text-muted"><i class="mdi mdi-arrow-right"></i></td>
+                  <td class="py-0 text-muted">{% if validation.existing_librenms_link.host_id %}#{{ validation.existing_librenms_link.host_id }} <span class="text-muted">(unchanged)</span>{% else %}-- <span class="text-muted">(unchanged)</span>{% endif %}</td>
+                </tr>
+                <tr>
+                  <td class="py-0 pe-3"><span class="badge bg-purple-lt"><i class="mdi mdi-chip"></i> OOB</span></td>
+                  <td class="py-0 pe-3 text-muted">--</td>
+                  <td class="py-0 pe-3 text-muted"><i class="mdi mdi-arrow-right"></i></td>
+                  <td class="py-0">#{{ libre_device.device_id }} <span class="text-muted">({{ validation.oob_candidate.type }}{% if validation.oob_candidate.ip %}, {{ validation.oob_candidate.ip }}{% endif %})</span></td>
+                </tr>
+              </tbody>
+            </table>
+            <div class="text-muted">
+              <i class="mdi mdi-information-outline"></i>
+              Existing device is updated in place -- no new NetBox device is created.
+            </div>
           </div>
         </div>
         <div class="mb-3">
@@ -819,39 +834,41 @@
       <div id="serial-role-host-{{ libre_device.device_id }}"
            {% if validation.serial_role_choice_available and validation.serial_action != 'promote_to_host' %}style="display:none"{% endif %}>
         <div class="alert alert-info py-2 mb-3 small">
-          <div class="d-flex align-items-center gap-2 mb-1">
-            <i class="mdi mdi-swap-horizontal"></i>
-            <strong>Promote effect on
-              <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>
-            </strong>
-          </div>
-          <table class="table table-sm table-borderless mb-1" style="width:auto;">
-            <thead>
-              <tr class="text-muted">
-                <th class="py-0 pe-3 fw-normal">Slot</th>
-                <th class="py-0 pe-3 fw-normal">Before</th>
-                <th class="py-0 pe-3 fw-normal"></th>
-                <th class="py-0 fw-normal">After</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td class="py-0 pe-3"><span class="badge bg-info-lt"><i class="mdi mdi-server"></i> Host</span></td>
-                <td class="py-0 pe-3 text-muted">#{{ validation.promote_to_host.existing_libre_id }}</td>
-                <td class="py-0 pe-3 text-muted"><i class="mdi mdi-arrow-right"></i></td>
-                <td class="py-0">#{{ libre_device.device_id }} <span class="text-muted">({{ validation.resolved_name|default:libre_device.sysName|default:libre_device.hostname }})</span></td>
-              </tr>
-              <tr>
-                <td class="py-0 pe-3"><span class="badge bg-purple-lt"><i class="mdi mdi-chip"></i> OOB</span></td>
-                <td class="py-0 pe-3 text-muted">--</td>
-                <td class="py-0 pe-3 text-muted"><i class="mdi mdi-arrow-right"></i></td>
-                <td class="py-0">#{{ validation.promote_to_host.existing_libre_id }} <span class="text-muted">({{ validation.promote_to_host.existing_oob_type }})</span></td>
-              </tr>
-            </tbody>
-          </table>
-          <div class="text-muted">
-            <i class="mdi mdi-information-outline"></i>
-            Existing device is updated in place -- no new NetBox device is created.
+          <div>
+            <div class="d-flex align-items-center gap-2 mb-1">
+              <i class="mdi mdi-swap-horizontal"></i>
+              <strong>Promote effect on
+                <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>
+              </strong>
+            </div>
+            <table class="table table-sm table-borderless mb-1" style="width:auto;">
+              <thead>
+                <tr class="text-muted">
+                  <th class="py-0 pe-3 fw-normal">Slot</th>
+                  <th class="py-0 pe-3 fw-normal">Before</th>
+                  <th class="py-0 pe-3 fw-normal"></th>
+                  <th class="py-0 fw-normal">After</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td class="py-0 pe-3"><span class="badge bg-info-lt"><i class="mdi mdi-server"></i> Host</span></td>
+                  <td class="py-0 pe-3 text-muted">#{{ validation.promote_to_host.existing_libre_id }}</td>
+                  <td class="py-0 pe-3 text-muted"><i class="mdi mdi-arrow-right"></i></td>
+                  <td class="py-0">#{{ libre_device.device_id }} <span class="text-muted">({{ validation.resolved_name|default:libre_device.sysName|default:libre_device.hostname }})</span></td>
+                </tr>
+                <tr>
+                  <td class="py-0 pe-3"><span class="badge bg-purple-lt"><i class="mdi mdi-chip"></i> OOB</span></td>
+                  <td class="py-0 pe-3 text-muted">--</td>
+                  <td class="py-0 pe-3 text-muted"><i class="mdi mdi-arrow-right"></i></td>
+                  <td class="py-0">#{{ validation.promote_to_host.existing_libre_id }} <span class="text-muted">({{ validation.promote_to_host.existing_oob_type }})</span></td>
+                </tr>
+              </tbody>
+            </table>
+            <div class="text-muted">
+              <i class="mdi mdi-information-outline"></i>
+              Existing device is updated in place -- no new NetBox device is created.
+            </div>
           </div>
         </div>
         <div class="mb-3">
@@ -951,11 +968,11 @@
                         <input class="form-check-input" type="radio" name="_promote_pl_choice"
                                id="promote-pl-new-{{ libre_device.device_id }}" value="new"
                                data-override-target="override_platform_id"
-                               data-override-value="{% if validation.platform.platform %}{{ validation.platform.platform.pk }}{% endif %}"
-                               {% if not validation.platform.platform or validation.existing_device.platform_id == validation.platform.platform.pk %}disabled{% endif %}>
+                               data-override-value="{{ platform_display.platform_pk|default_if_none:'' }}"
+                               {% if not platform_display.platform_pk or validation.existing_device.platform_id == platform_display.platform_pk %}disabled{% endif %}>
                         <label class="form-check-label" for="promote-pl-new-{{ libre_device.device_id }}">
                           {% if validation.platform.platform %}
-                            Use <code>{{ validation.platform.platform }}</code>
+                            Use <code>{{ platform_display.platform }}</code>
                           {% else %}
                             <span class="text-muted">No NetBox platform matches LibreNMS OS
                             <em>{{ libre_device.os|default:"—" }}</em>. Use the
@@ -1043,7 +1060,7 @@
           {% comment %}
           Carry the server the modal was rendered for (mirrors the Add-as-OOB form above) so a
           multi-server link/update runs against that server, not the session/default one -- otherwise
-          set_librenms_device_id writes the mapping under the wrong server namespace.
+          the mapping is written under the wrong server namespace.
           {% endcomment %}
           {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
           {% if validation.device_type_mismatch %}
@@ -1081,11 +1098,13 @@
           </span>
         </div>
         <div class="alert alert-info py-2 mb-3">
-          <i class="mdi mdi-information-outline"></i>
-          LibreNMS device <strong>{{ libre_device.sysName|default:libre_device.hostname }}</strong>
-          appears to be an OOB management controller
-          (<strong>{{ validation.oob_candidate.type }}</strong>
-          {% if validation.oob_candidate.ip %}— {{ validation.oob_candidate.ip }}{% endif %}).
+          <i class="mdi mdi-information-outline me-2"></i>
+          <div>
+            LibreNMS device <strong>{{ libre_device.sysName|default:libre_device.hostname }}</strong>
+            appears to be an OOB management controller
+            (<strong>{{ validation.oob_candidate.type }}</strong>
+            {% if validation.oob_candidate.ip %}— {{ validation.oob_candidate.ip }}{% endif %}).
+          </div>
         </div>
         <div class="mb-3">
           {% include "netbox_librenms_plugin/htmx/_add_as_oob_form.html" %}
@@ -1134,26 +1153,34 @@
 
     {% else %}
       <div class="alert alert-info py-2 mb-3">
-        <i class="mdi mdi-link"></i>
-        <strong>Exists</strong> — Device already exists as
-        <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>.
+        <i class="mdi mdi-link me-2"></i>
+        <div>
+          <strong>Exists</strong> — Device already exists as
+          <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>.
+        </div>
       </div>
     {% endif %}
 
   {% elif validation.is_ready %}
     <div class="alert alert-success py-2 mb-3">
-      <i class="mdi mdi-check-circle"></i>
-      <strong>Ready to Import</strong> — All prerequisites are met.
+      <i class="mdi mdi-check-circle me-2"></i>
+      <div>
+        <strong>Ready to Import</strong> — All prerequisites are met.
+      </div>
     </div>
   {% elif validation.can_import %}
     <div class="alert alert-warning py-2 mb-3">
-      <i class="mdi mdi-alert"></i>
-      <strong>Can Import</strong> — Review warnings below before importing.
+      <i class="mdi mdi-alert me-2"></i>
+      <div>
+        <strong>Can Import</strong> — Review warnings below before importing.
+      </div>
     </div>
   {% else %}
     <div class="alert alert-danger py-2 mb-3">
-      <i class="mdi mdi-close-circle"></i>
-      <strong>Cannot Import</strong> — Validation issues prevent import.
+      <i class="mdi mdi-close-circle me-2"></i>
+      <div>
+        <strong>Cannot Import</strong> — Validation issues prevent import.
+      </div>
     </div>
   {% endif %}
 

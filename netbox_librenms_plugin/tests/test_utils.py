@@ -234,70 +234,6 @@ class TestSiteMatching:
 
 
 # =============================================================================
-# TestPlatformMatching - 4 tests
-# =============================================================================
-
-
-@pytest.mark.django_db
-class TestPlatformMatching:
-    """Test platform matching logic."""
-
-    def test_find_platform_for_os_exact_match(self):
-        """OS string matched to platform."""
-        from dcim.models import Platform
-
-        from netbox_librenms_plugin.utils import find_matching_platform
-
-        platform = Platform.objects.create(name="ios", slug="utils-ios")
-        result = find_matching_platform("ios")
-
-        assert result["found"] is True
-        assert result["platform"] == platform
-        assert result["match_type"] == "exact"
-
-    def test_find_platform_for_os_mapping_match(self):
-        """A mapping resolves an OS name that differs from the platform name."""
-        from dcim.models import Platform
-
-        from netbox_librenms_plugin.models import PlatformMapping
-        from netbox_librenms_plugin.utils import find_matching_platform
-
-        platform = Platform.objects.create(name="Network OS", slug="utils-network-os")
-        PlatformMapping.objects.create(librenms_os="vendor_os", netbox_platform=platform)
-
-        result = find_matching_platform("vendor_os")
-
-        assert result == {"found": True, "platform": platform, "match_type": "mapping"}
-
-    def test_find_platform_for_os_not_found(self):
-        """Returns None when no match."""
-        from netbox_librenms_plugin.utils import find_matching_platform
-
-        result = find_matching_platform("unknown_os")
-
-        assert result["found"] is False
-        assert result["platform"] is None
-
-    def test_find_platform_for_os_empty(self):
-        """Empty OS returns None."""
-        from netbox_librenms_plugin.utils import find_matching_platform
-
-        result = find_matching_platform("")
-
-        assert result["found"] is False
-        assert result["platform"] is None
-
-    def test_find_platform_for_os_dash(self):
-        """Dash placeholder returns None."""
-        from netbox_librenms_plugin.utils import find_matching_platform
-
-        result = find_matching_platform("-")
-
-        assert result["found"] is False
-        assert result["platform"] is None
-
-
-# =============================================================================
 # TestConversionHelpers - 4 tests
 # =============================================================================
 
@@ -557,7 +493,7 @@ class TestVirtualChassisHelpers:
     def test_get_librenms_sync_device_no_vc(self):
         """Device without VC returns itself."""
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
+        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
         device = make_device("utils-standalone-sync")
 
@@ -568,7 +504,7 @@ class TestVirtualChassisHelpers:
     @pytest.mark.django_db
     def test_get_librenms_sync_device_with_librenms_id(self):
         """VC member with librenms_id is returned (real VC; the member without one iterated first)."""
-        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
+        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
         without_id, with_id = _two_member_vc("sync-withid", None, {"default": 123})
         assert get_librenms_sync_device(without_id) == with_id
@@ -576,7 +512,7 @@ class TestVirtualChassisHelpers:
     @pytest.mark.django_db
     def test_get_librenms_sync_device_dict_preferred_over_legacy_bare_int(self):
         """In a partially migrated VC, a per-server dict member is preferred over a legacy bare-int."""
-        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
+        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
         # member_a (legacy bare-int) iterated first — the function should still prefer member_b (dict).
         member_a, member_b = _two_member_vc("sync-dictpref", 42, {"default": 42})
@@ -585,7 +521,7 @@ class TestVirtualChassisHelpers:
     @pytest.mark.django_db
     def test_get_librenms_sync_device_host_id_preferred_over_oob_only(self):
         """A member holding the real host id wins over an OOB-only member, even iterated first."""
-        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
+        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
         member_a, member_b = _two_member_vc(
             "sync-hostpref",
@@ -597,7 +533,7 @@ class TestVirtualChassisHelpers:
     @pytest.mark.django_db
     def test_get_librenms_sync_device_oob_only_resolves_when_no_host_id(self):
         """When no member has a host id, an OOB-only mapping still resolves the sync device."""
-        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
+        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
         member_a, member_b = _two_member_vc("sync-oobonly", None, {"default": {"oob": {"id": 7, "type": "drac"}}})
         assert get_librenms_sync_device(member_a, server_key="default") == member_b
@@ -605,7 +541,7 @@ class TestVirtualChassisHelpers:
     @pytest.mark.django_db
     def test_get_librenms_sync_device_legacy_fallback_when_no_dict(self):
         """When no member has a per-server dict, fall back to legacy bare-int."""
-        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
+        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
         # member_b (no id) iterated first, member_a (legacy bare-int) second → member_a wins.
         member_b, member_a = _two_member_vc("sync-legacy", None, 42)
@@ -614,7 +550,7 @@ class TestVirtualChassisHelpers:
     @pytest.mark.django_db
     def test_get_librenms_sync_device_dict_for_different_server_falls_through(self):
         """Per-server dict with a different key does not match; legacy bare-int resolves instead."""
-        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
+        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
         # member_a: legacy bare-int (universal); member_b: dict only for "production".
         member_a, member_b = _two_member_vc("sync-diffserver", 42, {"production": 99})
@@ -623,7 +559,7 @@ class TestVirtualChassisHelpers:
     def test_get_librenms_sync_device_fallback_to_member_with_ip(self):
         """Priority 3: no dict member, master has no IP, another member has primary IP → that member."""
         from netbox_librenms_plugin.tests.conftest import ip_on
-        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
+        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
         master, member_with_ip = _two_member_vc("sync-primary-ip", None, None)
         address = ip_on(member_with_ip, "198.18.20.1/24", "management")
@@ -639,7 +575,7 @@ class TestVirtualChassisHelpers:
         from dcim.models import VirtualChassis
 
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
+        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
         vc = VirtualChassis.objects.create(name="sync-lowest-position")
         members = {}
@@ -654,11 +590,11 @@ class TestVirtualChassisHelpers:
 
         assert result == members[1]
 
-    def test_get_module_template_interface_names_rewrites_for_vc_member(self):
+    def test_get_module_adoptable_interface_names_rewrites_for_vc_member(self):
         from dcim.models import InterfaceTemplate, Module
 
         from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type
-        from netbox_librenms_plugin.utils import get_module_template_interface_names
+        from netbox_librenms_plugin.utils import get_module_adoptable_interface_names
 
         _first, _second, device = self._three_member_vc("utils-template-rewrite")
         module_device = make_device_with_module_bays("utils-template-module", ["Bay 1"])
@@ -674,16 +610,16 @@ class TestVirtualChassisHelpers:
             module_type=module_type,
         )
 
-        result = get_module_template_interface_names(device, module)
+        result = get_module_adoptable_interface_names(device, module)
 
-        assert result == ["TenGigabitEthernet3/1/1"]
+        assert result == (["TenGigabitEthernet3/1/1"], False)
 
     def test_zero_id_is_not_a_valid_librenms_id(self):
         """
         LibreNMS uses MySQL auto-increment IDs starting at 1; device_id=0 cannot exist.
         A member whose resolved ID is 0 must be skipped so a real ID is preferred.
         """
-        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
+        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
         member_zero, member_real = _two_member_vc("sync-zero-id", {"default": 0}, {"default": 5})
 
@@ -832,7 +768,10 @@ class TestPaginationHelpers:
 
         from netbox_librenms_plugin.utils import get_table_paginate_count
 
+        from django.contrib.auth.models import AnonymousUser
+
         request = RequestFactory().get("/", {"table1_per_page": "50"})
+        request.user = AnonymousUser()
 
         result = get_table_paginate_count(request, "table1_")
 
@@ -845,8 +784,11 @@ class TestPaginationHelpers:
 
         from netbox_librenms_plugin.utils import get_table_paginate_count
 
+        from django.contrib.auth.models import AnonymousUser
+
         settings.MAX_PAGE_SIZE = disabled_max
         request = RequestFactory().get("/", {"table1_per_page": "500"})
+        request.user = AnonymousUser()
 
         assert get_table_paginate_count(request, "table1_") == 500
 

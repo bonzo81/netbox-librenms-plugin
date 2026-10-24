@@ -341,3 +341,19 @@ class TestLibreNMSVLANTableConfigure:
 
         assert isinstance(table.paginator, EnhancedPaginator)
         assert table.page.number == 2
+
+    def test_page_links_stay_on_the_vlan_tab(self):
+        from django.template.loader import render_to_string
+
+        from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
+
+        rows = [{"vlan_id": vlan_id, "name": f"VLAN {vlan_id}", "exists_in_netbox": False} for vlan_id in range(1, 61)]
+        table = LibreNMSVLANTable(data=rows)
+        request = RequestFactory().get("/", {"vlans_page": "2", "vlans_per_page": "25"})
+        request.user = AnonymousUser()
+        table.configure(request)
+
+        html = render_to_string("netbox_librenms_plugin/inc/paginator.html", {"table": table}, request=request)
+
+        assert "?tab=vlans&" in html
+        assert "?tab=&" not in html

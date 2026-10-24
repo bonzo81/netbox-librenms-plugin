@@ -10,7 +10,7 @@ from django.utils import timezone
 from tenancy.models import Tenant
 from virtualization.models import Cluster, VirtualMachine
 
-from ..constants import normalize_oob_type
+from ..constants import is_librenms_placeholder, normalize_oob_type
 from ..import_validation_helpers import (
     apply_merge_candidates,
     apply_oob_detection_result,
@@ -19,13 +19,25 @@ from ..import_validation_helpers import (
 from ..ip_addressing import parse_host_address
 from ..librenms_api import LibreNMSAPI, librenms_id_owned_message
 from ..librenms_ids import coerce_librenms_id
+from ..models import RuleConfigurationError
+from ..platform_versions import (
+    HIDDEN_PLATFORM,
+    PlatformFacts,
+    PlatformReason,
+    PlatformState,
+    assess_platform,
+    import_platform,
+    platform_label,
+    platform_version_tracking_enabled,
+    reason_text,
+)
 from ..utils import (
     cached_row_matches,
     exception_text_for,
     find_devices_by_serial,
     find_matching_location,
-    find_matching_platform,
     find_matching_site,
+    is_vc_position,
     match_librenms_hardware_to_device_type,
     normalize_serial,
     parse_location_for_import,
@@ -34,10 +46,12 @@ from ..utils import (
 from .cache import get_import_device_cache_key
 from .naming import _name_candidates, _resolve_device_name
 from .virtual_chassis import (
-    _generate_vc_member_name,
+    _member_name,
+    chassis_serial_key,
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
     update_vc_member_suggested_names,
+    vc_serial_key,
 )
 from netbox_librenms_plugin.server_mappings import (
     IDENTITY_BUSY_MESSAGE,
@@ -249,8 +263,6 @@ def _try_chassis_device_type_match(api, device_id, preloaded_device_type_rules: 
         dict | None: Dict with matched/device_type/match_type keys, or None on failure.
 
     """
-    skip_values = {"", "-", "Unspecified", "BUILTIN", "None"}
-
     try:
         success, inventory = api.get_inventory_filtered(device_id, ent_physical_class="chassis")
         if not success or not inventory:
@@ -259,8 +271,8 @@ def _try_chassis_device_type_match(api, device_id, preloaded_device_type_rules: 
         for item in inventory:
             # Try entPhysicalName first (often the chassis part number like CHAS-BP-MX480-S)
             for field in ("entPhysicalName", "entPhysicalModelName"):
-                value = item.get(field) or ""
-                if value and value not in skip_values:
+                value = normalize_serial(item.get(field))
+                if not is_librenms_placeholder(value):
                     chassis_match = match_librenms_hardware_to_device_type(
                         value, preloaded_rules=preloaded_device_type_rules
                     )
@@ -270,10 +282,65 @@ def _try_chassis_device_type_match(api, device_id, preloaded_device_type_rules: 
                         chassis_match["match_type"] = "chassis"
                         chassis_match["chassis_model"] = value
                         return chassis_match
+    except RuleConfigurationError:
+        raise
     except Exception:
         logger.debug(f"Chassis inventory fallback failed for device {device_id}", exc_info=True)
 
     return None
+
+
+def match_import_device_type(libre_device: dict, api=None, preloaded_device_type_rules: dict | None = None):
+    """
+    Return the DeviceType match for a LibreNMS row: mapping or hardware first, then the chassis model.
+
+    Validation and the Virtual Chassis details dialog both read the matched DeviceType from here.
+
+    Returns:
+        dict | None: ``{matched, device_type, match_type}``, or None when several DeviceTypes match.
+
+    """
+    dt_match = match_librenms_hardware_to_device_type(
+        libre_device.get("hardware", ""), preloaded_rules=preloaded_device_type_rules
+    )
+    # When the hardware string matches nothing, the chassis model is a second lookup source.
+    if dt_match is not None and not dt_match["matched"] and api and libre_device.get("device_id"):
+        chassis_match = _try_chassis_device_type_match(
+            api, libre_device["device_id"], preloaded_device_type_rules=preloaded_device_type_rules
+        )
+        if chassis_match and chassis_match["matched"]:
+            dt_match = chassis_match
+    return dt_match
+
+
+DEVICE_TYPE_OVERRIDE_UNAVAILABLE = "Selected device type is unavailable"
+
+
+class DeviceTypeOverrideError(ValueError):
+    """A manual DeviceType override names no DeviceType."""
+
+
+def effective_import_device_type(matched_device_type, manual_mappings: dict | None = None):
+    """
+    Return the DeviceType an import row creates its device with.
+
+    A manual ``device_type_id`` override wins and must name a DeviceType; otherwise the matched
+    DeviceType from :func:`match_import_device_type` applies. The stack master match, the bulk
+    import precheck and the device write all read this one result.
+
+    Raises:
+        DeviceTypeOverrideError: The override is present but names no DeviceType.
+
+    """
+    if not manual_mappings or "device_type_id" not in manual_mappings:
+        return matched_device_type
+    try:
+        device_type = DeviceType.objects.filter(pk=int(manual_mappings["device_type_id"])).first()
+    except (TypeError, ValueError):
+        device_type = None
+    if device_type is None:
+        raise DeviceTypeOverrideError(DEVICE_TYPE_OVERRIDE_UNAVAILABLE)
+    return device_type
 
 
 def _determine_device_name(
@@ -519,6 +586,7 @@ def validate_device_for_import(  # noqa: C901
     use_sysname: bool = True,
     strip_domain: bool = False,
     preloaded_device_type_rules: dict | None = None,
+    serial_key_for=vc_serial_key,
 ) -> dict:
     """
     Validate if a LibreNMS device can be imported to NetBox.
@@ -543,6 +611,7 @@ def validate_device_for_import(  # noqa: C901
         use_sysname: If True, prefer sysName over hostname (matches import behavior).
         strip_domain: If True, strip domain suffix from device name.
         preloaded_device_type_rules: Optional device-type normalization rules keyed for lookup.
+        serial_key_for: Returns the :func:`vc_serial_key` of a Manufacturer; a batch passes one memoized callable.
 
     Returns:
         dict: Validation result with structure (the key set is pinned by
@@ -609,9 +678,9 @@ def validate_device_for_import(  # noqa: C901
                     'host_device': Device or None
                 },
                 'platform': {
-                    'found': bool,
-                    'platform': Platform or None,
-                    'match_type': str  # 'exact' or None
+                    'platform': Platform or None,  # assigned without a create: the target or the OS platform
+                    'assessment': PlatformAssessment or None,
+                    'reason_text': str,  # the words of the assessment reason
                 },
                 'rack': {  # Only for devices
                     'found': bool,
@@ -697,7 +766,7 @@ def validate_device_for_import(  # noqa: C901
             "found": False,
             "host_device": None,
         },
-        "platform": {"found": False, "platform": None, "match_type": None},
+        "platform": {"platform": None, "assessment": None, "reason_text": ""},
         "rack": {
             "found": False,
             "rack": None,
@@ -844,15 +913,15 @@ def validate_device_for_import(  # noqa: C901
                     result["librenms_id_needs_migration"] = True
 
                 # Check if name matches resolved name (VC-aware: compare against VC member name)
-                if hostname and existing_device.virtual_chassis and existing_device.vc_position:
-                    incoming_serial = normalize_serial(libre_device.get("serial"))
-                    if incoming_serial == "-":
-                        incoming_serial = ""
-                    vc_expected_name = _generate_vc_member_name(
+                if hostname and existing_device.virtual_chassis and is_vc_position(existing_device.vc_position):
+                    serial_key = chassis_serial_key(existing_device)
+                    incoming_serial = libre_device.get("serial")
+                    vc_expected_name = _member_name(
                         hostname,
                         existing_device.vc_position,
-                        # Trim the stored fallback too, or a padded serial mints a bogus name.
-                        serial=incoming_serial or normalize_serial(existing_device.serial),
+                        incoming_serial if serial_key(incoming_serial) else existing_device.serial,
+                        None,
+                        serial_key,
                     )
                     if existing_device.name == vc_expected_name:
                         result["name_matches"] = True
@@ -1392,7 +1461,9 @@ def validate_device_for_import(  # noqa: C901
 
             # 3. Validate DeviceType (required)
             hardware = libre_device.get("hardware", "")
-            dt_match = match_librenms_hardware_to_device_type(hardware, preloaded_rules=preloaded_device_type_rules)
+            dt_match = match_import_device_type(
+                libre_device, api, preloaded_device_type_rules=preloaded_device_type_rules
+            )
 
             if dt_match is None:
                 result["device_type"]["found"] = False
@@ -1403,17 +1474,6 @@ def validate_device_for_import(  # noqa: C901
                         f"Multiple device types match hardware '{hardware}' — resolve the ambiguity in NetBox."
                     )
             else:
-                # Chassis inventory fallback: when hardware doesn't match,
-                # try the chassis entPhysicalModelName as an additional lookup source
-                if not dt_match["matched"] and api:
-                    device_id = libre_device.get("device_id")
-                    if device_id:
-                        chassis_match = _try_chassis_device_type_match(
-                            api, device_id, preloaded_device_type_rules=preloaded_device_type_rules
-                        )
-                        if chassis_match and chassis_match["matched"]:
-                            dt_match = chassis_match
-
                 # Update result keys individually to preserve the existing schema (especially "found")
                 result["device_type"]["found"] = dt_match["matched"]
                 result["device_type"]["device_type"] = dt_match.get("device_type")
@@ -1521,23 +1581,20 @@ def validate_device_for_import(  # noqa: C901
             result["cluster"]["found"] = True  # Not required for devices
 
         # 5. Match Platform (optional - same for both devices and VMs)
-        os = libre_device.get("os", "")
-        platform_match = find_matching_platform(os)
-        result["platform"] = platform_match
-
-        if not platform_match["found"] and os:
-            if platform_match.get("match_type") == "ambiguous":
-                ambiguity_source = platform_match.get("ambiguity_source", "mapping")
-                if ambiguity_source == "platform":
-                    result["warnings"].append(
-                        f"Multiple Platforms match OS: '{os}' — resolve the duplicate Platform names in NetBox"
-                    )
-                else:
-                    result["warnings"].append(
-                        f"Multiple platform mappings found for OS: '{os}' — resolve the conflict in Platform Mappings"
-                    )
-            else:
-                result["warnings"].append(f"No matching platform found for OS: '{os}'")
+        platform_assessment = assess_platform(
+            None,
+            PlatformFacts.from_librenms(libre_device.get("os"), libre_device.get("version")),
+            tracking=platform_version_tracking_enabled(),
+        )
+        result["platform"] = {
+            "platform": platform_assessment.target or platform_assessment.os_platform,
+            "assessment": platform_assessment,
+            # The validation is cached and shown to any import user, so its text names no platform.
+            "reason_text": reason_text(platform_assessment.reason, platform_assessment, None),
+        }
+        if platform_assessment.state is PlatformState.BLOCKED or platform_assessment.os_platform is None:
+            if platform_assessment.reason is not PlatformReason.NO_OS:
+                result["warnings"].append(result["platform"]["reason_text"])
 
         # 6. Additional validations
         if not hostname:
@@ -1564,7 +1621,10 @@ def validate_device_for_import(  # noqa: C901
                                 f"Virtual chassis CONFIRMED for device {hostname}: "
                                 f"{vc_detection['member_count']} members"
                             )
-                            result["virtual_chassis"] = update_vc_member_suggested_names(vc_detection, hostname)
+                            device_type = effective_import_device_type(result["device_type"].get("device_type"))
+                            result["virtual_chassis"] = update_vc_member_suggested_names(
+                                vc_detection, hostname, serial_key_for(getattr(device_type, "manufacturer", None))
+                            )
                 except Exception as e:
                     logger.exception("Exception during VC detection for device %s: %s", hostname, e)
                     # The validation result has no viewer: it is cached and shown to any import user.
@@ -1637,6 +1697,31 @@ def _validate_and_insert(row, _mapping_fields=frozenset()):
     return row
 
 
+def import_platform_warnings(label, plan, text_viewer):
+    """
+    Return the warning for an imported object that did not get its version platform.
+
+    Args:
+        label (str): Names the imported object, e.g. ``device 12``.
+        plan (ImportPlatform): The platform the import assigned.
+        text_viewer: The user who reads the text, or None for saved text.
+
+    Returns:
+        list[str]: One warning, or none when the object got the platform the rule calls for.
+
+    """
+    if plan.reason is None:
+        return []
+    from dcim.models import Platform
+
+    detail = reason_text(plan.reason, plan.assessment, text_viewer)
+    if plan.error is not None:
+        detail = f"{detail} {exception_text_for(plan.error, Platform, text_viewer)}"
+    platform = platform_label(plan.platform, text_viewer)
+    assigned = "an OS platform you cannot view" if platform == HIDDEN_PLATFORM else f"OS platform {platform}"
+    return [f"Imported {label} with {assigned}: {detail}"]
+
+
 def import_single_device(  # noqa: C901
     device_id: int,
     server_key: str = None,
@@ -1658,7 +1743,6 @@ def import_single_device(  # noqa: C901
             - site_id: NetBox Site ID
             - device_type_id: NetBox DeviceType ID
             - device_role_id: NetBox DeviceRole ID
-            - platform_id: NetBox Platform ID (optional)
             - rack_id: NetBox Rack ID (optional)
         sync_options: Sync options (optional):
             - sync_interfaces: bool (default True)
@@ -1682,6 +1766,7 @@ def import_single_device(  # noqa: C901
                     'cables': int,
                     'ip_addresses': int
                 },
+                'warnings': List[str],  # only on success: the version platform the device did not get
             }
 
     """
@@ -1769,20 +1854,16 @@ def import_single_device(  # noqa: C901
         site = validation["site"].get("site")
         device_type = validation["device_type"].get("device_type")
         device_role = validation["device_role"].get("role")
-        platform = validation["platform"].get("platform")
         rack = None
         rack_explicitly_selected = False
 
+        try:
+            device_type = effective_import_device_type(device_type, manual_mappings)
+        except DeviceTypeOverrideError as exc:
+            return {"success": False, "device": None, "message": "", "error": str(exc), "synced": {}}
         if manual_mappings:
             site = Site.objects.filter(id=manual_mappings.get("site_id")).first() or site
-            device_type = DeviceType.objects.filter(id=manual_mappings.get("device_type_id")).first() or device_type
             device_role = DeviceRole.objects.filter(id=manual_mappings.get("device_role_id")).first() or device_role
-
-            platform_id = manual_mappings.get("platform_id")
-            if platform_id:
-                from dcim.models import Platform
-
-                platform = Platform.objects.filter(id=platform_id).first() or platform
 
             rack_id = manual_mappings.get("rack_id")
             if rack_id:
@@ -1867,9 +1948,14 @@ def import_single_device(  # noqa: C901
                 "comments": f"Imported from LibreNMS by netbox-librenms-plugin on {import_time}",
             }
 
-            # Add optional fields
-            if platform:
-                device_data["platform"] = platform
+            # A version platform created here rolls back with a failed import.
+            platform_plan = import_platform(
+                PlatformFacts.from_librenms(libre_device.get("os"), libre_device.get("version")),
+                tracking=platform_version_tracking_enabled(),
+                actor=user,
+            )
+            if platform_plan.platform is not None:
+                device_data["platform"] = platform_plan.platform
 
             # Persist the canonical serial used by the exact indexed match lookups.
             serial = normalize_serial(libre_device.get("serial"))
@@ -1937,6 +2023,7 @@ def import_single_device(  # noqa: C901
             "message": f"Successfully imported device: {device.name}",
             "error": None,
             "synced": synced,
+            "warnings": import_platform_warnings(f"device {device_id}", platform_plan, text_viewer),
         }
 
     except Exception as e:

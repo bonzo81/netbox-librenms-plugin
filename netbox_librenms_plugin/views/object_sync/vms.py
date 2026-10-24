@@ -1,6 +1,5 @@
 import copy
 
-from django.urls import reverse
 from utilities.views import ViewTab, register_model_view
 from virtualization.models import VirtualMachine
 
@@ -64,10 +63,6 @@ class VMInterfaceTableView(BaseInterfaceTableView):
     def get_interfaces(self, obj):
         """Return all interfaces for the virtual machine."""
         return obj.interfaces.all()
-
-    def get_redirect_url(self, obj):
-        """Return the VM interface sync redirect URL."""
-        return reverse("plugins:netbox_librenms_plugin:vm_interface_sync", kwargs={"pk": obj.pk})
 
 
 class VMIPAddressTableView(BaseIPAddressTableView):

@@ -48,7 +48,8 @@ test-useful while losing identifying detail:
 - **Pseudonymized deterministically:** serials, hostnames, all model SKUs,
   and the `os` become `SN-…` / `device-…` / `MODEL-…` / `os-…` tokens. The mapping is stable,
   so cross-references (a device serial that equals a stack member's serial, which identifies
-  the master) still match. `hardware`, `remote_platform`, `entPhysicalModelName`, and
+  the master) still match. A placeholder serial such as `BUILTIN`, `-` or `N/A` stays unchanged,
+  because VC detection ignores it. `hardware`, `remote_platform`, `entPhysicalModelName`, and
   transceiver `model` share one model map per recording. Whitespace and case variants
   yield one token. Generic and absent-model placeholders stay unchanged. Tests can
   key ModuleType and ModuleTypeMapping rows to these tokens. `ifName` gets *pattern-aware* anonymization: structured interface names (slots,
@@ -77,7 +78,11 @@ Schema version 1 treats `entPhysicalName` and `entPhysicalDescr` as private disp
 replaces the text with a deterministic `entity-...` token. It preserves only a bounded terminal
 slash locator, such as `1/1` or `2/x1`, when the module hierarchy reader needs that locator. This
 keeps synthetic transceivers nested without publishing the surrounding label. Model tokens
-stay in the separate `entPhysicalModelName` field.
+stay in the separate `entPhysicalModelName` field. An `entPhysicalDescr` also keeps the
+Junos Virtual Chassis markers that VC detection reads: `Virtual Chassis` on the root, and a
+leading `FPC` or `FPC <n>` on member rows (for example `FPC 1 entity-...`). It also keeps the
+Juniper MX `@ fpc/pic/port` locators that the dangling-parent repair reads: `entity-... @ 1/0/2`
+on an optic, `PIC: entity-... @ 1/0/*` and `FPC: entity-... @ 1/*/*`.
 
 Schema version 1 does not capture operator-specific inventory-ignore rules or module-bay mappings.
 It therefore does not promise to replay arbitrary name-based rules. A future schema that declares
@@ -137,4 +142,6 @@ text, including when it ends in a newline.
 
 Use at most 100 patterns per map and 200 characters per pattern. Each compiled
 program has a 1 MiB RE2 memory budget. Malformed Unicode patterns are excluded.
-A name with malformed Unicode (for example, a lone surrogate) never matches a pattern.
+For a name with malformed Unicode (for example, a lone surrogate),
+`name_matches_lag_pattern()` returns `False`. A direct `search()` on a compiled pattern raises
+`UnicodeEncodeError` for that name, so match names through the helper.

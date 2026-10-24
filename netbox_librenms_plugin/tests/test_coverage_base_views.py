@@ -710,8 +710,6 @@ class TestBaseClassContracts:
         with pytest.raises(NotImplementedError):
             view.get_interfaces(device)
         with pytest.raises(NotImplementedError):
-            view.get_redirect_url(device)
-        with pytest.raises(NotImplementedError):
             view.get_table([], device, "ifName")
 
     def test_cable_table_hook_fails_fast(self, live_librenms):

@@ -2,10 +2,9 @@ import django_tables2 as tables
 from django.utils.html import format_html, format_html_join
 from django.utils.safestring import mark_safe
 from netbox.tables.columns import ToggleColumn
-from utilities.paginator import EnhancedPaginator
 
 from netbox_librenms_plugin.constants import LIBRENMS_VLAN_STATE_ACTIVE
-from netbox_librenms_plugin.utils import get_table_paginate_count, get_vlan_sync_css_class, render_vlan_sync_action
+from netbox_librenms_plugin.utils import get_vlan_sync_css_class, paginate_sync_table, render_vlan_sync_action
 
 
 class _VLANSelectionColumn(ToggleColumn):
@@ -45,6 +44,7 @@ class LibreNMSVLANTable(tables.Table):
 
     def __init__(self, *args, vlan_groups=None, **kwargs):
         super().__init__(*args, **kwargs)
+        self.tab = "vlans"
         self.prefix = "vlans_"
         self.vlan_groups = vlan_groups or []
         # Donor "migrated mode" renders no form, so per-row submit buttons must become status text.
@@ -185,7 +185,7 @@ class LibreNMSVLANTable(tables.Table):
 
         select_html = format_html(
             '<select name="vlan_group_{}" class="form-select form-select-sm vlan-sync-group-select"'
-            ' data-vlan-id="{}" data-vlan-name="{}" style="min-width: 180px;">{}</select>',
+            ' data-vlan-id="{}" data-vlan-name="{}">{}</select>',
             vlan_id,
             vlan_id,
             record.get("name", ""),
@@ -221,8 +221,4 @@ class LibreNMSVLANTable(tables.Table):
 
     def configure(self, request):
         """Configure the table with pagination."""
-        paginate = {
-            "paginator_class": EnhancedPaginator,
-            "per_page": get_table_paginate_count(request, self.prefix),
-        }
-        tables.RequestConfig(request, paginate).configure(self)
+        paginate_sync_table(self, request)

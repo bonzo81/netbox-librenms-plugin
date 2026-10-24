@@ -38,12 +38,14 @@
   {# Virtual Chassis Detection Error #}
   {% if vc_data.detection_error %}
   <div class="alert alert-warning">
-    <h6 class="alert-heading">
-      <i class="mdi mdi-alert"></i> Virtual Chassis Detection Error
-    </h6>
-    <p class="mb-0">
-      Unable to detect virtual chassis information: <strong>{{ vc_data.detection_error }}</strong>
-    </p>
+    <div>
+      <h6 class="alert-heading">
+        <i class="mdi mdi-alert"></i> Virtual Chassis Detection Error
+      </h6>
+      <p class="mb-0">
+        Unable to detect virtual chassis information: <strong>{{ vc_data.detection_error }}</strong>
+      </p>
+    </div>
   </div>
   {% endif %}
 
@@ -57,6 +59,13 @@
       <p class="mb-3">
         This device is part of a <strong>{{ vc_data.member_count }}-member</strong> stack/virtual chassis.
       </p>
+      {% if not vc_data.master_identified %}
+      <div class="alert alert-warning py-2 px-3 small">
+        <i class="mdi mdi-alert"></i>
+        No unique member matches the device serial, so the stack master could not be identified.
+        The import creates the device without a virtual chassis.
+      </div>
+      {% endif %}
 
       {% if vc_data.members %}
       <h6 class="mb-3">Stack Members:</h6>
@@ -67,7 +76,7 @@
               <li class="py-3 {% if not forloop.last %}border-bottom{% endif %}">
                 <div class="d-flex flex-wrap align-items-center gap-2">
                   <span class="text-muted me-2">
-                    {% if member.position %}
+                    {% if member.position is not None %}
                       Pos {{ member.position }}
                     {% else %}
                       Pos —
@@ -103,12 +112,14 @@
   </div>
   {% elif not vc_data.detection_error %}
   <div class="alert alert-info">
-    <h6 class="alert-heading">
-      <i class="mdi mdi-information-outline"></i> Not a Virtual Chassis
-    </h6>
-    <p class="mb-0">
-      This device does not appear to be part of a virtual chassis or stack.
-    </p>
+    <div>
+      <h6 class="alert-heading">
+        <i class="mdi mdi-information-outline"></i> Not a Virtual Chassis
+      </h6>
+      <p class="mb-0">
+        This device does not appear to be part of a virtual chassis or stack.
+      </p>
+    </div>
   </div>
   {% endif %}
 

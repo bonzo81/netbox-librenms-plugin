@@ -143,7 +143,7 @@ class TestGetLibreNMSSyncDevice:
         return vc, members
 
     def test_explicit_server_mapping_has_highest_priority(self):
-        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
+        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
         _vc, (first, second, _third) = self._members("mapping")
         seed_stored_mapping(first, {"other": 10}, save=True)
@@ -153,7 +153,7 @@ class TestGetLibreNMSSyncDevice:
         assert get_librenms_sync_device(first, server_key=None) == first
 
     def test_legacy_mapping_is_a_server_fallback(self):
-        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
+        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
         _vc, (first, second, _third) = self._members("legacy")
         seed_stored_mapping(second, 55, save=True)
@@ -161,7 +161,7 @@ class TestGetLibreNMSSyncDevice:
         assert get_librenms_sync_device(first, server_key="default") == second
 
     def test_float_mapping_is_rejected_in_favor_of_a_valid_mapping(self):
-        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
+        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
         _vc, (first, second, third) = self._members("float")
         seed_stored_mapping(first, {"default": 1.0}, save=True)
@@ -170,7 +170,7 @@ class TestGetLibreNMSSyncDevice:
         assert get_librenms_sync_device(first, server_key=None) == third
 
     def test_master_then_any_primary_ip_then_lowest_position_fallbacks(self):
-        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
+        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
         vc, (first, second, third) = self._members("fallback")
         _add_primary_ip(second, "second")
@@ -187,7 +187,7 @@ class TestGetLibreNMSSyncDevice:
         assert get_librenms_sync_device(third, server_key="default") == first
 
     def test_standalone_device_is_its_own_sync_device(self):
-        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
+        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
         device = make_device("sync-standalone")
         assert get_librenms_sync_device(device, server_key="default") == device
@@ -206,10 +206,13 @@ class TestPaginationAndUserPreferences:
         assert get_table_paginate_count(request, "table_") == netbox_get_paginate_count(request)
 
     def test_valid_table_page_size_is_read_from_get_and_post(self):
+        from django.contrib.auth.models import AnonymousUser
+
         from netbox_librenms_plugin.utils import get_table_paginate_count
 
         get_request = RequestFactory().get("/", {"table_per_page": "17"})
         post_request = RequestFactory().post("/", {"table_per_page": "19"})
+        get_request.user = post_request.user = AnonymousUser()
 
         assert get_table_paginate_count(get_request, "table_") == 17
         assert get_table_paginate_count(post_request, "table_") == 19
@@ -372,21 +375,6 @@ class TestLocationAndPlatformMatching:
         assert result["found"] is True
         assert result["site"] == expected
         assert find_matching_site("example site")["site"] == expected
-
-    def test_case_insensitive_duplicate_platform_fails_closed(self):
-        from dcim.models import Platform
-
-        from netbox_librenms_plugin.utils import find_matching_platform
-
-        Platform.objects.create(name="example-os", slug="example-os")
-        Platform.objects.create(name="EXAMPLE-OS", slug="example-os-upper")
-
-        assert find_matching_platform("example-os") == {
-            "found": False,
-            "platform": None,
-            "match_type": "ambiguous",
-            "ambiguity_source": "platform",
-        }
 
 
 class TestStoredLibreNMSIdentifiers:

@@ -279,10 +279,10 @@ class ImportDevicesJob(JobRunner):
         precheck_outcome = None
         skipped_id_set = set()
         if collision_check_ids:
-            # Block NetBox object collisions and ambiguous stack fingerprints on the async path.
+            # Block NetBox object collisions on the async path.
             # Every non-empty batch runs it. One row cannot collide, but the scan also fails a row
             # closed when its virtual-chassis inventory can't be read, and that check is per row.
-            collisions, unresolved, stack_ambiguities = detect_collisions_for_device_ids(
+            collisions, unresolved = detect_collisions_for_device_ids(
                 collision_check_ids,
                 api,
                 libre_devices_cache=libre_devices_cache,
@@ -311,13 +311,7 @@ class ImportDevicesJob(JobRunner):
                 batch_blocked_msg = msg
             else:
                 # Apply the same whole-batch blockers and unresolved-row skips as the sync view.
-                precheck_outcome = classify_bulk_precheck(
-                    collisions,
-                    unresolved,
-                    stack_ambiguities,
-                    device_ids,
-                    vm_imports,
-                )
+                precheck_outcome = classify_bulk_precheck(collisions, unresolved, device_ids, vm_imports)
                 skipped_id_set = set(precheck_outcome.skipped_ids)
                 if precheck_outcome.blocked:
                     self.logger.error(precheck_outcome.block_message)
