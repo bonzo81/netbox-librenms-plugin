@@ -587,6 +587,7 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
     mapping_write = 'device.custom_field_data["librenms_id"] = {"default": 5}\n'
     conflict_raise = 'raise MappingChanged("changed")\n'
     titled_icon = '<i class="mdi mdi-alert" title="Missing"></i>'
+    server_key_lookup = "document.querySelector('[name=server_key]');\n"
     sources = {
         # Flagged: a direct HTTP call outside the client.
         "netbox_librenms_plugin/worker.py": http_call,
@@ -614,6 +615,9 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
         # Flagged: a conflict raised without its record. Clean: the runner's own raise.
         "netbox_librenms_plugin/claims.py": conflict_raise,
         "netbox_librenms_plugin/transactions.py": conflict_raise,
+        # Flagged: a page script looks up the server key in the whole document. Clean: vendored code.
+        "netbox_librenms_plugin/static/netbox_librenms_plugin/js/page.js": server_key_lookup,
+        "netbox_librenms_plugin/static/netbox_librenms_plugin/js/vendor/lib.js": server_key_lookup,
     }
     for name, source in sources.items():
         staged = tmp_path / name
@@ -633,4 +637,5 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
         ("netbox_librenms_plugin/templates/netbox_librenms_plugin/seed.html", "titled-icon-needs-accessible-name"),
         ("netbox_librenms_plugin/static/netbox_librenms_plugin/js/seed.js", "titled-icon-needs-accessible-name"),
         ("netbox_librenms_plugin/claims.py", "conflict-raised-without-record"),
+        ("netbox_librenms_plugin/static/netbox_librenms_plugin/js/page.js", "sync-script-reads-page-server-key"),
     }, found

@@ -3,9 +3,9 @@ Render the real _cable_sync_content.html template in both modes.
 
 In migrated mode the POST form is replaced by a plain <div> (a migrated donor must not POST a
 cable sync). But the cable table still renders interactive controls whose verify-cable fetch
-(handleCableChange) reads document.querySelector('[name=csrfmiddlewaretoken]').value and
-input[name="server_key"] — so standalone CSRF + server_key hidden inputs must be emitted in
-migrated mode too, or those JS requests hit a null token (TypeError/403) / the wrong server.
+(handleCableChange) reads document.querySelector('[name=csrfmiddlewaretoken]').value, so a
+standalone CSRF input must be emitted in migrated mode too, or those JS requests hit a null token
+(TypeError/403). The server key of a script request comes from the sync page.
 """
 
 import pytest
@@ -41,19 +41,15 @@ class TestCableSyncContentTemplateMigratedMode:
         }
         return render_to_string("netbox_librenms_plugin/_cable_sync_content.html", ctx, request=request)
 
-    def test_migrated_mode_drops_form_but_keeps_csrf_and_server_key(self):
-        # Non-default server so the assertion proves the actual value is emitted.
+    def test_migrated_mode_drops_form_but_keeps_csrf(self):
         html = self._render(
             migrated={"server_key": "prod", "device_id": 1, "at": "now"},
             server_key="prod",
         )
         # The live POST form must be gone in migrated mode (a donor must not POST a sync).
         assert "<form" not in html
-        # ...but the CSRF token AND server_key must remain so the JS-driven verify-cable fetch
-        # (handleCableChange) targets the right server with a usable token.
+        # ...but the CSRF token must remain so the JS-driven verify-cable fetch (handleCableChange) authenticates.
         assert "csrfmiddlewaretoken" in html
-        assert 'name="server_key"' in html
-        assert 'value="prod"' in html
 
     def test_normal_mode_emits_form_with_csrf_and_server_key(self):
         html = self._render(migrated=None)

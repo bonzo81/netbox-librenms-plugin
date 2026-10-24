@@ -1747,6 +1747,25 @@ rules:
       - metavariable-regex:
           metavariable: $ACTION
           regex: ^["'](add|change)["']$
+  - id: sync-script-reads-page-server-key
+    languages: [javascript]
+    severity: ERROR
+    message: >-
+      This script looks up a server_key input in the whole document. The server panel renders a
+      server_key input for each other server, so the first match can name the wrong server. Call
+      syncServerKey(), which reads the server of the sync page from #librenms-sync-tabs.
+    metadata:
+      category: correctness
+    paths:
+      include:
+        - "*.js"
+      exclude:
+        - "**/vendor/**"
+        - "*.min.js"
+    pattern-either:
+      - pattern: document.querySelector("=~/server_key/")
+      - pattern: document.querySelectorAll("=~/server_key/")
+      - pattern: document.getElementsByName("server_key")
 
   - id: batch-validation-needs-candidate-keys
     languages: [python]

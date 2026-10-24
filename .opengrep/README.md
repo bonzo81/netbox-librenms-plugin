@@ -32,7 +32,7 @@ unchecked until that review.
 | Path | Purpose |
 | --- | --- |
 | `.opengrep/librenms-rules.yaml` | The ruleset. **Single source of truth.** |
-| `.opengrep/tests/*.py`, `.opengrep/tests/*.html` | Annotated rule-test fixtures. |
+| `.opengrep/tests/*.py`, `.opengrep/tests/*.html`, `.opengrep/tests/*.js` | Annotated rule-test fixtures. |
 | `scripts/opengrep-scan.sh` | Scan the source tree. Pre-push hook and manual use. Non-zero on any finding. |
 | `scripts/opengrep-test.sh` | Run the rule-tests against the ruleset. |
 | `netbox_librenms_plugin/tests/test_import_disclosure.py` | Check scan options and explicit targets with the real executable. |
@@ -74,6 +74,7 @@ unchecked until that review.
 | `regex-error-must-raise` | error | A handler that catches `re.error` or `REGEX_COMPILE_ERRORS` and does not raise. A stored rule regex compiles through `models.compile_rule_regex`, which raises `RuleConfigurationError`. |
 | `rule-error-message-needs-projection` | error | A `str()` conversion of the rule error bound by the module-context walrus check, or the exception parameter in `RuleConfigurationErrorMiddleware.process_exception`. These paths use `public_message`. Other aliases and handlers are outside this check. |
 | `post-write-scope-through-helper` | error | An inline `restrict(user, "add"/"change")` or `restricted_queryset(model, "add"/"change")` existence check of a row that the same block saved or created before. Call `transactions.saved_in_scope()`. |
+| `sync-script-reads-page-server-key` | error | A package script calls `document.querySelector`, `querySelectorAll` or `getElementsByName` for `server_key`. A lookup inside one form is allowed. Vendored and minified files are excluded. |
 
 ## Scope
 
@@ -109,7 +110,8 @@ must fail with an unexpected finding on that line. Use separate scans at represe
 verify path inclusion and exclusion; rule-tests alone do not test that scope.
 `test_each_rule_applies_to_its_declared_paths` in `tests/test_import_disclosure.py` does this.
 
-A fixture is a `.py` file with `#` markers or a `.html` file with `<!-- ruleid: ... -->` markers.
+A fixture is a `.py` file with `#` markers, a `.html` file with `<!-- ruleid: ... -->` markers, or a
+`.js` file with `// ruleid: ...` markers.
 `opengrep test` does not accept a `{# ... #}` marker. The script fails on a fixture with another
 extension, and on a fixture with no `ruleid:` marker: opengrep would check nothing in it and pass.
 
