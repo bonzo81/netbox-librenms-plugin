@@ -1482,3 +1482,24 @@ rules:
       - pattern-not-inside: |
           def _member_name(...):
               ...
+
+  - id: netbox-only-controls-use-replaceable-handlers
+    languages: [javascript]
+    severity: ERROR
+    message: Assign the control handler so a row swap replaces the previous listener.
+    patterns:
+      - pattern-inside: |
+          function initializeNetBoxOnlyInterfaces() { ... }
+      - pattern: $CONTROL.addEventListener(...)
+
+  - id: metadata-ports-skip-vlan-associations
+    languages: [python]
+    severity: ERROR
+    message: Read port metadata without unused VLAN associations.
+    patterns:
+      - pattern: $API.get_ports(...)
+      - pattern-not: $API.get_ports(..., with_vlans=False, ...)
+    paths:
+      include:
+        - '**/views/base/modules_view.py'
+        - '**/views/base/cables_view.py'

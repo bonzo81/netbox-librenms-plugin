@@ -4292,16 +4292,16 @@ function initializeNetBoxOnlyInterfaces() {
     const interfaceCheckboxes = document.querySelectorAll('.netbox-interface-checkbox');
 
     if (selectAllCheckbox) {
-        selectAllCheckbox.addEventListener('change', function () {
+        selectAllCheckbox.onchange = function () {
             interfaceCheckboxes.forEach(checkbox => {
                 checkbox.checked = this.checked;
             });
-        });
+        };
     }
 
     // Update select all checkbox when individual checkboxes change
     interfaceCheckboxes.forEach(checkbox => {
-        checkbox.addEventListener('change', function () {
+        checkbox.onchange = function () {
             const checkedCount = document.querySelectorAll('.netbox-interface-checkbox:checked').length;
             const totalCount = interfaceCheckboxes.length;
 
@@ -4309,14 +4309,14 @@ function initializeNetBoxOnlyInterfaces() {
                 selectAllCheckbox.checked = checkedCount === totalCount;
                 selectAllCheckbox.indeterminate = checkedCount > 0 && checkedCount < totalCount;
             }
-        });
+        };
     });
 
     // Delete interfaces functionality
     const deleteButton = document.getElementById('confirm-delete-interfaces');
 
     if (deleteButton) {
-        deleteButton.addEventListener('click', function () {
+        deleteButton.onclick = function () {
             const selectedCheckboxes = document.querySelectorAll('.netbox-interface-checkbox:checked');
 
             if (selectedCheckboxes.length === 0) {
@@ -4324,7 +4324,7 @@ function initializeNetBoxOnlyInterfaces() {
             }
 
             deleteSelectedInterfaces(selectedCheckboxes);
-        });
+        };
     }
 }
 
