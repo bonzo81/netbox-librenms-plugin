@@ -5029,3 +5029,61 @@ def test_sync_table_fits_the_page_at_phone_width(page, table_id):
     assert state["page"] <= PHONE_WIDTH, state
     assert state["table"] <= state["card"] + 1, state
     assert state["toolbar"] <= state["toolbarBox"] + 1, state
+
+
+def _load_netbox_only_controls(page):
+    html = """<input name="csrfmiddlewaretoken" value="test-token">
+      <input type="checkbox" id="select-all-netbox-interfaces">
+      <div id="netbox-only-interfaces-rows">
+        <input type="checkbox" class="netbox-interface-checkbox" value="7">
+      </div>
+      <button id="confirm-delete-interfaces">Delete</button>"""
+    page.route(
+        "https://plugin.example.com/dcim/devices/1/librenms-sync/",
+        lambda route: route.fulfill(body=html, content_type="text/html"),
+    )
+    page.goto("https://plugin.example.com/dcim/devices/1/librenms-sync/")
+    _add_page_scripts(page)
+    page.evaluate("initializeScripts()")
+
+
+def test_netbox_only_delete_sends_one_request_after_reinitialization(page):
+    requests = []
+    page.route(
+        "**/delete-netbox-interfaces/",
+        lambda route: (requests.append(route.request), route.fulfill(json={"status": "success"}))[-1],
+    )
+    _load_netbox_only_controls(page)
+    page.route(
+        "**/netbox-only-rows/",
+        lambda route: route.fulfill(
+            body='<input type="checkbox" class="netbox-interface-checkbox" value="7">',
+            content_type="text/html",
+        ),
+    )
+    page.evaluate("""async () => {
+      await htmxTest.ajax('GET', '/netbox-only-rows/', {target: '#netbox-only-interfaces-rows'});
+    }""")
+    page.locator(".netbox-interface-checkbox").check()
+
+    page.locator("#confirm-delete-interfaces").click()
+    page.wait_for_load_state("networkidle")
+
+    assert len(requests) == 1
+    assert requests[0].method == "POST"
+    assert 'name="interface_ids"\r\n\r\n7' in requests[0].post_data
+
+
+def test_netbox_only_select_all_uses_only_the_current_rows_after_reinitialization(page):
+    _load_netbox_only_controls(page)
+    page.evaluate("""() => {
+      window.oldNetboxCheckbox = document.querySelector('.netbox-interface-checkbox');
+      document.getElementById('netbox-only-interfaces-rows').innerHTML =
+        '<input type="checkbox" class="netbox-interface-checkbox" value="8">';
+      initializeScripts();
+    }""")
+
+    page.locator("#select-all-netbox-interfaces").check()
+
+    assert page.locator(".netbox-interface-checkbox").is_checked()
+    assert page.evaluate("oldNetboxCheckbox.checked") is False
