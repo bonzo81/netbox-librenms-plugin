@@ -842,7 +842,7 @@ class BaseCableTableView(
         cached_data = extract_cached_ports(cache.get(ports_cache_key), ports_cache_key)
         if cached_data:
             return cached_data
-        success, data = self.librenms_api.get_ports(librenms_id)
+        success, data = self.librenms_api.get_ports(librenms_id, with_vlans=False)
         if not success:
             return {"ports": []}
         return data
@@ -1233,7 +1233,7 @@ class BaseCableTableView(
                 oob_data.get("message") if isinstance(oob_data, dict) else oob_data,
             )
             return True
-        oob_ports_success, oob_ports_data = self.librenms_api.get_ports(oob_id)
+        oob_ports_success, oob_ports_data = self.librenms_api.get_ports(oob_id, with_vlans=False)
         oob_map, oob_alt_map = self._build_cable_port_name_maps(
             oob_ports_data if oob_ports_success else {}, interface_name_field, alt_name_field
         )
