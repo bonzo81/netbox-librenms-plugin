@@ -18,6 +18,7 @@ from netbox_librenms_plugin.filters import (
     DeviceTypeMappingFilterSet,
     InterfaceTypeMappingFilterSet,
     InventoryIgnoreRuleFilterSet,
+    IPAddressMappingFilterSet,
     LocationMappingFilterSet,
     ModuleBayMappingFilterSet,
     ModuleTypeMappingFilterSet,
@@ -32,6 +33,7 @@ from netbox_librenms_plugin.models import (
     DeviceTypeMapping,
     InterfaceTypeMapping,
     InventoryIgnoreRule,
+    IPAddressMapping,
     LocationMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
@@ -46,6 +48,7 @@ from .serializers import (
     DeviceTypeMappingSerializer,
     InterfaceTypeMappingSerializer,
     InventoryIgnoreRuleSerializer,
+    IPAddressMappingSerializer,
     JobErrorSerializer,
     LocationMappingSerializer,
     ModuleBayMappingSerializer,
@@ -84,6 +87,16 @@ class InterfaceTypeMappingViewSet(NetBoxModelViewSet):
 
     queryset = InterfaceTypeMapping.objects.select_related("platform")
     serializer_class = InterfaceTypeMappingSerializer
+
+
+class IPAddressMappingViewSet(NetBoxModelViewSet):
+    """API viewset for IPAddressMapping CRUD operations."""
+
+    permission_classes = [LibreNMSPluginPermission]
+    filterset_class = IPAddressMappingFilterSet
+
+    queryset = IPAddressMapping.objects.select_related("vrf")
+    serializer_class = IPAddressMappingSerializer
 
 
 class DeviceTypeMappingViewSet(NetBoxModelViewSet):

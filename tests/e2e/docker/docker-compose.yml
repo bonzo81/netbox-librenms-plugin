@@ -1,0 +1,144 @@
+---
+# NetBox with the plugin wheel, its worker, PostgreSQL, Redis and the LibreNMS stub.
+# setup.sh writes .env with NETBOX_CONTAINER_TAG and WHL_FILE, and builds the image.
+name: netbox-librenms-e2e
+
+x-netbox-environment: &netbox-environment
+  DB_HOST: postgres
+  DB_NAME: netbox
+  DB_PASSWORD: netbox-e2e
+  DB_USER: netbox
+  REDIS_HOST: redis
+  REDIS_DATABASE: 0
+  REDIS_PASSWORD: ""
+  REDIS_SSL: "false"
+  REDIS_CACHE_HOST: redis
+  REDIS_CACHE_DATABASE: 1
+  REDIS_CACHE_PASSWORD: ""
+  REDIS_CACHE_SSL: "false"
+  SECRET_KEY: "e2e-only-secret-key-0123456789-abcdefghijklmnopqrstuvwxyz"
+  API_TOKEN_PEPPER_1: "e2e-only-token-pepper-0123456789-abcdefghijklmnopqrstuv"
+  SKIP_SUPERUSER: "false"
+  SUPERUSER_EMAIL: "admin@example.com"
+  SUPERUSER_NAME: "admin"
+  SUPERUSER_PASSWORD: "admin"
+  HOUSEKEEPING_INTERVAL: 86400
+  METRICS_ENABLED: "false"
+  # A proxy that the Docker client injects must not see the calls between the services.
+  NO_PROXY: &no_proxy "${NO_PROXY:+${NO_PROXY},}localhost,127.0.0.1,postgres,redis,librenms-stub"
+  no_proxy: *no_proxy
+
+services:
+  netbox:
+    # The project name keeps the image of each concurrent stack apart.
+    image: &netbox-image ${COMPOSE_PROJECT_NAME}-netbox:${NETBOX_CONTAINER_TAG:?run setup.sh first}
+    build:
+      context: .
+      args:
+        FROM: netboxcommunity/netbox:${NETBOX_CONTAINER_TAG:?run setup.sh first}
+        WHL_FILE: ${WHL_FILE:?run setup.sh first}
+      secrets:
+        - host_ca
+    user: &netbox-user "999:root"
+    environment: *netbox-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      librenms-stub:
+        condition: service_healthy
+    ports:
+      - 127.0.0.1:${NETBOX_PORT:-8000}:8080
+    healthcheck:
+      start_period: 600s
+      timeout: 3s
+      interval: 5s
+      test: curl -f http://localhost:8080/login/ || exit 1
+
+  # The worker runs the image that the netbox service builds.
+  netbox-worker:
+    image: *netbox-image
+    user: *netbox-user
+    environment: *netbox-environment
+    depends_on:
+      netbox:
+        condition: service_healthy
+    command:
+      - /opt/netbox/venv/bin/python
+      - /opt/netbox/netbox/manage.py
+      - rqworker
+    healthcheck:
+      start_period: 20s
+      timeout: 3s
+      interval: 5s
+      test: "ps -aux | grep -v grep | grep -q rqworker || exit 1"
+
+  # The stub runs from the source tree, so it serves the recordings of this checkout.
+  librenms-stub:
+    image: netboxcommunity/netbox:${NETBOX_CONTAINER_TAG:?run setup.sh first}
+    working_dir: /app
+    environment:
+      PYTHONPATH: /opt/netbox/netbox
+      NO_PROXY: 127.0.0.1,localhost
+      no_proxy: 127.0.0.1,localhost
+    command:
+      - /opt/netbox/venv/bin/python
+      - -m
+      - netbox_librenms_plugin.tests.mock_librenms_server
+      - --port
+      - "8001"
+      - --token
+      - e2e-stub-token
+      - --quiet
+      - --recording
+      - juniper-ex4400-vc-2member
+      - --recording
+      - arcos-lag-transceivers
+      - --recording
+      - nokia-timos-transceivers
+      - --recording
+      - iosxe-subinterfaces
+    volumes:
+      - ../../..:/app:ro
+    healthcheck:
+      test:
+        - CMD
+        - /opt/netbox/venv/bin/python
+        - -c
+        - import urllib.request; urllib.request.urlopen("http://127.0.0.1:8001/healthz", timeout=2)
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  postgres:
+    image: docker.io/postgres:18-alpine
+    # PostgreSQL 18 does not start on Docker's 64 MB default /dev/shm.
+    shm_size: 1gb
+    environment:
+      POSTGRES_DB: netbox
+      POSTGRES_PASSWORD: netbox-e2e
+      POSTGRES_USER: netbox
+    volumes:
+      # The 18 image keeps its data in a versioned directory under /var/lib/postgresql.
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U netbox"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: docker.io/valkey/valkey:9-alpine
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  postgres-data:
+
+secrets:
+  host_ca:
+    file: ./host_ca.crt

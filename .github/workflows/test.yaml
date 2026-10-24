@@ -147,3 +147,71 @@ jobs:
         run: >-
           pytest -c netbox_librenms_plugin/tests/browser/pytest.ini
           netbox_librenms_plugin/tests/browser
+
+  e2e:
+    runs-on: ubuntu-latest
+    name: End-to-end / NetBox ${{ matrix.netbox }}
+    # snapshot is unreleased NetBox; report but don't gate.
+    continue-on-error: ${{ matrix.experimental }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Floor: min_version = 4.4.0.
+          - netbox: "v4.4.0"
+            experimental: false
+          # Latest stable netbox-docker image.
+          - netbox: "v4.7"
+            experimental: false
+          - netbox: "snapshot"
+            experimental: true
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Install Playwright
+        # --with-deps runs apt-get update, which fails on any broken source of the runner image.
+        # Playwright downloads its own Chromium, so the Google Chrome source is not needed.
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list /etc/apt/sources.list.d/google-chrome.sources
+          uv run --system-certs --no-project --with-requirements tests/e2e/requirements.txt \
+            playwright install --with-deps chromium
+
+      - name: Build the plugin wheel
+        run: uv build --system-certs --wheel
+
+      - name: Start the end-to-end stack
+        run: tests/e2e/setup.sh
+        env:
+          NETBOX_CONTAINER_TAG: ${{ matrix.netbox }}
+
+      - name: Run end-to-end tests
+        run: >-
+          uv run --system-certs --no-project --with-requirements tests/e2e/requirements.txt
+          pytest -c tests/e2e/pytest.ini tests/e2e -v
+
+      - name: Upload Playwright traces
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-traces-${{ matrix.netbox }}
+          path: test-results/
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Show Docker logs
+        if: ${{ always() }}
+        run: docker compose logs
+        working-directory: tests/e2e/docker

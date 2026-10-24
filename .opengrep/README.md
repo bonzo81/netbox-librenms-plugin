@@ -54,7 +54,7 @@ unchecked until that review.
 | `no-unittest-assertions` | warning | A test calls a `self` method with a unittest assertion API name. |
 | `xfail-needs-raises` | error | A test marks an expected failure with `pytest.mark.xfail` and does not name the exception with `raises=`, or gives `raises=None`. An alias of the marker is not followed. |
 | `executor-needs-bounded-executor` | error | A test creates a `ThreadPoolExecutor` and does not use `tests.conftest.bounded_executor`. `tests/conftest.py` is excluded. |
-| `synchronization-needs-timeout` | error | A test creates a one-argument Barrier or calls `Event.wait()` without an argument on a local Event binding. |
+| `synchronization-needs-timeout` | error | A test creates a Barrier without a non-`None` timeout or calls `Event.wait()` with an omitted or `None` timeout on a local Event binding. |
 | `barrier-needs-run-in-threads` | error | A test creates a `threading.Barrier` and then starts threads with `ThreadPoolExecutor` or `Thread`, not with `tests.conftest.run_in_threads`. |
 | `recorded-response-needs-envelope` | error | Code reads a recorded response as a bare `[status, body]` list instead of through `data_shapes.envelope.unwrap_response`. |
 | `no-selected-fuzzy-apis` | warning | Code calls selected approximate-selection APIs. This does not prove exact-only selection. |
@@ -63,8 +63,11 @@ unchecked until that review.
 | `no-stored-mapping-access-orm` | error | A `custom_field_data__librenms_id` lookup, projection or ordering, also across a relation such as `device__`; a `has_key`, `has_keys`, `has_any_keys` or `contains` lookup on the container whose value names the key; a projection of the whole container; or a `custom_fields.librenms_id` path. |
 | `no-stored-mapping-access-private` | error | An import or attribute access of a private name of `server_mappings`, or a patch target string that names one. |
 | `no-stored-mapping-access-template` | error | A template that reads `cf.librenms_id` or `custom_field_data.librenms_id`, or looks the key up with a filter. |
+| `no-scroll-wrapper-on-sync-table` | error | A `table-responsive` wrapper directly around `inc/table.html`. It clips a member dropdown that opens inside the table. A wrapper with another class, or one written with `{% if %}` in its class, is outside this check. |
 | `conflict-raised-without-record` | error | A raise of a `TransactionConflict` or `ConcurrentRowChange` class that does not go through `recorded_conflict(...)`. |
 | `no-lock-on-exists` | error | A `select_for_update()` chain that ends in `exists()` or `count()`. |
+| `assert-is-not-parametrized-flag` | error | A test asserts `value is not flag`, where `flag` is a `pytest.mark.parametrize` argument with `True` or `False` values. That identity check also passes for `None`. |
+| `vc-member-name-through-helper` | error | A `_generate_vc_member_name()` call outside `_member_name()`. Such a name skips the serial rules, so it can differ from the name that import creates. Tests are excluded, and an import alias of the function is not followed. |
 
 ## Scope
 
@@ -192,8 +195,11 @@ the same file. Its limits:
 
 The recorded-response rule checks the two legacy spellings of the `[status, body]` read: the
 `isinstance(..., list) and len(...) == 2 and isinstance(...[0], int)` test and the
-`x[1] if isinstance(x, list) else x` expression. It does not see tuple unpacking or a `type()`
-check. `data_shapes/envelope.py` is excluded because it owns the format.
+`x[1] if isinstance(x, list) else x` expression. The rule reports the expression only when `x` is
+assigned from an expression that contains `"responses"`, or is the loop variable of `for x in ...`
+or `for key, x in ...` over such an expression, because the expression alone is ordinary list
+selection. It does not see other tuple unpacking, a `type()` check, or a value passed in from
+another function. `data_shapes/envelope.py` is excluded because it owns the format.
 
 The `no-stored-mapping-access` rules check the key as the literal `"librenms_id"`, also through a
 local or module string constant. A key built at run time is outside the check. Their limits:
@@ -221,8 +227,8 @@ local or module string constant. A key built at run time is outside the check. T
 - The private rule reports an import of a private name, and a dotted access through a module
   import. It does not see `getattr()` with a computed name.
 - The template rule reads `cf` and `custom_field_data` by name. It does not see a container
-  that the view passes under another name. It skips a `{# ... #}` comment. It reports an HTML
-  comment, because Django renders the template code in it.
+  that the view passes under another name. The rule skips a `{# ... #}` comment. It reports an
+  HTML comment, because Django renders the template code in it.
 
 `conflict-raised-without-record` knows the conflict classes by name, also with a module prefix.
 It does not see a conflict that is raised from a variable. When you add a `TransactionConflict`
@@ -230,6 +236,11 @@ subclass, add its name to the rule and a fixture line.
 
 `no-lock-on-exists` checks one method chain. It does not see a locked queryset in a variable that a
 later statement ends with `exists()` or `count()`.
+
+`assert-is-not-parametrized-flag` reads a `pytest.mark.parametrize` decorator on the test function. It does
+not see a parameter that a class decorator or `pytestmark` sets. The decorator must name the parameter,
+as a string, a comma-separated string, or a tuple or list of strings. Its values must contain a `True`
+or `False` literal. With several argument names, the rule does not check which argument has that literal.
 
 ## `--taint-intrafile` is required
 
@@ -286,3 +297,13 @@ its own, and build the message on the next line, where the rule still checks it.
 3. Add the rule to `.opengrep/librenms-rules.yaml`. Run the rule-tests again and confirm they pass.
 4. Flip one `ruleid:` marker to `ok:`. Confirm the rule-test reports that line, then restore it.
 5. Run `./scripts/opengrep-scan.sh`. Report any findings before changing production code.
+
+`netbox-only-controls-use-replaceable-handlers` rejects `addEventListener` in
+`initializeNetBoxOnlyInterfaces`. These controls use event properties so repeated
+initialization replaces the handler and its row references. Other initializers and
+listener registration through aliases are outside this check.
+
+`metadata-ports-skip-vlan-associations` requires `with_vlans=False` for `get_ports`
+calls in the module and cable base views. These callers read port metadata.
+Interface views still request VLAN associations for VLAN comparison. Calls through
+aliases and consumers in other modules are outside this check.

@@ -316,8 +316,14 @@ def _importable_row(live_librenms, device_id, tag, *, members=None):
     )
 
     prerequisites = _prerequisites(tag)
+    # A stack's LibreNMS device serial is the master member's serial.
+    serial = members[0]["entPhysicalSerialNum"] if members else ""
     row = _libre_device(
-        device_id, f"{tag}-{device_id}", hardware=prerequisites["hardware"], location=prerequisites["location"]
+        device_id,
+        f"{tag}-{device_id}",
+        hardware=prerequisites["hardware"],
+        serial=serial,
+        location=prerequisites["location"],
     )
     if members is None:
         live_librenms.server.register(f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [row]})
@@ -422,6 +428,166 @@ def test_the_import_answer_names_a_chassis_that_a_lock_conflict_left_uncreated(c
         ]
 
 
+MASTER_UNKNOWN = "Imported device {} without a virtual chassis: the stack master could not be identified by serial."
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("htmx", [False, True], ids=["plain", "htmx"])
+def test_a_stack_whose_master_is_unknown_imports_standalone_and_says_why(client, live_librenms, htmx):
+    """No member carries the device serial, so the import creates no chassis and no member devices."""
+    from dcim.models import Device, VirtualChassis
+
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
+
+    device_id = 96361 if htmx else 96351
+    member_serial = f"SN-UNKNOWN-A-{int(htmx)}"
+    members = [_chassis(100, member_serial, position=1), _chassis(200, "", position=2)]
+    prerequisites, row = _importable_row(live_librenms, device_id, f"stack-unknown-{int(htmx)}", members=members)
+    row["serial"] = "ROOT"
+    live_librenms.server.register(f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [row]})
+    client.force_login(make_superuser(f"stack-unknown-{int(htmx)}-user"))
+    headers = {"HTTP_HX_REQUEST": "true"} if htmx else {}
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_devices"),
+        {
+            "server_key": "default",
+            "select": [str(device_id)],
+            f"role_{device_id}": str(prerequisites["device_role_id"]),
+        },
+        **headers,
+    )
+
+    imported = Device.objects.get(serial="ROOT")
+    assert imported.name == row["hostname"]
+    assert imported.virtual_chassis is None
+    assert not VirtualChassis.objects.filter(domain=f"librenms-default-{device_id}").exists()
+    assert not Device.objects.filter(serial=member_serial).exists()
+    warning = MASTER_UNKNOWN.format(device_id)
+    if htmx:
+        assert warning in response.content.decode()
+    else:
+        assert ("warning", warning) in messages_on(response.wsgi_request)
+
+
+def _import_stack(live_librenms, device_id, tag, members, *, serial, hardware=None, device_type_id=True):
+    """Import one LibreNMS stack row through the real bulk import; return the result and its row."""
+    from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+
+    prerequisites, row = _importable_row(live_librenms, device_id, tag, members=members)
+    row["serial"] = serial
+    if hardware is not None:
+        row["hardware"] = hardware
+    live_librenms.server.register(f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [row]})
+    mappings = dict(prerequisites)
+    if not device_type_id:
+        mappings.pop("device_type_id")
+    result = bulk_import_devices_shared(
+        [device_id],
+        server_key="default",
+        manual_mappings_per_device={device_id: mappings},
+        libre_devices_cache={device_id: row},
+        user=make_superuser(f"{tag}-user"),
+    )
+    return result, prerequisites, row
+
+
+@pytest.mark.django_db
+def test_two_members_with_the_master_serial_import_standalone_without_a_duplicate(live_librenms):
+    """Two chassis rows report the device serial: no single master, so no chassis and no second device."""
+    from dcim.models import Device, VirtualChassis
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
+
+    NormalizationRule.objects.get_or_create(
+        scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+    )
+    members = [_chassis(100, "S/N DUP-A", position=1), _chassis(200, "S/N DUP-A", position=2)]
+
+    result, _prerequisites, _row = _import_stack(live_librenms, 96371, "stack-dup-master", members, serial="S/N DUP-A")
+
+    assert [entry["device_id"] for entry in result["success"]] == [96371]
+    assert result["virtual_chassis_created"] == 0
+    assert result["warnings"] == [MASTER_UNKNOWN.format(96371)]
+    assert not VirtualChassis.objects.filter(domain="librenms-default-96371").exists()
+    assert Device.objects.filter(serial__in=["DUP-A", "S/N DUP-A"]).count() == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("device_type_source", ["mapped", "manual"])
+def test_a_manufacturer_serial_rule_identifies_the_master(live_librenms, device_type_source):
+    """A rule scoped to the DeviceType's manufacturer strips the member serials, so the master matches."""
+    from dcim.models import Device, DeviceType, VirtualChassis
+
+    from netbox_librenms_plugin.models import DeviceTypeMapping, NormalizationRule
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
+
+    device_id = 96381 if device_type_source == "mapped" else 96382
+    members = [_chassis(100, "PREFIX:SN1", position=1), _chassis(200, f"PREFIX:SN2-{device_id}", position=2)]
+    hardware = f"HW-{device_type_source.upper()}-{device_id}"
+    prerequisites, _row = _importable_row(live_librenms, device_id, f"stack-mfg-{device_type_source}", members=members)
+    device_type = DeviceType.objects.get(pk=prerequisites["device_type_id"])
+    NormalizationRule.objects.create(
+        scope="serial", manufacturer=device_type.manufacturer, match_pattern=r"^PREFIX:(.+)$", replacement=r"\1"
+    )
+    if device_type_source == "mapped":
+        DeviceTypeMapping.objects.create(librenms_hardware=hardware.lower(), netbox_device_type=device_type)
+
+    result, _prerequisites, _row = _import_stack(
+        live_librenms,
+        device_id,
+        f"stack-mfg-{device_type_source}-row",
+        members,
+        serial="SN1",
+        hardware=hardware,
+        device_type_id=device_type_source == "manual",
+    )
+
+    assert [entry["device_id"] for entry in result["success"]] == [device_id]
+    assert result["virtual_chassis_created"] == 1
+    chassis = VirtualChassis.objects.get(domain=f"librenms-default-{device_id}")
+    assert sorted(Device.objects.filter(virtual_chassis=chassis).values_list("serial", flat=True)) == [
+        "SN1",
+        f"SN2-{device_id}",
+    ]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("override", [None, 0, "not-an-id"], ids=["none", "missing", "garbage"])
+def test_an_unusable_device_type_override_fails_the_row_in_precheck_and_import(live_librenms, override):
+    """The precheck and the device write read one effective DeviceType, so both reject the override."""
+    from dcim.models import Device, DeviceType
+
+    from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+    from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
+
+    device_id = 96391
+    members = [_chassis(100, "OVR-A", position=1), _chassis(200, "OVR-B", position=2)]
+    prerequisites, row = _importable_row(live_librenms, device_id, f"stack-override-{override}", members=members)
+    if override == 0:
+        override = DeviceType.objects.order_by("-pk").values_list("pk", flat=True).first() + 100000
+    mappings = {**prerequisites, "device_type_id": override}
+
+    result = bulk_import_devices_shared(
+        [device_id],
+        server_key="default",
+        manual_mappings_per_device={device_id: mappings},
+        libre_devices_cache={device_id: row},
+        user=make_superuser(f"stack-override-{device_id}-user"),
+    )
+    single = import_single_device(
+        device_id, server_key="default", manual_mappings=mappings, libre_device=row, user=make_superuser("ovr-single")
+    )
+
+    assert result["success"] == []
+    assert result["failed"] == [{"device_id": device_id, "error": "Selected device type is unavailable"}]
+    assert single["success"] is False
+    assert single["error"] == "Selected device type is unavailable"
+    assert not Device.objects.filter(name=row["hostname"]).exists()
+
+
 @pytest.mark.django_db
 def test_a_failed_module_bay_count_write_fails_the_chassis_create():
     """The count write is part of the chassis transaction: its error must fail the create, not break it silently."""
@@ -440,11 +606,9 @@ def test_a_failed_module_bay_count_write_fails_the_chassis_create():
             lambda sql, params: sql.startswith('UPDATE "dcim_device" SET "module_bay_count"'), "40P01"
         ) as failed,
     ):
+        members = [{"serial": "MASTER-SERIAL", "position": 1}, {"serial": "MEMBER-SERIAL", "position": 2}]
         create_virtual_chassis_with_members(
-            master,
-            [{"serial": "MASTER-SERIAL", "position": 1}, {"serial": "MEMBER-SERIAL", "position": 2}],
-            {"device_id": 96321},
-            server_key="default",
+            master, members, {"device_id": 96321}, server_key="default", master_member=members[0]
         )
 
     assert failed, "precondition: the count write ran"
@@ -476,7 +640,7 @@ def test_collision_precheck_skips_import_prerequisite_queries():
     api = _LibreNMSBoundary(rows)
 
     with CaptureQueriesContext(connection) as captured:
-        collisions, unresolved, _stack_ambiguities = detect_collisions_for_device_ids(
+        collisions, unresolved = detect_collisions_for_device_ids(
             [96201, 96202, 96203],
             api,
             libre_devices_cache=rows,

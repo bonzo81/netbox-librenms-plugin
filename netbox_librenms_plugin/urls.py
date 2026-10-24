@@ -5,6 +5,7 @@ from .models import (
     DeviceTypeMapping,
     InterfaceTypeMapping,
     InventoryIgnoreRule,
+    IPAddressMapping,
     LocationMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
@@ -83,6 +84,15 @@ from .views import (
     InventoryIgnoreRuleEditView,
     InventoryIgnoreRuleListView,
     InventoryIgnoreRuleView,
+    IPAddressMappingBulkDeleteView,
+    IPAddressMappingBulkExportYAMLView,
+    IPAddressMappingBulkImportView,
+    IPAddressMappingChangeLogView,
+    IPAddressMappingCreateView,
+    IPAddressMappingDeleteView,
+    IPAddressMappingEditView,
+    IPAddressMappingListView,
+    IPAddressMappingView,
     LibreNMSImportView,
     LibreNMSSettingsView,
     LocationMappingBulkDeleteView,
@@ -668,6 +678,48 @@ urlpatterns = [
         InterfaceTypeMappingBulkDeleteView.as_view(),
         name="interfacetypemapping_bulk_delete",
     ),
+    # IP mapping URLs
+    path(
+        "ip-address-mappings/",
+        IPAddressMappingListView.as_view(),
+        name="ipaddressmapping_list",
+    ),
+    path(
+        "ip-address-mappings/<int:pk>/",
+        IPAddressMappingView.as_view(),
+        name="ipaddressmapping_detail",
+    ),
+    path(
+        "ip-address-mappings/add/",
+        IPAddressMappingCreateView.as_view(),
+        name="ipaddressmapping_add",
+    ),
+    path(
+        "ip-address-mappings/import/",
+        IPAddressMappingBulkImportView.as_view(),
+        name="ipaddressmapping_bulk_import",
+    ),
+    path(
+        "ip-address-mappings/<int:pk>/delete/",
+        IPAddressMappingDeleteView.as_view(),
+        name="ipaddressmapping_delete",
+    ),
+    path(
+        "ip-address-mappings/<int:pk>/edit/",
+        IPAddressMappingEditView.as_view(),
+        name="ipaddressmapping_edit",
+    ),
+    path(
+        "ip-address-mappings/<int:pk>/changelog/",
+        IPAddressMappingChangeLogView.as_view(),
+        name="ipaddressmapping_changelog",
+        kwargs={"model": IPAddressMapping},
+    ),
+    path(
+        "ip-address-mappings/delete/",
+        IPAddressMappingBulkDeleteView.as_view(),
+        name="ipaddressmapping_bulk_delete",
+    ),
     # Device type mapping URLs
     path(
         "device-type-mappings/",
@@ -883,6 +935,11 @@ urlpatterns = [
         "interface-type-mappings/export-yaml/",
         InterfaceTypeMappingBulkExportYAMLView.as_view(),
         name="interfacetypemapping_bulk_export_yaml",
+    ),
+    path(
+        "ip-address-mappings/export-yaml/",
+        IPAddressMappingBulkExportYAMLView.as_view(),
+        name="ipaddressmapping_bulk_export_yaml",
     ),
     path(
         "device-type-mappings/export-yaml/",

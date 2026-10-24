@@ -23,6 +23,16 @@ def _include_rule(name, manufacturer=None):
     )
 
 
+def _enabled_rules(manufacturer):
+    """Return the enabled rules that the loaded inventory policy applies to *manufacturer*."""
+    from uuid import uuid4
+
+    from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+    from netbox_librenms_plugin.tests.conftest import make_device
+
+    return load_inventory_policy(make_device(f"rules-scope-{uuid4().hex[:8]}").pk).rules_for(manufacturer)
+
+
 @pytest.mark.django_db
 class TestYamlExport:
     """The YAML export must carry the manufacturer scope so a re-import keeps it."""
@@ -48,19 +58,17 @@ class TestYamlExport:
 
 
 @pytest.mark.django_db
-class TestGetEnabledIgnoreRules:
-    """The loader scopes rules the way apply_normalization_rules scopes its own."""
+class TestPolicyRulesFor:
+    """The inventory policy scopes rules the way apply_normalization_rules scopes its own."""
 
     def test_a_vendor_takes_its_own_rules_and_the_unscoped_ones(self):
-        from netbox_librenms_plugin.utils import get_enabled_ignore_rules
-
         juniper = _manufacturer("Scope Juniper", "scope-juniper")
         cisco = _manufacturer("Scope Cisco", "scope-cisco")
         mine = _include_rule("scope-juniper-only", juniper)
         theirs = _include_rule("scope-cisco-only", cisco)
         shared = _include_rule("scope-all-vendors")
 
-        loaded = get_enabled_ignore_rules(juniper)
+        loaded = _enabled_rules(juniper)
 
         assert mine in loaded
         assert shared in loaded
@@ -68,26 +76,23 @@ class TestGetEnabledIgnoreRules:
 
     def test_no_manufacturer_takes_only_the_unscoped_rules(self):
         """A caller without a manufacturer must not inherit one vendor's rule."""
-        from netbox_librenms_plugin.utils import get_enabled_ignore_rules
-
         juniper = _manufacturer("Bare Juniper", "bare-juniper")
         scoped = _include_rule("bare-juniper-only", juniper)
         shared = _include_rule("bare-all-vendors")
 
-        loaded = get_enabled_ignore_rules(None)
+        loaded = _enabled_rules(None)
 
         assert shared in loaded
         assert scoped not in loaded
 
     def test_a_disabled_rule_is_excluded_whatever_its_scope(self):
         from netbox_librenms_plugin.models import InventoryIgnoreRule
-        from netbox_librenms_plugin.utils import get_enabled_ignore_rules
 
         juniper = _manufacturer("Off Juniper", "off-juniper")
         rule = _include_rule("off-juniper-only", juniper)
         InventoryIgnoreRule.objects.filter(pk=rule.pk).update(enabled=False)
 
-        assert rule not in get_enabled_ignore_rules(juniper)
+        assert rule not in _enabled_rules(juniper)
 
 
 @pytest.mark.django_db
@@ -96,8 +101,7 @@ class TestScopedIncludeRuleAdmission:
 
     def test_another_vendors_class_rule_does_not_admit_the_row(self):
         from netbox_librenms_plugin.models import InventoryIgnoreRule
-        from netbox_librenms_plugin.utils import get_enabled_ignore_rules
-        from netbox_librenms_plugin.views.base.modules_view import _class_is_included
+        from netbox_librenms_plugin.views.base.modules_view import _admitting_rules
 
         # The seeded rule is vendor-agnostic until migration 0019 runs against a NetBox that
         # knows Juniper, and its own scoping is covered by TestSeededRuleScoping.
@@ -109,19 +113,18 @@ class TestScopedIncludeRuleAdmission:
         _include_rule("admit-juniper-routing-engines", juniper)
         item = {"entPhysicalClass": "other", "entPhysicalName": "RE0"}
 
-        assert _class_is_included(item, get_enabled_ignore_rules(juniper)) is True
-        assert _class_is_included(item, get_enabled_ignore_rules(cisco)) is False
+        assert _admitting_rules(item, _enabled_rules(juniper))
+        assert not _admitting_rules(item, _enabled_rules(cisco))
 
     def test_an_unscoped_rule_still_admits_every_vendor(self):
         """Existing installs have vendor-agnostic rules, which must keep working."""
-        from netbox_librenms_plugin.utils import get_enabled_ignore_rules
-        from netbox_librenms_plugin.views.base.modules_view import _class_is_included
+        from netbox_librenms_plugin.views.base.modules_view import _admitting_rules
 
         cisco = _manufacturer("Global Cisco", "global-cisco")
         _include_rule("global-any-vendor")
         item = {"entPhysicalClass": "other", "entPhysicalName": "RE0"}
 
-        assert _class_is_included(item, get_enabled_ignore_rules(cisco)) is True
+        assert _admitting_rules(item, _enabled_rules(cisco))
 
 
 @pytest.mark.django_db
@@ -175,8 +178,7 @@ class TestSeededRuleScoping:
         """
         import importlib
 
-        from netbox_librenms_plugin.utils import get_enabled_ignore_rules
-        from netbox_librenms_plugin.views.base.modules_view import _class_is_included
+        from netbox_librenms_plugin.views.base.modules_view import _admitting_rules
 
         from netbox_librenms_plugin.models import InventoryIgnoreRule
 
@@ -188,8 +190,8 @@ class TestSeededRuleScoping:
         self._run_migration_scoping()
 
         item = {"entPhysicalClass": "other", "entPhysicalName": "RE0"}
-        assert _class_is_included(item, get_enabled_ignore_rules(juniper)) is True
-        assert _class_is_included(item, get_enabled_ignore_rules(juniper_networks)) is True
+        assert _admitting_rules(item, _enabled_rules(juniper))
+        assert _admitting_rules(item, _enabled_rules(juniper_networks))
 
     def test_scoping_preserves_operator_edits_in_every_clone(self):
         import importlib
@@ -223,8 +225,6 @@ class TestSeededRuleScoping:
     def test_deleting_a_manufacturer_does_not_make_its_rule_global(self):
         from django.db.models.deletion import ProtectedError
 
-        from netbox_librenms_plugin.utils import get_enabled_ignore_rules
-
         vendor = _manufacturer("Protected Vendor", "protected-vendor")
         other = _manufacturer("Other Vendor", "other-vendor")
         rule = _include_rule("protected-vendor-only", vendor)
@@ -234,7 +234,7 @@ class TestSeededRuleScoping:
 
         rule.refresh_from_db()
         assert rule.manufacturer_id == vendor.pk
-        assert rule not in get_enabled_ignore_rules(other)
+        assert rule not in _enabled_rules(other)
 
     def test_the_seeded_rule_is_left_enabled_when_juniper_is_absent(self):
         """

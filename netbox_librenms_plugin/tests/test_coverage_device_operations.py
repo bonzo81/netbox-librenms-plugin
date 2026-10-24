@@ -319,6 +319,31 @@ class TestChassisDeviceTypeMatch:
             part_number=part_number,
         )
 
+    @pytest.mark.parametrize("field", ["entPhysicalName", "entPhysicalModelName"])
+    @pytest.mark.parametrize("value", [0, 4410])
+    def test_numeric_chassis_models_reach_real_device_type_matching(self, librenms_api, field, value):
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
+        api, server = librenms_api
+        infrastructure = make_device("numeric-chassis-infrastructure")
+        matched = self._device_type("numeric", model=str(value))
+        server.register(
+            "/api/v0/inventory/5503",
+            {"status": "ok", "inventory": [{"entPhysicalClass": "chassis", field: value}]},
+        )
+        payload = _device_payload(
+            5503,
+            hostname="numeric-chassis-new",
+            sysName="numeric-chassis-new",
+            hardware="Unmatched numeric chassis",
+            location=infrastructure.site.name,
+        )
+
+        result = validate_device_for_import(payload, api=api, include_vc_detection=False)
+
+        assert result["device_type"]["device_type"] == matched
+        assert result["device_type"]["match_type"] == "chassis"
+
     def test_real_inventory_name_matches_a_real_device_type(self, librenms_api):
         from netbox_librenms_plugin.import_utils.device_operations import _try_chassis_device_type_match
 
@@ -391,6 +416,25 @@ class TestChassisDeviceTypeMatch:
         )
 
         assert _try_chassis_device_type_match(api, 5104) is None
+
+    @pytest.mark.parametrize("placeholder", ["N/A", "builtin", "unknown"])
+    def test_a_placeholder_is_no_lookup_key_in_any_case(self, librenms_api, placeholder):
+        """A DeviceType that happens to carry a placeholder name must not match a chassis that reports none."""
+        from netbox_librenms_plugin.import_utils.device_operations import _try_chassis_device_type_match
+
+        api, server = librenms_api
+        self._device_type(f"placeholder-{len(placeholder)}", model=placeholder)
+        server.register(
+            "/api/v0/inventory/5106",
+            {
+                "status": "ok",
+                "inventory": [
+                    {"entPhysicalClass": "chassis", "entPhysicalName": placeholder, "entPhysicalModelName": ""}
+                ],
+            },
+        )
+
+        assert _try_chassis_device_type_match(api, 5106) is None
 
     def test_ambiguous_inventory_model_has_no_match(self, librenms_api):
         from netbox_librenms_plugin.import_utils.device_operations import _try_chassis_device_type_match

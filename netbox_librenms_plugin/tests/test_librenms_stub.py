@@ -18,6 +18,7 @@ from netbox_librenms_plugin.tests.mock_librenms_server import (
     DEFAULT_STUB_RECORDINGS,
     MAX_REQUEST_BODY_BYTES,
     LibreNMSStubServer,
+    build_stub_server,
 )
 
 TOKEN = "dev-stub-token"
@@ -168,6 +169,20 @@ def test_persistent_stub_request_log_keeps_only_recent_requests():
         assert server.requests[-1]["query"]["probe"] == ["257"]
     finally:
         server.stop()
+
+
+@pytest.mark.parametrize(("flags", "logged"), [(["--quiet"], False), ([], True)], ids=["quiet", "default"])
+def test_stub_command_line_logs_each_request_unless_quiet(capfd, flags, logged):
+    """A container healthcheck polls the stub every few seconds, so --quiet keeps its log readable."""
+    argv = ["--host", "127.0.0.1", "--port", "0", "--token", TOKEN, "--recording", "linux-host", *flags]
+    server, _names = build_stub_server(argv)
+    server.start()
+    try:
+        assert _request(server, "GET", "/healthz").status_code == 200
+    finally:
+        server.stop()
+
+    assert ('"GET /healthz' in capfd.readouterr().err) is logged
 
 
 def test_stub_serves_recordings_and_derived_instance_endpoints_over_real_http():

@@ -1,0 +1,27 @@
+{% extends 'generic/object_list.html' %}
+
+{% block tabs %}
+    {% include 'netbox_librenms_plugin/inc/_mapping_tabs.html' with mapping_tab_active="ipaddressmapping" %}
+    {{ block.super }}
+{% endblock %}
+
+{% block content %}
+    <div class="alert alert-info">
+        <div>
+            <h4>IP Mapping</h4>
+            <p>An IP mapping keeps the LibreNMS addresses in a prefix out of IP sync. The IP Addresses
+               sync tab shows such an address as Ignored and does not create or update it in NetBox.
+               It never deletes an address that NetBox already has.</p>
+            <p>Example: Ignore prefix "fe80::/10" to keep IPv6 link-local addresses out of NetBox.
+               Set a VRF to apply the mapping only to addresses synced into that VRF.</p>
+        </div>
+    </div>
+    {{ block.super }}
+{% endblock %}
+
+{% block bulk_buttons %}
+    {{ block.super }}
+    <button type="submit" formaction="{% url 'plugins:netbox_librenms_plugin:ipaddressmapping_bulk_export_yaml' %}" class="btn btn-sm btn-secondary">
+        <i class="mdi mdi-download"></i> Export Selected (YAML)
+    </button>
+{% endblock %}

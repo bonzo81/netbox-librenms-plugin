@@ -459,12 +459,20 @@ rules:
     paths:
       include: ["**/netbox_librenms_plugin/tests/**"]
     pattern-either:
-      - pattern: threading.Barrier($PARTIES)
+      - patterns:
+          - pattern: threading.Barrier(...)
+          - pattern-not: threading.Barrier(..., timeout=$TIMEOUT, ...)
+          - pattern-not: threading.Barrier($PARTIES, $ACTION, $TIMEOUT)
+      - pattern: threading.Barrier(..., timeout=None, ...)
+      - pattern: threading.Barrier($PARTIES, $ACTION, None)
       - patterns:
           - pattern-inside: |
               $EVENT = threading.Event(...)
               ...
-          - pattern: $EVENT.wait()
+          - pattern-either:
+              - pattern: $EVENT.wait()
+              - pattern: $EVENT.wait(None)
+              - pattern: $EVENT.wait(timeout=None)
   - id: barrier-needs-run-in-threads
     languages: [python]
     severity: ERROR
@@ -1090,7 +1098,34 @@ rules:
       exclude: ["**/data_shapes/envelope.py"]
     pattern-either:
       - pattern: isinstance($V, list) and len($V) == 2 and isinstance($V[0], int)
-      - pattern: $V[1] if isinstance($V, list) else $V
+      # The ternary alone is ordinary list selection; report it only for a value read from "responses".
+      - patterns:
+          - pattern: $V[1] if isinstance($V, list) else $V
+          - pattern-either:
+              - pattern-inside: |
+                  $V = <... "responses" ...>
+                  ...
+              - pattern-inside: |
+                  for $K, $V in <... "responses" ...>:
+                    ...
+              - pattern-inside: |
+                  for $V in <... "responses" ...>:
+                    ...
+              # The same reads through a local alias of the "responses" mapping.
+              - patterns:
+                  - pattern-inside: |
+                      $R = <... "responses" ...>
+                      ...
+                  - pattern-either:
+                      - pattern-inside: |
+                          $V = <... $R ...>
+                          ...
+                      - pattern-inside: |
+                          for $K, $V in <... $R ...>:
+                            ...
+                      - pattern-inside: |
+                          for $V in <... $R ...>:
+                            ...
   - id: no-stored-mapping-access
     languages: [python]
     severity: ERROR
@@ -1116,6 +1151,7 @@ rules:
       - pattern: $OBJ.cf
       # The custom fields of a serialized object, such as a change record.
       - pattern: $DATA["custom_fields"]
+      - pattern: $DATA.get("custom_fields", ...)
     pattern-sinks:
       - patterns:
           - pattern-either:
@@ -1303,6 +1339,22 @@ rules:
           - pattern-regex: \b(?:cf|custom_field_data)\s*\.\s*librenms_id\b
           - pattern-regex: \b(?:cf|custom_field_data)\s*\|\s*\w+\s*:\s*["']librenms_id["']
       - pattern-not-inside: "{# ... #}"
+  - id: no-scroll-wrapper-on-sync-table
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      A table-responsive wrapper scrolls its content, so it clips a member dropdown that opens
+      inside the table. Include the table without the wrapper.
+    metadata:
+      category: correctness
+      references:
+        - ".github/instructions/frontend.instructions.md"
+    paths:
+      include:
+        - "*.html"
+    patterns:
+      - pattern-regex: class=["']table-responsive["'][^>]*>\s*\{%\s*include\s+["']inc/table\.html["']
+
   - id: conflict-raised-without-record
     languages: [python]
     severity: ERROR
@@ -1342,3 +1394,81 @@ rules:
       - metavariable-regex:
           metavariable: $TERMINAL
           regex: ^(exists|count)$
+  - id: assert-is-not-parametrized-flag
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `assert value is not flag` is an identity check against one bool. It passes for every value
+      that is not that object, also for None, so the test does not prove the expected flag. Write
+      `assert value is (not flag)`.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/tests/**"]
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              @pytest.mark.parametrize($NAME, $VALUES, ...)
+              def $TEST(..., $FLAG, ...):
+                  ...
+          - pattern-inside: |
+              @pytest.mark.parametrize((..., $NAME, ...), $VALUES, ...)
+              def $TEST(..., $FLAG, ...):
+                  ...
+          - pattern-inside: |
+              @pytest.mark.parametrize([..., $NAME, ...], $VALUES, ...)
+              def $TEST(..., $FLAG, ...):
+                  ...
+      - pattern-either:
+          - pattern: assert $VALUE is not $FLAG
+          - pattern: assert $VALUE is not $FLAG, $MESSAGE
+      # Opengrep parses the name string as Python, so "flag, other" also binds $FLAG.
+      - metavariable-pattern:
+          metavariable: $NAME
+          language: python
+          pattern: $FLAG
+      - metavariable-pattern:
+          metavariable: $VALUES
+          pattern-either:
+            - pattern: "True"
+            - pattern: "False"
+  - id: vc-member-name-through-helper
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This code builds a Virtual Chassis member name with _generate_vc_member_name(). That call
+      does not apply the serial rules, so a `{serial}` name can differ from the name that import
+      creates. Call _member_name() with a vc_serial_key() serial key.
+    metadata:
+      category: correctness
+    paths:
+      exclude:
+        - "**/tests/**"
+    patterns:
+      - pattern-either:
+          - pattern: _generate_vc_member_name(...)
+          - pattern: $MODULE._generate_vc_member_name(...)
+      - pattern-not-inside: |
+          def _member_name(...):
+              ...
+
+  - id: netbox-only-controls-use-replaceable-handlers
+    languages: [javascript]
+    severity: ERROR
+    message: Assign the control handler so a row swap replaces the previous listener.
+    patterns:
+      - pattern-inside: |
+          function initializeNetBoxOnlyInterfaces() { ... }
+      - pattern: $CONTROL.addEventListener(...)
+
+  - id: metadata-ports-skip-vlan-associations
+    languages: [python]
+    severity: ERROR
+    message: Read port metadata without unused VLAN associations.
+    patterns:
+      - pattern: $API.get_ports(...)
+      - pattern-not: $API.get_ports(..., with_vlans=False, ...)
+    paths:
+      include:
+        - '**/views/base/modules_view.py'
+        - '**/views/base/cables_view.py'

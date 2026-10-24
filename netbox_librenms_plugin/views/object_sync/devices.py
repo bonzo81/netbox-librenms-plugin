@@ -17,7 +17,8 @@ from netbox_librenms_plugin.interface_relationships import (
     resolve_relationship_row,
 )
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
-from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
+from netbox_librenms_plugin.module_grants import ACTION_VERIFY_MODULE, GrantRefusal, GrantRefused, read_module_grant
+from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.tables.cables import (
     LibreNMSCableTable,
     VCCableTable,
@@ -433,76 +434,117 @@ class SingleModuleVerifyView(
         # SingleInterfaceVerifyView).
         if error := self.require_object_permissions_json("POST"):
             return error
-        # Coerced like the sibling verify views: a raw JSON value reaching the pk lookup turns a
-        # bad request into a database error and a 500 where the siblings answer 400.
-        selected_device_id = coerce_model_pk(data.get("device_id"))
-        ent_physical_index = data.get("ent_physical_index")
+        parsed = self._parse_request(data)
+        if isinstance(parsed, JsonResponse):
+            return parsed
+        selected_device_id, page_device_id, ent_physical_index, row_depth = parsed
         # Configured-string-key-or-fallback, mirroring SingleInterfaceVerifyView above: a
         # forged/non-string key must neither probe another namespace nor TypeError-500.
         server_key = self.resolve_requested_server_key(data)
-        row_depth = data.get("depth", 0)
 
-        if selected_device_id is None:
-            return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
-        if ent_physical_index in (None, ""):
-            return JsonResponse({"status": "error", "message": "No entPhysicalIndex provided"}, status=400)
-
-        try:
-            ent_physical_index = int(ent_physical_index)
-        except (TypeError, ValueError):
-            return JsonResponse({"status": "error", "message": "Invalid entPhysicalIndex"}, status=400)
-
-        try:
-            row_depth = int(row_depth)
-        except (TypeError, ValueError):
-            row_depth = 0
-
-        # Restrict the lookup to the caller's viewable devices: the gate above only checked the
+        # Restrict the lookups to the caller's viewable devices: the gate above only checked the
         # model-level view_device perm, so a site-scoped grant would otherwise read another
         # device's cached verify payload by raw pk.
+        page_device = self.restrict_object_or_404(Device, pk=page_device_id)
         selected_device = self.restrict_object_or_404(Device, pk=selected_device_id)
+        if selected_device.pk != page_device.pk and (
+            not page_device.virtual_chassis_id or selected_device.virtual_chassis_id != page_device.virtual_chassis_id
+        ):
+            return JsonResponse(
+                {"status": "error", "message": "The selected device is not a member of this Virtual Chassis"},
+                status=400,
+            )
 
         module_table_view = DeviceModuleTableView()
         # Shallow-copy the request so the child view can mutate request.GET /
         # request.POST without affecting this request object.
         module_table_view.request = copy.copy(request)
         module_table_view.cache_only = True
-        context = module_table_view.get_context_data(
+        page_context, pinned_context = module_table_view.get_verify_context_data(
             module_table_view.request,
+            page_device,
             selected_device,
             server_key=server_key,
-            pin_rows_to_object=True,
         )
-        table = context.get("table")
-        if table is None:
+        if page_context.get("inventory_rule_error") is not None:
+            return JsonResponse({"status": "error", "message": GrantRefusal.RULE_ERROR.message}, status=409)
+        if pinned_context is None or pinned_context.get("table") is None:
             return JsonResponse({"status": "error", "message": "No cached inventory data"}, status=404)
-        table_data = table.data
-
-        # entPhysicalIndex should be unique, depth fallback handles malformed duplicates.
-        row = next(
-            (
-                candidate
-                for candidate in table_data
-                if candidate.get("selected_device_id") == selected_device.pk
-                and candidate.get("ent_physical_index") == ent_physical_index
-                and candidate.get("depth", 0) == row_depth
-            ),
-            None,
+        if page_context.get("inventory_index_ambiguous"):
+            return JsonResponse({"status": "error", "message": GrantRefusal.AMBIGUOUS_INDEX.message}, status=409)
+        return self._verified_row_response(
+            data, page_context, pinned_context, page_device, selected_device, ent_physical_index, row_depth
         )
-        if row is None:
-            row = next(
-                (
-                    candidate
-                    for candidate in table_data
-                    if candidate.get("selected_device_id") == selected_device.pk
-                    and candidate.get("ent_physical_index") == ent_physical_index
-                ),
-                None,
+
+    @staticmethod
+    def _parse_request(data):
+        """Return ``(device id, page device id, index, depth)`` from the request body, or a 400 response."""
+        # Coerced like the sibling verify views: a raw JSON value reaching the pk lookup turns a
+        # bad request into a database error and a 500 where the siblings answer 400.
+        selected_device_id = coerce_model_pk(data.get("device_id"))
+        page_device_id = coerce_model_pk(data.get("page_device_id"))
+        ent_physical_index = data.get("ent_physical_index")
+        if selected_device_id is None:
+            return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
+        if page_device_id is None:
+            return JsonResponse({"status": "error", "message": "No page device ID provided"}, status=400)
+        if ent_physical_index in (None, ""):
+            return JsonResponse({"status": "error", "message": "No entPhysicalIndex provided"}, status=400)
+        try:
+            ent_physical_index = int(ent_physical_index)
+        except (TypeError, ValueError):
+            return JsonResponse({"status": "error", "message": "Invalid entPhysicalIndex"}, status=400)
+        try:
+            row_depth = int(data.get("depth", 0))
+        except (TypeError, ValueError):
+            row_depth = 0
+        return selected_device_id, page_device_id, ent_physical_index, row_depth
+
+    def _verified_row_response(
+        self, data, page_context, pinned_context, page_device, selected_device, ent_physical_index, row_depth
+    ):
+        """Return the pinned row with its grants when the verify grant holds and both renders show the row."""
+        page_table, table = page_context["table"], pinned_context["table"]
+        try:
+            grant = read_module_grant(
+                data.get("verify_binding"),
+                action=ACTION_VERIFY_MODULE,
+                page_device_id=page_device.pk,
+                server_key=page_context["server_key"],
+            ).require(ent_index=ent_physical_index)
+        except GrantRefused as exc:
+            return JsonResponse({"status": "error", "message": exc.refusal.message}, status=409)
+        if grant.inventory_digest != page_table.inventory_snapshot_digest:
+            return JsonResponse({"status": "error", "message": GrantRefusal.SNAPSHOT.message}, status=409)
+        if grant.policy_fingerprint != page_table.policy_fingerprint:
+            return JsonResponse({"status": "error", "message": GrantRefusal.POLICY.message}, status=409)
+
+        # A grant needs both renders: the page table shows the row, and the table pinned to the member shows it.
+        page_indices = {candidate.get("ent_physical_index") for candidate in page_table.data}
+        row = self._pinned_row(table.data, selected_device.pk, ent_physical_index, row_depth)
+        if row is None or ent_physical_index not in page_indices:
+            return JsonResponse(
+                {"status": "error", "message": "This inventory row is not available for the selected member"},
+                status=404,
             )
-        if row is None:
-            return JsonResponse({"status": "error", "message": "Inventory row not found"}, status=404)
+        row = {**row, "branch_rows": [entry for entry in row.get("branch_rows", []) if entry[0] in page_indices]}
+        if not any(index != ent_physical_index for index, _target in row["branch_rows"]):
+            row["has_installable_children"] = False
+        if row.get("selectable") and table.selection_allowed:
+            row["selection_grant"] = table.selection_override(row)
         formatted_row = table.format_module_data(row)
         return JsonResponse({"status": "success", "formatted_row": formatted_row})
+
+    @staticmethod
+    def _pinned_row(table_data, device_id, ent_physical_index, row_depth):
+        """Return the pinned render's row of one index; the depth separates malformed duplicates."""
+        candidates = [
+            candidate
+            for candidate in table_data
+            if candidate.get("selected_device_id") == device_id
+            and candidate.get("ent_physical_index") == ent_physical_index
+        ]
+        return next((c for c in candidates if c.get("depth", 0) == row_depth), None) or next(iter(candidates), None)
 
 
 class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):

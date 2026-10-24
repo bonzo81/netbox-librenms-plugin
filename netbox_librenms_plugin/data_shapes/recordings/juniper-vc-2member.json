@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "name": "juniper-vc-2member",
-  "description": "Juniper EX Virtual Chassis, 2 members under a chassis-class root, 0-based positions.",
+  "description": "Synthetic generic stack shape, not a device capture: 2 chassis-class members under a chassis-class root, 0-based positions.",
   "meta": {
     "os": "os-990f10",
     "vendor": "juniper",
@@ -41,7 +41,41 @@
         }
       ]
     },
-    "GET /api/v0/inventory/674660074?entPhysicalClass=chassis&entPhysicalContainedIn=10": {
+    "GET /api/v0/inventory/674660074/all": {
+      "status": "ok",
+      "inventory": [
+        {
+          "entPhysicalIndex": 10,
+          "entPhysicalClass": "chassis",
+          "entPhysicalName": "entity-275655",
+          "entPhysicalDescr": "entity-74648f",
+          "entPhysicalSerialNum": "",
+          "entPhysicalModelName": "",
+          "entPhysicalContainedIn": 0
+        },
+        {
+          "entPhysicalIndex": 100,
+          "entPhysicalClass": "chassis",
+          "entPhysicalSerialNum": "SN-7854cc",
+          "entPhysicalModelName": "MODEL-f8bea9",
+          "entPhysicalName": "entity-6c5d81",
+          "entPhysicalDescr": "entity-d40007",
+          "entPhysicalParentRelPos": 0,
+          "entPhysicalContainedIn": 10
+        },
+        {
+          "entPhysicalIndex": 200,
+          "entPhysicalClass": "chassis",
+          "entPhysicalSerialNum": "SN-44bb4d",
+          "entPhysicalModelName": "MODEL-f8bea9",
+          "entPhysicalName": "entity-dea8b1",
+          "entPhysicalDescr": "entity-d40007",
+          "entPhysicalParentRelPos": 1,
+          "entPhysicalContainedIn": 10
+        }
+      ]
+    },
+    "GET /api/v0/inventory/674660074?entPhysicalContainedIn=10": {
       "status": "ok",
       "inventory": [
         {
@@ -74,7 +108,12 @@
       "member_serials": [
         "SN-7854cc",
         "SN-44bb4d"
-      ]
+      ],
+      "member_positions": [
+        0,
+        1
+      ],
+      "master_position": 0
     }
   }
 }

@@ -17,10 +17,12 @@
 
   {% if cache_expired_count %}
     <div class="alert alert-warning" role="alert">
-      <i class="mdi mdi-clock-alert"></i>
-      {{ cache_expired_count }} of {{ selected_count }} selected device{{ selected_count|pluralize }} had expired cache data
-      and {{ cache_expired_count|pluralize:"was,were" }} dropped or may be missing role/rack selections.
-      <button type="button" class="btn btn-link alert-link p-0 align-baseline" onclick="window.location.reload();">Refresh</button> or re-run your filter to reload device data.
+      <i class="mdi mdi-clock-alert me-2"></i>
+      <div>
+        {{ cache_expired_count }} of {{ selected_count }} selected device{{ selected_count|pluralize }} had expired cache data
+        and {{ cache_expired_count|pluralize:"was,were" }} dropped or may be missing role/rack selections.
+        <button type="button" class="btn btn-link alert-link p-0 align-baseline" onclick="window.location.reload();">Refresh</button> or re-run your filter to reload device data.
+      </div>
     </div>
   {% endif %}
 
@@ -72,6 +74,13 @@
           {% endif %}
         </div>
 
+        {% if vc.is_stack and not vc.master_identified %}
+          <div class="alert alert-warning py-2 px-3 mt-3 mb-0 small">
+            <i class="mdi mdi-alert"></i>
+            The stack master could not be identified by serial, so this device is imported without a virtual chassis.
+          </div>
+        {% endif %}
+
         {% if entry.validation.issues %}
           <div class="alert alert-warning py-2 px-3 mt-3 mb-0 small">
             <i class="mdi mdi-alert"></i>
@@ -87,7 +96,7 @@
                   {% for member in vc.members %}
                     <li class="d-flex flex-wrap align-items-center py-2 {% if not forloop.last %}border-bottom{% endif %}">
                       <span class="text-muted me-2">
-                        {% if member.position %}
+                        {% if member.position is not None %}
                           Pos {{ member.position }}
                         {% else %}
                           Pos —

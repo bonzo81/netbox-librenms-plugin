@@ -2,7 +2,8 @@
 
 import importlib
 import os
-from copy import deepcopy
+import runpy
+from pathlib import Path
 
 from netbox_librenms_plugin.tests.parallel import isolated_redis_databases
 
@@ -31,7 +32,9 @@ os.environ["REDIS_CACHE_DATABASE"] = str(_cache_redis_database)
 
 _configuration_name = os.environ.get("NETBOX_CONFIGURATION", "netbox.configuration")
 _configuration = importlib.import_module(_configuration_name)
-_plugin_config = deepcopy(getattr(_configuration, "PLUGINS_CONFIG", {}).get("netbox_librenms_plugin", {}))
+# Take the servers from the file CI installs, not from the developer's own NetBox configuration.
+_ci_configuration = Path(__file__).resolve().parents[2] / "media" / "configuration.testing.py"
+_plugin_config = runpy.run_path(str(_ci_configuration))["PLUGINS_CONFIG"]["netbox_librenms_plugin"]
 _configuration.PLUGINS = ["netbox_librenms_plugin"]
 _configuration.PLUGINS_CONFIG = {"netbox_librenms_plugin": _plugin_config}
 os.environ["NETBOX_CONFIGURATION"] = _configuration.__name__

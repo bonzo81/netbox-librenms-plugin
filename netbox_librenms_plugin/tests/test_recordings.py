@@ -8,12 +8,13 @@ recording's ``expected`` block. A new recording with an ``expected`` block
 becomes a passing test with no new code.
 
 The flow is exercised end-to-end (real client, real HTTP, real parsing); only
-the plugin-config lookup and the VC member-name pattern (a DB read) are stubbed,
-so these tests need no database.
+the plugin-config lookup is stubbed. VC detection reads the serial normalization
+rules and the member-name pattern, so the outcome tests use the test database.
 """
 
 from io import StringIO
 import json
+import re
 from threading import Barrier
 
 import pytest
@@ -93,11 +94,57 @@ def test_bundled_response_labels_and_revisions_are_anonymized(recording):
     check(recording.get("responses", {}))
 
 
+_ANON_TEXT = re.compile(r"(?:entity-[0-9a-f]{6}(?: \d+(?:/(?:\d+|[xc]\d+))+)?)|(?:\d+(?:/(?:\d+|[xc]\d+))+)")
+# A description may also keep the Junos Virtual Chassis markers that VC detection reads and the
+# Juniper MX "@ fpc/pic/port" locators that the dangling-parent repair reads.
+_JUNOS_DESCR = re.compile(
+    r"(?:(?:FPC(?: \d+)? )?entity-[0-9a-f]{6} @ \d+/\d+/\d+)|(?:PIC: entity-[0-9a-f]{6} @ \d+/\d+/\*)"
+    r"|(?:FPC: entity-[0-9a-f]{6} @ \d+/\*/\*)|(?:FPC(?: \d+)? entity-[0-9a-f]{6})"
+    r"|(?:entity-[0-9a-f]{6} Virtual Chassis)"
+)
+# A Juniper switch control board name keeps the prefix an include rule matches, never the SKU.
+_SCB_NAME = re.compile(r"SCB entity-[0-9a-f]{6}")
+# An IOS XE description keeps the leading "Front Panel" a description rule matches, as typed.
+_FRONT_PANEL_DESCR = re.compile(rf"\s*(?i:front panel)\s*(?:{_ANON_TEXT.pattern}|{_JUNOS_DESCR.pattern})?")
+
+
+def _inventory_text_is_anonymized(field, value):
+    if field == "entPhysicalDescr" and (_JUNOS_DESCR.fullmatch(value) or _FRONT_PANEL_DESCR.fullmatch(value)):
+        return True
+    if field == "entPhysicalName" and _SCB_NAME.fullmatch(value):
+        return True
+    return bool(_ANON_TEXT.fullmatch(value))
+
+
+def test_the_display_text_check_accepts_what_the_anonymizer_keeps():
+    """Every name and description the anonymizer writes passes the check on bundled recordings."""
+    descrs = [
+        "Front Panel 6 ports Gigabitethernet Module",
+        "Front Panel uplink card @ 1/0/2",
+        "FPC: MPC7E 3D 40XGE @ 1/*/*",
+        "PIC: 4x QSFP28 @ 1/0/*",
+        "QSFP+-40G-SR4 @ 1/0/2",
+        "16 ports Async Serial NIM",
+    ]
+    rows = [
+        {"entPhysicalIndex": index, "entPhysicalName": descr, "entPhysicalDescr": descr}
+        for index, descr in enumerate(descrs, start=1)
+    ]
+    recording = {
+        "schema_version": 1,
+        "name": "synthetic",
+        "device_id": 1,
+        "responses": {"GET /api/v0/inventory/1/all": {"status": "ok", "inventory": rows}},
+    }
+    anonymized = anonymize_recording(recording, salt="display-text")
+    (body,) = [unwrap_response(value)[1] for key, value in anonymized["responses"].items() if "/inventory/" in key]
+    texts = [(field, row[field]) for row in body["inventory"] for field in ("entPhysicalName", "entPhysicalDescr")]
+    assert [text for text in texts if not _inventory_text_is_anonymized(*text)] == []
+    assert [descr for descr in descrs if _inventory_text_is_anonymized("entPhysicalDescr", descr)] == []
+
+
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
 def test_bundled_inventory_display_text_is_anonymized(recording):
-    import re
-
-    allowed = re.compile(r"(?:entity-[0-9a-f]{6}(?: \d+(?:/(?:\d+|[xc]\d+))+)?)|(?:\d+(?:/(?:\d+|[xc]\d+))+)")
     for key, value in recording.get("responses", {}).items():
         body = unwrap_response(value)[1]
         if "/inventory/" not in key or not isinstance(body, dict):
@@ -105,7 +152,7 @@ def test_bundled_inventory_display_text_is_anonymized(recording):
         for item in body.get("inventory") or []:
             for field in ("entPhysicalName", "entPhysicalDescr"):
                 if isinstance(item, dict) and item.get(field):
-                    assert allowed.fullmatch(item[field]), (recording["name"], field, item[field])
+                    assert _inventory_text_is_anonymized(field, item[field]), (recording["name"], field, item[field])
 
 
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
@@ -411,9 +458,10 @@ _LEAKED_OUIS = frozenset({"36965", "713", "21327", "8172124", "9098", "2589"})
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
 def test_bundled_recording_has_anonymized_vendor_metadata(recording):
     """
-    A committed recording must carry the anonymizer's normalized icon (generic.svg) and
-    pseudonymized manufacturer names (MFG-<hash>) — a raw value means the fixture predates an
-    anonymizer rule and re-leaks vendor metadata.
+    A committed recording carries the normalized icon and pseudonymized manufacturer names.
+
+    The icon is generic.svg and each manufacturer name is MFG-<hash>. A raw value means the fixture
+    predates an anonymizer rule and re-leaks vendor metadata.
 
     Only response bodies are checked: ``meta.vendor`` is corpus metadata the anonymizer keeps on
     purpose, exactly like ``meta.os``, so it names the platform rather than leaking a device's.
@@ -592,7 +640,11 @@ def test_recording_has_required_schema(recording):
 
 
 def _assert_virtual_chassis(api, device_id, expected):
-    from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
+    from netbox_librenms_plugin.import_utils.virtual_chassis import (
+        detect_virtual_chassis_from_inventory,
+        identify_vc_master,
+        vc_serial_key,
+    )
 
     result = detect_virtual_chassis_from_inventory(api, device_id)
 
@@ -605,6 +657,12 @@ def _assert_virtual_chassis(api, device_id, expected):
     assert result["member_count"] == expected["member_count"]
     if "member_serials" in expected:
         assert [m["serial"] for m in result["members"]] == expected["member_serials"]
+    if "member_positions" in expected:
+        assert [m["position"] for m in result["members"]] == expected["member_positions"]
+    if "master_position" in expected:
+        _found, device = api.get_device_info(device_id)
+        master = identify_vc_master(result["members"], device["serial"], vc_serial_key())
+        assert master["position"] == expected["master_position"]
 
 
 def _assert_port_relationships(api, device_id, recording, expected):
@@ -707,6 +765,7 @@ def test_assert_port_relationships_tolerates_explicit_null_lag_patterns():
     assert api.sap_patterns == []
 
 
+@pytest.mark.django_db
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
 def test_recording_outcomes(recording, recording_server):
     """Replay a recording and assert its declared outcomes against the real logic."""
@@ -730,6 +789,7 @@ def test_recording_outcomes(recording, recording_server):
         _assert_oob(api, recording, expected["oob"])
 
 
+@pytest.mark.django_db
 def test_serial_outcome_without_patterns_replays_as_empty(recording_server):
     recording = {
         **next(item for item in _RECORDINGS if "serial_ports" in item["expected"]),
@@ -750,7 +810,7 @@ def test_anonymized_inventory_resolves_a_token_keyed_module_type(recording_serve
     recording = next(item for item in _RECORDINGS if item["name"] == "cisco-stackwise-3member")
     recording = json.loads(json.dumps(recording))
     device_id = recording["device_id"]
-    member_route = next(route for route in recording["responses"] if "entPhysicalClass=chassis" in route)
+    member_route = next(route for route in recording["responses"] if "entPhysicalContainedIn=1" in route)
     model = recording["responses"][member_route]["inventory"][0]["entPhysicalModelName"]
     recording["responses"][f"GET /api/v0/devices/{device_id}"]["devices"][0]["hardware"] = model
     anonymized = anonymize_recording(recording, salt="module-matching")
@@ -760,9 +820,7 @@ def test_anonymized_inventory_resolves_a_token_keyed_module_type(recording_serve
         ModuleTypeMapping.objects.create(librenms_model=token, netbox_module_type=module_type)
     _server, api = recording_server(anonymized)
 
-    success, inventory = api.get_inventory_filtered(
-        anonymized["device_id"], ent_physical_class="chassis", ent_physical_contained_in=1
-    )
+    success, inventory = api.get_inventory_filtered(anonymized["device_id"], ent_physical_contained_in=1)
 
     assert success and inventory
     assert resolve_module_type(inventory[0]["entPhysicalModelName"], get_module_types_indexed()) == module_type
@@ -779,6 +837,7 @@ def test_arcos_recording_preserves_breakout_port_names():
     assert any(re.fullmatch(r"swp[0-9]+s[0-9]+", port.get("ifName", "")) for port in ports)
 
 
+@pytest.mark.django_db
 @pytest.mark.parametrize("recording", _RECORDINGS, ids=_ids)
 def test_anonymized_recording_replays_declared_outcomes(recording, recording_server):
     """ID remapping preserves replay outcomes without changing the bundled source."""
@@ -803,3 +862,104 @@ def test_anonymized_recording_replays_declared_outcomes(recording, recording_ser
     assert len(original_ids) == len(anonymous_ids)
     assert set(original_ids).isdisjoint(anonymous_ids)
     assert [type(value) for value in original_ids] == [type(value) for value in anonymous_ids]
+
+
+@pytest.mark.django_db
+def test_timos_refresh_and_sync_put_each_ip_interface_under_its_port(client, settings, recording_server):
+    """A refresh of the TiMOS recording and a sync write one LAG member and parent the L3 interfaces."""
+    from django.urls import reverse
+    from dcim.models import Interface
+
+    from netbox_librenms_plugin.models import PortStackLagPattern
+    from netbox_librenms_plugin.tests.conftest import bind_librenms_server, make_device
+    from netbox_librenms_plugin.tests.interface_sync_post_helpers import SERVER_KEY, post_interface_sync
+    from netbox_librenms_plugin.tests.recordings import load_recording
+    from netbox_librenms_plugin.tests.view_test_helpers import make_superuser
+
+    recording = load_recording("nokia-timos-transceivers")
+    server, _api = recording_server(recording)
+    bind_librenms_server(settings, server, server_key=SERVER_KEY)
+    device_os = recording["meta"]["os"]
+    PortStackLagPattern.objects.update_or_create(
+        librenms_os=device_os,
+        defaults={
+            "lag_name_pattern": recording["lag_patterns"][device_os],
+            "sap_name_pattern": recording["sap_patterns"][device_os],
+        },
+    )
+    device = make_device("timos-ip-interfaces", librenms_cf={SERVER_KEY: {"id": recording["device_id"]}})
+    client.force_login(make_superuser("timos-ip-interfaces-user"))
+    refresh_url = reverse("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": device.pk})
+    assert client.post(refresh_url, {"server_key": SERVER_KEY, "interface_name_field": "ifName"}).status_code == 200
+
+    # lag-2 with members 2/x1/1/c12/1 and 2/x1/1/c36/1 and L3 interface lag2; L3 interface iface-91ad81 on 1/1/c9/1.
+    port_ids = [711982042, 1775758580, 1901702767, 627424630, 1461496686, 1354216783]
+    post_interface_sync(client, device, port_ids, htmx=False)
+
+    interfaces = {interface.name: interface for interface in Interface.objects.filter(device=device)}
+    lag = interfaces["lag-2"]
+    assert lag.type == "lag"
+    assert {name for name, interface in interfaces.items() if interface.lag_id == lag.pk} == {
+        "2/x1/1/c12/1",
+        "2/x1/1/c36/1",
+    }
+    assert (interfaces["lag2"].parent_id, interfaces["lag2"].type) == (lag.pk, "virtual")
+    assert interfaces["lag2"].lag_id is None
+    assert interfaces["iface-91ad81"].parent_id == interfaces["1/1/c9/1"].pk
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("rule_owner", ["global", "manufacturer"])
+def test_the_junos_name_update_writes_the_member_name_that_stack_creation_gives(client, live_librenms, rule_owner):
+    """The name action reads the raw stored master serial through the same serial rules as stack creation."""
+    import copy
+
+    from dcim.models import Device
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.import_utils.virtual_chassis import (
+        create_virtual_chassis_with_members,
+        detect_virtual_chassis_from_inventory,
+        identify_vc_master,
+        vc_serial_key,
+    )
+    from netbox_librenms_plugin.models import LibreNMSSettings, NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+    from netbox_librenms_plugin.tests.recordings import load_recording
+    from netbox_librenms_plugin.tests.test_junos_virtual_chassis import _DEVICE_ID, _RECORDING, _edit_rows
+
+    recording = copy.deepcopy(load_recording(_RECORDING))
+    _edit_rows(recording, 1, lambda row: row.update(entPhysicalSerialNum="S/N NAMED-A"))
+    _edit_rows(recording, 120, lambda row: row.update(entPhysicalSerialNum="S/N NAMED-A"))
+    _edit_rows(recording, 121, lambda row: row.update(entPhysicalSerialNum="S/N NAMED-B"))
+    libre_device = unwrap_response(recording["responses"][f"GET /api/v0/devices/{_DEVICE_ID}"])[1]["devices"][0]
+    libre_device["serial"] = "S/N NAMED-A"
+    live_librenms.server.load_recording(recording)
+    # Import stores the raw LibreNMS serial, so the name action must apply the rules itself.
+    master = seed_mapping(make_device(libre_device["sysName"], serial="S/N NAMED-A"), "default", own=_DEVICE_ID)
+    manufacturer = master.device_type.manufacturer
+    NormalizationRule.objects.filter(scope="serial").delete()
+    NormalizationRule.objects.create(
+        scope="serial",
+        manufacturer=manufacturer if rule_owner == "manufacturer" else None,
+        match_pattern=r"^S/N\s+(.+)$",
+        replacement=r"\1",
+    )
+    LibreNMSSettings.objects.update_or_create(pk=1, defaults={"vc_member_name_pattern": "-{serial}"})
+    members = detect_virtual_chassis_from_inventory(live_librenms.api, _DEVICE_ID)["members"]
+    master_member = identify_vc_master(members, master.serial, vc_serial_key(manufacturer))
+    create_virtual_chassis_with_members(master, members, libre_device, "default", master_member=master_member)
+    master.refresh_from_db()
+    created_name = master.name
+    Device.objects.filter(pk=master.pk).update(name="stale-name")
+
+    client.force_login(make_superuser(f"junos-name-update-{rule_owner}"))
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:update_device_name", kwargs={"pk": master.pk}),
+        {"server_key": "default", "use_sysname": "on"},
+    )
+
+    assert response.status_code == 302
+    master.refresh_from_db()
+    assert master.name == created_name

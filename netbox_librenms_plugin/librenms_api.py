@@ -45,6 +45,45 @@ HTTP_NOT_FOUND = 404
 logger = logging.getLogger(__name__)
 
 
+def librenms_id_cache_key(obj, server_key):
+    """
+    Return the cache key that holds the discovered LibreNMS ID of *obj* on *server_key*.
+
+    Args:
+        obj: NetBox object with model metadata and an optional primary key.
+        server_key (str): The LibreNMS server key.
+
+    Returns:
+        str: The cache key.
+
+    """
+    object_id = obj.pk
+    if object_id is None:
+        object_id = getattr(obj, "_librenms_cache_identity", None)
+        if object_id is None:
+            object_id = f"unsaved-{uuid4().hex}"
+            obj._librenms_cache_identity = object_id
+    return f"librenms_device_id_{obj._meta.model_name}_{object_id}_{server_key}"
+
+
+def stored_librenms_id(obj, server_key):
+    """
+    Return the stored or cached LibreNMS ID of *obj* on *server_key*, without discovery.
+
+    Args:
+        obj: NetBox object with a mapping or a cache identity.
+        server_key (str): The LibreNMS server key.
+
+    Returns:
+        object: The stored ID, the cached value as stored, or None.
+
+    """
+    librenms_id = read_mapping(obj).own_id(server_key)
+    if librenms_id is not None:
+        return librenms_id
+    return cache.get(librenms_id_cache_key(obj, server_key))
+
+
 def normalized_pair_key(first_port, second_port):
     """Return one order-independent key for a port pair, or None when it names a single port."""
     from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
@@ -468,15 +507,11 @@ class LibreNMSAPI:
             int: LibreNMS ID if found in the custom field or cache, None otherwise
 
         """
-        resolved_key = server_key or self.server_key
-        librenms_id = read_mapping(obj).own_id(resolved_key)
-        if librenms_id is not None:
-            return librenms_id
-        return self.get_cached_librenms_id(obj, server_key=resolved_key)
+        return stored_librenms_id(obj, server_key or self.server_key)
 
     def get_cached_librenms_id(self, obj, server_key=None):
         """Return the LibreNMS ID cached for *obj* on the server, or None."""
-        return cache.get(self._get_cache_key(obj, server_key=server_key or self.server_key))
+        return cache.get(librenms_id_cache_key(obj, server_key or self.server_key))
 
     def get_librenms_id(self, obj):
         """
@@ -568,15 +603,9 @@ class LibreNMSAPI:
             str: Cache key
 
         """
-        object_type = obj._meta.model_name
-        object_id = obj.pk
-        if object_id is None:
-            object_id = getattr(obj, "_librenms_cache_identity", None)
-            if object_id is None:
-                object_id = f"unsaved-{uuid4().hex}"
-                obj._librenms_cache_identity = object_id
-        resolved_key = server_key if server_key is not None else getattr(self, "server_key", "default")
-        return f"librenms_device_id_{object_type}_{object_id}_{resolved_key}"
+        return librenms_id_cache_key(
+            obj, server_key if server_key is not None else getattr(self, "server_key", "default")
+        )
 
     def _store_librenms_id(self, obj, librenms_id):
         """
@@ -685,7 +714,7 @@ class LibreNMSAPI:
         except (requests.exceptions.RequestException, ValueError, IndexError, KeyError, TypeError):
             return None
 
-    def get_device_info(self, device_id, use_cache=True, cache_only=False):
+    def get_device_info(self, device_id, use_cache=True):
         """
         Fetch device information from LibreNMS using its primary IP.
 
@@ -699,22 +728,18 @@ class LibreNMSAPI:
             use_cache: When False, bypass the short read cache and fetch live data
                 (still refreshing the cache on success). Import decisions pass False so a
                 value just corrected in LibreNMS isn't read back stale within the cache window.
-            cache_only: When True, return a cached value or a miss without querying LibreNMS.
 
         Returns:
             tuple: ``(success, data)``. On success, ``data`` is the device dictionary. For an
-                absent device or a cache-only miss, ``data`` is ``None``. For a transport failure
+                absent device, ``data`` is ``None``. For a transport failure
                 or another non-2xx response, ``data`` is a :class:`LibreNMSLookupError`.
 
         """
         cache_key = f"librenms_device_info_{self.server_key}_{device_id}"
-        if use_cache or cache_only:
+        if use_cache:
             cached = cache.get(cache_key)
             if cached is not None:
                 return cached
-        if cache_only:
-            return False, None
-
         try:
             response = _session.get(
                 f"{self.librenms_url}/api/v0/devices/{device_id}",
@@ -924,6 +949,10 @@ class LibreNMSAPI:
           5. A configured bridge-name pattern identifies the bridge side from ifName or ifDescr.
              This classification is stable across name-field fallback, so one pair cannot be
              reinterpreted as a different relationship kind.
+          6. A port with ifType 'ipForward' is an L3 interface: never a LAG member or aggregate.
+             In a pair that rules 4 and 5 leave, an ipForward port with a partner of another
+             ifType is a sub-interface of that partner as reported (no '.N' stripping). A pair
+             of two ipForward ports stays unclassified.
 
         Configurable via PortStackLagPattern model:
           - Per-OS regex patterns identify LAG aggregates when ifType is not 'ieee8023adLag'.
@@ -1141,6 +1170,9 @@ class LibreNMSAPI:
                 name = port.get(field)
                 return _matches_name_patterns(name, compiled_patterns)
 
+            def _is_l3_interface(port: dict) -> bool:
+                return port.get("ifType") == "ipForward"
+
             def _is_bridge(port: dict) -> bool:
                 return any(
                     _matches_name_patterns(port.get(name_field), compiled_bridge_patterns)
@@ -1189,6 +1221,7 @@ class LibreNMSAPI:
                     return False
                 return child_name.startswith(parent_name + ".") and child_name[len(parent_name) + 1 :].isdigit()
 
+            l3_child_ids: set = set()
             for high_port, low_port in filtered_port_pairs:
                 pair_key = normalized_pair_key(high_port, low_port)
                 if pair_key is None or pair_key in excluded_pairs:
@@ -1213,11 +1246,24 @@ class LibreNMSAPI:
                     _claim("bridge_members", pair_key)
                     continue
 
+                low_is_l3 = _is_l3_interface(low_port)
+                high_is_l3 = _is_l3_interface(high_port)
+                if low_is_l3 != high_is_l3:
+                    child, parent = (low_port, high_port) if low_is_l3 else (high_port, low_port)
+                    _relate(sub_interfaces, conflicted_sub_interfaces, child, parent)
+                    l3_child_ids.add(normalize_librenms_port_id(child.get("port_id")))
+                    _claim("sub_interfaces", pair_key)
+                    continue
+                if low_is_l3:
+                    continue
+
                 high_phys = _resolve_physical_port(high_port)
                 low_phys = _resolve_physical_port(low_port)
                 if normalize_librenms_port_id(high_phys.get("port_id")) == normalize_librenms_port_id(
                     low_phys.get("port_id")
                 ):
+                    continue
+                if _is_l3_interface(high_phys) or _is_l3_interface(low_phys):
                     continue
 
                 low_is_agg = _is_lag_aggregate(low_phys)
@@ -1239,7 +1285,7 @@ class LibreNMSAPI:
                     _relate(lag_members, conflicted_lag_members, low_phys, high_phys)
                     _claim("lag_members", pair_key)
 
-            # Every sub-interface edge shortens the active-field name, so the graph cannot contain a cycle.
+            # A name-derived edge shortens the active-field name, so these edges alone cannot form a cycle.
             for port in ports_with_id:
                 child_id = normalize_librenms_port_id(port.get("port_id"))
                 if child_id is None or child_id in sub_interfaces or child_id in conflicted_sub_interfaces:
@@ -1255,6 +1301,16 @@ class LibreNMSAPI:
                     continue
                 _relate(sub_interfaces, conflicted_sub_interfaces, port, parent_port)
                 _claim("sub_interfaces", pair_key)
+
+            # An ipForward edge can close a parent cycle with name edges; the names are the stronger signal.
+            for child_id in sorted(l3_child_ids):
+                parent_id, seen = sub_interfaces.get(child_id), set()
+                while parent_id is not None and parent_id != child_id and parent_id not in seen:
+                    seen.add(parent_id)
+                    parent_id = sub_interfaces.get(parent_id)
+                if parent_id == child_id:
+                    sub_interfaces.pop(child_id)
+                    conflicted_sub_interfaces.add(child_id)
 
             return {
                 "lag_members": lag_members,
