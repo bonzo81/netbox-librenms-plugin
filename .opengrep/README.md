@@ -80,6 +80,10 @@ unchecked until that review.
 | `sync-script-reads-page-server-key` | error | A package script calls `document.querySelector`, `querySelectorAll` or `getElementsByName` for `server_key`. A lookup inside one form is allowed. Vendored and minified files are excluded. |
 | `oob-controller-flag-has-one-writer` | error | A write of `row_is_oob_controller` outside `classify_oob_controller()`. Only a subscript assignment of the key is checked. |
 
+The `sync-tab-attributes-through-parser` rule rejects a sync container regex that closes the tag
+immediately after `data-active-tab`. It checks direct `re.search` calls in tests. Other attribute
+orders and regex API aliases are outside this narrow check.
+
 ## Scope
 
 `import-disclosure` and its sanitizer-shadow guard exclude tests and migrations. Canonical helper
