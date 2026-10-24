@@ -588,6 +588,7 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
     conflict_raise = 'raise MappingChanged("changed")\n'
     ports_read = "api.get_ports(device_id)\n"
     titled_icon = '<i class="mdi mdi-alert" title="Missing"></i>'
+    server_key_lookup = "document.querySelector('[name=server_key]');\n"
     sources = {
         # Flagged: a direct HTTP call outside the client.
         "netbox_librenms_plugin/worker.py": http_call,
@@ -619,6 +620,9 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
         "netbox_librenms_plugin/views/base/modules_view.py": ports_read,
         "netbox_librenms_plugin/views/base/cables_view.py": ports_read,
         "netbox_librenms_plugin/views/base/interfaces_view.py": ports_read,
+        # Flagged: a page script looks up the server key in the whole document. Clean: vendored code.
+        "netbox_librenms_plugin/static/netbox_librenms_plugin/js/page.js": server_key_lookup,
+        "netbox_librenms_plugin/static/netbox_librenms_plugin/js/vendor/lib.js": server_key_lookup,
     }
     for name, source in sources.items():
         staged = tmp_path / name
@@ -640,4 +644,5 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
         ("netbox_librenms_plugin/claims.py", "conflict-raised-without-record"),
         ("netbox_librenms_plugin/views/base/modules_view.py", "metadata-ports-skip-vlan-associations"),
         ("netbox_librenms_plugin/views/base/cables_view.py", "metadata-ports-skip-vlan-associations"),
+        ("netbox_librenms_plugin/static/netbox_librenms_plugin/js/page.js", "sync-script-reads-page-server-key"),
     }, found

@@ -1,5 +1,6 @@
 """Request-level coverage for an object's preferred LibreNMS server."""
 
+import re
 from contextlib import ExitStack
 from copy import deepcopy
 from types import SimpleNamespace
@@ -363,6 +364,23 @@ def test_the_server_state_and_name_check_icons_are_named_or_hidden(client, serve
     assert by_class["mdi-server-off"]["aria-hidden"] == "true"
     for named in ("mdi-star", "mdi-check-circle", "mdi-information-outline"):
         assert by_class[named]["role"] == "img"
+
+
+@pytest.mark.django_db
+def test_the_sync_tabs_name_the_active_server_for_the_page_scripts(client, servers):
+    """The scripts read the page server from the sync tabs, not from another server's form."""
+    owner = make_device(
+        "sync-tabs-active-server",
+        librenms_cf={"primary": {"id": 13601}, "secondary": {"id": 13602}, "_preferred_server": "secondary"},
+    )
+    _register_device(servers.primary, 13601, owner.name)
+    client.force_login(make_superuser("sync-tabs-active-server-writer"))
+
+    html = client.get(_sync_url(owner), {"server_key": "primary"}).content.decode()
+
+    tabs = re.search(r'<div id="librenms-sync-tabs"[^>]*>', html)
+    assert tabs, "the sync tabs did not render"
+    assert 'data-server-key="primary"' in tabs.group(0)
 
 
 @pytest.mark.django_db

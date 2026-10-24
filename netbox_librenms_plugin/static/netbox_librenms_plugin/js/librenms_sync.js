@@ -32,6 +32,16 @@ function getCsrfToken() {
 }
 
 /**
+ * Return the LibreNMS server key of the sync page, or '' for the default server.
+ *
+ * The server panel renders a server_key input for every other server, so a page-wide input
+ * lookup can name the wrong server. The page names its own server on #librenms-sync-tabs.
+ */
+function syncServerKey() {
+    return document.getElementById('librenms-sync-tabs')?.dataset.serverKey || '';
+}
+
+/**
  * Show a Bootstrap modal, using native Bootstrap Modal when available,
  * falling back to manual DOM manipulation otherwise.
  * Matches the ModalManager pattern in librenms_import.js.
@@ -1815,8 +1825,7 @@ const SELECTABLE_TABLE_IDS = [
  * @returns {string} The storage key.
  */
 function _selectionStorageKey(table) {
-    const serverKeyInput = document.querySelector('[name=server_key]');
-    const serverKey = serverKeyInput ? serverKeyInput.value : '';
+    const serverKey = syncServerKey();
     return 'lnmsSelection:' + window.location.pathname + ':' + table.id + ':' + serverKey;
 }
 
@@ -3105,7 +3114,7 @@ function initializeVlanModalSave() {
                 body: JSON.stringify({
                     device_id: deviceId,
                     vid_group_map: vidGroupMap,
-                    server_key: document.querySelector('input[name="server_key"]')?.value || null
+                    server_key: syncServerKey() || null
                 })
             }).then(response => {
                 if (!response.ok) {
@@ -3314,7 +3323,7 @@ function handleVRFChange(select, value) {
             ip_address: fullIpAddress,  // Use full IP address with prefix
             row_id: select.dataset.rowId,
             vrf_id: value,
-            server_key: document.querySelector('input[name="server_key"]')?.value || null
+            server_key: syncServerKey() || null
         })
     })
         .then(response => {
@@ -3461,7 +3470,7 @@ function handleInterfaceChange(select, value) {
             // display names collide (host vs OOB controller); interface_name is the fallback.
             port_id: row?.dataset.portId || null,
             interface_name_field: document.querySelector('input[name="interface_name_field"]:checked')?.value || null,
-            server_key: document.querySelector('input[name="server_key"]')?.value || null
+            server_key: syncServerKey() || null
         })
     })
         .then(response => {
@@ -3635,7 +3644,7 @@ function handleCableChange(select, value) {
             device_id: value,
             origin_device_id: verifyContext?.dataset.cableOriginDeviceId || null,
             row_id: select.dataset.interface,
-            server_key: document.querySelector('input[name="server_key"]')?.value || null
+            server_key: syncServerKey() || null
         })
     })
         .then(response => {
@@ -3931,7 +3940,7 @@ function handleModuleChange(select, value, options = {}) {
             verify_binding: select.dataset.verifyBinding || null,
             ent_physical_index: select.dataset.module,
             depth: rowDepth,
-            server_key: document.querySelector('input[name="server_key"]')?.value || null
+            server_key: syncServerKey() || null
         }),
         signal: controller.signal
     })
@@ -4553,7 +4562,7 @@ function deleteSelectedInterfaces(selectedCheckboxes) {
     }
 
     formData.append('csrfmiddlewaretoken', csrfToken);
-    const serverKey = document.querySelector('[name="server_key"]')?.value;
+    const serverKey = syncServerKey();
     if (serverKey) formData.append('server_key', serverKey);
 
     // Add interface IDs
@@ -5184,8 +5193,7 @@ document.addEventListener('click', function (e) {
         return;
     }
 
-    const serverKeyInput = document.querySelector('[name=server_key]');
-    const serverKey = serverKeyInput ? serverKeyInput.value : '';
+    const serverKey = syncServerKey();
 
     const body = new URLSearchParams({
         csrfmiddlewaretoken: csrf,
