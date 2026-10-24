@@ -413,8 +413,12 @@ class TestInvalidFilters:
         response = client.get(_sync_url(device), {"tab": "cables", "interfaces_q": "x" * 300}, HTTP_HX_REQUEST="true")
 
         assert response.status_code == 200
+        from netbox_librenms_plugin.tests.view_test_helpers import sync_tab_attributes
+
         html = response.content.decode()
-        assert re.search(r'<div id="librenms-sync-tabs" data-active-tab="cables">', html)
+        attrs = sync_tab_attributes(html)
+        assert attrs["data-active-tab"] == "cables"
+        assert attrs["data-server-key"] == SERVER_KEY
         assert 'id="interfaces_filter-errors"' in html
         assert 'id="cable-sync-content"' in html
 
