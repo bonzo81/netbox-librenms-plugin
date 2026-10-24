@@ -297,3 +297,13 @@ its own, and build the message on the next line, where the rule still checks it.
 3. Add the rule to `.opengrep/librenms-rules.yaml`. Run the rule-tests again and confirm they pass.
 4. Flip one `ruleid:` marker to `ok:`. Confirm the rule-test reports that line, then restore it.
 5. Run `./scripts/opengrep-scan.sh`. Report any findings before changing production code.
+
+`netbox-only-controls-use-replaceable-handlers` rejects `addEventListener` in
+`initializeNetBoxOnlyInterfaces`. These controls use event properties so repeated
+initialization replaces the handler and its row references. Other initializers and
+listener registration through aliases are outside this check.
+
+`metadata-ports-skip-vlan-associations` requires `with_vlans=False` for `get_ports`
+calls in the module and cable base views. These callers read port metadata.
+Interface views still request VLAN associations for VLAN comparison. Calls through
+aliases and consumers in other modules are outside this check.
