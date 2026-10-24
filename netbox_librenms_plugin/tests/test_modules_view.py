@@ -685,6 +685,9 @@ class TestMergeTransceiverDataPortIdentity:
         assert item["_librenms_port_id"] == 42
         assert item["_librenms_ifname"] == "Te1/0/1"
         assert item["entPhysicalName"] == "Te1/0/1"
+        port_requests = [request for request in librenms_server.requests if request["path"].endswith("/ports")]
+        assert len(port_requests) == 1
+        assert "with" not in port_requests[0]["query"]
 
     def test_existing_inventory_item_gets_port_identity_metadata(self, settings, librenms_server):
         view = _real_api_view(settings, librenms_server, librenms_id=101)
@@ -1060,6 +1063,9 @@ class TestMergeTransceiverDataPortIdentity:
         assert inventory[0]["_librenms_port_id"] == 56284
         assert inventory[0]["_librenms_ifname"] == "TenGigabitEthernet1/1/1"
         assert inventory[0]["_librenms_ifdescr"] == "Te1/1/1"
+        port_requests = [request for request in librenms_server.requests if request["path"].endswith("/ports")]
+        assert len(port_requests) == 1
+        assert "with" not in port_requests[0]["query"]
 
     def test_enrich_inventory_port_identity_skips_ambiguous_labels(self, settings, librenms_server):
         view = _real_api_view(settings, librenms_server, librenms_id=103)
@@ -1434,6 +1440,7 @@ class TestPostInventoryRefresh:
 
         assert response.status_code == 200
         assert len(port_requests) == 1
+        assert "with" not in port_requests[0]["query"]
         cached = cache.get(view.get_cache_key(device, "inventory", server_key=server_key))
         main_item = next(item for item in cached["inventory"] if item["entPhysicalIndex"] == 1)
         transceiver_item = next(item for item in cached["inventory"] if item["entPhysicalIndex"] == 2)
