@@ -327,8 +327,12 @@ class TestInvalidFilters:
         )
 
         assert response.status_code == 200
+        from netbox_librenms_plugin.tests.view_test_helpers import sync_tab_attributes
+
         html = response.content.decode()
-        assert re.search(r'<div id="librenms-sync-tabs" data-active-tab="ipaddresses">', html)
+        attrs = sync_tab_attributes(html)
+        assert attrs["data-active-tab"] == "ipaddresses"
+        assert attrs["data-server-key"] == SERVER_KEY
         assert 'id="ipaddresses_filter-errors"' in html
 
     def test_sync_validates_only_its_own_tab_filter_prefix(self, client, settings, librenms_server):
