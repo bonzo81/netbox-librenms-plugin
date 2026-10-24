@@ -285,8 +285,12 @@ class TestInvalidFilters:
         response = client.get(_sync_page_url(device), {"tab": "vlans", "vlans_q": "x" * 300}, HTTP_HX_REQUEST="true")
 
         assert response.status_code == 200
+        from netbox_librenms_plugin.tests.view_test_helpers import sync_tab_attributes
+
         html = response.content.decode()
-        assert re.search(r'<div id="librenms-sync-tabs" data-active-tab="vlans">', html)
+        attrs = sync_tab_attributes(html)
+        assert attrs["data-active-tab"] == "vlans"
+        assert attrs["data-server-key"] == SERVER_KEY
         assert 'id="vlans_filter-errors"' in html
 
     def test_sync_validates_only_its_own_tab_filter_prefix(self, client, settings):

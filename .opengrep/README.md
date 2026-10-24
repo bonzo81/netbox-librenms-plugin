@@ -78,6 +78,10 @@ unchecked until that review.
 | `post-write-scope-through-helper` | error | An inline `restrict(user, "add"/"change")` or `restricted_queryset(model, "add"/"change")` existence check of a row that the same block saved or created before. Call `transactions.saved_in_scope()`. |
 | `sync-script-reads-page-server-key` | error | A package script calls `document.querySelector`, `querySelectorAll` or `getElementsByName` for `server_key`. A lookup inside one form is allowed. Vendored and minified files are excluded. |
 
+The `sync-tab-attributes-through-parser` rule rejects a sync container regex that closes the tag
+immediately after `data-active-tab`. It checks direct `re.search` calls in tests. Other attribute
+orders and regex API aliases are outside this narrow check.
+
 ## Scope
 
 `import-disclosure` and its sanitizer-shadow guard exclude tests and migrations. Canonical helper

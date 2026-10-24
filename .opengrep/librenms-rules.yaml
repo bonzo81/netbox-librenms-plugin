@@ -1811,6 +1811,19 @@ rules:
       # A tab key right after "?", "&", "&amp;" or a template tag that follows "?".
       - pattern-regex: (?:[?&]|&amp;|\?\{%[^%]*%\})tab=
 
+  - id: sync-tab-attributes-through-parser
+    languages: [python]
+    severity: ERROR
+    message: Read the sync container attributes through sync_tab_attributes so added attributes remain valid.
+    patterns:
+      - pattern: re.search($PATTERN, ...)
+      - metavariable-regex:
+          metavariable: $PATTERN
+          regex: '.*librenms-sync-tabs.*data-active-tab=.*">.*'
+    paths:
+      include:
+        - "**/tests/**"
+
   - id: batch-validation-needs-candidate-keys
     languages: [python]
     severity: ERROR

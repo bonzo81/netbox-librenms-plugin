@@ -133,6 +133,26 @@ def render_module_tab(device, *, user=None, server_key="default"):
     return view.render_sync_partial(request, device, context["server_key"], {"module_sync": context}).content.decode()
 
 
+class _SyncTabParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.containers = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "div" and attrs.get("id") == "librenms-sync-tabs":
+            self.containers.append(attrs)
+
+
+def sync_tab_attributes(html):
+    """Return the attributes of the one rendered sync container."""
+    parser = _SyncTabParser()
+    parser.feed(str(html))
+    parser.close()
+    assert len(parser.containers) == 1
+    return parser.containers[0]
+
+
 class _TitledIconParser(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
