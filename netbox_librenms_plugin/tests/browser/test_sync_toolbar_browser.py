@@ -513,3 +513,14 @@ def test_filter_settle_preserves_an_untouched_tab_without_a_snapshot(page):
     assert untouched.inner_html() == original
     assert page.evaluate("[...syncCacheController().invalidatedLocally]") == []
     assert page.evaluate("syncCacheController().status.ipaddresses.state") == "missing"
+
+
+@pytest.mark.parametrize(("width", "wrapping"), [(1440, "nowrap"), (390, "wrap")])
+def test_table_cells_wrap_only_at_phone_width(page, width, wrapping):
+    load_tab(page, "vlan", "vlan_sync")
+    page.set_viewport_size({"width": width, "height": 900})
+    page.locator("#test-rows").evaluate("e => e.id = 'librenms-vlan-table'")
+    page.locator("#librenms-vlan-table td").evaluate(
+        "e => e.innerHTML = '<div class=d-flex><span>100</span><span>Users</span></div>'"
+    )
+    assert page.locator("#librenms-vlan-table .d-flex").evaluate("e => getComputedStyle(e).flexWrap") == wrapping
