@@ -23,7 +23,6 @@
         {% include "netbox_librenms_plugin/inc/_interface_sync_refresh.html" with object=interface_sync.object server_key=refresh_server_key %}
     </div>
 </div>
-{% if interface_sync.table %}{% include "netbox_librenms_plugin/inc/_relationship_diagnostics.html" with diagnostics=interface_sync.relationship_diagnostics %}{% endif %}
 {% if interface_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=interface_sync.filters prefix="interfaces_" tab="interfaces" section_id="interfaceFilterSection" label="Filter interfaces" %}{% endif %}
 
 {% include "netbox_librenms_plugin/inc/_ipam_permission_notice.html" with hidden_ipam_permissions=interface_sync.hidden_ipam_permissions vlan_scope_incomplete=interface_sync.vlan_scope_incomplete %}
@@ -76,8 +75,9 @@
 
     <div class="row mb-3">
         <div class="col col-md-12">
-            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
-                <div>
+            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3 sync-interface-key-row">
+                <div class="d-flex align-items-center flex-wrap gap-2">
+                    {% include "netbox_librenms_plugin/inc/_relationship_diagnostics.html" with diagnostics=interface_sync.relationship_diagnostics %}
                     {% if interface_sync.object.virtual_chassis %}
                     <button type="button" class="btn btn-secondary" id="bulk-vc-member-button" data-bs-toggle="modal"
                         data-bs-target="#bulkVCMemberModal" disabled>
