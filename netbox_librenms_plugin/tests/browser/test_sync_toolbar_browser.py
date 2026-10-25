@@ -473,3 +473,43 @@ def test_cache_expiry_hides_filters_until_refresh(page, expire_during_filter):
     expect(page.locator("#interface-sync-content .sync-filter-controls")).to_have_count(1)
     expect(page.locator("#interface-sync-content .sync-filter-form")).to_have_count(1)
     expect(page.get_by_role("progressbar")).to_have_count(1)
+
+
+def test_filter_settle_preserves_an_untouched_tab_without_a_snapshot(page):
+    from test_sync_cache_browser import _page_html, _state
+
+    page.clock.install(time=NOW)
+    initial = {
+        "interfaces": _state("ready"),
+        "ipaddresses": _state(None, state="missing", available=False),
+    }
+    initial["ipaddresses"]["timestamp"] = None
+    page.route("**/status?*", lambda route: route.fulfill(json={"tabs": initial}))
+    page.set_content(f"<style>{CSS}</style>" + _page_html(initial))
+    for tab, key, cached in (("interface", "interface_sync", True), ("ipaddress", "ip_sync", False)):
+        page.locator(f"#{tab}-sync-content").evaluate(
+            "(e, html) => e.innerHTML = html", render_tab(tab, key, partial=True, cached=cached)
+        )
+    _add_page_scripts(page)
+    page.evaluate("initializeScripts()")
+    untouched = page.locator("#ipaddress-sync-content")
+    expect(untouched.locator('[data-filter-snapshot="false"]')).to_have_count(1)
+    original = untouched.inner_html()
+    page.route(
+        "**/endpoint/sync_tab_filter/**",
+        lambda route: route.fulfill(body=render_tab("interface", "interface_sync", partial=True)),
+    )
+    page.evaluate("""() => {
+        window.filterSettled = false;
+        document.getElementById('interface-sync-content-results').addEventListener(
+            'htmx:afterSettle', () => { window.filterSettled = true; }, {once: true}
+        );
+    }""")
+
+    page.locator("#interfaces input[type=search]").fill("Ethernet")
+    page.clock.fast_forward(500)
+    page.wait_for_function("window.filterSettled")
+
+    assert untouched.inner_html() == original
+    assert page.evaluate("[...syncCacheController().invalidatedLocally]") == []
+    assert page.evaluate("syncCacheController().status.ipaddresses.state") == "missing"

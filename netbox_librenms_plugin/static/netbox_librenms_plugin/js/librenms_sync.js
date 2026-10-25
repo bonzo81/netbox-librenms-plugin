@@ -4179,8 +4179,12 @@ document.addEventListener('htmx:afterSwap', function () {
 });
 
 // HTMX must bind the new Refresh control before cache expiry moves it.
-document.addEventListener('htmx:afterSettle', function () {
-    document.querySelectorAll('[data-filter-snapshot="false"]').forEach(expireSyncTabFromElement);
+document.addEventListener('htmx:afterSettle', function (event) {
+    const settled = event.detail?.elt || event.target;
+    if (!(settled instanceof Element)) return;
+    const pane = settled.closest('.tab-pane[data-tab-id]');
+    if (!pane) return;
+    pane.querySelectorAll('[data-filter-snapshot="false"]').forEach(expireSyncTabFromElement);
 });
 
 function initializeFilterDisclosures() {
