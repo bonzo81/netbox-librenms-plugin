@@ -690,7 +690,7 @@ def _filter_tab(query):
     return f"""{render("_sync_filter_form")}
         <div class="sync-tab-primary-toolbar">{render("_sync_filter_controls")}</div>
         {render("_sync_filter_panel")}
-        <div id="interface-sync-content-results" data-filter-search="{query.get("interfaces_q", "")}" data-filter-state="{query.get("interfaces_sync_state", "")}">
+        <div id="interface-sync-content-results"><div data-filter-search="{query.get("interfaces_q", "")}" data-filter-state="{query.get("interfaces_sync_state", "")}">
         <form method="post" id="sync-form" action="/sync/">
           <input type="hidden" name="csrfmiddlewaretoken" value="token">
           <div class="sync-tab-primary-toolbar"><button type="submit" id="sync">Sync</button>
@@ -698,7 +698,7 @@ def _filter_tab(query):
           <table id="{TABLE}" data-rendered-q="{query.get("interfaces_q", "")}"
             data-rendered-sync_state="{query.get("interfaces_sync_state", "")}"
             data-rendered-filter_name="{query.get("interfaces_filter_name", "")}"></table>
-        </form></div>"""
+        </form></div></div>"""
 
 
 def _filter_page(query):
