@@ -440,7 +440,7 @@ class TestInvalidFilters:
         assert response.status_code == 400
         html = response.content.decode()
         assert 'id="interfaces_filter-errors"' not in html
-        assert 'id="cables_filter-errors"' in html and 'id="ipaddresses_filter-errors"' in html
+        assert 'id="cables_filter-errors"' not in html and 'id="ipaddresses_filter-errors"' not in html
         assert list(_rows(html)) == [1002]
 
     def test_invalid_filter_does_not_refuse_the_sync_action(self, client, settings):
