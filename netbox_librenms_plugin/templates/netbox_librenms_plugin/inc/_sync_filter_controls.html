@@ -30,7 +30,7 @@
         </button>
 
         {% if filters.active or form.errors %}
-        <a class="btn btn-link" href="{% sync_tab_url prefix=prefix tab=tab reset='page filters' %}">Clear filters</a>
+        <a class="btn btn-link sync-filter-clear" href="{% sync_tab_url prefix=prefix tab=tab reset='page filters' %}">Clear filters</a>
         {% endif %}
     </div>
 {% endwith %}
