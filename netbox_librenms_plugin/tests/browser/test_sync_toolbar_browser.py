@@ -346,3 +346,26 @@ def test_configuration_error_swap_disables_refresh_without_a_server(page, tab, k
     refresh.evaluate("button => button.click()")
     assert len(posted) == 1
     assert posted[0]["server_key"] == ["secondary"]
+
+
+@pytest.mark.parametrize("model", ["device", "virtualmachine"])
+@pytest.mark.parametrize("width", [1440, 390])
+def test_relationship_diagnostics_share_the_colour_key_row(page, model, width):
+    load_tab(page, "interface", "interface_sync", model=model)
+    page.set_viewport_size({"width": width, "height": 900})
+    link = page.locator(".sync-tab-lead-row button")
+    key = page.locator(".color-key")
+    expect(link).to_be_visible()
+    expect(key).to_be_visible()
+    assert page.evaluate("document.documentElement.scrollWidth") <= width
+    if width == 1440:
+        link_box = link.bounding_box()
+        key_box = key.bounding_box()
+        assert link_box["y"] + link_box["height"] / 2 == pytest.approx(key_box["y"] + key_box["height"] / 2, abs=1)
+        assert link_box["x"] + link_box["width"] <= key_box["x"]
+        assert link.evaluate("e => getComputedStyle(e).fontSize") == key.locator(".badge").first.evaluate(
+            "e => getComputedStyle(e).fontSize"
+        )
+    assert page.locator(".sync-tab-lead-row").evaluate(
+        "e => e.parentElement.parentElement.contains(document.querySelector('.color-key'))"
+    )

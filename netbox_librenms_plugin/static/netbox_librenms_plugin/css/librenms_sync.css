@@ -65,6 +65,22 @@
     justify-content: flex-end;
 }
 
+/* The relationship link and colour key use the same text size. */
+.sync-interface-key-row {
+    font-size: 0.75rem;
+}
+
+.sync-interface-key-row .sync-tab-lead-row button,
+.sync-interface-key-row .color-key .badge {
+    font-size: inherit;
+}
+
+.sync-interface-key-row .sync-tab-lead-row button {
+    height: auto;
+    white-space: normal;
+    text-align: start;
+}
+
 .sync-filter-controls {
     min-width: 0;
     max-width: 100%;
