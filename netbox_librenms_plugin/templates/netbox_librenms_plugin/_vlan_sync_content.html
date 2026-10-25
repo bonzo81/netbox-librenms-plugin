@@ -1,9 +1,24 @@
 {% load helpers %}
 {% load librenms_sync_query %}
 {% if sync_partial_response %}{% include 'inc/messages.html' %}{% endif %}
-{% if request.htmx %}
-{% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=vlan_sync.cache_expiry cache_container_id="vlan-cache-countdown" cache_countdown_id="vlan-countdown-timer" cache_oob=True %}
-{% endif %}
+<div class="noprint sync-tab-primary-toolbar">
+    <div class="sync-tab-actions d-flex align-items-center gap-2">
+        {% if vlan_sync.vlan_table and not migrated_to_marker and not vlan_sync.error_message %}
+        {% if vlan_sync.vlan_table.rows or vlan_sync.filters.in_use %}
+            <button type="submit" form="vlan-sync-form" class="btn btn-primary">
+                <span class="spinner spinner-border d-none" id="sync-spinner"></span>
+                <span>Sync Selected VLANs</span>
+            </button>
+        {% endif %}
+        {% endif %}
+    </div>
+    <div class="sync-tab-filter-refresh">
+        {% if vlan_sync.vlan_table or vlan_sync.filters.in_use %}{% include "netbox_librenms_plugin/inc/_sync_filter_controls.html" with filters=vlan_sync.filters prefix="vlans_" tab="vlans" section_id="vlanFilterSection" label="Filter VLANs" %}{% endif %}
+        {% firstof vlan_sync.server_key server_key librenms_server_info.server_key as refresh_server_key %}
+        {% include "netbox_librenms_plugin/inc/_vlan_sync_refresh.html" with object=vlan_sync.object server_key=refresh_server_key %}
+    </div>
+</div>
+{% if vlan_sync.vlan_table or vlan_sync.filters.in_use %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=vlan_sync.filters prefix="vlans_" tab="vlans" section_id="vlanFilterSection" label="Filter VLANs" %}{% endif %}
 
 {% include "netbox_librenms_plugin/inc/_ipam_permission_notice.html" with hidden_ipam_permissions=vlan_sync.hidden_ipam_permissions vlan_scope_incomplete=vlan_sync.vlan_scope_incomplete %}
 
@@ -16,7 +31,7 @@
 {% elif not vlan_sync.vlan_table or not vlan_sync.vlan_table.rows and not vlan_sync.filters.in_use %}
 <!-- No VLAN Data -->
 {# A filter in the URL keeps its form with its errors and Clear link, also when no snapshot is cached. #}
-{% if vlan_sync.filters.in_use %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=vlan_sync.filters prefix="vlans_" tab="vlans" section_id="vlanFilterSection" label="Filter VLANs" %}{% endif %}
+
 <div class="card">
     <div class="card-body text-center text-muted py-4">
         <i class="mdi mdi-sync-off mdi-48px"></i>
@@ -24,7 +39,6 @@
     </div>
 </div>
 {% else %}
-{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=vlan_sync.filters prefix="vlans_" tab="vlans" section_id="vlanFilterSection" label="Filter VLANs" %}
 
 {# Migrated donors must not sync: hiding only the button leaves the POST form live (Enter in a filter still submits), so drop the form in migrated mode. #}
 {% if migrated_to_marker %}
@@ -32,7 +46,7 @@
 {% else %}
 {% with model_name=vlan_sync.object|meta:"model_name" %}
 {% url 'plugins:netbox_librenms_plugin:sync_selected_vlans' object_type=model_name object_id=vlan_sync.object.pk as vlan_sync_url_path %}{% sync_tab_url vlan_sync_url_path as vlan_sync_url %}
-<form method="post"
+<form method="post" id="vlan-sync-form"
       action="{{ vlan_sync_url }}"
       hx-post="{{ vlan_sync_url }}"
       hx-target="#htmx-modal-content"
@@ -49,17 +63,6 @@
     {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" with server_key=vlan_sync.server_key %}
     {% if not migrated_to_marker %}
     <input type="hidden" name="action" value="create_vlans">
-    {% endif %}
-
-    {% if not migrated_to_marker %}
-    <div class="noprint d-flex align-items-center mt-0 mb-3 sync-tab-primary-toolbar">
-        <div>
-            <button type="submit" class="btn btn-primary">
-                <span class="spinner spinner-border d-none" id="sync-spinner"></span>
-                <span>Sync Selected VLANs</span>
-            </button>
-        </div>
-    </div>
     {% endif %}
 
     <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
