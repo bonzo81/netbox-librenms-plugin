@@ -14,6 +14,7 @@ PAGE_URL = "https://plugin.example.com/dcim/devices/1/librenms-sync/"
 VERIFY_ROUTE = "**/plugins/librenms_plugin/verify-interface/*"
 SAVE_PREF_URL = "https://plugin.example.com/plugins/librenms_plugin/save-user-pref/"
 TABLE = "librenms-interface-table"
+REFRESH_ENDPOINT = "https://plugin.example.com/plugins/librenms_plugin/device/1/refresh-interfaces/"
 
 
 def _serve(page, html, url=PAGE_URL):
@@ -652,10 +653,14 @@ def _filter_tab(query):
         settings.configure(USE_I18N=False, USE_TZ=True)
     sync_query = Library()
     sync_query.simple_tag(lambda *args, **kwargs: OTHER_STATE, name="sync_tab_query_items")
-    sync_query.simple_tag(lambda *args, **kwargs: "?tab=interfaces", name="sync_tab_url")
+    sync_query.simple_tag(lambda *args, **kwargs: 300, name="sync_cache_timeout")
+    sync_query.simple_tag(lambda path=None, **kwargs: path or "?tab=interfaces", name="sync_tab_url")
     # The browser suite has no URLconf and no NetBox, so the filter endpoint URL and ``meta`` are stubs.
     stubs = Library()
-    stubs.simple_tag(lambda *args, **kwargs: FILTER_ENDPOINT, name="url")
+    stubs.simple_tag(
+        lambda name, **kwargs: REFRESH_ENDPOINT if name.endswith("device_interface_sync") else FILTER_ENDPOINT,
+        name="url",
+    )
     helpers = Library()
     helpers.filter("meta", lambda owner, name: "device")
     engine = Engine(dirs=[str(TEMPLATES_ROOT)])
@@ -679,6 +684,9 @@ def _filter_tab(query):
             "section_id": "interfaceFilterSection",
             "label": "Filter interfaces",
             "owner": SimpleNamespace(pk=1),
+            "object": SimpleNamespace(pk=1),
+            "has_librenms_id": True,
+            "interface_sync": SimpleNamespace(cache_expiry=None),
             "content_id": "interface-sync-content",
             "server_key": "primary",
         }
@@ -688,6 +696,7 @@ def _filter_tab(query):
         return engine.get_template(f"netbox_librenms_plugin/inc/{name}.html").render(context)
 
     return f"""{render("_sync_filter_form")}
+        <div id="interface-sync-content-refresh">{render("_interface_sync_refresh")}</div>
         <div class="sync-tab-primary-toolbar">{render("_sync_filter_controls")}</div>
         {render("_sync_filter_panel")}
         <div id="interface-sync-content-results"><div data-filter-search="{query.get("interfaces_q", "")}" data-filter-state="{query.get("interfaces_sync_state", "")}">
@@ -1086,3 +1095,26 @@ def test_history_restores_the_filter_controls_with_the_results(page):
     page.go_forward()
     expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "xe")
     expect(page.locator("#id_interfaces_q")).to_have_value("xe")
+
+
+def test_a_filter_response_after_refresh_cannot_update_a_detached_results_target(page):
+    held = _serve_filter_tab(page)
+    refreshes = []
+    page.route(REFRESH_ENDPOINT, lambda route: refreshes.append(route))
+    page.evaluate(
+        "document.querySelector('.sync-filter-form').addEventListener('htmx:afterRequest', () => window.filterCompleted = true)"
+    )
+    original_url = page.url
+    page.fill("#id_interfaces_q", "eth")
+    first = _next_request(page, held, 1)
+    page.click(".sync-tab-refresh-toolbar button[hx-post]")
+    refresh = _next_request(page, refreshes, 1)
+    refresh.fulfill(status=200, content_type="text/html", body=_filter_tab({}))
+    expect(page.locator("#id_interfaces_q")).to_have_value("")
+
+    _answer(first)
+    page.wait_for_function("window.filterCompleted === true")
+
+    assert page.url == original_url
+    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "")
+    expect(page.locator("#id_interfaces_q")).to_have_value("")
