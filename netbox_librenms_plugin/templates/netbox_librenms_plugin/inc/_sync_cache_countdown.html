@@ -5,8 +5,9 @@
     <div id="{{ cache_countdown_id }}" class="sync-cache-bar" data-expiry="{{ cache_expiry|date:'c' }}"
          data-timeout="{{ cache_timeout }}" role="progressbar" aria-label="Cache time remaining"
          aria-valuemin="0" aria-valuemax="{{ cache_timeout }}" aria-valuenow="0" aria-valuetext="" title="">
-        <span class="sync-cache-fill"></span>
-        <span class="visually-hidden sync-cache-remaining"></span>
+        <i class="mdi mdi-timer-outline" aria-hidden="true"></i>
+        <span class="sync-cache-track"><span class="sync-cache-fill"></span></span>
+        <span class="sync-cache-remaining" aria-hidden="true"></span>
     </div>
     {% endif %}
 </div>

@@ -18,13 +18,13 @@
         {% endif %}
     </div>
     <div class="sync-tab-filter-refresh">
-        {% if interface_sync.table or interface_sync.filters.in_use %}{% include "netbox_librenms_plugin/inc/_sync_filter_controls.html" with filters=interface_sync.filters prefix="interfaces_" tab="interfaces" section_id="interfaceFilterSection" label="Filter interfaces" %}{% endif %}
+        {% if interface_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_controls.html" with filters=interface_sync.filters prefix="interfaces_" tab="interfaces" section_id="interfaceFilterSection" label="Filter interfaces" %}{% endif %}
         {% firstof interface_sync.server_key server_key librenms_server_info.server_key as refresh_server_key %}
         {% include "netbox_librenms_plugin/inc/_interface_sync_refresh.html" with object=interface_sync.object server_key=refresh_server_key %}
     </div>
 </div>
 {% if interface_sync.table %}{% include "netbox_librenms_plugin/inc/_relationship_diagnostics.html" with diagnostics=interface_sync.relationship_diagnostics %}{% endif %}
-{% if interface_sync.table or interface_sync.filters.in_use %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=interface_sync.filters prefix="interfaces_" tab="interfaces" section_id="interfaceFilterSection" label="Filter interfaces" %}{% endif %}
+{% if interface_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=interface_sync.filters prefix="interfaces_" tab="interfaces" section_id="interfaceFilterSection" label="Filter interfaces" %}{% endif %}
 
 {% include "netbox_librenms_plugin/inc/_ipam_permission_notice.html" with hidden_ipam_permissions=interface_sync.hidden_ipam_permissions vlan_scope_incomplete=interface_sync.vlan_scope_incomplete %}
 
@@ -184,7 +184,6 @@
 </form>
 {% endif %}
 {% else %}
-{# A filter in the URL keeps its form with its errors and Clear link, also when no snapshot is cached. #}
 
 <div class="card">
     <div class="card-body text-center text-muted py-4">

@@ -564,10 +564,12 @@ TAB_TABLES = {
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("tab", sorted(TAB_TABLES))
-def test_an_invalid_filter_shows_its_errors_when_the_tab_has_no_snapshot(client, settings, librenms_server, tab):
+@pytest.mark.parametrize("snapshot", [False, True])
+def test_filter_controls_and_errors_require_a_snapshot(client, settings, librenms_server, tab, snapshot):
     owner = _four_tab_owner(client, settings, librenms_server)
     table_id, data_type = TAB_TABLES[tab]
-    cache.delete(object.__new__(SyncCablesView).get_cache_key(owner, data_type, SERVER_KEY))
+    if not snapshot:
+        cache.delete(object.__new__(SyncCablesView).get_cache_key(owner, data_type, SERVER_KEY))
     page_path = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[owner.pk])
     query = {"tab": tab, "server_key": SERVER_KEY, f"{tab}_sync_state": "bogus"}
 
@@ -577,6 +579,11 @@ def test_an_invalid_filter_shows_its_errors_when_the_tab_has_no_snapshot(client,
     assert (full.status_code, swapped.status_code) == (400, 200)
     for response in (full, swapped):
         html = response.content.decode()
+        if not snapshot:
+            assert f'id="{tab}_filter-errors"' not in html
+            assert f'id="{tab}_filter-form"' not in html
+            assert f'id="id_{tab}_sync_state"' not in html
+            continue
         assert f'id="{tab}_filter-errors"' in html
         assert re.search(rf'id="id_{tab}_sync_state"[^>]*aria-invalid="true"', html, re.S)
         # The toolbar keeps its Clear link, which drops the invalid filter.
@@ -587,3 +594,17 @@ def test_an_invalid_filter_shows_its_errors_when_the_tab_has_no_snapshot(client,
         # The target tab shows no table; every sibling tab renders its table.
         tables = set(re.findall(r'<table[^>]*id="(librenms-[a-z]+-table)"', html))
         assert tables == {table for table, _ in TAB_TABLES.values()} - {table_id}
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("tab", sorted(TAB_TABLES))
+def test_zero_matches_keep_the_filter_controls(client, settings, librenms_server, tab):
+    owner = _four_tab_owner(client, settings, librenms_server)
+    page_path = reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[owner.pk])
+    response = client.get(page_path, {"tab": tab, "server_key": SERVER_KEY, f"{tab}_q": "no-such-row"})
+    assert response.status_code == 200
+    html = response.content.decode()
+    assert f'id="{tab}_filter-form"' in html
+    assert f'id="id_{tab}_q"' in html
+    assert "sync-filter-clear" in html
+    assert "No rows match" in html
