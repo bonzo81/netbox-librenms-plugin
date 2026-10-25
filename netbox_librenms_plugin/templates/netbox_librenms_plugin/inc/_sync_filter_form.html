@@ -16,14 +16,14 @@ Takes: filters (SyncFilters), prefix, tab, owner, content_id, server_key.
 <form method="get" id="{{ prefix }}filter-form" class="sync-filter-form noprint" data-sync-filter-tab="{{ tab }}"
     hx-get="{{ filter_url }}" hx-trigger="submit, input delay:500ms from:#{{ form.q.auto_id }}, change from:#{{ form.sync_state.auto_id }}"
     hx-target="#{{ content_id }}-results" hx-select="#{{ content_id }}-results" hx-swap="outerHTML"
-    hx-select-oob="#{{ prefix }}filter-count,#{{ prefix }}filter-clear,#{{ prefix }}filter-errors,#{{ content_id }}-refresh,#{{ content_id }}-actions" hx-sync="#librenms-sync-tabs:queue last"
+    hx-select-oob="#{{ prefix }}filter-count,#{{ prefix }}filter-clear,#{{ prefix }}filter-validation,#{{ content_id }}-refresh,#{{ content_id }}-actions" hx-sync="#librenms-sync-tabs:queue last"
     hx-vals='{"server_key": "{{ server_key|escapejs }}"}'>
     {# No server_key input: the sync scripts read the first one on the page, which must be the sync form's. #}
     {% sync_tab_query_items prefix=prefix tab=tab reset="page filters server_key" as hidden_items %}
     {% for key, value in hidden_items %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}
-    <div id="{{ prefix }}filter-errors">
+    <div id="{{ prefix }}filter-validation">
     {% if form.errors %}
-    <div class="alert alert-danger mb-3" role="alert">
+    <div class="alert alert-danger mb-3" role="alert" id="{{ prefix }}filter-errors">
         <div>
             <div>The filters are not valid, so the table is not shown. Correct them, or clear the filters.</div>
             <ul class="mb-0">
