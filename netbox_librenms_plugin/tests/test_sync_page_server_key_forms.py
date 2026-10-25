@@ -448,18 +448,15 @@ class TestInterfaceSyncRefreshButtonDeduped:
         request = RequestFactory().get("/", query or {})
         request.user = make_superuser("interface-refresh-renderer")
         return render_to_string(
-            "netbox_librenms_plugin/_interface_sync.html",
+            "netbox_librenms_plugin/inc/_interface_sync_refresh.html",
             {
                 "object": obj,
+                "server_key": "default",
                 "has_librenms_id": True,
                 "librenms_server_info": {"server_key": "default"},
             },
             request=request,
         )
-
-    def _refresh_button_tag(self, html, path):
-        hx_post = html.index(f'hx-post="{path}"')
-        return html[html.rfind("<button", 0, hx_post) : html.index(">", hx_post) + 1]
 
     def test_device_refresh_button_single_with_device_url(self):
         from django.urls import reverse
@@ -469,12 +466,11 @@ class TestInterfaceSyncRefreshButtonDeduped:
         device_path = reverse("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": device.pk})
         vm_path = reverse("plugins:netbox_librenms_plugin:vm_interface_sync", kwargs={"pk": device.pk})
 
-        # Exactly one refresh action button (hx-post), pointing at the device URL, with the
-        # shared hx-vals — and never the VM branch's URL.
+        # The refresh form owns one button and the active server key.
         assert html.count("hx-post=") == 1
         assert f'hx-post="{device_path}"' in html
-        button = self._refresh_button_tag(html, device_path)
-        assert "hx-vals=" in button and "server_key" in button
+        form = _enclosing_form(html, f'hx-post="{device_path}"')
+        assert 'name="server_key" value="default"' in form
         assert vm_path not in html
 
     def test_the_refresh_url_carries_the_page_query(self):
@@ -500,6 +496,6 @@ class TestInterfaceSyncRefreshButtonDeduped:
 
         assert html.count("hx-post=") == 1
         assert f'hx-post="{vm_path}"' in html
-        button = self._refresh_button_tag(html, vm_path)
-        assert "hx-vals=" in button and "server_key" in button
+        form = _enclosing_form(html, f'hx-post="{vm_path}"')
+        assert 'name="server_key" value="default"' in form
         assert device_path not in html
