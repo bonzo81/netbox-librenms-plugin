@@ -16,7 +16,7 @@ from netbox_librenms_plugin.sync_cache import (
     request_actor_id,
 )
 from netbox_librenms_plugin.sync_query import SyncQuery
-from netbox_librenms_plugin.utils import build_migrated_context, get_interface_name_field
+from netbox_librenms_plugin.utils import get_interface_name_field
 from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin, NetBoxObjectPermissionMixin
 
 

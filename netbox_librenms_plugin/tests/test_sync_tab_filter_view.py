@@ -2,7 +2,7 @@
 The tab filter endpoint: a filter form swaps only its tab, and the response updates the rest of the page.
 
 Every test sends a real request to the endpoint, renders the real tab from a seeded snapshot, and reads
-the response as htmx does: the tab content, the out-of-band tab links and Refresh button, and the
+the response as htmx does: the tab content and Refresh toolbar, the out-of-band tab links, and the
 ``HX-Push-Url`` header.
 """
 
@@ -63,7 +63,7 @@ def test_a_filter_answers_with_its_tab_the_tab_links_and_the_refresh_button(clie
     assert {_query(link)["tab"][0] for link in links} == {"interfaces", "cables", "ipaddresses", "vlans", "modules"}
     assert all(urlsplit(unescape(link)).path == page_path for link in links)
     assert all(_query(link)["interfaces_q"] == ["eth1"] and _query(link)["cables_q"] == ["keep"] for link in links)
-    (refresh,) = re.findall(r'hx-post="([^"]+)"', _out_of_band(html, "interfaces-refresh-action"))
+    (refresh,) = re.findall(r'<button[^>]*hx-post="([^"]+)"[^>]*hx-target="#interface-sync-content"', html)
     assert _query(refresh)["interfaces_q"] == ["eth1"]
 
 
@@ -91,8 +91,9 @@ def test_a_tab_with_no_snapshot_answers_with_its_empty_state(client, settings):
 
     assert response.status_code == 200
     html = response.content.decode()
-    assert "No interface data loaded" in html
-    assert 'id="id_interfaces_q"' not in html
+    assert not _rows(html)
+    assert 'id="id_interfaces_q"' in html
+    assert 'class="btn btn-link sync-filter-clear"' in html
 
 
 def test_the_modules_tab_has_no_filter(client, settings):
