@@ -654,7 +654,7 @@ class TestFollowUpsKeepThePageQuery:
         client = _superuser_client(client, settings, "cable-sync-rerender")
         device, _free = _picker_device("sync-rerender")
         page = _fragment(client, device, **{**PAGE_QUERY, "cables_page": "9"})
-        (action,) = re.findall(r'<form method="post" action="([^"]*)"', page.content.decode())
+        (action,) = re.findall(r'<form method="post"[^>]*action="([^"]*)"', page.content.decode())
         _assert_keeps_the_page_query(unescape(action), _sync_url(device), {**PAGE_QUERY, "cables_page": "9"})
 
         response = client.post(unescape(action), _sync_data(page, "7010"), HTTP_HX_REQUEST="true")

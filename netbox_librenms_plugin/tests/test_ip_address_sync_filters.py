@@ -389,7 +389,7 @@ def _assert_keeps_the_page_query(url, path):
 def _rendered_sync_action(client, owner):
     """Return the URL the rendered IP sync form posts to."""
     html = _tab(client, owner, **PAGE_QUERY)
-    (action,) = re.findall(r'<form method="post"\s+action="([^"]*)"', html)
+    (action,) = re.findall(r'<form method="post"[^>]*action="([^"]*)"', html)
     return unescape(action)
 
 
@@ -440,5 +440,5 @@ class TestRedirectsKeepThePageQuery:
         assert len(cancel_links) == 2
         for url in cancel_links:
             _assert_keeps_the_page_query(url, _sync_page_url(device))
-        (confirm_action,) = re.findall(r'<form method="post"\s+action="([^"]*)"', html)
+        (confirm_action,) = re.findall(r'<form method="post"[^>]*action="([^"]*)"', html)
         _assert_keeps_the_page_query(unescape(confirm_action), _sync_url(device))

@@ -69,7 +69,7 @@ KEEP_ALL_BUT_PAGE = tuple(key for key in KEEP_ALL if key != "interfaces_page")
 
 
 class _Hops(HTMLParser):
-    """Collect every URL attribute inside the element with *root_id*, and the fields of each GET form."""
+    """Collect URL attributes and fields by their native GET form owner."""
 
     def __init__(self, root_id):
         super().__init__(convert_charrefs=True)
@@ -77,6 +77,7 @@ class _Hops(HTMLParser):
         self.depth = 0
         self.urls = []
         self.get_forms = []
+        self.fields = []
         self._get_form = None
 
     def handle_starttag(self, tag, attrs):
@@ -89,13 +90,13 @@ class _Hops(HTMLParser):
         if tag == "form" and (attributes.get("method") or "get").lower() == "get":
             self._get_form = {"attrs": attributes, "fields": []}
             self.get_forms.append(self._get_form)
-        if self._get_form is not None and tag in ("input", "select") and attributes.get("name"):
-            self._get_form["fields"].append((attributes["name"], attributes.get("value") or ""))
+        if tag in ("input", "select") and attributes.get("name"):
+            parent_id = self._get_form["attrs"].get("id") if self._get_form else None
+            owner_id = attributes.get("form") or parent_id
+            self.fields.append((owner_id, attributes["name"], attributes.get("value") or ""))
         for name in URL_ATTRIBUTES:
             if name in attributes:
-                self.urls.append(
-                    {"tag": tag, "attrs": attributes, "url": attributes[name], "in_get_form": bool(self._get_form)}
-                )
+                self.urls.append({"tag": tag, "attrs": attributes, "url": attributes[name]})
 
     def handle_endtag(self, tag):
         if not self.depth:
@@ -108,6 +109,9 @@ class _Hops(HTMLParser):
 def _hops(html, root_id):
     parser = _Hops(root_id)
     parser.feed(html)
+    for form in parser.get_forms:
+        owner_id = form["attrs"].get("id")
+        form["fields"] = [(name, value) for owner, name, value in parser.fields if owner == owner_id]
     assert parser.urls, f"no hop found inside #{root_id}"
     return parser
 
@@ -146,7 +150,7 @@ def _classify(hop, page_path, routes):
     if "/sync-interface-" in path or path.startswith("/dcim/interfaces/"):
         # A relationship sync answers JSON and repaints one button; an object link leaves the page.
         return "follow-up"
-    if on_page and hop["in_get_form"]:
+    if on_page and "sync-filter-clear" in hop["attrs"].get("class", "").split():
         # Clear filters: this tab's filters and page go, every other state stays.
         assert not any(key in query for key in (*INTERFACE_FILTERS, "interfaces_page")), url
         _assert_keeps(query, ("cables_q", "interfaces_per_page", "interfaces_sort", "interfaces_show_ignored"), url)
@@ -333,7 +337,7 @@ def _classify_tab_hop(hop, page_path, tab, owner, page_query):
         return "picker loader"
     if OBJECT_LINK.match(path):
         return "object link"
-    if on_page and hop["in_get_form"]:
+    if on_page and "sync-filter-clear" in hop["attrs"].get("class", "").split():
         # Clear filters: this tab's filters and page go, every other state stays.
         assert not any(key in query for key in (*own_filters, f"{prefix}page")), url
         _assert_keeps(query, (*OTHER_TAB_FILTER, f"{prefix}per_page", f"{prefix}sort"), url, page_query)
@@ -575,8 +579,10 @@ def test_an_invalid_filter_shows_its_errors_when_the_tab_has_no_snapshot(client,
         html = response.content.decode()
         assert f'id="{tab}_filter-errors"' in html
         assert re.search(rf'id="id_{tab}_sync_state"[^>]*aria-invalid="true"', html, re.S)
-        # The form keeps its Clear link, which drops the invalid filter.
-        clear = [hop["url"] for hop in _hops(html, tab).urls if hop["in_get_form"] and hop["tag"] == "a"]
+        # The toolbar keeps its Clear link, which drops the invalid filter.
+        clear = [
+            hop["url"] for hop in _hops(html, tab).urls if "sync-filter-clear" in hop["attrs"].get("class", "").split()
+        ]
         assert clear and f"{tab}_sync_state" not in _query(clear[0])
         # The target tab shows no table; every sibling tab renders its table.
         tables = set(re.findall(r'<table[^>]*id="(librenms-[a-z]+-table)"', html))
