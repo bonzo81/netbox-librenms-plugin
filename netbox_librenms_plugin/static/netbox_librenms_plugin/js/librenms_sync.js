@@ -428,7 +428,7 @@ function syncCacheController() {
         const content = syncCacheContent(tab);
         if (content && !state.snapshot_available && !isColdSyncCacheState(state)) {
             root._controller.invalidatedLocally.add(tab);
-            clearSyncTabContent(tab, syncCacheUnavailableReason(tab, state), state.state === 'expired');
+            clearSyncTabContent(tab, syncCacheUnavailableReason(tab, state));
         }
         updateSyncCacheTabState(tab, state);
     });
@@ -557,7 +557,7 @@ function formatSyncCacheRelativeTime(timestamp) {
     return `${days} day${days === 1 ? '' : 's'} ago`;
 }
 
-function clearSyncTabContent(tab, message, keepCountdown = false) {
+function clearSyncTabContent(tab, message) {
     const content = syncCacheContent(tab);
     if (!content) return;
     const card = document.createElement('div');
@@ -573,7 +573,7 @@ function clearSyncTabContent(tab, message, keepCountdown = false) {
     card.appendChild(body);
     const refresh = content.querySelector('.sync-tab-refresh-toolbar');
     if (refresh) {
-        if (!keepCountdown) refresh.querySelector('.sync-cache-countdown')?.replaceChildren();
+        if (!refresh.querySelector('.sync-cache-bar.is-expired')) refresh.querySelector('.sync-cache-countdown')?.replaceChildren();
         const toolbar = document.createElement('div');
         toolbar.className = 'noprint sync-tab-primary-toolbar justify-content-end';
         toolbar.appendChild(refresh);
@@ -635,7 +635,7 @@ function expireSyncTabFromElement(element) {
     const controller = syncCacheController();
     if (!controller) return;
     controller.invalidatedLocally.add(tab);
-    clearSyncTabContent(tab, `${syncCacheLabel(tab)} cache expired. Refresh this tab to load current data.`, true);
+    clearSyncTabContent(tab, `${syncCacheLabel(tab)} cache expired. Refresh this tab to load current data.`);
     updateSyncCacheTabState(tab, { state: 'expired', snapshot_available: false });
 }
 
@@ -865,7 +865,7 @@ function reconcileSyncCacheStatus(nextStatus, statusGeneration = null, signal = 
             if (state.refresh_error && state.state !== 'refresh_failed') {
                 reason = `${reason} ${state.refresh_error} Refresh this tab to try again.`;
             }
-            clearSyncTabContent(tab, reason, state.state === 'expired');
+            clearSyncTabContent(tab, reason);
             const marker = refreshChanged ? `refresh:${state.refresh_error_timestamp}` : state.revision;
             if (!notice && marker) {
                 const message = state.state === 'invalidated' && !state.refresh_error
