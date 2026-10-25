@@ -183,6 +183,10 @@ def test_toolbar_fits_phone_width_and_keeps_refresh(page, tab, key, cached, migr
     page.set_viewport_size({"width": 390, "height": 900})
     expect(page.locator("button[hx-post].btn-outline-primary")).to_be_visible()
     assert page.evaluate("document.documentElement.scrollWidth") <= 390
+    if tab == "module" and cached and not migrated:
+        sync_box = page.locator("#install-selected-btn").bounding_box()
+        refresh_box = page.locator(".sync-tab-refresh-toolbar button").bounding_box()
+        assert sync_box["y"] == pytest.approx(refresh_box["y"], abs=1)
     if migrated:
         expect(page.locator(".sync-tab-actions button[type=submit]")).to_have_count(0)
     if not cached:
