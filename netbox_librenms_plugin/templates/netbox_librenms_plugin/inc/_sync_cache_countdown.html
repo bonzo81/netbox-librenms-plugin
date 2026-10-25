@@ -1,7 +1,12 @@
-<span {% if cache_oob %}hx-swap-oob="innerHTML:#{{ cache_container_id }}"{% else %}id="{{ cache_container_id }}"
-      class="text-secondary d-inline-flex align-items-center gap-1"{% endif %}>
+{% load librenms_sync_query %}
+<div id="{{ cache_container_id }}" class="sync-cache-countdown">
     {% if cache_expiry %}
-    <i class="mdi mdi-clock-outline"></i>
-    <span>Cache expires in <span id="{{ cache_countdown_id }}" data-expiry="{{ cache_expiry|date:'c' }}"></span></span>
+    {% sync_cache_timeout cache_server_key as cache_timeout %}
+    <div id="{{ cache_countdown_id }}" class="sync-cache-bar" data-expiry="{{ cache_expiry|date:'c' }}"
+         data-timeout="{{ cache_timeout }}" role="progressbar" aria-label="Cache time remaining"
+         aria-valuemin="0" aria-valuemax="{{ cache_timeout }}" aria-valuenow="0" aria-valuetext="" title="">
+        <span class="sync-cache-fill"></span>
+        <span class="visually-hidden sync-cache-remaining"></span>
+    </div>
     {% endif %}
-</span>
+</div>

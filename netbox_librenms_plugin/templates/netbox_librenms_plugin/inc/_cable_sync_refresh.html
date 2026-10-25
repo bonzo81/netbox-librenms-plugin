@@ -1,0 +1,20 @@
+{% load helpers librenms_sync_query %}
+{% if has_librenms_id or sync_partial_response %}
+<form method="post" class="sync-tab-refresh-toolbar">
+    {% csrf_token %}
+    {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
+    {% with model_name=object|meta:"model_name" %}
+        {% if model_name == "device" %}
+            {% url 'plugins:netbox_librenms_plugin:device_cable_sync' pk=object.pk as refresh_path %}
+        {% endif %}
+        {% if refresh_path %}
+            <button type="button" hx-post="{% sync_tab_url refresh_path %}"
+                    hx-target="#cable-sync-content" hx-sync="#cable-sync-content:drop"
+                    class="btn btn-outline-primary">
+                Refresh Cables
+            </button>
+        {% endif %}
+    {% endwith %}
+    {% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=cable_sync.cache_expiry cache_container_id="cable-cache-countdown" cache_countdown_id="cable-countdown-timer" cache_server_key=server_key %}
+</form>
+{% endif %}

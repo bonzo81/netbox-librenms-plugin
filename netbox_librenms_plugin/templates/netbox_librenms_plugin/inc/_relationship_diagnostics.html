@@ -8,7 +8,7 @@ cached snapshot the table renders, so this cannot describe rows the table is not
 Context: diagnostics (relationship_diagnostics_report output), or nothing to render.
 {% endcomment %}
 {% if diagnostics %}
-<div class="mb-2 noprint">
+<div class="mb-2 noprint sync-tab-lead-row">
   <button type="button" class="btn btn-link btn-sm p-0 text-muted text-decoration-none"
           onclick="showModal(document.getElementById('relationshipDiagnosticsModal'))">
     <i class="mdi mdi-information-outline me-1"></i>Relationship data: {{ diagnostics.pairs_usable }} of {{ diagnostics.pairs_seen }} stack row{{ diagnostics.pairs_seen|pluralize }} usable{% if diagnostics.pairs_unclassified %}, {{ diagnostics.pairs_unclassified }} unclassified{% endif %}

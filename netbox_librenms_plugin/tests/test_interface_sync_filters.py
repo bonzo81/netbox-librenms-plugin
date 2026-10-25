@@ -545,3 +545,17 @@ def test_interface_filter_query_budget_with_refused_type_changes(client, setting
     small, large = page_queries(100), page_queries(1024)
 
     assert large - small == QUERIES_PER_TYPE_CHANGE * (1024 - 100), (small, large)
+
+
+@pytest.mark.django_db
+def test_fragment_refresh_form_keeps_scope_and_configured_cache_duration(client, settings):
+    client = _superuser_client(client, settings, "cache-duration")
+    settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"][SERVER_KEY]["cache_timeout"] = 840
+    device = _mixed_device("cache-duration")
+    html = _tab(client, device)
+    assert 'class="sync-tab-refresh-toolbar"' in html
+    assert f'name="server_key" value="{SERVER_KEY}"' in html
+    assert 'data-timeout="840"' in html
+    assert 'aria-valuemax="840"' in html
+    assert 'role="progressbar"' in html
+    assert 'hx-swap-oob="innerHTML:#cache-countdown"' not in html
