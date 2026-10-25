@@ -40,44 +40,97 @@
     min-width: 23rem;
 }
 
-.sync-tab-refresh-toolbar:not(:has(~ [id$="-sync-content"] .sync-tab-primary-toolbar)),
-.sync-tab-refresh-toolbar:has(~ [id$="-sync-content"] > .alert) {
-    margin-bottom: 1rem !important;
+.sync-tab-primary-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
 }
 
-@media (min-width: 1200px) {
-    .sync-tab-refresh-toolbar:has(~ [id$="-sync-content"] .sync-tab-primary-toolbar):not(
-        :has(~ [id$="-sync-content"] > .alert)
-    ) {
-        position: relative;
-        z-index: 2;
-        height: 0;
-    }
+.sync-tab-actions,
+.sync-tab-actions > .d-flex,
+.sync-tab-filter-refresh {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 0.5rem;
+    min-width: 0;
+    max-width: 100%;
+}
 
-    .sync-tab-refresh-toolbar:has(~ [id$="-sync-content"] .sync-tab-primary-toolbar):not(
-        :has(~ [id$="-sync-content"] > .alert)
-    ) > .btn-list {
-        position: absolute;
-        inset-block-start: 0;
-        inset-inline-end: 0;
-    }
+.sync-tab-filter-refresh {
+    margin-inline-start: auto;
+    justify-content: flex-end;
+}
 
-    .sync-tab-refresh-toolbar:has(~ [id$="-sync-content"] .sync-tab-primary-toolbar):not(
-        :has(~ [id$="-sync-content"] > .alert)
-    ) ~ [id$="-sync-content"] .sync-tab-primary-toolbar {
-        min-height: 1.875rem;
-        padding-inline-end: 21rem;
-    }
+.sync-filter-controls {
+    min-width: 0;
+    max-width: 100%;
+}
 
-    /* A filter form is the first row of its tab, so the refresh controls sit beside its first rows. */
-    .sync-tab-refresh-toolbar:has(~ [id$="-sync-content"] .sync-tab-primary-toolbar):not(
-        :has(~ [id$="-sync-content"] > .alert)
-    ) ~ [id$="-sync-content"] .sync-filter-form > :not(.collapse) {
-        margin-inline-end: 21rem;
-    }
+.sync-filter-controls .form-control,
+.sync-filter-controls .form-select {
+    height: 1.875rem;
+    min-height: 1.875rem;
+    padding-block: 0.25rem;
+}
+
+.sync-filter-controls input[type="search"] {
+    width: 10rem;
+    max-width: 100%;
+}
+
+.sync-tab-refresh-toolbar {
+    flex: 0 0 auto;
+    margin: 0;
+}
+
+.sync-cache-countdown {
+    height: 3px;
+    margin-top: 3px;
+}
+
+.sync-cache-bar,
+.sync-cache-fill {
+    display: block;
+    height: 3px;
+    border-radius: var(--tblr-border-radius);
+}
+
+.sync-cache-bar {
+    background-color: var(--tblr-bg-surface-secondary);
+}
+
+.sync-cache-fill {
+    width: 100%;
+    background-color: var(--tblr-success);
+}
+
+.sync-cache-bar.is-warning .sync-cache-fill {
+    background-color: var(--tblr-warning);
+}
+
+.sync-filter-form .collapse.show,
+.sync-filter-form .alert {
+    margin-bottom: 1rem;
 }
 
 @media (max-width: 575.98px) {
+    .sync-tab-filter-refresh {
+        flex: 1 1 100%;
+        justify-content: flex-start;
+    }
+
+    .sync-filter-controls {
+        display: contents !important;
+    }
+
+    .sync-tab-refresh-toolbar {
+        margin-inline-start: auto;
+    }
+
     .interface-sync-options-menu,
     .ip-sync-options-menu {
         min-width: min(23rem, calc(100vw - 2rem));
