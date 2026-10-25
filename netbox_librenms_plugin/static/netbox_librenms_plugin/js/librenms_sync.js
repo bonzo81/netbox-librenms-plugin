@@ -4112,13 +4112,30 @@ function applyFilterDisclosureState(section, button, expanded) {
     }
 }
 
+const pendingFilterApplies = new WeakSet();
+
+// Keep an explicit Apply when queue-last replaces its submit with a later change.
+document.addEventListener('submit', function (event) {
+    if (event.target.matches('.sync-filter-form')) pendingFilterApplies.add(event.target);
+}, true);
+
+// Restored HTML has initial control values; the restored URL names the displayed filters.
+document.addEventListener('htmx:historyRestore', function () {
+    const parameters = new URLSearchParams(window.location.search);
+    document.querySelectorAll('.sync-filter-form').forEach(form => {
+        [...form.elements].filter(control => control.id && control.name).forEach(control => {
+            control.value = parameters.get(control.name) ?? '';
+        });
+    });
+});
+
 // An empty field means no filter, so it stays out of the page URL that the response pushes.
 document.addEventListener('htmx:configRequest', function (event) {
     if (event.detail.elt instanceof HTMLFormElement && event.detail.elt.matches('.sync-filter-form')) {
         const form = event.detail.elt;
         const results = event.detail.target.querySelector('[data-filter-search]');
         // A cancelled automatic choice must not apply column edits made after that choice.
-        if (event.detail.triggeringEvent?.type === 'change') {
+        if (event.detail.triggeringEvent?.type === 'change' && !pendingFilterApplies.has(form)) {
             const search = [...form.elements].find(control => control.matches('.sync-filter-search'));
             const state = [...form.elements].find(control => control.tagName === 'SELECT');
             if (search?.value === results.dataset.filterSearch && state?.value === results.dataset.filterState) {
@@ -4126,6 +4143,7 @@ document.addEventListener('htmx:configRequest', function (event) {
                 return;
             }
         }
+        pendingFilterApplies.delete(form);
         const parameters = event.detail.parameters;
         [...parameters.keys()].filter(key => parameters.getAll(key).every(value => value === '')).forEach(key => parameters.delete(key));
     }
