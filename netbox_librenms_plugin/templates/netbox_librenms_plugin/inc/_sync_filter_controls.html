@@ -27,9 +27,12 @@ Takes: filters (SyncFilters), prefix, tab, section_id, label.
         data-bs-target="#{{ section_id }}" aria-expanded="{% if form.columns_have_input %}true{% else %}false{% endif %}"
         aria-controls="{{ section_id }}">
         <i class="mdi mdi-filter-outline" aria-hidden="true"></i> Filters
+        <span id="{{ prefix }}filter-count">{% if filters.active_count %}<span class="badge bg-secondary text-white">{{ filters.active_count }}</span>{% endif %}</span>
     </button>
+    <span id="{{ prefix }}filter-clear">
     {% if filters.active or form.errors %}
     <a class="btn btn-link sync-filter-clear" href="{% sync_tab_url prefix=prefix tab=tab reset='page filters' %}">Clear filters</a>
     {% endif %}
+    </span>
 </div>
 {% endwith %}

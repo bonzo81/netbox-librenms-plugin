@@ -143,6 +143,11 @@ class SyncFilters:
         return self.is_valid and bool(self.query or self.sync_state or self.columns)
 
     @property
+    def active_count(self):
+        """Return the number of valid filters that narrow the rows."""
+        return int(bool(self.query)) + int(bool(self.sync_state)) + len(self.columns) if self.is_valid else 0
+
+    @property
     def in_use(self):
         """Return whether the query holds a filter of the tab, valid or not, so the tab shows its filter form."""
         return self.active or not self.is_valid

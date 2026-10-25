@@ -2,7 +2,7 @@
 {% load librenms_sync_query %}
 {% if sync_partial_response %}{% include 'inc/messages.html' %}{% endif %}
 <div class="noprint sync-tab-primary-toolbar">
-    <div class="sync-tab-actions d-flex align-items-center gap-2">
+    <div id="cable-sync-content-actions" class="sync-tab-actions d-flex align-items-center gap-2">
         {% if cable_sync.table %}
             {% if not migrated_to_marker %}
             <button type="submit" form="cable-sync-form" class="btn btn-primary">
@@ -18,11 +18,15 @@
     <div class="sync-tab-filter-refresh">
         {% if cable_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_controls.html" with filters=cable_sync.filters prefix="cables_" tab="cables" section_id="cableFilterSection" label="Filter cables" %}{% endif %}
         {% firstof cable_sync.server_key server_key librenms_server_info.server_key as refresh_server_key %}
+        <div id="cable-sync-content-refresh">
         {% include "netbox_librenms_plugin/inc/_cable_sync_refresh.html" with object=cable_sync.object server_key=refresh_server_key %}
+        </div>
     </div>
 </div>
 {% if cable_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with owner=cable_sync.object content_id="cable-sync-content" server_key=cable_sync.server_key filters=cable_sync.filters prefix="cables_" tab="cables" section_id="cableFilterSection" label="Filter cables" %}{% endif %}
 {% if cable_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_panel.html" with owner=cable_sync.object content_id="cable-sync-content" server_key=cable_sync.server_key filters=cable_sync.filters prefix="cables_" tab="cables" section_id="cableFilterSection" label="Filter cables" %}{% endif %}
+
+<div id="cable-sync-content-results" data-sync-filter-tab="cables" data-filter-snapshot="{% if cable_sync.table %}true{% else %}false{% endif %}" data-filter-search="{{ cable_sync.filters.form.q.value|default:'' }}" data-filter-state="{{ cable_sync.filters.form.sync_state.value|default:'' }}">
 
 <!-- Cable Sync Table -->
 {% if cable_sync.table %}
@@ -152,3 +156,5 @@ Out-of-band swap: empty and hide the shared #htmx-modal after a modal-driven act
     <script>if (typeof closeHtmxModal === 'function') { closeHtmxModal(); }</script>
 </div>
 {% endif %}
+
+</div>
