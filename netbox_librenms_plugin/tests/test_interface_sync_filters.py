@@ -435,12 +435,12 @@ class TestInvalidFilters:
             },
         )
 
-        # The page URL holds invalid filters of two other tabs, so the full page answers 400 and those
-        # tabs show their errors. The Interfaces tab filters its own rows as usual.
+        # Invalid sibling filters affect the page status but stay hidden without a snapshot.
+        # The Interfaces tab filters its own rows.
         assert response.status_code == 400
         html = response.content.decode()
         assert 'id="interfaces_filter-errors"' not in html
-        assert 'id="cables_filter-errors"' in html and 'id="ipaddresses_filter-errors"' in html
+        assert 'id="cables_filter-errors"' not in html and 'id="ipaddresses_filter-errors"' not in html
         assert list(_rows(html)) == [1002]
 
     def test_invalid_filter_does_not_refuse_the_sync_action(self, client, settings):
