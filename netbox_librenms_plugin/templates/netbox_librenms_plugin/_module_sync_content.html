@@ -1,8 +1,30 @@
 {% load helpers %}
 {% if sync_partial_response %}{% include 'inc/messages.html' %}{% endif %}
-{% if request.htmx %}
-{% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=module_sync.cache_expiry cache_container_id="module-cache-countdown" cache_countdown_id="module-countdown-timer" cache_oob=True %}
-{% endif %}
+<div class="noprint sync-tab-primary-toolbar">
+    <div class="sync-tab-actions d-flex align-items-center gap-2">
+        {% if module_sync.table and has_write_permission and not migrated_to_marker and not module_sync.inventory_rule_error %}
+            <form id="install-selected-form" method="post"
+                action="{% url 'plugins:netbox_librenms_plugin:install_selected' pk=module_sync.object.pk %}"
+                hx-post="{% url 'plugins:netbox_librenms_plugin:install_selected' pk=module_sync.object.pk %}"
+                hx-target="#module-sync-content" hx-swap="innerHTML"
+                hx-sync="#module-sync-content:drop" hx-disabled-elt="find button">
+                {% csrf_token %}
+                {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" with server_key=module_sync.server_key %}
+                <input type="hidden" name="inventory_binding" value="{{ module_sync.install_selected_inventory_binding|default:'' }}">
+                <button type="submit" class="btn btn-primary" id="install-selected-btn"{% if not module_sync.install_selected_inventory_binding %} disabled{% endif %}>
+                    <span class="lnms-btn-idle"><i class="mdi mdi-package-down"></i> Install Selected</span>
+                    <span class="lnms-installing"><span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Installing…</span>
+                </button>
+            </form>
+        {% elif migrated_to_marker %}
+            <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
+        {% endif %}
+    </div>
+    <div class="sync-tab-filter-refresh">
+        {% firstof module_sync.server_key server_key librenms_server_info.server_key as refresh_server_key %}
+        {% include "netbox_librenms_plugin/inc/_module_sync_refresh.html" with object=module_sync.object server_key=refresh_server_key %}
+    </div>
+</div>
 
 <!-- Module Sync Table -->
 {% if module_sync.inventory_rule_error %}
@@ -30,32 +52,6 @@
         Refresh Modules when LibreNMS reports each index once.
     </div>
 </div>
-{% endif %}
-{# Migrated donors must not install: drop the whole form (not just the button) so install_selected isn't a live POST target / wired JS handler in migrated mode — matching the other sync-content templates. #}
-{% if has_write_permission and not migrated_to_marker %}
-{# Separate form for Install Selected — uses JS to collect checked rows before submit #}
-<form id="install-selected-form" method="post"
-    action="{% url 'plugins:netbox_librenms_plugin:install_selected' pk=module_sync.object.pk %}"
-    hx-post="{% url 'plugins:netbox_librenms_plugin:install_selected' pk=module_sync.object.pk %}"
-    hx-target="#module-sync-content" hx-swap="innerHTML"
-    hx-sync="#module-sync-content:drop" hx-disabled-elt="find button">
-    {% csrf_token %}
-    {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" with server_key=module_sync.server_key %}
-    <input type="hidden" name="inventory_binding" value="{{ module_sync.install_selected_inventory_binding|default:'' }}">
-    <div class="noprint d-flex align-items-center mt-0 mb-3 sync-tab-primary-toolbar">
-        <button type="submit" class="btn btn-primary" id="install-selected-btn"{% if not module_sync.install_selected_inventory_binding %} disabled{% endif %}>
-            <span class="lnms-btn-idle"><i class="mdi mdi-package-down"></i> Install Selected</span>
-            <span class="lnms-installing"><span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Installing…</span>
-        </button>
-    </div>
-</form>
-{% elif migrated_to_marker %}
-{% comment %}
-Install form is dropped in migrated mode, but module VC-member changes still POST
-/verify-module/ via handleModuleChange(), which reads csrfmiddlewaretoken. Emit it as a
-standalone hidden input so the verify fetch keeps working.
-{% endcomment %}
-<input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
 {% endif %}
 <div class="noprint text-secondary mb-3">
     Showing inventory items from LibreNMS matched against NetBox module bays and module types.
