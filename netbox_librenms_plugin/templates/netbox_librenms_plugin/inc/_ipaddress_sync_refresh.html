@@ -10,7 +10,7 @@
             {% url 'plugins:netbox_librenms_plugin:vm_ipaddress_sync' pk=object.pk as refresh_path %}
         {% endif %}
         {% if refresh_path %}
-            <button type="button" hx-post="{% sync_tab_url refresh_path %}"
+            <button type="button" {% if server_key %}hx-post="{% sync_tab_url refresh_path %}"{% else %}disabled{% endif %}
                     hx-target="#ipaddress-sync-content" hx-sync="#ipaddress-sync-content:drop"
                     hx-include="[name='interface_name_field'], #ipaddress-sync-content [name='set-primary-ip-toggle'], #ipaddress-sync-content [name='create-missing-interfaces-toggle']"
                     class="btn btn-outline-primary">
