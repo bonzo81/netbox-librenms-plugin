@@ -14,12 +14,12 @@
         {% endif %}
     </div>
     <div class="sync-tab-filter-refresh">
-        {% if ip_sync.table or ip_sync.filters.in_use %}{% include "netbox_librenms_plugin/inc/_sync_filter_controls.html" with filters=ip_sync.filters prefix="ipaddresses_" tab="ipaddresses" section_id="ipFilterSection" label="Filter IP addresses" %}{% endif %}
+        {% if ip_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_controls.html" with filters=ip_sync.filters prefix="ipaddresses_" tab="ipaddresses" section_id="ipFilterSection" label="Filter IP addresses" %}{% endif %}
         {% firstof ip_sync.server_key server_key librenms_server_info.server_key as refresh_server_key %}
         {% include "netbox_librenms_plugin/inc/_ipaddress_sync_refresh.html" with object=ip_sync.object server_key=refresh_server_key %}
     </div>
 </div>
-{% if ip_sync.table or ip_sync.filters.in_use %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=ip_sync.filters prefix="ipaddresses_" tab="ipaddresses" section_id="ipFilterSection" label="Filter IP addresses" %}{% endif %}
+{% if ip_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=ip_sync.filters prefix="ipaddresses_" tab="ipaddresses" section_id="ipFilterSection" label="Filter IP addresses" %}{% endif %}
 
 <!-- IP Address Sync Table -->
 {% if ip_sync.table %}
@@ -77,7 +77,6 @@
 </form>
 {% endif %}
 {% else %}
-{# A filter in the URL keeps its form with its errors and Clear link, also when no snapshot is cached. #}
 
 <div class="card">
     <div class="card-body text-center text-muted py-4">
