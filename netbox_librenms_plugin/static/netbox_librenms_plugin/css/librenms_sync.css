@@ -88,28 +88,48 @@
 }
 
 .sync-cache-countdown {
-    height: 3px;
     margin-top: 3px;
 }
 
-.sync-cache-bar,
+.sync-cache-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    color: var(--tblr-success);
+    font-size: 0.6875rem;
+    line-height: 1;
+}
+
+.sync-cache-track,
 .sync-cache-fill {
     display: block;
     height: 3px;
     border-radius: var(--tblr-border-radius);
 }
 
-.sync-cache-bar {
+.sync-cache-track {
+    flex: 1;
     background-color: var(--tblr-bg-surface-secondary);
 }
 
 .sync-cache-fill {
     width: 100%;
-    background-color: var(--tblr-success);
+    background-color: currentColor;
 }
 
-.sync-cache-bar.is-warning .sync-cache-fill {
-    background-color: var(--tblr-warning);
+.sync-cache-remaining {
+    min-width: 3ch;
+    text-align: end;
+    font-family: var(--tblr-font-monospace, monospace);
+    font-variant-numeric: tabular-nums;
+}
+
+.sync-cache-bar.is-warning {
+    color: var(--tblr-warning);
+}
+
+.sync-cache-bar.is-expired {
+    color: var(--tblr-danger);
 }
 
 .sync-filter-form .collapse.show,
