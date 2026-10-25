@@ -782,7 +782,9 @@ def _map_os_platform(librenms_os, platform, actor):
                 raise _AddDenied
     except _AddDenied:
         return denied
-    except IntegrityError:
+    except (ValidationError, IntegrityError) as exc:
+        if classify_conflict(exc):
+            raise
         # A concurrent request may have added the mapping first.
         winners = _os_mappings(librenms_os)
         if not winners:

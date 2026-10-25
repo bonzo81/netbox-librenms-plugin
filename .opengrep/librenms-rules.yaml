@@ -1653,3 +1653,17 @@ rules:
           except $CLASS as $ERROR:
             ...
             raise
+
+  - id: mapping-create-recovers-validation-races
+    languages: [python]
+    severity: ERROR
+    message: Recover validation-time and insert-time mapping races together.
+    patterns:
+      - pattern-inside: |
+          def _map_os_platform(...):
+            ...
+      - pattern: |
+          try:
+            ...
+          except IntegrityError:
+            ...
