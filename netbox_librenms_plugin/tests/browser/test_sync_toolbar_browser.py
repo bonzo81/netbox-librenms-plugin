@@ -268,3 +268,24 @@ def test_sync_actions_submit_selected_rows_and_toolbar_options(page):
     page.wait_for_function("document.querySelector('button[form=interface-sync-form]') !== null")
     assert parse_qs(posted[0].post_data)["select"] == ["17"]
     assert parse_qs(posted[0].post_data)["server_key"] == ["secondary"]
+
+
+def test_active_filters_share_the_row_with_actions_in_the_netbox_frame(page):
+    load_tab(page, "interface", "interface_sync")
+    page.set_viewport_size({"width": 1440, "height": 900})
+    # These dimensions match the live NetBox sidebar and control widths.
+    page.add_style_tag(
+        content="""
+        .tab-pane { width: 1105px; }
+        .sync-tab-actions { width: 434px; }
+        .sync-filter-controls select { width: 161px; }
+        .sync-filter-toggle { width: 80px; }
+        .sync-filter-clear { width: 96px; }
+        .sync-tab-refresh-toolbar button { width: 147px; }
+    """
+    )
+    sync = page.locator('button[form="interface-sync-form"]').bounding_box()
+    refresh = page.locator(".sync-tab-refresh-toolbar button").bounding_box()
+    clear = page.locator(".sync-filter-clear").bounding_box()
+    assert sync["y"] == pytest.approx(refresh["y"], abs=1)
+    assert clear["y"] == pytest.approx(refresh["y"], abs=1)
