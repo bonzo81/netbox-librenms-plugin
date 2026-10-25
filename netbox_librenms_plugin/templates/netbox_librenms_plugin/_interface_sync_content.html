@@ -2,7 +2,7 @@
 {% load librenms_sync_query %}
 {% if sync_partial_response %}{% include 'inc/messages.html' %}{% endif %}
 <div class="noprint sync-tab-primary-toolbar">
-    <div class="sync-tab-actions d-flex align-items-center gap-2">
+    <div id="interface-sync-content-actions" class="sync-tab-actions d-flex align-items-center gap-2">
         {% if interface_sync.table %}
             {% if not migrated_to_marker %}
             <button type="submit" form="interface-sync-form" class="btn btn-primary">
@@ -20,11 +20,15 @@
     <div class="sync-tab-filter-refresh">
         {% if interface_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_controls.html" with filters=interface_sync.filters prefix="interfaces_" tab="interfaces" section_id="interfaceFilterSection" label="Filter interfaces" %}{% endif %}
         {% firstof interface_sync.server_key server_key librenms_server_info.server_key as refresh_server_key %}
+        <div id="interface-sync-content-refresh">
         {% include "netbox_librenms_plugin/inc/_interface_sync_refresh.html" with object=interface_sync.object server_key=refresh_server_key %}
+        </div>
     </div>
 </div>
 {% if interface_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with owner=interface_sync.object content_id="interface-sync-content" server_key=interface_sync.server_key filters=interface_sync.filters prefix="interfaces_" tab="interfaces" section_id="interfaceFilterSection" label="Filter interfaces" %}{% endif %}
 {% if interface_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_panel.html" with owner=interface_sync.object content_id="interface-sync-content" server_key=interface_sync.server_key filters=interface_sync.filters prefix="interfaces_" tab="interfaces" section_id="interfaceFilterSection" label="Filter interfaces" %}{% endif %}
+
+<div id="interface-sync-content-results" data-sync-filter-tab="interfaces" data-filter-snapshot="{% if interface_sync.table %}true{% else %}false{% endif %}" data-filter-search="{{ interface_sync.filters.form.q.value|default:'' }}" data-filter-state="{{ interface_sync.filters.form.sync_state.value|default:'' }}">
 
 {% include "netbox_librenms_plugin/inc/_ipam_permission_notice.html" with hidden_ipam_permissions=interface_sync.hidden_ipam_permissions vlan_scope_incomplete=interface_sync.vlan_scope_incomplete %}
 
@@ -331,4 +335,6 @@
             </div>
         </div>
     </div>
+</div>
+
 </div>

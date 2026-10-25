@@ -4115,37 +4115,45 @@ function applyFilterDisclosureState(section, button, expanded) {
 // An empty field means no filter, so it stays out of the page URL that the response pushes.
 document.addEventListener('htmx:configRequest', function (event) {
     if (event.detail.elt instanceof HTMLFormElement && event.detail.elt.matches('.sync-filter-form')) {
+        const form = event.detail.elt;
+        const results = event.detail.target;
+        // A cancelled automatic choice must not apply column edits made after that choice.
+        if (event.detail.triggeringEvent?.type === 'change') {
+            const search = [...form.elements].find(control => control.matches('.sync-filter-search'));
+            const state = [...form.elements].find(control => control.tagName === 'SELECT');
+            if (search?.value === results.dataset.filterSearch && state?.value === results.dataset.filterState) {
+                event.preventDefault();
+                return;
+            }
+        }
         const parameters = event.detail.parameters;
         [...parameters.keys()].filter(key => parameters.getAll(key).every(value => value === '')).forEach(key => parameters.delete(key));
     }
 });
 
-// The swap renders the search with the value the request sent; text typed during the request comes back.
-let typedFilterSearch = null;
-
-document.addEventListener('htmx:beforeSwap', function () {
-    const active = document.activeElement;
-    typedFilterSearch = active?.matches?.('.sync-filter-search')
-        ? { id: active.id, value: active.value, start: active.selectionStart, end: active.selectionEnd }
-        : null;
-});
-
-// afterSwap runs in the task of the swap, so no key press comes between the swap and this restore.
+// Validation belongs to the response, while the user's controls stay connected.
 document.addEventListener('htmx:afterSwap', function () {
-    const typed = typedFilterSearch;
-    typedFilterSearch = null;
-    const search = typed && document.getElementById(typed.id);
-    if (!search || search.value === typed.value) return;
-    search.value = typed.value;
-    search.setSelectionRange(typed.start, typed.end);
+    document.querySelectorAll('.sync-filter-form').forEach(form => {
+        const errors = document.getElementById(form.id.replace('filter-form', 'filter-errors'));
+        const invalidIds = new Set([...errors?.querySelectorAll('[data-filter-error-for]') || []]
+            .map(error => error.dataset.filterErrorFor));
+        [...form.elements].filter(control => control.id && control.name).forEach(control => {
+            const invalid = invalidIds.has(control.id);
+            control.classList.toggle('is-invalid', invalid);
+            if (invalid) {
+                control.setAttribute('aria-invalid', 'true');
+                control.setAttribute('aria-describedby', errors.id);
+            } else {
+                control.removeAttribute('aria-invalid');
+                control.removeAttribute('aria-describedby');
+            }
+        });
+    });
 });
 
-// htmx binds the new filter form at settle, so a search that differs from the rendered one filters again then.
+// HTMX must bind the new Refresh control before cache expiry moves it.
 document.addEventListener('htmx:afterSettle', function () {
-    const search = document.activeElement;
-    if (search?.matches?.('.sync-filter-search') && search.value !== search.defaultValue) {
-        search.dispatchEvent(new Event('input', { bubbles: true }));
-    }
+    document.querySelectorAll('[data-filter-snapshot="false"]').forEach(expireSyncTabFromElement);
 });
 
 function initializeFilterDisclosures() {

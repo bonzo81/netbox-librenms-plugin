@@ -12,8 +12,7 @@ Takes: filters (SyncFilters), prefix, section_id.
             <label class="form-label" for="{{ field.auto_id }}">{{ field.label }}</label>
             <input type="text" form="{{ form_id }}" name="{{ field.html_name }}" id="{{ field.auto_id }}" value="{{ field.value|default:'' }}"
                 class="form-control form-control-sm{% if field.errors %} is-invalid{% endif %}"
-                {% if field.errors %}aria-invalid="true" aria-describedby="{{ field.auto_id }}-error"{% endif %}>
-            {% if field.errors %}<div class="invalid-feedback" id="{{ field.auto_id }}-error">{{ field.errors|join:" " }}</div>{% endif %}
+                {% if field.errors %}aria-invalid="true" aria-describedby="{{ prefix }}filter-errors"{% endif %}>
         </div>
         {% endfor %}
         <button type="submit" form="{{ form_id }}" class="btn btn-sm btn-primary">Apply</button>

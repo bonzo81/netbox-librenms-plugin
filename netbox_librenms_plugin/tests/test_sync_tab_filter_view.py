@@ -92,8 +92,8 @@ def test_a_tab_with_no_snapshot_answers_with_its_empty_state(client, settings):
     assert response.status_code == 200
     html = response.content.decode()
     assert not _rows(html)
-    assert 'id="id_interfaces_q"' in html
-    assert 'class="btn btn-link sync-filter-clear"' in html
+    assert 'id="id_interfaces_q"' not in html
+    assert 'class="btn btn-link sync-filter-clear"' not in html
 
 
 def test_the_modules_tab_has_no_filter(client, settings):
