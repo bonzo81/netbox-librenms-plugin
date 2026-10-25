@@ -306,7 +306,7 @@ def test_filter_controls_submit_the_get_form(page, field, value):
     page.evaluate("initializeScripts()")
     if field == "q":
         page.locator("input[type=search]").fill(value)
-        page.clock.fast_forward(399)
+        page.clock.fast_forward(499)
         assert posted == []
         page.clock.fast_forward(1)
     else:
