@@ -4113,6 +4113,7 @@ function applyFilterDisclosureState(section, button, expanded) {
 }
 
 const pendingFilterApplies = new WeakSet();
+const initializedFilterTargets = new WeakSet();
 
 // Keep an explicit Apply when queue-last replaces its submit with a later change.
 document.addEventListener('submit', function (event) {
@@ -4133,7 +4134,15 @@ document.addEventListener('htmx:historyRestore', function () {
 document.addEventListener('htmx:configRequest', function (event) {
     if (event.detail.elt instanceof HTMLFormElement && event.detail.elt.matches('.sync-filter-form')) {
         const form = event.detail.elt;
-        const results = event.detail.target.querySelector('[data-filter-search]');
+        const target = event.detail.target;
+        if (!initializedFilterTargets.has(target)) {
+            // Refresh can replace this target before the response arrives, so reject its stale swap and URL.
+            target.addEventListener('htmx:beforeSwap', function (swap) {
+                if (!target.isConnected) swap.preventDefault();
+            });
+            initializedFilterTargets.add(target);
+        }
+        const results = target.querySelector('[data-filter-search]');
         // A cancelled automatic choice must not apply column edits made after that choice.
         if (event.detail.triggeringEvent?.type === 'change' && !pendingFilterApplies.has(form)) {
             const search = [...form.elements].find(control => control.matches('.sync-filter-search'));
