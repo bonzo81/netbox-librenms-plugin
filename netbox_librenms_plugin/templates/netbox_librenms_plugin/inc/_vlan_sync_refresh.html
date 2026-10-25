@@ -8,7 +8,7 @@
             {% url 'plugins:netbox_librenms_plugin:device_vlan_sync' pk=object.pk as refresh_path %}
         {% endif %}
         {% if refresh_path %}
-            <button type="button" hx-post="{% sync_tab_url refresh_path %}"
+            <button type="button" {% if server_key %}hx-post="{% sync_tab_url refresh_path %}"{% else %}disabled{% endif %}
                     hx-target="#vlan-sync-content" hx-sync="#vlan-sync-content:drop"
                     class="btn btn-outline-primary">
                 Refresh VLANs

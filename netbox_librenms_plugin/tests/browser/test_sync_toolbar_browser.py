@@ -41,7 +41,9 @@ body { padding: 16px; }
 )
 
 
-def render_tab(tab, key, *, model="device", cached=True, migrated=False, partial=False, timeout=600):
+def render_tab(
+    tab, key, *, model="device", cached=True, migrated=False, partial=False, timeout=600, server_key="secondary"
+):
     """Use real templates with only NetBox tags and table rendering replaced."""
     from django.conf import settings
     from django.template import Context, Engine, Library
@@ -101,7 +103,7 @@ def render_tab(tab, key, *, model="device", cached=True, migrated=False, partial
         "object": subject,
         "table": table,
         "vlan_table": table,
-        "server_key": "secondary",
+        "server_key": server_key,
         "filters": filters,
         "cache_expiry": NOW + timedelta(seconds=timeout) if cached else None,
         "install_selected_inventory_binding": "binding",
@@ -111,8 +113,9 @@ def render_tab(tab, key, *, model="device", cached=True, migrated=False, partial
         "object": subject,
         key: data,
         "has_librenms_id": True,
+        "sync_partial_response": partial,
         "has_write_permission": True,
-        "server_key": "secondary",
+        "server_key": server_key,
         "csrf_token": "token",
         "migrated_to_marker": migrated,
         "request": SimpleNamespace(htmx=partial),
@@ -289,3 +292,26 @@ def test_active_filters_share_the_row_with_actions_in_the_netbox_frame(page):
     clear = page.locator(".sync-filter-clear").bounding_box()
     assert sync["y"] == pytest.approx(refresh["y"], abs=1)
     assert clear["y"] == pytest.approx(refresh["y"], abs=1)
+
+
+@pytest.mark.parametrize(("tab", "key"), TABS)
+def test_configuration_error_swap_disables_refresh_without_a_server(page, tab, key):
+    """HTMX must replace a scoped refresh with an inert button after server resolution fails."""
+    load_tab(page, tab, key)
+    posted = []
+
+    def configuration_error(route):
+        posted.append(parse_qs(route.request.post_data))
+        route.fulfill(body=render_tab(tab, key, partial=True, cached=False, server_key=None))
+
+    page.route("**/endpoint/**", configuration_error)
+    _add_page_scripts(page)
+    page.evaluate("initializeScripts()")
+    page.locator(".sync-tab-refresh-toolbar button").click()
+    expect(page.locator("#test-rows")).to_have_count(0)
+    refresh = page.locator(".sync-tab-refresh-toolbar button")
+    expect(refresh).to_be_disabled()
+    assert refresh.get_attribute("hx-post") is None
+    refresh.evaluate("button => button.click()")
+    assert len(posted) == 1
+    assert posted[0]["server_key"] == ["secondary"]
