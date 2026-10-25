@@ -41,6 +41,8 @@ def test_device_refresh_button_renders_type_button():
 
     # Scope to the Refresh Interfaces button(s) — the included content template renders other
     # buttons (modal close etc.) that are out of scope for this finding.
-    refresh_buttons = [b for b in re.findall(r"<button\b.*?</button>", html, re.DOTALL) if 'class="btn btn-outline-primary"' in b]
+    refresh_buttons = [
+        b for b in re.findall(r"<button\b.*?</button>", html, re.DOTALL) if 'class="btn btn-outline-primary"' in b
+    ]
     assert refresh_buttons, "device branch should render a Refresh Interfaces button"
     assert all('type="button"' in b for b in refresh_buttons), refresh_buttons
