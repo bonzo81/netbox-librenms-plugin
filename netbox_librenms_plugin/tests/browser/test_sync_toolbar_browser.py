@@ -268,13 +268,17 @@ def test_filter_controls_need_a_snapshot_even_with_filter_input(page, tab, key):
 @pytest.mark.parametrize("field,value", [("q", "Ethernet"), ("sync_state", "new")])
 def test_filter_controls_submit_the_get_form(page, field, value):
     load_tab(page, "interface", "interface_sync")
+    page.clock.pause_at(NOW + timedelta(seconds=1))
+    initial_url = page.url
     page.route("**/browser-fixture?*", lambda route: route.fulfill(body="<p id='filtered'></p>"))
     _add_page_scripts(page)
     page.evaluate("initializeScripts()")
     with page.expect_navigation() as navigation:
         if field == "q":
             page.locator("input[type=search]").fill(value)
-            page.clock.fast_forward(500)
+            page.clock.fast_forward(399)
+            assert page.url == initial_url
+            page.clock.fast_forward(1)
         else:
             page.locator(".sync-filter-controls select").select_option(value)
     query = parse_qs(navigation.value.url.split("?", 1)[1])
