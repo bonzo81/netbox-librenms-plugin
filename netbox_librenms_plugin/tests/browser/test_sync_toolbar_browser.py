@@ -130,7 +130,8 @@ def render_tab(
 def load_tab(page, tab, key, **kwargs):
     page.clock.install(time=NOW)
     page.set_content(
-        f"<style>{CSS}</style><div class='tab-pane' data-tab-id='{tab}s'>{render_tab(tab, key, **kwargs)}</div>"
+        f"<style>{CSS}</style><div id='librenms-sync-tabs'>"
+        f"<div class='tab-pane' data-tab-id='{tab}s'>{render_tab(tab, key, **kwargs)}</div></div>"
     )
     page.add_style_tag(path=str(STYLE_PATH))
 
