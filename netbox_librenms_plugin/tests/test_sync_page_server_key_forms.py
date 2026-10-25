@@ -12,6 +12,7 @@ cache, and loopback LibreNMS HTTP boundary. Each form must contain the hidden
 
 from contextlib import ExitStack
 from copy import deepcopy
+from html.parser import HTMLParser
 from types import SimpleNamespace
 
 import pytest
@@ -499,3 +500,87 @@ class TestInterfaceSyncRefreshButtonDeduped:
         form = _enclosing_form(html, f'hx-post="{vm_path}"')
         assert 'name="server_key" value="default"' in form
         assert device_path not in html
+
+
+class _PostedForms(HTMLParser):
+    """Read native form fields and HTMX buttons from the rendered response."""
+
+    def __init__(self, html):
+        super().__init__()
+        self.forms = []
+        self.current = None
+        self.feed(html)
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "form":
+            self.current = {"attrs": attrs, "fields": {}, "buttons": []}
+            self.forms.append(self.current)
+        elif self.current is not None:
+            if tag == "input" and attrs.get("name"):
+                self.current["fields"][attrs["name"]] = attrs.get("value", "")
+            elif tag == "button":
+                self.current["buttons"].append(attrs)
+
+    def handle_endtag(self, tag):
+        if tag == "form":
+            self.current = None
+
+
+@pytest.mark.parametrize("configuration_error", ["removed", "invalid"])
+@pytest.mark.parametrize(
+    "model,tab",
+    [("device", tab) for tab in ["interface", "cable", "ipaddress", "vlan", "module"]]
+    + [("vm", "interface"), ("vm", "ipaddress")],
+)
+def test_refresh_configuration_error_cannot_retry_another_server(
+    client, settings, servers, model, tab, configuration_error
+):
+    """A swapped error must never turn a secondary-server refresh into a default-server fetch."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_vm
+
+    factory = make_device if model == "device" else make_vm
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+
+    obj = factory("refresh-retry-scope")
+    seed_stored_mapping(obj, {"default": {"id": 42}, "secondary": {"id": 42}}, save=True)
+    client.force_login(make_superuser("refresh-retry-user"))
+    _register_device_info(servers.default)
+    _register_device_info(servers.secondary)
+    page_url = reverse(f"plugins:netbox_librenms_plugin:{model}_librenms_sync", args=[obj.pk])
+    refresh_url = reverse(f"plugins:netbox_librenms_plugin:{model}_{tab}_sync", args=[obj.pk])
+    response = client.get(page_url, {"server_key": "secondary"})
+    assert response.status_code == 200
+    form = next(
+        form
+        for form in _PostedForms(response.content.decode()).forms
+        if any(button.get("hx-post", "").split("?", 1)[0] == refresh_url for button in form["buttons"])
+    )
+    assert form["fields"]["server_key"] == "secondary"
+    if configuration_error == "removed":
+        del settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["secondary"]
+    else:
+        settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["secondary"]["librenms_url"] = ""
+    servers.default.requests.clear()
+    servers.secondary.requests.clear()
+    response = client.post(refresh_url + "?server_key=secondary", form["fields"], HTTP_HX_REQUEST="true")
+    assert response.status_code == 200
+    assert not servers.default.requests
+    assert not servers.secondary.requests
+    forms = _PostedForms(response.content.decode()).forms
+    refresh = next(form for form in forms if "sync-tab-refresh-toolbar" in form["attrs"].get("class", ""))
+    button = refresh["buttons"][0]
+    if "disabled" not in button:
+        response = client.post(button["hx-post"], refresh["fields"], HTTP_HX_REQUEST="true")
+        assert response.status_code == 200
+    assert not servers.default.requests, "The retry addressed the installation default server"
+    assert not servers.secondary.requests
+    assert "disabled" in button
+    assert "hx-post" not in button
+    assert all(
+        "server_key" in form["fields"] or all("disabled" in button for button in form["buttons"])
+        for form in forms
+        if form["attrs"].get("method") == "post"
+    )
