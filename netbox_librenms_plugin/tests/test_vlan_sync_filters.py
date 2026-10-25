@@ -258,9 +258,9 @@ class TestInvalidFilters:
         html = _tab(client, device, vlans_q="voice")
 
         # The bound form, its Clear link and the filtered (empty) table stay, so the filter can be removed.
-        assert re.search(r'<input type="search" name="vlans_q" id="id_vlans_q" value="voice"', html)
-        (form,) = re.findall(r'<form method="get" class="sync-filter-form.*?</form>', html, re.S)
-        clear = [unescape(href) for href in re.findall(r'<a class="btn btn-sm btn-link" href="([^"]*)"', form)]
+        assert re.search(r'<input type="search"[^>]*name="vlans_q" id="id_vlans_q" value="voice"', html)
+        assert re.search(r'<form[^>]*id="vlans_filter-form"[^>]*class="sync-filter-form', html)
+        clear = [unescape(href) for href in re.findall(r'<a class="[^"]*sync-filter-clear[^"]*" href="([^"]*)"', html)]
         assert len(clear) == 1 and "vlans_q" not in parse_qs(urlsplit(clear[0]).query)
         assert re.search(r'<table[^>]*id="librenms-vlan-table"[^>]*data-filter-active="true"', html)
         assert _rows(html) == {}
@@ -344,7 +344,7 @@ def _assert_keeps_the_page_query(url, path):
 
 def _rendered_sync_action(client, device):
     """Return the URL the rendered VLAN sync form posts to."""
-    (action,) = re.findall(r'<form method="post"\s+action="([^"]*)"', _tab(client, device, **PAGE_QUERY))
+    (action,) = re.findall(r'<form method="post"[^>]*action="([^"]*)"', _tab(client, device, **PAGE_QUERY))
     return unescape(action)
 
 
@@ -386,7 +386,7 @@ class TestRedirectsKeepThePageQuery:
 
         assert response.status_code == 200
         html = response.content.decode()
-        (confirm_action,) = re.findall(r'<form method="post"\s+action="([^"]*)"', html)
+        (confirm_action,) = re.findall(r'<form method="post"[^>]*action="([^"]*)"', html)
         _assert_keeps_the_page_query(unescape(confirm_action), _sync_url(device))
         if not htmx:
             hrefs = [

@@ -1,11 +1,4 @@
-"""Issue #116 (CodeRabbit): the HTMX "Refresh Interfaces" buttons in _interface_sync.html
-must declare type="button". They live inside a <form method="post"> and drive their POST via
-hx-post; the HTML default of type="submit" would also fire a native form submit on click.
-
-The device branch is rendered for real against a real Device (the ``meta`` filter resolves
-model_name to "device"); a source-structure check covers the VM branch too without heavy VM
-scaffolding.
-"""
+"""Refresh controls declare their button type and use the object refresh route."""
 
 import pathlib
 import re
@@ -15,7 +8,7 @@ from django.contrib.auth.models import AnonymousUser
 from django.template.loader import get_template, render_to_string
 from django.test import RequestFactory
 
-TEMPLATE = "netbox_librenms_plugin/_interface_sync.html"
+TEMPLATE = "netbox_librenms_plugin/inc/_interface_sync_refresh.html"
 
 
 def test_every_button_declares_type():
