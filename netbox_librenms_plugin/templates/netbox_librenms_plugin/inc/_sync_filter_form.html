@@ -15,7 +15,7 @@ Takes: filters (SyncFilters), prefix, tab, owner, content_id, server_key.
 {% url 'plugins:netbox_librenms_plugin:sync_tab_filter' object_type=owner|meta:"model_name" pk=owner.pk tab=tab as filter_url %}
 <form method="get" id="{{ prefix }}filter-form" class="sync-filter-form noprint" data-sync-filter-tab="{{ tab }}"
     hx-get="{{ filter_url }}" hx-trigger="submit, input delay:500ms from:#{{ form.q.auto_id }}, change from:#{{ form.sync_state.auto_id }}"
-    hx-target="#{{ content_id }}-results" hx-select="#{{ content_id }}-results" hx-swap="outerHTML"
+    hx-target="#{{ content_id }}-results" hx-select="#{{ content_id }}-results > *" hx-swap="innerHTML"
     hx-select-oob="#{{ prefix }}filter-count,#{{ prefix }}filter-clear,#{{ prefix }}filter-validation,#{{ content_id }}-refresh,#{{ content_id }}-actions" hx-sync="#librenms-sync-tabs:queue last"
     hx-vals='{"server_key": "{{ server_key|escapejs }}"}'>
     {# No server_key input: the sync scripts read the first one on the page, which must be the sync form's. #}

@@ -4116,7 +4116,7 @@ function applyFilterDisclosureState(section, button, expanded) {
 document.addEventListener('htmx:configRequest', function (event) {
     if (event.detail.elt instanceof HTMLFormElement && event.detail.elt.matches('.sync-filter-form')) {
         const form = event.detail.elt;
-        const results = event.detail.target;
+        const results = event.detail.target.querySelector('[data-filter-search]');
         // A cancelled automatic choice must not apply column edits made after that choice.
         if (event.detail.triggeringEvent?.type === 'change') {
             const search = [...form.elements].find(control => control.matches('.sync-filter-search'));
