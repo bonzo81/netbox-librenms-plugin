@@ -1,9 +1,30 @@
 {% load helpers %}
 {% load librenms_sync_query %}
 {% if sync_partial_response %}{% include 'inc/messages.html' %}{% endif %}
-{% if request.htmx %}
-{% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=interface_sync.cache_expiry cache_container_id="cache-countdown" cache_countdown_id="countdown-timer" cache_oob=True %}
-{% endif %}
+<div class="noprint sync-tab-primary-toolbar">
+    <div class="sync-tab-actions d-flex align-items-center gap-2">
+        {% if interface_sync.table %}
+            {% if not migrated_to_marker %}
+            <button type="submit" form="interface-sync-form" class="btn btn-primary">
+                <span class="spinner spinner-border d-none" id="sync-spinner"></span>
+                <span>Sync Selected Interfaces</span>
+            </button>
+            {% include 'netbox_librenms_plugin/inc/_interface_sync_options.html' with sync_options=interface_sync.sync_options sync_form_id="interface-sync-form" %}
+            {% endif %}
+            <a href="#" class="ms-1"
+                onclick="event.preventDefault(); showModal(document.getElementById('interfaceTypeHelpModal'))">
+                <i class="mdi mdi-help-circle"></i> info
+            </a>
+        {% endif %}
+    </div>
+    <div class="sync-tab-filter-refresh">
+        {% if interface_sync.table or interface_sync.filters.in_use %}{% include "netbox_librenms_plugin/inc/_sync_filter_controls.html" with filters=interface_sync.filters prefix="interfaces_" tab="interfaces" section_id="interfaceFilterSection" label="Filter interfaces" %}{% endif %}
+        {% firstof interface_sync.server_key server_key librenms_server_info.server_key as refresh_server_key %}
+        {% include "netbox_librenms_plugin/inc/_interface_sync_refresh.html" with object=interface_sync.object server_key=refresh_server_key %}
+    </div>
+</div>
+{% if interface_sync.table %}{% include "netbox_librenms_plugin/inc/_relationship_diagnostics.html" with diagnostics=interface_sync.relationship_diagnostics %}{% endif %}
+{% if interface_sync.table or interface_sync.filters.in_use %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=interface_sync.filters prefix="interfaces_" tab="interfaces" section_id="interfaceFilterSection" label="Filter interfaces" %}{% endif %}
 
 {% include "netbox_librenms_plugin/inc/_ipam_permission_notice.html" with hidden_ipam_permissions=interface_sync.hidden_ipam_permissions vlan_scope_incomplete=interface_sync.vlan_scope_incomplete %}
 
@@ -24,10 +45,6 @@
 </div>
 {% endif %}
 
-{% include "netbox_librenms_plugin/inc/_relationship_diagnostics.html" with diagnostics=interface_sync.relationship_diagnostics %}
-
-{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=interface_sync.filters prefix="interfaces_" tab="interfaces" section_id="interfaceFilterSection" label="Filter interfaces" %}
-
 {# Migrated donors must not sync: hiding only the button leaves the POST form live (Enter in a filter still submits), so drop the form in migrated mode. #}
 {% with model_name=interface_sync.object|meta:"model_name" %}
 {% if migrated_to_marker %}
@@ -45,7 +62,7 @@
 {# htmx swaps the tab in place, so the scroll position survives; method/action stay as the no-JS fallback. #}
 {# The URL carries the page query, so the tab comes back with the same filters, page and page size. #}
 {% sync_tab_url sync_url interface_name_field=interface_name_field as sync_action_url %}
-<form method="post"
+<form method="post" id="interface-sync-form"
     data-interface-origin-device-id="{{ interface_sync.object.pk }}"
     data-blocked-port-ids="{{ interface_sync.blocked_port_ids_json }}"
     action="{{ sync_action_url }}"
@@ -56,23 +73,7 @@
     {% if interface_sync.server_key %}<input type="hidden" name="server_key" value="{{ interface_sync.server_key }}">{% endif %}
 {% endif %}
     {% endwith %}
-    {% block table_actions %}
-    <div class="noprint d-flex justify-content-between align-items-center mt-0 mb-3 sync-tab-primary-toolbar">
-        <div class="d-flex align-items-center gap-2">
-            {% if not migrated_to_marker %}
-            <button type="submit" class="btn btn-primary">
-                <span class="spinner spinner-border d-none" id="sync-spinner"></span>
-                <span>Sync Selected Interfaces</span>
-            </button>
-            {% include 'netbox_librenms_plugin/inc/_interface_sync_options.html' with sync_options=interface_sync.sync_options %}
-            {% endif %}
-            <a href="#" class="ms-1"
-                onclick="event.preventDefault(); showModal(document.getElementById('interfaceTypeHelpModal'))">
-                <i class="mdi mdi-help-circle"></i> info
-            </a>
-        </div>
-    </div>
-    {% endblock %} <!-- End block table_actions -->
+
     <div class="row mb-3">
         <div class="col col-md-12">
             <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
@@ -184,7 +185,7 @@
 {% endif %}
 {% else %}
 {# A filter in the URL keeps its form with its errors and Clear link, also when no snapshot is cached. #}
-{% if interface_sync.filters.in_use %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=interface_sync.filters prefix="interfaces_" tab="interfaces" section_id="interfaceFilterSection" label="Filter interfaces" %}{% endif %}
+
 <div class="card">
     <div class="card-body text-center text-muted py-4">
         <i class="mdi mdi-sync-off mdi-48px"></i>

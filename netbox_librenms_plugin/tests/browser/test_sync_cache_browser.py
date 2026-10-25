@@ -2903,159 +2903,20 @@ def test_verified_missing_snapshot_restores_pane_controls_but_not_modal_controls
     assert "could not be verified" in page.locator("#interface-sync-content").inner_text()
 
 
-@pytest.mark.parametrize(
-    ("template", "content_id"),
-    [
-        ("_interface_sync.html", "interface-sync-content"),
-        ("_ipaddress_sync.html", "ipaddress-sync-content"),
-        ("_module_sync.html", "module-sync-content"),
-        ("_vlan_sync.html", "vlan-sync-content"),
-        ("_cable_sync.html", "cable-sync-content"),
-    ],
-)
-def test_the_tab_templates_keep_the_refresh_button_outside_the_cached_content(template, content_id):
-    """The pane refresh button the fail-closed test injects must mirror the real templates."""
-    markup = (TEMPLATE_DIR / template).read_text()
-    refresh = markup.index("Refresh ")
-    content = markup.index(f'id="{content_id}"')
-    assert refresh < content, f"{template}: the refresh button moved inside #{content_id}"
+@pytest.mark.parametrize("tab", ["interface", "ipaddress", "module", "vlan", "cable"])
+def test_refresh_forms_and_countdowns_live_in_the_swapped_content(tab):
+    wrapper = (TEMPLATE_DIR / f"_{tab}_sync.html").read_text()
+    content = (TEMPLATE_DIR / f"_{tab}_sync_content.html").read_text()
+    refresh = (TEMPLATE_DIR / "inc" / f"_{tab}_sync_refresh.html").read_text()
 
-
-@pytest.mark.parametrize(
-    ("template", "heading", "countdown_id"),
-    [
-        ("_interface_sync.html", "Interface Sync", "cache-countdown"),
-        ("_ipaddress_sync.html", "IP Address Sync", "ip-cache-countdown"),
-        ("_module_sync.html", "Module Sync", "module-cache-countdown"),
-        ("_vlan_sync.html", "VLAN Sync", "vlan-cache-countdown"),
-        ("_cable_sync.html", "Cable Sync", "cable-cache-countdown"),
-    ],
-)
-def test_tab_toolbars_put_the_shared_countdown_before_refresh(template, heading, countdown_id):
-    """Every tab uses one compact header toolbar without a redundant title."""
-    markup = (TEMPLATE_DIR / template).read_text()
-
-    assert f"<h2>{heading}</h2>" not in markup
-    countdown = markup.index(f'cache_container_id="{countdown_id}"')
-    refresh = markup.index("Refresh ")
-    assert countdown < refresh
-
-
-@pytest.mark.parametrize(
-    ("template", "countdown_id"),
-    [
-        ("_interface_sync_content.html", "cache-countdown"),
-        ("_ipaddress_sync_content.html", "ip-cache-countdown"),
-        ("_module_sync_content.html", "module-cache-countdown"),
-        ("_vlan_sync_content.html", "vlan-cache-countdown"),
-        ("_cable_sync_content.html", "cable-cache-countdown"),
-    ],
-)
-def test_refreshed_tab_content_replaces_the_header_countdown_out_of_band(template, countdown_id):
-    """A tab refresh updates the countdown even though its toolbar is outside the swap target."""
-    markup = (TEMPLATE_DIR / template).read_text()
-
-    assert "{% if request.htmx %}" in markup
-    assert f'cache_container_id="{countdown_id}"' in markup
-    assert "cache_oob=True" in markup
-
-
-@pytest.mark.parametrize(
-    ("wrapper_template", "content_template"),
-    [
-        ("_interface_sync.html", "_interface_sync_content.html"),
-        ("_ipaddress_sync.html", "_ipaddress_sync_content.html"),
-        ("_module_sync.html", "_module_sync_content.html"),
-        ("_vlan_sync.html", "_vlan_sync_content.html"),
-        ("_cable_sync.html", "_cable_sync_content.html"),
-    ],
-)
-def test_tab_toolbars_do_not_stack_extra_vertical_margins(wrapper_template, content_template):
-    """The refresh and primary action rows use one compact vertical rhythm."""
-    wrapper = (TEMPLATE_DIR / wrapper_template).read_text()
-    content = (TEMPLATE_DIR / content_template).read_text()
-
-    assert 'class="d-flex justify-content-end align-items-center mb-0 sync-tab-refresh-toolbar"' in wrapper
+    assert f'id="{tab}-sync-content"' in wrapper
+    assert f"_{tab}_sync_content.html" in wrapper
+    assert "sync-tab-refresh-toolbar" not in wrapper
     assert "sync-tab-primary-toolbar" in content
-    assert "mt-0" in content
-
-
-def test_tab_toolbars_share_a_row_only_when_the_viewport_has_room(page):
-    """Wide tabs align their actions with refresh controls, while narrow tabs stack them."""
-    page.set_content(
-        """
-        <style>
-          * { box-sizing: border-box; }
-          .sync-shell { width: 100%; }
-          .sync-tab-refresh-toolbar { display: flex; justify-content: flex-end; height: 30px; }
-          .sync-tab-refresh-toolbar > .btn-list { display: flex; width: 300px; height: 30px; }
-          .sync-tab-primary-toolbar { display: flex; width: 100%; height: 30px; }
-          .sync-tab-primary-toolbar > .primary-actions { width: 390px; height: 30px; }
-        </style>
-        <div class="sync-shell">
-          <div class="sync-tab-refresh-toolbar">
-            <div class="btn-list" id="refresh-actions"></div>
-          </div>
-          <div id="interface-sync-content">
-            <div class="sync-tab-primary-toolbar">
-              <div class="primary-actions" id="sync-actions"></div>
-            </div>
-          </div>
-        </div>
-        <div class="sync-shell" id="empty-sync-tab">
-          <div class="sync-tab-refresh-toolbar">
-            <div class="btn-list" id="empty-refresh-actions"></div>
-          </div>
-          <div id="cable-sync-content">
-            <div class="card" id="empty-state-card" style="height: 100px;"></div>
-          </div>
-        </div>
-        <div class="sync-shell" id="module-sync-tab">
-          <div class="sync-tab-refresh-toolbar">
-            <div class="btn-list" id="module-refresh-actions"></div>
-          </div>
-          <style id="module-inline-styles"></style>
-          <div id="module-sync-content">
-            <div class="sync-tab-primary-toolbar">
-              <div class="primary-actions" id="module-install-actions"></div>
-            </div>
-          </div>
-        </div>
-        <div class="sync-shell" id="warning-sync-tab">
-          <div class="sync-tab-refresh-toolbar">
-            <div class="btn-list" id="warning-refresh-actions"></div>
-          </div>
-          <div id="warning-sync-content">
-            <div class="alert" id="sync-warning" style="height: 30px;"></div>
-            <div class="sync-tab-primary-toolbar">
-              <div class="primary-actions"></div>
-            </div>
-          </div>
-        </div>
-        """
-    )
-    page.add_style_tag(path=str(STYLE_PATH))
-
-    page.set_viewport_size({"width": 1440, "height": 800})
-    refresh_rect = page.locator("#refresh-actions").bounding_box()
-    sync_rect = page.locator("#sync-actions").bounding_box()
-    assert refresh_rect["y"] == pytest.approx(sync_rect["y"], abs=1)
-    assert sync_rect["x"] + sync_rect["width"] < refresh_rect["x"]
-    module_refresh_rect = page.locator("#module-refresh-actions").bounding_box()
-    module_install_rect = page.locator("#module-install-actions").bounding_box()
-    assert module_refresh_rect["y"] == pytest.approx(module_install_rect["y"], abs=1)
-
-    page.set_viewport_size({"width": 900, "height": 800})
-    refresh_rect = page.locator("#refresh-actions").bounding_box()
-    sync_rect = page.locator("#sync-actions").bounding_box()
-    assert refresh_rect["y"] + refresh_rect["height"] <= sync_rect["y"]
-
-    empty_refresh_rect = page.locator("#empty-refresh-actions").bounding_box()
-    empty_card_rect = page.locator("#empty-state-card").bounding_box()
-    assert empty_refresh_rect["y"] + empty_refresh_rect["height"] + 16 <= empty_card_rect["y"]
-    warning_refresh_rect = page.locator("#warning-refresh-actions").bounding_box()
-    warning_rect = page.locator("#sync-warning").bounding_box()
-    assert warning_refresh_rect["y"] + warning_refresh_rect["height"] + 16 <= warning_rect["y"]
+    assert f"_{tab}_sync_refresh.html" in content
+    assert "cache_oob" not in content
+    assert refresh.index("</button>") < refresh.index("_sync_cache_countdown.html")
+    assert "_hidden_server_key.html" in refresh
 
 
 def test_vlan_group_verification_ignores_a_late_response_for_an_old_selection(page):

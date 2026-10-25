@@ -337,38 +337,39 @@ function getDeviceIdFromUrl() {
 // CACHE COUNTDOWN TIMERS
 // ============================================
 
-/**
- * Initialize a countdown timer for cache expiry display.
- * Updates every second to show remaining time in MM:SS format.
- *
- * @param {string} elementId - DOM element ID containing data-expiry attribute
- * @returns {number|undefined} Interval ID for cleanup, or undefined if element not found
- */
+// Show the remaining cache lifetime without visible text.
 function initializeCountdown(elementId) {
     const countdownElement = document.getElementById(elementId);
     if (!countdownElement) return;
-
+    const expiry = new Date(countdownElement.dataset.expiry).getTime();
+    const timeout = Number(countdownElement.dataset.timeout);
     let countdownInterval;
 
     function updateCountdown() {
-        const expiry = new Date(countdownElement.dataset.expiry).getTime();
-        const now = new Date().getTime();
-        const distance = expiry - now;
-
-        if (distance < 0) {
+        if (!countdownElement.isConnected) {
             clearInterval(countdownInterval);
-            countdownElement.innerHTML = "EXPIRED";
+            return;
+        }
+        const distance = expiry - Date.now();
+        if (distance <= 0) {
+            clearInterval(countdownInterval);
             expireSyncTabFromElement(countdownElement);
             return;
         }
-
-        const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
-        const seconds = Math.floor((distance % (1000 * 60)) / 1000);
-        countdownElement.innerHTML = minutes + "m " + seconds + "s ";
+        const remaining = Math.ceil(distance / 1000);
+        const text = `${Math.floor(remaining / 60)}m ${remaining % 60}s`;
+        const fill = countdownElement.querySelector('.sync-cache-fill');
+        if (fill) fill.style.width = `${Math.max(0, Math.min(100, distance / (timeout * 1000) * 100))}%`;
+        countdownElement.classList.toggle('is-warning', remaining <= 60);
+        countdownElement.setAttribute('aria-valuenow', String(Math.min(timeout, remaining)));
+        countdownElement.setAttribute('aria-valuetext', text);
+        countdownElement.title = text;
+        const description = countdownElement.querySelector('.sync-cache-remaining');
+        if (description) description.textContent = text;
     }
 
-    updateCountdown();
     countdownInterval = setInterval(updateCountdown, COUNTDOWN_UPDATE_INTERVAL_MS);
+    updateCountdown();
     return countdownInterval;
 }
 
@@ -568,7 +569,16 @@ function clearSyncTabContent(tab, message) {
     text.textContent = message;
     body.append(icon, text);
     card.appendChild(body);
-    content.replaceChildren(card);
+    const refresh = content.querySelector('.sync-tab-refresh-toolbar');
+    if (refresh) {
+        refresh.querySelector('.sync-cache-countdown')?.replaceChildren();
+        const toolbar = document.createElement('div');
+        toolbar.className = 'noprint sync-tab-primary-toolbar justify-content-end';
+        toolbar.appendChild(refresh);
+        content.replaceChildren(toolbar, card);
+    } else {
+        content.replaceChildren(card);
+    }
     content.dataset.cacheEmpty = 'true';
 }
 
@@ -4094,6 +4104,26 @@ function applyFilterDisclosureState(section, button, expanded) {
     }
 }
 
+function initializeSyncFilters() {
+    document.querySelectorAll('.sync-filter-form').forEach((form) => {
+        if (form.dataset.liveSearchBound) return;
+        form.dataset.liveSearchBound = 'true';
+        let timer;
+        const submit = () => { clearTimeout(timer); form.requestSubmit(); };
+        Array.from(form.elements).forEach((field) => {
+            if (field.type === 'search') {
+                field.addEventListener('input', () => {
+                    clearTimeout(timer);
+                    timer = setTimeout(submit, 400);
+                });
+            } else if (field.name.endsWith('_sync_state')) {
+                field.addEventListener('change', submit);
+            }
+        });
+        form.addEventListener('submit', () => clearTimeout(timer));
+    });
+}
+
 function initializeFilterDisclosures() {
     document.querySelectorAll('.sync-filter-toggle[aria-controls]').forEach((button) => {
         const section = document.getElementById(button.getAttribute('aria-controls'));
@@ -4529,7 +4559,7 @@ function deleteSelectedInterfaces(selectedCheckboxes) {
 function initializeSyncFormSpinners() {
     // Handle regular form submit buttons with sync-spinner inside
     document.querySelectorAll('.spinner.spinner-border.d-none').forEach(function (spinner) {
-        const form = spinner.closest('form');
+        const form = spinner.closest('button')?.form;
         const button = spinner.closest('button');
         if (!form || !button || form.dataset.spinnerInitialized) return;
 
@@ -4826,6 +4856,7 @@ function initializeScripts() {
     initializeVlanGroupSelects();
     initializeVlanModalSave();
     initializeFilterDisclosures();
+    initializeSyncFilters();
     initializeCountdowns();
     initializeCheckboxListeners();
     initializeBulkEditApply();
