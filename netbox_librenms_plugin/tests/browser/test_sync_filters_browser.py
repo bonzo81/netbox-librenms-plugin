@@ -1050,3 +1050,39 @@ def test_filter_status_and_validation_update_without_replacing_controls(page):
     _answer(_next_request(page, held, 3))
     expect(page.locator(".sync-filter-clear")).to_have_count(0)
     expect(page.locator("#interfaces_filter-count .badge")).to_have_count(0)
+
+
+def test_an_applied_column_survives_a_cancelled_queued_state_change(page):
+    held = _serve_filter_tab(page)
+    page.fill("#id_interfaces_q", "eth")
+    first = _next_request(page, held, 1)
+    page.fill("#id_interfaces_filter_name", "xe")
+    page.click("#interfaceFilterSection button[type=submit]")
+    page.select_option("#id_interfaces_sync_state", "mismatched")
+    page.select_option("#id_interfaces_sync_state", "")
+
+    _answer(first)
+
+    second = _next_request(page, held, 2)
+    assert parse_qs(urlsplit(second.request.url).query)["interfaces_filter_name"] == ["xe"]
+    _answer(second)
+    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-filter_name", "xe")
+    page.wait_for_timeout(700)
+    assert len(held) == 2
+
+
+def test_history_restores_the_filter_controls_with_the_results(page):
+    held = _serve_filter_tab(page)
+    for count, value in enumerate(("eth", "xe"), start=1):
+        page.fill("#id_interfaces_q", value)
+        _answer(_next_request(page, held, count))
+        expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", value)
+
+    page.go_back()
+
+    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "eth")
+    expect(page.locator("#id_interfaces_q")).to_have_value("eth")
+    assert parse_qs(urlsplit(page.url).query)["interfaces_q"] == ["eth"]
+    page.go_forward()
+    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "xe")
+    expect(page.locator("#id_interfaces_q")).to_have_value("xe")
