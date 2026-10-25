@@ -787,7 +787,8 @@ class TestMapOSPlatform:
 
 @transactional_db_with_all_apps()
 class TestMapOSPlatformRace:
-    def test_a_concurrent_mapping_to_another_platform_is_reported_from_the_winner(self):
+    @pytest.mark.parametrize("before_validation", [False, True])
+    def test_a_concurrent_mapping_to_another_platform_is_reported_from_the_winner(self, before_validation):
         """Another session commits the mapping first; this insert meets a real unique violation."""
         from django.contrib.messages import constants
         from django.db import connection, connections
@@ -805,19 +806,23 @@ class TestMapOSPlatformRace:
                 connections.close_all()
 
         def insert_after_the_winner(execute, sql, params, many, context):
-            if sql.startswith('INSERT INTO "netbox_librenms_plugin_platformmapping"') and not winners:
+            boundary = (
+                sql.startswith("SELECT %s AS") and '"netbox_librenms_plugin_platformmapping"' in sql
+                if before_validation
+                else sql.startswith('INSERT INTO "netbox_librenms_plugin_platformmapping"')
+            )
+            if boundary and not winners:
                 with bounded_executor(1) as executor:
                     executor.submit(create_winner).result(timeout=10)
             return execute(sql, params, many, context)
 
+        target = _platform("Juniper Junos")
         with connection.execute_wrapper(insert_after_the_winner):
-            report = map_os_platform("junos", _platform("Juniper Junos"), actor)
+            report = map_os_platform("junos", target, actor)
 
         assert winners
-        assert report == (
-            constants.WARNING,
-            "Platform mapping for 'junos' not created: a mapping already points to 'Other Junos'.",
-        )
+        assert report.level == constants.WARNING
+        assert report == map_os_platform("junos", target, actor)
         assert PlatformMapping.objects.get().netbox_platform == other
 
 

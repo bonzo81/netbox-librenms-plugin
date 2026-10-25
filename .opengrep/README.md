@@ -319,3 +319,7 @@ listener registration through aliases are outside this check.
 calls in the module and cable base views. These callers read port metadata.
 Interface views still request VLAN associations for VLAN comparison. Calls through
 aliases and consumers in other modules are outside this check.
+
+`mapping-create-recovers-validation-races` rejects an IntegrityError-only recovery
+in `_map_os_platform`. The creator must also recover uniqueness errors from
+`full_clean()`. Other creators and exception aliases are outside this check.
