@@ -287,7 +287,10 @@ def test_filter_controls_submit_the_get_form(page, field, value):
     posted = []
     page.route(
         "**/endpoint/sync_tab_filter/**",
-        lambda route: (posted.append(route.request), route.fulfill(body="<p id='filtered'></p>"))[-1],
+        lambda route: (
+            posted.append(route.request),
+            route.fulfill(body="<div id='interface-sync-content-results'><p id='filtered'></p></div>"),
+        )[-1],
     )
     _add_page_scripts(page)
     page.evaluate("initializeScripts()")
@@ -391,3 +394,68 @@ def test_relationship_diagnostics_share_the_colour_key_row(page, model, width):
     assert page.locator(".sync-tab-lead-row").evaluate(
         "e => e.parentElement.parentElement.contains(document.querySelector('.color-key'))"
     )
+
+
+@pytest.mark.parametrize(("tab", "key"), TABS[:-1])
+@pytest.mark.parametrize("server_key", ["secondary", None])
+def test_filter_get_keeps_the_toolbar_cache_bar_and_scoped_refresh(page, tab, key, server_key):
+    load_tab(page, tab, key, server_key=server_key)
+    page.set_viewport_size({"width": 1440, "height": 900})
+    _add_page_scripts(page)
+    page.evaluate("window.originalFilter = document.querySelector('.sync-filter-form')")
+    endpoint = "**/endpoint/sync_tab_filter/**"
+    page.route(
+        endpoint,
+        lambda route: route.fulfill(
+            status=200, content_type="text/html", body=render_tab(tab, key, partial=True, server_key=server_key)
+        ),
+    )
+    with page.expect_response(endpoint):
+        page.locator("input[type=search]").fill("Ethernet")
+    expect(page.locator(f"#{tab}-sync-content-results #test-rows")).to_have_count(1)
+    assert page.evaluate("originalFilter === document.querySelector('.sync-filter-form')")
+    expect(page.get_by_role("progressbar")).to_have_count(1)
+    refresh = page.locator(".sync-tab-refresh-toolbar button")
+    if server_key:
+        expect(refresh).to_be_enabled()
+        expect(page.locator(".sync-tab-refresh-toolbar [name=server_key]")).to_have_value(server_key)
+    else:
+        expect(refresh).to_be_disabled()
+        assert refresh.get_attribute("hx-post") is None
+    search_box = page.locator("input[type=search]").bounding_box()
+    assert search_box["y"] == pytest.approx(refresh.bounding_box()["y"], abs=1)
+    assert page.evaluate("document.documentElement.scrollWidth") <= 1440
+
+
+@pytest.mark.parametrize("expire_during_filter", [False, True])
+def test_cache_expiry_hides_filters_until_refresh(page, expire_during_filter):
+    from test_sync_cache_browser import _page_html, _state
+
+    page.clock.install(time=NOW)
+    initial = {"interfaces": _state("ready"), "ipaddresses": _state("ready-ip")}
+    page.route("**/status?*", lambda route: route.fulfill(json={"tabs": initial}))
+    page.set_content(f"<style>{CSS}</style>" + _page_html(initial))
+    page.locator("#interface-sync-content").evaluate(
+        "(e, html) => e.innerHTML = html", render_tab("interface", "interface_sync", partial=True, timeout=2)
+    )
+    page.add_style_tag(path=str(STYLE_PATH))
+    _add_page_scripts(page)
+    page.evaluate("initializeScripts()")
+    if expire_during_filter:
+        page.route(
+            "**/endpoint/sync_tab_filter/**",
+            lambda route: route.fulfill(body=render_tab("interface", "interface_sync", partial=True, cached=False)),
+        )
+        page.locator("input[type=search]").fill("Ethernet")
+        page.clock.fast_forward(500)
+    else:
+        page.clock.fast_forward(2000)
+    expect(page.locator(".sync-filter-controls, .sync-filter-form, #interfaceFilterSection")).to_have_count(0)
+    page.route(
+        "**/endpoint/device_interface_sync/**",
+        lambda route: route.fulfill(body=render_tab("interface", "interface_sync", partial=True)),
+    )
+    page.locator("#interface-sync-content .sync-tab-refresh-toolbar button").click()
+    expect(page.locator("#interface-sync-content .sync-filter-controls")).to_have_count(1)
+    expect(page.locator("#interface-sync-content .sync-filter-form")).to_have_count(1)
+    expect(page.get_by_role("progressbar")).to_have_count(1)

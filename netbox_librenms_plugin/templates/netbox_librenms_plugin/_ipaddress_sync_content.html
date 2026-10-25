@@ -2,7 +2,7 @@
 {% load librenms_sync_query %}
 {% if sync_partial_response %}{% include 'inc/messages.html' %}{% endif %}
 <div class="noprint sync-tab-primary-toolbar">
-    <div class="sync-tab-actions d-flex align-items-center gap-2">
+    <div id="ipaddress-sync-content-actions" class="sync-tab-actions d-flex align-items-center gap-2">
         {% if ip_sync.table %}
             {% if not migrated_to_marker %}
             <button type="submit" form="ipaddress-sync-form" class="btn btn-primary">
@@ -16,11 +16,15 @@
     <div class="sync-tab-filter-refresh">
         {% if ip_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_controls.html" with filters=ip_sync.filters prefix="ipaddresses_" tab="ipaddresses" section_id="ipFilterSection" label="Filter IP addresses" %}{% endif %}
         {% firstof ip_sync.server_key server_key librenms_server_info.server_key as refresh_server_key %}
+        <div id="ipaddress-sync-content-refresh">
         {% include "netbox_librenms_plugin/inc/_ipaddress_sync_refresh.html" with object=ip_sync.object server_key=refresh_server_key %}
+        </div>
     </div>
 </div>
 {% if ip_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with owner=ip_sync.object content_id="ipaddress-sync-content" server_key=ip_sync.server_key filters=ip_sync.filters prefix="ipaddresses_" tab="ipaddresses" section_id="ipFilterSection" label="Filter IP addresses" %}{% endif %}
 {% if ip_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_panel.html" with owner=ip_sync.object content_id="ipaddress-sync-content" server_key=ip_sync.server_key filters=ip_sync.filters prefix="ipaddresses_" tab="ipaddresses" section_id="ipFilterSection" label="Filter IP addresses" %}{% endif %}
+
+<div id="ipaddress-sync-content-results" data-sync-filter-tab="ipaddresses" data-filter-snapshot="{% if ip_sync.table %}true{% else %}false{% endif %}" data-filter-search="{{ ip_sync.filters.form.q.value|default:'' }}" data-filter-state="{{ ip_sync.filters.form.sync_state.value|default:'' }}">
 
 <!-- IP Address Sync Table -->
 {% if ip_sync.table %}
@@ -131,3 +135,5 @@ the interface move-to-winner control in _interface_sync_content.html.
     </div>
 </div>
 {% endif %}
+
+</div>
