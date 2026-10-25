@@ -337,7 +337,7 @@ function getDeviceIdFromUrl() {
 // CACHE COUNTDOWN TIMERS
 // ============================================
 
-// Show the remaining cache lifetime without visible text.
+// Show the remaining cache lifetime below Refresh.
 function initializeCountdown(elementId) {
     const countdownElement = document.getElementById(elementId);
     if (!countdownElement) return;
@@ -351,21 +351,23 @@ function initializeCountdown(elementId) {
             return;
         }
         const distance = expiry - Date.now();
-        if (distance <= 0) {
-            clearInterval(countdownInterval);
-            expireSyncTabFromElement(countdownElement);
-            return;
-        }
-        const remaining = Math.ceil(distance / 1000);
-        const text = `${Math.floor(remaining / 60)}m ${remaining % 60}s`;
+        const remaining = Math.max(0, Math.ceil(distance / 1000));
+        const text = remaining > 0
+            ? `Cached data expires in ${Math.floor(remaining / 60)}m ${remaining % 60}s. Refresh to fetch it again.`
+            : 'Cached data expired. Refresh to fetch it again.';
         const fill = countdownElement.querySelector('.sync-cache-fill');
         if (fill) fill.style.width = `${Math.max(0, Math.min(100, distance / (timeout * 1000) * 100))}%`;
-        countdownElement.classList.toggle('is-warning', remaining <= 60);
+        countdownElement.classList.toggle('is-warning', remaining > 0 && remaining < 60);
+        countdownElement.classList.toggle('is-expired', remaining === 0);
         countdownElement.setAttribute('aria-valuenow', String(Math.min(timeout, remaining)));
         countdownElement.setAttribute('aria-valuetext', text);
         countdownElement.title = text;
         const description = countdownElement.querySelector('.sync-cache-remaining');
-        if (description) description.textContent = text;
+        if (description) description.textContent = remaining < 60 ? `${remaining}s` : `${Math.ceil(remaining / 60)}m`;
+        if (remaining === 0) {
+            clearInterval(countdownInterval);
+            expireSyncTabFromElement(countdownElement);
+        }
     }
 
     countdownInterval = setInterval(updateCountdown, COUNTDOWN_UPDATE_INTERVAL_MS);
@@ -426,7 +428,7 @@ function syncCacheController() {
         const content = syncCacheContent(tab);
         if (content && !state.snapshot_available && !isColdSyncCacheState(state)) {
             root._controller.invalidatedLocally.add(tab);
-            clearSyncTabContent(tab, syncCacheUnavailableReason(tab, state));
+            clearSyncTabContent(tab, syncCacheUnavailableReason(tab, state), state.state === 'expired');
         }
         updateSyncCacheTabState(tab, state);
     });
@@ -555,7 +557,7 @@ function formatSyncCacheRelativeTime(timestamp) {
     return `${days} day${days === 1 ? '' : 's'} ago`;
 }
 
-function clearSyncTabContent(tab, message) {
+function clearSyncTabContent(tab, message, keepCountdown = false) {
     const content = syncCacheContent(tab);
     if (!content) return;
     const card = document.createElement('div');
@@ -571,7 +573,7 @@ function clearSyncTabContent(tab, message) {
     card.appendChild(body);
     const refresh = content.querySelector('.sync-tab-refresh-toolbar');
     if (refresh) {
-        refresh.querySelector('.sync-cache-countdown')?.replaceChildren();
+        if (!keepCountdown) refresh.querySelector('.sync-cache-countdown')?.replaceChildren();
         const toolbar = document.createElement('div');
         toolbar.className = 'noprint sync-tab-primary-toolbar justify-content-end';
         toolbar.appendChild(refresh);
@@ -633,7 +635,7 @@ function expireSyncTabFromElement(element) {
     const controller = syncCacheController();
     if (!controller) return;
     controller.invalidatedLocally.add(tab);
-    clearSyncTabContent(tab, `${syncCacheLabel(tab)} cache expired. Refresh this tab to load current data.`);
+    clearSyncTabContent(tab, `${syncCacheLabel(tab)} cache expired. Refresh this tab to load current data.`, true);
     updateSyncCacheTabState(tab, { state: 'expired', snapshot_available: false });
 }
 
@@ -863,7 +865,7 @@ function reconcileSyncCacheStatus(nextStatus, statusGeneration = null, signal = 
             if (state.refresh_error && state.state !== 'refresh_failed') {
                 reason = `${reason} ${state.refresh_error} Refresh this tab to try again.`;
             }
-            clearSyncTabContent(tab, reason);
+            clearSyncTabContent(tab, reason, state.state === 'expired');
             const marker = refreshChanged ? `refresh:${state.refresh_error_timestamp}` : state.revision;
             if (!notice && marker) {
                 const message = state.state === 'invalidated' && !state.refresh_error
