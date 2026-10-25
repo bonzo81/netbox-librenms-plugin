@@ -265,6 +265,7 @@
 }
 
 /* At phone width, the sync tables wrap their cell content, so that they fit their card without a scroll wrapper. */
+@media (max-width: 575.98px) {
     .librenms-info-sync-table .d-flex,
     #librenms-cable-table .d-flex,
     #librenms-cable-table-vc .d-flex,
