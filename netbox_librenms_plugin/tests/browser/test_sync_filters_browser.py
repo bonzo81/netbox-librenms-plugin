@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
+import pytest
 from playwright.sync_api import expect
 
 from test_sync_cache_browser import _add_page_scripts, _page_html, _state
@@ -622,7 +623,7 @@ def _filter_form_class():
     class InterfaceFilterForm(forms.Form):
         """The shape of SyncFilterForm for the interfaces tab, which the browser suite cannot import."""
 
-        q = forms.CharField(label="Search", required=False)
+        q = forms.CharField(label="Search", required=False, max_length=256)
         sync_state = forms.ChoiceField(
             label="Sync state", required=False, choices=[("", "All sync states"), ("mismatched", "Mismatched")]
         )
@@ -664,7 +665,12 @@ def _filter_tab(query):
 
     form = _filter_form_class()(query, prefix="interfaces_")
     form.is_valid()
-    filters = SimpleNamespace(form=form, active=any(query.values()), in_use=any(query.values()))
+    filters = SimpleNamespace(
+        form=form,
+        active=any(value for key, value in query.items() if key.startswith("interfaces_")),
+        in_use=any(query.values()),
+        active_count=sum(bool(value) for key, value in query.items() if key.startswith("interfaces_")),
+    )
     context = Context(
         {
             "filters": filters,
@@ -682,13 +688,17 @@ def _filter_tab(query):
         return engine.get_template(f"netbox_librenms_plugin/inc/{name}.html").render(context)
 
     return f"""{render("_sync_filter_form")}
+        <div class="sync-tab-primary-toolbar">{render("_sync_filter_controls")}</div>
+        {render("_sync_filter_panel")}
+        <div id="interface-sync-content-results" data-filter-search="{query.get("interfaces_q", "")}" data-filter-state="{query.get("interfaces_sync_state", "")}">
         <form method="post" id="sync-form" action="/sync/">
           <input type="hidden" name="csrfmiddlewaretoken" value="token">
           <div class="sync-tab-primary-toolbar"><button type="submit" id="sync">Sync</button>
-            {render("_sync_filter_controls")}</div>
-          {render("_sync_filter_panel")}
-          <table id="{TABLE}" data-rendered-q="{query.get("interfaces_q", "")}"></table>
-        </form>"""
+            </div>
+          <table id="{TABLE}" data-rendered-q="{query.get("interfaces_q", "")}"
+            data-rendered-sync_state="{query.get("interfaces_sync_state", "")}"
+            data-rendered-filter_name="{query.get("interfaces_filter_name", "")}"></table>
+        </form></div>"""
 
 
 def _filter_page(query):
@@ -762,6 +772,137 @@ def test_a_sync_state_choice_filters_the_tab_at_once(page):
     assert parse_qs(urlsplit(page.url).query)["interfaces_sync_state"] == ["mismatched"]
 
 
+@pytest.mark.parametrize("control", ["sync_state", "filter_name"])
+def test_filter_changes_during_a_search_are_sent_once_after_the_response(page, control):
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    held = _serve_filter_tab(page)
+    page.fill("#id_interfaces_q", "eth")
+    first = _next_request(page, held, 1)
+
+    if control == "sync_state":
+        page.focus("#id_interfaces_sync_state")
+        page.select_option("#id_interfaces_sync_state", "mismatched")
+        value = "mismatched"
+    else:
+        page.fill("#id_interfaces_filter_name", "xe")
+        page.click("#interfaceFilterSection button[type=submit]")
+        value = "xe"
+    page.wait_for_timeout(700)
+    assert len(held) == 1
+
+    _answer(first)
+    second = _next_request(page, held, 2)
+    query = parse_qs(urlsplit(second.request.url).query)
+    assert query[f"interfaces_{control}"] == [value]
+    assert query["interfaces_q"] == ["eth"]
+    _answer(second)
+
+    expect(page.locator(f"#id_interfaces_{control}")).to_have_value(value)
+    expect(page.locator("#id_interfaces_q")).to_have_value("eth")
+    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "eth")
+    expect(page.locator(f"#{TABLE}")).to_have_attribute(f"data-rendered-{control}", value)
+    assert parse_qs(urlsplit(page.url).query)[f"interfaces_{control}"] == [value]
+    page.wait_for_timeout(1000)
+    assert len(held) == 2
+    assert errors == []
+
+
+def test_unapplied_column_edits_survive_a_search_response_without_submitting(page):
+    held = _serve_filter_tab(page)
+    page.fill("#id_interfaces_q", "eth")
+    first = _next_request(page, held, 1)
+    page.fill("#id_interfaces_filter_name", "xe")
+
+    _answer(first)
+
+    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "eth")
+    expect(page.locator("#id_interfaces_filter_name")).to_have_value("xe")
+    page.wait_for_timeout(1000)
+    assert len(held) == 1
+    page.click("#interfaceFilterSection button[type=submit]")
+    second = _next_request(page, held, 2)
+    assert parse_qs(urlsplit(second.request.url).query)["interfaces_filter_name"] == ["xe"]
+    _answer(second)
+    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-filter_name", "xe")
+
+
+def test_a_delayed_search_keeps_all_latest_fields_after_focus_moves(page):
+    held = _serve_filter_tab(page)
+    page.fill("#id_interfaces_q", "et")
+    first = _next_request(page, held, 1)
+    page.fill("#id_interfaces_q", "eth")
+    page.fill("#id_interfaces_filter_name", "xe")
+
+    # The response arrives before the search delay, with focus on a column field.
+    _answer(first)
+    second = _next_request(page, held, 2)
+    query = parse_qs(urlsplit(second.request.url).query)
+    assert query["interfaces_q"] == ["eth"]
+    assert query["interfaces_filter_name"] == ["xe"]
+    _answer(second)
+    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "eth")
+    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-filter_name", "xe")
+    expect(page.locator("#id_interfaces_filter_name")).to_be_focused()
+    page.wait_for_timeout(1000)
+    assert len(held) == 2
+
+
+def test_repeated_changes_and_clearing_during_each_request_send_only_the_latest_form(page):
+    held = _serve_filter_tab(page)
+    page.fill("#id_interfaces_q", "eth")
+    first = _next_request(page, held, 1)
+    page.select_option("#id_interfaces_sync_state", "mismatched")
+    page.fill("#id_interfaces_filter_name", "xe")
+    page.click("#interfaceFilterSection button[type=submit]")
+    page.fill("#id_interfaces_filter_name", "ge")
+    page.click("#interfaceFilterSection button[type=submit]")
+    _answer(first)
+
+    second = _next_request(page, held, 2)
+    query = parse_qs(urlsplit(second.request.url).query)
+    assert query["interfaces_sync_state"] == ["mismatched"]
+    assert query["interfaces_filter_name"] == ["ge"]
+    page.select_option("#id_interfaces_sync_state", "")
+    page.fill("#id_interfaces_filter_name", "")
+    page.click("#interfaceFilterSection button[type=submit]")
+    _answer(second)
+
+    third = _next_request(page, held, 3)
+    query = parse_qs(urlsplit(third.request.url).query)
+    assert "interfaces_sync_state" not in query
+    assert "interfaces_filter_name" not in query
+    assert query["interfaces_q"] == ["eth"]
+    _answer(third)
+    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-sync_state", "")
+    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-filter_name", "")
+    page.wait_for_timeout(1000)
+    assert len(held) == 3
+
+
+def test_a_queued_choice_back_to_the_sent_value_does_not_apply_later_column_edits(page):
+    held = _serve_filter_tab(page)
+    page.fill("#id_interfaces_q", "eth")
+    first = _next_request(page, held, 1)
+    page.select_option("#id_interfaces_sync_state", "mismatched")
+    page.select_option("#id_interfaces_sync_state", "")
+    _answer(first)
+    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "eth")
+    page.wait_for_timeout(1000)
+    assert len(held) == 1
+
+    # A later cache fragment replacement must not turn that completed choice into an Apply.
+    page.fill("#id_interfaces_filter_name", "xe")
+    page.evaluate(
+        "endpoint => { window.htmxTest.ajax('GET', endpoint + '?interfaces_q=eth', {target: '#interface-sync-content-results', select: '#interface-sync-content-results'}); }",
+        FILTER_ENDPOINT,
+    )
+    _answer(_next_request(page, held, 2))
+    expect(page.locator("#id_interfaces_filter_name")).to_have_value("xe")
+    page.wait_for_timeout(1000)
+    assert len(held) == 2
+
+
 def test_the_column_filters_wait_for_apply(page):
     held = _serve_filter_tab(page)
     page.fill("#id_interfaces_filter_name", "xe")
@@ -822,3 +963,90 @@ def test_a_search_waits_for_the_running_request_and_then_sends_only_the_latest_t
     expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "et-0/")
     page.wait_for_timeout(700)
     assert [parse_qs(urlsplit(route.request.url).query).get("interfaces_q") for route in held] == [["et"], ["et-0/"]]
+
+
+def test_a_search_typed_before_the_response_keeps_its_full_delay(page):
+    held = _serve_filter_tab(page)
+    page.fill("#id_interfaces_q", "et")
+    first = _next_request(page, held, 1)
+    page.fill("#id_interfaces_q", "eth")
+    typed_at = page.evaluate("performance.now()")
+    _answer(first)
+    second = _next_request(page, held, 2)
+    elapsed = page.evaluate("performance.now()") - typed_at
+    assert elapsed >= 450, elapsed
+    assert parse_qs(urlsplit(second.request.url).query)["interfaces_q"] == ["eth"]
+    _answer(second)
+
+
+def test_a_cancelled_choice_does_not_submit_a_later_unapplied_column(page):
+    held = _serve_filter_tab(page)
+    page.fill("#id_interfaces_q", "eth")
+    first = _next_request(page, held, 1)
+    page.select_option("#id_interfaces_sync_state", "mismatched")
+    page.select_option("#id_interfaces_sync_state", "")
+    page.fill("#id_interfaces_filter_name", "xe")
+    _answer(first)
+    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "eth")
+    page.wait_for_timeout(1000)
+    assert all("interfaces_filter_name" not in parse_qs(urlsplit(route.request.url).query) for route in held)
+    expect(page.locator("#id_interfaces_filter_name")).to_have_value("xe")
+
+
+def test_cache_expiry_discards_a_delayed_search_before_a_new_form_appears(page):
+    held = _serve_filter_tab(page)
+    page.fill("#id_interfaces_q", "eth")
+    # Use the same removal path as cache expiry, during the search delay.
+    page.evaluate("""() => {
+        document.body.insertAdjacentHTML('beforeend', '<div id="librenms-sync-cache-state"></div>');
+        document.getElementById('librenms-sync-cache-state')._controller = {
+            contract: {interfaces: {content_id: 'interface-sync-content'}}
+        };
+        clearSyncTabContent('interfaces');
+    }""")
+    page.wait_for_timeout(700)
+    assert held == []
+    page.evaluate(
+        "endpoint => { htmxTest.ajax('GET', endpoint, {target: '#interface-sync-content'}); }", FILTER_ENDPOINT
+    )
+    _answer(_next_request(page, held, 1))
+    expect(page.locator("#id_interfaces_q")).to_have_value("")
+    page.fill("#id_interfaces_filter_name", "xe")
+    page.evaluate(
+        "endpoint => { htmxTest.ajax('GET', endpoint, {target: '#interface-sync-content'}); }", FILTER_ENDPOINT
+    )
+    _answer(_next_request(page, held, 2))
+    page.wait_for_timeout(1000)
+    assert len(held) == 2
+
+
+def test_a_filter_response_keeps_the_same_form_and_controls(page):
+    held = _serve_filter_tab(page)
+    page.evaluate(
+        "window.originalFilterForm = document.querySelector('.sync-filter-form'); window.originalSearch = document.querySelector('.sync-filter-search')"
+    )
+    page.fill("#id_interfaces_q", "eth")
+    _answer(_next_request(page, held, 1))
+    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "eth")
+    assert page.evaluate(
+        "originalFilterForm === document.querySelector('.sync-filter-form') && originalSearch === document.querySelector('.sync-filter-search')"
+    )
+
+
+def test_filter_status_and_validation_update_without_replacing_controls(page):
+    held = _serve_filter_tab(page)
+    search = page.locator("#id_interfaces_q")
+    page.fill("#id_interfaces_q", "x" * 257)
+    _answer(_next_request(page, held, 1))
+    expect(page.locator("#interfaces_filter-errors [role=alert]")).to_be_visible()
+    expect(search).to_have_attribute("aria-invalid", "true")
+    expect(page.locator(".sync-filter-clear")).to_have_count(1)
+    page.fill("#id_interfaces_q", "eth")
+    _answer(_next_request(page, held, 2))
+    expect(page.locator("#interfaces_filter-errors [role=alert]")).to_have_count(0)
+    expect(search).not_to_have_attribute("aria-invalid", "true")
+    expect(page.locator("#interfaces_filter-count .badge")).to_have_text("1")
+    page.fill("#id_interfaces_q", "")
+    _answer(_next_request(page, held, 3))
+    expect(page.locator(".sync-filter-clear")).to_have_count(0)
+    expect(page.locator("#interfaces_filter-count .badge")).to_have_count(0)
