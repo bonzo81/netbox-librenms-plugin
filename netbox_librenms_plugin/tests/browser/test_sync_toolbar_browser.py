@@ -22,7 +22,7 @@ NOW = datetime(2026, 10, 25, 10, tzinfo=UTC)
 CSS = (
     NETBOX_PAGE_CSS
     + """
-:root { --tblr-success: #2fb344; --tblr-warning: #f59f00; }
+:root { --tblr-success: #2fb344; --tblr-warning: #f59f00; --tblr-danger: #d63939; }
 body { padding: 16px; }
 .justify-content-between { justify-content: space-between; }
 .justify-content-end { justify-content: flex-end; }
@@ -167,16 +167,27 @@ def test_cache_bar_drains_and_warns_in_the_last_minute(page, tab, key):
     expect(bar).to_have_count(1)
     start = bar.locator(".sync-cache-fill").bounding_box()["width"]
     refresh_width = page.locator("button[hx-post].btn-outline-primary").bounding_box()["width"]
-    assert start == pytest.approx(refresh_width, abs=1)
+    assert bar.bounding_box()["width"] == pytest.approx(refresh_width, abs=1)
+    assert start < refresh_width
+    expect(bar.locator(".mdi-timer-outline")).to_have_count(1)
+    expect(bar.locator(".sync-cache-remaining")).to_have_text("3m")
     assert bar.get_attribute("aria-valuemax") == "180"
     page.clock.fast_forward(60_000)
     middle = bar.locator(".sync-cache-fill").bounding_box()["width"]
     assert middle == pytest.approx(start * 2 / 3, abs=1)
+    expect(bar.locator(".sync-cache-remaining")).to_have_text("2m")
     page.clock.fast_forward(61_000)
     assert bar.get_attribute("aria-valuenow") == "59"
     assert bar.get_attribute("aria-valuetext") == bar.get_attribute("title")
     assert bar.locator(".sync-cache-fill").evaluate("e => getComputedStyle(e).backgroundColor") == "rgb(245, 159, 0)"
-    assert bar.locator(".sync-cache-remaining").bounding_box()["width"] <= 1
+    expect(bar.locator(".sync-cache-remaining")).to_have_text("59s")
+    for selector in (".mdi-timer-outline", ".sync-cache-remaining"):
+        assert bar.locator(selector).evaluate("e => getComputedStyle(e).color") == "rgb(245, 159, 0)"
+    label_style = bar.locator(".sync-cache-remaining").evaluate(
+        "e => ({font: getComputedStyle(e).fontFamily, digits: getComputedStyle(e).fontVariantNumeric})"
+    )
+    assert "monospace" in label_style["font"]
+    assert label_style["digits"] == "tabular-nums"
 
 
 @pytest.mark.parametrize(("tab", "key"), TABS)
@@ -224,6 +235,7 @@ def test_cache_expiry_removes_rows_and_actions_but_keeps_refresh(page):
         "(e, html) => e.outerHTML = html", render_tab("interface", "interface_sync", timeout=120)
     )
     _add_page_scripts(page)
+    page.add_style_tag(path=str(STYLE_PATH))
     page.evaluate("initializeSyncCacheConsistency(); initializeCountdowns()")
     expect(page.locator("#test-rows")).to_have_count(1)
     page.clock.fast_forward(120_000)
@@ -231,7 +243,26 @@ def test_cache_expiry_removes_rows_and_actions_but_keeps_refresh(page):
     expect(page.locator("#interface-sync-form")).to_have_count(0)
     expect(page.locator(".sync-tab-actions")).to_have_count(0)
     expect(page.locator("#interface-sync-content button[hx-post].btn-outline-primary")).to_be_visible()
-    expect(page.get_by_role("progressbar")).to_have_count(0)
+    bar = page.get_by_role("progressbar")
+    expect(bar).to_have_count(1)
+    expect(bar).to_have_attribute("aria-valuenow", "0")
+    expect(bar.locator(".sync-cache-remaining")).to_have_text("0s")
+    assert bar.locator(".sync-cache-fill").bounding_box()["width"] == 0
+    for selector in (".mdi-timer-outline", ".sync-cache-remaining"):
+        assert bar.locator(selector).evaluate("e => getComputedStyle(e).color") == "rgb(214, 57, 57)"
+    expect(page.locator(".sync-filter-controls, .sync-filter-form")).to_have_count(0)
+    page.evaluate("""() => reconcileSyncCacheStatus({
+        ...syncCacheController().status,
+        interfaces: {...syncCacheController().status.interfaces, state: 'expired', snapshot_available: false}
+    })""")
+    expect(page.get_by_role("progressbar")).to_have_count(1)
+
+
+@pytest.mark.parametrize(("tab", "key"), TABS[:-1])
+def test_filter_controls_need_a_snapshot_even_with_filter_input(page, tab, key):
+    load_tab(page, tab, key, cached=False)
+    expect(page.locator(".sync-filter-controls, .sync-filter-form")).to_have_count(0)
+    expect(page.locator("button[hx-post].btn-outline-primary")).to_be_visible()
 
 
 @pytest.mark.parametrize("field,value", [("q", "Ethernet"), ("sync_state", "new")])
