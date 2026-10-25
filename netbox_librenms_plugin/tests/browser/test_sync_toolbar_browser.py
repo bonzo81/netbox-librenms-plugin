@@ -253,7 +253,7 @@ def test_cache_expiry_removes_rows_and_actions_but_keeps_refresh(page):
     expect(page.locator(".sync-filter-controls, .sync-filter-form")).to_have_count(0)
     page.evaluate("""() => reconcileSyncCacheStatus({
         ...syncCacheController().status,
-        interfaces: {...syncCacheController().status.interfaces, state: 'expired', snapshot_available: false}
+        interfaces: {...syncCacheController().status.interfaces, state: 'missing', snapshot_available: false}
     })""")
     expect(page.get_by_role("progressbar")).to_have_count(1)
 
