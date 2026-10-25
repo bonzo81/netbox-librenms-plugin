@@ -119,7 +119,7 @@
 
 @media (max-width: 575.98px) {
     .sync-tab-filter-refresh {
-        flex: 1 1 100%;
+        flex: 0 1 auto;
         justify-content: flex-start;
     }
 
