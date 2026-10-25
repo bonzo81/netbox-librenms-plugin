@@ -43,7 +43,16 @@ body { padding: 16px; }
 
 
 def render_tab(
-    tab, key, *, model="device", cached=True, migrated=False, partial=False, timeout=600, server_key="secondary"
+    tab,
+    key,
+    *,
+    model="device",
+    cached=True,
+    migrated=False,
+    partial=False,
+    timeout=600,
+    server_key="secondary",
+    active_count=0,
 ):
     """Use real templates with only NetBox tags and table rendering replaced."""
     from django.conf import settings
@@ -90,6 +99,7 @@ def render_tab(
         is_valid=True,
         in_use=True,
         active=True,
+        active_count=active_count,
         form=SimpleNamespace(
             q=field("q"),
             sync_state=field("sync_state", [("", "All sync states"), ("new", "New")]),
@@ -329,8 +339,9 @@ def test_sync_actions_submit_selected_rows_and_toolbar_options(page):
     assert parse_qs(posted[0].post_data)["server_key"] == ["secondary"]
 
 
-def test_active_filters_share_the_row_with_actions_in_the_netbox_frame(page):
-    load_tab(page, "interface", "interface_sync")
+@pytest.mark.parametrize("active_count", [0, 1])
+def test_active_filters_share_the_row_with_actions_in_the_netbox_frame(page, active_count):
+    load_tab(page, "interface", "interface_sync", active_count=active_count)
     page.set_viewport_size({"width": 1440, "height": 900})
     # These dimensions match the live NetBox sidebar and control widths.
     page.add_style_tag(
@@ -343,6 +354,9 @@ def test_active_filters_share_the_row_with_actions_in_the_netbox_frame(page):
         .sync-tab-refresh-toolbar button { width: 147px; }
     """
     )
+    if active_count:
+        page.add_style_tag(content=".sync-filter-toggle { width: 104px; }")
+        expect(page.locator("#interfaces_filter-count .badge")).to_have_text("1")
     sync = page.locator('button[form="interface-sync-form"]').bounding_box()
     refresh = page.locator(".sync-tab-refresh-toolbar button").bounding_box()
     clear = page.locator(".sync-filter-clear").bounding_box()
