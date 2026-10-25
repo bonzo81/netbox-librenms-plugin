@@ -14,7 +14,7 @@ The Interfaces, Cables, IP Addresses and VLANs tabs have a filter on the right o
 - **Sync state** shows the matching, the mismatched, or the not-in-NetBox rows. Each tab below says what these states mean for its rows. A row in no state shows only under **All sync states**.
 - **Filters** opens one field for each column. Search, Sync state and the column fields must all match.
 
-Search submits the filters automatically 400 ms after your last input. Sync state submits the filters when you select a state. Select **Apply** or press Enter to apply column filters. Enter in a filter field never starts a sync. **Clear filters** removes the filters of that tab.
+Search submits the filters automatically 500 ms after your last input. Sync state submits the filters when you select a state. Select **Apply** or press Enter to apply column filters. Enter in a filter field never starts a sync. **Clear filters** removes the filters of that tab.
 
 The filters are part of the page URL. Paging, sorting, the page size, refreshing, syncing and the confirmation dialogs keep the filters of every tab. A refresh or a sync also keeps the page, or shows the last page when the page no longer exists. A new filter starts at the first page. These changes reset more:
 
