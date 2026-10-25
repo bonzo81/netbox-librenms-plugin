@@ -33,3 +33,11 @@ def sync_tab_url(context, path="", prefix="", reset="", **changes):
 def sync_tab_query_items(context, prefix="", reset="", **changes):
     """Return the (key, value) pairs of the changed page query, for hidden form inputs; see ``sync_tab_url``."""
     return SyncQuery.from_request(context["request"]).items(changes, reset.split(), prefix)
+
+
+@register.simple_tag
+def sync_cache_timeout(server_key):
+    """Return the configured cache lifetime in seconds for the tab's server."""
+    from netbox_librenms_plugin.librenms_api import configured_cache_timeout
+
+    return configured_cache_timeout(server_key)
