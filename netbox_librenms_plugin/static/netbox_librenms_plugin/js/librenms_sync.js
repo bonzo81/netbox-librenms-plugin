@@ -1957,11 +1957,12 @@ function _rowCompanionInputs(row) {
  * @returns {boolean}
  */
 function _isSelectionCompanionName(name) {
-    const cableSnapshotPrefixes = [
+    const snapshotPrefixes = [
         'expected_local_id_',
         'expected_local_device_id_',
         'expected_remote_id_',
         'expected_remote_device_id_',
+        'expected_vlan_name_',
     ];
     return (
         Boolean(name) &&
@@ -1969,7 +1970,7 @@ function _isSelectionCompanionName(name) {
             name.startsWith('selection_grant_') ||
             name.startsWith('vlan_group_') ||
             name.startsWith('vrf_') ||
-            cableSnapshotPrefixes.some((prefix) => name.startsWith(prefix)))
+            snapshotPrefixes.some((prefix) => name.startsWith(prefix)))
     );
 }
 
