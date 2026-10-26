@@ -264,6 +264,7 @@ def test_unsigned_vlan_selection_requires_a_present_canonical_group_field(client
             "action": "create_vlans",
             "select": "612",
             "vlan_group_612": "",
+            "expected_vlan_name_612": "Explicit global",
         },
     )
 
@@ -301,6 +302,7 @@ def test_present_unusable_sync_one_rejects_the_request_instead_of_running_bulk_r
             "sync_one": sync_one,
             "select": "701",
             "vlan_group_701": "",
+            "expected_vlan_name_701": "Checked bulk row",
         },
     )
 
@@ -356,6 +358,7 @@ def test_per_row_group_selection_requires_vlan_group_view_permission(client, set
             "action": "create_vlans",
             "sync_one": "101",
             "vlan_group_101": str(group.pk),
+            "expected_vlan_name_101": "Proposed name",
         },
     )
 
@@ -400,6 +403,7 @@ def test_force_all_intent_group_requires_vlan_group_view_permission(client, sett
             "force_all": "1",
             "conflict_intent": intent,
             "vlan_group_101": str(group.pk),
+            "expected_vlan_name_101": "Proposed name",
         },
     )
 
@@ -495,6 +499,7 @@ def test_per_row_create_ignores_other_ticked_rows(client, settings):
             "action": "create_vlans",
             "sync_one": "201",
             "vlan_group_201": "",
+            "expected_vlan_name_201": "Create this",
             "select": ["202", "203"],
         },
     )
@@ -537,7 +542,9 @@ def test_per_row_update_keeps_one_row_through_confirmation(client, settings):
             "sync_one": "301",
             "select": "302",
             "vlan_group_301": str(group.pk),
+            "expected_vlan_name_301": "Updated selected",
             "vlan_group_302": str(group.pk),
+            "expected_vlan_name_302": "Updated ticked",
         },
         HTTP_HX_REQUEST="true",
     )
@@ -562,6 +569,7 @@ def test_per_row_update_keeps_one_row_through_confirmation(client, settings):
             "select": "301",
             "conflict_intent": conflict["intent"],
             "vlan_group_301": str(group.pk),
+            "expected_vlan_name_301": "Updated selected",
         },
         HTTP_HX_REQUEST="true",
     )
@@ -794,7 +802,13 @@ def test_invalid_only_selection_still_reports_the_batch_summary(client, settings
 
     response = client.post(
         _sync_url(device),
-        {"server_key": "default", "action": "create_vlans", "select": "0", "vlan_group_0": ""},
+        {
+            "server_key": "default",
+            "action": "create_vlans",
+            "select": "0",
+            "vlan_group_0": "",
+            "expected_vlan_name_0": "Invalid VID",
+        },
     )
 
     assert response.status_code == 302
