@@ -1364,7 +1364,8 @@ def test_vlan_row_submit_keeps_another_page_selection_and_group(page):
         <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit">
           <table id="librenms-vlan-table"><tbody><tr>
             <td><input id="vlan-101" type="checkbox" name="select" value="101"></td>
-            <td><select name="vlan_group_101">
+            <td><input type="hidden" name="expected_vlan_name_101" value="users">
+              <select name="vlan_group_101">
               <option value="1">Group A</option><option value="2">Group B</option>
             </select></td>
           </tr></tbody></table>
@@ -1402,6 +1403,7 @@ def test_vlan_row_submit_keeps_another_page_selection_and_group(page):
     assert [pair for pair in posted if pair[0] == "sync_one"] == [["sync_one", "201"]]
     assert [pair for pair in posted if pair == ["select", "101"]] == []
     assert stored["101"]["inputs"]["vlan_group_101"] == "2"
+    assert stored["101"]["inputs"]["expected_vlan_name_101"] == "users"
 
 
 # Tabler's modal layout: the open modal covers the viewport, so a click beside the dialog hits the modal itself.

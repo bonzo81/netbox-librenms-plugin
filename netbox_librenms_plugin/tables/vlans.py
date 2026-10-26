@@ -198,9 +198,13 @@ class LibreNMSVLANTable(tables.Table):
             ],
         )
 
+        # The writer refuses a row whose proposed name is not the name this page shows.
         select_html = format_html(
+            '<input type="hidden" name="expected_vlan_name_{}" value="{}">'
             '<select name="vlan_group_{}" class="form-select form-select-sm vlan-sync-group-select"'
             ' data-vlan-id="{}" data-vlan-name="{}">{}</select>',
+            vlan_id,
+            record.get("name") or "",
             vlan_id,
             vlan_id,
             record.get("name", ""),

@@ -64,6 +64,7 @@ class _VLANSyncOutcome:
     invalid_vid_count: int = 0
     invalid_name_count: int = 0
     name_taken_count: int = 0
+    stale_name_count: int = 0
     add_permission_skipped_count: int = 0
     confirmation_error_count: int = 0
     conflicts: list[dict] = field(default_factory=list)
@@ -102,6 +103,8 @@ class _VLANSyncOutcome:
             reasons.append(f"{self.invalid_name_count} skipped (invalid VLAN name)")
         if self.name_taken_count:
             reasons.append(f"{self.name_taken_count} skipped (VLAN name already in the group)")
+        if self.stale_name_count:
+            reasons.append(f"{self.stale_name_count} skipped (VLAN name changed after display)")
         if self.confirmation_error_count:
             reasons.append(f"{self.confirmation_error_count} skipped (confirmation no longer current)")
         return reasons
@@ -445,6 +448,19 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             return None
         return name
 
+    @staticmethod
+    def _name_is_the_displayed_name(request, vid, name, outcome):
+        """Return whether the page showed *name* for this VID, so a rule change never writes an unseen name."""
+        if request.POST.get(f"expected_vlan_name_{vid}") == name:
+            return True
+        messages.error(
+            request,
+            f"VLAN {vid}: the proposed VLAN name changed after the page was shown. "
+            "Refresh the VLAN data and try again.",
+        )
+        outcome.stale_name_count += 1
+        return False
+
     def _apply_force_payload(
         self,
         request,
@@ -590,6 +606,9 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             return
         name = self._validated_vlan_name(request, vid, vlan_data, outcome, source_name)
         if name is None:
+            return
+        # A confirmation carries its own signed name, which _apply_confirmed_vlan_change checks.
+        if force_payload is None and not self._name_is_the_displayed_name(request, vid, name, outcome):
             return
         if self._apply_force_payload(
             request,
