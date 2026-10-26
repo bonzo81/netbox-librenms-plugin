@@ -1208,6 +1208,19 @@ class TestParsePortVlanData:
         result = api.parse_port_vlan_data(port_data)
         assert result["mode"] is None
 
+    @pytest.mark.parametrize("if_vlan", [0, "0", "", None])
+    @pytest.mark.parametrize("vlans", [None, [{"vlan": 20, "untagged": 0}]], ids=["no-list", "list"])
+    def test_every_no_vlan_sentinel_reads_as_no_if_vlan(self, settings, librenms_server, if_vlan, vlans):
+        """LibreNMS reports a port without a VLAN as ifVlan 0, "0", "" or null; each one gives the same result."""
+        api = api_for(settings, librenms_server.url)
+        port_data = {"port_id": 1, "ifName": "Gi0/1", "ifDescr": "GE", "ifVlan": if_vlan, "ifTrunk": "dot1Q"}
+        if vlans is not None:
+            port_data["vlans"] = vlans
+        result = api.parse_port_vlan_data(port_data)
+        assert result["mode"] is None
+        assert result["untagged_vlan"] is None
+        assert result["tagged_vlans"] == ([20] if vlans else [])
+
     def test_trunk_mode_set_correctly(self, settings, librenms_server):
         api = api_for(settings, librenms_server.url)
         port_data = {

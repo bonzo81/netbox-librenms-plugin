@@ -2403,6 +2403,9 @@ class LibreNMSAPI:
         if_descr = port_data.get("ifDescr", "")
         interface_name = port_data.get(interface_name_field, "") or if_name
         if_vlan = port_data.get("ifVlan", "")
+        # LibreNMS reports a port without a VLAN as ifVlan 0 or "0", as well as "" or null.
+        if if_vlan in (0, "0"):
+            if_vlan = ""
         if_trunk = port_data.get("ifTrunk")
 
         # Determine 802.1Q mode
