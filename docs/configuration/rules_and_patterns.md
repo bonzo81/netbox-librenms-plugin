@@ -125,6 +125,7 @@ The available scopes are:
 - `device_type` normalizes the LibreNMS hardware string before Device Type Mapping, part-number, or model lookup.
 - `module_bay` normalizes `entPhysicalName` before Module Bay Mapping lookup.
 - `serial` normalizes inventory serial numbers before comparison or storage.
+- `vlan_name` changes the VLAN name that the VLANs tab compares with NetBox and saves.
 
 Rules can optionally be limited to a manufacturer. Regular-expression matching is case-sensitive unless the pattern enables case-insensitive matching, for example with `(?i)`.
 
@@ -140,6 +141,25 @@ The following example removes a Nokia revision suffix so that one Module Type Ma
 ```
 
 For this rule, `3HE16474AARA01` becomes `3HE16474AA`.
+
+### VLAN names
+
+A `vlan_name` rule changes the name of a VLAN that LibreNMS reports. The VLANs tab compares the changed name with NetBox, and the sync saves it. In the match pattern of a `vlan_name` rule, `{vid}` stands for the VLAN ID of the row. Other scopes cannot use `{vid}`. When a rule changes a name, the VLANs tab shows the LibreNMS name in a note next to the new name.
+
+On Junos devices, LibreNMS reports a VLAN name with the VLAN ID added after a `+`, for example `users+100` for VLAN 100. The following rule removes the suffix only when it is the VLAN ID of the row:
+
+```yaml
+- scope: vlan_name
+  manufacturer: Juniper
+  match_pattern: "^(.+)\\+{vid}$"
+  replacement: "\\1"
+  priority: 100
+  description: "Remove the VLAN ID that LibreNMS adds to Junos VLAN names"
+```
+
+For VLAN 100, `users+100` becomes `users`, and `users+200` does not change. To remove any numeric suffix, use `^(.+)\\+\\d+$` as the match pattern.
+
+The plugin does not create this rule. Before you add it, look at the names of your NetBox VLANs: a VLAN whose NetBox name still has the suffix shows a name change, which you must confirm before the sync renames it. NetBox requires a unique VLAN name in a VLAN group, so two VLANs that get the same name cannot both be in one group.
 
 ![Normalization Rule List](../img/normalization_rules/list.png)
 

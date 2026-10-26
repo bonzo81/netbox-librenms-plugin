@@ -7,10 +7,11 @@
 # Import via: LibreNMS → Normalization Rules → Import → YAML
 #
 # Fields:
-#   scope          — module_type, device_type, or module_bay
+#   scope          — module_type, device_type, module_bay, serial, or vlan_name
 #   manufacturer   — Optional manufacturer name (must exist in NetBox).
 #                    When set, the rule only fires for that manufacturer.
 #   match_pattern  — Python regex (re.sub pattern)
+#                    In a vlan_name rule, {vid} stands for the VLAN ID of the row.
 #   replacement    — Replacement string (supports \1, \2 back-references)
 #   priority       — Lower values run first (default 100)
 #   description    — Optional note
@@ -59,3 +60,13 @@
   replacement: "\\1"
   priority: 50
   description: "Extract Nokia part number from transceiver model field (strip trailing vendor/oui info)"
+
+# ── Junos VLAN ID suffix removal ─────────────────────────────────────────────
+# LibreNMS reports Junos VLAN names with the VLAN ID added: "users+100" for
+# VLAN 100.  This rule removes the suffix only when it is the VLAN ID of the row.
+- scope: vlan_name
+  manufacturer: Juniper
+  match_pattern: "^(.+)\\+{vid}$"
+  replacement: "\\1"
+  priority: 100
+  description: "Remove the VLAN ID that LibreNMS adds to Junos VLAN names"

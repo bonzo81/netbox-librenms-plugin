@@ -642,6 +642,7 @@ def test_vlan_table_row_without_usable_vid_has_no_action(vid):
     assert "Invalid VID" in vid_html
 
 
+@pytest.mark.django_db
 def test_vlan_status_action_escapes_the_reported_vid():
     """The table escapes an unusable reported VID and does not render a submit button."""
     from django.contrib.auth.models import AnonymousUser

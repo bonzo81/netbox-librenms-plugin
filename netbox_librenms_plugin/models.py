@@ -766,20 +766,25 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
     SCOPE_DEVICE_TYPE = "device_type"
     SCOPE_MODULE_BAY = "module_bay"
     SCOPE_SERIAL = "serial"
+    SCOPE_VLAN_NAME = "vlan_name"
 
     SCOPE_CHOICES = [
         (SCOPE_MODULE_TYPE, "Module Type"),
         (SCOPE_DEVICE_TYPE, "Device Type"),
         (SCOPE_MODULE_BAY, "Module Bay"),
         (SCOPE_SERIAL, "Serial"),
+        (SCOPE_VLAN_NAME, "VLAN Name"),
     ]
+
+    # In a VLAN name rule, this text in match_pattern stands for the row's VLAN ID.
+    VID_PLACEHOLDER = "{vid}"
 
     scope = models.CharField(
         max_length=50,
         choices=SCOPE_CHOICES,
         db_index=True,
         help_text="Which lookup this rule applies to. Serial rules rewrite the stored "
-        "serial rather than a matching key.",
+        "serial, and VLAN name rules the proposed VLAN name, rather than a matching key.",
     )
     manufacturer = models.ForeignKey(
         Manufacturer,
@@ -792,7 +797,8 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
     )
     match_pattern = models.CharField(
         max_length=500,
-        help_text="Regex pattern to match against input string (Python re syntax)",
+        help_text="Regex pattern to match against input string (Python re syntax). In a VLAN name rule, "
+        "{vid} stands for the VLAN ID of the row.",
     )
     replacement = models.CharField(
         max_length=500,
@@ -818,7 +824,9 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
             errors["replacement"] = "This field is required."
         if errors:
             raise ValidationError(errors)
-        compiled = validate_regex_field(self.match_pattern, "match_pattern")
+        if self.VID_PLACEHOLDER in self.match_pattern and self.scope != self.SCOPE_VLAN_NAME:
+            raise ValidationError({"match_pattern": f"Only a VLAN name rule can use {self.VID_PLACEHOLDER}."})
+        compiled = validate_regex_field(self._pattern_for_vid(1), "match_pattern")
         # Validate the replacement template by running a dummy substitution
         try:
             _validate_replacement_template(compiled, self.replacement)
@@ -838,9 +846,30 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
         check_rule_replacement(self, compiled, "replacement")
         return compiled
 
-    def apply(self, value: str) -> str:
-        """Return *value* with this rule's substitution applied; raise RuleConfigurationError for a broken rule."""
-        return self.compiled_match_pattern.sub(self.replacement, value)
+    def _pattern_for_vid(self, vid):
+        """Return match_pattern with each VID placeholder replaced by *vid* as literal text."""
+        return self.match_pattern.replace(self.VID_PLACEHOLDER, re.escape(str(vid)))
+
+    def apply(self, value: str, *, vid=None) -> str:
+        """
+        Return *value* with this rule's substitution applied.
+
+        A rule that uses the VID placeholder leaves *value* unchanged when *vid* is None.
+
+        Raises:
+            RuleConfigurationError: When the stored pattern or replacement does not work.
+
+        """
+        if self.VID_PLACEHOLDER not in self.match_pattern:
+            return self.compiled_match_pattern.sub(self.replacement, value)
+        if vid is None:
+            return value
+        try:
+            compiled = re.compile(self._pattern_for_vid(vid))
+        except REGEX_COMPILE_ERRORS as exc:
+            raise RuleConfigurationError(self, "match_pattern") from exc
+        check_rule_replacement(self, compiled, "replacement")
+        return compiled.sub(self.replacement, value)
 
     def get_absolute_url(self):
         """Return the URL for this rule's detail page."""

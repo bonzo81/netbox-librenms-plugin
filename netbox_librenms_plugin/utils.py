@@ -3147,6 +3147,27 @@ def index_vlan_source_rows(rows):
     return rows_by_vid, invalid_rows
 
 
+def vlan_source_namer(device):
+    """
+    Return the function that gives a LibreNMS VLAN row the name that a sync proposes for *device*.
+
+    The VLAN tab and the VLAN writer both use it, so the name the tab compares is the name the writer saves.
+    """
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    manufacturer = device.device_type.manufacturer if device is not None else None
+    scope = NormalizationRule.SCOPE_VLAN_NAME
+    rules = preload_normalization_rules(scope, manufacturer=manufacturer)
+
+    def name(row, vid):
+        value = row.get("vlan_name", f"VLAN {vid}" if vid is not None else "")
+        if not isinstance(value, str):
+            return value
+        return apply_normalization_rules(value, scope, manufacturer, preloaded_rules=rules, vid=vid)
+
+    return name
+
+
 # Header attributes for the sync tables: a header may wrap, and librenms_sync.js finds a column by its data-col.
 SYNC_TABLE_HEADER_ATTRS = {"class": "text-wrap", "data-col": lambda bound_column: bound_column.name}
 
@@ -4285,7 +4306,9 @@ def preload_normalization_rules(scope: str, manufacturer=None) -> dict:
     return cache
 
 
-def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, preloaded_rules: dict | None = None) -> str:
+def apply_normalization_rules(
+    value: str, scope: str, manufacturer=None, *, preloaded_rules: dict | None = None, vid=None
+) -> str:
     """
     Apply NormalizationRule chain to transform a string before matching.
 
@@ -4304,6 +4327,7 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, prel
         preloaded_rules:  Optional dict from :func:`preload_normalization_rules`.
             When provided, DB queries are skipped and preloaded lists are used
             instead, eliminating repeated queries inside loops.
+        vid:  The VLAN ID that a VLAN name rule's placeholder stands for.
 
     Returns:
         The normalized string after all matching rules have been applied.
@@ -4319,7 +4343,7 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, prel
 
     def _apply_rules(val, rules_qs):
         for rule in rules_qs:
-            val = rule.apply(val)
+            val = rule.apply(val, vid=vid)
         return val
 
     if preloaded_rules is not None:
