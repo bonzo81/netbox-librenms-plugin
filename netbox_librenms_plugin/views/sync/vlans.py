@@ -24,6 +24,7 @@ from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
     index_vlan_source_rows,
     normalize_vlan_vid,
+    vlan_source_namer,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -62,6 +63,7 @@ class _VLANSyncOutcome:
     concurrent_change_count: int = 0
     invalid_vid_count: int = 0
     invalid_name_count: int = 0
+    name_taken_count: int = 0
     add_permission_skipped_count: int = 0
     confirmation_error_count: int = 0
     conflicts: list[dict] = field(default_factory=list)
@@ -98,6 +100,8 @@ class _VLANSyncOutcome:
             reasons.append(f"{self.invalid_vid_count} skipped (invalid VLAN VID)")
         if self.invalid_name_count:
             reasons.append(f"{self.invalid_name_count} skipped (invalid VLAN name)")
+        if self.name_taken_count:
+            reasons.append(f"{self.name_taken_count} skipped (VLAN name already in the group)")
         if self.confirmation_error_count:
             reasons.append(f"{self.confirmation_error_count} skipped (confirmation no longer current)")
         return reasons
@@ -430,9 +434,9 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             return None, False
 
     @staticmethod
-    def _validated_vlan_name(request, vid, vlan_data, outcome):
-        """Validate one LibreNMS VLAN name at the NetBox model boundary."""
-        name = vlan_data.get("vlan_name", f"VLAN {vid}")
+    def _validated_vlan_name(request, vid, vlan_data, outcome, source_name):
+        """Validate one proposed VLAN name at the NetBox model boundary."""
+        name = source_name(vlan_data, vid)
         try:
             VLAN._meta.get_field("name").clean(name, None)
         except ValidationError:
@@ -496,11 +500,16 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                 )
                 outcome.ambiguous_count += 1
             except VLAN.DoesNotExist:
-                messages.error(
-                    request,
-                    f"VLAN {vid}: the VLAN could not be resolved after a concurrent change; skipped.",
-                )
-                outcome.concurrent_change_count += 1
+                # NetBox keeps VLAN names unique in a group, and a VLAN name rule can make two VIDs share a name.
+                if VLAN.objects.filter(group=lookup["group"], name=name).exists():
+                    messages.error(request, f'VLAN {vid}: the VLAN group already has a VLAN named "{name}"; skipped.')
+                    outcome.name_taken_count += 1
+                else:
+                    messages.error(
+                        request,
+                        f"VLAN {vid}: the VLAN could not be resolved after a concurrent change; skipped.",
+                    )
+                    outcome.concurrent_change_count += 1
             return None, False
 
     def _find_or_create_vlan(self, request, *, vid, row_vlan_group, name, outcome):
@@ -553,6 +562,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         *,
         vid_str,
         librenms_vlans,
+        source_name,
         duplicate_source_vids,
         force_intents,
         changeable_vlans,
@@ -578,7 +588,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         row_vlan_group, group_is_valid = self._resolve_row_vlan_group(request, vid, force_payload, outcome)
         if not group_is_valid:
             return
-        name = self._validated_vlan_name(request, vid, vlan_data, outcome)
+        name = self._validated_vlan_name(request, vid, vlan_data, outcome, source_name)
         if name is None:
             return
         if self._apply_force_payload(
@@ -688,6 +698,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
             vid for row in invalid_rows if (vid := normalize_vlan_vid(row.get("vlan_vlan"))) is not None
         }
         changeable_vlans = self.restricted_queryset(VLAN, "change")
+        source_name = vlan_source_namer(obj)
 
         with transaction.atomic():
             global_vids = self._selected_global_vids(request, selected_vlans, librenms_vlans, force_intents)
@@ -697,6 +708,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                     request,
                     vid_str=vid_str,
                     librenms_vlans=librenms_vlans,
+                    source_name=source_name,
                     duplicate_source_vids=duplicate_source_vids,
                     force_intents=force_intents,
                     changeable_vlans=changeable_vlans,

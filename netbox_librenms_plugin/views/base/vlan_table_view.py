@@ -12,6 +12,7 @@ from netbox_librenms_plugin.utils import (
     index_vlan_source_rows,
     is_list_of_dicts,
     normalize_vlan_vid,
+    vlan_source_namer,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -363,6 +364,7 @@ class BaseVLANTableView(
         vid_to_vlans = lookup_maps.get("vid_to_vlans", {})
 
         rows_by_vid, _invalid_rows = index_vlan_source_rows(librenms_vlans)
+        source_name = vlan_source_namer(device)
         compared = []
         for vlan in librenms_vlans:
             raw_vid = vlan.get("vlan_vlan")
@@ -374,7 +376,7 @@ class BaseVLANTableView(
             else:
                 vid_error = None
             vid = canonical_vid if vid_error is None else None
-            name = vlan.get("vlan_name", "")
+            name = source_name(vlan, vid)
 
             # Auto-selection logic for VLAN group dropdown
             auto_selected_group_id = None
@@ -420,6 +422,7 @@ class BaseVLANTableView(
                     "raw_vlan_id": raw_vid,
                     "vid_error": vid_error,
                     "name": name,
+                    "librenms_name": vlan.get("vlan_name"),
                     "type": vlan.get("vlan_type", "ethernet"),
                     "state": vlan.get("vlan_state", LIBRENMS_VLAN_STATE_ACTIVE),
                     "exists_in_netbox": bool(netbox_vlan),
