@@ -316,7 +316,13 @@ class TestInvalidFilters:
 
         response = client.post(
             f"{_sync_url(device)}?{query}",
-            {"server_key": SERVER_KEY, "action": "create_vlans", "select": ["30"], "vlan_group_30": ""},
+            {
+                "server_key": SERVER_KEY,
+                "action": "create_vlans",
+                "select": ["30"],
+                "vlan_group_30": "",
+                "expected_vlan_name_30": "voice",
+            },
             HTTP_HX_REQUEST="true",
         )
 
@@ -358,7 +364,13 @@ class TestRedirectsKeepThePageQuery:
 
         response = client.post(
             action,
-            {"server_key": SERVER_KEY, "action": "create_vlans", "select": ["30"], "vlan_group_30": ""},
+            {
+                "server_key": SERVER_KEY,
+                "action": "create_vlans",
+                "select": ["30"],
+                "vlan_group_30": "",
+                "expected_vlan_name_30": "voice",
+            },
             HTTP_HX_REQUEST="true",
         )
 
@@ -380,7 +392,13 @@ class TestRedirectsKeepThePageQuery:
 
         response = client.post(
             action,
-            {"server_key": SERVER_KEY, "action": "create_vlans", "select": ["20"], "vlan_group_20": str(group.pk)},
+            {
+                "server_key": SERVER_KEY,
+                "action": "create_vlans",
+                "select": ["20"],
+                "vlan_group_20": str(group.pk),
+                "expected_vlan_name_20": "guests",
+            },
             **headers,
         )
 
