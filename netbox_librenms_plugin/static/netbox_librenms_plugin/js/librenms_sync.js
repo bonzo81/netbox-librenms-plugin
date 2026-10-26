@@ -1947,21 +1947,30 @@ function _rowCompanionInputs(row) {
  * @returns {boolean}
  */
 function _isSelectionCompanionName(name) {
-    const snapshotPrefixes = [
-        'expected_local_id_',
-        'expected_local_device_id_',
-        'expected_remote_id_',
-        'expected_remote_device_id_',
-        'expected_vlan_name_',
-    ];
     return (
         Boolean(name) &&
         (name.startsWith('device_selection_') ||
             name.startsWith('selection_grant_') ||
             name.startsWith('vlan_group_') ||
             name.startsWith('vrf_') ||
-            snapshotPrefixes.some((prefix) => name.startsWith(prefix)))
+            _isShownStateName(name))
     );
+}
+
+/**
+ * Return whether a field tells the writer what the row showed, so the writer can refuse a changed row.
+ *
+ * @param {string} name - The submitted field name.
+ * @returns {boolean}
+ */
+function _isShownStateName(name) {
+    return [
+        'expected_local_id_',
+        'expected_local_device_id_',
+        'expected_remote_id_',
+        'expected_remote_device_id_',
+        'expected_vlan_name_',
+    ].some((prefix) => name.startsWith(prefix));
 }
 
 /**
@@ -2049,8 +2058,8 @@ function restoreTableSelection(table) {
             if (input.matches('select.vrf-select') && !chosen.includes(input.name)) return;
             // A grant names the render it was signed for: the row keeps its own, and a restored member gets one from its verify.
             if (input.name.startsWith('selection_grant_')) return;
-            // A rendered VLAN row posts the name it shows now; only an off-page row posts its stored name.
-            if (input.name.startsWith('expected_vlan_name_')) return;
+            // A rendered row posts the state it shows now; only an off-page row posts its stored state.
+            if (_isShownStateName(input.name)) return;
             const renderedValue = input.value;
             if (input.tomselect) {
                 input.tomselect.setValue(companionInputs[input.name], true);

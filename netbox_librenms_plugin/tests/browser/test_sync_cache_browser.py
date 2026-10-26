@@ -1406,38 +1406,47 @@ def test_vlan_row_submit_keeps_another_page_selection_and_group(page):
     assert stored["101"]["inputs"]["expected_vlan_name_101"] == "users"
 
 
-def test_a_restored_vlan_row_keeps_the_name_it_shows_now(page):
-    """A restored selection must post the name the row shows now, not the name it showed when it was selected."""
+@pytest.mark.parametrize(
+    ("table_id", "field", "selected_value", "shown_value"),
+    [
+        # A VLAN name rule changed the name.
+        ("librenms-vlan-table", "expected_vlan_name_300", "web+300", "web"),
+        # The far end of the cable now resolves to another NetBox interface.
+        ("librenms-cable-table", "expected_remote_id_300", "100", "200"),
+        ("librenms-cable-table-vc", "expected_remote_id_300", "100", "200"),
+    ],
+)
+def test_a_restored_row_posts_the_value_it_shows_now(page, table_id, field, selected_value, shown_value):
+    """A restored selection must post the value the row shows now, not the value it showed when it was selected."""
 
-    def vlan_page(shown_name):
+    def sync_page(value):
         return f"""
         <input name="server_key" value="production">
         <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit">
-          <table id="librenms-vlan-table"><tbody><tr>
-            <td><input id="vlan-300" type="checkbox" name="select" value="300"></td>
-            <td><input type="hidden" name="expected_vlan_name_300" value="{shown_name}">
-              <select name="vlan_group_300"><option value="">Global</option></select></td>
+          <table id="{table_id}"><tbody><tr data-interface="300">
+            <td><input id="row-300" type="checkbox" name="select" value="300"></td>
+            <td><select name="device_selection_300"><option value="1" selected>m1</option></select>
+              <input type="hidden" name="{field}" value="{value}"></td>
           </tr></tbody></table>
         </form>
         """
 
-    shown = {"name": "web+300"}
+    shown = {"value": selected_value}
     page.route(
         f"{SELECTION_PAGE_URL}**",
-        lambda route: route.fulfill(status=200, content_type="text/html", body=vlan_page(shown["name"])),
+        lambda route: route.fulfill(status=200, content_type="text/html", body=sync_page(shown["value"])),
     )
     page.goto(SELECTION_PAGE_URL)
     _add_page_scripts(page)
-    page.check("#vlan-300")
+    page.check("#row-300")
 
-    # A VLAN name rule changed the name; the reloaded page shows the new one.
-    shown["name"] = "web"
+    shown["value"] = shown_value
     page.goto(SELECTION_PAGE_URL)
     _add_page_scripts(page)
-    page.evaluate("restoreTableSelection(document.getElementById('librenms-vlan-table'))")
+    page.evaluate(f"restoreTableSelection(document.getElementById('{table_id}'))")
 
-    assert page.locator("#vlan-300").is_checked()
-    assert page.locator('[name="expected_vlan_name_300"]').input_value() == "web"
+    assert page.locator("#row-300").is_checked()
+    assert page.locator(f'[name="{field}"]').input_value() == shown_value
 
 
 # Tabler's modal layout: the open modal covers the viewport, so a click beside the dialog hits the modal itself.
