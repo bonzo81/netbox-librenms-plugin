@@ -2049,6 +2049,8 @@ function restoreTableSelection(table) {
             if (input.matches('select.vrf-select') && !chosen.includes(input.name)) return;
             // A grant names the render it was signed for: the row keeps its own, and a restored member gets one from its verify.
             if (input.name.startsWith('selection_grant_')) return;
+            // A rendered VLAN row posts the name it shows now; only an off-page row posts its stored name.
+            if (input.name.startsWith('expected_vlan_name_')) return;
             const renderedValue = input.value;
             if (input.tomselect) {
                 input.tomselect.setValue(companionInputs[input.name], true);
