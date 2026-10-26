@@ -16,6 +16,11 @@ RUN --mount=type=secret,id=host_ca,required=false \
         /opt/netbox/venv/bin/pip install /opt/netbox/dist/${WHL_FILE}; \
     fi
 
+# NGINX Unit starts a process on demand, and a cold process answers too late for a browser check: start all 4 at boot.
+RUN if [ -f /etc/unit/nginx-unit.json ]; then \
+        /opt/netbox/venv/bin/python -c 'import json, pathlib; p = pathlib.Path("/etc/unit/nginx-unit.json"); c = json.loads(p.read_text()); c["applications"]["netbox"]["processes"] = 4; p.write_text(json.dumps(c, indent=2))'; \
+    fi
+
 # NetBox serves the plugin's static files only after collectstatic sees the plugin enabled.
 COPY plugins.py /etc/netbox/config/plugins.py
 RUN SECRET_KEY="collectstatic-only-secret-key-0123456789-abcdefghijklmnop" \
