@@ -1271,9 +1271,16 @@ function initializePrimaryIpToggle() {
         const selection = readStoredSelection(table);
         const vrfs = JSON.parse(table.dataset.mgmtRowVrfs || '{}');
         JSON.parse(table.dataset.mgmtRows || '[]').forEach((key) => {
-            if (visible.has(key) || seeded.has(key)) return;
+            if (visible.has(key)) return;
+            const name = 'vrf_' + key;
+            const entry = selection[key];
+            // A VRF the user chose stays; any other follows the VRF that the page shows now, for example after Create VRF.
+            if (entry && Object.hasOwn(vrfs, key) && !(entry.chosen || []).includes(name)) {
+                entry.inputs = {...(entry.inputs || {}), [name]: vrfs[key]};
+            }
+            if (seeded.has(key)) return;
             seeded.add(key);
-            if (!selection[key]) selection[key] = {inputs: {['vrf_' + key]: vrfs[key] ?? ''}, auto: ''};
+            if (!entry) selection[key] = {inputs: {[name]: vrfs[key] ?? ''}, auto: ''};
         });
         writeStoredSelection(table, selection);
         writeSeededManagementRows(table, seeded);

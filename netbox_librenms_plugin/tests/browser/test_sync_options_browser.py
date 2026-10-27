@@ -801,3 +801,13 @@ def test_a_vrf_the_user_did_not_choose_follows_the_page(page, swap_page):
     assert page.locator("#ip-mgmt").is_checked()
     assert page.locator("#vrf-ip-mgmt").input_value() == "5"
     assert _submitted_fields(page)["vrf_198.18.0.1/24"] == ["5"]
+
+
+def test_an_off_page_management_row_follows_the_vrf_the_page_shows_now(page, swap_page):
+    load, swap = swap_page
+    load(_ip_form_markup(IP_PAGE_TWO_ROWS, mgmt_vrf="", set_primary=True))
+
+    # Create VRF on another row made the management row's VRF exist; the row stays on another page.
+    swap(_ip_form_markup(IP_PAGE_TWO_ROWS, mgmt_vrf="5", set_primary=True), "ip-sync-options")
+
+    assert _submitted_fields(page)["vrf_198.18.0.1/24"] == ["5"]
