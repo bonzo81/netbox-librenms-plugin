@@ -3,7 +3,6 @@ import json
 import logging
 import re
 import threading
-from copy import deepcopy
 from dataclasses import dataclass
 from typing import Optional
 
@@ -11,7 +10,7 @@ import psycopg
 from dcim.models import Device, Interface
 from django.core import signing
 from django.core.exceptions import FieldDoesNotExist, ObjectDoesNotExist, ValidationError
-from django.db import DatabaseError, IntegrityError
+from django.db import DatabaseError, IntegrityError, transaction
 from django.db.models import Count, Max
 from django.http import HttpRequest
 from django.utils.functional import SimpleLazyObject
@@ -1628,29 +1627,50 @@ def get_user_pref(request, path, default=None):
     return default
 
 
-def save_user_pref(request, path, value):
-    """
-    Save a user preference value via request.user.config.
+# When the user made each saved choice, in milliseconds, by preference path.
+PREFERENCE_SAVED_AT = "plugins.netbox_librenms_plugin.preference_saved_at"
 
-    NetBox seeds a new UserConfig with ``settings.DEFAULT_USER_PREFERENCES`` **by reference**
-    (users/signals.py) and ``UserConfig.set()`` edits ``data`` in place, so writing straight
-    through would mutate that process-wide dict: this user's choice would then become the
-    default every later-created user inherits, and the fallback every preference-less user
-    reads. Copy the row's data first so the write stays with this user.
+
+def save_user_pref(request, path, value, saved_at=None):
+    """
+    Save a user preference value in the user's NetBox config.
+
+    The write reads the user's config again under a row lock, so a request that saves another
+    preference at the same time keeps its value. The fresh row also keeps the write away from
+    NetBox's shared DEFAULT_USER_PREFERENCES dict, which a new UserConfig holds by reference.
 
     Args:
         request (HttpRequest): Request for the user whose preference is saved.
         path (str): Preference path to set.
         value (object): Preference value to save.
+        saved_at (int | None): When the user made the choice, in milliseconds. A save older than
+            the one stored for the path is ignored, so a request that arrives late cannot undo a
+            newer choice.
 
     """
-    if hasattr(request, "user") and hasattr(request.user, "config"):
-        user_config = request.user.config
-        user_config.data = deepcopy(user_config.data)
+    from users.models import UserConfig
+
+    user = getattr(request, "user", None)
+    config = getattr(user, "config", None) if user is not None else None
+    if config is None or config.pk is None:
+        return
+    with transaction.atomic():
+        user_config = UserConfig.objects.select_for_update().get(pk=config.pk)
+        stamps = user_config.get(PREFERENCE_SAVED_AT)
+        stamps = dict(stamps) if isinstance(stamps, dict) else {}
+        if saved_at is not None:
+            stored_at = stamps.get(path)
+            if isinstance(stored_at, int) and not isinstance(stored_at, bool) and stored_at > saved_at:
+                return
+            stamps[path] = saved_at
         try:
-            user_config.set(path, value, commit=True)
+            user_config.set(path, value)
+            if saved_at is not None:
+                user_config.set(PREFERENCE_SAVED_AT, stamps)
         except (TypeError, ValueError):
-            pass
+            return
+        user_config.save()
+    user.config = user_config
 
 
 IMPORT_CONTEXT_COLUMNS = ("location", "hardware", "hostname", "sysname")

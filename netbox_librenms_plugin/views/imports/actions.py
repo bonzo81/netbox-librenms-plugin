@@ -4169,6 +4169,10 @@ class SaveUserPrefView(LibreNMSPermissionMixin, View):
 
         key = data.get("key")
         value = data.get("value")
+        # When the user made the choice, in milliseconds; the save ignores it when a newer choice is stored.
+        saved_at = data.get("saved_at")
+        if saved_at is not None and (isinstance(saved_at, bool) or not isinstance(saved_at, int) or saved_at < 0):
+            return JsonResponse({"error": "Invalid save time"}, status=400)
 
         # ALLOWED_PREFS is a dict, so an unhashable key from the JSON body raises rather than
         # missing; the envelope check above stops one level short of this.
@@ -4198,7 +4202,7 @@ class SaveUserPrefView(LibreNMSPermissionMixin, View):
             if value is None:
                 return JsonResponse({"error": "Invalid interface sync options"}, status=400)
 
-        save_user_pref(request, self.ALLOWED_PREFS[key], value)
+        save_user_pref(request, self.ALLOWED_PREFS[key], value, saved_at=saved_at)
         return JsonResponse({"status": "ok"})
 
 

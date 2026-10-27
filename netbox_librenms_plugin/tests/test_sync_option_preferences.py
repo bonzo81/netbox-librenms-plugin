@@ -18,7 +18,11 @@ from netbox_librenms_plugin.tests._html_helpers import open_tags
 from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_device, make_interface
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.test_ip_address_sync_safety import _configure_test_server, _serve_librenms_ip_rows
-from netbox_librenms_plugin.utils import resolve_create_missing_interfaces, resolve_set_primary_ip
+from netbox_librenms_plugin.utils import (
+    SET_PRIMARY_IP_PREFERENCE,
+    resolve_create_missing_interfaces,
+    resolve_set_primary_ip,
+)
 from netbox_librenms_plugin.views.imports.actions import SaveUserPrefView
 from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
@@ -38,10 +42,10 @@ def _stored(user, path=PREFERENCE):
     return get_user_model().objects.get(pk=user.pk).config.get(path)
 
 
-def _save(client, value, key="interface_sync_options"):
+def _save(client, value, key="interface_sync_options", **extra):
     return client.post(
         reverse("plugins:netbox_librenms_plugin:save_user_pref"),
-        data=json.dumps({"key": key, "value": value}),
+        data=json.dumps({"key": key, "value": value, **extra}),
         content_type="application/json",
     )
 
@@ -180,6 +184,47 @@ class TestSavingTheMenu:
         assert _stored(chooser) == {"auto_select_lag_members": True, "exclude_columns": ["vlans"]}
         assert get_config().DEFAULT_USER_PREFERENCES == defaults_before
         assert _stored(_user("sync-options-later")) is None
+
+
+@pytest.mark.django_db
+class TestConcurrentPreferenceSaves:
+    def test_a_save_keeps_a_preference_that_another_request_stored_meanwhile(self):
+        user = _user("sync-options-concurrent")
+        # This request loaded the user before another request stored Set Primary IP.
+        stale = get_user_model().objects.get(pk=user.pk)
+        assert stale.config.get(SET_PRIMARY_IP_PREFERENCE) is None
+        _store_raw(get_user_model().objects.get(pk=user.pk), True, SET_PRIMARY_IP_PREFERENCE)
+        request = RequestFactory().post(
+            reverse("plugins:netbox_librenms_plugin:save_user_pref"),
+            data=json.dumps({"key": "interface_sync_options", "value": FACTORY_STATE}),
+            content_type="application/json",
+        )
+        request.user = stale
+
+        assert SaveUserPrefView.as_view()(request).status_code == 200
+
+        assert _stored(user) == FACTORY_STATE
+        assert _stored(user, SET_PRIMARY_IP_PREFERENCE) is True
+
+    def test_an_older_choice_does_not_replace_a_newer_one(self, client):
+        user = _user("sync-options-order")
+        client.force_login(user)
+
+        assert _save(client, True, "set_primary_ip", saved_at=2000).status_code == 200
+        # The older request reaches the server last, for example after a flush on page unload.
+        assert _save(client, False, "set_primary_ip", saved_at=1000).status_code == 200
+
+        assert _stored(user, SET_PRIMARY_IP_PREFERENCE) is True
+        assert _save(client, False, "set_primary_ip", saved_at=3000).status_code == 200
+        assert _stored(user, SET_PRIMARY_IP_PREFERENCE) is False
+
+    @pytest.mark.parametrize("saved_at", ["1000", -1, True, 1.5])
+    def test_an_invalid_save_time_is_rejected(self, client, saved_at):
+        user = _user(f"sync-options-bad-time-{saved_at!r}")
+        client.force_login(user)
+
+        assert _save(client, True, "set_primary_ip", saved_at=saved_at).status_code == 400
+        assert _stored(user, SET_PRIMARY_IP_PREFERENCE) is None
 
 
 @pytest.mark.django_db

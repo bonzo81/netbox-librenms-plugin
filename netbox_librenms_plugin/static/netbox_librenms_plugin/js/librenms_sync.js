@@ -1088,7 +1088,7 @@ const pendingSyncOptionSaves = new Map();
 /**
  * Send one pending preference save now.
  *
- * @param {{url: string, csrfToken: string, key: string, value: *, sent: Promise<boolean>|null}} save
+ * @param {{url: string, csrfToken: string, key: string, value: *, savedAt: number, sent: Promise<boolean>|null}} save
  * @returns {Promise<boolean>} Resolves to false when the POST failed
  */
 function sendSyncOptionPreference(save) {
@@ -1098,7 +1098,8 @@ function sendSyncOptionPreference(save) {
         // A save that the user starts just before leaving the page must still reach the server.
         keepalive: true,
         headers: {'Content-Type': 'application/json', 'X-CSRFToken': save.csrfToken},
-        body: JSON.stringify({key: save.key, value: save.value})
+        // The server keeps the newest choice, so a request that arrives late cannot undo a later one.
+        body: JSON.stringify({key: save.key, value: save.value, saved_at: save.savedAt})
     }).then(response => {
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
@@ -1129,10 +1130,11 @@ function saveSyncOptionPreference(root, key, value) {
     }
     let save = pendingSyncOptionSaves.get(key);
     if (!save) {
-        save = {url: savePrefUrl, csrfToken: csrfToken, key: key, value: value, sent: null};
+        save = {url: savePrefUrl, csrfToken: csrfToken, key: key, value: value, savedAt: 0, sent: null};
         pendingSyncOptionSaves.set(key, save);
     }
     save.value = value;
+    save.savedAt = Date.now();
     syncOptionSaving = syncOptionSaving.then(() => save.sent || sendSyncOptionPreference(save));
     return syncOptionSaving;
 }

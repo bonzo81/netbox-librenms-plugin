@@ -2217,7 +2217,9 @@ def test_a_cache_fragment_binds_the_primary_ip_toggle(page):
         page.uncheck("#set-primary-ip-toggle-cb")
 
     assert not mgmt_row.is_checked()
-    assert [json.loads(body) for body in saved_prefs] == [{"key": "set_primary_ip", "value": False}]
+    assert [{"key": body["key"], "value": body["value"]} for body in map(json.loads, saved_prefs)] == [
+        {"key": "set_primary_ip", "value": False}
+    ]
 
     page.check("#set-primary-ip-toggle-cb")
 

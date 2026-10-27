@@ -669,8 +669,10 @@ def test_a_queued_preference_save_is_sent_when_the_page_unloads(page):
     page.evaluate("window.dispatchEvent(new Event('pagehide'))")
     page.wait_for_function("window.fetchKeepalive.length === 2")
 
-    latest = json.loads(held[1].request.post_data)["value"]
-    assert sorted(latest["exclude_columns"]) == ["mtu", "speed"]
+    first, latest = (json.loads(route.request.post_data) for route in held)
+    assert sorted(latest["value"]["exclude_columns"]) == ["mtu", "speed"]
+    # The server keeps the newest choice, whichever request it gets last.
+    assert latest["saved_at"] >= first["saved_at"] > 0
     assert page.evaluate("window.fetchKeepalive")[1] == [SAVE_PREF_PATH, True]
     # The queued save does not send the same choice again once the held request ends.
     for route in held:
