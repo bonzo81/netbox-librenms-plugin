@@ -1042,19 +1042,27 @@ function checkSyncCacheStatus() {
     return controller.checking;
 }
 
-function initializeSyncCacheConsistency() {
-    const controller = syncCacheController();
-    if (!controller || controller.root.dataset.listenersInitialized === 'true') return;
-    controller.root.dataset.listenersInitialized = 'true';
+// The page listeners outlive a history restore, which replaces the cache-state root and its controller.
+let syncCachePageListenersBound = false;
 
-    window.addEventListener('blur', () => { controller.lostFocus = true; });
+function initializeSyncCacheConsistency() {
+    if (!syncCacheController() || syncCachePageListenersBound) return;
+    syncCachePageListenersBound = true;
+
+    window.addEventListener('blur', () => {
+        const controller = syncCacheController();
+        if (controller) controller.lostFocus = true;
+    });
     window.addEventListener('focus', () => {
-        if (controller.lostFocus) {
+        const controller = syncCacheController();
+        if (controller?.lostFocus) {
             controller.lostFocus = false;
             checkSyncCacheStatus();
         }
     });
     document.addEventListener('librenmsCacheChanged', event => {
+        const controller = syncCacheController();
+        if (!controller) return;
         const payload = event.detail?.value || event.detail || {};
         Object.values(payload.revisions || {}).forEach(revision => controller.ownRevisions.add(revision));
         if (payload.source_fragment_required) {
