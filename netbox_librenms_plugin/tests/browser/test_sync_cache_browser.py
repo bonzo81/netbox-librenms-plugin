@@ -5214,3 +5214,47 @@ def test_a_failed_load_of_the_netbox_only_rows_replaces_the_spinner(page, failur
 
     expect(page.locator("#netbox-only-interfaces-rows [role=alert]")).to_have_count(1)
     expect(page.locator("#netbox-only-interfaces-rows .spinner-border")).to_have_count(0)
+
+
+def test_a_history_restore_keeps_one_set_of_page_listeners_on_the_restored_controller(page):
+    """Back restores a new cache-state root; the page listeners must serve its controller, once."""
+    initial = {"interfaces": _state("before-interfaces"), "ipaddresses": _state("before-ip")}
+    link = (
+        '<a id="go" hx-get="https://plugin.example.com/next" hx-push-url="https://plugin.example.com/page?next=1"'
+        ' hx-target="#htmx-modal-content">Next</a>'
+    )
+    page.route(
+        "https://plugin.example.com/page**",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="text/html",
+            body=f"<!doctype html><html><body>{_page_html(initial)}{link}</body></html>",
+        ),
+    )
+    page.route(
+        "https://plugin.example.com/next",
+        lambda route: route.fulfill(status=200, content_type="text/html", body='<p id="next">next</p>'),
+    )
+    statuses = []
+    page.route(
+        "https://plugin.example.com/status?*",
+        lambda route: (statuses.append(route.request.url), route.fulfill(json={"tabs": initial})),
+    )
+    page.goto("https://plugin.example.com/page?tab=interfaces")
+    _add_page_scripts(page)
+    page.evaluate("initializeScripts()")
+    page.click("#go")
+    page.wait_for_selector("#next")
+
+    page.go_back()
+    page.wait_for_selector("#go")
+    page.wait_for_function("syncCacheController() && syncCacheController().checking === null")
+    statuses.clear()
+    page.evaluate("window.dispatchEvent(new Event('blur')); window.dispatchEvent(new Event('focus'))")
+    page.wait_for_timeout(500)
+    page.evaluate(
+        "document.dispatchEvent(new CustomEvent('librenmsCacheChanged', {detail: {revisions: {interfaces: 'r-new'}}}))"
+    )
+
+    assert len(statuses) == 1
+    assert page.evaluate("syncCacheController().ownRevisions.has('r-new')")
