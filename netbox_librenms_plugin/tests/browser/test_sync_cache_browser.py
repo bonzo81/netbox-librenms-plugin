@@ -5248,7 +5248,12 @@ def test_a_history_restore_keeps_one_set_of_page_listeners_on_the_restored_contr
 
     page.go_back()
     page.wait_for_selector("#go")
-    page.wait_for_function("syncCacheController() && syncCacheController().checking === null")
+    # The restore can start its own status check; count only once no request has come for a while.
+    seen = -1
+    while seen != len(statuses):
+        seen = len(statuses)
+        page.wait_for_timeout(300)
+        page.wait_for_function("syncCacheController() && syncCacheController().checking === null")
     statuses.clear()
     page.evaluate("window.dispatchEvent(new Event('blur')); window.dispatchEvent(new Event('focus'))")
     page.wait_for_timeout(500)

@@ -4138,6 +4138,12 @@ document.addEventListener('htmx:historyCacheHit', function (event) {
             delete element.dataset[key];
         });
     });
+    // TomSelect markup stays without its instance, and NetBox enhances only a plain select: undo it as destroy() does.
+    snapshot.content.querySelectorAll('.ts-wrapper').forEach(wrapper => wrapper.remove());
+    snapshot.content.querySelectorAll('select.tomselected').forEach(select => {
+        select.classList.remove('tomselected', 'ts-hidden-accessible');
+        select.removeAttribute('tabindex');
+    });
     event.detail.item.content = snapshot.innerHTML;
 });
 
