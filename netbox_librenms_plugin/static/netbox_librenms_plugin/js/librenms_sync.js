@@ -1084,11 +1084,14 @@ function initializeSyncOptions(rootId, optionSelector, countId, resetId, store) 
 let syncOptionSaving = Promise.resolve();
 // The latest choice per key that no request carries yet; a later save of the key replaces it.
 const pendingSyncOptionSaves = new Map();
+// The server keeps this page's newest choice of a key, so a request that arrives late cannot undo a later one.
+const syncOptionClientId = Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, '0')).join('');
+let syncOptionSequence = 0;
 
 /**
  * Send one pending preference save now.
  *
- * @param {{url: string, csrfToken: string, key: string, value: *, savedAt: number, sent: Promise<boolean>|null}} save
+ * @param {{url: string, csrfToken: string, key: string, value: *, sequence: number, sent: Promise<boolean>|null}} save
  * @returns {Promise<boolean>} Resolves to false when the POST failed
  */
 function sendSyncOptionPreference(save) {
@@ -1098,8 +1101,12 @@ function sendSyncOptionPreference(save) {
         // A save that the user starts just before leaving the page must still reach the server.
         keepalive: true,
         headers: {'Content-Type': 'application/json', 'X-CSRFToken': save.csrfToken},
-        // The server keeps the newest choice, so a request that arrives late cannot undo a later one.
-        body: JSON.stringify({key: save.key, value: save.value, saved_at: save.savedAt})
+        body: JSON.stringify({
+            key: save.key,
+            value: save.value,
+            client_id: syncOptionClientId,
+            sequence: save.sequence
+        })
     }).then(response => {
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
@@ -1130,11 +1137,12 @@ function saveSyncOptionPreference(root, key, value) {
     }
     let save = pendingSyncOptionSaves.get(key);
     if (!save) {
-        save = {url: savePrefUrl, csrfToken: csrfToken, key: key, value: value, savedAt: 0, sent: null};
+        save = {url: savePrefUrl, csrfToken: csrfToken, key: key, value: value, sequence: 0, sent: null};
         pendingSyncOptionSaves.set(key, save);
     }
     save.value = value;
-    save.savedAt = Date.now();
+    syncOptionSequence += 1;
+    save.sequence = syncOptionSequence;
     syncOptionSaving = syncOptionSaving.then(() => save.sent || sendSyncOptionPreference(save));
     return syncOptionSaving;
 }
@@ -2283,6 +2291,8 @@ function restoreOffPageSelections(form) {
         // Lifecycle write, no closure: it gives back off-page rows a failed submit consumed, as they were.
         writeStoredSelection(table, Object.assign(readStoredSelection(table), consumed[tableId].rows));
         writeSeededManagementRows(table, new Set([...readSeededManagementRows(table), ...consumed[tableId].seeded]));
+        // The consume also cleared the rows of this page, which still shows them checked.
+        persistTableSelection(table);
         updateOffPageSelectionNotice(table);
     });
 }

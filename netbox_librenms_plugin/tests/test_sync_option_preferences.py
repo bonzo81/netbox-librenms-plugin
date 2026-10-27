@@ -206,24 +206,47 @@ class TestConcurrentPreferenceSaves:
         assert _stored(user) == FACTORY_STATE
         assert _stored(user, SET_PRIMARY_IP_PREFERENCE) is True
 
-    def test_an_older_choice_does_not_replace_a_newer_one(self, client):
+    def test_an_older_choice_of_the_same_page_does_not_replace_a_newer_one(self, client):
         user = _user("sync-options-order")
         client.force_login(user)
 
-        assert _save(client, True, "set_primary_ip", saved_at=2000).status_code == 200
-        # The older request reaches the server last, for example after a flush on page unload.
-        assert _save(client, False, "set_primary_ip", saved_at=1000).status_code == 200
-
+        assert _save(client, True, "set_primary_ip", client_id="page-a", sequence=2).status_code == 200
+        # The older request of the page reaches the server last, for example after a flush on page unload.
+        assert _save(client, False, "set_primary_ip", client_id="page-a", sequence=1).status_code == 200
         assert _stored(user, SET_PRIMARY_IP_PREFERENCE) is True
-        assert _save(client, False, "set_primary_ip", saved_at=3000).status_code == 200
+
+        assert _save(client, False, "set_primary_ip", client_id="page-a", sequence=3).status_code == 200
         assert _stored(user, SET_PRIMARY_IP_PREFERENCE) is False
 
-    @pytest.mark.parametrize("saved_at", ["1000", -1, True, 1.5])
-    def test_an_invalid_save_time_is_rejected(self, client, saved_at):
-        user = _user(f"sync-options-bad-time-{saved_at!r}")
+    def test_another_page_s_choice_is_stored_whatever_its_sequence(self, client):
+        """Pages count on their own, so no clock or counter orders the choices of two pages."""
+        user = _user("sync-options-pages")
         client.force_login(user)
 
-        assert _save(client, True, "set_primary_ip", saved_at=saved_at).status_code == 400
+        assert _save(client, True, "set_primary_ip", client_id="page-a", sequence=50).status_code == 200
+        assert _save(client, False, "set_primary_ip", client_id="page-b", sequence=1).status_code == 200
+
+        assert _stored(user, SET_PRIMARY_IP_PREFERENCE) is False
+
+    @pytest.mark.parametrize(
+        "order",
+        [
+            {"client_id": "page-a", "sequence": "1"},
+            {"client_id": "page-a", "sequence": -1},
+            {"client_id": "page-a", "sequence": True},
+            {"client_id": "page-a", "sequence": 1.5},
+            {"client_id": 5, "sequence": 1},
+            {"client_id": "", "sequence": 1},
+            {"client_id": "x" * 65, "sequence": 1},
+            {"client_id": "page-a"},
+            {"sequence": 1},
+        ],
+    )
+    def test_an_invalid_order_is_rejected(self, client, order):
+        user = _user(f"sync-options-bad-order-{len(repr(order))}-{sorted(order)}")
+        client.force_login(user)
+
+        assert _save(client, True, "set_primary_ip", **order).status_code == 400
         assert _stored(user, SET_PRIMARY_IP_PREFERENCE) is None
 
 

@@ -671,8 +671,9 @@ def test_a_queued_preference_save_is_sent_when_the_page_unloads(page):
 
     first, latest = (json.loads(route.request.post_data) for route in held)
     assert sorted(latest["value"]["exclude_columns"]) == ["mtu", "speed"]
-    # The server keeps the newest choice, whichever request it gets last.
-    assert latest["saved_at"] >= first["saved_at"] > 0
+    # The server keeps the newest choice of this page, whichever request it gets last.
+    assert latest["client_id"] == first["client_id"]
+    assert latest["sequence"] > first["sequence"]
     assert page.evaluate("window.fetchKeepalive")[1] == [SAVE_PREF_PATH, True]
     # The queued save does not send the same choice again once the held request ends.
     for route in held:
@@ -731,3 +732,36 @@ def test_a_failed_sync_keeps_the_management_row_the_user_cleared(page, swap_page
 
     assert len(posted) == 2
     assert sorted(posted[1]["select"]) == ["198.18.0.3/24"]
+
+
+def test_a_failed_sync_keeps_the_selected_management_row_of_the_page(page, swap_page):
+    load, swap = swap_page
+    answers = [500, 200]
+    posted = []
+
+    def answer(route):
+        posted.append(parse_qs(route.request.post_data, keep_blank_values=True))
+        route.fulfill(status=answers.pop(0), body="")
+
+    page.route(f"**{IP_SUBMIT_PATH}", answer)
+
+    def htmx_form(rows):
+        return _ip_form_markup(rows, set_primary=True).replace(
+            f'<form id="ip-sync-form" method="post" action="{IP_SUBMIT_PATH}">',
+            f'<form id="ip-sync-form" hx-post="{IP_SUBMIT_PATH}" hx-swap="none">',
+        )
+
+    load(htmx_form(IP_ROWS))
+    page.evaluate("htmxTest.process(document.body)")
+    assert page.locator("#ip-mgmt").is_checked()
+    page.click("#ip-submit")
+    page.wait_for_function("() => !document.querySelector('#ip-sync-form.htmx-request')")
+    page.wait_for_timeout(200)
+
+    swap(htmx_form(IP_PAGE_TWO_ROWS), "ip-sync-options")
+    page.check("#ip-third")
+    page.click("#ip-submit")
+    page.wait_for_timeout(500)
+
+    assert len(posted) == 2
+    assert sorted(posted[1]["select"]) == ["198.18.0.1/24", "198.18.0.3/24"]

@@ -1627,11 +1627,11 @@ def get_user_pref(request, path, default=None):
     return default
 
 
-# When the user made each saved choice, in milliseconds, by preference path.
-PREFERENCE_SAVED_AT = "plugins.netbox_librenms_plugin.preference_saved_at"
+# The page and the sequence number of the stored choice, by preference path.
+PREFERENCE_ORDER = "plugins.netbox_librenms_plugin.preference_order"
 
 
-def save_user_pref(request, path, value, saved_at=None):
+def save_user_pref(request, path, value, order=None):
     """
     Save a user preference value in the user's NetBox config.
 
@@ -1643,9 +1643,9 @@ def save_user_pref(request, path, value, saved_at=None):
         request (HttpRequest): Request for the user whose preference is saved.
         path (str): Preference path to set.
         value (object): Preference value to save.
-        saved_at (int | None): When the user made the choice, in milliseconds. A save older than
-            the one stored for the path is ignored, so a request that arrives late cannot undo a
-            newer choice.
+        order (tuple[str, int] | None): The page that made the choice and its count of choices.
+            A choice older than the stored choice of the same page is ignored, so a request that
+            arrives late cannot undo a newer choice. Pages count on their own, so no clock is compared.
 
     """
     from users.models import UserConfig
@@ -1656,17 +1656,23 @@ def save_user_pref(request, path, value, saved_at=None):
         return
     with transaction.atomic():
         user_config = UserConfig.objects.select_for_update().get(pk=config.pk)
-        stamps = user_config.get(PREFERENCE_SAVED_AT)
-        stamps = dict(stamps) if isinstance(stamps, dict) else {}
-        if saved_at is not None:
-            stored_at = stamps.get(path)
-            if isinstance(stored_at, int) and not isinstance(stored_at, bool) and stored_at > saved_at:
+        orders = user_config.get(PREFERENCE_ORDER)
+        orders = dict(orders) if isinstance(orders, dict) else {}
+        if order is not None:
+            client_id, sequence = order
+            stored = orders.get(path)
+            if (
+                isinstance(stored, dict)
+                and stored.get("client") == client_id
+                and isinstance(stored.get("sequence"), int)
+                and stored["sequence"] > sequence
+            ):
                 return
-            stamps[path] = saved_at
+            orders[path] = {"client": client_id, "sequence": sequence}
         try:
             user_config.set(path, value)
-            if saved_at is not None:
-                user_config.set(PREFERENCE_SAVED_AT, stamps)
+            if order is not None:
+                user_config.set(PREFERENCE_ORDER, orders)
         except (TypeError, ValueError):
             return
         user_config.save()
