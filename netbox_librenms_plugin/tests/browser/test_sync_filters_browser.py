@@ -1111,7 +1111,10 @@ def test_history_restore_binds_the_restored_select_all_control_again(page):
                 <button type="button" id="saveVlanGroups">Save</button></div>
                 <span></span><button type="button" class="vlan-edit-btn" data-row-key="r1"
                     data-vlans='[{{"vid": 10, "type": "U"}}]' data-vlan-groups='[{{"id": 5, "name": "g"}}]'></button>
-                <input type="hidden" class="vlan-group-hidden" name="vlan_group_r1_10" value="">`);
+                <input type="hidden" class="vlan-group-hidden" name="vlan_group_r1_10" value="">
+                <select id="ts-member" class="form-select tomselected ts-hidden-accessible" tabindex="-1">
+                <option value="1">1</option></select><div class="ts-wrapper form-select single">
+                <div class="ts-control"></div><div class="ts-dropdown single"></div></div>`);
             initializeScripts();
         }}"""
     )
@@ -1127,6 +1130,13 @@ def test_history_restore_binds_the_restored_select_all_control_again(page):
     # The VLAN modal Save button marks itself with a plain data-initialized.
     page.click("#saveVlanGroups")
     expect(page.locator('input[name="vlan_group_r1_10"]')).to_have_value("5")
+    # TomSelect markup without its instance: NetBox enhances only a select that matches its selector.
+    assert page.locator(".ts-wrapper").count() == 0
+    assert page.evaluate(
+        "document.getElementById('ts-member').matches("
+        "'select:not(.tomselected):not(.no-ts):not([size]):not(.api-select):not(.color-select)')"
+    )
+    assert page.evaluate("document.getElementById('ts-member').getAttribute('tabindex')") is None
 
 
 def test_a_history_cache_miss_binds_each_control_once(page):
