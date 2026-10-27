@@ -2324,7 +2324,7 @@ class TestResolvePortRelationships:
         assert kinds["sub_interfaces"]["conflicted"] == 1
 
     def test_a_long_ip_interface_chain_resolves_in_linear_walks(self, mock_librenms_api):
-        """Each walk up a long acyclic chain must stay cheap; list membership made it cubic."""
+        """A long acyclic chain and many small loops resolve in a few linear passes."""
         import time
 
         count = 2000
@@ -2333,13 +2333,23 @@ class TestResolvePortRelationships:
             ports.append({"port_id": 2 * index + 1, "ifName": f"p{index}", "ifType": "ipForward"})
             ports.append({"port_id": 2 * index + 2, "ifName": f"p{index + 1}.1", "ifType": "l2vlan"})
             port_stack.append({"high_port_id": 2 * index + 1, "low_port_id": 2 * index + 2})
+        # Small parent loops beside the chain: each repaired loop must not walk the chain again.
+        loops = 60
+        for loop in range(loops):
+            first = 10000 + 3 * loop
+            ports.append({"port_id": first, "ifName": f"c{loop}", "ifType": "ipForward"})
+            ports.append({"port_id": first + 1, "ifName": f"c{loop}.1", "ifType": "l2vlan"})
+            ports.append({"port_id": first + 2, "ifName": f"c{loop}.1.2", "ifType": "l2vlan"})
+            port_stack.append({"high_port_id": first, "low_port_id": first + 2})
 
         started = time.monotonic()
         result = mock_librenms_api.resolve_port_relationships(ports, port_stack, lag_patterns={})
         elapsed = time.monotonic() - started
 
         assert result["sub_interfaces"][1] == 2
-        assert elapsed < 5, f"{count} chained ipForward ports took {elapsed:.1f}s"
+        assert 10000 not in result["sub_interfaces"]
+        assert result["sub_interfaces"][10002] == 10001
+        assert elapsed < 5, f"{count} chained ipForward ports and {loops} loops took {elapsed:.1f}s"
 
     def test_a_sub_unit_of_an_ip_interface_is_not_a_lag_member(self, mock_librenms_api):
         """The physical-level port of a stacked sub-unit can be an L3 interface, which never joins a LAG."""

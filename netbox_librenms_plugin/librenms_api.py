@@ -1277,28 +1277,29 @@ class LibreNMSAPI:
             for port in ports_with_id:
                 _relate_name_derived_parent(port)
 
+            def _parent_cycle_ports() -> set:
+                """Return every port on a parent cycle, walking each port of the parent map once."""
+                walked, on_cycles = set(), set()
+                for start in sub_interfaces:
+                    path, positions, node = [], {}, start
+                    while node is not None and node not in walked and node not in positions:
+                        positions[node] = len(path)
+                        path.append(node)
+                        node = sub_interfaces.get(node)
+                    if node in positions:
+                        on_cycles.update(path[positions[node] :])
+                    walked.update(path)
+                return on_cycles
+
             # An ipForward edge can close a parent cycle with name edges; the names are the stronger signal.
-            cycle_found = True
-            while cycle_found:
-                cycle_found = False
-                for child_id in sorted(l3_child_ids):
-                    cycle, seen, parent_id = [child_id], {child_id}, sub_interfaces.get(child_id)
-                    while parent_id is not None and parent_id not in seen:
-                        cycle.append(parent_id)
-                        seen.add(parent_id)
-                        parent_id = sub_interfaces.get(parent_id)
-                    if parent_id != child_id:
-                        continue
-                    dropped = [node for node in cycle if node in l3_child_ids]
-                    for node in dropped:
-                        sub_interfaces.pop(node)
-                        l3_child_ids.discard(node)
-                    for node in dropped:
-                        _relate_name_derived_parent(by_id[node])
-                        if node not in sub_interfaces:
-                            conflicted_sub_interfaces.add(node)
-                    cycle_found = True
-                    break
+            while dropped := sorted(l3_child_ids & _parent_cycle_ports()):
+                for node in dropped:
+                    sub_interfaces.pop(node)
+                    l3_child_ids.discard(node)
+                for node in dropped:
+                    _relate_name_derived_parent(by_id[node])
+                    if node not in sub_interfaces:
+                        conflicted_sub_interfaces.add(node)
 
             return {
                 "lag_members": lag_members,
