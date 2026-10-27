@@ -1627,8 +1627,10 @@ def get_user_pref(request, path, default=None):
     return default
 
 
-# The page and the sequence number of the stored choice, by preference path.
+# The newest sequence number of each recent page, by preference path.
 PREFERENCE_ORDER = "plugins.netbox_librenms_plugin.preference_order"
+# Pages that saved a preference recently; an older page's late request is then accepted again.
+PREFERENCE_ORDER_PAGES = 20
 
 
 def save_user_pref(request, path, value, order=None):
@@ -1660,15 +1662,16 @@ def save_user_pref(request, path, value, order=None):
         orders = dict(orders) if isinstance(orders, dict) else {}
         if order is not None:
             client_id, sequence = order
-            stored = orders.get(path)
-            if (
-                isinstance(stored, dict)
-                and stored.get("client") == client_id
-                and isinstance(stored.get("sequence"), int)
-                and stored["sequence"] > sequence
-            ):
+            pages = orders.get(path)
+            pages = dict(pages) if isinstance(pages, dict) else {}
+            stored = pages.pop(client_id, None)
+            if isinstance(stored, int) and not isinstance(stored, bool) and stored > sequence:
                 return
-            orders[path] = {"client": client_id, "sequence": sequence}
+            # The newest page goes last, so the oldest page is the first to go.
+            pages[client_id] = sequence
+            while len(pages) > PREFERENCE_ORDER_PAGES:
+                pages.pop(next(iter(pages)))
+            orders[path] = pages
         try:
             user_config.set(path, value)
             if order is not None:

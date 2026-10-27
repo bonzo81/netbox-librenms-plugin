@@ -1979,6 +1979,8 @@ function restoreTableSelection(table) {
         if (entry.auto && blocked.has(row.dataset.portId)) return;
         // A stored VRF or group that the row no longer offers would fall back to another one, so the row is cleared.
         if (_storedChoiceIsGone(row, companionInputs)) {
+            // Set Primary IP can have checked the row already; the commit below drops it only when unchecked.
+            checkbox.checked = false;
             cleared += 1;
             return;
         }

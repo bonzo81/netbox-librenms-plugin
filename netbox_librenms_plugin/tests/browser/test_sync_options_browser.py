@@ -765,3 +765,24 @@ def test_a_failed_sync_keeps_the_selected_management_row_of_the_page(page, swap_
 
     assert len(posted) == 2
     assert sorted(posted[1]["select"]) == ["198.18.0.1/24", "198.18.0.3/24"]
+
+
+def test_a_management_row_whose_vrf_is_gone_is_cleared_after_set_primary_ip_selects_it(page, swap_page):
+    load, swap = swap_page
+    load(_ip_form_markup(_ip_row("198.18.0.1/24", checkbox_id="ip-mgmt", mgmt=True)))
+    page.wait_for_selector(".vrf-select[data-vrf-select-initialized]", state="attached")
+    page.select_option("#vrf-ip-mgmt", "7")
+    page.check("#ip-mgmt")
+    swap(_ip_form_markup(IP_PAGE_TWO_ROWS), "ip-sync-options")
+
+    # Set Primary IP was turned on elsewhere, and the user lost access to VRF 7 meanwhile.
+    without_blue = tuple(choice for choice in VRF_CHOICES if choice[0] != "7")
+    swap(
+        _ip_form_markup(
+            _ip_row("198.18.0.1/24", checkbox_id="ip-mgmt", mgmt=True, choices=without_blue), set_primary=True
+        ),
+        "ip-sync-options",
+    )
+
+    assert not page.locator("#ip-mgmt").is_checked()
+    assert "select" not in _submitted_fields(page)

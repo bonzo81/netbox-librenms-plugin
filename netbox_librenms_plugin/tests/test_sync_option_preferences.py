@@ -228,6 +228,17 @@ class TestConcurrentPreferenceSaves:
 
         assert _stored(user, SET_PRIMARY_IP_PREFERENCE) is False
 
+    def test_a_late_choice_of_a_page_stays_ignored_after_another_page_saved(self, client):
+        user = _user("sync-options-interleaved")
+        client.force_login(user)
+
+        assert _save(client, False, "set_primary_ip", client_id="page-a", sequence=2).status_code == 200
+        assert _save(client, False, "set_primary_ip", client_id="page-b", sequence=1).status_code == 200
+        # Page A's first request arrives last.
+        assert _save(client, True, "set_primary_ip", client_id="page-a", sequence=1).status_code == 200
+
+        assert _stored(user, SET_PRIMARY_IP_PREFERENCE) is False
+
     @pytest.mark.parametrize(
         "order",
         [
