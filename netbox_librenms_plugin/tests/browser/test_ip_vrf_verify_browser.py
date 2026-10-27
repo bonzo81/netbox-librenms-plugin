@@ -79,7 +79,7 @@ def test_a_restored_selection_shows_the_stored_vrf_and_verifies_it_again(page):
     page.evaluate(
         f"""() => writeStoredSelection(document.getElementById('librenms-ipaddress-table'), {{
             'row-1': {{inputs: {{}}, auto: ''}},
-            'row-2': {{inputs: {{'vrf_row-2': '{IGNORED}'}}, auto: ''}},
+            'row-2': {{inputs: {{'vrf_row-2': '{IGNORED}'}}, auto: '', chosen: ['vrf_row-2']}},
         }})"""
     )
 
