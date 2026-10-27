@@ -157,7 +157,7 @@ On Junos devices, LibreNMS reports a VLAN name with the VLAN ID added after a `+
   description: "Remove the VLAN ID that LibreNMS adds to Junos VLAN names"
 ```
 
-For VLAN 100, `users+100` becomes `users`, and `users+200` does not change. To remove any numeric suffix, use `^(.+)\\+\\d+$` as the match pattern.
+For VLAN 100, `users+100` becomes `users`, and `users+200` does not change. To remove any numeric suffix, type `^(.+)\+\d+$` as the match pattern in the rule form. In a YAML import, write it as `"^(.+)\\+\\d+$"`.
 
 The plugin does not create this rule. Before you add it, look at the names of your NetBox VLANs: a VLAN whose NetBox name still has the suffix shows a name change, which you must confirm before the sync renames it. NetBox requires a unique VLAN name in a VLAN group, so two VLANs that get the same name cannot both be in one group.
 
