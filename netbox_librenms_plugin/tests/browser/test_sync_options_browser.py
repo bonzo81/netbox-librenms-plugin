@@ -563,7 +563,6 @@ def test_a_sync_option_save_outlives_a_page_change(page, menu_page):
     assert page.evaluate("window.fetchKeepalive") == [[SAVE_PREF_PATH, True]]
 
 
-
 VRF_CHOICES = (("", "Global"), ("5", "red"), ("7", "blue"), ("9", "green"))
 
 
