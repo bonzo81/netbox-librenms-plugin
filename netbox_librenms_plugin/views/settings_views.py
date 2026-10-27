@@ -17,6 +17,7 @@ from netbox_librenms_plugin.forms import (
 )
 from netbox_librenms_plugin.librenms_api import LibreNMSAPI
 from netbox_librenms_plugin.models import LibreNMSSettings
+from netbox_librenms_plugin.transactions import classify_conflict
 from netbox_librenms_plugin.utils import exception_text_for, save_user_pref
 from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin
 
@@ -106,6 +107,9 @@ class LibreNMSSettingsView(LibreNMSPermissionMixin, View):
                         request.user,
                     )
                 except Exception as e:
+                    # save_user_pref writes under a row lock, so a lock conflict goes on to the try-again answer.
+                    if classify_conflict(e):
+                        raise
                     logger.exception(
                         "Unexpected error while updating user preferences for user %s: %s",
                         request.user,
