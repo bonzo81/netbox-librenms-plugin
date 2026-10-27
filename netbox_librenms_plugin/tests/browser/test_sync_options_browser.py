@@ -584,11 +584,13 @@ def test_an_interface_name_field_save_outlives_a_page_change(page):
     assert page.evaluate("window.fetchKeepalive") == [[SAVE_PREF_PATH, True]]
 
 
-def _ip_row(address, *, checkbox_id, mgmt=False, vrf=""):
+VRF_CHOICES = (("", "Global"), ("5", "red"), ("7", "blue"), ("9", "green"))
+
+
+def _ip_row(address, *, checkbox_id, mgmt=False, vrf="", choices=VRF_CHOICES):
     """One IP row with its VRF select, the way the IP table renders it."""
     options = "".join(
-        f'<option value="{value}"{" selected" if value == vrf else ""}>{label}</option>'
-        for value, label in (("", "Global"), ("5", "red"), ("7", "blue"), ("9", "green"))
+        f'<option value="{value}"{" selected" if value == vrf else ""}>{label}</option>' for value, label in choices
     )
     mgmt_attribute = ' data-mgmt-ip="true"' if mgmt else ""
     return (
@@ -675,3 +677,55 @@ def test_a_queued_preference_save_is_sent_when_the_page_unloads(page):
         route.fulfill(status=200, content_type="application/json", body='{"status": "ok"}')
     page.evaluate("syncOptionSaving")
     assert len(held) == 2
+
+
+def test_a_selected_row_whose_vrf_is_gone_is_cleared_not_moved_to_global(page, swap_page):
+    load, swap = swap_page
+    load(_ip_form_markup(_ip_row("198.18.0.2/24", checkbox_id="ip-other")))
+    page.wait_for_selector(".vrf-select[data-vrf-select-initialized]", state="attached")
+    page.select_option("#vrf-ip-other", "7")
+    page.check("#ip-other")
+
+    swap(_ip_form_markup(IP_PAGE_TWO_ROWS), "ip-sync-options")
+    # The user lost access to VRF 7 meanwhile, so the page renders the row without it.
+    without_blue = tuple(choice for choice in VRF_CHOICES if choice[0] != "7")
+    swap(_ip_form_markup(_ip_row("198.18.0.2/24", checkbox_id="ip-other", choices=without_blue)), "ip-sync-options")
+
+    assert not page.locator("#ip-other").is_checked()
+    assert "select" not in _submitted_fields(page)
+
+
+def test_a_failed_sync_keeps_the_management_row_the_user_cleared(page, swap_page):
+    load, swap = swap_page
+    answers = [500, 200]
+    posted = []
+
+    def answer(route):
+        posted.append(parse_qs(route.request.post_data, keep_blank_values=True))
+        route.fulfill(status=answers.pop(0), body="")
+
+    page.route(f"**{IP_SUBMIT_PATH}", answer)
+
+    def htmx_form(rows):
+        markup = _ip_form_markup(rows, set_primary=True)
+        return markup.replace(
+            f'<form id="ip-sync-form" method="post" action="{IP_SUBMIT_PATH}">',
+            f'<form id="ip-sync-form" hx-post="{IP_SUBMIT_PATH}" hx-swap="none">',
+        )
+
+    load(htmx_form(IP_ROWS))
+    page.evaluate("htmxTest.process(document.body)")
+    page.uncheck("#ip-mgmt")
+    swap(htmx_form(IP_PAGE_TWO_ROWS), "ip-sync-options")
+    page.check("#ip-third")
+
+    page.click("#ip-submit")
+    page.wait_for_function("() => !document.querySelector('#ip-sync-form.htmx-request')")
+    page.wait_for_timeout(200)
+    swap(htmx_form(IP_PAGE_TWO_ROWS), "ip-sync-options")
+    page.check("#ip-third")
+    page.click("#ip-submit")
+    page.wait_for_timeout(500)
+
+    assert len(posted) == 2
+    assert sorted(posted[1]["select"]) == ["198.18.0.3/24"]

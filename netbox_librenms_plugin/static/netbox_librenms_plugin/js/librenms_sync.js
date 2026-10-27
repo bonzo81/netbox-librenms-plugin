@@ -1967,6 +1967,11 @@ function restoreTableSelection(table) {
         }
         // A row the cascade added is re-derived by the closure; it is never restored onto a blocked row.
         if (entry.auto && blocked.has(row.dataset.portId)) return;
+        // A stored VRF or group that the row no longer offers would fall back to another one, so the row is cleared.
+        if (_storedChoiceIsGone(row, companionInputs)) {
+            cleared += 1;
+            return;
+        }
         row.querySelectorAll('select[name], input[type="hidden"][name]').forEach(function (input) {
             if (!_isSelectionCompanionName(input.name)) return;
             if (!Object.hasOwn(companionInputs, input.name)) return;
@@ -1988,6 +1993,28 @@ function restoreTableSelection(table) {
     commitSelectionChange(table);
     _showClearedSelectionNotice(table, cleared);
     restoredVrfs.forEach((select) => handleVRFChange(select, select.value));
+}
+
+/**
+ * Return whether the row no longer offers a stored VRF or VLAN group.
+ *
+ * Setting a select to a value it does not offer selects its first option, so the row would post another
+ * VRF or group than the user chose. Global, the empty value, is always offered.
+ *
+ * @param {HTMLTableRowElement} row - The rendered row.
+ * @param {Object<string, string>} companionInputs - The stored companion values of the row.
+ * @returns {boolean}
+ */
+function _storedChoiceIsGone(row, companionInputs) {
+    return Array.from(row.querySelectorAll('select.vrf-select[name], select.vlan-sync-group-select[name]')).some(
+        (select) => {
+            if (!Object.hasOwn(companionInputs, select.name) || companionInputs[select.name] === '') return false;
+            const stored = companionInputs[select.name];
+            return select.tomselect
+                ? !Object.hasOwn(select.tomselect.options, stored)
+                : !Array.from(select.options).some((option) => option.value === stored);
+        }
+    );
 }
 
 /** Tables whose rows carry a Virtual Chassis member that the row's verify request decided. */
@@ -2252,7 +2279,8 @@ function restoreOffPageSelections(form) {
         const table = document.getElementById(tableId);
         if (!table) return;
         // Lifecycle write, no closure: it gives back off-page rows a failed submit consumed, as they were.
-        writeStoredSelection(table, Object.assign(readStoredSelection(table), consumed[tableId]));
+        writeStoredSelection(table, Object.assign(readStoredSelection(table), consumed[tableId].rows));
+        writeSeededManagementRows(table, new Set([...readSeededManagementRows(table), ...consumed[tableId].seeded]));
         updateOffPageSelectionNotice(table);
     });
 }
@@ -2271,7 +2299,7 @@ HTMX_FAILURE_EVENTS.forEach(function (eventName) {
  *
  * @param {HTMLElement[]} tables - The tables whose stored rows the request submits.
  * @param {FormData} params - The request parameters.
- * @returns {Object} The consumed records by table id and row key.
+ * @returns {Object<string, {rows: Object, seeded: string[]}>} By table id: the consumed records by row key, and the seeded management rows.
  */
 function consumeOffPageSelections(tables, params) {
     const consumed = {};
@@ -2284,7 +2312,8 @@ function consumeOffPageSelections(tables, params) {
                 .filter(_isSelectionCompanionName)
                 .forEach(function (name) { params.append(name, companions[name]); });
         });
-        consumed[table.id] = records;
+        // A failed submit gives back the rows and the management rows that Set Primary IP already selected.
+        consumed[table.id] = {rows: records, seeded: Array.from(readSeededManagementRows(table))};
         clearStoredSelection(table);
     });
     return consumed;
