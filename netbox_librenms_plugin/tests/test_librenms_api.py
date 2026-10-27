@@ -2305,6 +2305,24 @@ class TestResolvePortRelationships:
         kinds = {kind["key"]: kind for kind in result["diagnostics"]["kinds"]}
         assert kinds["sub_interfaces"]["conflicted"] == 1
 
+    def test_every_ip_interface_edge_on_a_parent_loop_yields_to_the_names(self, mock_librenms_api):
+        """A loop with two ipForward edges drops both, and each child takes its name-derived parent."""
+        ports = [
+            {"port_id": 1, "ifName": "a", "ifDescr": "a", "ifType": "ipForward"},
+            {"port_id": 2, "ifName": "a.1", "ifDescr": "a.1", "ifType": "l2vlan"},
+            {"port_id": 3, "ifName": "a.1.3", "ifDescr": "a.1.3", "ifType": "ipForward"},
+            {"port_id": 4, "ifName": "a.1.3.4", "ifDescr": "a.1.3.4", "ifType": "l2vlan"},
+            {"port_id": 5, "ifName": "a.1.5", "ifDescr": "a.1.5", "ifType": "l2vlan"},
+        ]
+        # The loop is 1 -> 4 -> 3 -> 5 -> 2 -> 1; the edges 1 -> 4 and 3 -> 5 come from ipForward stack rows.
+        port_stack = [{"high_port_id": 4, "low_port_id": 1}, {"high_port_id": 5, "low_port_id": 3}]
+
+        result = mock_librenms_api.resolve_port_relationships(ports, port_stack, lag_patterns={})
+
+        assert result["sub_interfaces"] == {2: 1, 3: 2, 4: 3, 5: 2}
+        kinds = {kind["key"]: kind for kind in result["diagnostics"]["kinds"]}
+        assert kinds["sub_interfaces"]["conflicted"] == 1
+
     def test_a_sub_unit_of_an_ip_interface_is_not_a_lag_member(self, mock_librenms_api):
         """The physical-level port of a stacked sub-unit can be an L3 interface, which never joins a LAG."""
         ports = [

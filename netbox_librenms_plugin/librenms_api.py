@@ -1256,32 +1256,48 @@ class LibreNMSAPI:
                     _relate(lag_members, conflicted_lag_members, low_phys, high_phys)
                     _claim("lag_members", pair_key)
 
-            # A name-derived edge shortens the active-field name, so these edges alone cannot form a cycle.
-            for port in ports_with_id:
+            def _relate_name_derived_parent(port: dict) -> None:
+                """Relate a port that has no parent yet to the parent its active-field name gives."""
                 child_id = normalize_librenms_port_id(port.get("port_id"))
                 if child_id is None or child_id in sub_interfaces or child_id in conflicted_sub_interfaces:
-                    continue
+                    return
                 parent_port = _name_derived_parent(port)
                 if parent_port is None or normalize_librenms_port_id(parent_port.get("port_id")) is None:
-                    continue
+                    return
                 pair_key = normalized_pair_key(port, parent_port)
                 if pair_key is None or pair_key in excluded_pairs or pair_key in claimed_pairs:
-                    continue
-                # This loop walks ports_with_id, not filtered_port_pairs, so rule 2 is reapplied here.
+                    return
+                # This walks ports_with_id, not filtered_port_pairs, so rule 2 is reapplied here.
                 if _has_sap_name(port, parent_port):
-                    continue
+                    return
                 _relate(sub_interfaces, conflicted_sub_interfaces, port, parent_port)
                 _claim("sub_interfaces", pair_key)
 
+            # A name-derived edge shortens the active-field name, so these edges alone cannot form a cycle.
+            for port in ports_with_id:
+                _relate_name_derived_parent(port)
+
             # An ipForward edge can close a parent cycle with name edges; the names are the stronger signal.
-            for child_id in sorted(l3_child_ids):
-                parent_id, seen = sub_interfaces.get(child_id), set()
-                while parent_id is not None and parent_id != child_id and parent_id not in seen:
-                    seen.add(parent_id)
-                    parent_id = sub_interfaces.get(parent_id)
-                if parent_id == child_id:
-                    sub_interfaces.pop(child_id)
-                    conflicted_sub_interfaces.add(child_id)
+            cycle_found = True
+            while cycle_found:
+                cycle_found = False
+                for child_id in sorted(l3_child_ids):
+                    cycle, parent_id = [child_id], sub_interfaces.get(child_id)
+                    while parent_id is not None and parent_id not in cycle:
+                        cycle.append(parent_id)
+                        parent_id = sub_interfaces.get(parent_id)
+                    if parent_id != child_id:
+                        continue
+                    dropped = [node for node in cycle if node in l3_child_ids]
+                    for node in dropped:
+                        sub_interfaces.pop(node)
+                        l3_child_ids.discard(node)
+                    for node in dropped:
+                        _relate_name_derived_parent(by_id[node])
+                        if node not in sub_interfaces:
+                            conflicted_sub_interfaces.add(node)
+                    cycle_found = True
+                    break
 
             return {
                 "lag_members": lag_members,
