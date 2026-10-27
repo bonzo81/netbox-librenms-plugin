@@ -538,3 +538,47 @@ def test_a_selected_row_on_another_page_posts_the_vrf_the_user_chose(page, swap_
 
     assert posted["select"] == ["198.18.0.2/24"]
     assert posted["vrf_198.18.0.2/24"] == ["7"]
+
+
+# The browser cancels a plain fetch when the page unloads; a keepalive fetch completes.
+RECORD_FETCH_OPTIONS = """() => {
+    window.fetchKeepalive = [];
+    const send = window.fetch;
+    window.fetch = (url, init) => {
+        window.fetchKeepalive.push([String(url), Boolean(init && init.keepalive)]);
+        return send(url, init);
+    };
+}"""
+
+
+def test_a_sync_option_save_outlives_a_page_change(page, menu_page):
+    saved = menu_page()
+    page.evaluate(RECORD_FETCH_OPTIONS)
+
+    page.check("#exclude-mtu")
+    _settle(page)
+
+    assert len(saved) == 1
+    assert page.evaluate("window.fetchKeepalive") == [[SAVE_PREF_PATH, True]]
+
+
+def test_an_interface_name_field_save_outlives_a_page_change(page):
+    page.route(
+        f"**{SAVE_PREF_PATH}",
+        lambda route: route.fulfill(status=200, content_type="application/json", body='{"status": "ok"}'),
+    )
+    page.set_content(
+        f'<input type="hidden" name="csrfmiddlewaretoken" value="{CSRF_TOKEN}">'
+        f'<div data-save-pref-url="{SAVE_PREF_PATH}">'
+        '<input type="radio" class="interface-name-field" name="interface_name_field" value="ifName" checked>'
+        '<input type="radio" class="interface-name-field" name="interface_name_field" value="ifDescr" id="if-descr">'
+        "</div>"
+    )
+    page.add_script_tag(path=str(SCRIPT_PATH))
+    page.evaluate("initializeScripts()")
+    page.evaluate(RECORD_FETCH_OPTIONS)
+
+    page.check("#if-descr")
+    page.wait_for_function("window.fetchKeepalive.length === 1")
+
+    assert page.evaluate("window.fetchKeepalive") == [[SAVE_PREF_PATH, True]]

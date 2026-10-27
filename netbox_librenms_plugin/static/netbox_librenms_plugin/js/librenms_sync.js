@@ -1101,6 +1101,8 @@ function saveSyncOptionPreference(root, key, value) {
     }
     syncOptionSaving = syncOptionSaving.then(() => fetch(savePrefUrl, {
         method: 'POST',
+        // A save that the user starts just before leaving the page must still reach the server.
+        keepalive: true,
         headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrfToken},
         body: JSON.stringify({key: key, value: value})
     })).then(response => {
@@ -3917,6 +3919,7 @@ function updateInterfaceNameField() {
                     const platformId = preferenceSelector.dataset.platformId || null;
                     fetch(savePrefUrl, {
                         method: 'POST',
+                        keepalive: true,
                         headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrfToken},
                         body: JSON.stringify({
                             key: 'interface_name_field',
