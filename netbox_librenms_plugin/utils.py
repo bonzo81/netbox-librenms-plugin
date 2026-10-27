@@ -1627,7 +1627,7 @@ def get_user_pref(request, path, default=None):
     return default
 
 
-# The newest sequence number of each recent page, by preference path.
+# By preference path: a save counter, and the newest sequence number and save count of each recent page.
 PREFERENCE_ORDER = "plugins.netbox_librenms_plugin.preference_order"
 # Pages that saved a preference recently; an older page's late request is then accepted again.
 PREFERENCE_ORDER_PAGES = 20
@@ -1662,16 +1662,23 @@ def save_user_pref(request, path, value, order=None):
         orders = dict(orders) if isinstance(orders, dict) else {}
         if order is not None:
             client_id, sequence = order
-            pages = orders.get(path)
-            pages = dict(pages) if isinstance(pages, dict) else {}
-            stored = pages.pop(client_id, None)
-            if isinstance(stored, int) and not isinstance(stored, bool) and stored > sequence:
+            record = orders.get(path)
+            record = record if isinstance(record, dict) else {}
+            pages = {
+                page: entry
+                for page, entry in (record.get("pages") or {}).items()
+                if isinstance(entry, list) and len(entry) == 2 and all(type(number) is int for number in entry)
+            }
+            stored = pages.get(client_id)
+            if stored is not None and stored[0] > sequence:
                 return
-            # The newest page goes last, so the oldest page is the first to go.
-            pages[client_id] = sequence
+            # jsonb reorders object keys, so a save counter, not key order, tells which page saved last.
+            serial = record.get("serial") if type(record.get("serial")) is int else 0
+            serial += 1
+            pages[client_id] = [sequence, serial]
             while len(pages) > PREFERENCE_ORDER_PAGES:
-                pages.pop(next(iter(pages)))
-            orders[path] = pages
+                del pages[min(pages, key=lambda page: pages[page][1])]
+            orders[path] = {"serial": serial, "pages": pages}
         try:
             user_config.set(path, value)
             if order is not None:

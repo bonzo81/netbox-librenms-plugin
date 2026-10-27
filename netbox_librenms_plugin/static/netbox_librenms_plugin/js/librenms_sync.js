@@ -1814,7 +1814,7 @@ function _selectionSnapshot(table) {
  * row restored after paging keeps the same standing it had before.
  *
  * @param {HTMLElement} table - The table element.
- * @returns {Object<string, {inputs: Object<string, string>, auto: string}>} Selected rows by key.
+ * @returns {Object<string, {inputs: Object<string, string>, auto: string, chosen: string[]}>} Selected rows by key.
  */
 function readStoredSelection(table) {
     try {
@@ -1936,6 +1936,7 @@ function persistTableSelection(table) {
                     : checkbox.dataset[MEMBER_MARKER]
                       ? 'member'
                       : '',
+                chosen: _chosenVrfNames(row),
             };
         } else {
             // Only the visible page can retract a row: an absent checkbox means "another page",
@@ -1978,7 +1979,8 @@ function restoreTableSelection(table) {
         // A row the cascade added is re-derived by the closure; it is never restored onto a blocked row.
         if (entry.auto && blocked.has(row.dataset.portId)) return;
         // A stored VRF or group that the row no longer offers would fall back to another one, so the row is cleared.
-        if (_storedChoiceIsGone(row, companionInputs)) {
+        const chosen = (entry && entry.chosen) || [];
+        if (_storedChoiceIsGone(row, companionInputs, chosen)) {
             // Set Primary IP can have checked the row already; the commit below drops it only when unchecked.
             checkbox.checked = false;
             cleared += 1;
@@ -1987,6 +1989,8 @@ function restoreTableSelection(table) {
         row.querySelectorAll('select[name], input[type="hidden"][name]').forEach(function (input) {
             if (!_isSelectionCompanionName(input.name)) return;
             if (!Object.hasOwn(companionInputs, input.name)) return;
+            // Only a VRF the user chose comes back; a stored default follows the page, for example a new suggestion.
+            if (input.matches('select.vrf-select') && !chosen.includes(input.name)) return;
             const renderedValue = input.value;
             if (input.tomselect) {
                 input.tomselect.setValue(companionInputs[input.name], true);
@@ -2008,6 +2012,24 @@ function restoreTableSelection(table) {
 }
 
 /**
+ * Return the VRF fields of a row whose value differs from the VRF that the page rendered.
+ *
+ * Only such a VRF is the user's choice. TomSelect sets the selected property, not the attribute,
+ * so defaultSelected keeps the rendered VRF.
+ *
+ * @param {HTMLTableRowElement} row - The rendered row.
+ * @returns {string[]} Field names.
+ */
+function _chosenVrfNames(row) {
+    return Array.from(row.querySelectorAll('select.vrf-select[name]'))
+        .filter((select) => {
+            const rendered = Array.from(select.options).find((option) => option.defaultSelected) || select.options[0];
+            return select.value !== (rendered ? rendered.value : '');
+        })
+        .map((select) => select.name);
+}
+
+/**
  * Return whether the row no longer offers a stored VRF or VLAN group.
  *
  * Setting a select to a value it does not offer selects its first option, so the row would post another
@@ -2015,12 +2037,14 @@ function restoreTableSelection(table) {
  *
  * @param {HTMLTableRowElement} row - The rendered row.
  * @param {Object<string, string>} companionInputs - The stored companion values of the row.
+ * @param {string[]} chosen - The VRF fields that the user chose.
  * @returns {boolean}
  */
-function _storedChoiceIsGone(row, companionInputs) {
+function _storedChoiceIsGone(row, companionInputs, chosen) {
     return Array.from(row.querySelectorAll('select.vrf-select[name], select.vlan-sync-group-select[name]')).some(
         (select) => {
             if (!Object.hasOwn(companionInputs, select.name) || companionInputs[select.name] === '') return false;
+            if (select.matches('.vrf-select') && !chosen.includes(select.name)) return false;
             const stored = companionInputs[select.name];
             return select.tomselect
                 ? !Object.hasOwn(select.tomselect.options, stored)

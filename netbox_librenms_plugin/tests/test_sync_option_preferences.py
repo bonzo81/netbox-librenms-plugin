@@ -239,6 +239,21 @@ class TestConcurrentPreferenceSaves:
 
         assert _stored(user, SET_PRIMARY_IP_PREFERENCE) is False
 
+    def test_the_oldest_page_is_forgotten_first_whatever_its_id(self, client):
+        """The stored record keeps the recent pages; jsonb reorders object keys, so key order is no age."""
+        user = _user("sync-options-eviction")
+        client.force_login(user)
+        for page_number in range(19):
+            assert _save(client, False, "set_primary_ip", client_id=f"z{page_number:02}", sequence=1).status_code == 200
+        assert _save(client, False, "set_primary_ip", client_id="a", sequence=2).status_code == 200
+        # A twenty-first page makes the oldest page go.
+        assert _save(client, False, "set_primary_ip", client_id="z19", sequence=1).status_code == 200
+
+        # Page "a" saved recently, so its late first request stays ignored.
+        assert _save(client, True, "set_primary_ip", client_id="a", sequence=1).status_code == 200
+
+        assert _stored(user, SET_PRIMARY_IP_PREFERENCE) is False
+
     @pytest.mark.parametrize(
         "order",
         [

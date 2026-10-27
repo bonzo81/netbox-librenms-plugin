@@ -430,14 +430,14 @@ IP_PAGE_TWO_ROWS = (
 )
 
 
-def _ip_form_markup(rows, **menu_state):
+def _ip_form_markup(rows, mgmt_vrf="5", **menu_state):
     """One page of the IP tab, with the table inside the form that submits the selection."""
     return (
         f"{_ip_menu_markup(**menu_state)}"
         f'<form id="ip-sync-form" method="post" action="{IP_SUBMIT_PATH}">'
         # The server names the management row on every page, also where the row is not rendered.
         """<table id="librenms-ipaddress-table" data-mgmt-rows='["198.18.0.1/24"]'"""
-        """ data-mgmt-row-vrfs='{"198.18.0.1/24": "5"}'>"""
+        f""" data-mgmt-row-vrfs='{{"198.18.0.1/24": "{mgmt_vrf}"}}'>"""
         '<thead><tr><th><input type="checkbox" class="toggle"></th>'
         f'<th>Address</th></tr></thead><tbody>{rows}</tbody></table><button type="submit" id="ip-submit">Sync</button>'
         "</form>"
@@ -786,3 +786,18 @@ def test_a_management_row_whose_vrf_is_gone_is_cleared_after_set_primary_ip_sele
 
     assert not page.locator("#ip-mgmt").is_checked()
     assert "select" not in _submitted_fields(page)
+
+
+def test_a_vrf_the_user_did_not_choose_follows_the_page(page, swap_page):
+    """A new suggestion, for example after Create VRF, replaces the VRF stored for an off-page management row."""
+    load, swap = swap_page
+    load(_ip_form_markup(IP_PAGE_TWO_ROWS, mgmt_vrf="", set_primary=True))
+
+    swap(
+        _ip_form_markup(_ip_row("198.18.0.1/24", checkbox_id="ip-mgmt", mgmt=True, vrf="5"), set_primary=True),
+        "ip-sync-options",
+    )
+
+    assert page.locator("#ip-mgmt").is_checked()
+    assert page.locator("#vrf-ip-mgmt").input_value() == "5"
+    assert _submitted_fields(page)["vrf_198.18.0.1/24"] == ["5"]
