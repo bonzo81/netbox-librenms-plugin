@@ -1129,6 +1129,39 @@ def test_history_restore_binds_the_restored_select_all_control_again(page):
     expect(page.locator('input[name="vlan_group_r1_10"]')).to_have_value("5")
 
 
+def test_a_history_cache_miss_binds_each_control_once(page):
+    vlan_modal = """<div id="vlanDetailModal" data-current-row-key="r1" data-current-device-id="1">
+        <div class="modal-body"></div><table><tbody id="vlanDetailTableBody"><tr><td>
+        <select class="vlan-modal-group-select" data-vid="10"><option value="5" selected>g</option></select>
+        </td></tr></tbody></table><input type="checkbox" id="applyVlanGroupToAll" checked>
+        <button type="button" id="saveVlanGroups">Save</button></div>"""
+    html = _filter_page({}).replace("</body>", f"{vlan_modal}</body>")
+    held, saves = [], []
+    page.route(f"{PAGE_URL}**", lambda route: route.fulfill(status=200, content_type="text/html", body=html))
+    page.route(f"{FILTER_ENDPOINT}**", lambda route: held.append(route))
+    page.route(
+        "**/save-vlan-group-overrides/",
+        lambda route: (
+            saves.append(route.request),
+            route.fulfill(status=200, content_type="application/json", body="{}"),
+        ),
+    )
+    page.goto(f"{PAGE_URL}?tab=interfaces&server_key=primary")
+    _add_page_scripts(page)
+    # Without a history cache, Back loads the page from the server again.
+    page.evaluate("htmxTest.config.historyCacheSize = 0")
+    page.fill("#id_interfaces_q", "eth")
+    _answer(_next_request(page, held, 1))
+    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "eth")
+
+    page.go_back()
+    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "")
+    page.click("#saveVlanGroups")
+    page.wait_for_timeout(300)
+
+    assert len(saves) == 1
+
+
 def test_a_filter_response_after_refresh_cannot_update_a_detached_results_target(page):
     held = _serve_filter_tab(page)
     refreshes = []
