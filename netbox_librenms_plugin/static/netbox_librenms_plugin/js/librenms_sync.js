@@ -4121,21 +4121,25 @@ document.addEventListener('submit', function (event) {
 }, true);
 
 // Restored HTML has initial control values; the restored URL names the displayed filters.
-document.addEventListener('htmx:historyRestore', function () {
-    // A restored snapshot keeps the binding markers of its controls but not their listeners.
-    const historyElement = document.querySelector('[hx-history-elt],[data-hx-history-elt]') || document.body;
-    historyElement.querySelectorAll('*').forEach(element => {
+// A cached snapshot keeps the binding markers of its controls but not their listeners; the swap binds them again.
+document.addEventListener('htmx:historyCacheHit', function (event) {
+    const snapshot = document.createElement('template');
+    snapshot.innerHTML = event.detail.item.content;
+    snapshot.content.querySelectorAll('*').forEach(element => {
         Object.keys(element.dataset).filter(key => /(^initialized|Initialized|Bound)$/.test(key)).forEach(key => {
             delete element.dataset[key];
         });
     });
+    event.detail.item.content = snapshot.innerHTML;
+});
+
+document.addEventListener('htmx:historyRestore', function () {
     const parameters = new URLSearchParams(window.location.search);
     document.querySelectorAll('.sync-filter-form').forEach(form => {
         [...form.elements].filter(control => control.id && control.name).forEach(control => {
             control.value = parameters.get(control.name) ?? '';
         });
     });
-    initializeScripts();
 });
 
 // An empty field means no filter, so it stays out of the page URL that the response pushes.
