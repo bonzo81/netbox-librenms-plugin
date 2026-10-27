@@ -82,3 +82,23 @@ def test_a_restored_selection_keeps_the_rendered_vrf_and_never_checks_a_disabled
     assert not page.locator('input[value="row-1"]').is_checked()
     assert page.locator("#vrf_select_row-2").input_value() == ""
     assert page.locator('input[value="row-2"]').is_checked()
+
+
+def test_a_selected_row_that_leaves_the_page_posts_its_vrf(page):
+    _load(page, [_row("row-1"), _row("row-2")])
+    page.evaluate(
+        f"""() => {{
+            const table = document.getElementById('librenms-ipaddress-table');
+            document.getElementById('vrf_select_row-1').value = '{ALLOWED}';
+            table.querySelector('input[value="row-1"]').checked = true;
+            persistTableSelection(table);
+            // A filter or another page leaves the selected row out of the rendered table.
+            table.querySelector('tr[data-interface="row-1"]').remove();
+            injectOffPageSelections(document.getElementById('sync-form'));
+        }}"""
+    )
+
+    posted = page.evaluate("[...new FormData(document.getElementById('sync-form'))]")
+
+    assert ["select", "row-1"] in posted
+    assert ["vrf_row-1", ALLOWED] in posted
