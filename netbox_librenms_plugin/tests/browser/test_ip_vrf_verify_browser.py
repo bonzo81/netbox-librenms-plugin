@@ -67,21 +67,30 @@ def test_a_late_response_for_an_earlier_vrf_does_not_repaint_the_row(page):
     assert checkbox.is_disabled()
 
 
-def test_a_restored_selection_keeps_the_rendered_vrf_and_never_checks_a_disabled_row(page):
+def test_a_restored_selection_shows_the_stored_vrf_and_verifies_it_again(page):
     _load(page, [_row("row-1", disabled=True), _row("row-2")])
-    page.route(VERIFY_ROUTE, lambda route: route.abort())
+    verified = []
+
+    def verify(route):
+        verified.append(route.request.post_data_json["vrf_id"])
+        route.fulfill(status=200, content_type="application/json", body=_verdict("Ignored", False))
+
+    page.route(VERIFY_ROUTE, verify)
     page.evaluate(
         f"""() => writeStoredSelection(document.getElementById('librenms-ipaddress-table'), {{
-            'row-1': {{inputs: {{}}, auto: '', mgmt: false}},
-            'row-2': {{inputs: {{'vrf_row-2': '{IGNORED}'}}, auto: '', mgmt: false}},
+            'row-1': {{inputs: {{}}, auto: ''}},
+            'row-2': {{inputs: {{'vrf_row-2': '{IGNORED}'}}, auto: ''}},
         }})"""
     )
 
     page.evaluate("restoreTableSelection(document.getElementById('librenms-ipaddress-table'))")
 
     assert not page.locator('input[value="row-1"]').is_checked()
-    assert page.locator("#vrf_select_row-2").input_value() == ""
-    assert page.locator('input[value="row-2"]').is_checked()
+    assert page.locator("#vrf_select_row-2").input_value() == IGNORED
+    _wait_for(page, lambda: verified == [IGNORED])
+    # The rendered status belonged to the rendered VRF; the verify of the stored VRF decides the row.
+    page.wait_for_function("document.querySelectorAll('td[data-col=status]')[1].textContent === 'Ignored'")
+    assert page.locator('input[value="row-2"]').is_disabled()
 
 
 def test_a_selected_row_that_leaves_the_page_posts_its_vrf(page):
