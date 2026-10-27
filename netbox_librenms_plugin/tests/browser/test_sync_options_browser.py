@@ -468,6 +468,20 @@ def test_turning_set_primary_ip_off_drops_the_off_page_management_row(page, swap
     assert _submitted_selection(page) == ["198.18.0.2/24", "198.18.0.3/24"]
 
 
+def test_turning_set_primary_ip_off_drops_every_row_the_server_names_as_management(page, swap_page):
+    load, _swap = swap_page
+    load(_ip_form_markup(IP_PAGE_TWO_ROWS, set_primary=True))
+    # A stored entry carries no management mark, for example one that an earlier plugin version wrote.
+    page.evaluate(
+        """() => writeStoredSelection(document.getElementById('librenms-ipaddress-table'),
+            {'198.18.0.1/24': {inputs: {}, auto: ''}})"""
+    )
+    page.check("#ip-third")
+    page.uncheck("#set-primary-ip-toggle-cb")
+
+    assert _submitted_selection(page) == ["198.18.0.3/24"]
+
+
 def test_turning_set_primary_ip_on_selects_the_off_page_management_row(page, swap_page):
     load, swap = swap_page
     load(_ip_form_markup(IP_ROWS))

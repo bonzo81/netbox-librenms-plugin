@@ -1230,7 +1230,7 @@ function initializePrimaryIpToggle() {
         const visible = new Set(Array.from(table.querySelectorAll('td input[name="select"]'), (box) => box.value));
         const selection = readStoredSelection(table);
         JSON.parse(table.dataset.mgmtRows || '[]').forEach((key) => {
-            if (!visible.has(key)) selection[key] = {inputs: {}, auto: '', mgmt: true};
+            if (!visible.has(key)) selection[key] = {inputs: {}, auto: ''};
         });
         writeStoredSelection(table, selection);
     };
@@ -1240,8 +1240,8 @@ function initializePrimaryIpToggle() {
         if (table && !toggle.checked) {
             // The management row can be selected on another page, where no checkbox can clear it.
             const selection = readStoredSelection(table);
-            Object.keys(selection).forEach((key) => {
-                if (selection[key] && selection[key].mgmt) delete selection[key];
+            JSON.parse(table.dataset.mgmtRows || '[]').forEach((key) => {
+                delete selection[key];
             });
             writeStoredSelection(table, selection);
         }
@@ -1766,7 +1766,7 @@ function _selectionSnapshot(table) {
  * row restored after paging keeps the same standing it had before.
  *
  * @param {HTMLElement} table - The table element.
- * @returns {Object<string, {inputs: Object<string, string>, auto: string, mgmt: boolean}>} Selected rows by key.
+ * @returns {Object<string, {inputs: Object<string, string>, auto: string}>} Selected rows by key.
  */
 function readStoredSelection(table) {
     try {
@@ -1887,7 +1887,6 @@ function persistTableSelection(table) {
                     : checkbox.dataset[MEMBER_MARKER]
                       ? 'member'
                       : '',
-                mgmt: row.dataset.mgmtIp === 'true',
             };
         } else {
             // Only the visible page can retract a row: an absent checkbox means "another page",
