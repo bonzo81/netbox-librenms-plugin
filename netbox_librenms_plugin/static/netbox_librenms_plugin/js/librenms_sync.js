@@ -4125,7 +4125,7 @@ document.addEventListener('htmx:historyRestore', function () {
     // A restored snapshot keeps the binding markers of its controls but not their listeners.
     const historyElement = document.querySelector('[hx-history-elt],[data-hx-history-elt]') || document.body;
     historyElement.querySelectorAll('*').forEach(element => {
-        Object.keys(element.dataset).filter(key => /(Initialized|Bound)$/.test(key)).forEach(key => {
+        Object.keys(element.dataset).filter(key => /(^initialized|Initialized|Bound)$/.test(key)).forEach(key => {
             delete element.dataset[key];
         });
     });

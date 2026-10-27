@@ -1105,6 +1105,13 @@ def test_history_restore_binds_the_restored_select_all_control_again(page):
             table.innerHTML = '<thead><tr><th><input type="checkbox" class="toggle" id="toggle-all"></th></tr></thead>'
                 + '<tbody><tr data-port-id="1"><td data-col="selection"><input type="checkbox" name="select" value="1"></td></tr>'
                 + '<tr data-port-id="2"><td data-col="selection"><input type="checkbox" name="select" value="2"></td></tr></tbody>';
+            document.body.insertAdjacentHTML('beforeend', `<div id="vlanDetailModal" data-current-row-key="r1">
+                <table><tbody id="vlanDetailTableBody"><tr><td><select class="vlan-modal-group-select" data-vid="10">
+                <option value="5" selected>g</option></select></td></tr></tbody></table>
+                <button type="button" id="saveVlanGroups">Save</button></div>
+                <span></span><button type="button" class="vlan-edit-btn" data-row-key="r1"
+                    data-vlans='[{{"vid": 10, "type": "U"}}]' data-vlan-groups='[{{"id": 5, "name": "g"}}]'></button>
+                <input type="hidden" class="vlan-group-hidden" name="vlan_group_r1_10" value="">`);
             initializeScripts();
         }}"""
     )
@@ -1117,6 +1124,9 @@ def test_history_restore_binds_the_restored_select_all_control_again(page):
     page.check("#toggle-all")
 
     expect(page.locator(f'#{TABLE} td input[name="select"]:checked')).to_have_count(2)
+    # The VLAN modal Save button marks itself with a plain data-initialized.
+    page.click("#saveVlanGroups")
+    expect(page.locator('input[name="vlan_group_r1_10"]')).to_have_value("5")
 
 
 def test_a_filter_response_after_refresh_cannot_update_a_detached_results_target(page):
