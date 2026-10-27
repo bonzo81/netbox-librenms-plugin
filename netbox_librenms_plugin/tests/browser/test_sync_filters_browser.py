@@ -1097,6 +1097,28 @@ def test_history_restores_the_filter_controls_with_the_results(page):
     expect(page.locator("#id_interfaces_q")).to_have_value("xe")
 
 
+def test_history_restore_binds_the_restored_select_all_control_again(page):
+    held = _serve_filter_tab(page)
+    page.evaluate(
+        f"""() => {{
+            const table = document.getElementById('{TABLE}');
+            table.innerHTML = '<thead><tr><th><input type="checkbox" class="toggle" id="toggle-all"></th></tr></thead>'
+                + '<tbody><tr data-port-id="1"><td data-col="selection"><input type="checkbox" name="select" value="1"></td></tr>'
+                + '<tr data-port-id="2"><td data-col="selection"><input type="checkbox" name="select" value="2"></td></tr></tbody>';
+            initializeScripts();
+        }}"""
+    )
+    page.fill("#id_interfaces_q", "eth")
+    _answer(_next_request(page, held, 1))
+    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "eth")
+
+    page.go_back()
+    expect(page.locator("#toggle-all")).to_be_attached()
+    page.check("#toggle-all")
+
+    expect(page.locator(f'#{TABLE} td input[name="select"]:checked')).to_have_count(2)
+
+
 def test_a_filter_response_after_refresh_cannot_update_a_detached_results_target(page):
     held = _serve_filter_tab(page)
     refreshes = []

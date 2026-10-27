@@ -4122,12 +4122,20 @@ document.addEventListener('submit', function (event) {
 
 // Restored HTML has initial control values; the restored URL names the displayed filters.
 document.addEventListener('htmx:historyRestore', function () {
+    // A restored snapshot keeps the binding markers of its controls but not their listeners.
+    const historyElement = document.querySelector('[hx-history-elt],[data-hx-history-elt]') || document.body;
+    historyElement.querySelectorAll('*').forEach(element => {
+        Object.keys(element.dataset).filter(key => /(Initialized|Bound)$/.test(key)).forEach(key => {
+            delete element.dataset[key];
+        });
+    });
     const parameters = new URLSearchParams(window.location.search);
     document.querySelectorAll('.sync-filter-form').forEach(form => {
         [...form.elements].filter(control => control.id && control.name).forEach(control => {
             control.value = parameters.get(control.name) ?? '';
         });
     });
+    initializeScripts();
 });
 
 // An empty field means no filter, so it stays out of the page URL that the response pushes.
