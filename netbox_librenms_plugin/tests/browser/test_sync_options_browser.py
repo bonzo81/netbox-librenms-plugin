@@ -436,15 +436,16 @@ def _ip_form_markup(rows, **menu_state):
         f"{_ip_menu_markup(**menu_state)}"
         f'<form id="ip-sync-form" method="post" action="{IP_SUBMIT_PATH}">'
         # The server names the management row on every page, also where the row is not rendered.
-        """<table id="librenms-ipaddress-table" data-mgmt-rows='["198.18.0.1/24"]'>"""
+        """<table id="librenms-ipaddress-table" data-mgmt-rows='["198.18.0.1/24"]'"""
+        """ data-mgmt-row-vrfs='{"198.18.0.1/24": "5"}'>"""
         '<thead><tr><th><input type="checkbox" class="toggle"></th>'
         f'<th>Address</th></tr></thead><tbody>{rows}</tbody></table><button type="submit" id="ip-submit">Sync</button>'
         "</form>"
     )
 
 
-def _submitted_selection(page):
-    """Submit the IP form and return the posted ``select`` values."""
+def _submitted_fields(page):
+    """Submit the IP form and return every posted field."""
     posted = []
     page.route(
         f"**{IP_SUBMIT_PATH}",
@@ -452,7 +453,12 @@ def _submitted_selection(page):
     )
     page.click("#ip-submit")
     page.wait_for_function("document.body.textContent.trim() === 'ok'")
-    return sorted(parse_qs(posted[0])["select"])
+    return parse_qs(posted[0], keep_blank_values=True)
+
+
+def _submitted_selection(page):
+    """Submit the IP form and return the posted ``select`` values."""
+    return sorted(_submitted_fields(page)["select"])
 
 
 def test_turning_set_primary_ip_off_drops_the_off_page_management_row(page, swap_page):
@@ -503,3 +509,32 @@ def test_a_saved_set_primary_ip_selects_the_management_row_from_another_page(pag
     page.check("#ip-third")
 
     assert _submitted_selection(page) == ["198.18.0.1/24", "198.18.0.3/24"]
+
+
+def test_an_off_page_management_row_posts_the_vrf_its_row_shows(page, swap_page):
+    load, _swap = swap_page
+    load(_ip_form_markup(IP_PAGE_TWO_ROWS, set_primary=True))
+    page.check("#ip-third")
+
+    posted = _submitted_fields(page)
+
+    assert sorted(posted["select"]) == ["198.18.0.1/24", "198.18.0.3/24"]
+    assert posted["vrf_198.18.0.1/24"] == ["5"]
+
+
+def test_a_selected_row_on_another_page_posts_the_vrf_the_user_chose(page, swap_page):
+    load, swap = swap_page
+    row = (
+        '<tr><td data-col="selection"><input type="checkbox" name="select" value="198.18.0.2/24" id="ip-other"></td>'
+        '<td><select name="vrf_198.18.0.2/24" id="vrf-other"><option value="">Global</option>'
+        '<option value="7">blue</option></select></td></tr>'
+    )
+    load(_ip_form_markup(row))
+    page.select_option("#vrf-other", "7")
+    page.check("#ip-other")
+
+    swap(_ip_form_markup(IP_PAGE_TWO_ROWS), "ip-sync-options")
+    posted = _submitted_fields(page)
+
+    assert posted["select"] == ["198.18.0.2/24"]
+    assert posted["vrf_198.18.0.2/24"] == ["7"]

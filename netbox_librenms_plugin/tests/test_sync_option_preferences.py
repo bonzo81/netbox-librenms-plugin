@@ -543,6 +543,26 @@ class TestRenderingTheIPMenu:
         assert not [tag for tag in open_tags(html, "tr") if tag.get("data-mgmt-ip") == "true"]
         (table,) = [tag for tag in open_tags(html, "table") if tag.get("id") == "librenms-ipaddress-table"]
         assert json.loads(table["data-mgmt-rows"]) == ["198.18.41.8/24"]
+        assert json.loads(table["data-mgmt-row-vrfs"]) == {"198.18.41.8/24": ""}
+
+    @pytest.mark.parametrize("vrf_key", ["vrf_id", "suggested_vrf_id"])
+    def test_the_table_gives_the_vrf_that_the_management_row_shows(self, vrf_key):
+        from ipam.models import VRF
+
+        from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
+
+        blue = VRF.objects.create(name="mgmt-vrf-blue")
+        hidden_id = VRF.objects.create(name="mgmt-vrf-hidden").pk
+        rows = [
+            {"ip_with_mask": "198.18.42.1/24", "is_mgmt_ip": True, "vrfs": [blue], vrf_key: blue.pk},
+            # A VRF that the row cannot offer is not what its select shows.
+            {"ip_with_mask": "198.18.42.2/24", "is_mgmt_ip": True, "vrfs": [blue], vrf_key: hidden_id},
+            {"ip_with_mask": "198.18.42.3/24", "vrfs": [blue], vrf_key: blue.pk},
+        ]
+
+        table = IPAddressTable(rows)
+
+        assert json.loads(table.attrs["data-mgmt-row-vrfs"]) == {"198.18.42.1/24": str(blue.pk), "198.18.42.2/24": ""}
 
     def test_a_posted_toggle_beats_the_saved_choice_on_refresh(self, client, settings, live_librenms):
         _configure_test_server(settings)

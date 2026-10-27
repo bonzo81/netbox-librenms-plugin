@@ -1229,8 +1229,9 @@ function initializePrimaryIpToggle() {
         // A management row on another page has no checkbox, so it goes into the stored selection.
         const visible = new Set(Array.from(table.querySelectorAll('td input[name="select"]'), (box) => box.value));
         const selection = readStoredSelection(table);
+        const vrfs = JSON.parse(table.dataset.mgmtRowVrfs || '{}');
         JSON.parse(table.dataset.mgmtRows || '[]').forEach((key) => {
-            if (!visible.has(key)) selection[key] = {inputs: {}, auto: ''};
+            if (!visible.has(key)) selection[key] = {inputs: {['vrf_' + key]: vrfs[key] ?? ''}, auto: ''};
         });
         writeStoredSelection(table, selection);
     };
@@ -1863,6 +1864,7 @@ function _isSelectionCompanionName(name) {
         Boolean(name) &&
         (name.startsWith('device_selection_') ||
             name.startsWith('vlan_group_') ||
+            name.startsWith('vrf_') ||
             cableSnapshotPrefixes.some((prefix) => name.startsWith(prefix)))
     );
 }
@@ -1930,6 +1932,8 @@ function restoreTableSelection(table) {
         row.querySelectorAll('select[name], input[type="hidden"][name]').forEach(function (input) {
             if (!_isSelectionCompanionName(input.name)) return;
             if (!Object.hasOwn(companionInputs, input.name)) return;
+            // A rendered IP row keeps the VRF that its verify settled; only an off-page row posts its stored VRF.
+            if (input.name.startsWith('vrf_')) return;
             const renderedValue = input.value;
             if (input.tomselect) {
                 input.tomselect.setValue(companionInputs[input.name], true);

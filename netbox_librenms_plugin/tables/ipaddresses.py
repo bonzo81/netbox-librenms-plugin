@@ -8,6 +8,14 @@ from utilities.paginator import EnhancedPaginator
 from netbox_librenms_plugin.utils import get_table_paginate_count, identify_ip_sync_rows, rule_block_html
 
 
+def _shown_vrf_id(row):
+    """Return the VRF that the row's VRF select shows, or "" for Global."""
+    choices = {vrf.pk for vrf in row.get("vrfs") or ()}
+    # The view sets vrf_id or suggested_vrf_id, never both.
+    shown = next((vrf_id for vrf_id in (row.get("vrf_id"), row.get("suggested_vrf_id")) if vrf_id in choices), None)
+    return "" if shown is None else str(shown)
+
+
 class IPAddressTable(tables.Table):
     """Table for displaying LibreNMS IP address data."""
 
@@ -18,10 +26,12 @@ class IPAddressTable(tables.Table):
         elif kwargs.get("data") is not None:
             kwargs["data"] = identify_ip_sync_rows(list(kwargs["data"]))
         super().__init__(*args, **kwargs)
-        # Set Primary IP selects the management row also from a page that does not render it.
-        self.attrs["data-mgmt-rows"] = json.dumps(
-            list(dict.fromkeys(row["row_id"] for row in self.data if row.get("is_mgmt_ip") and row["row_id"]))
-        )
+        # Set Primary IP selects the management row also from a page that does not render it, with the VRF it shows.
+        mgmt_row_vrfs = {
+            row["row_id"]: _shown_vrf_id(row) for row in self.data if row.get("is_mgmt_ip") and row["row_id"]
+        }
+        self.attrs["data-mgmt-rows"] = json.dumps(list(mgmt_row_vrfs))
+        self.attrs["data-mgmt-row-vrfs"] = json.dumps(mgmt_row_vrfs)
         # Identify the owning sync tab so the paginator links (inc/paginator.html builds
         # ?tab={{ table.tab }}) keep the user on the IP Addresses tab. Without this, table.tab
         # renders empty and paging falls back to the default (Interfaces) tab.
