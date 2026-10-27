@@ -31,6 +31,8 @@
     "DB_PASSWORD": "${localEnv:DB_PASSWORD:netbox}",
     "REDIS_HOST": "${localEnv:REDIS_HOST:redis}",
     "REDIS_PASSWORD": "${localEnv:REDIS_PASSWORD:}",
+    "TEST_DB_NAME": "${localEnv:TEST_DB_NAME:test_netbox_librenms}",
+    "TEST_REDIS_HOST": "${localEnv:TEST_REDIS_HOST:redis}",
     "SUPERUSER_NAME": "${localEnv:SUPERUSER_NAME:admin}",
     "SUPERUSER_EMAIL": "${localEnv:SUPERUSER_EMAIL:admin@example.com}",
     "SUPERUSER_PASSWORD": "${localEnv:SUPERUSER_PASSWORD:admin}",

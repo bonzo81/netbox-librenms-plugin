@@ -707,6 +707,33 @@ def test_test_alias_rejects_a_blank_redis_host():
     assert "TEST_REDIS_HOST must not be empty." in result.stderr
 
 
+def _unset_variable_default(value):
+    """Return what a compose ``${NAME:-x}`` or a devcontainer ``${localEnv:NAME:x}`` gives when NAME is unset."""
+    match = re.fullmatch(r"\$\{(?:localEnv:)?\w+:-?(.*)\}", value)
+    return match.group(1) if match else value
+
+
+@pytest.mark.parametrize("source", ["docker-compose.yml", "devcontainer.json"])
+def test_the_devcontainer_environment_runs_the_test_alias(source):
+    """A new devcontainer must run netbox-test with no variable that the developer exports."""
+    import json
+
+    path = REPOSITORY_ROOT / ".devcontainer" / source
+    if source == "docker-compose.yml":
+        environment = yaml.safe_load(path.read_text())["services"]["devcontainer"]["environment"]
+    else:
+        environment = json.loads(path.read_text())["containerEnv"]
+    defaults = {name: _unset_variable_default(str(value)) for name, value in environment.items()}
+
+    result = _run_netbox_test_alias(
+        db_name=defaults.get("TEST_DB_NAME", ""), redis_host=defaults.get("TEST_REDIS_HOST", "")
+    )
+
+    assert "STATUS 0" in result.stdout, result.stderr
+    # The tests use the devcontainer's own Redis service.
+    assert defaults["TEST_REDIS_HOST"] == defaults["REDIS_HOST"]
+
+
 @pytest.mark.django_db(transaction=True)
 def test_custom_field_restore_drops_stale_content_type_cache(caplog):
     """Repair the custom field after a worker cached a ContentType from another DB state."""
