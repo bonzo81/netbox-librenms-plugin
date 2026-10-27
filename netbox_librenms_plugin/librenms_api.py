@@ -1282,9 +1282,10 @@ class LibreNMSAPI:
             while cycle_found:
                 cycle_found = False
                 for child_id in sorted(l3_child_ids):
-                    cycle, parent_id = [child_id], sub_interfaces.get(child_id)
-                    while parent_id is not None and parent_id not in cycle:
+                    cycle, seen, parent_id = [child_id], {child_id}, sub_interfaces.get(child_id)
+                    while parent_id is not None and parent_id not in seen:
                         cycle.append(parent_id)
+                        seen.add(parent_id)
                         parent_id = sub_interfaces.get(parent_id)
                     if parent_id != child_id:
                         continue
