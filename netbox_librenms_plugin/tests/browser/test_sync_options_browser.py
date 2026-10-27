@@ -649,3 +649,29 @@ def test_a_selected_row_shows_its_chosen_vrf_again_when_it_returns(page, swap_pa
     assert page.locator("#ip-other").is_checked()
     assert page.locator("#vrf-ip-other").input_value() == "7"
     assert _submitted_fields(page)["vrf_198.18.0.2/24"] == ["7"]
+
+
+def test_a_queued_preference_save_is_sent_when_the_page_unloads(page):
+    held = []
+    page.route(f"**{SAVE_PREF_PATH}", lambda route: held.append(route))
+    page.set_content(
+        f'<input type="hidden" name="csrfmiddlewaretoken" value="{CSRF_TOKEN}">{_menu_markup()}{_ip_menu_markup()}'
+    )
+    page.add_script_tag(path=str(SCRIPT_PATH))
+    page.evaluate("initializeScripts()")
+    page.evaluate(RECORD_FETCH_OPTIONS)
+
+    page.check("#exclude-mtu")
+    page.check("#exclude-speed")
+    page.wait_for_function("window.fetchKeepalive.length === 1")
+    page.evaluate("window.dispatchEvent(new Event('pagehide'))")
+    page.wait_for_function("window.fetchKeepalive.length === 2")
+
+    latest = json.loads(held[1].request.post_data)["value"]
+    assert sorted(latest["exclude_columns"]) == ["mtu", "speed"]
+    assert page.evaluate("window.fetchKeepalive")[1] == [SAVE_PREF_PATH, True]
+    # The queued save does not send the same choice again once the held request ends.
+    for route in held:
+        route.fulfill(status=200, content_type="application/json", body='{"status": "ok"}')
+    page.evaluate("syncOptionSaving")
+    assert len(held) == 2

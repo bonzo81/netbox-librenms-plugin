@@ -1082,6 +1082,34 @@ function initializeSyncOptions(rootId, optionSelector, countId, resetId, store) 
 
 // Each preference save waits for the one before it, so the server stores the last state the user chose.
 let syncOptionSaving = Promise.resolve();
+// The latest choice per key that no request carries yet; a later save of the key replaces it.
+const pendingSyncOptionSaves = new Map();
+
+/**
+ * Send one pending preference save now.
+ *
+ * @param {{url: string, csrfToken: string, key: string, value: *, sent: Promise<boolean>|null}} save
+ * @returns {Promise<boolean>} Resolves to false when the POST failed
+ */
+function sendSyncOptionPreference(save) {
+    if (pendingSyncOptionSaves.get(save.key) === save) pendingSyncOptionSaves.delete(save.key);
+    save.sent = fetch(save.url, {
+        method: 'POST',
+        // A save that the user starts just before leaving the page must still reach the server.
+        keepalive: true,
+        headers: {'Content-Type': 'application/json', 'X-CSRFToken': save.csrfToken},
+        body: JSON.stringify({key: save.key, value: save.value})
+    }).then(response => {
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        return true;
+    }).catch(error => {
+        console.debug(`Failed to save ${save.key} pref:`, error.message);
+        return false;
+    });
+    return save.sent;
+}
 
 /**
  * Queue one user preference save.
@@ -1099,23 +1127,20 @@ function saveSyncOptionPreference(root, key, value) {
         console.debug(`Failed to save ${key} pref: missing CSRF token`);
         return Promise.resolve(true);
     }
-    syncOptionSaving = syncOptionSaving.then(() => fetch(savePrefUrl, {
-        method: 'POST',
-        // A save that the user starts just before leaving the page must still reach the server.
-        keepalive: true,
-        headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrfToken},
-        body: JSON.stringify({key: key, value: value})
-    })).then(response => {
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-        }
-        return true;
-    }).catch(error => {
-        console.debug(`Failed to save ${key} pref:`, error.message);
-        return false;
-    });
+    let save = pendingSyncOptionSaves.get(key);
+    if (!save) {
+        save = {url: savePrefUrl, csrfToken: csrfToken, key: key, value: value, sent: null};
+        pendingSyncOptionSaves.set(key, save);
+    }
+    save.value = value;
+    syncOptionSaving = syncOptionSaving.then(() => save.sent || sendSyncOptionPreference(save));
     return syncOptionSaving;
 }
+
+// A queued save may not start before the page unloads, so the latest choice of each key goes now.
+window.addEventListener('pagehide', () => {
+    Array.from(pendingSyncOptionSaves.values()).forEach(sendSyncOptionPreference);
+});
 
 /**
  * Keep a sync options menu as user preferences.
