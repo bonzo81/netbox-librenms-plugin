@@ -713,16 +713,15 @@ def _unset_variable_default(value):
     return match.group(1) if match else value
 
 
-@pytest.mark.parametrize("source", ["docker-compose.yml", "devcontainer.json"])
-def test_the_devcontainer_environment_runs_the_test_alias(source):
+def test_the_devcontainer_environment_runs_the_test_alias():
     """A new devcontainer must run netbox-test with no variable that the developer exports."""
     import json
 
-    path = REPOSITORY_ROOT / ".devcontainer" / source
-    if source == "docker-compose.yml":
-        environment = yaml.safe_load(path.read_text())["services"]["devcontainer"]["environment"]
-    else:
-        environment = json.loads(path.read_text())["containerEnv"]
+    path = REPOSITORY_ROOT / ".devcontainer" / "docker-compose.yml"
+    environment = yaml.safe_load(path.read_text())["services"]["devcontainer"]["environment"]
+    # containerEnv overrides the compose environment, so a value there would hide the one in .devcontainer/.env.
+    container_env = json.loads((REPOSITORY_ROOT / ".devcontainer" / "devcontainer.json").read_text())["containerEnv"]
+    assert not {"TEST_DB_NAME", "TEST_REDIS_HOST"} & container_env.keys()
     defaults = {name: _unset_variable_default(str(value)) for name, value in environment.items()}
 
     result = _run_netbox_test_alias(
