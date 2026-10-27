@@ -17,7 +17,7 @@ Every Django test run needs two environment variables:
 - `TEST_DB_NAME`: the database that pytest creates and drops. The name must start with `test_`.
 - `TEST_REDIS_HOST`: the Redis host for the test cache and queues.
 
-The devcontainer sets them to `test_netbox_librenms` and `redis`, and CI sets them in `.github/workflows/test.yaml`.
+The devcontainer sets them to `test_netbox_librenms` and `test-redis`, and CI sets them in `.github/workflows/test.yaml`. Use a Redis that no running NetBox uses: the tests flush whole Redis databases.
 In another environment, export them before you run the tests:
 
 ```bash

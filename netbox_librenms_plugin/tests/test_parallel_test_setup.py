@@ -730,8 +730,10 @@ def test_the_devcontainer_environment_runs_the_test_alias(source):
     )
 
     assert "STATUS 0" in result.stdout, result.stderr
-    # The tests use the devcontainer's own Redis service.
-    assert defaults["TEST_REDIS_HOST"] == defaults["REDIS_HOST"]
+    # cache.clear() flushes a whole Redis database, so the tests get their own Redis service, not the app's.
+    services = yaml.safe_load((REPOSITORY_ROOT / ".devcontainer" / "docker-compose.yml").read_text())["services"]
+    assert defaults["TEST_REDIS_HOST"] != defaults["REDIS_HOST"]
+    assert defaults["TEST_REDIS_HOST"] in services
 
 
 @pytest.mark.django_db(transaction=True)

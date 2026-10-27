@@ -116,6 +116,8 @@ Below are the dev container defaults. The field name to change these defaults is
    - .env: `DB_HOST`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`
 - Redis: 7-alpine
    - .env: `REDIS_HOST`, `REDIS_PASSWORD`
+- Test Redis: a second 7-alpine service, `test-redis`, for the tests only
+   - .env: `TEST_REDIS_HOST`
 - NetBox DEBUG: `True` (dev only)
    - .env: `DEBUG`
 - Secret key: dev placeholder (not for production)
