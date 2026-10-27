@@ -356,7 +356,7 @@ cat ~/.ssh/id_ed25519.pub
 - `rq-logs` - tail RQ worker logs
 - `netbox-shell` - Django shell
 - `netbox-manage` - Django manage.py
-- `netbox-test` - run tests
+- `netbox-test` - run the Django tests in parallel; it reads `TEST_DB_NAME` and `TEST_REDIS_HOST`, which the devcontainer sets
 - `plugin-install` - reinstall plugin
 - `ruff-check|format|fix` - Ruff helpers
 
