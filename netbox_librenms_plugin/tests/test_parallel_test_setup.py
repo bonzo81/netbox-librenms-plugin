@@ -787,6 +787,8 @@ def test_settings_module_takes_the_plugin_servers_from_the_ci_configuration(tmp_
         )
         base_configuration = "loader_configuration"
     (tmp_path / "developer_configuration.py").write_text(
+        # The netbox-docker configuration prints a banner when it loads.
+        "print('loaded config')\n"
         "import importlib, os\n"
         "_base = importlib.import_module(os.environ['BASE_NETBOX_CONFIGURATION'])\n"
         "globals().update({name: getattr(_base, name) for name in dir(_base) if name.isupper()})\n"
@@ -798,7 +800,7 @@ def test_settings_module_takes_the_plugin_servers_from_the_ci_configuration(tmp_
     script = (
         "import importlib; "
         "settings = importlib.import_module('netbox_librenms_plugin.tests.isolated_settings'); "
-        "print(sorted(settings.PLUGINS_CONFIG['netbox_librenms_plugin']['servers']))"
+        "print('SERVERS=' + repr(sorted(settings.PLUGINS_CONFIG['netbox_librenms_plugin']['servers'])))"
     )
     result = subprocess.run(
         [sys.executable, "-c", script],
@@ -819,7 +821,8 @@ def test_settings_module_takes_the_plugin_servers_from_the_ci_configuration(tmp_
 
     ci_servers = runpy.run_path(str(REPOSITORY_ROOT / "media" / "configuration.testing.py"))["PLUGINS_CONFIG"]
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == repr(sorted(ci_servers["netbox_librenms_plugin"]["servers"])), result.stdout
+    expected = "SERVERS=" + repr(sorted(ci_servers["netbox_librenms_plugin"]["servers"]))
+    assert expected in result.stdout.splitlines(), result.stdout
 
 
 def test_playwright_state_machine_has_a_required_separate_ci_job():
