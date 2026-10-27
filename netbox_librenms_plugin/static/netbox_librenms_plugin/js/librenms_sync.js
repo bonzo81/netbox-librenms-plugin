@@ -1222,33 +1222,43 @@ function initializePrimaryIpToggle() {
     const toggle = document.getElementById('set-primary-ip-toggle-cb');
     if (!toggle || toggle.dataset.mgmtRowBound === 'true') return;
     toggle.dataset.mgmtRowBound = 'true';
-    const selectManagementRow = () => {
-        document.querySelectorAll('tr[data-mgmt-ip="true"] input[name="select"]').forEach((box) => {
-            box.checked = toggle.checked;
-        });
+    // Each render runs this again, so a row is selected once per stored selection and the user can clear it.
+    const selectManagementRows = (again) => {
         const table = document.getElementById('librenms-ipaddress-table');
         if (!table || !toggle.checked) return;
-        // A management row on another page has no checkbox, so it goes into the stored selection.
+        const seeded = again ? new Set() : readSeededManagementRows(table);
         const visible = new Set(Array.from(table.querySelectorAll('td input[name="select"]'), (box) => box.value));
+        table.querySelectorAll('tr[data-mgmt-ip="true"] input[name="select"]').forEach((box) => {
+            if (!seeded.has(box.value)) box.checked = true;
+            seeded.add(box.value);
+        });
+        // A management row on another page has no checkbox, so it goes into the stored selection with the VRF it shows.
         const selection = readStoredSelection(table);
         const vrfs = JSON.parse(table.dataset.mgmtRowVrfs || '{}');
         JSON.parse(table.dataset.mgmtRows || '[]').forEach((key) => {
-            if (!visible.has(key)) selection[key] = {inputs: {['vrf_' + key]: vrfs[key] ?? ''}, auto: ''};
+            if (visible.has(key) || seeded.has(key)) return;
+            seeded.add(key);
+            if (!selection[key]) selection[key] = {inputs: {['vrf_' + key]: vrfs[key] ?? ''}, auto: ''};
         });
         writeStoredSelection(table, selection);
+        writeSeededManagementRows(table, seeded);
     };
-    selectManagementRow();
+    selectManagementRows(false);
     toggle.addEventListener('change', () => {
         const table = document.getElementById('librenms-ipaddress-table');
         if (table && !toggle.checked) {
+            table.querySelectorAll('tr[data-mgmt-ip="true"] input[name="select"]').forEach((box) => {
+                box.checked = false;
+            });
             // The management row can be selected on another page, where no checkbox can clear it.
             const selection = readStoredSelection(table);
             JSON.parse(table.dataset.mgmtRows || '[]').forEach((key) => {
                 delete selection[key];
             });
             writeStoredSelection(table, selection);
+            writeSeededManagementRows(table, new Set());
         }
-        selectManagementRow();
+        selectManagementRows(true);
         // Store the change too, or the next swap restores the row from the old selection.
         commitSelectionChange(table);
     });
@@ -1919,6 +1929,7 @@ function restoreTableSelection(table) {
     const selection = readStoredSelection(table);
     const blocked = _blockedPortIds();
     let cleared = 0;
+    const restoredVrfs = [];
     table.querySelectorAll('td input[name="select"]:not(:disabled)').forEach(function (checkbox) {
         const entry = selection[checkbox.value];
         const row = checkbox.closest('tr');
@@ -1934,8 +1945,6 @@ function restoreTableSelection(table) {
         row.querySelectorAll('select[name], input[type="hidden"][name]').forEach(function (input) {
             if (!_isSelectionCompanionName(input.name)) return;
             if (!Object.hasOwn(companionInputs, input.name)) return;
-            // A rendered IP row keeps the VRF that its verify settled; only an off-page row posts its stored VRF.
-            if (input.name.startsWith('vrf_')) return;
             const renderedValue = input.value;
             if (input.tomselect) {
                 input.tomselect.setValue(companionInputs[input.name], true);
@@ -1945,12 +1954,15 @@ function restoreTableSelection(table) {
             if (input.matches('select.vlan-sync-group-select') && input.value !== renderedValue) {
                 verifyVlanSyncGroup(input, input.dataset.vlanId, input.dataset.vlanName, input.value);
             }
+            // The row status belongs to the rendered VRF, so a restored VRF is verified again.
+            if (input.matches('select.vrf-select') && input.value !== renderedValue) restoredVrfs.push(input);
         });
         checkbox.checked = true;
         _applySelectionMarker(checkbox, entry.auto);
     });
     commitSelectionChange(table);
     _showClearedSelectionNotice(table, cleared);
+    restoredVrfs.forEach((select) => handleVRFChange(select, select.value));
 }
 
 /** Tables whose rows carry a Virtual Chassis member that the row's verify request decided. */
@@ -2110,7 +2122,46 @@ function updateOffPageSelectionNotice(table) {
 function clearStoredSelection(table) {
     // Lifecycle write, no closure: a submit consumed the selection, and it changes no row on the page.
     writeStoredSelection(table, {});
+    writeSeededManagementRows(table, new Set());
     updateOffPageSelectionNotice(table);
+}
+
+/**
+ * Return the management rows that Set Primary IP already selected for the table's stored selection.
+ *
+ * @param {HTMLElement} table - The IP table.
+ * @returns {Set<string>} Row keys.
+ */
+function readSeededManagementRows(table) {
+    try {
+        const stored = JSON.parse(window.sessionStorage.getItem(_selectionStorageKey(table) + ':mgmt') || 'null');
+        if (stored && stored.snapshot === _selectionSnapshot(table) && Array.isArray(stored.rows)) {
+            return new Set(stored.rows);
+        }
+    } catch (_) {
+        // Without storage, each render selects the management rows again.
+    }
+    return new Set();
+}
+
+/**
+ * Store the management rows that Set Primary IP selected for the table's stored selection.
+ *
+ * @param {HTMLElement} table - The IP table.
+ * @param {Set<string>} rows - Row keys.
+ * @returns {void}
+ */
+function writeSeededManagementRows(table, rows) {
+    try {
+        const key = _selectionStorageKey(table) + ':mgmt';
+        if (rows.size) {
+            window.sessionStorage.setItem(key, JSON.stringify({snapshot: _selectionSnapshot(table), rows: [...rows]}));
+        } else {
+            window.sessionStorage.removeItem(key);
+        }
+    } catch (_) {
+        // Storage is a convenience here, as for the stored selection.
+    }
 }
 
 /**
@@ -2984,6 +3035,8 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
  * @param {string} value - Selected VRF ID
  */
 function handleVRFChange(select, value) {
+    // A selected row takes its new VRF into the stored selection, which an off-page submit posts.
+    commitSelectionChange(select.closest('table'));
     const ipAddress = select.dataset.ip;
     const prefixLength = select.dataset.prefix || "";  // Get prefix length if present
     const fullIpAddress = prefixLength ? `${ipAddress}/${prefixLength}` : ipAddress;

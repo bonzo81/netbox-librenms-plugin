@@ -2178,7 +2178,8 @@ def _ipaddress_toggle_fragment():
     engine.template_builtins.append(urls)
     menu = engine.from_string((TEMPLATE_DIR / "inc" / "_ip_sync_options.html").read_text(encoding="utf-8"))
     return (
-        menu.render(Context({"ip_sync": {"set_primary_ip": True}}, use_l10n=False)) + "<table><tbody>"
+        menu.render(Context({"ip_sync": {"set_primary_ip": True}}, use_l10n=False))
+        + '<table id="librenms-ipaddress-table"><tbody>'
         '<tr data-mgmt-ip="true"><td><input type="checkbox" name="select" value="10.0.0.1"></td></tr>'
         '<tr><td><input type="checkbox" name="select" value="10.0.0.2"></td></tr>'
         "</tbody></table>"

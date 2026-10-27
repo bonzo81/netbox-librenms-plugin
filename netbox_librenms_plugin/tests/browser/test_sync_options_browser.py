@@ -582,3 +582,70 @@ def test_an_interface_name_field_save_outlives_a_page_change(page):
     page.wait_for_function("window.fetchKeepalive.length === 1")
 
     assert page.evaluate("window.fetchKeepalive") == [[SAVE_PREF_PATH, True]]
+
+
+def _ip_row(address, *, checkbox_id, mgmt=False, vrf=""):
+    """One IP row with its VRF select, the way the IP table renders it."""
+    options = "".join(
+        f'<option value="{value}"{" selected" if value == vrf else ""}>{label}</option>'
+        for value, label in (("", "Global"), ("5", "red"), ("7", "blue"), ("9", "green"))
+    )
+    mgmt_attribute = ' data-mgmt-ip="true"' if mgmt else ""
+    return (
+        f'<tr{mgmt_attribute}><td data-col="selection">'
+        f'<input type="checkbox" name="select" value="{address}" id="{checkbox_id}"></td>'
+        f'<td><select class="vrf-select" name="vrf_{address}" id="vrf-{checkbox_id}">{options}</select></td></tr>'
+    )
+
+
+def test_a_management_row_the_user_cleared_stays_cleared_on_another_page(page, swap_page):
+    load, swap = swap_page
+    load(_ip_form_markup(IP_ROWS, set_primary=True))
+    page.uncheck("#ip-mgmt")
+
+    swap(_ip_form_markup(IP_PAGE_TWO_ROWS, set_primary=True), "ip-sync-options")
+    page.check("#ip-third")
+
+    assert _submitted_selection(page) == ["198.18.0.3/24"]
+
+
+def test_an_off_page_management_row_keeps_the_vrf_the_user_chose(page, swap_page):
+    load, swap = swap_page
+    load(_ip_form_markup(_ip_row("198.18.0.1/24", checkbox_id="ip-mgmt", mgmt=True, vrf="5"), set_primary=True))
+    page.wait_for_selector(".vrf-select[data-vrf-select-initialized]", state="attached")
+    page.select_option("#vrf-ip-mgmt", "9")
+
+    swap(_ip_form_markup(IP_PAGE_TWO_ROWS, set_primary=True), "ip-sync-options")
+    posted = _submitted_fields(page)
+
+    assert posted["select"] == ["198.18.0.1/24"]
+    assert posted["vrf_198.18.0.1/24"] == ["9"]
+
+
+def test_a_vrf_change_on_a_selected_row_reaches_the_stored_selection(page, swap_page):
+    load, swap = swap_page
+    load(_ip_form_markup(_ip_row("198.18.0.2/24", checkbox_id="ip-other")))
+    page.wait_for_selector(".vrf-select[data-vrf-select-initialized]", state="attached")
+    page.check("#ip-other")
+    page.select_option("#vrf-ip-other", "7")
+
+    swap(_ip_form_markup(IP_PAGE_TWO_ROWS), "ip-sync-options")
+    posted = _submitted_fields(page)
+
+    assert posted["vrf_198.18.0.2/24"] == ["7"]
+
+
+def test_a_selected_row_shows_its_chosen_vrf_again_when_it_returns(page, swap_page):
+    load, swap = swap_page
+    page_one = _ip_form_markup(_ip_row("198.18.0.2/24", checkbox_id="ip-other"))
+    load(page_one)
+    page.wait_for_selector(".vrf-select[data-vrf-select-initialized]", state="attached")
+    page.select_option("#vrf-ip-other", "7")
+    page.check("#ip-other")
+
+    swap(_ip_form_markup(IP_PAGE_TWO_ROWS), "ip-sync-options")
+    swap(page_one, "ip-sync-options")
+
+    assert page.locator("#ip-other").is_checked()
+    assert page.locator("#vrf-ip-other").input_value() == "7"
+    assert _submitted_fields(page)["vrf_198.18.0.2/24"] == ["7"]
