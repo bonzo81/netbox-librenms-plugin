@@ -1350,3 +1350,29 @@ rules:
       - metavariable-regex:
           metavariable: $TERMINAL
           regex: ^(exists|count)$
+  - id: no-monkeypatch-on-django-proxy
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This test monkeypatches a Django proxy that forwards attributes to another object: the cache,
+      the settings or a database connection. pytest 9.2 undoes such a patch with delattr, so the undo
+      deletes a setting, or reaches a new cache backend after the settings fixture restored CACHES.
+      Patch caches["default"], or change a setting with the settings fixture or override_settings.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/tests/**"]
+    patterns:
+      - pattern-either:
+          - pattern: $MP.$PATCH(django.core.cache.cache, ...)
+          - pattern: $MP.$PATCH($MODULE.cache, ...)
+          - pattern: $MP.$PATCH(django.conf.settings, ...)
+          - pattern: $MP.$PATCH(django.db.connection, ...)
+          - patterns:
+              - pattern-inside: |
+                  def $TEST(..., settings, ...):
+                    ...
+              - pattern: $MP.$PATCH(settings, ...)
+      - metavariable-regex:
+          metavariable: $PATCH
+          regex: ^(setattr|delattr)$
