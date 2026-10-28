@@ -1091,7 +1091,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             ignore_cache[idx] = _own_ignore_action(item, index_map, item_ignore_contexts, ignore_rules, device_identity)
 
         module_types = self._get_module_types()
-        self._generic_module_types = self._get_generic_module_types()
         self._module_type_ambiguities = self._get_module_type_ambiguities()
         self._carrier_install_rules_by_manufacturer = {}
 
@@ -2528,12 +2527,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         return get_module_types_indexed()
 
-    def _get_generic_module_types(self):
-        """Get module types from the 'Generic' manufacturer for secondary fallback matching."""
-        from netbox_librenms_plugin.utils import get_generic_module_types_indexed
-
-        return get_generic_module_types_indexed()
-
     def _get_module_type_ambiguities(self):
         """Return part_number/model strings that map to multiple NetBox ModuleTypes."""
         from netbox_librenms_plugin.utils import get_module_type_ambiguities
@@ -3279,13 +3272,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # member it targets rather than the page device.
         row_manufacturer = getattr(self, "_current_manufacturer", None) or manufacturer
         norm_rules_type = getattr(self, "_norm_rules_type", None)
-        generic_module_types = getattr(self, "_generic_module_types", None)
         matched_type = resolve_module_type(
             model_name,
             module_types,
             manufacturer=row_manufacturer,
             norm_rules=norm_rules_type,
-            generic_fallback=generic_module_types,
             fallback_names=module_type_lookup_candidates(item),
         )
 

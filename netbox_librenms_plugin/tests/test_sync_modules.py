@@ -31,6 +31,7 @@ from netbox_librenms_plugin.tests.lock_conflict_helpers import (
     second_connection,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import (
+    get as view_get,
     make_request,
     message_texts,
     module_row_binding,
@@ -4068,3 +4069,129 @@ def test_install_branch_non_numeric_parent_index(client):
     )
     assert response.status_code == 302
     assert "Invalid parent inventory index." in message_texts(response.wsgi_request)
+
+
+@pytest.mark.django_db
+class TestGenericModuleTypeFallback:
+    """A model the table resolves only through the Generic manufacturer must resolve the same way in every writer."""
+
+    @staticmethod
+    def _generic_only_type(model):
+        """Create *model* under a vendor and under Generic, so only the Generic index can resolve it."""
+        from dcim.models import Manufacturer
+
+        generic, _ = Manufacturer.objects.get_or_create(name="Generic", defaults={"slug": "generic"})
+        make_module_type(model)
+        return make_module_type(model, manufacturer=generic)
+
+    def test_a_manufacturer_renamed_to_generic_rebuilds_the_cached_index(self):
+        from dcim.models import Manufacturer
+
+        from netbox_librenms_plugin.utils import get_module_types_indexed, resolve_module_type
+
+        manufacturer = Manufacturer.objects.create(name="Soon Generic", slug="soon-generic")
+        make_module_type("GENERIC-RENAMED")
+        renamed_type = make_module_type("GENERIC-RENAMED", manufacturer=manufacturer)
+        assert resolve_module_type(renamed_type.model, get_module_types_indexed()) is None
+
+        manufacturer.name = "Generic"
+        manufacturer.save()
+
+        assert resolve_module_type(renamed_type.model, get_module_types_indexed()) == renamed_type
+
+    def test_the_branch_install_uses_the_generic_type(self, live_librenms):
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        device = make_device("generic-branch", librenms_cf={"default": 91})
+        make_module_bay(device, "Generic Slot")
+        generic_type = self._generic_only_type("GENERIC-SHARED-BRANCH")
+        rows = [
+            {
+                "entPhysicalIndex": 910,
+                "entPhysicalModelName": generic_type.model,
+                "entPhysicalName": "Generic Slot",
+                "entPhysicalDescr": "Generic Slot",
+                "entPhysicalClass": "module",
+                "entPhysicalContainedIn": 0,
+                "entPhysicalSerialNum": "SN-GENERIC-BRANCH",
+            }
+        ]
+        request = _post_request(
+            {
+                "parent_index": "910",
+                "server_key": "default",
+                "inventory_binding": module_inventory_binding_token(
+                    device.pk,
+                    "default",
+                    "install_branch",
+                    {"parent_index": 910},
+                    910,
+                    module_inventory_snapshot_digest(rows),
+                ),
+            }
+        )
+        view = _view(InstallBranchView, request, live_librenms)
+        seed_inventory(view, device, rows, librenms_id=91)
+
+        view_post(view, request, pk=device.pk)
+
+        assert Module.objects.filter(device=device, module_type=generic_type).exists()
+
+    def test_the_replace_uses_the_generic_type(self, live_librenms):
+        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
+
+        device = make_device("generic-replace", librenms_cf={"default": 92})
+        bay = make_module_bay(device, "Generic Replace Bay")
+        installed = install_module(device, bay.name, "GENERIC-REPLACE-OLD")
+        generic_type = self._generic_only_type("GENERIC-SHARED-REPLACE")
+        item = {
+            "entPhysicalIndex": 920,
+            "entPhysicalModelName": generic_type.model,
+            "entPhysicalName": bay.name,
+            "entPhysicalClass": "module",
+            "entPhysicalSerialNum": "SN-GENERIC-REPLACE",
+        }
+        request = _post_request(
+            {
+                "module_id": installed.pk,
+                "ent_index": 920,
+                "server_key": "default",
+                "inventory_binding": module_row_binding(
+                    device, "replace_module", item, action_target={"module_id": installed.pk}
+                ),
+            }
+        )
+        view = _view(ReplaceModuleView, request, live_librenms)
+        seed_inventory(view, device, [item], librenms_id=92)
+
+        view_post(view, request, pk=device.pk)
+
+        assert device.modules.get(module_bay=bay).module_type == generic_type
+
+    def test_the_replace_preview_recognises_the_generic_type(self, live_librenms):
+        from netbox_librenms_plugin.views.sync.modules import ModuleMismatchPreviewView
+
+        device = make_device("generic-preview", librenms_cf={"default": 93})
+        bay = make_module_bay(device, "Generic Preview Bay")
+        generic_type = self._generic_only_type("GENERIC-SHARED-PREVIEW")
+        installed = install_module(device, bay.name, generic_type.model, manufacturer=generic_type.manufacturer)
+        item = {
+            "entPhysicalIndex": 930,
+            "entPhysicalModelName": generic_type.model,
+            "entPhysicalSerialNum": "SN-GENERIC-PREVIEW",
+        }
+        request = make_request(
+            "get",
+            {"module_id": str(installed.pk), "ent_index": "930", "server_key": "default"},
+            user=make_superuser(),
+        )
+        view = _view(ModuleMismatchPreviewView, request, live_librenms)
+        seed_inventory(view, device, [item], librenms_id=93)
+
+        response = view_get(view, request, pk=device.pk)
+
+        assert response.status_code == 200
+        # The badge marks a LibreNMS model that resolved to the installed module's type.
+        assert b"mdi-check-decagram" in response.content
