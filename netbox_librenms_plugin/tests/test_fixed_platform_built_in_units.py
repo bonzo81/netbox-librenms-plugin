@@ -304,6 +304,53 @@ class TestCandidate:
 class TestMarkBuiltIn:
     """The confirm modal and the POST that records the part number and makes sure the model rule covers it."""
 
+    @pytest.mark.parametrize("resolution", ["normalization", "generic"])
+    def test_a_fallback_module_type_keeps_an_incompatible_bay_out_of_the_mark(self, client, resolution):
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.conftest import (
+            make_module_bay,
+            make_module_bay_type,
+            make_module_type_with_bays,
+            make_superuser,
+        )
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts
+        from netbox_librenms_plugin.utils import netbox_constrains_module_bay_types
+
+        if not netbox_constrains_module_bay_types():
+            pytest.skip("NetBox constrains module bays by type from 4.7")
+        device = ixr_device(f"ixr-fallback-{resolution}", part_number="")
+        manufacturer = device.device_type.manufacturer
+        if resolution == "normalization":
+            model = "SYSTEM-BOARD"
+            NormalizationRule.objects.create(
+                scope="module_type",
+                manufacturer=manufacturer,
+                match_pattern=f"^{PART_NUMBER}$",
+                replacement=model,
+            )
+        else:
+            model = PART_NUMBER
+            make_module_type_with_bays(model, manufacturer=manufacturer)
+            manufacturer = Manufacturer.objects.create(name="Generic", slug="generic")
+        module_type = make_module_type_with_bays(model, manufacturer=manufacturer)
+        module_type.module_bay_types.set([make_module_bay_type("system-board")])
+        make_module_bay(device, "Slot 1", bay_types=("line-card",))
+        seed_snapshot(device, ixr_inventory())
+        row = tab_rows(device)[SLOT_1]
+        assert row["module_type_id"] == module_type.pk
+        assert row["module_bay_id"] is None
+        _tag, path, fields = controls(device)[SLOT_1]
+
+        client.force_login(make_superuser())
+        response = client.post(path, fields)
+
+        assert message_texts(response.wsgi_request, "error") == []
+        assert response.status_code == 302
+        assert DeviceType.objects.get(pk=device.device_type_id).part_number == PART_NUMBER
+        assert [rule.manufacturer_id for rule in built_in_rules()] == [device.device_type.manufacturer_id]
+
     def test_marking_records_the_part_number_and_creates_the_rule(self):
         from dcim.models import DeviceType
 
