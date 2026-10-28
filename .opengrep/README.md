@@ -65,7 +65,7 @@ unchecked until that review.
 | `no-stored-mapping-access-template` | error | A template that reads `cf.librenms_id` or `custom_field_data.librenms_id`, or looks the key up with a filter. |
 | `conflict-raised-without-record` | error | A raise of a `TransactionConflict` or `ConcurrentRowChange` class that does not go through `recorded_conflict(...)`. |
 | `no-lock-on-exists` | error | A `select_for_update()` chain that ends in `exists()` or `count()`. |
-| `no-monkeypatch-on-django-proxy` | error | A test calls a monkeypatch `setattr` or `delattr` on the Django cache, settings or connection proxy, or on a `cache` attribute of a module. |
+| `no-monkeypatch-on-django-proxy` | error | A test calls a monkeypatch `setattr` or `delattr` on the Django cache, settings or connection proxy, or on a `cache` attribute of a module, also as a dotted-string target. |
 
 ## Scope
 

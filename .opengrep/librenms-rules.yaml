@@ -1373,6 +1373,11 @@ rules:
                   def $TEST(..., settings, ...):
                     ...
               - pattern: $MP.$PATCH(settings, ...)
+          - patterns:
+              - pattern: $MP.$PATCH("$TARGET", ...)
+              - metavariable-regex:
+                  metavariable: $TARGET
+                  regex: ^django\.(core\.cache\.cache|conf\.settings|db\.connection)\.
       - metavariable-regex:
           metavariable: $PATCH
           regex: ^(setattr|delattr)$

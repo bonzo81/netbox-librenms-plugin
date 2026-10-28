@@ -38,6 +38,19 @@ def test_lazy_settings_and_connection(monkeypatch):
     monkeypatch.setattr(connection, "vendor", "sqlite")
 
 
+def test_dotted_string_targets(monkeypatch):
+    # ruleid: no-monkeypatch-on-django-proxy
+    monkeypatch.setattr("django.core.cache.cache.set", lambda *args, **kwargs: None)
+    # ruleid: no-monkeypatch-on-django-proxy
+    monkeypatch.setattr("django.conf.settings.DEBUG", True)
+    # ruleid: no-monkeypatch-on-django-proxy
+    monkeypatch.delattr("django.db.connection.vendor")
+    # ok: no-monkeypatch-on-django-proxy
+    monkeypatch.setattr("netbox_librenms_plugin.utils._get_netbox_version_tuple", lambda: (4, 5, 8))
+    # ok: no-monkeypatch-on-django-proxy
+    monkeypatch.setattr("django.core.cache.caches", {})
+
+
 def test_resolved_backend(monkeypatch):
     # ok: no-monkeypatch-on-django-proxy
     monkeypatch.setattr(caches["default"], "set", lambda *args, **kwargs: None)
