@@ -12,11 +12,26 @@ python -m playwright install chromium
 
 The devcontainer setup script and the CI browser job install it for you.
 
-Run all tests with a single command:
+Every Django test run needs two environment variables:
+
+- `TEST_DB_NAME`: the database that pytest creates and drops. The name must start with `test_`.
+- `TEST_REDIS_HOST`: the Redis host for the test cache and queues.
+
+The devcontainer sets them to `test_netbox_librenms` and `test-redis`, and CI sets them in `.github/workflows/test.yaml`. Use a Redis that no running NetBox uses: the tests flush whole Redis databases.
+In another environment, export them before you run the tests:
+
+```bash
+export TEST_DB_NAME=test_netbox_librenms TEST_REDIS_HOST=localhost
+```
+
+Run the formatter, the linter and both suites with a single command:
 
 ```bash
 make test
 ```
+
+`make test` runs `make format` first, and `make format` changes files in your working tree.
+To run the tests only, use `make unittest` and `make browser`.
 
 Run the Django suite without the separate browser suite:
 

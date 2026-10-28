@@ -116,6 +116,8 @@ Below are the dev container defaults. The field name to change these defaults is
    - .env: `DB_HOST`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`
 - Redis: 7-alpine
    - .env: `REDIS_HOST`, `REDIS_PASSWORD`
+- Test Redis: a second 7-alpine service, `test-redis`, for the tests only
+   - .env: `TEST_REDIS_HOST`
 - NetBox DEBUG: `True` (dev only)
    - .env: `DEBUG`
 - Secret key: dev placeholder (not for production)
@@ -356,7 +358,7 @@ cat ~/.ssh/id_ed25519.pub
 - `rq-logs` - tail RQ worker logs
 - `netbox-shell` - Django shell
 - `netbox-manage` - Django manage.py
-- `netbox-test` - run tests
+- `netbox-test` - run the Django tests in parallel; it reads `TEST_DB_NAME` and `TEST_REDIS_HOST`, which the devcontainer sets
 - `plugin-install` - reinstall plugin
 - `ruff-check|format|fix` - Ruff helpers
 

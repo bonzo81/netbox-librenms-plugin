@@ -29,6 +29,12 @@ from netbox_librenms_plugin.tests.parallel import (
 REPOSITORY_ROOT = Path(__file__).parents[2]
 
 
+def _python_child_environment(**overrides):
+    """Return the environment for a child Python that imports NetBox and the plugin."""
+    # pytest injects the NetBox source path from pyproject; a bare subprocess does not.
+    return {**os.environ, "PYTHONPATH": os.pathsep.join(path for path in sys.path if path), **overrides}
+
+
 def _pytest_plugins_lines(source):
     """Return the line of every module-level ``pytest_plugins`` assignment in *source*."""
     import ast
@@ -701,6 +707,34 @@ def test_test_alias_rejects_a_blank_redis_host():
     assert "TEST_REDIS_HOST must not be empty." in result.stderr
 
 
+def _unset_variable_default(value):
+    """Return what a compose ``${NAME:-x}`` or a devcontainer ``${localEnv:NAME:x}`` gives when NAME is unset."""
+    match = re.fullmatch(r"\$\{(?:localEnv:)?\w+:-?(.*)\}", value)
+    return match.group(1) if match else value
+
+
+def test_the_devcontainer_environment_runs_the_test_alias():
+    """A new devcontainer must run netbox-test with no variable that the developer exports."""
+    import json
+
+    path = REPOSITORY_ROOT / ".devcontainer" / "docker-compose.yml"
+    environment = yaml.safe_load(path.read_text())["services"]["devcontainer"]["environment"]
+    # containerEnv overrides the compose environment, so a value there would hide the one in .devcontainer/.env.
+    container_env = json.loads((REPOSITORY_ROOT / ".devcontainer" / "devcontainer.json").read_text())["containerEnv"]
+    assert not {"TEST_DB_NAME", "TEST_REDIS_HOST"} & container_env.keys()
+    defaults = {name: _unset_variable_default(str(value)) for name, value in environment.items()}
+
+    result = _run_netbox_test_alias(
+        db_name=defaults.get("TEST_DB_NAME", ""), redis_host=defaults.get("TEST_REDIS_HOST", "")
+    )
+
+    assert "STATUS 0" in result.stdout, result.stderr
+    # cache.clear() flushes a whole Redis database, so the tests get their own Redis service, not the app's.
+    services = yaml.safe_load((REPOSITORY_ROOT / ".devcontainer" / "docker-compose.yml").read_text())["services"]
+    assert defaults["TEST_REDIS_HOST"] != defaults["REDIS_HOST"]
+    assert defaults["TEST_REDIS_HOST"] in services
+
+
 @pytest.mark.django_db(transaction=True)
 def test_custom_field_restore_drops_stale_content_type_cache(caplog):
     """Repair the custom field after a worker cached a ContentType from another DB state."""
@@ -752,13 +786,7 @@ def test_settings_module_exports_the_stripped_redis_host():
         [sys.executable, "-c", script],
         capture_output=True,
         text=True,
-        env={
-            **os.environ,
-            # pytest injects the NetBox source path from pyproject; a bare subprocess does not.
-            "PYTHONPATH": os.pathsep.join(path for path in sys.path if path),
-            "TEST_DB_NAME": "test_netbox_librenms",
-            "TEST_REDIS_HOST": "  redis  ",
-        },
+        env=_python_child_environment(TEST_DB_NAME="test_netbox_librenms", TEST_REDIS_HOST="  redis  "),
         cwd=REPOSITORY_ROOT,
         check=False,
     )
@@ -1299,7 +1327,7 @@ except TimeoutError:
 """
     result = subprocess.run(
         [sys.executable, "-c", script, helper],
-        env={**os.environ, "DJANGO_SETTINGS_MODULE": "netbox_librenms_plugin.tests.isolated_settings"},
+        env=_python_child_environment(DJANGO_SETTINGS_MODULE="netbox_librenms_plugin.tests.isolated_settings"),
         capture_output=True,
         text=True,
         timeout=15,
@@ -1386,7 +1414,7 @@ connections.close_all()
 """
     result = subprocess.run(
         [sys.executable, "-c", script, connection.settings_dict["NAME"], connection_source, str(closed_peer)],
-        env={**os.environ, "DJANGO_SETTINGS_MODULE": "netbox_librenms_plugin.tests.isolated_settings"},
+        env=_python_child_environment(DJANGO_SETTINGS_MODULE="netbox_librenms_plugin.tests.isolated_settings"),
         capture_output=True,
         text=True,
         timeout=20,

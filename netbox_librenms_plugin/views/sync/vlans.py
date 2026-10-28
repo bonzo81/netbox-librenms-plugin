@@ -177,10 +177,12 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         if error := self.require_all_permissions("POST"):
             return error
 
-        # Read server_key from POST so we use the exact server the user was viewing
-        self._post_server_key = request.POST.get("server_key") or self.librenms_api.server_key
-
         obj = self.get_object(object_type, object_id)
+        # Use the exact server the user was viewing; an unknown, malformed or repeated key writes nothing.
+        self._post_server_key = self.rebind_api_for_posted_server(request.POST)
+        if self._post_server_key is None:
+            messages.error(request, "Selected LibreNMS server is no longer configured.")
+            return self._redirect(object_type, object_id)
         action = request.POST.get("action", "")
 
         if action == "create_vlans":

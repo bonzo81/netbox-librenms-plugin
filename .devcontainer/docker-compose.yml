@@ -17,6 +17,10 @@ services:
       DB_PASSWORD: ${DB_PASSWORD:-netbox}
       REDIS_HOST: ${REDIS_HOST:-redis}
       REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      # The isolated test settings require both; pytest creates and drops the test_ database.
+      TEST_DB_NAME: ${TEST_DB_NAME:-test_netbox_librenms}
+      # Tests flush whole Redis databases, so they use their own Redis, never the app's.
+      TEST_REDIS_HOST: ${TEST_REDIS_HOST:-test-redis}
       SECRET_KEY: ${SECRET_KEY:-dummydummydummydummydummydummydummydummydummydummydummydummy}
       SUPERUSER_NAME: ${SUPERUSER_NAME:-admin}
       SUPERUSER_EMAIL: ${SUPERUSER_EMAIL:-admin@example.com}
@@ -38,6 +42,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      test-redis:
         condition: service_healthy
       librenms-stub:
         # The devcontainer runs `sleep infinity`, so a stub that cannot serve must not block it.
@@ -103,6 +109,14 @@ services:
     command: redis-server --appendonly yes
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  test-redis:
+    image: redis:7-alpine
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 30s
