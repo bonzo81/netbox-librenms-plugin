@@ -372,6 +372,22 @@ class TestIPAddressWriteFailures:
 
 @pytest.mark.django_db
 class TestVLANWriteFailures:
+    @pytest.mark.parametrize("posted_keys", [["bad__key"], ["removed", SERVER_KEY]], ids=["malformed", "ambiguous"])
+    def test_an_unusable_server_key_fails_closed(self, client, live_librenms, posted_keys):
+        device = make_device("vlan-unusable-server", librenms_cf={SERVER_KEY: {"id": 132}})
+        _seed(SyncVLANsView(), device, "vlans", [{"vlan_vlan": 3132, "vlan_name": "Application"}])
+        _login(client, "vlan-unusable-server-user")
+
+        response = client.post(
+            _vlan_url(device),
+            {"server_key": posted_keys, "action": "create_vlans", "select": "3132", "vlan_group_3132": ""},
+        )
+
+        assert response.status_code == 302
+        assert not VLAN.objects.filter(vid=3132).exists()
+        assert _response_messages(response, "error")
+        assert live_librenms.server.requests == []
+
     def test_grouped_vlan_is_created_in_the_selected_scope(self, client, live_librenms):
         device = make_device("vlan-group", librenms_cf={SERVER_KEY: {"id": 131}})
         group = VLANGroup.objects.create(name="Application Group", slug="application-group")
