@@ -45,8 +45,9 @@ def _wait_for(page, condition):
     raise AssertionError("the page did not send the expected verify requests")
 
 
-def test_a_late_response_for_an_earlier_vrf_does_not_repaint_the_row(page):
+def test_a_late_response_for_an_earlier_vrf_does_not_repaint_the_row(page, fetches):
     _load(page, [_row("row-1")])
+    fetches.install()
     held = []
     page.route(VERIFY_ROUTE, lambda route: held.append(route))
     page.evaluate("initializeVRFSelects()")
@@ -63,7 +64,7 @@ def test_a_late_response_for_an_earlier_vrf_does_not_repaint_the_row(page):
     to_ignored.fulfill(status=200, content_type="application/json", body=_verdict("Ignored", False))
     page.wait_for_function("document.querySelector('td[data-col=status]').textContent === 'Ignored'")
     to_allowed.fulfill(status=200, content_type="application/json", body=_verdict("Create", True))
-    page.wait_for_timeout(300)
+    fetches.wait_until_settled()
 
     assert page.locator('td[data-col="status"]').text_content() == "Ignored"
     assert checkbox.is_disabled()
