@@ -18,12 +18,8 @@ from netbox_librenms_plugin.librenms_ids import (
     coerce_librenms_id,
     normalize_librenms_port_id,
 )
-from netbox_librenms_plugin.server_mappings import (
-    get_librenms_sync_device,
-    name_match_may_be_port,
-    port_holders,
-    read_mapping,
-)
+from netbox_librenms_plugin.server_mappings import name_match_may_be_port, port_holders, read_mapping
+from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,

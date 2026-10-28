@@ -623,7 +623,7 @@ class TestSharedSnapshotsFollowTheWholeChassis:
             sync_subject_key,
         )
         from netbox_librenms_plugin.tests.conftest import install_module, make_module_bay, make_virtual_chassis_members
-        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
+        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
         _vc, (member_one, member_two) = make_virtual_chassis_members("shared-claim-vc")
         for member in (member_one, member_two):

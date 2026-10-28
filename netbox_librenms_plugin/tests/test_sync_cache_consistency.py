@@ -7,7 +7,7 @@ import pytest
 from dcim.models import Cable, Module, ModuleBay, ModuleBayTemplate, ModuleType
 from django.apps import apps as django_apps
 from django.contrib.auth import get_user_model
-from django.core.cache import cache
+from django.core.cache import cache, caches
 from django.db import transaction
 from django.http import HttpResponse
 from django.test import RequestFactory, override_settings
@@ -1953,7 +1953,7 @@ def test_cable_refresh_without_a_cached_snapshot_reports_failure_not_success(
     url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", kwargs={"pk": device.pk})
     # Inject the one condition the real flow cannot produce locally: the snapshot is gone by the
     # time the handler checks for it (an eviction between the write and the read).
-    monkeypatch.setattr(cache, "has_key", lambda _key: False)
+    monkeypatch.setattr(caches["default"], "has_key", lambda _key: False)
     response = client.post(url, {"server_key": "primary"}, HTTP_HX_REQUEST="true")
 
     assert response.status_code == 200
@@ -1975,7 +1975,7 @@ def _drop_snapshot_write(monkeypatch, device, tab):
             return
         real_set(key, *args, **kwargs)
 
-    monkeypatch.setattr(cache, "set", drop_snapshot_write)
+    monkeypatch.setattr(caches["default"], "set", drop_snapshot_write)
     return skipped
 
 
@@ -2259,7 +2259,7 @@ def test_cleanup_failure_invalidates_every_dependent_tab(
         raise RuntimeError("cache backend failed")
 
     with monkeypatch.context() as context:
-        context.setattr(cache, "delete_pattern", fail_delete_pattern)
+        context.setattr(caches["default"], "delete_pattern", fail_delete_pattern)
         with django_capture_on_commit_callbacks(execute=True):
             transition = coordinator.schedule_mutation(SyncTab.INTERFACES, "primary", actor_id=1)
 
@@ -2319,7 +2319,7 @@ def test_cleanup_failure_on_unmapped_active_server_invalidates_surviving_mapped_
         raise RuntimeError("cache backend failed")
 
     with monkeypatch.context() as context:
-        context.setattr(cache, "delete_pattern", fail_delete_pattern)
+        context.setattr(caches["default"], "delete_pattern", fail_delete_pattern)
         with django_capture_on_commit_callbacks(execute=True):
             transition = coordinator.schedule_mutation(SyncTab.INTERFACES, active_server_key, actor_id=1)
 
@@ -2351,7 +2351,7 @@ def test_cleanup_failure_does_not_mark_tabs_without_cache_state(
         raise RuntimeError("cache backend failed")
 
     with monkeypatch.context() as context:
-        context.setattr(cache, "delete_pattern", fail_delete_pattern)
+        context.setattr(caches["default"], "delete_pattern", fail_delete_pattern)
         with django_capture_on_commit_callbacks(execute=True):
             transition = coordinator.schedule_mutation(SyncTab.INTERFACES, "primary", actor_id=1)
 

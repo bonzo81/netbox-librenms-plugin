@@ -79,7 +79,7 @@ class TestSingleCableVerifyView:
     def test_vc_no_resolvable_sync_device_returns_an_empty_row(self):
         """Verify a virtual chassis without a resolvable sync member returns the safe empty row."""
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
-        from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
+        from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
         _virtual_chassis, (device, _sibling) = make_virtual_chassis_members("cbl-nosync")
         device.vc_position = None

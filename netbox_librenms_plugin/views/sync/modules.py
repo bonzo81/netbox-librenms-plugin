@@ -23,10 +23,10 @@ from netbox_librenms_plugin.server_mappings import (
     assign_own,
     claim_librenms_port_binding,
     find_port_owner,
-    get_librenms_sync_device,
     persist_mapping,
     read_mapping,
 )
+from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
     apply_request_cache_transition,

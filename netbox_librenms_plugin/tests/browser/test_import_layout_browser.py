@@ -157,3 +157,35 @@ def test_failed_import_preference_save_reports_the_http_status(page):
         lambda message: message.type == "debug" and "savePref: fetch failed: HTTP 503" in message.text
     ):
         page.uncheck("#use-sysname-toggle-cb")
+
+
+def test_an_import_preference_save_outlives_a_page_change(page):
+    """The browser cancels a plain fetch when the page unloads; a keepalive fetch completes."""
+    page.route(SAVE_PREF_URL, lambda route: route.fulfill(status=200, body='{"status": "ok"}'))
+    page.set_content(
+        f"""
+        <input type="hidden" name="csrfmiddlewaretoken" value="test-csrf-token">
+        <div data-save-pref-url="{SAVE_PREF_URL}"></div>
+        <input id="use-sysname-toggle-cb" type="checkbox" checked>
+        <input id="strip-domain-toggle-cb" type="checkbox">
+        <span id="import-name-summary"></span>
+        <span id="import-options-count"></span>
+        <div id="device-import-results"></div>
+        """
+    )
+    page.add_script_tag(path=ASSET_ROOT / "js" / "librenms_import.js")
+    page.evaluate(
+        """() => {
+            window.fetchKeepalive = [];
+            const send = window.fetch;
+            window.fetch = (url, init) => {
+                window.fetchKeepalive.push(Boolean(init && init.keepalive));
+                return send(url, init);
+            };
+        }"""
+    )
+
+    page.uncheck("#use-sysname-toggle-cb")
+    page.wait_for_function("window.fetchKeepalive.length === 1")
+
+    assert page.evaluate("window.fetchKeepalive") == [True]

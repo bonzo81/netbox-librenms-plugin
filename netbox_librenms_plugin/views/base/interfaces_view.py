@@ -23,7 +23,8 @@ from netbox_librenms_plugin.interface_relationships import (
     resolve_relationship_row,
 )
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
-from netbox_librenms_plugin.server_mappings import get_librenms_sync_device, read_mapping, read_mappings
+from netbox_librenms_plugin.server_mappings import read_mapping, read_mappings
+from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
 from netbox_librenms_plugin.utils import (
     apply_lag_vlan_fill,
@@ -31,6 +32,7 @@ from netbox_librenms_plugin.utils import (
     cache_remaining_ttl,
     get_interface_name_field,
     get_interface_port_identity_sets,
+    interface_sync_options_menu,
     is_list_of_dicts,
     is_valid_ports_payload,
     normalize_relationship_maps,
@@ -1056,6 +1058,7 @@ class BaseInterfaceTableView(
             "vlan_scope_incomplete": vlan_scope_incomplete,
             "show_ignored": show_ignored,
             "ignored_count": ignored_count,
+            "sync_options": interface_sync_options_menu(request),
             # The browser's related-row walk skips these, on this page and on every other.
             "blocked_port_ids_json": json.dumps([str(port_id) for port_id in blocked_port_ids if port_id is not None]),
         }

@@ -1034,8 +1034,10 @@ function initializeCountdowns() {
  * @param {string} optionSelector - Selector for controls inside the dropdown
  * @param {string} countId - Changed-options badge element ID
  * @param {string} resetId - Reset button element ID
+ * @param {Object} [store] - Keeps the user's choice: save(root, options) runs once per user change
+ *     and once per Reset; restore(root, options) runs before the first count
  */
-function initializeSyncOptions(rootId, optionSelector, countId, resetId) {
+function initializeSyncOptions(rootId, optionSelector, countId, resetId, store) {
     const root = document.getElementById(rootId);
     if (!root || root.dataset.initialized === 'true') return;
 
@@ -1054,8 +1056,14 @@ function initializeSyncOptions(rootId, optionSelector, countId, resetId) {
         countBadge.classList.toggle('bg-primary-lt', changedCount > 0);
     };
 
-    options.forEach((option) => option.addEventListener('change', updateCount));
+    let resetting = false;
+    options.forEach((option) => option.addEventListener('change', () => {
+        updateCount();
+        if (store && !resetting) store.save(root, options);
+    }));
     resetButton?.addEventListener('click', () => {
+        // Reset saves the menu once below, not once per control it flips.
+        resetting = true;
         options.forEach((option) => {
             const defaultChecked = option.dataset.defaultChecked === 'true';
             if (option.checked !== defaultChecked) {
@@ -1063,25 +1071,239 @@ function initializeSyncOptions(rootId, optionSelector, countId, resetId) {
                 option.dispatchEvent(new Event('change', { bubbles: true }));
             }
         });
+        resetting = false;
         updateCount();
+        if (store) store.save(root, options);
     });
+    store?.restore(root, options);
     root.dataset.initialized = 'true';
     updateCount();
 }
+
+// Each preference save waits for the one before it, so the server stores the last state the user chose.
+let syncOptionSaving = Promise.resolve();
+// The latest choice per key that no request carries yet; a later save of the key replaces it.
+const pendingSyncOptionSaves = new Map();
+// The server keeps this page's newest choice of a key, so a request that arrives late cannot undo a later one.
+const syncOptionClientId = Array.from(crypto.getRandomValues(new Uint8Array(16)), (byte) => byte.toString(16).padStart(2, '0')).join('');
+let syncOptionSequence = 0;
+
+/**
+ * Send one pending preference save now.
+ *
+ * @param {{url: string, csrfToken: string, key: string, value: *, sequence: number, sent: Promise<boolean>|null}} save
+ * @returns {Promise<boolean>} Resolves to false when the POST failed
+ */
+function sendSyncOptionPreference(save) {
+    if (pendingSyncOptionSaves.get(save.key) === save) pendingSyncOptionSaves.delete(save.key);
+    save.sent = fetch(save.url, {
+        method: 'POST',
+        // A save that the user starts just before leaving the page must still reach the server.
+        keepalive: true,
+        headers: {'Content-Type': 'application/json', 'X-CSRFToken': save.csrfToken},
+        body: JSON.stringify({
+            key: save.key,
+            value: save.value,
+            client_id: syncOptionClientId,
+            sequence: save.sequence
+        })
+    }).then(response => {
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        return true;
+    }).catch(error => {
+        console.debug(`Failed to save ${save.key} pref:`, error.message);
+        return false;
+    });
+    return save.sent;
+}
+
+/**
+ * Queue one user preference save.
+ *
+ * @param {HTMLElement} root - The menu root, which carries the save-pref URL
+ * @param {string} key - The preference key
+ * @param {*} value - The preference value
+ * @returns {Promise<boolean>} Resolves to false only when the POST was sent and failed
+ */
+function saveSyncOptionPreference(root, key, value) {
+    const savePrefUrl = root.dataset.savePrefUrl;
+    if (!savePrefUrl) return Promise.resolve(true);
+    const csrfToken = getCsrfToken();
+    if (!csrfToken) {
+        console.debug(`Failed to save ${key} pref: missing CSRF token`);
+        return Promise.resolve(true);
+    }
+    let save = pendingSyncOptionSaves.get(key);
+    if (!save) {
+        save = {url: savePrefUrl, csrfToken: csrfToken, key: key, value: value, sequence: 0, sent: null};
+        pendingSyncOptionSaves.set(key, save);
+    }
+    save.value = value;
+    syncOptionSequence += 1;
+    save.sequence = syncOptionSequence;
+    syncOptionSaving = syncOptionSaving.then(() => save.sent || sendSyncOptionPreference(save));
+    return syncOptionSaving;
+}
+
+// A queued save may not start before the page unloads, so the latest choice of each key goes now.
+window.addEventListener('pagehide', () => {
+    Array.from(pendingSyncOptionSaves.values()).forEach(sendSyncOptionPreference);
+});
+
+/**
+ * Keep a sync options menu as user preferences.
+ *
+ * A tab swap can render the menu from a stored value that a queued save has not replaced yet,
+ * so the swapped-in menu gets the last choice made on this page.
+ * A key whose save failed is sent again, with its last choice, by the next save or restore.
+ *
+ * @param {Object<string, {read: Function, write: Function}>} preferences - Per preference key,
+ *     read(options) returns its value and write(options, value) applies it
+ * @returns {{restore: Function, save: Function}} The store for initializeSyncOptions
+ */
+function syncOptionStore(preferences) {
+    const chosen = {};
+    const failed = new Set();
+    let current = {};
+    const values = (options) => Object.fromEntries(
+        Object.entries(preferences).map(([key, preference]) => [key, preference.read(options)])
+    );
+    const send = (root, key) => {
+        // Saves finish in queue order, so the last save of a key decides whether it failed.
+        failed.delete(key);
+        saveSyncOptionPreference(root, key, chosen[key]).then((saved) => {
+            if (saved) failed.delete(key);
+            else failed.add(key);
+        });
+    };
+    return {
+        restore(root, options) {
+            Object.entries(chosen).forEach(([key, value]) => preferences[key].write(options, value));
+            current = values(options);
+            Array.from(failed).forEach((key) => send(root, key));
+        },
+        save(root, options) {
+            const next = values(options);
+            Object.keys(next).forEach((key) => {
+                if (JSON.stringify(next[key]) === JSON.stringify(current[key]) && !failed.has(key)) return;
+                chosen[key] = next[key];
+                send(root, key);
+            });
+            current = next;
+        }
+    };
+}
+
+/** A preference held by one checkbox, found by its ID. */
+function checkboxPreference(id) {
+    const find = (options) => options.find((option) => option.id === id);
+    return {
+        read: (options) => Boolean(find(options)?.checked),
+        write: (options, value) => {
+            const option = find(options);
+            if (option) option.checked = value;
+        }
+    };
+}
+
+const interfaceSyncOptionStore = syncOptionStore({
+    interface_sync_options: {
+        read: (options) => ({
+            auto_select_lag_members: Boolean(
+                options.find((option) => option.name === 'auto_select_lag_members')?.checked
+            ),
+            exclude_columns: options
+                .filter((option) => option.name === 'exclude_columns' && option.checked)
+                .map((option) => option.value)
+        }),
+        write: (options, value) => options.forEach((option) => {
+            option.checked = option.name === 'auto_select_lag_members'
+                ? value.auto_select_lag_members
+                : value.exclude_columns.includes(option.value);
+        })
+    }
+});
+
+const ipSyncOptionStore = syncOptionStore({
+    set_primary_ip: checkboxPreference('set-primary-ip-toggle-cb'),
+    create_missing_interfaces: checkboxPreference('create-missing-interfaces-toggle-cb')
+});
 
 function initializeSyncOptionMenus() {
     initializeSyncOptions(
         'interface-sync-options',
         '.interface-sync-option',
         'interface-sync-options-count',
-        'reset-interface-sync-options'
+        'reset-interface-sync-options',
+        interfaceSyncOptionStore
     );
     initializeSyncOptions(
         'ip-sync-options',
         '.ip-sync-option',
         'ip-sync-options-count',
-        'reset-ip-sync-options'
+        'reset-ip-sync-options',
+        ipSyncOptionStore
     );
+}
+
+/**
+ * Keep the management-IP row selected while "Set Primary IP" is on.
+ *
+ * Runs after the menu is restored, so the row follows the user's latest choice.
+ */
+function initializePrimaryIpToggle() {
+    const toggle = document.getElementById('set-primary-ip-toggle-cb');
+    if (!toggle || toggle.dataset.mgmtRowBound === 'true') return;
+    toggle.dataset.mgmtRowBound = 'true';
+    // Each render runs this again, so a row is selected once per stored selection and the user can clear it.
+    const selectManagementRows = (again) => {
+        const table = document.getElementById('librenms-ipaddress-table');
+        if (!table || !toggle.checked) return;
+        const seeded = again ? new Set() : readSeededManagementRows(table);
+        const visible = new Set(Array.from(table.querySelectorAll('td input[name="select"]'), (box) => box.value));
+        table.querySelectorAll('tr[data-mgmt-ip="true"] input[name="select"]').forEach((box) => {
+            if (!seeded.has(box.value)) box.checked = true;
+            seeded.add(box.value);
+        });
+        // A management row on another page has no checkbox, so it goes into the stored selection with the VRF it shows.
+        const selection = readStoredSelection(table);
+        const vrfs = JSON.parse(table.dataset.mgmtRowVrfs || '{}');
+        JSON.parse(table.dataset.mgmtRows || '[]').forEach((key) => {
+            if (visible.has(key)) return;
+            const name = 'vrf_' + key;
+            const entry = selection[key];
+            // A VRF the user chose stays; any other follows the VRF that the page shows now, for example after Create VRF.
+            if (entry && Object.hasOwn(vrfs, key) && !(entry.chosen || []).includes(name)) {
+                entry.inputs = {...(entry.inputs || {}), [name]: vrfs[key]};
+            }
+            if (seeded.has(key)) return;
+            seeded.add(key);
+            if (!entry) selection[key] = {inputs: {[name]: vrfs[key] ?? ''}, auto: ''};
+        });
+        writeStoredSelection(table, selection);
+        writeSeededManagementRows(table, seeded);
+    };
+    selectManagementRows(false);
+    toggle.addEventListener('change', () => {
+        const table = document.getElementById('librenms-ipaddress-table');
+        if (table && !toggle.checked) {
+            table.querySelectorAll('tr[data-mgmt-ip="true"] input[name="select"]').forEach((box) => {
+                box.checked = false;
+            });
+            // The management row can be selected on another page, where no checkbox can clear it.
+            const selection = readStoredSelection(table);
+            JSON.parse(table.dataset.mgmtRows || '[]').forEach((key) => {
+                delete selection[key];
+            });
+            writeStoredSelection(table, selection);
+            writeSeededManagementRows(table, new Set());
+        }
+        selectManagementRows(true);
+        // Store the change too, or the next swap restores the row from the old selection.
+        commitSelectionChange(table);
+    });
 }
 
 // ============================================
@@ -1599,7 +1821,7 @@ function _selectionSnapshot(table) {
  * row restored after paging keeps the same standing it had before.
  *
  * @param {HTMLElement} table - The table element.
- * @returns {Object<string, {inputs: Object<string, string>, auto: string}>} Selected rows by key.
+ * @returns {Object<string, {inputs: Object<string, string>, auto: string, chosen: string[]}>} Selected rows by key.
  */
 function readStoredSelection(table) {
     try {
@@ -1696,6 +1918,7 @@ function _isSelectionCompanionName(name) {
         Boolean(name) &&
         (name.startsWith('device_selection_') ||
             name.startsWith('vlan_group_') ||
+            name.startsWith('vrf_') ||
             cableSnapshotPrefixes.some((prefix) => name.startsWith(prefix)))
     );
 }
@@ -1720,6 +1943,7 @@ function persistTableSelection(table) {
                     : checkbox.dataset[MEMBER_MARKER]
                       ? 'member'
                       : '',
+                chosen: _chosenVrfNames(row),
             };
         } else {
             // Only the visible page can retract a row: an absent checkbox means "another page",
@@ -1748,6 +1972,7 @@ function restoreTableSelection(table) {
     const selection = readStoredSelection(table);
     const blocked = _blockedPortIds();
     let cleared = 0;
+    const restoredVrfs = [];
     table.querySelectorAll('td input[name="select"]:not(:disabled)').forEach(function (checkbox) {
         const entry = selection[checkbox.value];
         const row = checkbox.closest('tr');
@@ -1760,9 +1985,19 @@ function restoreTableSelection(table) {
         }
         // A row the cascade added is re-derived by the closure; it is never restored onto a blocked row.
         if (entry.auto && blocked.has(row.dataset.portId)) return;
+        // A stored VRF or group that the row no longer offers would fall back to another one, so the row is cleared.
+        const chosen = (entry && entry.chosen) || [];
+        if (_storedChoiceIsGone(row, companionInputs, chosen)) {
+            // Set Primary IP can have checked the row already; the commit below drops it only when unchecked.
+            checkbox.checked = false;
+            cleared += 1;
+            return;
+        }
         row.querySelectorAll('select[name], input[type="hidden"][name]').forEach(function (input) {
             if (!_isSelectionCompanionName(input.name)) return;
             if (!Object.hasOwn(companionInputs, input.name)) return;
+            // Only a VRF the user chose comes back; a stored default follows the page, for example a new suggestion.
+            if (input.matches('select.vrf-select') && !chosen.includes(input.name)) return;
             const renderedValue = input.value;
             if (input.tomselect) {
                 input.tomselect.setValue(companionInputs[input.name], true);
@@ -1772,12 +2007,57 @@ function restoreTableSelection(table) {
             if (input.matches('select.vlan-sync-group-select') && input.value !== renderedValue) {
                 verifyVlanSyncGroup(input, input.dataset.vlanId, input.dataset.vlanName, input.value);
             }
+            // The row status belongs to the rendered VRF, so a restored VRF is verified again.
+            if (input.matches('select.vrf-select') && input.value !== renderedValue) restoredVrfs.push(input);
         });
         checkbox.checked = true;
         _applySelectionMarker(checkbox, entry.auto);
     });
     commitSelectionChange(table);
     _showClearedSelectionNotice(table, cleared);
+    restoredVrfs.forEach((select) => handleVRFChange(select, select.value));
+}
+
+/**
+ * Return the VRF fields of a row whose value differs from the VRF that the page rendered.
+ *
+ * Only such a VRF is the user's choice. TomSelect sets the selected property, not the attribute,
+ * so defaultSelected keeps the rendered VRF.
+ *
+ * @param {HTMLTableRowElement} row - The rendered row.
+ * @returns {string[]} Field names.
+ */
+function _chosenVrfNames(row) {
+    return Array.from(row.querySelectorAll('select.vrf-select[name]'))
+        .filter((select) => {
+            const rendered = Array.from(select.options).find((option) => option.defaultSelected) || select.options[0];
+            return select.value !== (rendered ? rendered.value : '');
+        })
+        .map((select) => select.name);
+}
+
+/**
+ * Return whether the row no longer offers a stored VRF or VLAN group.
+ *
+ * Setting a select to a value it does not offer selects its first option, so the row would post another
+ * VRF or group than the user chose. Global, the empty value, is always offered.
+ *
+ * @param {HTMLTableRowElement} row - The rendered row.
+ * @param {Object<string, string>} companionInputs - The stored companion values of the row.
+ * @param {string[]} chosen - The VRF fields that the user chose.
+ * @returns {boolean}
+ */
+function _storedChoiceIsGone(row, companionInputs, chosen) {
+    return Array.from(row.querySelectorAll('select.vrf-select[name], select.vlan-sync-group-select[name]')).some(
+        (select) => {
+            if (!Object.hasOwn(companionInputs, select.name) || companionInputs[select.name] === '') return false;
+            if (select.matches('.vrf-select') && !chosen.includes(select.name)) return false;
+            const stored = companionInputs[select.name];
+            return select.tomselect
+                ? !Object.hasOwn(select.tomselect.options, stored)
+                : !Array.from(select.options).some((option) => option.value === stored);
+        }
+    );
 }
 
 /** Tables whose rows carry a Virtual Chassis member that the row's verify request decided. */
@@ -1937,7 +2217,46 @@ function updateOffPageSelectionNotice(table) {
 function clearStoredSelection(table) {
     // Lifecycle write, no closure: a submit consumed the selection, and it changes no row on the page.
     writeStoredSelection(table, {});
+    writeSeededManagementRows(table, new Set());
     updateOffPageSelectionNotice(table);
+}
+
+/**
+ * Return the management rows that Set Primary IP already selected for the table's stored selection.
+ *
+ * @param {HTMLElement} table - The IP table.
+ * @returns {Set<string>} Row keys.
+ */
+function readSeededManagementRows(table) {
+    try {
+        const stored = JSON.parse(window.sessionStorage.getItem(_selectionStorageKey(table) + ':mgmt') || 'null');
+        if (stored && stored.snapshot === _selectionSnapshot(table) && Array.isArray(stored.rows)) {
+            return new Set(stored.rows);
+        }
+    } catch (_) {
+        // Without storage, each render selects the management rows again.
+    }
+    return new Set();
+}
+
+/**
+ * Store the management rows that Set Primary IP selected for the table's stored selection.
+ *
+ * @param {HTMLElement} table - The IP table.
+ * @param {Set<string>} rows - Row keys.
+ * @returns {void}
+ */
+function writeSeededManagementRows(table, rows) {
+    try {
+        const key = _selectionStorageKey(table) + ':mgmt';
+        if (rows.size) {
+            window.sessionStorage.setItem(key, JSON.stringify({snapshot: _selectionSnapshot(table), rows: [...rows]}));
+        } else {
+            window.sessionStorage.removeItem(key);
+        }
+    } catch (_) {
+        // Storage is a convenience here, as for the stored selection.
+    }
 }
 
 /**
@@ -2003,7 +2322,10 @@ function restoreOffPageSelections(form) {
         const table = document.getElementById(tableId);
         if (!table) return;
         // Lifecycle write, no closure: it gives back off-page rows a failed submit consumed, as they were.
-        writeStoredSelection(table, Object.assign(readStoredSelection(table), consumed[tableId]));
+        writeStoredSelection(table, Object.assign(readStoredSelection(table), consumed[tableId].rows));
+        writeSeededManagementRows(table, new Set([...readSeededManagementRows(table), ...consumed[tableId].seeded]));
+        // The consume also cleared the rows of this page, which still shows them checked.
+        persistTableSelection(table);
         updateOffPageSelectionNotice(table);
     });
 }
@@ -2022,7 +2344,7 @@ HTMX_FAILURE_EVENTS.forEach(function (eventName) {
  *
  * @param {HTMLElement[]} tables - The tables whose stored rows the request submits.
  * @param {FormData} params - The request parameters.
- * @returns {Object} The consumed records by table id and row key.
+ * @returns {Object<string, {rows: Object, seeded: string[]}>} By table id: the consumed records by row key, and the seeded management rows.
  */
 function consumeOffPageSelections(tables, params) {
     const consumed = {};
@@ -2035,7 +2357,8 @@ function consumeOffPageSelections(tables, params) {
                 .filter(_isSelectionCompanionName)
                 .forEach(function (name) { params.append(name, companions[name]); });
         });
-        consumed[table.id] = records;
+        // A failed submit gives back the rows and the management rows that Set Primary IP already selected.
+        consumed[table.id] = {rows: records, seeded: Array.from(readSeededManagementRows(table))};
         clearStoredSelection(table);
     });
     return consumed;
@@ -2811,6 +3134,8 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
  * @param {string} value - Selected VRF ID
  */
 function handleVRFChange(select, value) {
+    // A selected row takes its new VRF into the stored selection, which an off-page submit posts.
+    commitSelectionChange(select.closest('table'));
     const ipAddress = select.dataset.ip;
     const prefixLength = select.dataset.prefix || "";  // Get prefix length if present
     const fullIpAddress = prefixLength ? `${ipAddress}/${prefixLength}` : ipAddress;
@@ -3746,6 +4071,7 @@ function updateInterfaceNameField() {
                     const platformId = preferenceSelector.dataset.platformId || null;
                     fetch(savePrefUrl, {
                         method: 'POST',
+                        keepalive: true,
                         headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrfToken},
                         body: JSON.stringify({
                             key: 'interface_name_field',
@@ -4214,6 +4540,9 @@ document.body.addEventListener('closeModal', closeHtmxModal);
  */
 
 function initializeScripts() {
+    // The row selection restore reads the menu switches, so the menu is restored first.
+    initializeSyncOptionMenus();
+    initializePrimaryIpToggle();
     initializeCheckboxes();
     initializeVCMemberSelect();
     initializeVRFSelects();
@@ -4221,7 +4550,6 @@ function initializeScripts() {
     initializeVlanModalSave();
     initializeFilters();
     initializeCountdowns();
-    initializeSyncOptionMenus();
     initializeCheckboxListeners();
     initializeBulkEditApply();
     updateInterfaceNameField();

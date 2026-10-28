@@ -154,7 +154,7 @@ def _cache_relationship(view, obj, relation_field, source_id, related_id, source
     """Seed the real VC-scoped cache snapshot required by an inline relationship POST."""
     from django.core.cache import cache
 
-    from netbox_librenms_plugin.server_mappings import get_librenms_sync_device
+    from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 
     cache_obj = get_librenms_sync_device(obj, server_key="default") or obj
     cache_key = view.get_cache_key(cache_obj, "ports", "default")

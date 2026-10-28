@@ -768,6 +768,63 @@ def test_settings_module_exports_the_stripped_redis_host():
     assert "CACHE_HOST='redis'" in result.stdout, result.stdout
 
 
+@pytest.mark.parametrize("base_shape", ["module_globals", "module_getattr"])
+def test_settings_module_takes_the_plugin_servers_from_the_ci_configuration(tmp_path, base_shape):
+    """A developer's own NetBox configuration names other servers; the tests must still see CI's servers."""
+    import runpy
+
+    environment_configuration = os.environ.get("NETBOX_CONFIGURATION", "netbox.configuration")
+    base_configuration = environment_configuration
+    if base_shape == "module_getattr":
+        # The netbox-docker loader serves its settings only through a module __getattr__ and __dir__.
+        (tmp_path / "loader_configuration.py").write_text(
+            "import importlib\n"
+            f"_loaded = importlib.import_module({environment_configuration!r})\n"
+            "def __getattr__(name):\n"
+            "    return getattr(_loaded, name)\n"
+            "def __dir__():\n"
+            "    return dir(_loaded)\n"
+        )
+        base_configuration = "loader_configuration"
+    (tmp_path / "developer_configuration.py").write_text(
+        # The netbox-docker configuration prints a banner when it loads.
+        "print('loaded config')\n"
+        "import importlib, os\n"
+        "_base = importlib.import_module(os.environ['BASE_NETBOX_CONFIGURATION'])\n"
+        "globals().update({name: getattr(_base, name) for name in dir(_base) if name.isupper()})\n"
+        "PLUGINS_CONFIG = {'netbox_librenms_plugin': {'servers': {\n"
+        "    'production': {'librenms_url': 'https://librenms.invalid', 'api_token': 'x'},\n"
+        "    'stub': {'librenms_url': 'https://stub.invalid', 'api_token': 'x'},\n"
+        "}}}\n"
+    )
+    script = (
+        "import importlib; "
+        "settings = importlib.import_module('netbox_librenms_plugin.tests.isolated_settings'); "
+        "print('SERVERS=' + repr(sorted(settings.PLUGINS_CONFIG['netbox_librenms_plugin']['servers'])))"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join([str(tmp_path), *(path for path in sys.path if path)]),
+            "BASE_NETBOX_CONFIGURATION": base_configuration,
+            "NETBOX_CONFIGURATION": "developer_configuration",
+            "DJANGO_SETTINGS_MODULE": "netbox_librenms_plugin.tests.isolated_settings",
+            "TEST_DB_NAME": "test_netbox_librenms",
+            "TEST_REDIS_HOST": "redis",
+        },
+        cwd=REPOSITORY_ROOT,
+        check=False,
+    )
+
+    ci_servers = runpy.run_path(str(REPOSITORY_ROOT / "media" / "configuration.testing.py"))["PLUGINS_CONFIG"]
+    assert result.returncode == 0, result.stderr
+    expected = "SERVERS=" + repr(sorted(ci_servers["netbox_librenms_plugin"]["servers"]))
+    assert expected in result.stdout.splitlines(), result.stdout
+
+
 def test_playwright_state_machine_has_a_required_separate_ci_job():
     """Run browser behavior independently from the NetBox test matrix."""
     workflow = (REPOSITORY_ROOT / ".github/workflows/test.yaml").read_text()
