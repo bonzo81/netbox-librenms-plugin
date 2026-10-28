@@ -73,7 +73,6 @@ def _make_view():
     view._regex_bay_mappings = []
     view._norm_rules_bay = None
     view._norm_rules_type = None
-    view._generic_module_types = {}
     view._module_type_ambiguities = {}
     view._carrier_install_rules = []
     return view
@@ -6270,7 +6269,6 @@ class TestScopePreservedAcrossIntegratedContainer:
             child_bays=[f"x1/c{n}" for n in range(1, 5)],
         )
         device_bays, module_scoped_bays = view._get_module_bays(selected_device)
-        view._generic_module_types = view._get_generic_module_types()
         view._module_type_ambiguities = view._get_module_type_ambiguities()
         view._carrier_install_rules = view._get_carrier_install_rules(selected_device.device_type.manufacturer)
 
@@ -6435,7 +6433,6 @@ class TestBuildRowAmbiguityWiring:
             manufacturer=device.device_type.manufacturer,
         )
         candidate_b = make_module_type("3HE18883AARB01", manufacturer=other_manufacturer)
-        view._generic_module_types = view._get_generic_module_types()
         # Ambiguity preloaded on the view
         view._module_type_ambiguities = view._get_module_type_ambiguities()
         module_bays = {bay.name: bay for bay in device.modulebays.filter(module__isnull=True)}
@@ -6476,7 +6473,6 @@ class TestBuildRowAmbiguityWiring:
         view = self._view()
         device = make_device_with_module_bays("build-row-no-ambiguity", ["Slot 2"])
         manufacturer = device.device_type.manufacturer
-        view._generic_module_types = view._get_generic_module_types()
         view._module_type_ambiguities = view._get_module_type_ambiguities()
         module_bays = {bay.name: bay for bay in device.modulebays.filter(module__isnull=True)}
         item = {

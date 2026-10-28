@@ -4050,14 +4050,17 @@ class _ModuleTypeIndex(dict):
     ``mfr_mappings``, a dict keyed by ``(manufacturer_pk, librenms_model)`` populated
     from manufacturer-scoped ``ModuleTypeMapping`` rows. ``resolve_module_type`` probes
     the manufacturer-scoped key first so vendor-specific overrides win for matching
-    devices without leaking into other vendors' lookups.
+    devices without leaking into other vendors' lookups. ``generic`` holds the
+    :func:`get_generic_module_types_indexed` index, so every caller of the resolver gets
+    the same Generic fallback as the table.
     """
 
-    __slots__ = ("mfr_mappings",)
+    __slots__ = ("generic", "mfr_mappings")
 
-    def __init__(self, *args, mfr_mappings=None, **kwargs):
+    def __init__(self, *args, mfr_mappings=None, generic=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.mfr_mappings: dict = mfr_mappings or {}
+        self.generic: dict = generic or {}
 
 
 # (version, index) held as a single tuple so a lock-free reader always gets a CONSISTENT pair from
@@ -4072,7 +4075,7 @@ def _module_types_index_version():
     Return a cheap fingerprint of the module-type index inputs.
 
     Changes on any create/delete/edit (via ``save()``) of a ModuleType, a module-type
-    InterfaceTemplate, or a ModuleTypeMapping, so the cache below self-invalidates
+    InterfaceTemplate, a ModuleTypeMapping, or a Manufacturer (the Generic index keys on its name), so the cache below self-invalidates
     (including across test transactions) with no signal wiring.
 
     Limitation: a count-preserving bulk ``QuerySet.update()`` bypasses ``save()`` and so does
@@ -4081,11 +4084,11 @@ def _module_types_index_version():
     ever mutates these models via ``save()``, so this affects external bulk-update tooling only.
 
     Returns:
-        tuple[tuple[int, str], tuple[int, str], tuple[int, str]]: Fingerprints for module types,
-            interface templates, and module type mappings.
+        tuple[tuple[int, str], ...]: Fingerprints for module types, interface templates,
+            module type mappings, and manufacturers.
 
     """
-    from dcim.models import InterfaceTemplate, ModuleType
+    from dcim.models import InterfaceTemplate, Manufacturer, ModuleType
 
     from netbox_librenms_plugin.models import ModuleTypeMapping
 
@@ -4097,6 +4100,7 @@ def _module_types_index_version():
         _fp(ModuleType.objects.all()),
         _fp(InterfaceTemplate.objects.filter(module_type__isnull=False)),
         _fp(ModuleTypeMapping.objects.all()),
+        _fp(Manufacturer.objects.all()),
     )
 
 
@@ -4206,7 +4210,7 @@ def _build_module_types_index() -> dict:
         else:
             mapping_seen.add(key)
             result[key] = mapping.netbox_module_type
-    return _ModuleTypeIndex(result, mfr_mappings=mfr_mappings)
+    return _ModuleTypeIndex(result, mfr_mappings=mfr_mappings, generic=get_generic_module_types_indexed())
 
 
 def get_module_type_ambiguities() -> dict:
@@ -4387,9 +4391,10 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, prel
     return value
 
 
-def _probe_module_type_name(name, module_types, *, manufacturer, norm_rules, generic_fallback):
+def _probe_module_type_name(name, module_types, *, manufacturer, norm_rules):
     """Run one candidate name through the scoped, global, normalized and generic look-ups."""
     mfr_mappings = getattr(module_types, "mfr_mappings", None)
+    generic_fallback = getattr(module_types, "generic", None)
     mfr_pk = getattr(manufacturer, "pk", None)
 
     def _lookup_mfr(candidate):
@@ -4446,7 +4451,6 @@ def resolve_module_type(
     manufacturer=None,
     *,
     norm_rules: dict | None = None,
-    generic_fallback: dict | None = None,
     fallback_names: tuple | list = (),
 ):
     """
@@ -4455,10 +4459,10 @@ def resolve_module_type(
     Pass ``norm_rules`` (from :func:`preload_normalization_rules`) to avoid
     repeated DB queries when called in a loop.
 
-    Pass ``generic_fallback`` (from :func:`get_generic_module_types_indexed`) to enable
-    a secondary look-up in the 'Generic' manufacturer when the primary index has no match
-    (e.g. because the same model name is used by multiple manufacturers, making it
-    ambiguous in the primary index).
+    When *module_types* is the ``_ModuleTypeIndex`` from :func:`get_module_types_indexed`, its
+    ``generic`` index gives a secondary look-up in the 'Generic' manufacturer when the primary
+    index has no match (e.g. because the same model name is used by multiple manufacturers,
+    making it ambiguous in the primary index).
 
     When *manufacturer* is provided **and** *module_types* is the ``_ModuleTypeIndex``
     returned by :func:`get_module_types_indexed`, manufacturer-scoped
@@ -4471,7 +4475,6 @@ def resolve_module_type(
         module_types (dict): Primary module type lookup index.
         manufacturer (Manufacturer | None): Optional manufacturer for scoped rules and mappings.
         norm_rules (dict | None): Preloaded normalization rules that avoid repeated database queries.
-        generic_fallback (dict | None): Generic manufacturer index used when the primary lookup has no match.
         fallback_names (tuple | list): Names to try, in order, when *model_name* is a placeholder.
             They are ignored when it is a real model. :func:`module_type_lookup_candidates` builds
             these from a row so every call site tries the same names in the same order.
@@ -4498,7 +4501,6 @@ def resolve_module_type(
             module_types,
             manufacturer=manufacturer,
             norm_rules=norm_rules,
-            generic_fallback=generic_fallback,
         )
         if matched:
             return matched
