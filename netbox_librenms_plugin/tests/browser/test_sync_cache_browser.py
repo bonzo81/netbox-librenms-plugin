@@ -1447,6 +1447,8 @@ def test_a_restored_row_posts_the_value_it_shows_now(page, table_id, field, sele
 
     assert page.locator("#row-300").is_checked()
     assert page.locator(f'[name="{field}"]').input_value() == shown_value
+    stored = page.evaluate(f"readStoredSelection(document.getElementById('{table_id}'))")
+    assert stored["300"]["inputs"][field] == shown_value
 
 
 # Tabler's modal layout: the open modal covers the viewport, so a click beside the dialog hits the modal itself.
