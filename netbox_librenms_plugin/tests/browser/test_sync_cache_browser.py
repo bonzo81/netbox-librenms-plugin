@@ -5257,9 +5257,9 @@ def test_a_history_restore_keeps_one_set_of_page_listeners_on_the_restored_contr
     statuses.clear()
     page.evaluate("window.dispatchEvent(new Event('blur')); window.dispatchEvent(new Event('focus'))")
     page.wait_for_timeout(500)
+    assert len(statuses) == 1
     page.evaluate(
         "document.dispatchEvent(new CustomEvent('librenmsCacheChanged', {detail: {revisions: {interfaces: 'r-new'}}}))"
     )
 
-    assert len(statuses) == 1
     assert page.evaluate("syncCacheController().ownRevisions.has('r-new')")
