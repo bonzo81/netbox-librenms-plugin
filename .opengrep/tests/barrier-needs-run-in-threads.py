@@ -82,3 +82,41 @@ def test_bounded_waits():
     event.wait(timeout=5)
     # ok: synchronization-needs-timeout
     event.wait(5)
+
+
+
+def test_barriers_without_a_timeout():
+    # ruleid: synchronization-needs-timeout
+    Barrier(2, action=print)
+    # ruleid: synchronization-needs-timeout
+    threading.Barrier(parties=2)
+    # ruleid: synchronization-needs-timeout
+    Barrier(2, print)
+    # ruleid: synchronization-needs-timeout
+    Barrier(parties=2, action=print)
+    # ruleid: synchronization-needs-timeout
+    Barrier(2, timeout=None)
+    # ruleid: synchronization-needs-timeout
+    threading.Barrier(2, None, None)
+
+
+def test_event_waits_with_no_timeout_limit():
+    event = Event()
+    # ruleid: synchronization-needs-timeout
+    event.wait(None)
+    # ruleid: synchronization-needs-timeout
+    event.wait(timeout=None)
+    qualified_event = threading.Event()
+    # ruleid: synchronization-needs-timeout
+    qualified_event.wait(timeout=None)
+
+
+def test_barriers_with_a_timeout():
+    # ok: synchronization-needs-timeout
+    Barrier(2, action=print, timeout=5)
+    # ok: synchronization-needs-timeout
+    threading.Barrier(parties=2, timeout=5)
+    # ok: synchronization-needs-timeout
+    Barrier(2, None, 5)
+    # ok: synchronization-needs-timeout
+    Barrier(parties=2, action=print, timeout=5)

@@ -21,14 +21,13 @@ from netbox_librenms_plugin.server_mappings import (
     ContainerStatus,
     IdentityOwned,
     convert_legacy,
-    get_librenms_sync_device,
     persist_mapping,
     read_mapping,
     release_server,
     require_server_key,
     set_preference,
 )
-from netbox_librenms_plugin.server_selection import build_server_mappings
+from netbox_librenms_plugin.server_selection import build_server_mappings, get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import SyncTab
 from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, update_existing_row
 from netbox_librenms_plugin.utils import (

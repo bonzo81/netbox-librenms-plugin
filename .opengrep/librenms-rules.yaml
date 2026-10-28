@@ -459,12 +459,20 @@ rules:
     paths:
       include: ["**/netbox_librenms_plugin/tests/**"]
     pattern-either:
-      - pattern: threading.Barrier($PARTIES)
+      - patterns:
+          - pattern: threading.Barrier(...)
+          - pattern-not: threading.Barrier(..., timeout=$TIMEOUT, ...)
+          - pattern-not: threading.Barrier($PARTIES, $ACTION, $TIMEOUT)
+      - pattern: threading.Barrier(..., timeout=None, ...)
+      - pattern: threading.Barrier($PARTIES, $ACTION, None)
       - patterns:
           - pattern-inside: |
               $EVENT = threading.Event(...)
               ...
-          - pattern: $EVENT.wait()
+          - pattern-either:
+              - pattern: $EVENT.wait()
+              - pattern: $EVENT.wait(None)
+              - pattern: $EVENT.wait(timeout=None)
   - id: barrier-needs-run-in-threads
     languages: [python]
     severity: ERROR
@@ -1342,3 +1350,29 @@ rules:
       - metavariable-regex:
           metavariable: $TERMINAL
           regex: ^(exists|count)$
+  - id: no-monkeypatch-on-django-proxy
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This test monkeypatches a Django proxy that forwards attributes to another object: the cache,
+      the settings or a database connection. pytest 9.2 undoes such a patch with delattr, so the undo
+      deletes a setting, or reaches a new cache backend after the settings fixture restored CACHES.
+      Patch caches["default"], or change a setting with the settings fixture or override_settings.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/tests/**"]
+    patterns:
+      - pattern-either:
+          - pattern: $MP.$PATCH(django.core.cache.cache, ...)
+          - pattern: $MP.$PATCH($MODULE.cache, ...)
+          - pattern: $MP.$PATCH(django.conf.settings, ...)
+          - pattern: $MP.$PATCH(django.db.connection, ...)
+          - patterns:
+              - pattern-inside: |
+                  def $TEST(..., settings, ...):
+                    ...
+              - pattern: $MP.$PATCH(settings, ...)
+      - metavariable-regex:
+          metavariable: $PATCH
+          regex: ^(setattr|delattr)$

@@ -1,0 +1,38 @@
+{# The checked state is the user's saved choice; data-default-checked is the factory default for the count badge and Reset. #}
+<div class="dropdown" id="interface-sync-options"
+    data-save-pref-url="{% url 'plugins:netbox_librenms_plugin:save_user_pref' %}">
+    <button class="btn btn-outline-secondary dropdown-toggle" type="button"
+        data-bs-toggle="dropdown" data-bs-auto-close="outside" aria-expanded="false">
+        <i class="mdi mdi-tune-variant"></i> Sync options
+        <span class="badge bg-secondary-lt ms-1" id="interface-sync-options-count">0</span>
+    </button>
+    <div class="dropdown-menu p-3 interface-sync-options-menu">
+        <div class="form-check form-switch mb-2"
+            title="Select interface rows that are required by LAG, parent, or bridge relationships">
+            <input class="form-check-input interface-sync-option" type="checkbox"
+                id="autoSelectLagMembers" name="auto_select_lag_members" value="1"
+                data-default-checked="{{ sync_options.auto_select_lag_members_default|yesno:'true,false' }}"{% if sync_options.auto_select_lag_members %} checked{% endif %}>
+            <label class="form-check-label small" for="autoSelectLagMembers">
+                Auto-select related interfaces
+            </label>
+        </div>
+        <hr class="my-2">
+        <div class="small fw-bold mb-2 text-secondary">Exclude from sync</div>
+        <div class="row row-cols-2 g-1">
+            {% for column in sync_options.exclude_columns %}
+            <div class="col">
+                <div class="form-check">
+                    <input class="form-check-input interface-sync-option" type="checkbox"
+                        name="exclude_columns" value="{{ column.value }}" id="exclude-{{ column.value }}"
+                        data-default-checked="{{ column.default_checked|yesno:'true,false' }}"{% if column.checked %} checked{% endif %}>
+                    <label class="form-check-label small" for="exclude-{{ column.value }}">{{ column.label }}</label>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        <hr class="my-2">
+        <button class="btn btn-link btn-sm p-0" type="button" id="reset-interface-sync-options">
+            Reset to defaults
+        </button>
+    </div>
+</div>
