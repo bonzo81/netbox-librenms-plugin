@@ -1,7 +1,7 @@
 """Integration tests for the base cable, interface, and IP address views."""
 
 import pytest
-from django.core.cache import cache
+from django.core.cache import cache, caches
 
 from netbox_librenms_plugin.tests.conftest import (
     cable_together,
@@ -427,8 +427,8 @@ class TestInterfaceViewWithRealObjects:
             id_reads.append(list(keys))
             return real_get_many(keys, *args, **kwargs)
 
-        monkeypatch.setattr(librenms_api.cache, "get", get)
-        monkeypatch.setattr(librenms_api.cache, "get_many", get_many)
+        monkeypatch.setattr(caches["default"], "get", get)
+        monkeypatch.setattr(caches["default"], "get_many", get_many)
 
         context = view.get_context_data(request, device, "ifName", server_key="default")
 
