@@ -1975,13 +1975,16 @@ function restoreTableSelection(table) {
     let cleared = 0;
     const restoredVrfs = [];
     const reverified = [];
-    table.querySelectorAll('td input[name="select"]:not(:disabled)').forEach(function (checkbox) {
+    table.querySelectorAll('td input[name="select"]').forEach(function (checkbox) {
         const entry = selection[checkbox.value];
         const row = checkbox.closest('tr');
         if (!entry || !row) return;
         // A row whose member verify is in flight belongs to that request, which stores the row when it settles.
         if (row.dataset.verifyPending) return;
         const companionInputs = (entry && entry.inputs) || {};
+        const chosen = (entry && entry.chosen) || [];
+        // A disabled row is decided in its rendered VRF, so only another chosen VRF, verified again below, can enable it.
+        if (checkbox.disabled && !_restoresAnotherChosenVrf(row, companionInputs, chosen)) return;
         // The commit below drops a cleared row from storage, with its member value.
         if (_storedMemberDiffers(table, row, checkbox.value, companionInputs)) {
             cleared += 1;
@@ -1990,7 +1993,6 @@ function restoreTableSelection(table) {
         // A row the cascade added is re-derived by the closure; it is never restored onto a blocked row.
         if (entry.auto && blocked.has(row.dataset.portId)) return;
         // A stored VRF or group that the row no longer offers would fall back to another one, so the row is cleared.
-        const chosen = (entry && entry.chosen) || [];
         if (_storedChoiceIsGone(row, companionInputs, chosen)) {
             // Set Primary IP can have checked the row already; the commit below drops it only when unchecked.
             checkbox.checked = false;
@@ -2089,6 +2091,23 @@ function _storedChoiceIsGone(row, companionInputs, chosen) {
                 ? !Object.hasOwn(select.tomselect.options, stored)
                 : !Array.from(select.options).some((option) => option.value === stored);
         }
+    );
+}
+
+/**
+ * Return whether a stored row restores a VRF the user chose that differs from the rendered VRF.
+ *
+ * @param {HTMLTableRowElement} row - The rendered row.
+ * @param {Object<string, string>} companionInputs - The stored companion values of the row.
+ * @param {string[]} chosen - The names of the selects the user changed.
+ * @returns {boolean}
+ */
+function _restoresAnotherChosenVrf(row, companionInputs, chosen) {
+    return Array.from(row.querySelectorAll('select.vrf-select[name]')).some(
+        (select) =>
+            chosen.includes(select.name) &&
+            Object.hasOwn(companionInputs, select.name) &&
+            companionInputs[select.name] !== select.value
     );
 }
 
