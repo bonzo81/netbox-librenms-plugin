@@ -3824,6 +3824,7 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
             _normalize_librenms_text(item.get("entPhysicalModelName")),
             get_module_types_indexed(),
             manufacturer=manufacturer,
+            norm_rules=preload_normalization_rules("module_type", manufacturer=manufacturer),
             fallback_names=module_type_lookup_candidates(item),
         )
         exact_mappings, regex_mappings = load_bay_mappings()
