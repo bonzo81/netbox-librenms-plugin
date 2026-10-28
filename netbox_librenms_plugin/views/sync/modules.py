@@ -92,7 +92,8 @@ logger = logging.getLogger(__name__)
 # Every module action below scopes its cache reads and its LibreNMS id writes by server key.
 MODULE_MOVE_REQUIRES_NETBOX_MESSAGE = "Moving a module needs NetBox 4.7 or later. Earlier releases move only the module itself and leave its interfaces, its module bays and any modules installed in them on the original device."
 NO_LIBRENMS_SERVER_MESSAGE = (
-    "No LibreNMS server is configured. Add a server to the plugin configuration before syncing modules."
+    "The selected LibreNMS server is not configured. Reload the page, or add the server to the plugin "
+    "configuration before syncing modules."
 )
 
 # OOB-controller rows are merged into the cached snapshot for display only, and every entry point
