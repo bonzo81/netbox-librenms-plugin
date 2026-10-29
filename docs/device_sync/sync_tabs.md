@@ -22,7 +22,7 @@ The filters are part of the page URL. Paging, sorting, the page size, refreshing
 - A change of the interface name field loads the page again with the same filters, at the first page of every tab.
 - A page load (paging, a filter change or a name field change) loses the changes in the table that you did not submit.
 
-A row that changes after the page loads, for example when you select another Virtual Chassis member, is marked **Changed since filtering**, because it can be outside the filter now. Select **Apply** to filter again. A row selection belongs to one filter, so a new filter starts with no rows selected. Selected rows that the page does not show, on another page or outside the filter, stay selected, and the notice above the table counts them.
+A row that changes after the page loads, for example when you select another Virtual Chassis member, is marked **Changed since filtering**, because it can be outside the filter now. Select **Apply** to filter again. A row selection belongs to one filter. A filter that you did not use before starts with no rows selected. When you go back to a filter that you used before, its selected rows are selected again, also the rows on other pages, and **Sync Selected** includes them. Selected rows that the page does not show, on another page or outside the filter, stay selected, and the notice above the table counts them.
 
 A filter that is not valid, for example text longer than 256 characters, shows its errors in place of the table of that tab. The other tabs and the sync actions work as usual.
 
