@@ -1667,3 +1667,18 @@ rules:
             ...
           except IntegrityError:
             ...
+
+  - id: batch-validation-needs-candidate-keys
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This batch passes a memoized serial_key_for but no candidate_keys. On a VC cache miss, each
+      device then reads the serial rules again. Pass candidate_keys=functools.cache(candidate_vc_serial_keys)
+      from the same batch.
+    metadata:
+      category: performance
+    paths:
+      exclude: ["**/netbox_librenms_plugin/tests/**"]
+    patterns:
+      - pattern: validate_device_for_import(..., serial_key_for=$KEYS, ...)
+      - pattern-not: validate_device_for_import(..., candidate_keys=$CANDIDATES, ...)
