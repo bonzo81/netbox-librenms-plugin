@@ -223,9 +223,7 @@ class TestMatching:
         html = _tab(client, device, interfaces_per_page="25", interfaces_q="ETH117")
         assert list(_rows(html)) == [5117]
         # The browser keys the selection on this text, so a selection never carries to another server.
-        assert re.search(
-            r'<table[^>]*id="librenms-interface-table"[^>]*data-selection-scope="[^"]*server_key=default', html
-        )
+        assert re.search(r'data-sync-filter-tab="interfaces" data-selection-scope="[^"]*server_key=default', html)
         assert re.search(r"Showing 1-1 of 1\s*\(filtered from 120\)", html)
 
         first_page = _tab(client, device, interfaces_per_page="25", interfaces_q="eth0")
@@ -389,11 +387,9 @@ class TestInvalidFilters:
 
         assert _rows(html) == {}
         assert 'id="interfaces_filter-errors"' in html
-        # The placeholder names the table and its selection scope, so the browser can drop other scopes.
-        assert re.search(
-            r'data-filter-invalid="true" data-selection-table="librenms-interface-table(-vm)?" data-selection-scope="[^"]*interface_name_field=',
-            html,
-        )
+        assert 'data-filter-invalid="true"' in html
+        # The tab names its selection scope also with no table, so the browser can drop other scopes.
+        assert re.search(r'data-sync-filter-tab="interfaces" data-selection-scope="[^"]*interface_name_field=', html)
         field = next(iter(params))
         if field in ("interfaces_sync_state", "interfaces_q"):
             assert re.search(rf'id="id_{field}"[^>]*aria-invalid="true"', html, re.S)
