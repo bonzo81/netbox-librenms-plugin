@@ -257,7 +257,8 @@ def test_the_tab_leaves_the_netbox_only_rows_to_the_dialog(client, settings):
 def test_the_netbox_only_rows_need_a_view_of_the_device(client, settings):
     _superuser_client(client, settings, "netbox-only-denied")
     device = _refreshed(_mixed_device("netbox-only-denied"))
-    client.force_login(get_user_model().objects.create(username="netbox-only-no-grant"))
+    # The plugin grants pass the plugin gate, so only the device check can refuse the rows.
+    client.force_login(make_user_with_perms("netbox-only-no-grant", []))
 
     response = _netbox_only(client, device)
 
