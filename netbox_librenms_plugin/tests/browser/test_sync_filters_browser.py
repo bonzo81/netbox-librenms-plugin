@@ -445,6 +445,30 @@ def test_a_name_field_change_drops_the_ip_selection_from_the_next_bulk_sync(page
     assert _submitted(page) == ["198.18.0.2/24"]
 
 
+def test_a_return_to_the_earlier_name_field_does_not_restore_its_selection(page):
+    ip_table = f"document.getElementById('{IP_TABLE}')"
+    other_server = f"lnmsSelection:{urlsplit(PAGE_URL).path}:{IP_TABLE}:other:interface_name_field=ifName"
+    _serve(page, _ip_selection_page("interface_name_field=ifName", ["198.18.0.1/24", "198.18.0.2/24"]))
+    page.evaluate(f"sessionStorage.setItem('{other_server}', JSON.stringify({{'7': {{inputs: {{}}, auto: ''}}}}))")
+    page.evaluate("initializeCheckboxes()")
+    page.check("#cb-198-18-0-1-24")
+    page.evaluate(f"writeSeededManagementRows({ip_table}, new Set(['198.18.0.1/24']))")
+
+    _serve(page, _ip_selection_page("interface_name_field=ifDescr", ["198.18.0.1/24"]))
+    page.evaluate("initializeCheckboxes()")
+    expect(page.locator("#cb-198-18-0-1-24")).not_to_be_checked()
+
+    # Back under ifName the old row is on another page, and nothing of its old selection comes back.
+    _serve(page, _ip_selection_page("interface_name_field=ifName", ["198.18.0.2/24"]))
+    page.evaluate("initializeCheckboxes()")
+    assert page.evaluate(f"offPageSelectionKeys({ip_table})") == []
+    assert page.evaluate(f"readSeededManagementRows({ip_table}).size") == 0
+    assert page.locator(f"#{IP_TABLE}-offpage-selection").count() == 0
+    # Another server keeps its own selection.
+    assert page.evaluate(f"sessionStorage.getItem('{other_server}')") is not None
+    assert _submitted(page) == []
+
+
 CABLE_TABLE = "librenms-cable-table-vc"
 
 
