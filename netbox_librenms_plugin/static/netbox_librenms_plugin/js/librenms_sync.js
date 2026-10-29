@@ -1414,6 +1414,9 @@ function initializePrimaryIpToggle() {
  */
 function initializeTableCheckboxes(tableId) {
     const table = document.getElementById(tableId);
+    // An invalid filter renders a placeholder in place of the table, with the same selection scope.
+    const scoped = table || document.querySelector(`[data-selection-table="${tableId}"]`);
+    if (scoped) pruneOtherSelectionScopes(tableId, scoped.dataset.selectionScope);
     if (!table) return;
 
     // Query the CURRENT checkboxes live inside every handler instead of closing over a snapshot.
@@ -1474,7 +1477,6 @@ function initializeTableCheckboxes(tableId) {
 
     // Re-check whatever this table had selected on another page. Runs after the handlers are
     // bound so the requirement cascade sees the restored rows.
-    pruneOtherSelectionScopes(table);
     restoreTableSelection(table);
 }
 
@@ -1882,7 +1884,7 @@ const SELECTABLE_TABLE_IDS = [
  * @returns {string} The storage key.
  */
 function _selectionStorageKey(table) {
-    const key = _selectionStoreBase(table);
+    const key = _selectionStoreBase(table.id);
     const scope = table.dataset.selectionScope;
     return scope ? key + ':' + scope : key;
 }
@@ -1890,11 +1892,11 @@ function _selectionStorageKey(table) {
 /**
  * Build the part of a table's storage key that every selection scope of the table shares.
  *
- * @param {HTMLElement} table - The table element.
+ * @param {string} tableId - The table element ID.
  * @returns {string} The key without the selection scope.
  */
-function _selectionStoreBase(table) {
-    return 'lnmsSelection:' + window.location.pathname + ':' + table.id + ':' + syncServerKey();
+function _selectionStoreBase(tableId) {
+    return 'lnmsSelection:' + window.location.pathname + ':' + tableId + ':' + syncServerKey();
 }
 
 /**
@@ -1903,13 +1905,13 @@ function _selectionStoreBase(table) {
  * A scope change starts with no rows selected, and a return to an earlier scope must not restore
  * its old selection. Each scope store has a ':mgmt' companion, which goes with it.
  *
- * @param {HTMLElement} table - The table element.
+ * @param {string} tableId - The table element ID.
+ * @param {string|undefined} scope - The selection scope of the current render.
  * @returns {void}
  */
-function pruneOtherSelectionScopes(table) {
-    const scope = table.dataset.selectionScope;
+function pruneOtherSelectionScopes(tableId, scope) {
     if (!scope) return;
-    const base = _selectionStoreBase(table);
+    const base = _selectionStoreBase(tableId);
     try {
         const stale = [];
         for (let i = 0; i < window.sessionStorage.length; i++) {
