@@ -1036,6 +1036,28 @@ class TestNameMatchesWithNamingPreferences:
         if not existing_name_matches:
             assert result["suggested_name"] == expected_name
 
+    def test_virtual_chassis_member_at_position_zero_keeps_its_member_name(self):
+        """Junos numbers its first member 0, so that member's VC name must also match."""
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis_members
+
+        _virtual_chassis, members = make_virtual_chassis_members("naming-zero", count=2)
+        existing = members[0]
+        existing.vc_position = 0
+        existing.name = _generate_vc_member_name("stack-zero", 0, serial="VC-NAMING-ZERO")
+        existing.serial = "VC-NAMING-ZERO"
+        seed_stored_mapping(existing, {"default": {"id": 45}})
+        existing.save()
+
+        result = validate_device_for_import(
+            {"device_id": 45, "hostname": "stack-zero", "sysName": "stack-zero", "serial": existing.serial},
+            include_vc_detection=False,
+        )
+
+        assert result["name_matches"] is True
+        assert result["name_sync_available"] is False
+
     @pytest.mark.parametrize(
         ("use_sysname", "hostname", "sysname", "expected_source"),
         [
@@ -1379,9 +1401,11 @@ class TestVCPositionHandling:
         result = update_vc_member_suggested_names(vc_data, master_name)
 
         assert [member["suggested_name"] for member in result["members"]] == expected_names
-        assert [member["position"] for member in result["members"]] == [
-            position if position > 0 else index for index, position in enumerate(positions, start=1)
-        ]
+        # One invalid position numbers the whole stack in row order from 1.
+        valid = all(position >= 0 for position in positions)
+        assert [member["position"] for member in result["members"]] == (
+            positions if valid else list(range(1, len(positions) + 1))
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1456,8 +1480,8 @@ class TestCloneVirtualChassisDataAdditional:
         result = _clone_virtual_chassis_data(data)
         assert result["detection_error"] == "Some error"
 
-    def test_member_with_zero_position_replaced_by_one_based(self):
-        """A member with position=0 is replaced by idx+1 (1-based)."""
+    def test_member_with_zero_position_is_kept(self):
+        """Position 0 is a real member number (Junos counts from 0), so it is kept."""
         from netbox_librenms_plugin.import_utils.virtual_chassis import _clone_virtual_chassis_data
 
         data = {
@@ -1466,8 +1490,8 @@ class TestCloneVirtualChassisDataAdditional:
             "members": [{"serial": "S0", "position": 0}, {"serial": "S2", "position": 2}],
         }
         result = _clone_virtual_chassis_data(data)
-        assert result["members"][0]["position"] == 1  # 0 → idx+1 = 1
-        assert result["members"][1]["position"] == 2  # kept as-is
+        assert result["members"][0]["position"] == 0
+        assert result["members"][1]["position"] == 2
 
     def test_member_count_falls_back_to_len_when_zero(self):
         """member_count=0 in source is replaced by len(members)."""
@@ -1561,7 +1585,11 @@ class TestVirtualChassisHTTPIntegration:
         assert get_virtual_chassis_data(object(), None)["is_stack"] is False
 
     def test_detects_stack_from_real_http_inventory(self, settings, librenms_server):
-        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+        from netbox_librenms_plugin.import_utils.virtual_chassis import (
+            get_virtual_chassis_data,
+            identify_vc_master,
+            vc_serial_key,
+        )
 
         device_id = 42
         librenms_server.device_info_response(device_id=device_id, hostname="stack-master", serial="MEMBER-1")
@@ -1573,7 +1601,7 @@ class TestVirtualChassisHTTPIntegration:
         assert result["is_stack"] is True
         assert result["member_count"] == 2
         assert [member["position"] for member in result["members"]] == [1, 2]
-        assert result["members"][0]["is_master"] is True
+        assert identify_vc_master(result["members"], "MEMBER-1", vc_serial_key()) is result["members"][0]
         assert result["members"][0]["suggested_name"] == "stack-master-M1"
 
     def test_negative_result_is_cached_until_forced_refresh(self, settings, librenms_server):
@@ -1719,11 +1747,9 @@ class TestCreateVirtualChassisWithMembers:
 
         master = make_device("vc-master", serial="MASTER-SERIAL")
 
+        members = [{"serial": "MASTER-SERIAL", "position": 1}]
         virtual_chassis = create_virtual_chassis_with_members(
-            master,
-            [],
-            {"device_id": 101},
-            server_key="test-server",
+            master, members, {"device_id": 101}, server_key="test-server", master_member=members[0]
         )
 
         master.refresh_from_db()
@@ -1741,15 +1767,12 @@ class TestCreateVirtualChassisWithMembers:
 
         master = make_device("stack-master", serial="MASTER-SERIAL")
         members = [
-            {"serial": "MASTER-SERIAL", "position": 1, "name": "Master", "is_master": True},
+            {"serial": "MASTER-SERIAL", "position": 1, "name": "Master"},
             {"serial": "MEMBER-SERIAL", "position": 2, "name": "Member"},
         ]
 
         virtual_chassis = create_virtual_chassis_with_members(
-            master,
-            members,
-            {"device_id": 102},
-            server_key="test-server",
+            master, members, {"device_id": 102}, server_key="test-server", master_member=members[0]
         )
 
         created_members = list(virtual_chassis.members.order_by("vc_position"))
@@ -1758,6 +1781,14 @@ class TestCreateVirtualChassisWithMembers:
             ("stack-master-M2", "MEMBER-SERIAL", 2),
         ]
         assert virtual_chassis.master_id == master.pk
+
+    def test_a_stack_without_a_matching_member_names_no_master(self):
+        """Guessing the master's slot splits the stack into more devices than switches, so none is named."""
+        from netbox_librenms_plugin.import_utils.virtual_chassis import identify_vc_master, vc_serial_key
+
+        members = [{"serial": "UNMATCHED-A", "position": 1}, {"serial": "", "position": 2}]
+
+        assert identify_vc_master(members, "ROOT", vc_serial_key()) is None
 
 
 @pytest.mark.django_db

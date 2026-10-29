@@ -1,5 +1,6 @@
 """HTMX endpoints and POST handlers for importing LibreNMS devices."""
 
+import functools
 import json
 import logging
 import re
@@ -61,7 +62,11 @@ from netbox_librenms_plugin.import_utils import (
     validate_device_for_import,
     visible_object_label,
 )
-from netbox_librenms_plugin.import_utils.bulk_import import ambiguous_stack_groups, stack_identity
+from netbox_librenms_plugin.import_utils.device_operations import (
+    effective_import_device_type,
+    match_import_device_type,
+)
+from netbox_librenms_plugin.import_utils.virtual_chassis import candidate_vc_serial_keys, vc_master_view, vc_serial_key
 from netbox_librenms_plugin.import_validation_helpers import (
     apply_cluster_to_validation,
     apply_host_to_validation,
@@ -1150,6 +1155,8 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         errors = []
         seen_ids = set()
         cache_expired_count = 0
+        serial_key_for = functools.cache(vc_serial_key)
+        candidate_keys = functools.cache(candidate_vc_serial_keys)
 
         for raw_device_id in device_ids:
             try:
@@ -1190,6 +1197,8 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 # Keep confirm modal aligned with import-time behavior: always
                 # detect VC membership so stack members are visible before import.
                 include_vc_detection=True,
+                serial_key_for=serial_key_for,
+                candidate_keys=candidate_keys,
             )
             # Mark validation with VC detection flag for proper URL generation in table
             # Bulk confirm should respect the initial filter's VC detection preference
@@ -1197,9 +1206,15 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
 
             device_name = validation.get("resolved_name") or f"device-{device_id}"
 
-            if validation.get("virtual_chassis", {}).get("is_stack") and device_name:
+            if validation.get("virtual_chassis", {}).get("is_stack"):
+                # Preview the names and the master the way import makes them: with the resolved DeviceType's rules.
+                device_type = effective_import_device_type((validation.get("device_type") or {}).get("device_type"))
+                serial_key = serial_key_for(getattr(device_type, "manufacturer", None))
                 validation["virtual_chassis"] = update_vc_member_suggested_names(
-                    validation["virtual_chassis"], device_name
+                    validation["virtual_chassis"], device_name, serial_key
+                )
+                validation["virtual_chassis"] = vc_master_view(
+                    validation["virtual_chassis"], libre_device.get("serial"), serial_key
                 )
 
             from dcim.models import DeviceRole, Rack
@@ -1337,18 +1352,10 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         }
 
         collisions = scope_bulk_collisions(detect_bulk_collisions(devices), request.user)
-        stack_ambiguities = ambiguous_stack_groups(
-            (
-                entry["device_id"],
-                stack_identity(entry["validation"].get("virtual_chassis", {}), entry["device_id"]),
-            )
-            for entry in devices
-            if not entry["is_vm"]
-        )
         # After collision detection, which must key on the unrestricted matches to stop two rows
         # writing the same NetBox device.
         scope_validation_disclosures([entry.get("validation") for entry in devices], request.user)
-        if collisions or stack_ambiguities:
+        if collisions:
             # Render at 200 (not 4xx): this is an interstitial modal swapped
             # into #htmx-modal-content, exactly like the confirm step. A non-2xx
             # status makes HTMX skip the swap and route the body through
@@ -1357,13 +1364,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             return render(
                 request,
                 "netbox_librenms_plugin/htmx/bulk_import_collision.html",
-                {
-                    "collisions": collisions,
-                    "stack_ambiguities": stack_ambiguities,
-                    "stack_block_message": classify_bulk_precheck(
-                        collisions, [], stack_ambiguities, [entry["device_id"] for entry in devices], {}
-                    ).stack_block_message,
-                },
+                {"collisions": collisions},
             )
 
         return render(
@@ -1578,7 +1579,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                         "No background worker was available.",
                     )
 
-        # Re-run the object-collision and stack-ambiguity checks before any synchronous import.
+        # Re-run the object-collision check before any synchronous import.
         # The confirm preview is advisory. A stale confirm form or scripted POST reaches this view
         # directly, so the import path must enforce the same blockers. This runs on the SYNCHRONOUS
         # path only: it sits after the background-job dispatch above, so a batch that enqueued a job
@@ -1588,7 +1589,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         # its virtual-chassis inventory can't be read, and that check is per row.
         precheck_skip_msg = None
         if parsed_ids:
-            collisions, unresolved, stack_ambiguities = detect_collisions_for_device_ids(
+            collisions, unresolved = detect_collisions_for_device_ids(
                 parsed_ids,
                 self.librenms_api,
                 libre_devices_cache=libre_devices_cache,
@@ -1599,13 +1600,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 vm_device_ids=vm_imports,
                 user=request.user,
             )
-            outcome = classify_bulk_precheck(
-                collisions,
-                unresolved,
-                stack_ambiguities,
-                device_ids_to_import,
-                vm_imports,
-            )
+            outcome = classify_bulk_precheck(collisions, unresolved, device_ids_to_import, vm_imports)
             if outcome.blocked:
                 # Block the whole batch with the same message that ImportDevicesJob logs.
                 if is_htmx:
@@ -1613,12 +1608,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     return render(
                         request,
                         "netbox_librenms_plugin/htmx/bulk_import_collision.html",
-                        {
-                            "stack_block_message": outcome.stack_block_message,
-                            "collisions": outcome.collisions,
-                            "oob": True,
-                            "stack_ambiguities": outcome.stack_ambiguities,
-                        },
+                        {"collisions": outcome.collisions, "oob": True},
                     )
                 messages.error(request, outcome.block_message)
                 return redirect(active_import_url)
@@ -1872,7 +1862,14 @@ class DeviceVCDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 status=200,
             )
 
-        vc_data = get_virtual_chassis_data(self.librenms_api, device_id)
+        # Preview the master the way import will match it: with the matched DeviceType's rules.
+        match = match_import_device_type(libre_device, self.librenms_api)
+        device_type = effective_import_device_type(match.get("device_type") if match and match["matched"] else None)
+        vc_data = vc_master_view(
+            get_virtual_chassis_data(self.librenms_api, device_id),
+            libre_device.get("serial"),
+            vc_serial_key(getattr(device_type, "manufacturer", None)),
+        )
 
         context = {
             "libre_device": libre_device,

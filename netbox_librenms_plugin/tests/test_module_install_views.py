@@ -269,14 +269,15 @@ class TestUpdateModuleSerialView:
         assert any("falling back to the page device" in text for text in message_texts(request, "warning"))
         assert "Missing or invalid module ID." in message_texts(request, "error")
 
-    def test_a_placeholder_serial_is_stored_as_blank(self, live_librenms):
+    @pytest.mark.parametrize("placeholder", ["N/A", "BUILTIN", "null"])
+    def test_a_placeholder_serial_is_stored_as_blank(self, live_librenms, placeholder):
         """The serial comes from the cached row, so a placeholder there must land as blank."""
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
-        device = make_device_with_module_bays("serial-placeholder", ["Slot 1"])
+        device = make_device_with_module_bays(f"serial-placeholder-{len(placeholder)}", ["Slot 1"])
         seed_mapping(device, "default", own=68)
-        module = install_module(device, "Slot 1", "SERIAL-PLACEHOLDER-CARD", serial="OLD")
-        rows = [_item(11, module.module_type.model, "Slot 1", entPhysicalSerialNum="N/A")]
+        module = install_module(device, "Slot 1", f"SERIAL-PLACEHOLDER-CARD-{len(placeholder)}", serial="OLD")
+        rows = [_item(11, module.module_type.model, "Slot 1", entPhysicalSerialNum=placeholder)]
 
         request = make_request(
             "post",

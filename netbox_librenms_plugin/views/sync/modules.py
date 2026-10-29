@@ -16,7 +16,7 @@ from django.urls import reverse
 from django.views import View
 from utilities.exceptions import AbortRequest
 
-from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
+from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE, is_librenms_placeholder
 from netbox_librenms_plugin.interface_diff import type_change_refusal
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
@@ -41,6 +41,7 @@ from netbox_librenms_plugin.utils import (
     get_module_types_indexed,
     get_vc_member_positions,
     load_module_type_bay_types,
+    is_vc_position,
     module_inventory_binding_matches,
     module_inventory_binding_token,
     module_inventory_row_digest,
@@ -55,7 +56,6 @@ from netbox_librenms_plugin.utils import (
 )
 from netbox_librenms_plugin.utils import coerce_positive_int as _coerce_positive_int
 from netbox_librenms_plugin.views.base.modules_view import (
-    _PLACEHOLDER_VALUES,
     BaseModuleTableView,
     _get_item_port_identity,
     _inventory_item_key,
@@ -580,20 +580,6 @@ def _module_interface_update_message(bind_result, location):
     return f"Updated interface {interface_name} for {location}."
 
 
-def _get_vc_member_positions(device):
-    """Compatibility wrapper for VC member position lookups."""
-    return get_vc_member_positions(device)
-
-
-def _rewrite_interface_name_for_vc_member(interface_name, vc_position, member_positions=None):
-    """Compatibility wrapper for VC-aware interface name rewriting."""
-    return rewrite_interface_name_for_vc_member(
-        interface_name,
-        vc_position,
-        member_positions=member_positions,
-    )
-
-
 def _normalize_module_interface_names_for_vc_member(
     device,
     module,
@@ -628,9 +614,9 @@ def _normalize_module_interface_names_for_vc_member(
 
     vc_position = getattr(device, "vc_position", None)
     vc_id = getattr(device, "virtual_chassis_id", None)
-    if not isinstance(vc_position, int) or vc_position < 1 or not isinstance(vc_id, int):
+    if not is_vc_position(vc_position) or not isinstance(vc_id, int):
         return result
-    member_positions = _get_vc_member_positions(device)
+    member_positions = get_vc_member_positions(device)
 
     from dcim.models import Interface
 
@@ -642,7 +628,7 @@ def _normalize_module_interface_names_for_vc_member(
         if interface.pk not in changeable_interface_ids:
             result["skipped"] += 1
             continue
-        desired_name = _rewrite_interface_name_for_vc_member(
+        desired_name = rewrite_interface_name_for_vc_member(
             interface.name,
             vc_position,
             member_positions=member_positions,
@@ -1005,7 +991,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 return refusal
             manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
             serial = normalize_inventory_serial(bind_item.get("entPhysicalSerialNum"), manufacturer=manufacturer)
-            if serial.lower() in _PLACEHOLDER_VALUES:
+            if is_librenms_placeholder(serial):
                 serial = ""
 
         self.restrict_object_or_404(
@@ -1203,7 +1189,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             else []
         )
         default_context, ignore_contexts = BaseModuleTableView._build_inventory_ignore_contexts(
-            page_device, cached_data, index_map, vc_members, get_enabled_ignore_rules
+            page_device, cached_data, vc_members, get_enabled_ignore_rules
         )
         root = index_map.get(parent_index)
         if root is not None and ignore_contexts[_inventory_item_key(root)]["selected_device"].pk != target_device.pk:
@@ -1544,7 +1530,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             manufacturer=device.device_type.manufacturer,
             preloaded_rules=norm_rules_serial,
         )
-        if serial.lower() in _PLACEHOLDER_VALUES:
+        if is_librenms_placeholder(serial):
             serial = ""
         name = item.get("entPhysicalName", "") or model_name
 
@@ -2341,7 +2327,7 @@ class UpdateModuleSerialView(
             return refusal
         manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
         serial = normalize_inventory_serial(librenms_item.get("entPhysicalSerialNum"), manufacturer=manufacturer)
-        if serial.lower() in _PLACEHOLDER_VALUES:
+        if is_librenms_placeholder(serial):
             serial = ""
 
         try:
@@ -2834,7 +2820,7 @@ class ModuleMismatchPreviewView(
         librenms_serial = normalize_inventory_serial(
             librenms_item.get("entPhysicalSerialNum"), manufacturer=manufacturer
         )
-        if librenms_serial.lower() in _PLACEHOLDER_VALUES:
+        if is_librenms_placeholder(librenms_serial):
             librenms_serial = ""
 
         # Detect type mismatch
@@ -2853,7 +2839,7 @@ class ModuleMismatchPreviewView(
         # differs from the NetBox type but is a confirmed match (the common serial-mismatch case).
         type_matched = matched_type is not None and installed_module.module_type_id == matched_type.pk
         installed_serial = (installed_module.serial or "").strip()
-        if installed_serial.lower() in _PLACEHOLDER_VALUES:
+        if is_librenms_placeholder(installed_serial):
             installed_serial = ""
         serial_mismatch = bool(
             not type_mismatch and librenms_serial != installed_serial and (librenms_serial or installed_serial)
@@ -3046,7 +3032,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         # The replacement is stored and matched against serials the install path already
         # normalized, so a raw vendor marker here would never match either.
         serial = normalize_inventory_serial(librenms_item.get("entPhysicalSerialNum"), manufacturer=manufacturer)
-        if serial.lower() in _PLACEHOLDER_VALUES:
+        if is_librenms_placeholder(serial):
             serial = ""
 
         module_types = get_module_types_indexed()

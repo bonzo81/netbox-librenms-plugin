@@ -118,17 +118,6 @@ def test_no_test_module_registers_a_session_wide_plugin():
     )
 
 
-def test_module_actions_e2e_creates_a_test_owned_device():
-    """The E2E setup must not mutate or clean up a pre-existing device."""
-    source = (REPOSITORY_ROOT / "tests/e2e/test_module_actions_in_place.py").read_text()
-
-    assert "RUN_ID = uuid4().hex" in source
-    assert 'DEVICE_NAME = f"e2e-modules-stub-{RUN_ID}"' in source
-    assert "device = Device.objects.create(" in source
-    assert "device, was_created = Device.objects.get_or_create(" not in source
-    assert 'created["device"] = [device.pk, True]' in source
-
-
 # Import root -> the distribution name that provides it.
 THIRD_PARTY_TEST_IMPORT_ROOTS = {
     "django": "django",
@@ -1205,6 +1194,54 @@ def test_configured_norecursedirs_still_skips_pytest_default_directories(tmp_pat
     assert "test_skipped_by_default" not in collection.stdout, (
         "norecursedirs dropped pytest's default exclusions:\n" + collection.stdout
     )
+
+
+def _run_e2e_setup(tmp_path, *, host_ca_exists=True, wheel_in_build_dir=False):
+    """Run a copy of tests/e2e/setup.sh with a stub docker and return the run and the build directory."""
+    import shutil
+
+    e2e = tmp_path / "tests" / "e2e"
+    shutil.copytree(
+        REPOSITORY_ROOT / "tests" / "e2e" / "docker", e2e / "docker", ignore=shutil.ignore_patterns("*.whl")
+    )
+    shutil.copy(REPOSITORY_ROOT / "tests" / "e2e" / "setup.sh", e2e / "setup.sh")
+    wheel = (e2e / "docker" if wheel_in_build_dir else tmp_path) / "netbox_librenms_plugin-0.0.0-py3-none-any.whl"
+    wheel.write_bytes(b"wheel")
+    host_ca = tmp_path / "host-ca.pem"
+    if host_ca_exists:
+        host_ca.write_text("CA\n")
+    # A stub docker keeps the run local; the script only has to reach the compose calls.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "docker").write_text("#!/bin/sh\nexit 0\n")
+    (bin_dir / "docker").chmod(0o755)
+    environment = {
+        **os.environ,
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "NETBOX_CONTAINER_TAG": "v4.7",
+        "SSL_CERT_FILE": str(host_ca),
+    }
+    run = subprocess.run(
+        ["bash", str(e2e / "setup.sh"), str(wheel)], capture_output=True, text=True, env=environment, check=False
+    )
+    return run, e2e / "docker"
+
+
+@pytest.mark.parametrize("host_ca_exists", [True, False])
+def test_e2e_setup_starts_without_a_host_ca_bundle(tmp_path, host_ca_exists):
+    """The e2e build treats the host CA as optional, so setup must not stop when the bundle is missing."""
+    run, build_dir = _run_e2e_setup(tmp_path, host_ca_exists=host_ca_exists)
+
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert (build_dir / "host_ca.crt").read_text() == ("CA\n" if host_ca_exists else "")
+
+
+def test_e2e_setup_keeps_a_selected_wheel_that_is_already_in_the_build_directory(tmp_path):
+    """The cleanup of old wheels must not delete the wheel that the caller selected."""
+    run, build_dir = _run_e2e_setup(tmp_path, wheel_in_build_dir=True)
+
+    assert run.returncode == 0, run.stdout + run.stderr
+    assert [path.read_bytes() for path in build_dir.glob("*.whl")] == [b"wheel"]
 
 
 @pytest.mark.django_db

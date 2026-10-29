@@ -17,14 +17,18 @@ Use find_pii to check the result for residual identifying data.
 import hashlib
 import ipaddress
 import re
+from collections.abc import Callable
 from typing import NamedTuple
 
 from netbox_librenms_plugin.constants import (
     GENERIC_CONTAINER_MODELS,
+    JUNOS_FPC_DESCR_PREFIX,
+    JUNOS_FPC_MEMBER_DESCR_RE,
+    JUNOS_VC_ROOT_DESCR_MARKER,
     LIBRENMS_EMPTY_MESSAGES,
     LIBRENMS_GLOBAL_ROUTING_INSTANCE,
     LIBRENMS_PLACEHOLDER_VALUES,
-    MODULE_MODEL_PLACEHOLDERS,
+    is_librenms_placeholder,
 )
 from netbox_librenms_plugin.data_shapes.ports import (
     ANON_INTERFACE_NAME_PREFIX,
@@ -102,7 +106,7 @@ HOSTNAME_KEYS = frozenset(
 )
 # Use one model identity across device, inventory, transceiver, and link rows.
 MODEL_KEYS = frozenset({"hardware", "remote_platform", "entPhysicalModelName", "model"})
-_MODEL_PLACEHOLDERS = GENERIC_CONTAINER_MODELS | LIBRENMS_PLACEHOLDER_VALUES | MODULE_MODEL_PLACEHOLDERS
+_MODEL_PLACEHOLDERS = GENERIC_CONTAINER_MODELS | LIBRENMS_PLACEHOLDER_VALUES
 # entPhysicalMfgName is the ENTITY-MIB manufacturer name (e.g. "Cisco Systems Inc."). It names the
 # vendor the os-hash deliberately masks and is read by no sync logic, so it's pseudonymized to a
 # deterministic MFG-<hash> — the field shape (present, non-empty) survives without the vendor.
@@ -110,6 +114,7 @@ _MODEL_PLACEHOLDERS = GENERIC_CONTAINER_MODELS | LIBRENMS_PLACEHOLDER_VALUES | M
 # reasoning: it names the vendor the os-hash masks, and no sync logic reads it.
 MFG_KEYS = frozenset({"entPhysicalMfgName", "vendor"})
 # Replace private ENTITY display text. Structural fields and model tokens keep joins.
+# A description keeps only the Junos Virtual Chassis markers that VC detection reads.
 ENTITY_TEXT_KEYS = frozenset({"entPhysicalName", "entPhysicalDescr"})
 # The transceiver OUI is the IEEE-registered manufacturer prefix as an integer: 36965 is 0x009065,
 # Finisar. Where "vendor" is null it is the only vendor identifier on the row, so masking the name
@@ -521,16 +526,37 @@ def _anon_serial_label(value, rules):
     return f"device-{_hash(value, rules.salt)}"
 
 
-def _anon_entity_text(value, rules):
+def _entity_token(text, rules):
+    """Return the pseudonym for one piece of ENTITY text, with its bounded terminal hierarchy locator."""
+    text = text.strip()
+    if not text or _ENTITY_TOKEN_RE.fullmatch(text) or _ENTITY_LOCATOR_RE.fullmatch(text):
+        return text
+    token = f"entity-{_hash(text, rules.salt)}"
+    locator_match = _ENTITY_LOCATOR_SUFFIX_RE.search(text)
+    return f"{token} {locator_match.group('locator')}" if locator_match else token
+
+
+def _anon_junos_vc_descr(normalized, rules):
+    """Keep the Junos Virtual Chassis markers of a description, or return None when it has none."""
+    member = JUNOS_FPC_MEMBER_DESCR_RE.match(normalized)
+    if member:
+        return f"{member.group(0)}{_entity_token(normalized[member.end() :], rules)}".strip()
+    if normalized.startswith(JUNOS_FPC_DESCR_PREFIX):
+        rest = normalized[len(JUNOS_FPC_DESCR_PREFIX) :]
+        return f"{JUNOS_FPC_DESCR_PREFIX} {_entity_token(rest, rules)}".strip()
+    marker = re.search(re.escape(JUNOS_VC_ROOT_DESCR_MARKER), normalized, re.IGNORECASE)
+    if marker:
+        rest = f"{normalized[: marker.start()]} {normalized[marker.end() :]}"
+        return f"{_entity_token(rest, rules)} {JUNOS_VC_ROOT_DESCR_MARKER}".strip()
+    return None
+
+
+def _anon_entity_text(value, rules, *, keep_vc_markers=False):
     """Replace private ENTITY text while keeping a bounded terminal hierarchy locator."""
     normalized = value.strip()
-    if not normalized or _ENTITY_TOKEN_RE.fullmatch(normalized) or _ENTITY_LOCATOR_RE.fullmatch(normalized):
-        return normalized
-    locator_match = _ENTITY_LOCATOR_SUFFIX_RE.search(normalized)
-    token = f"entity-{_hash(normalized, rules.salt)}"
-    if locator_match:
-        return f"{token} {locator_match.group('locator')}"
-    return token
+    if keep_vc_markers and (kept := _anon_junos_vc_descr(normalized, rules)) is not None:
+        return kept
+    return _entity_token(normalized, rules)
 
 
 def _anon_oid(value, salt):
@@ -726,7 +752,14 @@ def _anon_value(key, value, rules, container=None):  # noqa: C901
         if isinstance(value, bool) or not isinstance(value, (str, int, float)):
             return value
         serial = str(value).strip()
-        return f"SN-{_hash(serial, salt)}" if serial and serial != "-" else value
+        if not serial or is_librenms_placeholder(serial):
+            return value
+        if rules.serial_key is not None:
+            serial = rules.serial_key(value)
+            if not serial:
+                # The key removed the identity of a real serial: never publish the raw value.
+                return ""
+        return f"SN-{_hash(serial, salt)}"
     if key in MODEL_KEYS:
         if isinstance(value, bool) or not isinstance(value, (str, int, float)):
             return value
@@ -760,7 +793,7 @@ def _anon_value(key, value, rules, container=None):  # noqa: C901
     if key in MFG_KEYS:
         return f"MFG-{_hash(value, salt)}"
     if key in ENTITY_TEXT_KEYS:
-        return _anon_entity_text(value, rules)
+        return _anon_entity_text(value, rules, keep_vc_markers=key == "entPhysicalDescr")
     if key in VERSION_KEYS:
         return f"fw-{_hash(value, salt)}"
     if key == "os":
@@ -786,6 +819,7 @@ class _Rules(NamedTuple):
     """The per-recording anonymization context threaded through the walk."""
 
     salt: str = ""
+    serial_key: Callable | None = None
     database_ids: _DatabaseIDs | None = None
     model_tokens: dict | None = None
     # Compiled LAG name patterns captured WITH the recording (see _anon_interface_name).
@@ -851,7 +885,7 @@ def _walk(obj, rules, container=None):
     return obj
 
 
-def anonymize_recording(recording, *, salt=""):
+def anonymize_recording(recording, *, salt="", serial_key=None):
     """
     Return a copy of *recording* with every response body anonymized field-by-field.
 
@@ -866,6 +900,7 @@ def anonymize_recording(recording, *, salt=""):
     Args:
         recording (dict): A recording as produced by :func:`.capture.capture_device_recording`.
         salt (str): Optional salt mixed into the deterministic pseudonym hashes.
+        serial_key: The production serial key for a live capture. Offline recordings use their stored serials.
 
     Returns:
         dict: A new recording with anonymized ``responses`` and a neutral name/description.
@@ -878,6 +913,7 @@ def anonymize_recording(recording, *, salt=""):
     # are compiled once here and threaded through the walk.
     rules = _Rules(
         salt=salt,
+        serial_key=serial_key,
         database_ids=database_ids,
         model_tokens={},
         lag_patterns=tuple(compile_lag_patterns(recording)),

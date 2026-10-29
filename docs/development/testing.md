@@ -167,6 +167,29 @@ pytest netbox_librenms_plugin/tests/ -v --lf
 pytest -c netbox_librenms_plugin/tests/browser/pytest.ini netbox_librenms_plugin/tests/browser --lf
 ```
 
+### End-to-End Suite
+
+The suite in `tests/e2e` drives a real NetBox through its web UI and REST API. The Compose stack in `tests/e2e/docker` runs NetBox with the plugin wheel, an RQ worker, PostgreSQL, Redis, and the LibreNMS stub. The stub serves the recordings of this checkout. The suite needs Docker. It does not need a test database or the devcontainer.
+
+```bash
+uv build --wheel
+export NETBOX_PORT=8000
+NETBOX_CONTAINER_TAG=v4.7 tests/e2e/setup.sh
+uv run --no-project --with-requirements tests/e2e/requirements.txt playwright install --with-deps chromium
+uv run --no-project --with-requirements tests/e2e/requirements.txt \
+    pytest -c tests/e2e/pytest.ini tests/e2e
+docker compose -f tests/e2e/docker/docker-compose.yml down -v
+```
+
+- `setup.sh` installs the one wheel in `dist/`, or the wheel path that you give as its argument. `NETBOX_CONTAINER_TAG` is a `netboxcommunity/netbox` image tag.
+- On supported Linux hosts, `playwright install --with-deps chromium` installs Chromium and its required system libraries.
+- `NETBOX_PORT` sets the host port of NetBox (default 8000). `setup.sh` and the test run both read it, so export it once before the two commands, as above. `COMPOSE_PROJECT_NAME` gives the stack its own name and its own NetBox image, `<project name>-netbox:<NETBOX_CONTAINER_TAG>`. `setup.sh` writes both to `tests/e2e/docker/.env`, so later `docker compose` commands use the same values.
+- Run concurrent stacks in separate worktrees. Give each stack a distinct `NETBOX_PORT` and `COMPOSE_PROJECT_NAME`. Project names alone do not isolate setup files. `setup.sh` writes `.env`, `host_ca.crt`, and the staged wheel in `tests/e2e/docker` inside each checkout. Run setup, tests, and teardown from the same worktree for each stack.
+- Behind a TLS-intercepting proxy, `setup.sh` passes the proxy variables to the image build and gives the build the CA bundle in `SSL_CERT_FILE`.
+- The `uv` and `playwright` commands run on the host, so behind such a proxy they need the CA too. Add `--system-certs` to each `uv` command, or export `SSL_CERT_FILE`. Export `NODE_EXTRA_CA_CERTS` with the CA bundle path before `playwright install`.
+- A failed test keeps its Playwright trace in `test-results/<test>/trace.zip`. Open it through the same environment:
+  `uv run --no-project --with-requirements tests/e2e/requirements.txt playwright show-trace test-results/<test>/trace.zip`.
+
 ## Testing Philosophy
 
 A test is worth what it actually runs. Rank the options in this order:

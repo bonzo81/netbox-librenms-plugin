@@ -10,7 +10,12 @@ from netbox.views import generic
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.import_utils import _determine_device_name
-from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
+from netbox_librenms_plugin.import_utils.virtual_chassis import (
+    _member_name,
+    chassis_serial_key,
+    extract_vc_members,
+    members_by_serial_key,
+)
 from netbox_librenms_plugin.server_mappings import mapped_device_servers, read_mapping
 from netbox_librenms_plugin.server_selection import (
     ServerSelectionState,
@@ -22,7 +27,6 @@ from netbox_librenms_plugin.sync_cache import (
     TAB_SPECS,
     SyncCacheConsistency,
     SyncTab,
-    SyncTabState,
     sync_cache_browser_contract,
 )
 from netbox_librenms_plugin.utils import (
@@ -30,7 +34,6 @@ from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_user_pref,
     match_librenms_hardware_to_device_type,
-    normalize_inventory_serial,
     resolve_naming_preferences,
     save_user_pref,
 )
@@ -304,16 +307,7 @@ class BaseLibreNMSSyncView(
                 active_tab=SyncTab(active_sync_tab),
             )
 
-        active_cache_state = sync_cache_status.get(active_sync_tab) if sync_cache_status else None
-        cache_only_device_info = bool(
-            active_cache_state
-            and active_cache_state["state"] in (SyncTabState.INVALIDATED.value, SyncTabState.REFRESH_FAILED.value)
-        )
-        librenms_info = self.get_librenms_device_info(
-            obj,
-            request,
-            cache_only=cache_only_device_info,
-        )
+        librenms_info = self.get_librenms_device_info(obj, request)
 
         interface_context = self.get_interface_context(request, obj)
         cable_context = self.get_cable_context(request, obj)
@@ -508,7 +502,7 @@ class BaseLibreNMSSyncView(
         mappings = build_server_mappings(obj, active_server_key, plugin_config=plugins_cfg)
         return [asdict(mapping) for mapping in mappings] or None
 
-    def get_librenms_device_info(self, obj, request=None, *, cache_only=False):
+    def get_librenms_device_info(self, obj, request=None):
         """Get the LibreNMS device information for the given object."""
         found_in_librenms = False
         mismatched_device = False
@@ -524,18 +518,14 @@ class BaseLibreNMSSyncView(
             "librenms_device_location": "-",
             "librenms_device_hardware_match": None,
             "vc_inventory_serials": [],
-            "vc_inventory_not_loaded": False,
         }
 
         if self.librenms_id is not None:
-            success, device_info = self.librenms_api.get_device_info(self.librenms_id, cache_only=cache_only)
+            success, device_info = self.librenms_api.get_device_info(self.librenms_id)
             # A lookup that failed for its own reason must not be reported as a missing device.
             from netbox_librenms_plugin.librenms_api import LibreNMSLookupError
 
             lookup_error = device_info if isinstance(device_info, LibreNMSLookupError) else None
-            # One flag for "no usable device info", so every consumer (status text, the add
-            # action, its modal, the tab region) stays in step. The reason travels separately.
-            device_info_unavailable = (cache_only and not success) or lookup_error is not None
             # isinstance(dict) guard: a truthy non-dict payload (string/list) would 500 on the
             # device_info.get(...) calls below; fall back to the default details block instead
             # of trusting success=True alone (issue #100).
@@ -576,10 +566,8 @@ class BaseLibreNMSSyncView(
                         and obj.virtual_chassis is not None
                         and obj.vc_position is not None
                     ):
-                        resolved_name = _generate_vc_member_name(
-                            resolved_name,
-                            obj.vc_position,
-                            serial=getattr(obj, "serial", None),
+                        resolved_name = _member_name(
+                            resolved_name, obj.vc_position, obj.serial, None, chassis_serial_key(obj)
                         )
 
                 # Update device details regardless of match
@@ -600,14 +588,9 @@ class BaseLibreNMSSyncView(
                     }
                 )
 
-                # For Virtual Chassis, fetch inventory. Inventory has no snapshot, so a
-                # cache-only render must skip it instead of contacting LibreNMS. The skip is
-                # reported separately, or an unloaded inventory renders as an empty one.
+                # For Virtual Chassis, fetch inventory
                 if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
-                    if cache_only:
-                        librenms_device_details["vc_inventory_not_loaded"] = True
-                    else:
-                        librenms_device_details["vc_inventory_serials"] = self._get_vc_inventory_serials(obj)
+                    librenms_device_details["vc_inventory_serials"] = self._get_vc_inventory_serials(obj)
 
                 # Device was retrieved successfully via librenms_id — trust the ID
                 found_in_librenms = True
@@ -791,13 +774,16 @@ class BaseLibreNMSSyncView(
         """
         Fetch inventory serials for Virtual Chassis members.
 
+        The members come from :func:`extract_vc_members`, the same definition that import
+        detection uses, so a Junos VC lists its FPC members and not the root chassis.
+
         Args:
             obj: NetBox device object (VC member)
 
         Returns:
             list: [
                 {
-                    'description': 'Chassis component description',
+                    'description': 'Member component description',
                     'serial': 'serial number',
                     'model': 'model name',
                     'assigned_member': Device object or None (if serial matches existing assignment)
@@ -809,41 +795,27 @@ class BaseLibreNMSSyncView(
         if not success:
             return []
 
-        # Filter for chassis components
-        chassis_components = [item for item in inventory if item.get("entPhysicalClass") == "chassis"]
-
         # Get all VC members
         vc_members = obj.virtual_chassis.members.all()
 
         # The ENTITY-MIB serial carries the vendor's decoration ("S/N BCFB9793" on Juniper) while
-        # the stored member serial does not, so compare and display the normalized value.
-        master = obj.virtual_chassis.master or obj
-        manufacturer = getattr(getattr(master, "device_type", None), "manufacturer", None)
-        # One lazy cache for the whole loop: apply_normalization_rules fills it on the first
-        # component that needs normalizing and reuses it for the rest, so a stack costs one read
-        # instead of one per component and an inventory with no serials costs none.
-        serial_rules: dict = {}
+        # the stored member serial does not, so compare and display the serial key.
+        serial_key = chassis_serial_key(obj)
+        # A serial key that two members share assigns neither.
+        members_by_key = members_by_serial_key(vc_members, serial_key)
 
         result = []
-        for component in chassis_components:
-            serial = normalize_inventory_serial(
-                component.get("entPhysicalSerialNum"), manufacturer=manufacturer, preloaded_rules=serial_rules
-            )
-            if not serial or serial == "-":
+        for component in extract_vc_members(inventory, (serial_key,)):
+            serial = serial_key(component["serial"])
+            if not serial:
                 continue
-
-            # Check if this serial is already assigned to a VC member
-            assigned_member = None
-            for member in vc_members:
-                if member.serial and member.serial.strip() == serial.strip():
-                    assigned_member = member
-                    break
+            assigned_member = members_by_key.get(serial)
 
             result.append(
                 {
-                    "description": component.get("entPhysicalDescr", "-"),
+                    "description": component["description"] or "-",
                     "serial": serial,
-                    "model": component.get("entPhysicalModelName", "-"),
+                    "model": component["model"] or "-",
                     "assigned_member": assigned_member,
                 }
             )

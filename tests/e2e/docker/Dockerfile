@@ -1,0 +1,27 @@
+# check=skip=InvalidDefaultArgInFrom
+# setup.sh requires the tag and compose passes FROM, so no default can hide a missing tag.
+ARG FROM
+FROM ${FROM}
+
+ARG WHL_FILE
+COPY ${WHL_FILE} /opt/netbox/dist/
+# The optional host CA lets the install pass a TLS-intercepting proxy: uv reads SSL_CERT_FILE, pip reads PIP_CERT.
+RUN --mount=type=secret,id=host_ca,required=false \
+    if [ -s "/run/secrets/host_ca" ]; then \
+        export SSL_CERT_FILE=/run/secrets/host_ca PIP_CERT=/run/secrets/host_ca; \
+    fi; \
+    if [ -f "/usr/local/bin/uv" ]; then \
+        /usr/local/bin/uv pip install --python /opt/netbox/venv/bin/python /opt/netbox/dist/${WHL_FILE}; \
+    else \
+        /opt/netbox/venv/bin/pip install /opt/netbox/dist/${WHL_FILE}; \
+    fi
+
+# NGINX Unit starts a process on demand, and a cold process answers too late for a browser check: start all 4 at boot.
+RUN if [ -f /etc/unit/nginx-unit.json ]; then \
+        /opt/netbox/venv/bin/python -c 'import json, pathlib; p = pathlib.Path("/etc/unit/nginx-unit.json"); c = json.loads(p.read_text()); c["applications"]["netbox"]["processes"] = 4; p.write_text(json.dumps(c, indent=2))'; \
+    fi
+
+# NetBox serves the plugin's static files only after collectstatic sees the plugin enabled.
+COPY plugins.py /etc/netbox/config/plugins.py
+RUN SECRET_KEY="collectstatic-only-secret-key-0123456789-abcdefghijklmnop" \
+    /opt/netbox/venv/bin/python /opt/netbox/netbox/manage.py collectstatic --no-input

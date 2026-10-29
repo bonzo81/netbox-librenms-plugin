@@ -32,7 +32,7 @@ from netbox_librenms_plugin.constants import (
     OOB_NAME_SUFFIX,
     PORT_ID_SOURCE_COLLISION_REASON,
     REPORTED_NAME_PORT_COLLISION_REASON,
-    is_module_model_placeholder,
+    is_librenms_placeholder,
     is_supported_interface_name_field,
 )
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_host_address
@@ -316,7 +316,13 @@ def cache_remaining_ttl(cache, key):
         return None
 
 
-_VC_MEMBER_INTERFACE_PATTERN = re.compile(r"^(?P<prefix>[A-Za-z][A-Za-z0-9]*)(?P<member>\d+)(?P<suffix>[/:].+)$")
+# The optional "-" admits Junos names such as xe-1/2/0, like get_virtual_chassis_member does.
+_VC_MEMBER_INTERFACE_PATTERN = re.compile(r"^(?P<prefix>[A-Za-z][A-Za-z0-9]*-?)(?P<member>\d+)(?P<suffix>[/:].+)$")
+
+
+def is_vc_position(value) -> bool:
+    """Return whether *value* is a Virtual Chassis position: an int, not a bool, 0 or more."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
 def convert_speed_to_kbps(speed_bps: int | None) -> int | None:
@@ -1222,7 +1228,7 @@ def get_vc_member_positions(device: Device) -> set[int]:
     positions = set()
 
     own_position = getattr(device, "vc_position", None)
-    if isinstance(own_position, int) and own_position > 0:
+    if is_vc_position(own_position):
         positions.add(own_position)
 
     vc = getattr(device, "virtual_chassis", None)
@@ -1245,7 +1251,7 @@ def get_vc_member_positions(device: Device) -> set[int]:
             parsed = int(raw_position)
         except (TypeError, ValueError):
             continue
-        if parsed > 0:
+        if is_vc_position(parsed):
             positions.add(parsed)
 
     return positions
@@ -1255,7 +1261,7 @@ def rewrite_interface_name_for_vc_member(
     interface_name: str, vc_position: int, member_positions: set[int] | None = None
 ) -> str | None:
     """Rewrite a template/interface name to the selected VC member position when appropriate."""
-    if not interface_name or not isinstance(vc_position, int) or vc_position < 1:
+    if not interface_name or not is_vc_position(vc_position):
         return None
     match = _VC_MEMBER_INTERFACE_PATTERN.match(interface_name)
     if not match:
@@ -1287,7 +1293,7 @@ def _instantiate_module_template_interface_specs(device: Device, module) -> list
     vc_position = getattr(device, "vc_position", None)
     vc_id = getattr(device, "virtual_chassis_id", None)
     member_positions = None
-    if isinstance(vc_position, int) and vc_position > 0 and isinstance(vc_id, int):
+    if is_vc_position(vc_position) and isinstance(vc_id, int):
         member_positions = get_vc_member_positions(device)
 
     template_specs = []
@@ -1479,9 +1485,9 @@ def detect_vc_normalization_noop(device: Device, module) -> Optional[dict]:
     vc_position = getattr(device, "vc_position", None)
     vc_id = getattr(device, "virtual_chassis_id", None)
     # bool is a subclass of int; reject explicitly so True/False can't masquerade.
-    if isinstance(vc_position, bool) or isinstance(vc_id, bool):
+    if isinstance(vc_id, bool):
         return None
-    if not (isinstance(vc_position, int) and vc_position > 0 and isinstance(vc_id, int)):
+    if not (is_vc_position(vc_position) and isinstance(vc_id, int)):
         return None
 
     template_manager = getattr(getattr(module, "module_type", None), "interfacetemplates", None)
@@ -3117,26 +3123,10 @@ def normalize_serial(value) -> str:
     return "" if value is None else str(value).strip()
 
 
-# "0" is deliberately absent: normalize_serial documents zero as a real-but-falsey serial.
-_STACK_SERIAL_PLACEHOLDERS = frozenset(
-    {
-        "-",
-        "n/a",
-        "na",
-        "none",
-        "not available",
-        "notavailable",
-        "null",
-        "unknown",
-        "unspecified",
-    }
-)
-
-
 def normalize_stack_serial(value) -> str:
     """Return a serial usable as stack identity evidence, preserving numeric zero."""
     serial = normalize_serial(value)
-    return "" if serial.casefold() in _STACK_SERIAL_PLACEHOLDERS else serial
+    return "" if is_librenms_placeholder(serial) else serial
 
 
 def find_devices_by_serial(serial: str, limit: int = 2) -> list:
@@ -4444,10 +4434,8 @@ def module_type_lookup_candidates(item):
     """
     candidates = []
     for key in ("entPhysicalModelName", "entPhysicalDescr"):
-        value = item.get(key)
-        if isinstance(value, str):
-            value = value.strip()
-        if not is_module_model_placeholder(value) and value not in candidates:
+        value = normalize_serial(item.get(key))
+        if not is_librenms_placeholder(value) and value not in candidates:
             candidates.append(value)
     return candidates
 
@@ -4496,10 +4484,10 @@ def resolve_module_type(
     # for every SFP the vendor declined to identify. The fallbacks apply only then. A real model
     # that resolves to nothing stays unresolved, because matching it on its own description
     # would be a guess, and a ModuleTypeMapping row is the supported way to teach that name.
-    if is_module_model_placeholder(model_name):
+    if is_librenms_placeholder(model_name):
         candidates = []
         for name in fallback_names:
-            if not is_module_model_placeholder(name) and name not in candidates:
+            if not is_librenms_placeholder(name) and name not in candidates:
                 candidates.append(name)
     else:
         candidates = [model_name]

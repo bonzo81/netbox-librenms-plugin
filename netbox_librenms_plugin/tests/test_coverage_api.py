@@ -647,8 +647,8 @@ class TestGetDeviceInfoErrors:
         # ...then the import path reads live and LibreNMS denies the device.
         assert api.get_device_info(device_id, use_cache=False) == (False, None)
 
-        # A cache-only read (the partial refresh) must not resurrect the deleted device.
-        assert api.get_device_info(device_id, cache_only=True) == (False, None)
+        # A later cached read must not resurrect the deleted device.
+        assert cache.get(f"librenms_device_info_default_{device_id}") is None
 
     def test_request_exception_reports_the_lookup_failure(self, settings, librenms_server):
         """A transport failure is not an answer about the device, so it is not "not found"."""
@@ -1207,6 +1207,19 @@ class TestParsePortVlanData:
         port_data = {"port_id": 1, "ifName": "Gi0/1", "ifDescr": "GigabitEthernet", "ifVlan": ""}
         result = api.parse_port_vlan_data(port_data)
         assert result["mode"] is None
+
+    @pytest.mark.parametrize("if_vlan", [0, "0", "", None])
+    @pytest.mark.parametrize("vlans", [None, [{"vlan": 20, "untagged": 0}]], ids=["no-list", "list"])
+    def test_every_no_vlan_sentinel_reads_as_no_if_vlan(self, settings, librenms_server, if_vlan, vlans):
+        """LibreNMS reports a port without a VLAN as ifVlan 0, "0", "" or null; each one gives the same result."""
+        api = api_for(settings, librenms_server.url)
+        port_data = {"port_id": 1, "ifName": "Gi0/1", "ifDescr": "GE", "ifVlan": if_vlan, "ifTrunk": "dot1Q"}
+        if vlans is not None:
+            port_data["vlans"] = vlans
+        result = api.parse_port_vlan_data(port_data)
+        assert result["mode"] is None
+        assert result["untagged_vlan"] is None
+        assert result["tagged_vlans"] == ([20] if vlans else [])
 
     def test_trunk_mode_set_correctly(self, settings, librenms_server):
         api = api_for(settings, librenms_server.url)

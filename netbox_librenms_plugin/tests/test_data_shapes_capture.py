@@ -425,7 +425,7 @@ def test_capture_roundtrip_preserves_vc_outcome(recording_server):
     keys = list(captured["responses"])
     assert f"GET /api/v0/devices/{_STACK_RECORDING_ID}" in keys
     assert any(f"inventory/{_STACK_RECORDING_ID}?entPhysicalContainedIn=0" in k for k in keys)
-    assert any("entPhysicalClass=chassis" in k for k in keys)
+    assert f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalContainedIn=1" in keys
     # The seed serves real empty ports and port_stack responses. Both routes are required,
     # so an omitted route would abort capture instead of storing its 404 response.
     assert captured["responses"][f"GET /api/v0/devices/{_STACK_RECORDING_ID}/ports"] == {"status": "ok", "ports": []}
@@ -443,6 +443,26 @@ def test_capture_roundtrip_preserves_vc_outcome(recording_server):
     assert result is not None
     assert result["member_count"] == 3
     assert [m["serial"] for m in result["members"]] == seed["expected"]["virtual_chassis"]["member_serials"]
+
+
+def test_capture_roundtrip_preserves_a_junos_fpc_virtual_chassis(recording_server):
+    """The capture records the root's direct children, so the FPC members replay as a stack."""
+    from netbox_librenms_plugin.import_utils.virtual_chassis import detect_virtual_chassis_from_inventory
+
+    seed = load_recording("juniper-ex4400-vc-2member")
+    # The capture holds inventory only; capture also requires the port routes.
+    device_id = seed["device_id"]
+    seed["responses"][f"GET /api/v0/devices/{device_id}/ports"] = {"status": "ok", "ports": []}
+    seed["responses"][f"GET /api/v0/devices/{device_id}/port_stack"] = {"status": "ok", "mappings": []}
+    _server, api = recording_server(seed)
+
+    captured = capture_device_recording(api, seed["device_id"], name="captured-junos")
+
+    _server2, api2 = recording_server(captured)
+    result = detect_virtual_chassis_from_inventory(api2, seed["device_id"])
+    assert result is not None
+    assert [m["serial"] for m in result["members"]] == seed["expected"]["virtual_chassis"]["member_serials"]
+    assert [m["position"] for m in result["members"]] == seed["expected"]["virtual_chassis"]["member_positions"]
 
 
 def test_capture_roundtrip_preserves_port_relationships(recording_server):
@@ -501,7 +521,7 @@ def test_capture_mirrors_inventory_all_fallback_when_server_ignores_filters(reco
             "GET /api/v0/devices/1000": {"status": "ok", "devices": [{"device_id": 1000, "os": "ios"}]},
             # The server ignores the entPhysical* filter params → empty filtered inventory...
             "GET /api/v0/inventory/1000?entPhysicalContainedIn=0": {"status": "ok", "inventory": []},
-            "GET /api/v0/inventory/1000?entPhysicalClass=chassis&entPhysicalContainedIn=1": {
+            "GET /api/v0/inventory/1000?entPhysicalContainedIn=1": {
                 "status": "ok",
                 "inventory": [],
             },

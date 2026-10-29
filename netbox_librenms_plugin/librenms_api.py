@@ -685,7 +685,7 @@ class LibreNMSAPI:
         except (requests.exceptions.RequestException, ValueError, IndexError, KeyError, TypeError):
             return None
 
-    def get_device_info(self, device_id, use_cache=True, cache_only=False):
+    def get_device_info(self, device_id, use_cache=True):
         """
         Fetch device information from LibreNMS using its primary IP.
 
@@ -699,22 +699,18 @@ class LibreNMSAPI:
             use_cache: When False, bypass the short read cache and fetch live data
                 (still refreshing the cache on success). Import decisions pass False so a
                 value just corrected in LibreNMS isn't read back stale within the cache window.
-            cache_only: When True, return a cached value or a miss without querying LibreNMS.
 
         Returns:
             tuple: ``(success, data)``. On success, ``data`` is the device dictionary. For an
-                absent device or a cache-only miss, ``data`` is ``None``. For a transport failure
+                absent device, ``data`` is ``None``. For a transport failure
                 or another non-2xx response, ``data`` is a :class:`LibreNMSLookupError`.
 
         """
         cache_key = f"librenms_device_info_{self.server_key}_{device_id}"
-        if use_cache or cache_only:
+        if use_cache:
             cached = cache.get(cache_key)
             if cached is not None:
                 return cached
-        if cache_only:
-            return False, None
-
         try:
             response = _session.get(
                 f"{self.librenms_url}/api/v0/devices/{device_id}",
@@ -924,6 +920,10 @@ class LibreNMSAPI:
           5. A configured bridge-name pattern identifies the bridge side from ifName or ifDescr.
              This classification is stable across name-field fallback, so one pair cannot be
              reinterpreted as a different relationship kind.
+          6. A port with ifType 'ipForward' is an L3 interface: never a LAG member or aggregate.
+             In a pair that rules 4 and 5 leave, an ipForward port with a partner of another
+             ifType is a sub-interface of that partner as reported (no '.N' stripping). A pair
+             of two ipForward ports stays unclassified.
 
         Configurable via PortStackLagPattern model:
           - Per-OS regex patterns identify LAG aggregates when ifType is not 'ieee8023adLag'.
@@ -1141,6 +1141,9 @@ class LibreNMSAPI:
                 name = port.get(field)
                 return _matches_name_patterns(name, compiled_patterns)
 
+            def _is_l3_interface(port: dict) -> bool:
+                return port.get("ifType") == "ipForward"
+
             def _is_bridge(port: dict) -> bool:
                 return any(
                     _matches_name_patterns(port.get(name_field), compiled_bridge_patterns)
@@ -1189,6 +1192,7 @@ class LibreNMSAPI:
                     return False
                 return child_name.startswith(parent_name + ".") and child_name[len(parent_name) + 1 :].isdigit()
 
+            l3_child_ids: set = set()
             for high_port, low_port in filtered_port_pairs:
                 pair_key = normalized_pair_key(high_port, low_port)
                 if pair_key is None or pair_key in excluded_pairs:
@@ -1213,11 +1217,24 @@ class LibreNMSAPI:
                     _claim("bridge_members", pair_key)
                     continue
 
+                low_is_l3 = _is_l3_interface(low_port)
+                high_is_l3 = _is_l3_interface(high_port)
+                if low_is_l3 != high_is_l3:
+                    child, parent = (low_port, high_port) if low_is_l3 else (high_port, low_port)
+                    _relate(sub_interfaces, conflicted_sub_interfaces, child, parent)
+                    l3_child_ids.add(normalize_librenms_port_id(child.get("port_id")))
+                    _claim("sub_interfaces", pair_key)
+                    continue
+                if low_is_l3:
+                    continue
+
                 high_phys = _resolve_physical_port(high_port)
                 low_phys = _resolve_physical_port(low_port)
                 if normalize_librenms_port_id(high_phys.get("port_id")) == normalize_librenms_port_id(
                     low_phys.get("port_id")
                 ):
+                    continue
+                if _is_l3_interface(high_phys) or _is_l3_interface(low_phys):
                     continue
 
                 low_is_agg = _is_lag_aggregate(low_phys)
@@ -1239,22 +1256,50 @@ class LibreNMSAPI:
                     _relate(lag_members, conflicted_lag_members, low_phys, high_phys)
                     _claim("lag_members", pair_key)
 
-            # Every sub-interface edge shortens the active-field name, so the graph cannot contain a cycle.
-            for port in ports_with_id:
+            def _relate_name_derived_parent(port: dict) -> None:
+                """Relate a port that has no parent yet to the parent its active-field name gives."""
                 child_id = normalize_librenms_port_id(port.get("port_id"))
                 if child_id is None or child_id in sub_interfaces or child_id in conflicted_sub_interfaces:
-                    continue
+                    return
                 parent_port = _name_derived_parent(port)
                 if parent_port is None or normalize_librenms_port_id(parent_port.get("port_id")) is None:
-                    continue
+                    return
                 pair_key = normalized_pair_key(port, parent_port)
                 if pair_key is None or pair_key in excluded_pairs or pair_key in claimed_pairs:
-                    continue
-                # This loop walks ports_with_id, not filtered_port_pairs, so rule 2 is reapplied here.
+                    return
+                # This walks ports_with_id, not filtered_port_pairs, so rule 2 is reapplied here.
                 if _has_sap_name(port, parent_port):
-                    continue
+                    return
                 _relate(sub_interfaces, conflicted_sub_interfaces, port, parent_port)
                 _claim("sub_interfaces", pair_key)
+
+            # A name-derived edge shortens the active-field name, so these edges alone cannot form a cycle.
+            for port in ports_with_id:
+                _relate_name_derived_parent(port)
+
+            def _parent_cycle_ports() -> set:
+                """Return every port on a parent cycle, walking each port of the parent map once."""
+                walked, on_cycles = set(), set()
+                for start in sub_interfaces:
+                    path, positions, node = [], {}, start
+                    while node is not None and node not in walked and node not in positions:
+                        positions[node] = len(path)
+                        path.append(node)
+                        node = sub_interfaces.get(node)
+                    if node in positions:
+                        on_cycles.update(path[positions[node] :])
+                    walked.update(path)
+                return on_cycles
+
+            # An ipForward edge can close a parent cycle with name edges; the names are the stronger signal.
+            while dropped := sorted(l3_child_ids & _parent_cycle_ports()):
+                for node in dropped:
+                    sub_interfaces.pop(node)
+                    l3_child_ids.discard(node)
+                for node in dropped:
+                    _relate_name_derived_parent(by_id[node])
+                    if node not in sub_interfaces:
+                        conflicted_sub_interfaces.add(node)
 
             return {
                 "lag_members": lag_members,
@@ -2376,6 +2421,9 @@ class LibreNMSAPI:
         if_descr = port_data.get("ifDescr", "")
         interface_name = port_data.get(interface_name_field, "") or if_name
         if_vlan = port_data.get("ifVlan", "")
+        # LibreNMS reports a port without a VLAN as ifVlan 0 or "0", as well as "" or null.
+        if if_vlan in (0, "0"):
+            if_vlan = ""
         if_trunk = port_data.get("ifTrunk")
 
         # Determine 802.1Q mode

@@ -9,6 +9,7 @@ match and a reason, never an authoritative decision.
 """
 
 import re
+from urllib.parse import parse_qs
 
 from netbox_librenms_plugin.data_shapes.anonymize import pseudonymize_os
 from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
@@ -25,6 +26,8 @@ from netbox_librenms_plugin.data_shapes.recordings_store import (
     SERIAL_SENSORS_UNAVAILABLE,
     recording_meta,
 )
+from netbox_librenms_plugin.import_utils.virtual_chassis import extract_vc_stack, select_vc_parent_index
+from netbox_librenms_plugin.utils import normalize_stack_serial
 
 # Vendor kinship for the *similarity* signal only — NOT for collapsing distinct OSes into one
 # "covered" verdict. ios / iosxr / nxos share a vendor but their ifName/ifDescr conventions differ,
@@ -98,6 +101,13 @@ def _body(recording, predicate):
     return None
 
 
+def _contained_in_query(route_key):
+    """Return the entPhysicalContainedIn value of an inventory route key, or None."""
+    query = route_key.split("?", 1)[1] if "?" in route_key else ""
+    values = parse_qs(query).get("entPhysicalContainedIn")
+    return values[0] if values else None
+
+
 def _inventory_items(body):
     """Return the ``inventory`` list from an inventory response body, or []."""
     if isinstance(body, dict) and isinstance(body.get("inventory"), list):
@@ -122,16 +132,39 @@ def _ports(recording):
     return []
 
 
-def compute_shape_signature(recording):
+def _vc_rows(recording):
+    """Return the root inventory rows and the direct children of the stack root that VC detection reads."""
+    root_items = _inventory_items(_body(recording, lambda k: _contained_in_query(k) == "0"))
+    parent_index = select_vc_parent_index(root_items)
+    child_items = []
+    if parent_index is not None:
+        child_items = _inventory_items(_body(recording, lambda k: _contained_in_query(k) == str(parent_index)))
+    return root_items, child_items
+
+
+def vc_detecting_serial_key(recording, serial_keys):
+    """
+    Return the first of *serial_keys* under which a raw capture holds a stack, or the first key.
+
+    Detection accepts a stack that any candidate key explains, so a capture must anonymize serials
+    with that key for the recording to keep the stack.
+    """
+    root_items, child_items = _vc_rows(recording)
+    rows = [*root_items, *child_items]
+    return next((key for key in serial_keys if extract_vc_stack(rows, (key,)).members), serial_keys[0])
+
+
+def compute_shape_signature(recording, *, serial_key=normalize_stack_serial):
     """
     Compute the testing-relevant fingerprint of a recording.
 
     Args:
         recording (dict): A recording (raw or anonymized — the signature only reads structural
             fields that anonymization preserves).
+        serial_key: The production serial key for a raw capture. Offline recordings compare stored serials.
 
     Returns:
-        dict: ``{os, virtual_chassis:{present,root_class,member_count,position_base},
+        dict: ``{os, virtual_chassis:{present,root_class,member_count,position_base,member_shape},
             lag:{present,ieee8023ad,name_prefix}, sub_interfaces:{present,styles}, port_stack,
             vlans, transceivers, serial, vrf, oob}``.
 
@@ -145,20 +178,22 @@ def compute_shape_signature(recording):
         if isinstance(devices, list) and devices and isinstance(devices[0], dict):
             os_name = devices[0].get("os")
 
-    # Virtual chassis: root container class + chassis members under it.
-    root_items = _inventory_items(_body(recording, lambda k: "entPhysicalContainedIn=0" in k))
+    # Virtual chassis: root container class + the members and member shape VC detection finds under it.
+    root_items, child_items = _vc_rows(recording)
     root_class = None
     if any(i.get("entPhysicalClass") == "stack" for i in root_items):
         root_class = "stack"
     elif any(i.get("entPhysicalClass") == "chassis" for i in root_items):
         root_class = "chassis"
-    chassis = [i for i in _inventory_items(_body(recording, lambda k: "entPhysicalClass=chassis" in k))]
-    positions = [i.get("entPhysicalParentRelPos") for i in chassis if isinstance(i.get("entPhysicalParentRelPos"), int)]
+    # Live callers supply their serial key. Anonymized recordings already preserve that equality.
+    stack = extract_vc_stack([*root_items, *child_items], (serial_key,))
+    members = stack.members
     vc = {
-        "present": len(chassis) > 1,
+        "present": bool(members),
         "root_class": root_class,
-        "member_count": len(chassis),
-        "position_base": min(positions) if positions else None,
+        "member_count": len(members),
+        "position_base": min(member["position"] for member in members) if members else None,
+        "member_shape": stack.shape,
     }
 
     # LAG + sub-interface styles from ports. LAG detection mirrors the client's
@@ -278,6 +313,7 @@ def _structural_axes(signature):
         vc.get("root_class"),
         vc.get("member_count"),
         vc.get("position_base"),
+        vc.get("member_shape"),
         lag.get("present", False),
         # The ifType-vs-pattern LAG detection style is a distinct shape: a pattern-only LAG
         # (ieee8023ad False) must not be reported as covered by an 802.3ad-ifType LAG, and vice versa.
@@ -319,6 +355,8 @@ def signature_schema_errors(signature):  # noqa: C901
         position_base = vc.get("position_base")
         if position_base is not None and (not isinstance(position_base, int) or isinstance(position_base, bool)):
             errors.append("virtual_chassis.position_base must be an integer or null")
+        if "member_shape" not in vc or (vc["member_shape"] is not None and not isinstance(vc["member_shape"], str)):
+            errors.append("virtual_chassis.member_shape must be a string or null")
 
     lag = signature.get("lag")
     if not isinstance(lag, dict):

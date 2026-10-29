@@ -1,16 +1,11 @@
-"""Two serial-less stacks that fingerprint alike must block the batch, not silently share one VC."""
+"""Stack rows in a bulk import: unreadable stacks fail closed, and stacks without a master import standalone."""
 
 import pytest
 
-from netbox_librenms_plugin.import_utils.bulk_import import (
-    classify_bulk_precheck,
-    detect_collisions_for_device_ids,
-    stack_identity,
-)
+from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
 from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
 
-# Two members with no serial and identical name/model/position: the shape that makes the
-# fingerprint branch of stack_identity collapse two unrelated stacks onto one key.
+# Two members with no serial: a stack whose master cannot be identified.
 CHASSIS_MEMBERS = [
     {
         "entPhysicalClass": "chassis",
@@ -52,7 +47,7 @@ class _StackBoundary:
 
     def get_inventory_filtered(self, _device_id, **kwargs):
         if kwargs.get("ent_physical_contained_in") == 0:
-            return True, [{"entPhysicalClass": "stack", "entPhysicalIndex": 1}]
+            return True, [{"entPhysicalClass": "stack", "entPhysicalIndex": 1, "entPhysicalContainedIn": 0}]
         return True, list(self.members)
 
 
@@ -119,31 +114,49 @@ def test_cached_device_ambiguity_adds_a_reason_when_issues_are_absent(duplicate_
 
 
 @pytest.mark.django_db
-def test_two_serialless_stacks_that_fingerprint_alike_block_the_batch():
-    """Without serials the fingerprint is a guess, so a second stack must not import VC-less."""
-    rows = {97101: _row(97101, "stack-a"), 97102: _row(97102, "stack-b")}
-    api = _StackBoundary(rows)
+def test_two_look_alike_serialless_stacks_both_import_standalone(client, librenms_server, settings):
+    """Neither stack can name its master, so each imports as a single device with a warning; the batch runs."""
+    from dcim.models import Device, VirtualChassis
+    from django.urls import reverse
 
-    # Assert the precondition first: a fixture that stopped producing two same-keyed stacks
-    # would make the block assertion below pass for the wrong reason.
-    vc_a = get_virtual_chassis_data(api, 97101)
-    vc_b = get_virtual_chassis_data(api, 97102)
-    assert vc_a.get("is_stack") and vc_b.get("is_stack"), "the fixture must detect two stacks"
-    identity_a = stack_identity(vc_a, 97101)
-    identity_b = stack_identity(vc_b, 97102)
-    assert identity_a.basis == identity_b.basis == "fingerprint"
-    assert identity_a.key == identity_b.key, "the fixture must reproduce the shared serial-less key"
+    from netbox_librenms_plugin.import_utils.virtual_chassis import VC_MASTER_UNKNOWN_WARNING
+    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device, make_superuser
 
-    collisions, unresolved, stack_ambiguities = detect_collisions_for_device_ids(
-        [97101, 97102],
-        api,
-        libre_devices_cache=rows,
-        sync_options={"use_sysname": True},
+    configure_librenms_servers(
+        settings,
+        {"default": {"librenms_url": librenms_server.url, "api_token": "test-token", "verify_ssl": False}},
     )
-    outcome = classify_bulk_precheck(collisions, unresolved, stack_ambiguities, [97101, 97102], {})
+    infrastructure = make_device("look-alike-stack-infrastructure")
+    device_ids = [97101, 97102]
+    for device_id in device_ids:
+        row = {
+            **_row(device_id, f"look-alike-stack-{device_id}"),
+            "hardware": infrastructure.device_type.model,
+            "location": infrastructure.site.name,
+        }
+        librenms_server.register(f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [row]})
+        librenms_server.vc_inventory_callable(
+            device_id, [{"entPhysicalClass": "stack", "entPhysicalIndex": 1}], {1: CHASSIS_MEMBERS}
+        )
+    client.force_login(make_superuser("look-alike-stack-importer"))
 
-    assert outcome.blocked is True, "two same-keyed serial-less stacks must block the batch"
-    assert "stack" in outcome.block_message.lower()
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:bulk_import_devices"),
+        {
+            "select": [str(device_id) for device_id in device_ids],
+            "server_key": "default",
+            **{f"role_{device_id}": str(infrastructure.role_id) for device_id in device_ids},
+        },
+        headers={"HX-Request": "true"},
+    )
+
+    body = response.content.decode()
+    assert response.status_code == 200
+    assert "Bulk import blocked" not in body
+    for device_id in device_ids:
+        assert VC_MASTER_UNKNOWN_WARNING.format(device_id=device_id) in body
+        assert Device.objects.get(name=f"look-alike-stack-{device_id}").virtual_chassis is None
+    assert not VirtualChassis.objects.filter(domain__in=[f"librenms-default-{i}" for i in device_ids]).exists()
 
 
 @pytest.mark.django_db
@@ -158,7 +171,7 @@ def test_transient_vc_detection_failure_fails_closed_without_poisoning_retry():
     api = _TransientFailureStackBoundary(rows, failed_id)
     cache.delete(_vc_cache_key(api, failed_id))
 
-    _collisions, unresolved, _stack_ambiguities = detect_collisions_for_device_ids(
+    _collisions, unresolved = detect_collisions_for_device_ids(
         list(rows),
         api,
         libre_devices_cache=rows,
@@ -169,26 +182,6 @@ def test_transient_vc_detection_failure_fails_closed_without_poisoning_retry():
     assert unresolved == [failed_id]
     assert retried["is_stack"] is True
     assert api.root_attempts[failed_id] == 2
-
-
-@pytest.mark.django_db
-def test_placeholder_member_serials_fall_back_to_ambiguous_fingerprint():
-    """Placeholder serials do not identify a stack, so indistinguishable stacks block."""
-    rows = {97121: _row(97121, "stack-placeholder-a"), 97122: _row(97122, "stack-placeholder-b")}
-    members = [{**member, "entPhysicalSerialNum": " N/A "} for member in CHASSIS_MEMBERS]
-    api = _StackBoundary(rows, members=members)
-
-    collisions, unresolved, stack_ambiguities = detect_collisions_for_device_ids(
-        list(rows),
-        api,
-        libre_devices_cache=rows,
-        sync_options={"use_sysname": True},
-    )
-    outcome = classify_bulk_precheck(collisions, unresolved, stack_ambiguities, list(rows), {})
-
-    assert unresolved == []
-    assert outcome.blocked is True
-    assert stack_ambiguities[0]["device_ids"] == [97121, 97122]
 
 
 @pytest.mark.django_db
@@ -304,56 +297,6 @@ def test_a_missing_device_does_not_turn_inventory_404_into_a_non_stack(settings,
 
 
 @pytest.mark.django_db
-def test_confirm_preview_discloses_ambiguous_serialless_stacks(client, librenms_server, settings):
-    from django.urls import reverse
-
-    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_superuser
-
-    configure_librenms_servers(
-        settings,
-        {"default": {"librenms_url": librenms_server.url, "api_token": "test-token", "verify_ssl": False}},
-    )
-    device_ids = [97140, 97141]
-    for device_id in device_ids:
-        row = _row(device_id, f"preview-stack-{device_id}")
-        librenms_server.register(f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [row]})
-        librenms_server.vc_inventory_callable(
-            device_id,
-            [{"entPhysicalClass": "stack", "entPhysicalIndex": 1}],
-            {1: CHASSIS_MEMBERS},
-        )
-    client.force_login(make_superuser("preview-ambiguous-stacks"))
-
-    response = client.post(
-        reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
-        {"server_key": "default", "select": [str(device_id) for device_id in device_ids]},
-        headers={"HX-Request": "true"},
-    )
-
-    assert response.status_code == 200
-    assert b"ambiguous serial-less stacks" in response.content
-    assert b"Confirm Import" not in response.content
-
-
-@pytest.mark.django_db
-def test_ambiguous_stack_ids_are_listed_in_numeric_order():
-    """LibreNMS ids are numbers, so the blocked-batch message must not order them lexically."""
-    rows = {2: _row(2, "stack-low"), 10: _row(10, "stack-high")}
-    api = _StackBoundary(rows)
-
-    _collisions, unresolved, stack_ambiguities = detect_collisions_for_device_ids(
-        [10, 2],
-        api,
-        libre_devices_cache=rows,
-        sync_options={"use_sysname": True},
-    )
-    outcome = classify_bulk_precheck(_collisions, unresolved, stack_ambiguities, [10, 2], {})
-
-    assert stack_ambiguities[0]["device_ids"] == [2, 10]
-    assert "LibreNMS device ids 2, 10" in outcome.block_message
-
-
-@pytest.mark.django_db
 def test_an_empty_inventory_reads_as_empty_through_the_client_side_fallback(librenms_server, settings):
     """A device that holds no inventory must not read as a failed detection."""
     from netbox_librenms_plugin.librenms_api import LibreNMSAPI
@@ -412,18 +355,3 @@ def test_single_writer_refuses_failed_stack_detection_with_manual_mappings(libre
     validation = validate_device_for_import(row, api=LibreNMSAPI(server_key="default"))
     assert validation["can_import"] is False
     assert any("stack" in issue.lower() for issue in validation["issues"])
-
-
-@pytest.mark.django_db
-def test_stack_alert_does_not_repeat_the_separate_object_collision_message():
-    import re
-    from dataclasses import asdict
-    from django.template.loader import render_to_string
-
-    collisions = [{"nb_device_pk": 1, "nb_kind": "device", "target_visible": False, "librenms_rows": []}]
-    outcome = classify_bulk_precheck(collisions, [], [{"device_ids": [1, 2]}], [1, 2], {})
-    rendered = render_to_string("netbox_librenms_plugin/htmx/bulk_import_collision.html", asdict(outcome))
-    alert = re.search(r'<div class="alert alert-danger[^"]*">(.*?)</div>', rendered, re.S).group(1)
-    assert "serial-less stacks" in alert
-    assert "NetBox object collision" not in alert
-    assert "same NetBox object" in rendered

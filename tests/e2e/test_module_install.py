@@ -1,286 +1,117 @@
 """
-End-to-end Playwright tests for LibreNMS plugin module sync workflow.
+Module install and branch install on the device sync page.
 
-These tests exercise the full import → modules → install flow against a
-live NetBox + LibreNMS instance inside the devcontainer.
-
-Prerequisites:
-    - NetBox running at NETBOX_URL (default http://172.22.0.4:8000)
-    - LibreNMS server configured in plugin settings
-    - A device linked to LibreNMS that has inventory modules
-    - Playwright installed: pip install playwright && playwright install chromium
-
-Configuration (environment variables):
-    E2E_TESTS_ENABLED=1          Required to run these tests
-    E2E_DEVICE_ID=<id>           NetBox device PK to test against (auto-detected if omitted)
-    NETBOX_URL=<url>             NetBox base URL (default http://172.22.0.4:8000)
-    NETBOX_USER=<user>           Login username (default admin)
-    NETBOX_PASS=<pass>           Login password (default admin)
-    NETBOX_CONTAINER=<name>      Docker container name (auto-detected if omitted)
-
-Run:
-    cd <repository root>
-    HTTP_PROXY= HTTPS_PROXY= http_proxy= https_proxy= \
-    no_proxy=localhost,127.0.0.1,172.22.0.4 \
-    E2E_TESTS_ENABLED=1 python -m pytest tests/e2e/test_module_install.py -v -s
+The device is linked to the stub's Nokia SR OS recording. Its first line card holds an MDA, so
+the seeded types give the card a bay in the device and the MDA a bay in the card's module type:
+the MDA can only go in once the card is installed.
 """
 
-import os
-
 import pytest
+from playwright.sync_api import expect
 
-from .conftest import NETBOX_URL, netbox_shell as _netbox_shell
+from . import module_tab as tab
+from .conftest import recorded, recording_device_id
 
-E2E_ENABLED = os.environ.get("E2E_TESTS_ENABLED", "0") == "1"
-
-if not E2E_ENABLED:
-    pytest.skip(
-        "E2E tests skipped — set E2E_TESTS_ENABLED=1 to run against a live instance",
-        allow_module_level=True,
-    )
-
-
-def _detect_device_id():
-    """
-    Find a device linked to LibreNMS that has inventory modules.
-
-    Returns the NetBox device PK, or skips the test session if none found.
-    """
-    output = _netbox_shell(
-        "from dcim.models import Device; "
-        "devs = Device.objects.exclude(custom_field_data__librenms_id=None)"
-        ".exclude(custom_field_data__librenms_id={}).order_by('pk'); "
-        "print(devs.first().pk if devs.exists() else '')"
-    )
-    if not output.strip():
-        pytest.skip("No device with librenms_id found in NetBox")
-    return int(output.strip())
-
-
-def _delete_device_modules(device_id):
-    """Remove all modules from a device."""
-    _netbox_shell(
-        f"from dcim.models import Module; "
-        f"deleted = Module.objects.filter(device_id={device_id}).delete(); "
-        f"print(f'Deleted {{deleted}}')"
-    )
-
-
-def _get_interfaces(device_id):
-    """Get interface names for a device."""
-    output = _netbox_shell(
-        f"from dcim.models import Interface; "
-        f'[print(f\'{{i.name}}|{{i.module.module_type.model if i.module else "-"}}|'
-        f'{{i.module.module_bay.name if i.module else "-"}}\')'
-        f" for i in Interface.objects.filter(device_id={device_id}).order_by('name')]"
-    )
-    results = []
-    for line in output.split("\n"):
-        if "|" in line:
-            name, mod_type, bay = line.split("|")
-            results.append({"name": name, "module_type": mod_type, "bay": bay})
-    return results
+RECORDING = "nokia-timos-transceivers"
+LIBRENMS_ID = recording_device_id(RECORDING)
+INVENTORY = recorded(RECORDING, f"/api/v0/inventory/{LIBRENMS_ID}/all")["inventory"]
+CARD = next(item for item in INVENTORY if item["entPhysicalClass"] == "ioModule" and item["entPhysicalModelName"])
+MDA = next(
+    item
+    for item in INVENTORY
+    if item["entPhysicalClass"] == "mdaModule" and item["entPhysicalContainedIn"] == CARD["entPhysicalIndex"]
+)
+CARD_ROW = CARD["entPhysicalIndex"]
+MDA_ROW = MDA["entPhysicalIndex"]
+INSTALLED_BRANCH = {
+    CARD["entPhysicalName"]: (CARD["entPhysicalModelName"], CARD["entPhysicalSerialNum"]),
+    MDA["entPhysicalName"]: (MDA["entPhysicalModelName"], MDA["entPhysicalSerialNum"]),
+}
 
 
 @pytest.fixture(scope="module")
-def device_id():
-    """Resolve the device PK to test against."""
-    env_id = os.environ.get("E2E_DEVICE_ID")
-    if env_id:
-        return int(env_id)
-    return _detect_device_id()
+def seeded_device(module_device) -> dict:
+    """Create the device with a bay for the card, and the card type with a bay for the MDA."""
+    return module_device(
+        LIBRENMS_ID,
+        [CARD["entPhysicalName"]],
+        {CARD["entPhysicalModelName"]: [MDA["entPhysicalName"]], MDA["entPhysicalModelName"]: []},
+    )
 
 
-class TestModuleInstallWorkflow:
-    """Test the full module sync and install workflow."""
+@pytest.fixture
+def modules_page(logged_in_page, netbox_url, netbox_api, seeded_device):
+    """Leave the device with no modules, and open its module tab with fresh inventory."""
+    netbox_api.delete_modules(seeded_device["id"])
+    tab.open_modules_tab(logged_in_page, netbox_url, seeded_device["id"])
+    tab.refresh_modules(logged_in_page, CARD_ROW)
+    return logged_in_page
 
-    def _goto_modules_tab(self, page, device_id):
-        """Navigate to the modules sync tab and refresh data."""
-        page.goto(f"{NETBOX_URL}/dcim/devices/{device_id}/librenms-sync/?tab=modules")
-        page.wait_for_load_state("networkidle")
-        page.wait_for_selector('button:has-text("Refresh Modules")', timeout=10000)
 
-        btn = page.query_selector('button:has-text("Refresh Modules")')
-        assert btn is not None, "Refresh Modules button not found"
-        btn.click()
-        page.wait_for_selector("#modules table tr", timeout=30000)
-        page.wait_for_load_state("networkidle")
+def test_clean_state_shows_the_card_matched_and_its_mda_without_a_bay(modules_page):
+    """With no modules installed, the card is Matched and the MDA has no bay to go in yet."""
+    page = modules_page
+    expect(tab.row(page, CARD_ROW)).to_have_attribute("data-status", "Matched")
+    mda = tab.row(page, MDA_ROW)
+    expect(mda).to_have_attribute("data-status", "No Bay")
+    expect(mda.locator("td[data-col=module_bay]")).to_contain_text("No matching bay")
+    expect(tab.row(page, CARD_ROW).locator("button[data-action=install-branch]")).to_have_count(1)
 
-    def _get_table_rows(self, page):
-        """Parse the module sync table into dicts."""
-        pane = page.query_selector("#modules")
-        assert pane is not None, "Modules pane not found"
 
-        def _text(tr, col):
-            el = tr.query_selector(f'td[data-col="{col}"]')
-            return el.inner_text().strip() if el else ""
+def test_single_install_installs_the_card_and_gives_the_mda_its_bay(modules_page, netbox_api, seeded_device):
+    """Installing the card alone creates one module, and its bay becomes the MDA's bay."""
+    page = modules_page
+    tab.install_row(page, CARD_ROW)
 
-        rows = []
-        for tr in pane.query_selector_all("table tr"):
-            if tr.query_selector('td[data-col="name"]') is None:
-                continue
-            rows.append(
-                {
-                    "name": _text(tr, "name"),
-                    "model": _text(tr, "model"),
-                    "serial": _text(tr, "serial"),
-                    "bay": _text(tr, "module_bay"),
-                    "type": _text(tr, "module_type"),
-                    "status": _text(tr, "status"),
-                    "tr": tr,
-                }
-            )
-        return rows
+    expect(tab.row(page, CARD_ROW)).to_have_attribute("data-status", "Installed")
+    expect(tab.row(page, MDA_ROW)).to_have_attribute("data-status", "Matched")
+    expect(tab.row(page, MDA_ROW).locator("td[data-col=module_bay]")).to_contain_text(MDA["entPhysicalName"])
+    card = CARD["entPhysicalName"]
+    assert netbox_api.installed_modules(seeded_device["id"]) == {card: INSTALLED_BRANCH[card]}
 
-    def _find_row_with_button(self, rows, action):
-        """Find the first top-level row that offers the actions-column control ``action``."""
-        for row in rows:
-            if row["name"].startswith("└─"):
-                continue
-            btn = row["tr"].query_selector(f'button[data-action="{action}"]')
-            if btn:
-                return row, btn
-        return None, None
 
-    def test_clean_state_shows_matched_rows(self, page, device_id):
-        """After deleting all modules, table shows rows with Matched status."""
-        _delete_device_modules(device_id)
-        self._goto_modules_tab(page, device_id)
+def test_branch_install_creates_the_card_and_its_mda(modules_page, netbox_api, seeded_device):
+    """Install Branch creates the parent module and the child module in the parent's bay."""
+    page = modules_page
+    tab.install_branch(page, CARD_ROW)
 
-        rows = self._get_table_rows(page)
-        assert len(rows) > 0, "No rows in module sync table"
+    expect(tab.row(page, CARD_ROW)).to_have_attribute("data-status", "Installed")
+    expect(tab.row(page, MDA_ROW)).to_have_attribute("data-status", "Installed")
+    assert netbox_api.installed_modules(seeded_device["id"]) == INSTALLED_BRANCH
+    modules = {
+        module["module_bay"]["name"]: module
+        for module in netbox_api.list("dcim/modules", device_id=seeded_device["id"])
+    }
+    mda_bay = netbox_api.get(f"dcim/module-bays/{modules[MDA['entPhysicalName']]['module_bay']['id']}")
+    assert mda_bay["module"]["id"] == modules[CARD["entPhysicalName"]]["id"], "the MDA is not in a bay of the card"
 
-        matched = [r for r in rows if r["status"] == "Matched"]
-        assert len(matched) > 0, f"Expected at least one Matched row, got statuses: {set(r['status'] for r in rows)}"
 
-    def test_single_install(self, page, device_id):
-        """Installing a single top-level module works."""
-        _delete_device_modules(device_id)
-        self._goto_modules_tab(page, device_id)
+def test_branch_install_over_an_installed_card_installs_only_the_mda(modules_page, netbox_api, seeded_device):
+    """A branch install whose parent bay is already occupied installs the rest without an error."""
+    page = modules_page
+    tab.install_row(page, CARD_ROW)
+    expect(tab.row(page, CARD_ROW).locator("button[data-action=install-branch]")).to_have_count(1)
 
-        rows = self._get_table_rows(page)
-        row, btn = self._find_row_with_button(rows, "install")
-        if not btn:
-            pytest.skip("No installable module found in table")
+    tab.install_branch(page, CARD_ROW)
 
-        module_name = row["name"]
-        btn.click()
-        page.wait_for_load_state("networkidle")
+    expect(page.locator("#module-sync-content")).not_to_contain_text("Branch install failed")
+    expect(tab.row(page, MDA_ROW)).to_have_attribute("data-status", "Installed")
+    assert netbox_api.installed_modules(seeded_device["id"]) == INSTALLED_BRANCH
 
-        module_count = _netbox_shell(
-            f"from dcim.models import Module; print(Module.objects.filter(device_id={device_id}).count())"
-        )
-        assert int(module_count.strip()) > 0, f"No modules in DB after installing '{module_name}'"
 
-    def test_branch_install(self, page, device_id):
-        """Branch install creates parent module + children."""
-        _delete_device_modules(device_id)
-        self._goto_modules_tab(page, device_id)
+def test_full_workflow_leaves_no_installable_row(modules_page, netbox_api, seeded_device):
+    """Install every Matched top-level row, with its branch when it has one, until none is left."""
+    page = modules_page
+    table = page.locator(tab.TABLE)
+    for _ in range(len(INVENTORY)):
+        matched = table.locator("tbody tr[data-status=Matched][data-depth='0']")
+        if matched.count() == 0:
+            break
+        index = int(matched.first.get_attribute("data-ent-index"))
+        if tab.row(page, index).locator("button[data-action=install-branch]").count():
+            tab.install_branch(page, index)
+        else:
+            tab.install_row(page, index)
 
-        rows = self._get_table_rows(page)
-        row, btn = self._find_row_with_button(rows, "install-branch")
-        if not btn:
-            pytest.skip("No branch-installable module found in table")
-
-        module_name = row["name"]
-        btn.click()
-        page.wait_for_load_state("networkidle", timeout=60000)
-
-        module_count = _netbox_shell(
-            f"from dcim.models import Module; print(Module.objects.filter(device_id={device_id}).count())"
-        )
-        count = int(module_count.strip())
-        assert count > 1, f"Branch install of '{module_name}' created {count} module(s), expected >1"
-
-        interfaces = _get_interfaces(device_id)
-        module_interfaces = [i for i in interfaces if i["module_type"] != "-"]
-        assert len(module_interfaces) > 0, f"No interfaces linked to modules after branch install of '{module_name}'"
-        for iface in module_interfaces:
-            assert not iface["name"].isdigit(), (
-                f"Interface '{iface['name']}' has bare numeric name — naming rule not applied"
-            )
-
-    def test_branch_install_no_duplicate_errors(self, page, device_id):
-        """Branch install handles already-occupied bays gracefully."""
-        self._goto_modules_tab(page, device_id)
-
-        rows = self._get_table_rows(page)
-        row, btn = self._find_row_with_button(rows, "install-branch")
-        if not btn:
-            pytest.skip("No branch-installable module found in table")
-
-        module_name = row["name"]
-
-        # First install (may already be installed from prior test)
-        btn.click()
-        page.wait_for_load_state("networkidle", timeout=60000)
-
-        # Navigate back and try again — bays should now be occupied
-        self._goto_modules_tab(page, device_id)
-        rows = self._get_table_rows(page)
-        _, btn2 = self._find_row_with_button(rows, "install-branch")
-        if not btn2:
-            pytest.skip(f"No Install Branch button after first install of '{module_name}'")
-
-        btn2.click()
-        page.wait_for_load_state("networkidle", timeout=30000)
-
-        body_text = page.query_selector("body").inner_text()
-        assert "Branch install failed" not in body_text, (
-            "Branch install crashed instead of handling occupied bays gracefully"
-        )
-
-    def test_child_bays_hidden_when_parent_not_installed(self, page, device_id):
-        """Children show 'No matching bay' when parent module is not installed."""
-        _delete_device_modules(device_id)
-        self._goto_modules_tab(page, device_id)
-
-        rows = self._get_table_rows(page)
-        children = [r for r in rows if r["name"].startswith("└─")]
-        if not children:
-            pytest.skip("No child module rows found in table")
-
-        no_bay = [c for c in children if "No matching bay" in c["bay"]]
-        assert len(no_bay) > 0, (
-            "Expected some children to show 'No matching bay' when parent not installed, "
-            f"got bays: {set(c['bay'] for c in children)}"
-        )
-
-    def test_full_workflow(self, page, device_id):
-        """Full workflow: clean → install individuals → branch install → verify."""
-        _delete_device_modules(device_id)
-        self._goto_modules_tab(page, device_id)
-
-        # Step 1: Install a few individual modules
-        for _ in range(3):
-            rows = self._get_table_rows(page)
-            row, btn = self._find_row_with_button(rows, "install")
-            if not btn:
-                break
-            btn.click()
-            page.wait_for_load_state("networkidle")
-
-        # Step 2: Branch install all available branches
-        while True:
-            rows = self._get_table_rows(page)
-            row, btn = self._find_row_with_button(rows, "install-branch")
-            if not btn:
-                break
-            btn.click()
-            page.wait_for_load_state("networkidle", timeout=60000)
-            self._goto_modules_tab(page, device_id)
-
-        # Verify: no top-level "Matched" items remain uninstalled
-        self._goto_modules_tab(page, device_id)
-        rows = self._get_table_rows(page)
-        top_level_matched = [r for r in rows if r["status"] == "Matched" and not r["name"].startswith("└─")]
-        assert len(top_level_matched) == 0, (
-            f"Top-level items still Matched after full workflow: {[r['name'] for r in top_level_matched]}"
-        )
-
-        # Verify interface naming — no bare numeric names
-        interfaces = _get_interfaces(device_id)
-        for iface in interfaces:
-            assert not iface["name"].isdigit(), (
-                f"Interface '{iface['name']}' has bare numeric name — naming rule not applied"
-            )
+    expect(table.locator("tbody tr[data-status=Matched]")).to_have_count(0)
+    assert netbox_api.installed_modules(seeded_device["id"]) == INSTALLED_BRANCH

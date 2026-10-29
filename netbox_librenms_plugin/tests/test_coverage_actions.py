@@ -595,6 +595,70 @@ class TestBulkImportConfirmView:
 
         assert "Unable to display virtual chassis members: Inventory read failed" in html
 
+    def test_confirm_template_displays_member_position_zero(self):
+        """Junos numbers its first member 0; the confirm page must show that position."""
+        from django.template.loader import render_to_string
+
+        html = render_to_string(
+            "netbox_librenms_plugin/htmx/bulk_import_confirm.html",
+            {
+                "devices": [
+                    {
+                        "device_id": 9902,
+                        "device_name": "zero-based-stack",
+                        "validation": {
+                            "virtual_chassis": {
+                                "is_stack": True,
+                                "member_count": 2,
+                                "members": [
+                                    {"position": 0, "serial": "SN-0", "suggested_name": "zero-based-stack-M0"},
+                                    {"position": 1, "serial": "SN-1", "suggested_name": "zero-based-stack-M1"},
+                                ],
+                            }
+                        },
+                    }
+                ],
+                "server_key": "default",
+            },
+        )
+
+        assert "Pos 0" in html
+        assert "Pos 1" in html
+
+    @pytest.mark.parametrize("master_identified", [True, False])
+    def test_confirm_template_says_a_stack_without_a_master_imports_standalone(self, master_identified):
+        from django.template.loader import render_to_string
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import (
+            _clone_virtual_chassis_data,
+            vc_master_view,
+            vc_serial_key,
+        )
+
+        members = [{"position": 1, "serial": "SN-1"}, {"position": 2, "serial": "SN-2"}]
+        html = render_to_string(
+            "netbox_librenms_plugin/htmx/bulk_import_confirm.html",
+            {
+                "devices": [
+                    {
+                        "device_id": 9903,
+                        "device_name": "unknown-master-stack",
+                        "validation": {
+                            "virtual_chassis": vc_master_view(
+                                _clone_virtual_chassis_data({"is_stack": True, "member_count": 2, "members": members}),
+                                "SN-1" if master_identified else "ROOT",
+                                vc_serial_key(),
+                            )
+                        },
+                    }
+                ],
+                "server_key": "default",
+            },
+        )
+
+        notice = "The stack master could not be identified by serial"
+        assert (notice in html) is (not master_identified)
+
 
 @pytest.mark.django_db
 class TestBulkImportConfirmViewIntegration:
@@ -2127,6 +2191,147 @@ class TestDeviceVCDetailsView:
         assert b"2-member" in result.content
         assert b"stack-master-M1" in result.content
         assert b"stack-master-M2" in result.content
+
+    def test_zero_based_stack_renders_member_zero(self, settings, librenms_server):
+        server_key = "vc-details-zero"
+        device_id = 43
+        view = self._view(settings, librenms_server, server_key)
+        librenms_server.device_info_response(device_id=device_id, hostname="zero-master", serial="ZERO-0")
+        librenms_server.vc_inventory_callable(
+            device_id,
+            [{"entPhysicalClass": "stack", "entPhysicalIndex": 100, "entPhysicalContainedIn": 0}],
+            {
+                100: [
+                    {
+                        "entPhysicalClass": "chassis",
+                        "entPhysicalIndex": index,
+                        "entPhysicalParentRelPos": position,
+                        "entPhysicalSerialNum": f"ZERO-{position}",
+                        "entPhysicalContainedIn": 100,
+                    }
+                    for index, position in ((200, 0), (201, 1))
+                ]
+            },
+        )
+        request = make_view_request("get", {"server_key": server_key})
+
+        result = get_view(view, request, device_id=device_id)
+
+        assert result.status_code == 200
+        html = " ".join(result.content.decode().split())
+        assert "Pos 0" in html
+        assert "zero-master-M0" in html
+        assert "zero-master-M1" in html
+
+    def test_a_stack_without_a_master_says_the_import_creates_no_chassis(self, settings, librenms_server):
+        server_key = "vc-details-no-master"
+        device_id = 44
+        view = self._view(settings, librenms_server, server_key)
+        librenms_server.device_info_response(device_id=device_id, hostname="no-master", serial="ROOT")
+        librenms_server.vc_inventory_callable(
+            device_id,
+            [{"entPhysicalClass": "stack", "entPhysicalIndex": 100}],
+            {
+                100: [
+                    {"entPhysicalClass": "chassis", "entPhysicalIndex": 200, "entPhysicalParentRelPos": 1},
+                    {"entPhysicalClass": "chassis", "entPhysicalIndex": 201, "entPhysicalParentRelPos": 2},
+                ]
+            },
+        )
+        request = make_view_request("get", {"server_key": server_key})
+
+        result = get_view(view, request, device_id=device_id)
+
+        html = " ".join(result.content.decode().split())
+        assert "the stack master could not be identified" in html
+        assert "without a virtual chassis" in html
+
+    def test_the_chassis_matched_device_types_serial_rule_names_the_master(self, settings, librenms_server):
+        """Unmatched hardware falls back to the chassis model, exactly as the import resolves the DeviceType."""
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        server_key = "vc-details-chassis-rule"
+        device_id = 46
+        device_type = make_device("vc-details-chassis-type").device_type
+        NormalizationRule.objects.create(
+            scope="serial", manufacturer=device_type.manufacturer, match_pattern=r"^PREFIX:(.+)$", replacement=r"\1"
+        )
+        view = self._view(settings, librenms_server, server_key)
+        librenms_server.device_info_response(
+            device_id=device_id, hostname="chassis-master", serial="SN1", hardware="NO-SUCH-HW"
+        )
+        member = {"entPhysicalClass": "chassis", "entPhysicalModelName": device_type.model}
+        librenms_server.vc_inventory_callable(
+            device_id,
+            [{"entPhysicalClass": "stack", "entPhysicalIndex": 100}],
+            {
+                100: [
+                    {
+                        **member,
+                        "entPhysicalIndex": 200,
+                        "entPhysicalParentRelPos": 1,
+                        "entPhysicalSerialNum": "PREFIX:SN1",
+                    },
+                    {
+                        **member,
+                        "entPhysicalIndex": 201,
+                        "entPhysicalParentRelPos": 2,
+                        "entPhysicalSerialNum": "PREFIX:SN2",
+                    },
+                ]
+            },
+        )
+        request = make_view_request("get", {"server_key": server_key})
+
+        result = get_view(view, request, device_id=device_id)
+
+        html = " ".join(result.content.decode().split())
+        assert html.count('<span class="badge bg-success text-white">Master</span>') == 1
+        assert "the stack master could not be identified" not in html
+
+    def test_the_matched_device_types_serial_rule_names_the_master(self, settings, librenms_server):
+        """The dialog previews the master with the rules of the DeviceType that import will use."""
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        server_key = "vc-details-mfg-rule"
+        device_id = 45
+        device_type = make_device("vc-details-mfg-type").device_type
+        NormalizationRule.objects.create(
+            scope="serial", manufacturer=device_type.manufacturer, match_pattern=r"^PREFIX:(.+)$", replacement=r"\1"
+        )
+        view = self._view(settings, librenms_server, server_key)
+        librenms_server.device_info_response(
+            device_id=device_id, hostname="mfg-master", serial="SN1", hardware=device_type.model
+        )
+        librenms_server.vc_inventory_callable(
+            device_id,
+            [{"entPhysicalClass": "stack", "entPhysicalIndex": 100}],
+            {
+                100: [
+                    {
+                        "entPhysicalClass": "chassis",
+                        "entPhysicalIndex": 200,
+                        "entPhysicalParentRelPos": 1,
+                        "entPhysicalSerialNum": "PREFIX:SN1",
+                    },
+                    {
+                        "entPhysicalClass": "chassis",
+                        "entPhysicalIndex": 201,
+                        "entPhysicalParentRelPos": 2,
+                        "entPhysicalSerialNum": "PREFIX:SN2",
+                    },
+                ]
+            },
+        )
+        request = make_view_request("get", {"server_key": server_key})
+
+        result = get_view(view, request, device_id=device_id)
+
+        html = " ".join(result.content.decode().split())
+        assert html.count('<span class="badge bg-success text-white">Master</span>') == 1
+        assert "the stack master could not be identified" not in html
 
 
 class TestBulkImportDevicesViewSyncExecution:
