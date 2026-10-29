@@ -902,7 +902,10 @@ def validate_device_for_import(  # noqa: C901
                     result["librenms_id_needs_migration"] = True
 
                 # Check if name matches resolved name (VC-aware: compare against VC member name)
-                if hostname and existing_device.virtual_chassis and is_vc_position(existing_device.vc_position):
+                if result["existing_match_type"] == "librenms_oob":
+                    # The row carries the controller's hostname and serial, so it never names the host.
+                    pass
+                elif hostname and existing_device.virtual_chassis and is_vc_position(existing_device.vc_position):
                     serial_key = chassis_serial_key(existing_device)
                     incoming_serial = libre_device.get("serial")
                     vc_expected_name = _member_name(

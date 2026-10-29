@@ -1129,6 +1129,36 @@ class TestValidateDeviceForImport:
         assert result["serial_action"] is None
         assert result["device_type_mismatch"] is False
 
+    @pytest.mark.parametrize("in_chassis", [False, True], ids=["standalone", "vc-member"])
+    def test_an_oob_linked_row_offers_no_name_from_the_controller(self, in_chassis):
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        settings_row = LibreNMSSettings.objects.order_by("pk").first() or LibreNMSSettings()
+        settings_row.vc_member_name_pattern = "-{serial}"
+        settings_row.save()
+        name = f"validation-oob-host-{int(in_chassis)}"
+        device = make_device(
+            name,
+            serial="HOST-SERIAL",
+            librenms_cf={SERVER_KEY: {"id": 42, "oob": {"id": 5417, "type": "idrac"}}},
+        )
+        if in_chassis:
+            make_virtual_chassis(f"{name}-vc", device)
+        payload = _device_payload(
+            5417,
+            hostname=f"{name}-idrac",
+            sysName=f"{name}-idrac",
+            serial="CONTROLLER-SERIAL",
+            hardware="iDRAC9",
+            os="idrac",
+        )
+
+        result = self._validate(payload)
+
+        assert result["existing_match_type"] == "librenms_oob"
+        assert result["name_sync_available"] is False
+        assert result["suggested_name"] is None
+
     def test_hostname_and_serial_on_different_linked_devices_surface_merge_candidates(self):
         host = make_device(
             "validation-merge-host",
