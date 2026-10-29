@@ -389,7 +389,11 @@ class TestInvalidFilters:
 
         assert _rows(html) == {}
         assert 'id="interfaces_filter-errors"' in html
-        assert 'data-filter-invalid="true"' in html
+        # The placeholder names the table and its selection scope, so the browser can drop other scopes.
+        assert re.search(
+            r'data-filter-invalid="true" data-selection-table="librenms-interface-table(-vm)?" data-selection-scope="[^"]*interface_name_field=',
+            html,
+        )
         field = next(iter(params))
         if field in ("interfaces_sync_state", "interfaces_q"):
             assert re.search(rf'id="id_{field}"[^>]*aria-invalid="true"', html, re.S)

@@ -75,8 +75,7 @@
                 {% include 'inc/table.html' with table=cable_sync.table %}
                 {% include 'netbox_librenms_plugin/inc/paginator.html' with table=cable_sync.table filtered_from=cable_sync.filtered_from %}
                 {% else %}
-                {# The error summary above the form says what to correct; no row is shown for an invalid filter. #}
-                <div class="card-body text-center text-muted py-4" data-filter-invalid="true">Correct the filters to show the cables.</div>
+                {% include 'netbox_librenms_plugin/inc/_sync_filter_invalid.html' with table=cable_sync.table text="Correct the filters to show the cables." %}
                 {% endif %}
             </div>
         </div>
