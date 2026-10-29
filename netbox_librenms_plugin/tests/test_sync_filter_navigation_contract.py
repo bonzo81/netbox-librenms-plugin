@@ -246,6 +246,40 @@ def test_the_tab_links_keep_every_tab_state(client, settings, librenms_server):
 
 
 @pytest.mark.django_db
+def test_a_filters_reset_drops_exactly_the_keys_the_filter_parser_owns():
+    from django.http import QueryDict
+
+    from netbox_librenms_plugin.sync_filters import FilterSpec
+    from netbox_librenms_plugin.sync_query import FILTERS, SyncQuery
+
+    spec = FilterSpec(prefix="interfaces_", columns=(), sync_state=lambda row: None)
+    keys = [
+        "interfaces_q",
+        "interfaces_sync_state",
+        "interfaces_filter_name",
+        "interfaces_filter_unknown",
+        "interfaces_qx",
+        "interfaces_page",
+        "interfaces_sort",
+        "vlans_q",
+        "tab",
+        "server_key",
+    ]
+    query = QueryDict(mutable=True)
+    for key in keys:
+        query[key] = "x"
+
+    kept = parse_qs(urlsplit(SyncQuery(query).url(reset=[FILTERS], prefix=spec.prefix)).query)
+
+    assert set(kept) == {key for key in keys if not spec.owns(key)}
+    assert set(keys) - set(kept) == {
+        "interfaces_q",
+        "interfaces_sync_state",
+        "interfaces_filter_name",
+        "interfaces_filter_unknown",
+    }
+
+
 def test_the_module_paginator_keeps_the_interface_filters():
     """The Modules tab shares the paginator, so its links carry the other tabs' state too."""
     rows = [{"ent_physical_index": index, "name": f"module {index}", "depth": 0} for index in range(60)]

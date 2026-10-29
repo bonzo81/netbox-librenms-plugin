@@ -44,6 +44,14 @@ class FilterColumn:
     has_field: bool = True
 
 
+def is_filter_key(prefix, key):
+    """Return whether query key *key* is a filter parameter of the tab that uses *prefix*."""
+    if not key.startswith(prefix):
+        return False
+    name = key[len(prefix) :]
+    return name in (QUERY_FIELD, SYNC_STATE_FIELD) or name.startswith(COLUMN_FIELD_PREFIX)
+
+
 @dataclass(frozen=True)
 class FilterSpec:
     """The filterable columns of one tab table variant, and how a row maps onto a sync state."""
@@ -63,10 +71,7 @@ class FilterSpec:
 
     def owns(self, key):
         """Return whether a query parameter is one of this tab's filter parameters."""
-        if not key.startswith(self.prefix):
-            return False
-        name = key[len(self.prefix) :]
-        return name in (QUERY_FIELD, SYNC_STATE_FIELD) or name.startswith(COLUMN_FIELD_PREFIX)
+        return is_filter_key(self.prefix, key)
 
 
 def normalize_filter_text(text):

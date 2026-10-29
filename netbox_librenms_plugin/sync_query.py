@@ -11,7 +11,7 @@ from django.http import QueryDict
 from django.utils.http import url_has_allowed_host_and_scheme
 
 from netbox_librenms_plugin.sync_cache import SyncTab
-from netbox_librenms_plugin.sync_filters import COLUMN_FIELD_PREFIX, QUERY_FIELD, SYNC_STATE_FIELD
+from netbox_librenms_plugin.sync_filters import is_filter_key
 
 # Keys the whole page shares. Any other name a caller gives is relative to the tab prefix.
 PAGE_KEYS = frozenset({"tab", "server_key", "interface_name_field"})
@@ -38,13 +38,7 @@ class SyncQuery:
         return name if name in PAGE_KEYS else f"{prefix}{name}"
 
     def _filter_keys(self, prefix):
-        names = (QUERY_FIELD, SYNC_STATE_FIELD)
-        return [
-            key
-            for key in self._query
-            if key.startswith(prefix)
-            and (key[len(prefix) :] in names or key[len(prefix) :].startswith(COLUMN_FIELD_PREFIX))
-        ]
+        return [key for key in self._query if is_filter_key(prefix, key)]
 
     def _changed(self, changes, reset, prefix):
         query = self._query.copy()
