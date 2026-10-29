@@ -33,7 +33,7 @@ from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.server_mappings import read_mapping, read_mappings
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
-from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_filters
+from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_filters, show_ignored_interfaces
 from netbox_librenms_plugin.utils import (
     apply_lag_vlan_fill,
     build_migrated_context,
@@ -1060,7 +1060,7 @@ class BaseInterfaceTableView(
         table = None
         filtered_from = None
         # Every hop of the tab carries the page query, so the toggle is read from it only.
-        show_ignored = request.GET.get("interfaces_show_ignored") == "1"
+        show_ignored = show_ignored_interfaces(request)
 
         if interface_name_field is None:
             interface_name_field = get_interface_name_field(request, obj)
@@ -1163,16 +1163,8 @@ class BaseInterfaceTableView(
                 return built
 
             # The filter runs after every whole-snapshot step above, so the counts, the ignored
-            # split and the blocked IDs describe the whole device. A new name field or ignored
-            # toggle starts an empty browser selection too.
-            table, filters, filtered_from = filter_sync_table(
-                request,
-                obj,
-                table_rows,
-                build_table,
-                server_key=server_key,
-                interfaces_show_ignored=int(show_ignored),
-            )
+            # split and the blocked IDs describe the whole device.
+            table, filters, filtered_from = filter_sync_table(request, table_rows, build_table)
             table.configure(request)
 
         # ``ttl()`` is Redis-specific; the Django cache API doesn't guarantee it. Guard with

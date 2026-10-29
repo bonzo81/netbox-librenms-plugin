@@ -73,6 +73,7 @@ def render_tab(
         name="sync_tab_query_items",
     )
     query.simple_tag(lambda server_key: timeout, name="sync_cache_timeout")
+    query.simple_tag(lambda *args: "interface_name_field=ifName", name="sync_selection_scope")
     fixtures = {
         "inc/table.html": '<table id="test-rows"><tbody><tr><td>Ethernet1</td></tr></tbody></table>',
         "inc/messages.html": "",

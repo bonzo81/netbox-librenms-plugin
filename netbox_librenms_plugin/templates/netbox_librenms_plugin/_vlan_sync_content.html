@@ -24,7 +24,7 @@
 {% if vlan_sync.vlan_table %}{% include "netbox_librenms_plugin/inc/_sync_filter_panel.html" with owner=vlan_sync.object content_id="vlan-sync-content" server_key=vlan_sync.server_key filters=vlan_sync.filters prefix="vlans_" tab="vlans" section_id="vlanFilterSection" label="Filter VLANs" %}{% endif %}
 
 <div id="vlan-sync-content-results">
-<div data-sync-filter-tab="vlans" data-filter-snapshot="{% if vlan_sync.vlan_table %}true{% else %}false{% endif %}" data-filter-search="{{ vlan_sync.filters.form.q.value|default:'' }}" data-filter-state="{{ vlan_sync.filters.form.sync_state.value|default:'' }}">
+<div data-sync-filter-tab="vlans" data-selection-scope="{% sync_selection_scope vlan_sync.object vlan_sync.server_key "vlans" %}" data-filter-snapshot="{% if vlan_sync.vlan_table %}true{% else %}false{% endif %}" data-filter-search="{{ vlan_sync.filters.form.q.value|default:'' }}" data-filter-state="{{ vlan_sync.filters.form.sync_state.value|default:'' }}">
 
 {% include "netbox_librenms_plugin/inc/_ipam_permission_notice.html" with hidden_ipam_permissions=vlan_sync.hidden_ipam_permissions vlan_scope_incomplete=vlan_sync.vlan_scope_incomplete %}
 
