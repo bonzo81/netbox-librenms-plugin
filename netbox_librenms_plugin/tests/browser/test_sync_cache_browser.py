@@ -614,12 +614,13 @@ class TestAMovedCableMemberIsNotRestored:
 class TestADetachedVerifyChangesNothing:
     """A verify answer for a row the tab swap replaced must not touch the new page or storage."""
 
-    def test_an_old_answer_after_a_tab_swap_changes_neither_storage_nor_the_blocked_set(self, page):
+    def test_an_old_answer_after_a_tab_swap_changes_neither_storage_nor_the_blocked_set(self, page, fetches):
         rows = [
             {"port_id": "10", "name": "et-0/0/0", "member": "1"},
             {"port_id": "20", "name": "et-0/0/1", "member": "1"},
         ]
         _load_verify_page(page, rows)
+        fetches.install()
         page.check("#cb-20")
         held = _hold_verify(page)
         page.evaluate(
@@ -641,7 +642,7 @@ class TestADetachedVerifyChangesNothing:
         )
         page.uncheck("#cb-20")
         _answer(held[0], _verified_row(rule_state="ignored", selection=""))
-        page.wait_for_timeout(300)
+        fetches.wait_until_settled()
 
         assert _stored_selection(page) == {}
         assert page.evaluate("() => document.querySelector('[data-blocked-port-ids]').dataset.blockedPortIds") == "[]"
