@@ -1485,6 +1485,7 @@ function initializeTableCheckboxes(tableId) {
 
     // Re-check whatever this table had selected on another page. Runs after the handlers are
     // bound so the requirement cascade sees the restored rows.
+    pruneOtherSelectionScopes(table);
     restoreTableSelection(table);
 }
 
@@ -1892,10 +1893,47 @@ const SELECTABLE_TABLE_IDS = [
  * @returns {string} The storage key.
  */
 function _selectionStorageKey(table) {
-    const serverKey = syncServerKey();
-    const key = 'lnmsSelection:' + window.location.pathname + ':' + table.id + ':' + serverKey;
+    const key = _selectionStoreBase(table);
     const scope = table.dataset.selectionScope;
     return scope ? key + ':' + scope : key;
+}
+
+/**
+ * Build the part of a table's storage key that every selection scope of the table shares.
+ *
+ * @param {HTMLElement} table - The table element.
+ * @returns {string} The key without the selection scope.
+ */
+function _selectionStoreBase(table) {
+    return 'lnmsSelection:' + window.location.pathname + ':' + table.id + ':' + syncServerKey();
+}
+
+/**
+ * Forget the stored selections of the table's other selection scopes on this server.
+ *
+ * A scope change starts with no rows selected, and a return to an earlier scope must not restore
+ * its old selection. Each scope store has a ':mgmt' companion, which goes with it.
+ *
+ * @param {HTMLElement} table - The table element.
+ * @returns {void}
+ */
+function pruneOtherSelectionScopes(table) {
+    const scope = table.dataset.selectionScope;
+    if (!scope) return;
+    const base = _selectionStoreBase(table);
+    try {
+        const stale = [];
+        for (let i = 0; i < window.sessionStorage.length; i++) {
+            const key = window.sessionStorage.key(i);
+            const owner = key.endsWith(':mgmt') ? key.slice(0, -':mgmt'.length) : key;
+            const rest = owner === base ? '' : owner.startsWith(base + ':') ? owner.slice(base.length + 1) : null;
+            // The scope is URL-encoded and has no colon, so a colon in the rest names another server's key.
+            if (rest !== null && rest !== scope && !rest.includes(':')) stale.push(key);
+        }
+        stale.forEach((key) => window.sessionStorage.removeItem(key));
+    } catch (_) {
+        // Without storage, no selection of another scope can come back.
+    }
 }
 
 /**
