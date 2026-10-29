@@ -153,20 +153,32 @@ class SyncFilters:
         return self.active or not self.is_valid
 
 
-def selection_scope(**context):
-    """
-    Return a stable text that names the rows a tab table can hold, for the browser's selection store.
+def show_ignored_interfaces(request):
+    """Return whether the interfaces tab shows the ports that interface rules ignore; the page query holds the toggle."""
+    return request.GET.get("interfaces_show_ignored") == "1"
 
-    The filters are left out: the selection belongs to the tab, so a filter change keeps the rows the
-    user selected, and the notice above the table counts the ones the filter hides.
+
+def selection_scope(request, owner, server_key, tab):
+    """
+    Return a stable text that names the rows a sync tab can hold, for the browser's selection store.
+
+    The tab renders it in every state, also with no table, so a change starts an empty selection. Every
+    tab names the interface name field, because the port names of every tab can follow it. The filters
+    are left out: a filter change keeps the rows the user selected.
 
     Args:
-        **context: Page state that decides which rows the table holds, such as the name field.
+        request (HttpRequest): The request; its query can override the name field.
+        owner (Device | VirtualMachine): The object of the sync page, which scopes the name field preference.
+        server_key (str | None): The LibreNMS server of the tab.
+        tab (str): The tab name, for example ``interfaces``.
 
     Returns:
-        str: The context, sorted and URL-encoded.
+        str: The scope, sorted and URL-encoded.
 
     """
+    context = {"interface_name_field": get_interface_name_field(request, owner), "server_key": server_key}
+    if tab == "interfaces":
+        context["interfaces_show_ignored"] = int(show_ignored_interfaces(request))
     return urlencode(sorted((key, str(value)) for key, value in context.items() if value))
 
 
@@ -254,24 +266,18 @@ def filter_sync_rows(rows, filters, spec):
     return [row for row in rows if matches(row)]
 
 
-def filter_sync_table(request, owner, rows, build_table, *, server_key, **scope_context):
+def filter_sync_table(request, rows, build_table):
     """
     Return the table of the rows that match the tab's filters in the request query, its filters, and the row count before them.
 
     The table owns the cell text functions, so a table of every row gives the filter spec, and a
-    second table shows the matches. The table attributes tell the browser whether a filter is active
-    and which selection store the table uses. The selection store always names the interface name
-    field: the port names of every tab can follow it, so a new name field starts an empty selection.
+    second table shows the matches. A table attribute tells the browser whether a filter is active.
 
     Args:
         request (HttpRequest): The request; its query holds the filters.
-        owner (Device | VirtualMachine): The object of the sync page, which scopes the name field preference.
         rows (list[dict]): Every row of the whole snapshot, prepared for display.
         build_table (Callable[[list[dict]], Table]): Returns a table of the given rows. The table has
             ``filter_spec()``.
-        server_key (str | None): The LibreNMS server of the tab. Each server has its own selection.
-        **scope_context: Other page state of one tab that decides which rows the table holds (see
-            ``selection_scope``).
 
     Returns:
         tuple[Table, SyncFilters, int | None]: The table to show, the bound filters, and the row count
@@ -287,10 +293,4 @@ def filter_sync_table(request, owner, rows, build_table, *, server_key, **scope_
         table = build_table(filter_sync_rows(rows, filters, spec))
         table.empty_text = NO_MATCH_TEXT
     table.attrs["data-filter-active"] = "true" if filters.active else "false"
-    # A filter keeps the browser selection; another name field or ignored toggle starts an empty one.
-    # The invalid filter placeholder reads the attribute, because a template cannot look up a hyphenated key.
-    table.selection_scope = selection_scope(
-        interface_name_field=get_interface_name_field(request, owner), server_key=server_key, **scope_context
-    )
-    table.attrs["data-selection-scope"] = table.selection_scope
     return table, filters, filtered_from

@@ -2,6 +2,7 @@
 
 from django import template
 
+from netbox_librenms_plugin.sync_filters import selection_scope
 from netbox_librenms_plugin.sync_query import SyncQuery
 
 register = template.Library()
@@ -41,3 +42,9 @@ def sync_cache_timeout(server_key):
     from netbox_librenms_plugin.librenms_api import configured_cache_timeout
 
     return configured_cache_timeout(server_key)
+
+
+@register.simple_tag(takes_context=True)
+def sync_selection_scope(context, owner, server_key, tab):
+    """Return the browser selection scope of a sync tab; see ``sync_filters.selection_scope``."""
+    return selection_scope(context["request"], owner, server_key, tab)

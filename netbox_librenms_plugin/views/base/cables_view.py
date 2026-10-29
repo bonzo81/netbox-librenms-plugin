@@ -3087,9 +3087,7 @@ class BaseCableTableView(
             tuple[Table, SyncFilters, int | None]: The table, its bound filters, and the row count before them.
 
         """
-        table, filters, filtered_from = filter_sync_table(
-            request, obj, links_data, lambda rows: self.get_table(rows, obj), server_key=server_key
-        )
+        table, filters, filtered_from = filter_sync_table(request, links_data, lambda rows: self.get_table(rows, obj))
         table.configure(request)
         return table, filters, filtered_from
 

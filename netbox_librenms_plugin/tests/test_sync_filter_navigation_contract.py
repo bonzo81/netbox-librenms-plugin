@@ -588,26 +588,30 @@ def _four_tab_owner(client, settings, librenms_server):
 
 
 def _signatures(client, owner, field):
-    """Return the selection scope of each tab table that the full sync page renders, by table ID."""
+    """Return the selection scope of each tab that the full sync page renders, by tab."""
     response = client.get(
         reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[owner.pk]),
         {"server_key": SERVER_KEY, "interface_name_field": field},
     )
     assert response.status_code == 200
-    return dict(re.findall(r'<table[^>]*id="([^"]+)"[^>]*data-selection-scope="([^"]*)"', response.content.decode()))
+    return dict(re.findall(r'data-sync-filter-tab="([^"]+)" data-selection-scope="([^"]*)"', response.content.decode()))
 
 
 @pytest.mark.django_db
-def test_every_tab_signs_its_selection_with_the_interface_name_field(client, settings, librenms_server):
-    """A name field change is a new selection on every tab, so no tab can keep rows that its filter now drops."""
+@pytest.mark.parametrize("snapshot", [False, True])
+def test_every_tab_signs_its_selection_with_the_interface_name_field(client, settings, librenms_server, snapshot):
+    """A name field change is a new selection on every tab, also with no snapshot, so no tab keeps dropped rows."""
     owner = _four_tab_owner(client, settings, librenms_server)
+    if not snapshot:
+        for _table_id, data_type in TAB_TABLES.values():
+            cache.delete(object.__new__(SyncCablesView).get_cache_key(owner, data_type, SERVER_KEY))
 
     signatures = {field: _signatures(client, owner, field) for field in ("ifName", "ifDescr")}
 
-    tables = {"librenms-interface-table", "librenms-cable-table", "librenms-ipaddress-table", "librenms-vlan-table"}
-    assert set(signatures["ifName"]) == tables
-    for table in tables:
-        assert signatures["ifName"][table] != signatures["ifDescr"][table], table
+    assert set(signatures["ifName"]) == set(TAB_TABLES)
+    for tab in TAB_TABLES:
+        assert f"server_key={SERVER_KEY}" in signatures["ifName"][tab], tab
+        assert signatures["ifName"][tab] != signatures["ifDescr"][tab], tab
 
 
 # The table of each tab, the cache data type of its snapshot, and its filter prefix.

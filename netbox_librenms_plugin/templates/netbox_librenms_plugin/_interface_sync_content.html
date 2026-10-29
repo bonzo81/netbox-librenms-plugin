@@ -29,7 +29,7 @@
 {% if interface_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_panel.html" with owner=interface_sync.object content_id="interface-sync-content" server_key=interface_sync.server_key filters=interface_sync.filters prefix="interfaces_" tab="interfaces" section_id="interfaceFilterSection" label="Filter interfaces" %}{% endif %}
 
 <div id="interface-sync-content-results">
-<div data-sync-filter-tab="interfaces" data-filter-snapshot="{% if interface_sync.table %}true{% else %}false{% endif %}" data-filter-search="{{ interface_sync.filters.form.q.value|default:'' }}" data-filter-state="{{ interface_sync.filters.form.sync_state.value|default:'' }}">
+<div data-sync-filter-tab="interfaces" data-selection-scope="{% sync_selection_scope interface_sync.object interface_sync.server_key "interfaces" %}" data-filter-snapshot="{% if interface_sync.table %}true{% else %}false{% endif %}" data-filter-search="{{ interface_sync.filters.form.q.value|default:'' }}" data-filter-state="{{ interface_sync.filters.form.sync_state.value|default:'' }}">
 
 {% include "netbox_librenms_plugin/inc/_ipam_permission_notice.html" with hidden_ipam_permissions=interface_sync.hidden_ipam_permissions vlan_scope_incomplete=interface_sync.vlan_scope_incomplete %}
 

@@ -32,7 +32,8 @@ def _selection_page(scope, port_ids):
     )
     return f"""<!doctype html><html><body>
         <input type="hidden" name="server_key" value="default">
-        <form method="post"><table id="{TABLE}" data-selection-scope="{scope}"><tbody>{rows}</tbody></table></form>
+        <div data-sync-filter-tab="interfaces" data-selection-scope="{scope}">
+          <form method="post"><table id="{TABLE}"><tbody>{rows}</tbody></table></form></div>
         </body></html>"""
 
 
@@ -414,10 +415,11 @@ def _ip_selection_page(signature, row_ids):
     )
     return f"""<!doctype html><html><body>
         <input type="hidden" name="server_key" value="default">
+        <div data-sync-filter-tab="ipaddresses" data-selection-scope="{signature}">
         <form method="post" action="{IP_SUBMIT_PATH}">
-          <table id="{IP_TABLE}" data-mgmt-rows="[]" data-selection-scope="{signature}"><tbody>{rows}</tbody></table>
+          <table id="{IP_TABLE}" data-mgmt-rows="[]"><tbody>{rows}</tbody></table>
           <button type="submit" id="sync">Sync</button>
-        </form></body></html>"""
+        </form></div></body></html>"""
 
 
 def _submitted(page):
@@ -469,27 +471,30 @@ def test_a_return_to_the_earlier_name_field_does_not_restore_its_selection(page)
     assert _submitted(page) == []
 
 
-def _invalid_filter_page(signature):
-    # The shape of inc/_sync_filter_invalid.html: an invalid filter renders no table.
+def _tab_without_table_page(signature, body):
     return f"""<!doctype html><html><body>
         <input type="hidden" name="server_key" value="default">
-        <form method="post" action="{IP_SUBMIT_PATH}">
-          <div data-filter-invalid="true" data-selection-table="{IP_TABLE}" data-selection-scope="{signature}">Fix</div>
-          <button type="submit" id="sync">Sync</button>
-        </form></body></html>"""
+        <div data-sync-filter-tab="ipaddresses" data-selection-scope="{signature}">{body}</div></body></html>"""
 
 
-def test_a_name_field_change_under_an_invalid_filter_does_not_restore_the_earlier_selection(page):
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param('<div data-filter-invalid="true">Correct the filters.</div>', id="invalid-filter"),
+        pytest.param("<p>No IP address data loaded.</p>", id="no-data"),
+    ],
+)
+def test_a_name_field_change_without_a_table_does_not_restore_the_earlier_selection(page, body):
     _serve(page, _ip_selection_page("interface_name_field=ifName", ["198.18.0.1/24", "198.18.0.2/24"]))
     page.evaluate("initializeCheckboxes()")
     page.check("#cb-198-18-0-1-24")
 
-    # The user enters an invalid filter, switches to ifDescr and back, and the tab shows no table each time.
+    # The tab shows no table while the user switches to ifDescr and back.
     for signature in ("interface_name_field=ifName", "interface_name_field=ifDescr", "interface_name_field=ifName"):
-        _serve(page, _invalid_filter_page(signature))
+        _serve(page, _tab_without_table_page(signature, body))
         page.evaluate("initializeCheckboxes()")
 
-    # The corrected filter shows the table again under ifName, with no row of the old selection.
+    # The table shows again under ifName, with no row of the old selection.
     _serve(page, _ip_selection_page("interface_name_field=ifName", ["198.18.0.2/24"]))
     page.evaluate("initializeCheckboxes()")
     assert page.evaluate(f"offPageSelectionKeys(document.getElementById('{IP_TABLE}'))") == []
@@ -612,10 +617,11 @@ def _cable_selection_page(signature, row_ids):
     )
     return f"""<!doctype html><html><body>
         <input type="hidden" name="server_key" value="default">
+        <div data-sync-filter-tab="cables" data-selection-scope="{signature}">
         <form method="post" action="{CABLE_SUBMIT_PATH}">
-          <table id="librenms-cable-table" data-selection-scope="{signature}"><tbody>{rows}</tbody></table>
+          <table id="librenms-cable-table"><tbody>{rows}</tbody></table>
           <button type="submit" id="sync">Sync</button>
-        </form></body></html>"""
+        </form></div></body></html>"""
 
 
 def test_a_name_field_change_drops_the_cable_selection_from_the_next_bulk_sync(page):
@@ -707,6 +713,7 @@ def _filter_tab(query):
     sync_query.simple_tag(lambda *args, **kwargs: OTHER_STATE, name="sync_tab_query_items")
     sync_query.simple_tag(lambda *args, **kwargs: 300, name="sync_cache_timeout")
     sync_query.simple_tag(lambda path=None, **kwargs: path or "?tab=interfaces", name="sync_tab_url")
+    sync_query.simple_tag(lambda *args: "interface_name_field=ifName", name="sync_selection_scope")
     # The browser suite has no URLconf and no NetBox, so the filter endpoint URL and ``meta`` are stubs.
     stubs = Library()
     stubs.simple_tag(

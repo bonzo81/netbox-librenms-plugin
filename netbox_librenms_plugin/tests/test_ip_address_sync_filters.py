@@ -94,6 +94,10 @@ def _table_attr(html, name):
     return unescape(re.search(rf'{name}="([^"]*)"', table).group(1))
 
 
+def _selection_scope(html):
+    return unescape(re.search(r'data-sync-filter-tab="ipaddresses" data-selection-scope="([^"]*)"', html).group(1))
+
+
 def _mixed_owner(kind, tag, client, server):
     """
     Return a device or VM whose rows cover every status the tab shows.
@@ -241,8 +245,8 @@ class TestWholeSnapshotData:
         assert _table_attr(filtered, "data-filter-active") == "true"
         assert _table_attr(unfiltered, "data-filter-active") == "false"
         # The selection belongs to the tab, so a filter keeps the rows already selected.
-        assert _table_attr(filtered, "data-selection-scope") == "interface_name_field=ifName&server_key=default"
-        assert _table_attr(filtered, "data-selection-scope") == _table_attr(unfiltered, "data-selection-scope")
+        assert _selection_scope(filtered) == "interface_name_field=ifName&server_key=default"
+        assert _selection_scope(filtered) == _selection_scope(unfiltered)
 
     def test_the_selection_signature_changes_with_the_interface_name_field(self, client, settings, librenms_server):
         bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
@@ -250,9 +254,7 @@ class TestWholeSnapshotData:
         device = _mixed_owner("device", "signature", client, librenms_server)
 
         signatures = {
-            field: _table_attr(
-                _tab(client, device, ipaddresses_q="eth", interface_name_field=field), "data-selection-scope"
-            )
+            field: _selection_scope(_tab(client, device, ipaddresses_q="eth", interface_name_field=field))
             for field in ("ifName", "ifDescr")
         }
 
@@ -298,11 +300,9 @@ class TestInvalidFilters:
 
         assert _rows(html) == {}
         assert 'id="ipaddresses_filter-errors"' in html
-        # The placeholder names the table and its selection scope, so the browser can drop other scopes.
-        assert re.search(
-            r'data-filter-invalid="true" data-selection-table="librenms-ipaddress-table" data-selection-scope="[^"]*interface_name_field=',
-            html,
-        )
+        assert 'data-filter-invalid="true"' in html
+        # The tab names its selection scope also with no table, so the browser can drop other scopes.
+        assert re.search(r'data-sync-filter-tab="ipaddresses" data-selection-scope="[^"]*interface_name_field=', html)
         field = next(iter(params))
         if field in ("ipaddresses_sync_state", "ipaddresses_q"):
             assert re.search(rf'id="id_{field}"[^>]*aria-invalid="true"', html, re.S)

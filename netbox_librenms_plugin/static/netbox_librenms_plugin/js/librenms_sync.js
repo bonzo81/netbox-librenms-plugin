@@ -1413,9 +1413,6 @@ function initializePrimaryIpToggle() {
  */
 function initializeTableCheckboxes(tableId) {
     const table = document.getElementById(tableId);
-    // An invalid filter renders a placeholder in place of the table, with the same selection scope.
-    const scoped = table || document.querySelector(`[data-selection-table="${tableId}"]`);
-    if (scoped) pruneOtherSelectionScopes(tableId, scoped.dataset.selectionScope);
     if (!table) return;
 
     // Query the CURRENT checkboxes live inside every handler instead of closing over a snapshot.
@@ -1495,6 +1492,12 @@ function initializeTableCheckboxes(tableId) {
  * Initialize checkbox handling for all sync comparison tables.
  */
 function initializeCheckboxes() {
+    // Each tab renders its scope in every state, also with no table, so a scope change always starts empty.
+    document.querySelectorAll('[data-sync-filter-tab][data-selection-scope]').forEach((tab) => {
+        SELECTABLE_TABLE_IDS
+            .filter((tableId) => SELECTABLE_TABLE_TABS[tableId] === tab.dataset.syncFilterTab)
+            .forEach((tableId) => pruneOtherSelectionScopes(tableId, tab.dataset.selectionScope));
+    });
     initializeTableCheckboxes('librenms-interface-table');
     initializeTableCheckboxes('librenms-interface-table-vm');
     initializeTableCheckboxes('librenms-cable-table');
@@ -1872,22 +1875,23 @@ function offPageRecords(table, selection) {
 }
 
 /** Tables whose selection survives pagination, and the tab each belongs to. */
-const SELECTABLE_TABLE_IDS = [
-    'librenms-interface-table',
-    'librenms-interface-table-vm',
-    'librenms-cable-table',
-    'librenms-cable-table-vc',
-    'librenms-ipaddress-table',
-    'librenms-vlan-table',
-    'librenms-port-vlan-table',
-    'librenms-module-table',
-];
+const SELECTABLE_TABLE_TABS = {
+    'librenms-interface-table': 'interfaces',
+    'librenms-interface-table-vm': 'interfaces',
+    'librenms-cable-table': 'cables',
+    'librenms-cable-table-vc': 'cables',
+    'librenms-ipaddress-table': 'ipaddresses',
+    'librenms-vlan-table': 'vlans',
+    'librenms-port-vlan-table': 'vlans',
+    'librenms-module-table': 'modules',
+};
+const SELECTABLE_TABLE_IDS = Object.keys(SELECTABLE_TABLE_TABS);
 
 /**
  * Build the sessionStorage key for one table.
  *
  * Scoped to the object being synced (the path), the table, the LibreNMS server, and the selection
- * scope the server renders on the table (the name field and the ignored toggle), so two devices, two
+ * scope the server renders on the tab (the name field and the ignored toggle), so two devices, two
  * tabs or two servers never share a selection. The page number, sort, page size and filters are left
  * out: the selection follows the user across pages and filters.
  *
@@ -1896,7 +1900,7 @@ const SELECTABLE_TABLE_IDS = [
  */
 function _selectionStorageKey(table) {
     const key = _selectionStoreBase(table.id);
-    const scope = table.dataset.selectionScope;
+    const scope = table.closest('[data-selection-scope]')?.dataset.selectionScope;
     return scope ? key + ':' + scope : key;
 }
 

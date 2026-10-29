@@ -64,6 +64,7 @@ def _render_sync_page(model_name):
     sync_query = Library()
     sync_query.simple_tag(lambda *args, **kwargs: "?", name="sync_tab_url")
     sync_query.simple_tag(lambda *args, **kwargs: [], name="sync_tab_query_items")
+    sync_query.simple_tag(lambda *args: "interface_name_field=ifName", name="sync_selection_scope")
 
     base = ("django.template.loaders.locmem.Loader", {"generic/object.html": "{% block content %}{% endblock %}"})
     engine = Engine(dirs=[str(TEMPLATES_DIR)], loaders=[base, "django.template.loaders.filesystem.Loader"])
