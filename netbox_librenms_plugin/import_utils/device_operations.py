@@ -574,6 +574,7 @@ def validate_device_for_import(  # noqa: C901
     strip_domain: bool = False,
     preloaded_device_type_rules: dict | None = None,
     serial_key_for=vc_serial_key,
+    candidate_keys=None,
 ) -> dict:
     """
     Validate if a LibreNMS device can be imported to NetBox.
@@ -599,6 +600,7 @@ def validate_device_for_import(  # noqa: C901
         strip_domain: If True, strip domain suffix from device name.
         preloaded_device_type_rules: Optional device-type normalization rules keyed for lookup.
         serial_key_for: Returns the :func:`vc_serial_key` of a Manufacturer; a batch passes one memoized callable.
+        candidate_keys: Returns :func:`candidate_vc_serial_keys` for VC detection; a batch passes one memoized callable.
 
     Returns:
         dict: Validation result with structure (the key set is pinned by
@@ -1596,7 +1598,9 @@ def validate_device_for_import(  # noqa: C901
             if device_id:
                 try:
                     logger.debug(f"Calling get_virtual_chassis_data for device {device_id}")
-                    vc_detection = get_virtual_chassis_data(api, device_id, force_refresh=force_vc_refresh)
+                    vc_detection = get_virtual_chassis_data(
+                        api, device_id, force_refresh=force_vc_refresh, candidate_keys=candidate_keys
+                    )
                     logger.debug(
                         f"VC detection result: is_stack={vc_detection.get('is_stack')}, "
                         f"member_count={vc_detection.get('member_count')}, "

@@ -267,6 +267,60 @@ class TestPrefetchVcData:
             assert len(rule_reads(run_batch)) == len(one_key_set)
         assert all(vc_module.get_virtual_chassis_data(api, device_id)["is_stack"] for device_id in device_ids)
 
+    @pytest.mark.parametrize("entry", ["confirm", "bulk-import", "filters"])
+    def test_a_validating_batch_without_a_vc_cache_reads_the_serial_rules_as_often_as_one_device(
+        self, settings, librenms_server, client, entry
+    ):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared, process_device_filters
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        server_key = f"vc_validate_rules_{entry}".replace("-", "_")
+        api = _api(settings, librenms_server, server_key)
+        user = make_superuser(f"vc-validate-rules-{entry}")
+        client.force_login(user)
+        table = f'"{NormalizationRule._meta.db_table}"'
+        serial_scope = f"'{NormalizationRule.SCOPE_SERIAL}'"
+
+        def run_batch(device_ids):
+            for device_id in device_ids:
+                _seed_stack(librenms_server, device_id)
+            rows = [{"device_id": i, "hostname": f"sw-{i}", "sysName": f"sw-{i}", "disabled": 0} for i in device_ids]
+            if entry == "confirm":
+                url = reverse("plugins:netbox_librenms_plugin:bulk_import_confirm")
+                response = client.post(url, {"select": device_ids, "server_key": server_key}, HTTP_HX_REQUEST="true")
+                assert response.status_code == 200
+            elif entry == "bulk-import":
+                bulk_import_devices_shared(
+                    device_ids,
+                    server_key=server_key,
+                    libre_devices_cache={row["device_id"]: row for row in rows},
+                    user=user,
+                )
+            else:
+                # No VC cache: each validation detects the stack again after the prefetch.
+                api.cache_timeout = 0
+                librenms_server.register("/api/v0/devices", {"status": "ok", "devices": rows})
+                validated = process_device_filters(
+                    api, {"hostname": "sw-"}, vc_detection_enabled=True, clear_cache=True, show_disabled=True
+                )
+                assert [row["device_id"] for row in validated] == device_ids
+
+        def rule_reads(device_ids):
+            with CaptureQueriesContext(connection) as queries:
+                run_batch(device_ids)
+            return [
+                query for query in queries.captured_queries if table in query["sql"] and serial_scope in query["sql"]
+            ]
+
+        one_device = rule_reads([7601])
+        assert one_device
+        assert len(rule_reads([7611, 7612, 7613])) == len(one_device)
+
 
 @pytest.mark.django_db
 class TestDetectVirtualChassisFailures:
