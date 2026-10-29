@@ -288,7 +288,9 @@ def filter_sync_table(request, owner, rows, build_table, *, server_key, **scope_
         table.empty_text = NO_MATCH_TEXT
     table.attrs["data-filter-active"] = "true" if filters.active else "false"
     # A filter keeps the browser selection; another name field or ignored toggle starts an empty one.
-    table.attrs["data-selection-scope"] = selection_scope(
+    # The invalid filter placeholder reads the attribute, because a template cannot look up a hyphenated key.
+    table.selection_scope = selection_scope(
         interface_name_field=get_interface_name_field(request, owner), server_key=server_key, **scope_context
     )
+    table.attrs["data-selection-scope"] = table.selection_scope
     return table, filters, filtered_from

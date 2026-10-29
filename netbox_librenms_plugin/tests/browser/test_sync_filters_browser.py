@@ -469,6 +469,34 @@ def test_a_return_to_the_earlier_name_field_does_not_restore_its_selection(page)
     assert _submitted(page) == []
 
 
+def _invalid_filter_page(signature):
+    # The shape of inc/_sync_filter_invalid.html: an invalid filter renders no table.
+    return f"""<!doctype html><html><body>
+        <input type="hidden" name="server_key" value="default">
+        <form method="post" action="{IP_SUBMIT_PATH}">
+          <div data-filter-invalid="true" data-selection-table="{IP_TABLE}" data-selection-scope="{signature}">Fix</div>
+          <button type="submit" id="sync">Sync</button>
+        </form></body></html>"""
+
+
+def test_a_name_field_change_under_an_invalid_filter_does_not_restore_the_earlier_selection(page):
+    _serve(page, _ip_selection_page("interface_name_field=ifName", ["198.18.0.1/24", "198.18.0.2/24"]))
+    page.evaluate("initializeCheckboxes()")
+    page.check("#cb-198-18-0-1-24")
+
+    # The user enters an invalid filter, switches to ifDescr and back, and the tab shows no table each time.
+    for signature in ("interface_name_field=ifName", "interface_name_field=ifDescr", "interface_name_field=ifName"):
+        _serve(page, _invalid_filter_page(signature))
+        page.evaluate("initializeCheckboxes()")
+
+    # The corrected filter shows the table again under ifName, with no row of the old selection.
+    _serve(page, _ip_selection_page("interface_name_field=ifName", ["198.18.0.2/24"]))
+    page.evaluate("initializeCheckboxes()")
+    assert page.evaluate(f"offPageSelectionKeys(document.getElementById('{IP_TABLE}'))") == []
+    assert page.locator(f"#{IP_TABLE}-offpage-selection").count() == 0
+    assert _submitted(page) == []
+
+
 CABLE_TABLE = "librenms-cable-table-vc"
 
 

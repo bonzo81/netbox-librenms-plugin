@@ -521,7 +521,11 @@ class TestInvalidFilters:
 
         assert _rows(html) == {}
         assert 'id="cables_filter-errors"' in html
-        assert 'data-filter-invalid="true"' in html
+        # The placeholder names the table and its selection scope, so the browser can drop other scopes.
+        assert re.search(
+            r'data-filter-invalid="true" data-selection-table="librenms-cable-table(-vc)?" data-selection-scope="[^"]*interface_name_field=',
+            html,
+        )
         field = next(iter(params))
         if field in ("cables_sync_state", "cables_q"):
             assert re.search(rf'id="id_{field}"[^>]*aria-invalid="true"', html, re.S)
