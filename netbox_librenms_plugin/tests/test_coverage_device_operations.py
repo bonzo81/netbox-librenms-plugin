@@ -1009,6 +1009,29 @@ class TestValidateDeviceForImport:
         assert result["existing_device"] is None
         assert result["existing_match_type"] is None
 
+    def test_a_match_that_its_rules_reject_hides_no_duplicate(self):
+        """The serial rules filter the exact matches before they are counted, so a rejected first match hides no twin."""
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        rejected = make_device("validation-rule-a-rejected", serial="SHARED-SERIAL")
+        vendor = Manufacturer.objects.create(name="Placeholder Vendor", slug="placeholder-vendor")
+        rejected.device_type = DeviceType.objects.create(
+            manufacturer=vendor, model="Placeholder Model", slug="placeholder-model"
+        )
+        rejected.save()
+        NormalizationRule.objects.create(
+            scope="serial", manufacturer=vendor, match_pattern=r"^SHARED-SERIAL$", replacement="N/A"
+        )
+        make_device("validation-rule-b-accepted", serial="SHARED-SERIAL")
+        make_device("validation-rule-c-accepted", serial="SHARED-SERIAL")
+
+        result = self._validate(_device_payload(5432, serial="SHARED-SERIAL"))
+
+        assert result["existing_device"] is None
+        assert result["serial_duplicate"] is True
+
     def test_linked_serial_drift_and_duplicate_are_distinguished(self):
         linked = make_device(
             "validation-serial-drift",
