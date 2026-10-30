@@ -957,6 +957,42 @@ class TestInstallAndUpdateViews:
         assert module.serial == "VIEW-SERIAL"
         assert any("Installed VIEW-INSTALL-CARD" in text for text in message_texts(request))
 
+    @pytest.mark.parametrize(("phys_class", "model"), [("port", "Linecard-Port"), ("container", "")])
+    def test_single_install_refuses_a_holder_row_with_a_valid_binding(self, live_librenms, phys_class, model):
+        """A binding signed for a holder row, e.g. on a page rendered before a rule change, installs nothing."""
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        device = make_device(f"view-install-holder-{phys_class}", librenms_cf={"default": 52})
+        bay = make_module_bay(device, "Holder Bay")
+        module_type = make_module_type(f"HOLDER-CARD-{phys_class.upper()}")
+        item = _inventory_item(520, model, bay.name, phys_class=phys_class)
+        request = _post_request(
+            {
+                "module_bay_id": bay.pk,
+                "module_type_id": module_type.pk,
+                "ent_index": 520,
+                "server_key": "default",
+                "inventory_binding": module_inventory_binding_token(
+                    device.pk,
+                    "default",
+                    "install_module",
+                    {"module_bay_id": bay.pk, "module_type_id": module_type.pk},
+                    520,
+                    module_inventory_row_digest(item),
+                ),
+            }
+        )
+        view = _view(InstallModuleView, request, live_librenms)
+        seed_inventory(view, device, [item], librenms_id=52)
+
+        response = view_post(view, request, pk=device.pk)
+
+        assert response.status_code == 302
+        assert not Module.objects.filter(device=device).exists()
+        assert message_texts(request, "error") == ["Nothing was installed: not hardware."]
+
     def test_a_database_error_in_the_bind_keeps_the_install(self, live_librenms):
         """The bind's own savepoint takes a real PostgreSQL error; the install still commits."""
         from dcim.models import Module
