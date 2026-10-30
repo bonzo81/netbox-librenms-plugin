@@ -2,7 +2,7 @@ import logging
 import re
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from django.contrib import messages
 from django.core.cache import cache
@@ -282,8 +282,8 @@ class DeviceIdentity:
     serial: str = ""
     # Casefolded DeviceType model and part number, without blanks.
     type_models: frozenset = frozenset()
-    # The key that compares the stored serial with an inventory serial; this default applies no rules.
-    serial_key: Callable[[object], str] = normalize_stack_serial
+    # The key that compares the stored serial with an inventory serial.
+    serial_key: Callable[[object], str] = field(kw_only=True)
 
     @classmethod
     def of(cls, device, serial_key) -> "DeviceIdentity":
@@ -297,7 +297,8 @@ class DeviceIdentity:
         )
 
 
-NO_DEVICE_IDENTITY = DeviceIdentity()
+# No device means no serial, so this key never decides a match.
+NO_DEVICE_IDENTITY = DeviceIdentity(serial_key=normalize_stack_serial)
 
 
 def _is_built_in_unit(item: dict, device_identity: DeviceIdentity) -> bool:
