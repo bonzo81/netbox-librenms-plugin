@@ -25,7 +25,7 @@
                     built-in units of a fixed platform, such as Cisco IOS XE <code>module 0</code>,
                     <code>module R0</code> and <code>module F0</code>.</li>
                 <li><strong>class_is</strong>: matches one <em>entPhysicalClass</em> for Include,
-                    Skip and Transparent actions. Include admits that class to module sync. An entity that no include rule admits gets no top-level row, but still shows below an admitted row.
+                    Skip and Transparent actions. Include admits that class to module sync. An entity that no include rule admits gets no top-level row, but still shows below an admitted row unless it is a holder or a skip or transparent rule hides it.
                     Each class the sync used to admit has its own seeded rule (<code>Inventory class: module</code>
                     and others), so disabling one hides that class. Optional name, description and model regex
                     filters narrow a class: the seeded <code>Juniper MX switch control boards</code> rule admits
