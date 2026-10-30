@@ -1097,6 +1097,9 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             )
             if refusal:
                 return refusal
+            if reason := _never_installable_reason(bind_item):
+                messages.error(request, f"Nothing was installed: {reason}.")
+                return _modules_action_response(request, page_device, server_key)
             manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
             try:
                 ignore_rules = get_enabled_ignore_rules(manufacturer)
