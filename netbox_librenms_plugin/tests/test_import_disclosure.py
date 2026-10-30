@@ -589,6 +589,7 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
     ports_read = "api.get_ports(device_id)\n"
     titled_icon = '<i class="mdi mdi-alert" title="Missing"></i>'
     server_key_lookup = "document.querySelector('[name=server_key]');\n"
+    serial_compare = "def same(row, serial):\n    return row.serial == serial\n"
     sources = {
         # Flagged: a direct HTTP call outside the client.
         "netbox_librenms_plugin/worker.py": http_call,
@@ -623,6 +624,12 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
         # Flagged: a page script looks up the server key in the whole document. Clean: vendored code.
         "netbox_librenms_plugin/static/netbox_librenms_plugin/js/page.js": server_key_lookup,
         "netbox_librenms_plugin/static/netbox_librenms_plugin/js/vendor/lib.js": server_key_lookup,
+        # Flagged: a stored Device serial in a view or import path compares through serials_match().
+        "netbox_librenms_plugin/views/sync/device_seed.py": serial_compare,
+        "netbox_librenms_plugin/import_utils/seed.py": serial_compare,
+        # Clean: Module writers store a normalized serial, and the rest of the package is out of scope.
+        "netbox_librenms_plugin/views/sync/modules.py": serial_compare,
+        "netbox_librenms_plugin/sync_seed.py": serial_compare,
     }
     for name, source in sources.items():
         staged = tmp_path / name
@@ -645,4 +652,6 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
         ("netbox_librenms_plugin/views/base/modules_view.py", "metadata-ports-skip-vlan-associations"),
         ("netbox_librenms_plugin/views/base/cables_view.py", "metadata-ports-skip-vlan-associations"),
         ("netbox_librenms_plugin/static/netbox_librenms_plugin/js/page.js", "sync-script-reads-page-server-key"),
+        ("netbox_librenms_plugin/views/sync/device_seed.py", "device-serial-compare-through-serials-match"),
+        ("netbox_librenms_plugin/import_utils/seed.py", "device-serial-compare-through-serials-match"),
     }, found
