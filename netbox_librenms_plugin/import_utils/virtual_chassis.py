@@ -273,6 +273,28 @@ def chassis_serial_key(device):
     return vc_serial_key(getattr(getattr(master, "device_type", None), "manufacturer", None))
 
 
+def devices_with_serial(serial, *, exclude_pk=None, limit: int = 2) -> list:
+    """
+    Return up to *limit* Devices that store *serial* and match it under their own serial rules.
+
+    The lookup is exact, as :func:`find_devices_by_serial` is. A stored value that the rules turn
+    into a placeholder is no hardware identity, so it is left out.
+
+    Args:
+        serial: The trimmed LibreNMS serial.
+        exclude_pk: The pk of a Device to leave out, for example the device that the write changes.
+        limit: How many Devices to return, enough to tell a unique match from a duplicate.
+
+    """
+    found = find_devices_by_serial(serial, limit + (exclude_pk is not None))
+    matches = [
+        device
+        for device in found
+        if device.pk != exclude_pk and serials_match(device.serial, serial, chassis_serial_key(device))
+    ]
+    return matches[:limit]
+
+
 def candidate_vc_serial_keys() -> tuple:
     """
     Return each :func:`vc_serial_key` that an import can compare members with, before its DeviceType is known.

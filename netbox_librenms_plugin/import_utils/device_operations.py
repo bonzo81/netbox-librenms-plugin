@@ -34,7 +34,6 @@ from ..platform_versions import (
 from ..utils import (
     cached_row_matches,
     exception_text_for,
-    find_devices_by_serial,
     find_matching_location,
     find_matching_site,
     is_vc_position,
@@ -49,6 +48,7 @@ from .naming import _name_candidates, _resolve_device_name
 from .virtual_chassis import (
     _member_name,
     chassis_serial_key,
+    devices_with_serial,
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
     serials_match,
@@ -950,8 +950,8 @@ def validate_device_for_import(  # noqa: C901
                     if serials_match(existing_device.serial, incoming_serial, chassis_serial_key(existing_device)):
                         result["serial_confirmed"] = True
                     elif normalize_serial(existing_device.serial):
-                        serial_conflict = (
-                            Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
+                        serial_conflict = next(
+                            iter(devices_with_serial(incoming_serial, exclude_pk=existing_device.pk, limit=1)), None
                         )
                         if serial_conflict:
                             result["serial_action"] = "conflict"
@@ -1040,8 +1040,8 @@ def validate_device_for_import(  # noqa: C901
                 if normalize_stack_serial(incoming_serial) and not serials_match(
                     existing_device.serial, incoming_serial, chassis_serial_key(existing_device)
                 ):
-                    serial_conflict = (
-                        Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
+                    serial_conflict = next(
+                        iter(devices_with_serial(incoming_serial, exclude_pk=existing_device.pk, limit=1)), None
                     )
                     if serial_conflict:
                         result["serial_action"] = "conflict"
@@ -1074,7 +1074,7 @@ def validate_device_for_import(  # noqa: C901
                     # and the downstream serial/OOB/merge flow would derive its guidance from a
                     # random device. Require a unique match before binding, mirroring the
                     # merge-peer [:2] guard (issue #101).
-                    serial_matches = find_devices_by_serial(serial)
+                    serial_matches = devices_with_serial(serial)
                     if len(serial_matches) > 1:
                         # Device.serial is not unique in NetBox, so several rows already share it.
                         # Binding to an arbitrary one is wrong, and importing anyway would mint YET
@@ -1239,9 +1239,7 @@ def validate_device_for_import(  # noqa: C901
                     # surface the wrong merge target. Fetch up to 2; only pair on exactly one,
                     # otherwise skip the suggestion and warn.
                     if _hostname_match and not _serial_match:
-                        _serial_peers = list(
-                            Device.objects.filter(serial=_serial_for_pair).exclude(pk=_hostname_match.pk)[:2]
-                        )
+                        _serial_peers = devices_with_serial(_serial_for_pair, exclude_pk=_hostname_match.pk)
                         if len(_serial_peers) == 1:
                             _serial_match = _serial_peers[0]
                         elif len(_serial_peers) > 1:
