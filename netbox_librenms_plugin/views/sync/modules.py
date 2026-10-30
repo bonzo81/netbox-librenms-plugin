@@ -1261,7 +1261,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             messages.error(request, "An inventory destination is unavailable. Refresh Modules and try again.")
             return
 
-        # Bay matching walks each row's ancestry, so a row keeps its whole attributed subtree, hidden holders too.
+        # The parent-module walk keeps a row's whole attributed subtree, hidden holders too.
         member_index_maps = self._ancestry_maps(granted, set(targets))
 
         # Load module types (with mappings)
@@ -1302,8 +1302,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     result = self._install_single(
                         target_device,
                         item,
-                        member_index_maps[target_device.pk],
                         module_types,
+                        naming_map=granted.index_map,
+                        ancestry_map=member_index_maps[target_device.pk],
                         exact_mappings=policy["exact_mappings"],
                         regex_mappings=policy["regex_mappings"],
                         manufacturer_id=mfr_id,
@@ -1346,15 +1347,20 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
     @staticmethod
     def _ancestry_maps(granted, target_ids):
         """
-        Return, per target, the inventory rows its bay matching may walk: the rows the signed render attributes to it.
+        Return, per target, the inventory rows its parent-module walk may use: the rows the signed render attributes to it.
 
         A pinned render attributes every row to its one member; the page render attributes rows as the table did.
         """
         policy = granted.policy
-        pinned = granted.grant.render_mode == RENDER_PINNED
-        owner = policy.member(granted.grant.device_id) if pinned else policy.page_device
+        if granted.grant.render_mode == RENDER_PINNED:
+            return InstallBranchView._attributed_rows(granted, policy.member(granted.grant.device_id), [], target_ids)
+        return InstallBranchView._attributed_rows(granted, policy.page_device, policy.vc_members, target_ids)
+
+    @staticmethod
+    def _attributed_rows(granted, owner, vc_members, target_ids):
+        """Return, per target, the inventory rows that the render of *owner* over *vc_members* attributes to it."""
         _default, contexts = BaseModuleTableView._build_inventory_ignore_contexts(
-            owner, granted.inventory, [] if pinned else policy.vc_members, policy
+            owner, granted.inventory, vc_members, granted.policy
         )
         return {
             device_id: {
@@ -1387,9 +1393,10 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
     def _install_single(
         device,
         item,
-        index_map,
         module_types,
         *,
+        naming_map,
+        ancestry_map,
         module_bays,
         allowed_module_type_ids,
         changeable_components,
@@ -1413,8 +1420,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         Args:
             device (Device): The NetBox device that receives the module.
             item (dict): The LibreNMS inventory item to install.
-            index_map (dict): The inventory items keyed by index.
             module_types (dict): The available module types indexed for matching.
+            naming_map (dict): The rendered inventory items keyed by index, for the bay names.
+            ancestry_map (dict): The items keyed by index that the parent-module walk may use.
             module_bays (QuerySet): The module bays available to the caller.
             allowed_module_type_ids (set[int]): The module type IDs available to the caller.
             changeable_components (dict): The component querysets available for adoption.
@@ -1480,12 +1488,13 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         matched_bay = InstallBranchView._resolve_bay_for_item(
             device,
             item,
-            index_map,
             bays,
             exact_mappings,
             regex_mappings,
             manufacturer_id,
             norm_rules_bay,
+            naming_map=naming_map,
+            ancestry_map=ancestry_map,
             holder_of=holder_of,
             accepted_bay_types=module_type_bay_type_ids(matched_type, type_bay_types),
         )
@@ -1564,13 +1573,14 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
     def _resolve_bay_for_item(
         device,
         item,
-        index_map,
         bays,
         exact_mappings,
         regex_mappings,
         manufacturer_id,
         norm_rules_bay,
         *,
+        naming_map,
+        ancestry_map,
         holder_of=None,
         accepted_bay_types=frozenset(),
     ):
@@ -1590,12 +1600,13 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         Args:
             device (Device): The device being installed onto.
             item (dict): The LibreNMS inventory item to place.
-            index_map (dict): The inventory items keyed by index.
             bays: The device's module bays, with ``installed_module`` selected.
             exact_mappings (list): The exact module bay mappings.
             regex_mappings (list): The regular expression module bay mappings.
             manufacturer_id (int | None): The device manufacturer ID.
             norm_rules_bay (dict | None): The module bay normalization rules.
+            naming_map (dict): The rendered inventory items keyed by index, for the bay names.
+            ancestry_map (dict): The items keyed by index that the parent-module walk may use.
             holder_of (dict | None): Preloaded module ancestry for a bulk install.
             accepted_bay_types (frozenset): The module bay types the module type fits.
 
@@ -1607,18 +1618,21 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         def match_against(candidate_bays):
             return BaseModuleTableView._match_bay_for_item(
                 item,
-                index_map,
+                naming_map,
                 candidate_bays,
                 exact_mappings=exact_mappings,
                 regex_mappings=regex_mappings,
                 manufacturer_id=manufacturer_id,
                 norm_rules_bay=norm_rules_bay,
+                foreign_indices=foreign_indices,
                 accepted_bay_types=accepted_bay_types,
             )
 
-        # Trace the item's LibreNMS parent hierarchy to an installed module, if any.
+        foreign_indices = naming_map.keys() - ancestry_map.keys()
+
+        # The bay names come from the whole render, as in the table; the module walk stops at a member boundary.
         parent_module_id = InstallBranchView._find_parent_module_id(
-            item, index_map, bays, exact_mappings, regex_mappings, manufacturer_id
+            item, ancestry_map, bays, exact_mappings, regex_mappings, manufacturer_id
         )
         matched = match_against(InstallBranchView._candidate_bays_for_item(bays, parent_module_id))
         if not matched and parent_module_id:
@@ -1976,7 +1990,17 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 )
                 granted.grant.require(device_id=page_device.pk)
                 plan = self._granted_selection(request, granted, selected_list, page_device, server_key)
-                for item, target_device in plan:
+                # A row walks its parent modules in the render that authorized it: the manifest or a pinned override.
+                manifest_maps = InstallBranchView._ancestry_maps(
+                    granted, {target.pk for _item, target, pinned in plan if not pinned}
+                )
+                pinned_maps = {
+                    target_id: InstallBranchView._attributed_rows(
+                        granted, granted.policy.member(target_id), [], {target_id}
+                    )[target_id]
+                    for target_id in {target.pk for _item, target, pinned in plan if pinned}
+                }
+                for item, target_device, pinned in plan:
                     mfr_id = target_device.device_type.manufacturer_id
                     if target_device.pk not in holder_of_by_device:
                         holder_of_by_device[target_device.pk] = _module_holder_map(target_device)
@@ -1986,8 +2010,9 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     result = InstallBranchView._install_single(
                         target_device,
                         item,
-                        granted.index_map,
                         module_types,
+                        naming_map=granted.index_map,
+                        ancestry_map=(pinned_maps if pinned else manifest_maps)[target_device.pk],
                         exact_mappings=exact_mappings,
                         regex_mappings=regex_mappings,
                         manufacturer_id=mfr_id,
@@ -2036,10 +2061,11 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
 
     def _granted_selection(self, request, granted, selected_list, page_device, server_key):
         """
-        Return ``[(row, target device)]`` for the selected indices, or refuse the whole request.
+        Return ``[(row, target device, pinned)]`` for the selected indices, or refuse the whole request.
 
         A selected row installs onto the target the manifest signed for it when the table offered it
         there. Another target needs the override that a verify request signed for that row and target.
+        ``pinned`` is True when that pinned override, not the manifest, authorized the row.
         """
         from dcim.models import Device
 
@@ -2052,7 +2078,8 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             if entry is None or target_id is None:
                 refused.append(index)
                 continue
-            if not (target_id == entry[0] and entry[1]):
+            pinned = not (target_id == entry[0] and entry[1])
+            if pinned:
                 try:
                     override = read_module_grant(
                         request.POST.get(f"selection_grant_{index}"),
@@ -2067,11 +2094,11 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 except GrantRefused:
                     refused.append(index)
                     continue
-            plan.append((index, target_id))
+            plan.append((index, target_id, pinned))
         if refused:
             names = [str(granted.index_map.get(index, {}).get("entPhysicalName") or index) for index in refused]
             raise _ModuleActionRefused(SELECTED_ROWS_REFUSED_MESSAGE.format(rows=", ".join(names)))
-        target_ids = {target_id for _index, target_id in plan}
+        target_ids = {target_id for _index, target_id, _pinned in plan}
         targets = {
             device.pk: device
             for device in self.restricted_queryset(Device)
@@ -2080,7 +2107,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         }
         if len(targets) != len(target_ids):
             raise GrantRefused(GrantRefusal.DESTINATION)
-        return [(granted.row(index), targets[target_id]) for index, target_id in plan]
+        return [(granted.row(index), targets[target_id], pinned) for index, target_id, pinned in plan]
 
 
 class UpdateModuleSerialView(

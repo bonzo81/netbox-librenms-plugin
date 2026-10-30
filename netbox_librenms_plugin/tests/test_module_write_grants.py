@@ -633,6 +633,16 @@ def test_a_child_attributed_to_another_member_installs_there_by_default(ui, vc_g
     assert _installed(page) == set()
 
 
+def test_a_branch_names_a_member_row_bay_from_a_container_on_the_page(ui, vc_grants):
+    """The page owns the Cage 1 container, but the member optic still takes its bay name from it, as the table does."""
+    page, member = vc_grants(optic_1_on_member=True)
+    action, fields = rendered_module_form(render(ui, page), "install-branch", CARRIER)
+
+    post(ui, action, fields)
+
+    assert ("Cage 1", "GR-OPTIC") in _installed(member)
+
+
 def test_a_member_serial_change_after_render_refuses_the_member_row(ui, vc_grants):
     """The row belongs to the member by its serial, so a member serial edit changes the policy it was rendered under."""
     from dcim.models import Device

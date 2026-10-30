@@ -1578,6 +1578,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         items = [*top_items, *(child for children in children_by_parent.values() for child in children)]
         member_contexts = self._build_member_contexts(obj, vc_members, items)
         ignore_contexts = ignore_contexts or {}
+        # Bay naming must know which ancestors of a row another member owns.
+        owner_ids = {
+            key[1]: context["selected_device"].pk for key, context in ignore_contexts.items() if key[0] == "index"
+        }
+        self._foreign_indices_by_device = {
+            device_id: frozenset(index for index, owner_id in owner_ids.items() if owner_id != device_id)
+            for device_id in {obj.pk, *(member.pk for member in vc_members)}
+        }
 
         table_data = []
         owners = None  # read once, only when a row has no attributed context
@@ -1775,6 +1783,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
     def _activate_row_context(self, target_context, selected_device):
         """Select the device-specific state used while one inventory row is built."""
         self._current_device_bays = target_context.get("device_bays") or {}
+        self._current_foreign_indices = getattr(self, "_foreign_indices_by_device", {}).get(
+            selected_device.id, frozenset()
+        )
         selected_type = getattr(selected_device, "device_type", None)
         manufacturer = getattr(selected_type, "manufacturer", None)
         self._current_manufacturer = manufacturer
@@ -2779,16 +2790,18 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             row["carrier_install_options"] = options
 
     @staticmethod
-    def _find_parent_container_name_static(item, index_map):
+    def _find_parent_container_name_static(item, index_map, foreign_indices):
         """
         Resolve the nearest ancestor container name by walking up the containment chain.
 
         Skips ancestors with an empty entPhysicalName and continues upward until a
-        non-empty name is found or the chain is exhausted.
+        non-empty name is found or the chain is exhausted. When another device owns
+        that ancestor, only a container names the bay; another class gives no name.
 
         Args:
             item (dict): The inventory item whose ancestors to inspect.
             index_map (dict): Inventory items keyed by physical index.
+            foreign_indices (Container[int]): The indices that a device other than the row's target owns.
 
         Returns:
             str | None: The nearest non-empty ancestor name, or None if no name is found.
@@ -2801,16 +2814,14 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             parent = index_map[contained_in]
             name = (parent.get("entPhysicalName") or "").strip()
             if name:
+                if contained_in in foreign_indices and parent.get("entPhysicalClass") != "container":
+                    return None
                 return name
             contained_in = parent.get("entPhysicalContainedIn", 0)
         return None
 
-    def _find_parent_container_name(self, item, index_map):
-        """Instance wrapper for parent container name resolution."""
-        return BaseModuleTableView._find_parent_container_name_static(item, index_map)
-
     @staticmethod
-    def _build_bay_candidate_names(item, index_map, include_normalized=False, norm_rules_bay=None):
+    def _build_bay_candidate_names(item, index_map, foreign_indices, include_normalized=False, norm_rules_bay=None):
         """
         Build deduplicated candidate names for bay matching.
 
@@ -2820,6 +2831,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         Args:
             item (dict): The inventory item to describe.
             index_map (dict): Inventory items keyed by physical index.
+            foreign_indices (Container[int]): The indices that a device other than the row's target owns.
             include_normalized (bool): Whether to append normalized name variants.
             norm_rules_bay (list | None): Preloaded module bay normalization rules.
 
@@ -2827,7 +2839,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             list[str]: Candidate names in matching order.
 
         """
-        parent_name = BaseModuleTableView._find_parent_container_name_static(item, index_map)
+        parent_name = BaseModuleTableView._find_parent_container_name_static(item, index_map, foreign_indices)
         candidate_names = [parent_name] if parent_name else []
         for candidate in BaseModuleTableView._interface_name_candidates(item):
             if candidate not in candidate_names:
@@ -2855,6 +2867,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         regex_mappings,
         manufacturer_id,
         norm_rules_bay,
+        foreign_indices,
         accepted_bay_types=frozenset(),
     ):
         """
@@ -2873,6 +2886,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             regex_mappings (list): The regex ModuleBayMapping entries.
             manufacturer_id (int | None): The selected device manufacturer ID.
             norm_rules_bay (dict | None): Preloaded module bay normalization rules; None reads them per name.
+            foreign_indices (Container[int]): The indices that a device other than the row's target owns.
             accepted_bay_types (frozenset): The module bay types the matched module type fits.
 
         Returns:
@@ -2883,6 +2897,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         candidates = BaseModuleTableView._build_bay_candidate_names(
             item,
             index_map,
+            foreign_indices,
             include_normalized=True,
             norm_rules_bay=norm_rules_bay,
         )
@@ -2931,6 +2946,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             regex_mappings=regex_mappings,
             manufacturer_id=getattr(self, "_current_manufacturer_id", None),
             norm_rules_bay=getattr(self, "_norm_rules_bay", None),
+            foreign_indices=getattr(self, "_current_foreign_indices", frozenset()),
             accepted_bay_types=accepted_bay_types,
         )
 
@@ -3467,7 +3483,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # Surface NetBox-model gaps that produced No Bay / No Type so the user
         # can fix the model rather than wonder why nothing matched.
         if status == "No Bay":
-            candidates = self._build_bay_candidate_names(item, index_map)
+            candidates = self._build_bay_candidate_names(
+                item, index_map, getattr(self, "_current_foreign_indices", frozenset())
+            )
             row["mapping_source_name"] = name if name in candidates else next(iter(candidates), "")
             suggestion = self._suggest_bay_mapping(item, module_bays, scope_preserved=scope_preserved)
             holder_hint = None
