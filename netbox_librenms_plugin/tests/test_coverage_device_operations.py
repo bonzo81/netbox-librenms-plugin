@@ -997,6 +997,18 @@ class TestValidateDeviceForImport:
         assert result["existing_device"] is None
         assert result["existing_match_type"] is None
 
+    def test_a_serial_that_the_rules_make_a_placeholder_binds_no_device(self):
+        """A rule that turns a vendor value into N/A makes that value no hardware identity."""
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.create(scope="serial", match_pattern=r"^VENDOR-PLACEHOLDER$", replacement="N/A")
+        make_device("validation-rule-placeholder", serial="VENDOR-PLACEHOLDER")
+
+        result = self._validate(_device_payload(5429, serial="VENDOR-PLACEHOLDER"))
+
+        assert result["existing_device"] is None
+        assert result["existing_match_type"] is None
+
     def test_linked_serial_drift_and_duplicate_are_distinguished(self):
         linked = make_device(
             "validation-serial-drift",
