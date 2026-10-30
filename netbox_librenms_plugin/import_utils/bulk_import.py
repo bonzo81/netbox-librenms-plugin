@@ -23,7 +23,6 @@ from ..transactions import classify_conflict
 from ..utils import (
     cached_row_matches,
     exception_text_for,
-    find_devices_by_serial,
     normalize_serial,
     normalize_stack_serial,
     preload_normalization_rules,
@@ -51,6 +50,7 @@ from .virtual_chassis import (
     VC_MASTER_UNKNOWN_WARNING,
     candidate_vc_serial_keys,
     create_virtual_chassis_with_members,
+    devices_with_serial,
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
     identify_vc_master,
@@ -1194,7 +1194,7 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             if not import_as_vm:
                 serial = normalize_serial(libre_device.get("serial"))
                 if normalize_stack_serial(serial):
-                    serial_matches = find_devices_by_serial(serial)
+                    serial_matches = devices_with_serial(serial)
                     if len(serial_matches) > 1:
                         ambiguous_fallback = True
                     elif serial_matches:
