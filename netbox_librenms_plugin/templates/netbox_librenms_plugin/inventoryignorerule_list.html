@@ -32,9 +32,9 @@
                     class <code>backplane</code> only when the name starts with <code>SCB</code>.</li>
             </ul>
             <p>When <strong>Require Serial Match</strong>
-               is enabled for Skip and Transparent actions (including class_is), the rule also requires
-               a nonempty serial that matches the parent entity. Clear this flag to match rows without a serial.
-               Include ignores this flag.</p>
+               is enabled on a name-based or class_is rule with the Skip or Transparent action, the rule also
+               requires a nonempty serial that matches the parent entity. Clear this flag to match rows without a
+               serial. Include, serial_matches_device and model_matches_device_type rules ignore this flag.</p>
             <p>Example — Cisco IOS-XR IDPROM entries:<br>
                Match type: <code>ends_with</code>, Pattern: <code>IDPROM</code>,
                Require serial match: <strong>Yes</strong><br>
