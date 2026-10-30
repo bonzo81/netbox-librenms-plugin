@@ -284,6 +284,17 @@ def test_capture_download_replays_the_same_normalized_virtual_chassis(client, re
 
 def _import_named_stack(live_librenms, rule_owner):
     """Serve a decorated-serial Junos VC with a serial rule and a ``-{serial}`` pattern; return its row and preview."""
+    return _import_stack(
+        live_librenms,
+        f"named-stack-{rule_owner}",
+        rule=(r"^S/N\s+(.+)$", r"\1", rule_owner),
+        master_serial="S/N NAMED-A",
+        member_serial="S/N NAMED-B",
+    )
+
+
+def _import_stack(live_librenms, tag, *, rule, master_serial, member_serial):
+    """Import the capture with *rule* ``(pattern, replacement, owner)`` and a ``-{serial}`` pattern; return its row and preview."""
     from dcim.models import DeviceType
 
     from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
@@ -292,22 +303,23 @@ def _import_named_stack(live_librenms, rule_owner):
     from netbox_librenms_plugin.tests.conftest import make_superuser
     from netbox_librenms_plugin.tests.test_bulk_import_job_control import _prerequisites
 
-    prerequisites = _prerequisites(f"named-stack-{rule_owner}")
+    prerequisites = _prerequisites(tag)
     manufacturer = DeviceType.objects.get(pk=prerequisites["device_type_id"]).manufacturer
+    pattern, replacement, rule_owner = rule
     NormalizationRule.objects.filter(scope="serial").delete()
     NormalizationRule.objects.create(
         scope="serial",
         manufacturer=manufacturer if rule_owner == "manufacturer" else None,
-        match_pattern=r"^S/N\s+(.+)$",
-        replacement=r"\1",
+        match_pattern=pattern,
+        replacement=replacement,
     )
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"vc_member_name_pattern": "-{serial}"})
     recording = copy.deepcopy(load_recording(_RECORDING))
-    _edit_rows(recording, 1, lambda row: row.update(entPhysicalSerialNum="S/N NAMED-A"))
-    _edit_rows(recording, 120, lambda row: row.update(entPhysicalSerialNum="S/N NAMED-A"))
-    _edit_rows(recording, 121, lambda row: row.update(entPhysicalSerialNum="S/N NAMED-B"))
+    _edit_rows(recording, 1, lambda row: row.update(entPhysicalSerialNum=master_serial))
+    _edit_rows(recording, 120, lambda row: row.update(entPhysicalSerialNum=master_serial))
+    _edit_rows(recording, 121, lambda row: row.update(entPhysicalSerialNum=member_serial))
     libre_device = unwrap_response(recording["responses"][f"GET /api/v0/devices/{_DEVICE_ID}"])[1]["devices"][0]
-    libre_device.update(serial="S/N NAMED-A", hardware=prerequisites["hardware"], location=prerequisites["location"])
+    libre_device.update(serial=master_serial, hardware=prerequisites["hardware"], location=prerequisites["location"])
     live_librenms.server.load_recording(recording)
 
     validation = validate_device_for_import(
@@ -319,14 +331,48 @@ def _import_named_stack(live_librenms, rule_owner):
         server_key="default",
         manual_mappings_per_device={_DEVICE_ID: prerequisites},
         libre_devices_cache={_DEVICE_ID: libre_device},
-        user=make_superuser(f"named-stack-{rule_owner}-user"),
+        user=make_superuser(f"{tag}-user"),
     )
     assert result["failed"] == []
     master = result["success"][0]["device"]
     master.refresh_from_db()
     # Import stores the raw LibreNMS serial, so every reader must apply the rules itself.
-    assert master.serial == "S/N NAMED-A"
+    assert master.serial == master_serial
     return libre_device, previewed, master
+
+
+def test_a_non_idempotent_rule_keys_a_member_serial_once_on_every_name_path(client, live_librenms):
+    """Under ^X(.+)$ the member stores "XX123" and every name path names it "-X123", as import does."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from netbox_librenms_plugin.tests.view_test_helpers import messages_on
+
+    _libre_device, previewed, master = _import_stack(
+        live_librenms,
+        "x-rule-stack",
+        rule=(r"^X(.+)$", r"\1", "global"),
+        master_serial="XAMASTER",
+        member_serial="XX123",
+    )
+    member = master.virtual_chassis.members.exclude(pk=master.pk).get()
+    assert member.serial == "XX123"
+    assert member.name == previewed[member.vc_position]
+    assert member.name.endswith("-X123")
+
+    client.force_login(make_superuser("x-rule-stack-viewer"))
+    page = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": member.pk}),
+        {"server_key": "default"},
+    )
+    assert page.context["resolved_name"] == member.name
+    synced = client.post(
+        reverse("plugins:netbox_librenms_plugin:update_device_name", kwargs={"pk": member.pk}),
+        {"server_key": "default"},
+    )
+    # The name sync writes the name that it computes, so a success that keeps the name proves they agree.
+    assert [level for level, _text in messages_on(synced.wsgi_request)] == ["success"]
+    assert type(member).objects.get(pk=member.pk).name == member.name
 
 
 @pytest.mark.parametrize("rule_owner", ["global", "manufacturer"])

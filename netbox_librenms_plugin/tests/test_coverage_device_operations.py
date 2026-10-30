@@ -970,6 +970,33 @@ class TestValidateDeviceForImport:
         assert result["serial_confirmed"] is True
         assert result["serial_action"] is None
 
+    @pytest.mark.parametrize("match", ["librenms_id", "hostname"])
+    def test_a_stored_decorated_serial_is_no_drift_under_the_serial_rules(self, match):
+        """Stored "S/N ABC" and incoming "ABC" key to one value, so validation offers no serial update."""
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        linked = {SERVER_KEY: 5427} if match == "librenms_id" else None
+        device = make_device(f"validation-keyed-drift-{match}", serial="S/N ABC-DRIFT", librenms_cf=linked)
+        payload = _device_payload(5427, hostname=device.name, sysName=device.name, serial="ABC-DRIFT")
+
+        result = self._validate(payload)
+
+        assert result["existing_device"] == device
+        assert result["serial_confirmed"] is (match == "librenms_id")
+        assert result["serial_action"] is None
+
+    @pytest.mark.parametrize("serial", ["unknown", " N/A ", "none"])
+    def test_a_placeholder_serial_binds_no_device_that_stores_it(self, serial):
+        make_device(f"validation-placeholder-{serial.strip()}", serial=serial.strip())
+
+        result = self._validate(_device_payload(5428, serial=serial))
+
+        assert result["existing_device"] is None
+        assert result["existing_match_type"] is None
+
     def test_linked_serial_drift_and_duplicate_are_distinguished(self):
         linked = make_device(
             "validation-serial-drift",
@@ -1494,6 +1521,31 @@ class TestImportSingleDevice:
         assert result["device"].status == "active"
         assert read_mapping(result["device"]).own_id(SERVER_KEY) == 5602
         assert result["synced"] == {"interfaces": 0, "cables": 0, "ip_addresses": 0}
+
+    @pytest.mark.parametrize(
+        ("incoming", "stored"), [("unknown", ""), (" N/A ", ""), (0, "0"), (" S/N RAW-5603 ", "S/N RAW-5603")]
+    )
+    def test_import_stores_the_trimmed_raw_serial_and_no_placeholder(self, librenms_api, incoming, stored):
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        site, device_type, role = self._infrastructure("raw-serial")
+        validation = _validation(site=site, device_type=device_type, role=role, resolved_name="raw-serial-import")
+
+        result = import_single_device(
+            5603,
+            SERVER_KEY,
+            validation,
+            sync_options={"sync_interfaces": False, "sync_cables": False},
+            libre_device=_device_payload(5603, serial=incoming),
+        )
+
+        assert result["success"] is True
+        result["device"].refresh_from_db()
+        assert result["device"].serial == stored
 
     def test_manual_mappings_use_real_objects(self, librenms_api):
         from dcim.models import Platform, Rack

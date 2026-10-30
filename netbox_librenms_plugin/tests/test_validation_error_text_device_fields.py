@@ -197,7 +197,9 @@ class TestADeviceFieldSyncShowsNetBoxsMessageOnlyToASuperuser:
         settings.CUSTOM_VALIDATORS = {"dcim.device": [_Refuses(f"Conflicts with {hidden.name}.", hidden.name)]}
         client.force_login(_viewer(tag, superuser, first, second))
 
-        response = _post(client, "assign_vc_serial", first, {"serial_1": "VC-SERIAL", "member_id_1": str(second.pk)})
+        response = _post(
+            client, "assign_vc_serial", first, {"librenms_serial_1": "VC-SERIAL", "member_id_1": str(second.pk)}
+        )
 
         _assert_shown(response, hidden, superuser, "the device")
 
