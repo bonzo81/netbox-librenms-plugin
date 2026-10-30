@@ -3042,11 +3042,11 @@ def normalize_serial(value) -> str:
 
     LibreNMS returns all-digit serials as JSON numbers, so the value must be
     coerced before stripping — and ``str(value or "")`` would silently drop the
-    real-but-falsey serial ``0``. Call sites keep their own ``"-"`` placeholder
-    guards.
+    real-but-falsey serial ``0``. Call sites skip a placeholder with
+    ``normalize_stack_serial``.
 
-    A vendor marker such as Juniper's leading "S/N " is removed by a NormalizationRule
-    in the ``serial`` scope, so the operator can see and edit the transformation.
+    ``Device.serial`` stores this form. A vendor marker such as Juniper's leading "S/N "
+    stays: ``serials_match`` applies the ``serial`` NormalizationRule chain to both sides.
 
     Args:
         value: The raw serial as returned by LibreNMS (str, number, or None).

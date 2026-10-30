@@ -13,7 +13,7 @@ from django.views import View
 from virtualization.models import VirtualMachine
 
 from netbox_librenms_plugin.import_utils import _determine_device_name
-from netbox_librenms_plugin.import_utils.virtual_chassis import _member_name, chassis_serial_key
+from netbox_librenms_plugin.import_utils.virtual_chassis import _member_name, chassis_serial_key, serials_match
 from netbox_librenms_plugin.platform_versions import (
     NewOSPlatform,
     OutcomeStatus,
@@ -40,6 +40,7 @@ from netbox_librenms_plugin.transactions import classify_conflict, run_transacti
 from netbox_librenms_plugin.utils import (
     match_librenms_hardware_to_device_type,
     normalize_serial,
+    normalize_stack_serial,
     resolve_naming_preferences,
     exception_text_for,
     validation_error_detail,
@@ -327,7 +328,7 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
 
         serial = normalize_serial(device_info.get("serial"))
 
-        if not serial or serial == "-":
+        if not normalize_stack_serial(serial):
             messages.warning(request, "No serial number available in LibreNMS")
             return _device_sync_redirect(request, pk, server_key)
 
@@ -623,8 +624,13 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
             messages.error(request, "Device is not part of a virtual chassis")
             return _server_mapping_redirect("device", pk, active_server_key, active_sync_tab)
 
+        rows = _posted_vc_serial_rows(request.POST)
+        if rows is None:
+            messages.error(request, "The VC Serials dialog is out of date. Reload the page and try again.")
+            return _server_mapping_redirect("device", pk, active_server_key, active_sync_tab)
+
         # One transaction for all members: a lock conflict rolls back every member, and the runner retries once.
-        assignments_made, errors = run_transaction(lambda: self._assign_serials(device, request.POST))
+        assignments_made, errors = run_transaction(lambda: self._assign_serials(device, rows))
 
         if assignments_made > 0:
             messages.success(
@@ -641,16 +647,13 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
 
         return _server_mapping_redirect("device", pk, active_server_key, active_sync_tab)
 
-    def _assign_serials(self, device, data):
+    def _assign_serials(self, device, rows):
         """Run one attempt: write each posted member serial; return the count of writes and the error texts."""
         assignments_made = 0
         errors = []
-        counter = 0
-        while f"serial_{counter + 1}" in data:
-            counter += 1
-            serial = normalize_serial(data.get(f"serial_{counter}"))
-            member_id = data.get(f"member_id_{counter}")
-            if not member_id:
+        for raw_serial, member_id in rows:
+            serial = normalize_serial(raw_serial)
+            if not member_id or not normalize_stack_serial(serial):
                 continue
             try:
                 member_pk = int(member_id)
@@ -687,6 +690,22 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
         except (ValidationError, IntegrityError) as e:
             return write_failure_message(e, f"set serial on {locked[0].name}", "serial", Device, self.request.user)
         return None
+
+
+def _posted_vc_serial_rows(data):
+    """
+    Return ``[(LibreNMS serial, member id)]`` for each row of the VC Serials dialog, in row order.
+
+    Each row posts ``member_id_N`` and the raw LibreNMS serial ``librenms_serial_N``. A row without
+    the raw serial comes from a page rendered before the field existed, so None refuses the post.
+    """
+    rows = []
+    while f"member_id_{len(rows) + 1}" in data:
+        index = len(rows) + 1
+        if f"librenms_serial_{index}" not in data:
+            return None
+        rows.append((data[f"librenms_serial_{index}"], data[f"member_id_{index}"]))
+    return rows
 
 
 def _has_removable_mapping(mapping, server_key):
@@ -961,11 +980,10 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             messages.error(request, "Could not retrieve device info from LibreNMS to verify serial.")
             return self._sync_url(object_type, pk)
 
-        librenms_serial = normalize_serial(device_info.get("serial"))
         netbox_serial = (getattr(obj, "serial", None) or "").strip()
         # VMs have no serial field in NetBox; skip the serial gate for them.
         is_vm = object_type == "vm"
-        if not is_vm and (not netbox_serial or not librenms_serial or netbox_serial != librenms_serial):
+        if not is_vm and not serials_match(netbox_serial, device_info.get("serial"), chassis_serial_key(obj)):
             messages.error(
                 request,
                 "Serial number mismatch — cannot convert legacy ID without serial confirmation.",
