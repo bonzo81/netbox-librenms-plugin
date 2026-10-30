@@ -212,6 +212,23 @@ def test_a_second_name_field_choice_waits_for_the_first_save(page):
     assert len(held) == 1
 
 
+def test_a_back_forward_cache_restore_shows_the_name_field_of_the_restored_rows(page):
+    held = []
+    page.route(SAVE_PREF_URL, lambda route: held.append(route))
+    _serve(page, _name_field_page(), f"{PAGE_URL}?tab=interfaces")
+    page.evaluate("updateInterfaceNameField()")
+    page.check("#if-descr")
+    page.wait_for_timeout(300)
+    assert len(held) == 1
+
+    # The page as the back-forward cache froze it before its navigation. Headless Chromium restores
+    # no page from that cache, so the test sends the event that the restore sends.
+    page.evaluate("window.dispatchEvent(new PageTransitionEvent('pageshow', {persisted: true}))")
+
+    assert page.locator("#if-name").is_checked()
+    assert page.locator("#if-name").is_enabled() and page.locator("#if-descr").is_enabled()
+
+
 def test_a_cache_restore_loads_the_fragment_for_the_page_query(page):
     initial = {"interfaces": _state("before"), "ipaddresses": _state("before-ip")}
     current = {"interfaces": _state("after"), "ipaddresses": initial["ipaddresses"]}
