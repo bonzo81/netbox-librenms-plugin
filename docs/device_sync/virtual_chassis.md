@@ -35,6 +35,8 @@ The **VC Serials** dialog shows each member serial after the rules, and **Sync A
 
 On import, the plugin does not create a member when a device with the same serial exists. It looks for a device that stores the LibreNMS serial, or the serial after the rules. When the found device stores the serial after the rules, but the rules give a different value for that stored serial, the two serials can be the same member or two different members. The plugin cannot tell them apart, so it skips the member and logs a warning that names the device. Check the two serials, then assign the serial manually.
 
+The plugin does not find a device that stores another form of the serial. For example, a member that an earlier import stored as `S/N ABC` is not found when LibreNMS reports `ABC`.
+
 Members that an earlier plugin version created store the serial after the rules. They keep their match while the rules give the same value for a value that they already changed, which is true for the seeded Juniper `S/N` rule. If a rule changes its own output again, use **Sync All** in the **VC Serials** dialog to store the LibreNMS serials.
 
 ## How It Works

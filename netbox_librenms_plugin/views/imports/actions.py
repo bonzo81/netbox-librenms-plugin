@@ -68,6 +68,7 @@ from netbox_librenms_plugin.import_utils.device_operations import (
 from netbox_librenms_plugin.import_utils.virtual_chassis import (
     candidate_vc_serial_keys,
     chassis_serial_key,
+    devices_with_serial,
     serials_match,
     vc_master_view,
     vc_serial_key,
@@ -611,10 +612,8 @@ def _apply_conflict_checked_serial(device, incoming_serial: str, user) -> HttpRe
         HttpResponse | None: An HTMX error toast when another device owns the serial, else None.
 
     """
-    from dcim.models import Device
-
     _acquire_serial_assignment_lock(incoming_serial)
-    conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=device.pk).first()
+    conflict_device = next(iter(devices_with_serial(incoming_serial, exclude_pk=device.pk, limit=1)), None)
     if conflict_device:
         # No identity in the log either: the lookup is unrestricted, and the serial alone lets an
         # operator find the owner without writing an unviewable object's name to a log file.
