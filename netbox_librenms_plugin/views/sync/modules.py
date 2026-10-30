@@ -2063,9 +2063,10 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         """
         Return ``[(row, target device, pinned)]`` for the selected indices, or refuse the whole request.
 
-        A selected row installs onto the target the manifest signed for it when the table offered it
-        there. Another target needs the override that a verify request signed for that row and target.
-        ``pinned`` is True when that pinned override, not the manifest, authorized the row.
+        A posted override, which a verify request signed for the row and its target, authorizes the
+        row on any target, the manifest target too: the row then shows the verified render. Without an
+        override, the row installs only onto the target the manifest signed and offered for it.
+        ``pinned`` is True when the override, not the manifest, authorized the row.
         """
         from dcim.models import Device
 
@@ -2078,11 +2079,12 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             if entry is None or target_id is None:
                 refused.append(index)
                 continue
-            pinned = not (target_id == entry[0] and entry[1])
+            override_token = request.POST.get(f"selection_grant_{index}")
+            pinned = bool(override_token) or not (target_id == entry[0] and entry[1])
             if pinned:
                 try:
                     override = read_module_grant(
-                        request.POST.get(f"selection_grant_{index}"),
+                        override_token,
                         action=ACTION_INSTALL_SELECTED_ROW,
                         page_device_id=page_device.pk,
                         server_key=server_key,
