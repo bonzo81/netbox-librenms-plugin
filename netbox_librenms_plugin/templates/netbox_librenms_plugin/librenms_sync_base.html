@@ -386,7 +386,7 @@
                         <tr>
                             <th scope="row" style="padding-left: 1rem;">
                                 Serial
-                                {% if object.serial and librenms_device_serial != object.serial %}
+                                {% if object.serial and not serial_matches %}
                                 <span class="text-warning ms-1" title="LibreNMS serial '{{ librenms_device_serial }}' does not match NetBox serial '{{ object.serial }}'">
                                     <i class="mdi mdi-alert"></i>
                                 </span>
@@ -394,7 +394,7 @@
                             </th>
                             <td>
                                 {{ librenms_device_serial }}
-                                {% if object.serial and librenms_device_serial == object.serial %}
+                                {% if serial_matches %}
                                 <span class="text-success ms-1" title="Serial matches NetBox">
                                     <i class="mdi mdi-check-circle"></i>
                                 </span>
@@ -616,7 +616,7 @@
                                             </button>
                                         {% else %}
                                             {% if librenms_device_serial != "-" %}
-                                                {% if object.serial != librenms_device_serial %}
+                                                {% if not serial_matches %}
                                                 <form method="post"
                                                       action="{% url 'plugins:netbox_librenms_plugin:update_device_serial' pk=object.pk %}"
                                                       style="display: inline;">
@@ -1193,7 +1193,7 @@ that may well be correct.
                                     {% endif %}
                                 </td>
                                 <td>
-                                    <input type="hidden" name="serial_{{ forloop.counter }}" value="{{ item.serial }}">
+                                    <input type="hidden" name="librenms_serial_{{ forloop.counter }}" value="{{ item.librenms_serial }}">
                                     <select name="member_id_{{ forloop.counter }}" class="form-select form-select-sm">
                                         <option value="">Select member...</option>
                                         {% for member in object.virtual_chassis.members.all %}

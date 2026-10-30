@@ -14,7 +14,7 @@ The available actions are:
 - **Transparent** hides the matched row and promotes its children to device-level bay matching. Use this for a fixed-chassis system board whose children should match device-level bays.
 - **Include** admits the inventory rows of one `entPhysicalClass` to Module Sync. This action must be paired with the **Class is** match type. See [Inventory classes](#inventory-classes).
 
-Name-based rules can use **Ends with**, **Starts with**, **Contains**, or a Python regular expression against `entPhysicalName`. These comparisons are case-insensitive except for regular expressions, whose behavior is controlled by the expression. **Serial matches device** compares `entPhysicalSerialNum` with the NetBox device serial. **Model matches device type** compares `entPhysicalModelName` case-insensitively with the model and the part number of the NetBox device type. **Class is** compares `entPhysicalClass` case-insensitively. The Include action needs it, and a Skip or Transparent rule can use it too. An Include rule ignores **Require serial match parent**.
+Name-based rules can use **Ends with**, **Starts with**, **Contains**, or a Python regular expression against `entPhysicalName`. These comparisons are case-insensitive except for regular expressions, whose behavior is controlled by the expression. **Serial matches device** compares `entPhysicalSerialNum` with the NetBox device serial, after the serial normalization rules apply to both. **Model matches device type** compares `entPhysicalModelName` case-insensitively with the model and the part number of the NetBox device type. **Class is** compares `entPhysicalClass` case-insensitively. The Include action needs it, and a Skip or Transparent rule can use it too. An Include rule ignores **Require serial match parent**.
 
 For name-based rules and for Skip or Transparent **Class is** rules, **Require serial match parent** adds a safety check: the rule applies only when the item's serial also matches an ancestor entity's serial. A row without a serial never passes this check, so clear the flag on a rule that must match such rows.
 
@@ -124,7 +124,7 @@ The available scopes are:
 - `module_type` normalizes `entPhysicalModelName` before Module Type Mapping lookup.
 - `device_type` normalizes the LibreNMS hardware string before Device Type Mapping, part-number, or model lookup.
 - `module_bay` normalizes `entPhysicalName` before Module Bay Mapping lookup.
-- `serial` normalizes inventory serial numbers before comparison or storage.
+- `serial` normalizes serial numbers before comparison. See [Serials](#serials).
 - `vlan_name` changes the VLAN name that the VLANs tab compares with NetBox and saves.
 
 Rules can optionally be limited to a manufacturer. Regular-expression matching is case-sensitive unless the pattern enables case-insensitive matching, for example with `(?i)`.
@@ -141,6 +141,14 @@ The following example removes a Nokia revision suffix so that one Module Type Ma
 ```
 
 For this rule, `3HE16474AARA01` becomes `3HE16474AA`.
+
+### Serials
+
+A `serial` rule applies only when the plugin compares two serials. The plugin stores each device serial as LibreNMS reports it, with the spaces at the start and end removed, and does not store a placeholder such as `-`, `N/A` or `unknown`. Each comparison applies the current rules to both serials: the serial that NetBox stores and the serial that LibreNMS reports. This includes the serial row of the LibreNMS Sync page, the import checks, virtual chassis members and the **Serial matches device** inventory rule. A rule change thus applies to both sides at once. A serial that is a placeholder before or after the rules matches nothing.
+
+The plugin seeds a global rule that removes Juniper's `S/N ` mark. With this rule, a stored `BCFB9793` matches a LibreNMS serial `S/N BCFB9793`, and a device that the plugin imports or syncs shows `S/N BCFB9793`.
+
+Virtual chassis members that an earlier plugin version created store the serial after the rules. A rule that changes its own output again, such as `^X(.+)$` to `\1`, can make such a member stop matching. See [Virtual Chassis Support](../device_sync/virtual_chassis.md#member-serials).
 
 ### VLAN names
 

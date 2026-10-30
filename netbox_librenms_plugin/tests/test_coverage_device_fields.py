@@ -249,7 +249,7 @@ class TestUpdateDeviceSerialView:
         assert any("updated from 'OLD-SERIAL'" in text for text in _messages(response, "success"))
         assert_update_logged(device, "serial", "OLD-SERIAL", "NEW-SERIAL")
 
-    @pytest.mark.parametrize("serial", [None, "", "-"])
+    @pytest.mark.parametrize("serial", [None, "", "-", "  ", "unknown", " N/A "])
     def test_missing_live_serial_preserves_the_stored_value(self, logged_in_client, librenms_server, serial):
         device = _linked_device(f"serial-missing-{serial!s}", 6512, serial="KEPT-SERIAL")
         librenms_server.register(
@@ -265,6 +265,15 @@ class TestUpdateDeviceSerialView:
         device.refresh_from_db()
         assert device.serial == "KEPT-SERIAL"
         assert any("No serial number available" in text for text in _messages(response, "warning"))
+
+    def test_a_numeric_zero_serial_is_stored(self, logged_in_client, librenms_server):
+        device = _linked_device("serial-zero", 6514, serial="OLD-ZERO")
+        librenms_server.device_info_response(device_id=6514, hostname=device.name, serial=0)
+
+        _post(logged_in_client, "update_device_serial", device)
+
+        device.refresh_from_db()
+        assert device.serial == "0"
 
     def test_first_serial_uses_the_set_message(self, logged_in_client, librenms_server):
         device = _linked_device("serial-first", 6513)
@@ -664,9 +673,9 @@ class TestAssignVCSerialView:
             "assign_vc_serial",
             first,
             {
-                "serial_1": " FIRST-VC-SERIAL ",
+                "librenms_serial_1": " FIRST-VC-SERIAL ",
                 "member_id_1": str(first.pk),
-                "serial_2": "SECOND-VC-SERIAL",
+                "librenms_serial_2": "SECOND-VC-SERIAL",
                 "member_id_2": str(second.pk),
             },
         )
@@ -696,9 +705,9 @@ class TestAssignVCSerialView:
                     "assign_vc_serial",
                     first,
                     {
-                        "serial_1": "FIRST-LOCKED-SERIAL",
+                        "librenms_serial_1": "FIRST-LOCKED-SERIAL",
                         "member_id_1": str(first.pk),
-                        "serial_2": "SECOND-LOCKED-SERIAL",
+                        "librenms_serial_2": "SECOND-LOCKED-SERIAL",
                         "member_id_2": str(second.pk),
                     },
                 )
@@ -708,6 +717,30 @@ class TestAssignVCSerialView:
         assert (first.serial, second.serial) == ("", "")
         assert response.status_code == 302
         assert messages_on(response.wsgi_request) == [("error", TRY_AGAIN_MESSAGE)]
+
+    def test_a_post_without_the_librenms_serial_writes_nothing(self, logged_in_client, librenms_server):
+        """A page rendered before the raw serial field posts only the keyed serial, so the view refuses it."""
+        first = make_device("vc-serial-stale-first")
+        second = make_device("vc-serial-stale-second")
+        make_virtual_chassis("vc-serial-stale", first, second)
+
+        response = _post(
+            logged_in_client,
+            "assign_vc_serial",
+            first,
+            {
+                "librenms_serial_1": "STALE-FIRST",
+                "member_id_1": str(first.pk),
+                "serial_2": "STALE-SECOND",
+                "member_id_2": str(second.pk),
+            },
+        )
+
+        first.refresh_from_db()
+        second.refresh_from_db()
+        assert (first.serial, second.serial) == ("", "")
+        assert _messages(response, "success") == []
+        assert len(_messages(response, "error")) == 1
 
     def test_wrong_chassis_and_missing_member_are_both_reported(self, logged_in_client, librenms_server):
         root = make_device("vc-serial-root")
@@ -721,11 +754,11 @@ class TestAssignVCSerialView:
             "assign_vc_serial",
             root,
             {
-                "serial_1": "OUTSIDER-SERIAL",
+                "librenms_serial_1": "OUTSIDER-SERIAL",
                 "member_id_1": str(outsider.pk),
-                "serial_2": "MISSING-SERIAL",
+                "librenms_serial_2": "MISSING-SERIAL",
                 "member_id_2": str(outsider.pk + 10000),
-                "serial_3": "GARBLED-SERIAL",
+                "librenms_serial_3": "GARBLED-SERIAL",
                 "member_id_3": "not-a-number",
             },
         )
@@ -748,7 +781,7 @@ class TestAssignVCSerialView:
             {
                 "server_key": SECONDARY_KEY,
                 "tab": "cables",
-                "serial_1": "CONTEXT-SERIAL",
+                "librenms_serial_1": "CONTEXT-SERIAL",
                 "member_id_1": str(second.pk),
             },
         )
@@ -794,7 +827,7 @@ class TestAssignVCSerialView:
             logged_in_client,
             "assign_vc_serial",
             device,
-            {"serial_1": "UNUSED-SERIAL", "member_id_1": ""},
+            {"librenms_serial_1": "UNUSED-SERIAL", "member_id_1": ""},
         )
 
         device.refresh_from_db()
@@ -1140,6 +1173,21 @@ class TestConvertLegacyLibreNMSIdView:
         device.refresh_from_db()
         assert stored_mapping_for_test(device) == 6562
         assert any("Serial number mismatch" in text for text in _messages(response, "error"))
+
+    def test_a_decorated_librenms_serial_confirms_the_stored_serial(self, logged_in_client, librenms_server):
+        """The serial rules key both sides, so a stored "ABC" matches LibreNMS "S/N ABC"."""
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        device = make_device("legacy-decorated", serial="ABC-LEGACY", librenms_cf=6566)
+        librenms_server.device_info_response(device_id=6566, hostname=device.name, serial="S/N ABC-LEGACY")
+
+        _post(logged_in_client, "convert_legacy_librenms_id", device, {"object_type": "device"})
+
+        device.refresh_from_db()
+        assert stored_mapping_for_test(device) == {SERVER_KEY: 6566}
 
     def test_vm_conversion_skips_the_device_serial_gate(self, logged_in_client, librenms_server):
         vm = make_vm("legacy-convert-vm")

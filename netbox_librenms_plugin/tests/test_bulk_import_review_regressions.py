@@ -517,7 +517,7 @@ def test_two_members_with_the_master_serial_import_standalone_without_a_duplicat
 @pytest.mark.django_db
 @pytest.mark.parametrize("device_type_source", ["mapped", "manual"])
 def test_a_manufacturer_serial_rule_identifies_the_master(live_librenms, device_type_source):
-    """A rule scoped to the DeviceType's manufacturer strips the member serials, so the master matches."""
+    """A rule scoped to the DeviceType's manufacturer keys the member serials, so the master matches; members store raw."""
     from dcim.models import Device, DeviceType, VirtualChassis
 
     from netbox_librenms_plugin.models import DeviceTypeMapping, NormalizationRule
@@ -548,8 +548,8 @@ def test_a_manufacturer_serial_rule_identifies_the_master(live_librenms, device_
     assert result["virtual_chassis_created"] == 1
     chassis = VirtualChassis.objects.get(domain=f"librenms-default-{device_id}")
     assert sorted(Device.objects.filter(virtual_chassis=chassis).values_list("serial", flat=True)) == [
+        f"PREFIX:SN2-{device_id}",
         "SN1",
-        f"SN2-{device_id}",
     ]
 
 

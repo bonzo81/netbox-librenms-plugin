@@ -1,6 +1,7 @@
 import logging
 import re
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from django.contrib import messages
@@ -14,7 +15,7 @@ from netbox_librenms_plugin.constants import (
     OOB_INVENTORY_SOURCE,
     is_librenms_placeholder,
 )
-from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory, vc_serial_key
+from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory, serials_match, vc_serial_key
 from netbox_librenms_plugin.inventory_policy import load_inventory_policy
 from netbox_librenms_plugin.inventory_tree import DANGLING_PARENT_KEY, REPORTED_PARENT_KEY, repair_dangling_parents
 from netbox_librenms_plugin.librenms_ids import (
@@ -55,6 +56,7 @@ from netbox_librenms_plugin.utils import (
     module_bay_type_fit,
     module_type_bay_type_ids,
     normalize_serial,
+    normalize_stack_serial,
     prefetch_module_bay_types,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -280,15 +282,18 @@ class DeviceIdentity:
     serial: str = ""
     # Casefolded DeviceType model and part number, without blanks.
     type_models: frozenset = frozenset()
+    # The key that compares the stored serial with an inventory serial; this default applies no rules.
+    serial_key: Callable[[object], str] = normalize_stack_serial
 
     @classmethod
-    def of(cls, device) -> "DeviceIdentity":
-        """Return the serial of *device* and the model and part number of its device type."""
+    def of(cls, device, serial_key) -> "DeviceIdentity":
+        """Return the serial of *device* under *serial_key*, and the model and part number of its device type."""
         device_type = device.device_type
         names = (device_type.model, device_type.part_number)
         return cls(
             serial=(device.serial or "").strip(),
             type_models=frozenset(folded for name in names if (folded := (name or "").strip().casefold())),
+            serial_key=serial_key,
         )
 
 
@@ -354,9 +359,7 @@ def _matches_target_device(
         # A line card that shares the device serial is a real FRU, so the serial rule takes direct chassis children.
         if not _sits_at_chassis_level(item, parent_item, index_map):
             return False
-        item_serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
-        device_serial = "" if is_librenms_placeholder(device_identity.serial) else device_identity.serial
-        return bool(item_serial and device_serial and item_serial == device_serial)
+        return serials_match(device_identity.serial, item.get("entPhysicalSerialNum"), device_identity.serial_key)
     if rule.match_type == rule.MATCH_MODEL_DEVICE_TYPE:
         # A real line card never carries the chassis PID, so the walk passes slot containers and other built-ins.
         passes = _passes_to_the_chassis(device_identity)
@@ -1468,6 +1471,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         """
         policy_cache = {}
         owners = cls._attribute_to_members(obj, inventory_data, vc_members, policy)
+        serial_key = policy.chassis_serial_key()
 
         def policy_for(device):
             if device.pk not in policy_cache:
@@ -1475,7 +1479,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 policy_cache[device.pk] = {
                     "manufacturer": manufacturer,
                     "ignore_rules": policy.rules_for(manufacturer),
-                    "device_identity": DeviceIdentity.of(device),
+                    "device_identity": DeviceIdentity.of(device, serial_key),
                 }
             return policy_cache[device.pk]
 

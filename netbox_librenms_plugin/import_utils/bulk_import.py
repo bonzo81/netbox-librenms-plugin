@@ -1193,7 +1193,7 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             ambiguous_fallback = False
             if not import_as_vm:
                 serial = normalize_serial(libre_device.get("serial"))
-                if serial and serial != "-":
+                if normalize_stack_serial(serial):
                     serial_matches = find_devices_by_serial(serial)
                     if len(serial_matches) > 1:
                         ambiguous_fallback = True

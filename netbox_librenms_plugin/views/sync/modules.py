@@ -3785,7 +3785,8 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
         grant.require(action_target={"device_type_id": device_type.pk})
         item = granted.row(grant.ent_index)
         has_bay = self._matches_a_bay(member, item, granted.index_map)
-        candidate = built_in_candidate(item, granted.index_map, DeviceIdentity.of(member), has_bay=has_bay)
+        identity = DeviceIdentity.of(member, granted.policy.chassis_serial_key())
+        candidate = built_in_candidate(item, granted.index_map, identity, has_bay=has_bay)
         if candidate is None:
             raise GrantRefused(GrantRefusal.STALE)
         if candidate.records_part_number and (device_type.part_number or "").strip():

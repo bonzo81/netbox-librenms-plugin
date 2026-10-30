@@ -2972,7 +2972,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         view = AssignVCSerialView()
         request = self._request(
             user,
-            {"server_key": "default", "member_id_1": str(sibling.pk), "serial_1": "HIJACKED"},
+            {"server_key": "default", "member_id_1": str(sibling.pk), "librenms_serial_1": "HIJACKED"},
         )
         view.setup(request)
         view.post(request, pk=page_member.pk)
