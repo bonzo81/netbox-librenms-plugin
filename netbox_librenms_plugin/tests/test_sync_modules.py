@@ -3517,6 +3517,37 @@ def _member_card_under_page_carrier(*, card_on_member):
     return page, member, unrelated, card_type, key
 
 
+def _verified_selection_grant(client, content, page, device, index):
+    """POST the verify request the member select of row *index* sends for *device*; return the row's selection grant."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms
+
+    (select,) = [attrs for attrs in module_tab_forms(content).selects if attrs.get("data-module") == str(index)]
+    (depth,) = re.findall(rf'<tr[^>]*data-ent-index="{index}"[^>]*data-depth="(\d+)"', content)
+    verified = client.post(
+        reverse("plugins:netbox_librenms_plugin:verify_module"),
+        data=json.dumps(
+            {
+                "device_id": device.pk,
+                "page_device_id": page.pk,
+                "ent_physical_index": index,
+                "depth": int(depth),
+                "server_key": "default",
+                "verify_binding": select.get("data-verify-binding"),
+            }
+        ),
+        content_type="application/json",
+    )
+    assert verified.status_code == 200, verified.content
+    (link,) = [
+        link
+        for link in module_tab_forms(verified.json()["formatted_row"]["device_selection"]).links
+        if "selection_grant" in link
+    ]
+    return link["value"]
+
+
 @pytest.mark.django_db
 def test_table_names_no_member_bay_after_a_module_row_of_the_page():
     """A page module above a member row does not name the member bay, so the card offers the member Card bay."""
@@ -3543,10 +3574,8 @@ def test_table_names_no_member_bay_after_a_module_row_of_the_page():
 def test_selected_install_walks_the_parent_chain_of_the_render_that_authorized_the_row(client, override):
     """A manifest row stops its parent walk at a member boundary; a pinned override walks the whole pinned render."""
     from dcim.models import Module
-    from django.urls import reverse
 
     from netbox_librenms_plugin.tests.conftest import make_superuser
-    from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms
 
     page, member, unrelated, card_type, key = _member_card_under_page_carrier(card_on_member=not override)
     user = make_superuser("selected-boundary-user")
@@ -3556,29 +3585,8 @@ def test_selected_install_walks_the_parent_chain_of_the_render_that_authorized_t
         action, fields = rendered_module_form(content, "install-selected")
         fields["select"] = ["2"]
         if override:
-            (select,) = [attrs for attrs in module_tab_forms(content).selects if attrs.get("data-module") == "2"]
-            (depth,) = re.findall(r'<tr[^>]*data-ent-index="2"[^>]*data-depth="(\d+)"', content)
-            verified = client.post(
-                reverse("plugins:netbox_librenms_plugin:verify_module"),
-                data=json.dumps(
-                    {
-                        "device_id": member.pk,
-                        "page_device_id": page.pk,
-                        "ent_physical_index": 2,
-                        "depth": int(depth),
-                        "server_key": "default",
-                        "verify_binding": select.get("data-verify-binding"),
-                    }
-                ),
-                content_type="application/json",
-            )
-            assert verified.status_code == 200, verified.content
-            (link,) = [
-                link
-                for link in module_tab_forms(verified.json()["formatted_row"]["device_selection"]).links
-                if "selection_grant" in link
-            ]
-            fields.update({"device_selection_2": str(member.pk), "selection_grant_2": link["value"]})
+            grant = _verified_selection_grant(client, content, page, member, 2)
+            fields.update({"device_selection_2": str(member.pk), "selection_grant_2": grant})
         response = client.post(action, fields)
     finally:
         cache.delete(key)
@@ -3588,6 +3596,43 @@ def test_selected_install_walks_the_parent_chain_of_the_render_that_authorized_t
     # The pinned member render attributes the carrier row to the member too, so the card goes into its carrier.
     expected = member.modulebays.get(name="Card", module=unrelated if override else None)
     assert card.module_bay_id == expected.pk
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("posted_grant", ["verified", "forged"])
+def test_selected_install_back_on_the_manifest_member_follows_the_verified_render(client, posted_grant):
+    """A member change and a change back leave the pinned row on the page, so its grant decides the install."""
+    from dcim.models import Module
+
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+
+    page, member, unrelated, card_type, key = _member_card_under_page_carrier(card_on_member=True)
+    user = make_superuser("selected-round-trip-user")
+    client.force_login(user)
+    try:
+        content = render_module_tab(page, user=user)
+        action, fields = rendered_module_form(content, "install-selected")
+        # The browser verifies the row for each member the user picks: the page first, then the member again.
+        _verified_selection_grant(client, content, page, page, 2)
+        grant = _verified_selection_grant(client, content, page, member, 2)
+        forged = fields["inventory_binding"]
+        fields.update(
+            {
+                "select": ["2"],
+                "device_selection_2": str(member.pk),
+                "selection_grant_2": grant if posted_grant == "verified" else forged,
+            }
+        )
+        response = client.post(action, fields)
+    finally:
+        cache.delete(key)
+    assert response.status_code == 302
+    if posted_grant == "forged":
+        assert not Module.objects.filter(module_type=card_type).exists()
+        return
+    # The verified member render puts the card into the member carrier, which its row showed.
+    card = Module.objects.get(module_type=card_type)
+    assert card.module_bay_id == member.modulebays.get(name="Card", module=unrelated).pk
 
 
 @pytest.mark.django_db
