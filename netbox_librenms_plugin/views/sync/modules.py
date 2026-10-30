@@ -3784,7 +3784,8 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
         device_type = member.device_type
         grant.require(action_target={"device_type_id": device_type.pk})
         item = granted.row(grant.ent_index)
-        has_bay = self._matches_a_bay(member, item, granted.index_map)
+        ancestry = InstallBranchView._ancestry_maps(granted, {member.pk})[member.pk]
+        has_bay = self._matches_a_bay(member, item, granted.index_map, granted.index_map.keys() - ancestry.keys())
         identity = DeviceIdentity.of(member, granted.policy.chassis_serial_key())
         candidate = built_in_candidate(item, granted.index_map, identity, has_bay=has_bay)
         if candidate is None:
@@ -3804,7 +3805,7 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
         )
 
     @staticmethod
-    def _matches_a_bay(device, item, index_map):
+    def _matches_a_bay(device, item, index_map, foreign_indices):
         """
         Return whether *item* matches a bay of *device* now, as the table matches a chassis-level row.
 
@@ -3847,6 +3848,7 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
             regex_mappings=regex_mappings,
             manufacturer_id=manufacturer.pk,
             norm_rules_bay=preload_normalization_rules("module_bay"),
+            foreign_indices=foreign_indices,
             accepted_bay_types=module_type_bay_type_ids(matched_type, load_module_type_bay_types()),
         )
         return matched_bay is not None
