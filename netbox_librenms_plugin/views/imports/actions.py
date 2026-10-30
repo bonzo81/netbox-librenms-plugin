@@ -65,7 +65,13 @@ from netbox_librenms_plugin.import_utils.device_operations import (
     effective_import_device_type,
     match_import_device_type,
 )
-from netbox_librenms_plugin.import_utils.virtual_chassis import candidate_vc_serial_keys, vc_master_view, vc_serial_key
+from netbox_librenms_plugin.import_utils.virtual_chassis import (
+    candidate_vc_serial_keys,
+    chassis_serial_key,
+    serials_match,
+    vc_master_view,
+    vc_serial_key,
+)
 from netbox_librenms_plugin.import_validation_helpers import (
     apply_cluster_to_validation,
     apply_host_to_validation,
@@ -123,6 +129,7 @@ from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
     coerce_model_pk,
     normalize_serial,
+    normalize_stack_serial,
     resolve_naming_preferences,
     same_host,
     save_interface_name_preference,
@@ -2021,15 +2028,15 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
     @staticmethod
     def _build_sync_info(libre_device, existing_device, actor):
         """Build sync comparison data between LibreNMS device and existing NetBox device."""
-        # Trimmed so a padded LibreNMS serial doesn't report drift against the stored trimmed value.
         librenms_serial = normalize_serial(libre_device.get("serial")) or "-"
         librenms_os = libre_device.get("os") or "-"
         librenms_hardware = libre_device.get("hardware") or "-"
 
-        # Serial comparison (VMs may not have serial in all NetBox versions). The stored side
-        # is normalized too, so a legacy padded serial doesn't render as drift.
+        # Serial comparison (VMs may not have serial in all NetBox versions).
         netbox_serial = normalize_serial(getattr(existing_device, "serial", None))
-        serial_synced = netbox_serial == librenms_serial or librenms_serial == "-"
+        serial_synced = not normalize_stack_serial(librenms_serial) or serials_match(
+            netbox_serial, librenms_serial, chassis_serial_key(existing_device)
+        )
 
         # Platform comparison
         platform_assessment = assess_platform(
@@ -2321,7 +2328,7 @@ class DeviceConflictActionView(
                     # conflict lookup can't disagree with the match paths on whitespace.
                     incoming_serial = normalize_serial(libre_device.get("serial")) if existing_model is Device else None
                     fields = ["name"]
-                    if incoming_serial and incoming_serial != "-":
+                    if normalize_stack_serial(incoming_serial):
                         if err := _apply_conflict_checked_serial(existing_device, incoming_serial, request.user):
                             return err
                         fields.append("serial")
@@ -2343,7 +2350,7 @@ class DeviceConflictActionView(
                     # Trimmed like validate/import_single_device (see the update branch above).
                     incoming_serial = normalize_serial(libre_device.get("serial"))
                     fields = []
-                    if incoming_serial and incoming_serial != "-":
+                    if normalize_stack_serial(incoming_serial):
                         if err := _apply_conflict_checked_serial(existing_device, incoming_serial, request.user):
                             return err
                         fields.append("serial")
@@ -2383,7 +2390,7 @@ class DeviceConflictActionView(
             # concurrent requests cannot both pass the serial uniqueness guard.
             # Trimmed like validate/import_single_device (see the update branch above).
             incoming_serial = normalize_serial(libre_device.get("serial"))
-            if incoming_serial and incoming_serial != "-":
+            if normalize_stack_serial(incoming_serial):
                 with transaction.atomic():
                     try:
                         locked_device = (

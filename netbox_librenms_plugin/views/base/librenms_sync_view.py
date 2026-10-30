@@ -15,6 +15,7 @@ from netbox_librenms_plugin.import_utils.virtual_chassis import (
     chassis_serial_key,
     extract_vc_members,
     members_by_serial_key,
+    serials_match,
 )
 from netbox_librenms_plugin.platform_versions import (
     PlatformFacts,
@@ -40,6 +41,8 @@ from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_user_pref,
     match_librenms_hardware_to_device_type,
+    normalize_serial,
+    normalize_stack_serial,
     resolve_naming_preferences,
     save_user_pref,
 )
@@ -337,13 +340,14 @@ class BaseLibreNMSSyncView(
         _lookup_device = getattr(self, "_librenms_lookup_device", obj)
         librenms_id_is_legacy = bool(_lookup_device) and read_mapping(_lookup_device).legacy.is_legacy
 
-        # Determine if serial match allows legacy ID conversion.
+        # The legacy ID gate compares the serial of the mapping owner, which can differ from the page device.
         # VMs have no serial field in NetBox; skip the gate so the Convert ID button is enabled.
-        _librenms_serial = librenms_info["librenms_device_details"].get("librenms_device_serial", "-")
-        _netbox_serial = getattr(_lookup_device, "serial", "") or ""
         _lookup_is_vm = _lookup_device._meta.model_name == "virtualmachine" if _lookup_device else False
         librenms_id_serial_confirmed = _lookup_is_vm or bool(
-            _librenms_serial and _librenms_serial != "-" and _netbox_serial and _librenms_serial == _netbox_serial
+            _lookup_device
+            and serials_match(
+                _lookup_device.serial, librenms_info["librenms_serial"], chassis_serial_key(_lookup_device)
+            )
         )
         device_info_unavailable = librenms_info.get("device_info_unavailable", False)
         show_add_device = not librenms_info["found_in_librenms"] and not device_info_unavailable
@@ -515,11 +519,13 @@ class BaseLibreNMSSyncView(
         found_in_librenms = False
         mismatched_device = False
         device_info_unavailable = False
+        librenms_serial = None
         lookup_error = getattr(self, "_librenms_id_lookup_error", None)
         librenms_device_details = {
             "librenms_device_url": None,
             "librenms_device_hardware": "-",
             "librenms_device_serial": "-",
+            "serial_matches": False,
             "librenms_device_os": "-",
             "librenms_device_version": "-",
             "librenms_device_features": "-",
@@ -548,7 +554,8 @@ class BaseLibreNMSSyncView(
 
                 # Extract new fields; use `or "-"` so null/empty from LibreNMS renders as "-"
                 hardware = device_info.get("hardware") or "-"
-                serial = device_info.get("serial") or "-"
+                librenms_serial = device_info.get("serial")
+                serial = normalize_stack_serial(librenms_serial) or "-"
                 os_name = device_info.get("os") or "-"
                 version = device_info.get("version") or "-"
                 features = device_info.get("features") or "-"
@@ -584,6 +591,9 @@ class BaseLibreNMSSyncView(
                         "librenms_device_url": f"{self.librenms_api.librenms_url}/device/device={self.librenms_id}/",
                         "librenms_device_hardware": hardware,
                         "librenms_device_serial": serial,
+                        "serial_matches": serials_match(
+                            getattr(obj, "serial", None), librenms_serial, chassis_serial_key(obj)
+                        ),
                         "librenms_device_os": os_name,
                         "librenms_device_version": version,
                         "librenms_device_features": features,
@@ -668,6 +678,8 @@ class BaseLibreNMSSyncView(
             "found_in_librenms": found_in_librenms,
             "device_info_unavailable": device_info_unavailable,
             "librenms_device_details": librenms_device_details,
+            # The untouched payload value: a numeric 0 is a serial, and the display fallback "-" is not.
+            "librenms_serial": librenms_serial,
             "mismatched_device": mismatched_device,
             "librenms_lookup_error": lookup_error,
         }
@@ -792,7 +804,8 @@ class BaseLibreNMSSyncView(
             list: [
                 {
                     'description': 'Member component description',
-                    'serial': 'serial number',
+                    'serial': 'serial key, as the dialog shows it',
+                    'librenms_serial': 'trimmed raw serial, as the dialog posts it',
                     'model': 'model name',
                     'assigned_member': Device object or None (if serial matches existing assignment)
                 }
@@ -806,8 +819,7 @@ class BaseLibreNMSSyncView(
         # Get all VC members
         vc_members = obj.virtual_chassis.members.all()
 
-        # The ENTITY-MIB serial carries the vendor's decoration ("S/N BCFB9793" on Juniper) while
-        # the stored member serial does not, so compare and display the serial key.
+        # Members store the raw serial, so both sides go through the serial key; the dialog shows the key.
         serial_key = chassis_serial_key(obj)
         # A serial key that two members share assigns neither.
         members_by_key = members_by_serial_key(vc_members, serial_key)
@@ -823,6 +835,7 @@ class BaseLibreNMSSyncView(
                 {
                     "description": component["description"] or "-",
                     "serial": serial,
+                    "librenms_serial": normalize_serial(component["serial"]),
                     "model": component["model"] or "-",
                     "assigned_member": assigned_member,
                 }

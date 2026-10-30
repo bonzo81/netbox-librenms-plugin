@@ -104,6 +104,15 @@ def _inventory_paths(server, device_id):
     return [r for r in server.requests if r["path"] == prefix or r["path"] == f"{prefix}/all"]
 
 
+def _seeded_serial_rule():
+    """Create the global rule that migration 0017 seeds: strip Juniper's "S/N " mark."""
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    NormalizationRule.objects.get_or_create(
+        scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+    )
+
+
 def _name_pattern(pattern="-M{position}"):
     """Store the VC member naming pattern the production code reads back."""
     from netbox_librenms_plugin.models import LibreNMSSettings
@@ -479,13 +488,8 @@ class TestCreateVirtualChassisWithMembers:
         assert "name already exists" in caplog.text
         assert Device.objects.filter(name="vc-keep-name-M1").count() == 1
 
-    def test_a_member_serial_keeps_no_vendor_marker(self):
-        """
-        Juniper reports ENTITY-MIB serials as "S/N BCFB9751".
-
-        Stored verbatim the VC member carries a serial the hardware never matches, and every
-        later comparison against a serial normalized elsewhere fails.
-        """
+    def test_a_member_stores_the_raw_librenms_serial(self):
+        """Juniper reports "S/N BCFB9751"; the member stores it as reported, and readers apply the rules."""
         from netbox_librenms_plugin.models import NormalizationRule
 
         NormalizationRule.objects.get_or_create(
@@ -505,7 +509,7 @@ class TestCreateVirtualChassisWithMembers:
         create_virtual_chassis_with_members(master, members, {"device_id": 8101}, master_member=members[0])
 
         created = Device.objects.get(virtual_chassis__name="vc-marker", vc_position=2)
-        assert created.serial == "BCFB9751"
+        assert created.serial == "S/N BCFB9751"
 
     def test_the_master_is_found_from_a_decorated_serial(self, settings, librenms_server):
         """
@@ -642,6 +646,83 @@ class TestCreateVirtualChassisWithMembers:
         assert not Device.objects.filter(serial="PADDED-MEMBER").exists()
         assert "Device with serial 'PADDED-MEMBER' already exists" in caplog.text
 
+    def test_a_legacy_keyed_member_blocks_its_decorated_serial(self):
+        """A member stored as "ABC" by an earlier release still blocks an incoming "S/N ABC"."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
+        _seeded_serial_rule()
+        _name_pattern()
+        master = make_device("vc-legacy-keyed", serial="MASTER-LK")
+        make_device("vc-legacy-keyed-elsewhere", serial="ABC-LK")
+        members = [{"serial": "MASTER-LK", "position": 1}, {"serial": "S/N ABC-LK", "position": 2}]
+
+        vc = create_virtual_chassis_with_members(master, members, {"device_id": 8006}, master_member=members[0])
+
+        assert vc.members.count() == 1
+        assert not Device.objects.filter(serial="S/N ABC-LK").exists()
+
+    def test_a_member_stored_raw_by_an_earlier_import_blocks_the_same_serial(self):
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
+        _seeded_serial_rule()
+        _name_pattern()
+        master = make_device("vc-earlier-raw", serial="MASTER-ER")
+        make_device("vc-earlier-raw-elsewhere", serial="S/N ABC-ER")
+        members = [{"serial": "MASTER-ER", "position": 1}, {"serial": "S/N ABC-ER", "position": 2}]
+
+        vc = create_virtual_chassis_with_members(master, members, {"device_id": 8007}, master_member=members[0])
+
+        assert vc.members.count() == 1
+        assert Device.objects.filter(serial="S/N ABC-ER").count() == 1
+
+    def test_one_batch_creates_one_member_for_two_forms_of_one_serial(self):
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
+        _seeded_serial_rule()
+        _name_pattern()
+        master = make_device("vc-batch-forms", serial="MASTER-BF")
+        members = [
+            {"serial": "MASTER-BF", "position": 1},
+            {"serial": "S/N ABC-BF", "position": 2},
+            {"serial": "ABC-BF", "position": 3},
+        ]
+
+        vc = create_virtual_chassis_with_members(master, members, {"device_id": 8008}, master_member=members[0])
+
+        assert sorted(vc.members.exclude(pk=master.pk).values_list("serial", flat=True)) == ["S/N ABC-BF"]
+
+    @pytest.mark.parametrize("earlier", ["batch", "legacy"])
+    def test_an_unconfirmed_key_match_skips_the_member_and_names_the_candidate(self, caplog, earlier):
+        """Under ^X(.+)$ the stored "X123" keys to "123", so an incoming "XX123" cannot be told apart from it."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_utils import virtual_chassis as vc_module
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.create(scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1")
+        _name_pattern()
+        master = make_device(f"vc-unconfirmed-{earlier}", serial="MASTER-UC")
+        members = [{"serial": "MASTER-UC", "position": 1}]
+        if earlier == "batch":
+            members.append({"serial": "X123", "position": 2})
+        else:
+            make_device(f"vc-unconfirmed-{earlier}-elsewhere", serial="X123")
+        members.append({"serial": "XX123", "position": 3})
+
+        with caplog.at_level(logging.WARNING, logger=vc_module.__name__):
+            vc = create_virtual_chassis_with_members(master, members, {"device_id": 8009}, master_member=members[0])
+
+        candidate = Device.objects.get(serial="X123")
+        assert not Device.objects.filter(serial="XX123").exists()
+        assert vc.members.count() == (2 if earlier == "batch" else 1)
+        (warning,) = [record.getMessage() for record in caplog.records if "XX123" in record.getMessage()]
+        assert candidate.name in warning
+
     def test_a_member_name_already_in_netbox_is_skipped(self, caplog):
         from dcim.models import Device
 
@@ -758,4 +839,34 @@ def test_placeholder_members_do_not_match_an_unrelated_device(use_manufacturer_r
     ]
     vc = create_virtual_chassis_with_members(master, members, {"device_id": 983}, master_member=members[0])
     assert sorted(vc.members.values_list("vc_position", flat=True)) == [1, 2, 3]
-    assert list(vc.members.exclude(pk=master.pk).values_list("serial", flat=True)) == ["", ""]
+    # A rule that blanks a real raw serial only stops comparisons; the member keeps the raw value.
+    stored = "VENDOR-PLACEHOLDER" if use_manufacturer_rule else ""
+    assert list(vc.members.exclude(pk=master.pk).values_list("serial", flat=True)) == [stored, stored]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("rule", [False, True])
+@pytest.mark.parametrize(
+    ("stored", "incoming", "matches"),
+    [
+        ("0", 0, True),
+        ("0", "0", True),
+        ("", None, False),
+        ("  ", "  ", False),
+        ("-", "-", False),
+        ("unknown", "unknown", False),
+        ("N/A", " n/a ", False),
+        ("ABC", None, False),
+    ],
+)
+def test_serials_match_keys_both_sides_and_never_matches_a_missing_serial(rule, stored, incoming, matches):
+    """A rule that adds a prefix cannot turn a missing serial into a real one."""
+    from netbox_librenms_plugin.import_utils.virtual_chassis import serials_match, vc_serial_key
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    if rule:
+        NormalizationRule.objects.create(scope="serial", match_pattern=r"^(.+)$", replacement=r"X\1")
+    key = vc_serial_key()
+
+    assert serials_match(stored, incoming, key) is matches
+    assert (key(incoming) == "") == (not matches)
