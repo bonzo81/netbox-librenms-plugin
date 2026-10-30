@@ -67,7 +67,6 @@ Use this workflow for imported devices or existing NetBox Devices and Virtual Ma
 Review the configuration that applies to the data you plan to synchronize:
 
 - [Interface Type Mappings](../configuration/mappings.md#interface-type-mappings) choose the NetBox interface type from the LibreNMS type and speed.
-- [IP Mappings](../configuration/mappings.md#ip-mappings) keep the addresses in a prefix, such as `fe80::/10`, out of IP Address Sync.
 - [Platform Mappings](../configuration/mappings.md#platform-mappings) support Device Information Sync.
 - [Module Type and Module Bay Mappings](../configuration/mappings.md#module-type-mappings) support Module Sync.
 - [Port Stack LAG Patterns](../configuration/rules_and_patterns.md#port-stack-lag-patterns) identify LAGs and ignore service access point relationships on platforms that need custom patterns.
