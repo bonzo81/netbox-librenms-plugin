@@ -253,6 +253,33 @@ def test_a_restored_retarget_writes_nothing_until_its_member_is_verified_again(p
     expect(page.locator("#install-selected-btn")).to_be_enabled()
 
 
+def test_a_restored_row_on_its_rendered_member_submits_the_grant_of_its_render(page):
+    """A change away and back stores a grant for the pinned row; the reloaded row shows the page render again."""
+    page.route(SUBMIT_URL, lambda route: route.fulfill(body="", content_type="text/html"))
+    _held, bodies = _answers(page, _success(30, "2", "override-30"), _success(30, "1", "pinned-30-m1"))
+    _load(page, [_row(30), _row(31)], url=f"{PAGE_URL}?page=1")
+    for member in ("2", "1"):
+        with page.expect_response(VERIFY_ROUTE):
+            _change_member(page, 30, member)
+        # The verified cell brings a new select, which listens once the page script wires it.
+        page.wait_for_function("document.getElementById('device_selection_30').dataset.moduleSelectInitialized")
+    page.check("#cb-30")
+    assert page.locator('[name="selection_grant_30"]').input_value() == "pinned-30-m1"
+
+    _load(page, [_row(30), _row(31)], url=f"{PAGE_URL}?page=1")
+
+    expect(page.locator("#cb-30")).to_be_checked()
+    assert page.locator("#device_selection_30").input_value() == "1"
+    with page.expect_request(SUBMIT_URL) as submitted:
+        page.click("#install-selected-btn")
+    pairs = parse_qsl(submitted.value.post_data, keep_blank_values=True)
+
+    # The reloaded row is the page render again, so it submits that render's empty grant and no verify runs.
+    assert len(bodies) == 2
+    assert ("device_selection_30", "1") in pairs
+    assert [value for name, value in pairs if name == "selection_grant_30"] == [""]
+
+
 def test_a_refused_reverify_clears_the_restored_selection_and_says_why(page):
     _answers(page, _success(30, "2", "override-30"), REFUSED)
     _load(page, [_row(30), _row(31)], url=f"{PAGE_URL}?page=1")
