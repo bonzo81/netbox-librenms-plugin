@@ -4352,6 +4352,11 @@ function setInterfaceNameFieldsDisabled(disabled) {
 window.addEventListener('pageshow', event => {
     if (!event.persisted) return;
     interfaceNameFieldSaving = false;
+    // The restored rows are those of the rendered name field, not of the radio checked before the navigation.
+    document.querySelectorAll('.interface-name-field').forEach(radio => {
+        radio.checked = radio.defaultChecked;
+    });
+    setInterfaceNameFieldFromURL();
     setInterfaceNameFieldsDisabled(false);
 });
 
