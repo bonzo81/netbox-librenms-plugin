@@ -286,7 +286,8 @@ def devices_with_serial(serial, *, exclude_pk=None, limit: int = 2) -> list:
         limit: How many Devices to return, enough to tell a unique match from a duplicate.
 
     """
-    found = find_devices_by_serial(serial, limit + (exclude_pk is not None))
+    # The rules decide per device, so filter every exact match before the limit counts it.
+    found = find_devices_by_serial(serial, limit=None)
     matches = [
         device
         for device in found
