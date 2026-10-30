@@ -1511,6 +1511,29 @@ rules:
           def _member_name(...):
               ...
 
+  - id: device-serial-compare-through-serials-match
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This code compares a stored serial with == or !=. Device.serial holds the trimmed raw
+      LibreNMS serial, so a comparison must apply the current serial rules to both sides. Call
+      serials_match(stored, incoming, serial_key) from import_utils.virtual_chassis.
+    metadata:
+      category: correctness
+    paths:
+      include:
+        - "**/netbox_librenms_plugin/views/**"
+        - "**/netbox_librenms_plugin/import_utils/**"
+      exclude:
+        - "**/tests/**"
+        # Module writers store a normalized serial, so a Module comparison stays exact.
+        - "**/views/sync/modules.py"
+    pattern-either:
+      - pattern: $X.serial == $Y
+      - pattern: $Y == $X.serial
+      - pattern: $X.serial != $Y
+      - pattern: $Y != $X.serial
+
   - id: netbox-only-controls-use-replaceable-handlers
     languages: [javascript]
     severity: ERROR
