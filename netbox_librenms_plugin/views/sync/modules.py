@@ -349,8 +349,8 @@ class _GrantedInventory:
         item = self.index_map.get(index)
         if item is None:
             raise GrantRefused(GrantRefusal.STALE)
-        if item.get("_source") == OOB_INVENTORY_SOURCE:
-            raise _ModuleActionRefused(OOB_INVENTORY_READ_ONLY_REASON)
+        if refusal := _never_installable_reason(item):
+            raise _ModuleActionRefused(f"Nothing was changed: {refusal}.")
         return item
 
 
