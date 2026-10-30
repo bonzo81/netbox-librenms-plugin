@@ -901,8 +901,10 @@ class TestInstallAndUpdateViews:
         assert any("Installed VIEW-INSTALL-CARD" in text for text in message_texts(request))
 
     @pytest.mark.parametrize(("phys_class", "model"), [("port", "Linecard-Port"), ("container", "")])
-    def test_single_install_refuses_a_holder_row_with_a_valid_binding(self, live_librenms, phys_class, model):
-        """A binding signed for a holder row, e.g. on a page rendered before a rule change, installs nothing."""
+    def test_single_install_refuses_a_holder_row_named_with_the_grant_of_a_hardware_row(
+        self, live_librenms, phys_class, model
+    ):
+        """A holder row renders no install, so a crafted index for it carries another row's grant."""
         from dcim.models import Module
 
         from netbox_librenms_plugin.views.sync.modules import InstallModuleView
@@ -910,31 +912,24 @@ class TestInstallAndUpdateViews:
         device = make_device(f"view-install-holder-{phys_class}", librenms_cf={"default": 52})
         bay = make_module_bay(device, "Holder Bay")
         module_type = make_module_type(f"HOLDER-CARD-{phys_class.upper()}")
-        item = _inventory_item(520, model, bay.name, phys_class=phys_class)
-        request = _post_request(
-            {
-                "module_bay_id": bay.pk,
-                "module_type_id": module_type.pk,
-                "ent_index": 520,
-                "server_key": "default",
-                "inventory_binding": module_inventory_binding_token(
-                    device.pk,
-                    "default",
-                    "install_module",
-                    {"module_bay_id": bay.pk, "module_type_id": module_type.pk},
-                    520,
-                    module_inventory_row_digest(item),
-                ),
-            }
+        card = _inventory_item(521, module_type.model, bay.name, serial="CARD-SN")
+        holder = _inventory_item(520, model, "Holder Slot", phys_class=phys_class)
+        view, request = _rendered_post(
+            InstallModuleView,
+            device,
+            [card, holder],
+            52,
+            live_librenms,
+            "install-module",
+            521,
+            extra={"ent_index": "520"},
         )
-        view = _view(InstallModuleView, request, live_librenms)
-        seed_inventory(view, device, [item], librenms_id=52)
 
         response = view_post(view, request, pk=device.pk)
 
         assert response.status_code == 302
         assert not Module.objects.filter(device=device).exists()
-        assert message_texts(request, "error") == ["Nothing was installed: not hardware."]
+        assert message_texts(request, "error") == [GrantRefusal.STALE.message]
 
     def test_a_database_error_in_the_bind_keeps_the_install(self, live_librenms):
         """The bind's own savepoint takes a real PostgreSQL error; the install still commits."""
