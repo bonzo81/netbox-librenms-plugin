@@ -148,19 +148,24 @@ class TestInventoryClassIncludeRule:
             DeviceIdentity,
             _check_ignore_rules,
         )
+        from netbox_librenms_plugin.utils import normalize_stack_serial
 
         index_map = {item["entPhysicalIndex"]: item for item in items}
         # _collect_top_items reads this cache for any item carrying an index, so a test that
         # passed {} would report that no rule ever matched.
         ignore_cache = {
             item["entPhysicalIndex"]: _check_ignore_rules(
-                item, index_map.get(item.get("entPhysicalContainedIn")), rules, index_map, DeviceIdentity()
+                item,
+                index_map.get(item.get("entPhysicalContainedIn")),
+                rules,
+                index_map,
+                DeviceIdentity(serial_key=normalize_stack_serial),
             )
             for item in items
         }
         transparent = BaseModuleTableView._find_transparent_indices(items, ignore_cache)
         return BaseModuleTableView._collect_top_items(
-            items, index_map, rules, DeviceIdentity(), transparent, ignore_cache
+            items, index_map, rules, DeviceIdentity(serial_key=normalize_stack_serial), transparent, ignore_cache
         )
 
     def _include_rule(self, pattern="other"):
@@ -3584,9 +3589,14 @@ class TestCheckIgnoreRules:
 
     def _check(self, item, parent_item, rules, index_map=None, device_serial="", type_models=()):
         from netbox_librenms_plugin.views.base.modules_view import DeviceIdentity, _check_ignore_rules
+        from netbox_librenms_plugin.utils import normalize_stack_serial
 
         return _check_ignore_rules(
-            item, parent_item, rules, index_map, DeviceIdentity(device_serial, frozenset(type_models))
+            item,
+            parent_item,
+            rules,
+            index_map,
+            DeviceIdentity(device_serial, frozenset(type_models), serial_key=normalize_stack_serial),
         )
 
     def test_match_with_serial_match_skips(self):
@@ -6218,6 +6228,7 @@ class TestScopePreservedAcrossIntegratedContainer:
         from netbox_librenms_plugin.models import ModuleBayMapping
         from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView, DeviceIdentity
+        from netbox_librenms_plugin.utils import normalize_stack_serial
 
         view = object.__new__(BaseModuleTableView)
         view._device_manufacturer = None
@@ -6307,7 +6318,7 @@ class TestScopePreservedAcrossIntegratedContainer:
             index_map=index_map,
             children_by_parent={100: [mda_item], 200: [port_item]},
             ignore_rules=[],
-            device_identity=DeviceIdentity(),
+            device_identity=DeviceIdentity(serial_key=normalize_stack_serial),
             module_types=view._get_module_types(),
             manufacturer=selected_device.device_type.manufacturer,
             selected_device=selected_device,
