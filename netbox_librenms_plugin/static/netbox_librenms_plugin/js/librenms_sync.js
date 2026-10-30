@@ -2007,8 +2007,8 @@ function restoreTableSelection(table) {
             if (!Object.hasOwn(companionInputs, input.name)) return;
             // Only a VRF the user chose comes back; a stored default follows the page, for example a new suggestion.
             if (input.matches('select.vrf-select') && !chosen.includes(input.name)) return;
-            // The verify of the restored member issues its grant; a stored grant is never reused.
-            if (reverify && input.name.startsWith('selection_grant_')) return;
+            // A grant names the render it was signed for: the row keeps its own, and a restored member gets one from its verify.
+            if (input.name.startsWith('selection_grant_')) return;
             const renderedValue = input.value;
             if (input.tomselect) {
                 input.tomselect.setValue(companionInputs[input.name], true);
