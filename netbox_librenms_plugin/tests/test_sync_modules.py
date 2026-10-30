@@ -81,8 +81,9 @@ class TestInstallSerialRulePreloading:
                 InstallBranchView._install_single(
                     device,
                     item,
-                    index_map,
                     {module_type.model: module_type},
+                    naming_map=index_map,
+                    ancestry_map=index_map,
                     module_bays=ModuleBay.objects.all(),
                     allowed_module_type_ids={module_type.pk},
                     changeable_components={model: model.objects.all() for _, _, model in _module_component_specs()},
@@ -243,8 +244,9 @@ def _run_install_single(device, item, index_map, module_types):
     return InstallBranchView._install_single(
         device,
         item,
-        index_map,
         module_types,
+        naming_map=index_map,
+        ancestry_map=index_map,
         module_bays=ModuleBay.objects.all(),
         allowed_module_type_ids={module_type.pk for module_type in module_types.values()},
         changeable_components={model: model.objects.all() for _, _, model in _module_component_specs()},
@@ -3462,6 +3464,130 @@ def test_branch_install_cuts_parent_bay_lookup_at_a_member_boundary(client, tran
     assert card.device_id == member.pk
     assert card.module_bay_id == member.modulebays.get(name="Card", module__isnull=True).pk
     assert not Module.objects.filter(module_bay__module=unrelated).exists()
+
+
+def _member_card_under_page_carrier(*, card_on_member):
+    """Cache a page carrier row with a card row below it; the member holds another carrier with a Card bay."""
+    from dcim.models import Module
+
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+    from netbox_librenms_plugin.tests.conftest import (
+        make_device_with_module_bays,
+        make_module_type,
+        make_module_type_with_bays,
+        make_virtual_chassis,
+    )
+    from netbox_librenms_plugin.views.mixins import CacheMixin
+
+    page = make_device_with_module_bays("selected-boundary-page", ["Carrier", "Card"], serial="PAGE-SERIAL")
+    member = make_device_with_module_bays("selected-boundary-member", ["Carrier", "Card"], serial="MEMBER-SERIAL")
+    make_virtual_chassis("selected-boundary-chassis", page, member)
+    carrier_type = make_module_type_with_bays("Selected Boundary Carrier", bay_names=["Card"])
+    card_type = make_module_type("Selected Boundary Card")
+    unrelated = Module.objects.create(
+        device=member,
+        module_bay=member.modulebays.get(name="Carrier"),
+        module_type=carrier_type,
+        status="active",
+        serial="OTHER-CARRIER",
+    )
+    InventoryIgnoreRule.objects.all().delete()
+    InventoryIgnoreRule.objects.create(name="Admit modules", match_type="class_is", pattern="module", action="include")
+    rows = [
+        {
+            "entPhysicalIndex": 1,
+            "entPhysicalContainedIn": 0,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Carrier",
+            "entPhysicalModelName": carrier_type.model,
+            "entPhysicalSerialNum": page.serial,
+        },
+        {
+            "entPhysicalIndex": 2,
+            "entPhysicalContainedIn": 1,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Card",
+            "entPhysicalModelName": card_type.model,
+            # Without the member serial, the page render attributes the card to the page with its carrier.
+            "entPhysicalSerialNum": member.serial if card_on_member else "SN-CARD",
+        },
+    ]
+    key = CacheMixin().get_cache_key(page, "inventory", "default")
+    cache.set(key, trusted_module_inventory_payload(page, rows))
+    return page, member, unrelated, card_type, key
+
+
+@pytest.mark.django_db
+def test_table_names_no_member_bay_after_a_module_row_of_the_page():
+    """A page module above a member row does not name the member bay, so the card offers the member Card bay."""
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    page, member, _unrelated, _card_type, key = _member_card_under_page_carrier(card_on_member=True)
+    request = make_request("get", {"server_key": "default"}, user=make_superuser("table-boundary-user"), path="/m/")
+    view = DeviceModuleTableView()
+    view.setup(request, pk=page.pk)
+    view.cache_only = True
+    try:
+        rows = list(view.get_context_data(request, page, server_key="default")["table"].data)
+    finally:
+        cache.delete(key)
+    (card,) = [row for row in rows if row["ent_physical_index"] == 2]
+    assert card["selected_device_id"] == member.pk
+    assert card["module_bay_id"] == member.modulebays.get(name="Card", module__isnull=True).pk
+    assert card["can_install"] is True
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("override", [False, True])
+def test_selected_install_walks_the_parent_chain_of_the_render_that_authorized_the_row(client, override):
+    """A manifest row stops its parent walk at a member boundary; a pinned override walks the whole pinned render."""
+    from dcim.models import Module
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms
+
+    page, member, unrelated, card_type, key = _member_card_under_page_carrier(card_on_member=not override)
+    user = make_superuser("selected-boundary-user")
+    client.force_login(user)
+    try:
+        content = render_module_tab(page, user=user)
+        action, fields = rendered_module_form(content, "install-selected")
+        fields["select"] = ["2"]
+        if override:
+            (select,) = [attrs for attrs in module_tab_forms(content).selects if attrs.get("data-module") == "2"]
+            (depth,) = re.findall(r'<tr[^>]*data-ent-index="2"[^>]*data-depth="(\d+)"', content)
+            verified = client.post(
+                reverse("plugins:netbox_librenms_plugin:verify_module"),
+                data=json.dumps(
+                    {
+                        "device_id": member.pk,
+                        "page_device_id": page.pk,
+                        "ent_physical_index": 2,
+                        "depth": int(depth),
+                        "server_key": "default",
+                        "verify_binding": select.get("data-verify-binding"),
+                    }
+                ),
+                content_type="application/json",
+            )
+            assert verified.status_code == 200, verified.content
+            (link,) = [
+                link
+                for link in module_tab_forms(verified.json()["formatted_row"]["device_selection"]).links
+                if "selection_grant" in link
+            ]
+            fields.update({"device_selection_2": str(member.pk), "selection_grant_2": link["value"]})
+        response = client.post(action, fields)
+    finally:
+        cache.delete(key)
+    assert response.status_code == 302
+    card = Module.objects.get(module_type=card_type)
+    assert card.device_id == member.pk
+    # The pinned member render attributes the carrier row to the member too, so the card goes into its carrier.
+    expected = member.modulebays.get(name="Card", module=unrelated if override else None)
+    assert card.module_bay_id == expected.pk
 
 
 @pytest.mark.django_db

@@ -75,6 +75,7 @@ def _match_bay(item, index_map, module_bays, *, exact=(), regex=()):
         regex_mappings=list(regex),
         manufacturer_id=None,
         norm_rules_bay={},
+        foreign_indices=frozenset(),
     )
 
 
@@ -441,12 +442,9 @@ class TestInstallSingleResolutionPaths:
             "manufacturer_id": device.device_type.manufacturer_id,
         }
         kwargs.update(overrides)
+        index_map = index_map if index_map is not None else {item["entPhysicalIndex"]: item}
         return InstallBranchView._install_single(
-            device,
-            item,
-            index_map if index_map is not None else {item["entPhysicalIndex"]: item},
-            module_types,
-            **kwargs,
+            device, item, module_types, naming_map=index_map, ancestry_map=index_map, **kwargs
         )
 
     def test_a_resolved_parent_narrows_the_search_without_hiding_a_device_level_bay(self):
