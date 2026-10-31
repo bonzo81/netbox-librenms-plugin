@@ -3570,6 +3570,71 @@ def test_table_names_no_member_bay_after_a_module_row_of_the_page():
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("anchor_on_member", [False, True])
+def test_table_counts_a_bay_position_only_under_a_module_of_the_target_member(anchor_on_member):
+    """The slot position under a carrier picks a member bay only when the member owns that carrier."""
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+    from netbox_librenms_plugin.tests.conftest import (
+        make_device_with_module_bays,
+        make_module_type,
+        make_superuser,
+        make_virtual_chassis,
+    )
+    from netbox_librenms_plugin.views.mixins import CacheMixin
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    page = make_device_with_module_bays("position-boundary-page", ["Slot 1", "Slot 2"], serial="PAGE-SERIAL")
+    member = make_device_with_module_bays("position-boundary-member", ["Slot 1", "Slot 2"], serial="MEMBER-SERIAL")
+    make_virtual_chassis("position-boundary-chassis", page, member)
+    carrier_type = make_module_type("Position Boundary Carrier")
+    card_type = make_module_type("Position Boundary Card")
+    InventoryIgnoreRule.objects.all().delete()
+    InventoryIgnoreRule.objects.create(name="Admit modules", match_type="class_is", pattern="module", action="include")
+    rows = [
+        {
+            "entPhysicalIndex": 1,
+            "entPhysicalContainedIn": 0,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Carrier",
+            "entPhysicalModelName": carrier_type.model,
+            "entPhysicalSerialNum": member.serial if anchor_on_member else page.serial,
+        },
+        *(
+            {
+                "entPhysicalIndex": index,
+                "entPhysicalContainedIn": 1,
+                "entPhysicalClass": "container",
+                "entPhysicalName": "",
+                "entPhysicalParentRelPos": index,
+            }
+            for index in (2, 3)
+        ),
+        {
+            "entPhysicalIndex": 4,
+            "entPhysicalContainedIn": 3,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Card",
+            "entPhysicalModelName": card_type.model,
+            "entPhysicalSerialNum": member.serial,
+        },
+    ]
+    key = CacheMixin().get_cache_key(page, "inventory", "default")
+    cache.set(key, trusted_module_inventory_payload(page, rows))
+    request = make_request("get", {"server_key": "default"}, user=make_superuser("position-boundary-user"), path="/m/")
+    view = DeviceModuleTableView()
+    view.setup(request, pk=page.pk)
+    view.cache_only = True
+    try:
+        table_rows = list(view.get_context_data(request, page, server_key="default")["table"].data)
+    finally:
+        cache.delete(key)
+    (card,) = [row for row in table_rows if row["ent_physical_index"] == 4]
+    assert card["selected_device_id"] == member.pk
+    expected = member.modulebays.get(name="Slot 2").pk if anchor_on_member else None
+    assert card.get("module_bay_id") == expected
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("override", [False, True])
 def test_selected_install_walks_the_parent_chain_of_the_render_that_authorized_the_row(client, override):
     """A manifest row stops its parent walk at a member boundary; a pinned override walks the whole pinned render."""

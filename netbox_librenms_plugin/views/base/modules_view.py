@@ -2916,7 +2916,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         bay = BaseModuleTableView._match_bay_by_name(candidates, module_bays, accepted_bay_types)
         if bay:
             return bay
-        return BaseModuleTableView._match_bay_by_position(item, index_map, module_bays, accepted_bay_types)
+        return BaseModuleTableView._match_bay_by_position(
+            item, index_map, module_bays, foreign_indices, accepted_bay_types
+        )
 
     def _match_module_bay(self, item, index_map, module_bays, accepted_bay_types=frozenset()):
         """
@@ -3141,33 +3143,24 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         return None
 
     @staticmethod
-    def _match_bay_by_position(item, index_map, module_bays, accepted_bay_types=frozenset()):
+    def _position_anchor(item, index_map, foreign_indices):
         """
-        Match bay by item's positional order among container siblings.
+        Find the ancestor that gives an item its slot position, and the container slot below it.
 
-        When an item is inside a container (no model), walk up to find the
-        nearest ancestor with a real hardware model, count which container slot
-        the item occupies, and match to the bay by number (e.g., SFP 1, SFP 2).
+        Walk up through modelless containers to the nearest ancestor with a real hardware model.
+        A modelless ancestor of another class (e.g. an IOS-XR class="module" with model="N/A"
+        under a linecard) is scaffolding, not a bay position, so the walk gives no anchor there.
+        When another device owns the anchor, only a container gives the position.
 
         Args:
-            item (dict): The inventory item to match.
+            item (dict): The inventory item to place.
             index_map (dict): Inventory items keyed by physical index.
-            module_bays (dict): Available NetBox module bays keyed by name.
-            accepted_bay_types (frozenset): The module bay types the matched module type fits.
+            foreign_indices (Container[int]): The indices that a device other than the row's target owns.
 
         Returns:
-            ModuleBay | None: The position-matched module bay, or None if no bay matches.
+            tuple[int, int] | None: The anchor index and the container slot index, or None.
 
         """
-        # Walk up through containers with placeholder/empty models to find the
-        # parent with a real hardware model.  Use a visited set to detect cycles.
-        #
-        # Only walk through ENTITY-MIB containers (entPhysicalClass="container").
-        # A modelless ancestor of any other class (e.g. class="module" with
-        # model="N/A" — Cisco IOS-XR uses these for motherboard/slice/EZChip
-        # scaffolding under a linecard) is hierarchical scaffolding, not a bay
-        # position; walking past it would silently align all deeply nested
-        # siblings to the same bay slot on the parent module.  Bail in that case.
         current_idx = item.get("entPhysicalContainedIn", 0)
         container_idx = None
         visited = set()
@@ -3175,23 +3168,44 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             visited.add(current_idx)
             ancestor = index_map[current_idx]
             model = _normalize_librenms_text(ancestor.get("entPhysicalModelName")).lower()
+            is_container = ancestor.get("entPhysicalClass") == "container"
             if model and model not in GENERIC_CONTAINER_MODELS:
-                # Found the parent with a real model; container_idx is the intermediate container
-                break
-            cls = ancestor.get("entPhysicalClass") or ""
-            if cls != "container":
+                if not container_idx or (current_idx in foreign_indices and not is_container):
+                    return None
+                return current_idx, container_idx
+            if not is_container:
                 return None
             container_idx = current_idx
             current_idx = ancestor.get("entPhysicalContainedIn", 0)
-        else:
-            return None
+        return None
 
-        if not container_idx:
+    @staticmethod
+    def _match_bay_by_position(item, index_map, module_bays, foreign_indices, accepted_bay_types=frozenset()):
+        """
+        Match bay by item's positional order among container siblings.
+
+        When an item is inside a container (no model), find the nearest ancestor
+        with a real hardware model, count which container slot the item occupies,
+        and match to the bay by number (e.g., SFP 1, SFP 2).
+
+        Args:
+            item (dict): The inventory item to match.
+            index_map (dict): Inventory items keyed by physical index.
+            module_bays (dict): Available NetBox module bays keyed by name.
+            foreign_indices (Container[int]): The indices that a device other than the row's target owns.
+            accepted_bay_types (frozenset): The module bay types the matched module type fits.
+
+        Returns:
+            ModuleBay | None: The position-matched module bay, or None if no bay matches.
+
+        """
+        anchor = BaseModuleTableView._position_anchor(item, index_map, foreign_indices)
+        if anchor is None:
             return None
+        parent_with_model_idx, container_idx = anchor
 
         # Determine position: count siblings under the parent, filtering out
         # non-hardware items (sensors, LEDs) that would shift the bay index.
-        parent_with_model_idx = current_idx
         siblings = sorted(
             [
                 i
