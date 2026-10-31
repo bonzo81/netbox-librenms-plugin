@@ -1,5 +1,6 @@
 """Render the tab templates and check their toolbar geometry and cache lifetime."""
 
+import re
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from urllib.parse import parse_qs
@@ -121,7 +122,9 @@ def render_tab(
         "request": SimpleNamespace(htmx=partial),
     }
     name = f"_{tab}_sync{'_content' if partial else ''}.html"
-    return engine.get_template(f"netbox_librenms_plugin/{name}").render(Context(context, use_l10n=False, use_tz=False))
+    html = engine.get_template(f"netbox_librenms_plugin/{name}").render(Context(context, use_l10n=False, use_tz=False))
+    # The server renders the page at NOW, the same time the browser clock starts at.
+    return re.sub(r'data-server-now="[^"]+"', f'data-server-now="{NOW.isoformat()}"', html)
 
 
 def load_tab(page, tab, key, **kwargs):
@@ -188,6 +191,17 @@ def test_cache_bar_drains_and_warns_in_the_last_minute(page, tab, key):
     )
     assert "monospace" in label_style["font"]
     assert label_style["digits"] == "tabular-nums"
+
+
+def test_a_later_countdown_restart_keeps_the_remaining_time(page):
+    """Each htmx swap restarts every countdown; a restart must not give back the time already used."""
+    load_tab(page, "interface", "interface_sync", timeout=180)
+    _add_page_scripts(page)
+    page.evaluate("initializeCountdowns()")
+    bar = page.get_by_role("progressbar")
+    page.clock.fast_forward(120_000)
+    page.evaluate("initializeCountdowns()")
+    expect(bar).to_have_attribute("aria-valuenow", "60")
 
 
 @pytest.mark.parametrize(("tab", "key"), TABS)
