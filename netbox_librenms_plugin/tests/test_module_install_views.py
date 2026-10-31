@@ -5,6 +5,7 @@ import pytest
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
 from netbox_librenms_plugin.tests.conftest import (
+    install_module,
     make_device,
     make_device_with_module_bays,
     make_interface,
@@ -495,6 +496,46 @@ class TestUpdateModuleSerialView:
         assert response.status_code == 302
         assert message_texts(request, "error") == [GrantRefusal.DESTINATION.message]
         assert message_texts(request, "warning") == []
+
+    @pytest.mark.parametrize("placeholder", ["N/A", "BUILTIN", "null"])
+    def test_a_placeholder_serial_updates_as_blank(self, live_librenms, placeholder):
+        """A grant signed for a placeholder row, e.g. by an older page, must store a blank serial."""
+        from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+        from netbox_librenms_plugin.module_grants import (
+            ACTION_UPDATE_SERIAL,
+            RENDER_ATTRIBUTED,
+            module_inventory_snapshot_digest,
+            sign_module_grant,
+        )
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView, _get_cached_inventory_for_device
+
+        device = make_device_with_module_bays(f"serial-placeholder-{len(placeholder)}", ["Slot 1"])
+        seed_mapping(device, "default", own=68)
+        module = install_module(device, "Slot 1", f"SERIAL-PLACEHOLDER-CARD-{len(placeholder)}", serial="OLD")
+        view = UpdateModuleSerialView()
+        view._librenms_api = live_librenms.api
+        rows = [_item(11, module.module_type.model, "Slot 1", entPhysicalSerialNum=placeholder)]
+        seed_inventory(view, device, rows, librenms_id=68)
+        inventory = _get_cached_inventory_for_device(device, "default", view.get_cache_key)
+        grant = sign_module_grant(
+            page_device_id=device.pk,
+            device_id=device.pk,
+            server_key="default",
+            action=ACTION_UPDATE_SERIAL,
+            inventory_digest=module_inventory_snapshot_digest(inventory),
+            policy_fingerprint=load_inventory_policy(device.pk).fingerprint,
+            render_mode=RENDER_ATTRIBUTED,
+            ent_index=11,
+            action_target={"module_id": module.pk},
+        )
+        data = {"module_id": module.pk, "ent_index": 11, "server_key": "default", "inventory_binding": grant}
+        request = make_request("post", data, user=make_superuser(), path="/modules/")
+
+        response = view_post(view, request, pk=device.pk)
+
+        assert response.status_code == 302
+        module.refresh_from_db()
+        assert module.serial == ""
 
     def test_an_invalid_module_id_is_reported(self, live_librenms):
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
