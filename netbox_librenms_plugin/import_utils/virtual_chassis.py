@@ -287,13 +287,14 @@ def devices_with_serial(serial, *, exclude_pk=None, limit: int = 2) -> list:
 
     """
     # The rules decide per device, so filter every exact match before the limit counts it.
-    found = find_devices_by_serial(serial, limit=None)
-    matches = [
-        device
-        for device in found
-        if device.pk != exclude_pk and serials_match(device.serial, serial, chassis_serial_key(device))
-    ]
-    return matches[:limit]
+    matches = []
+    for device in find_devices_by_serial(serial, limit=None):
+        if device.pk == exclude_pk or not serials_match(device.serial, serial, chassis_serial_key(device)):
+            continue
+        matches.append(device)
+        if limit is not None and len(matches) >= limit:
+            break
+    return matches
 
 
 def candidate_vc_serial_keys() -> tuple:
