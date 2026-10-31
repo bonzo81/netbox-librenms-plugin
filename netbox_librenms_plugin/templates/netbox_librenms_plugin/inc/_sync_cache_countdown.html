@@ -3,6 +3,7 @@
     {% if cache_expiry %}
     {% sync_cache_timeout cache_server_key as cache_timeout %}
     <div id="{{ cache_countdown_id }}" class="sync-cache-bar" data-expiry="{{ cache_expiry|date:'c' }}"
+         data-server-now="{% now 'c' %}"
          data-timeout="{{ cache_timeout }}" role="progressbar" aria-label="Cache time remaining"
          aria-valuemin="0" aria-valuemax="{{ cache_timeout }}" aria-valuenow="0" aria-valuetext="" title="">
         <i class="mdi mdi-timer-outline" aria-hidden="true"></i>
