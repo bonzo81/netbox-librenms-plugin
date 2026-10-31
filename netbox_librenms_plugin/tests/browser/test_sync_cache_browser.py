@@ -3755,6 +3755,51 @@ def test_hidden_tab_countdown_changes_available_rail_to_unavailable_without_inte
     assert page.locator("#ip-action").count() == 0
 
 
+def test_a_browser_clock_ahead_of_the_server_keeps_a_valid_cached_tab(page):
+    """The countdown measures the cache lifetime on the server clock that rendered it."""
+    from datetime import UTC, datetime, timedelta
+
+    from django.conf import settings
+    from django.template import Context, Engine, Library
+
+    if not settings.configured:
+        settings.configure(USE_I18N=False, USE_TZ=True)
+    query = Library()
+    query.simple_tag(lambda server_key: 600, name="sync_cache_timeout")
+    engine = Engine()
+    engine.template_libraries["librenms_sync_query"] = query
+    countdown = engine.from_string((TEMPLATE_DIR / "inc" / "_sync_cache_countdown.html").read_text()).render(
+        Context(
+            {
+                "cache_expiry": datetime.now(UTC) + timedelta(minutes=5),
+                "cache_container_id": "cache-countdown",
+                "cache_countdown_id": "countdown-timer",
+                "cache_server_key": "primary",
+            }
+        )
+    )
+    initial = {"interfaces": _state("before"), "ipaddresses": _state("before-ip")}
+
+    page.clock.install(time=datetime.now(UTC) + timedelta(days=1))
+    page.set_content(
+        _replace_fixture_markup(
+            _page_html(initial),
+            '<button id="interface-action">Sync</button>',
+            '<table id="interface-rows"><tr><td>Ethernet1</td></tr></table>'
+            + countdown
+            + '<button id="interface-action">Sync</button>',
+        )
+    )
+    _add_page_scripts(page)
+    page.evaluate("initializeSyncCacheConsistency(); initializeCountdown('countdown-timer')")
+
+    assert page.locator("#interface-rows").count() == 1
+    assert page.locator("#interface-action").count() == 1
+    assert page.evaluate("syncCacheController().invalidatedLocally.size") == 0
+    assert page.locator("#interfaces-tab").evaluate("node => node.classList.contains('sync-cache-ready')")
+    assert not page.locator("#countdown-timer").evaluate("node => node.classList.contains('is-expired')")
+
+
 def test_failed_retry_updates_an_already_invalidated_tab_without_a_new_revision(page):
     initial = {
         "interfaces": _state("mutation", state="locally_changed", source_tab="interfaces"),

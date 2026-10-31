@@ -343,6 +343,12 @@ function initializeCountdown(elementId) {
     if (!countdownElement) return;
     const expiry = new Date(countdownElement.dataset.expiry).getTime();
     const timeout = Number(countdownElement.dataset.timeout);
+    // Count on the server clock that rendered the expiry; keep the first offset, because every htmx swap restarts the countdown.
+    if (countdownElement.dataset.clockOffset === undefined) {
+        const serverNow = new Date(countdownElement.dataset.serverNow).getTime();
+        countdownElement.dataset.clockOffset = String(Number.isFinite(serverNow) ? serverNow - Date.now() : 0);
+    }
+    const clockOffset = Number(countdownElement.dataset.clockOffset);
     let countdownInterval;
 
     function updateCountdown() {
@@ -350,7 +356,7 @@ function initializeCountdown(elementId) {
             clearInterval(countdownInterval);
             return;
         }
-        const distance = expiry - Date.now();
+        const distance = expiry - (Date.now() + clockOffset);
         const remaining = Math.max(0, Math.ceil(distance / 1000));
         const text = remaining > 0
             ? `Cached data expires in ${Math.floor(remaining / 60)}m ${remaining % 60}s. Refresh to fetch it again.`
