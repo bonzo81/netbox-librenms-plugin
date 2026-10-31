@@ -45,6 +45,45 @@ HTTP_NOT_FOUND = 404
 logger = logging.getLogger(__name__)
 
 
+def librenms_id_cache_key(obj, server_key):
+    """
+    Return the cache key that holds the discovered LibreNMS ID of *obj* on *server_key*.
+
+    Args:
+        obj: NetBox object with model metadata and an optional primary key.
+        server_key (str): The LibreNMS server key.
+
+    Returns:
+        str: The cache key.
+
+    """
+    object_id = obj.pk
+    if object_id is None:
+        object_id = getattr(obj, "_librenms_cache_identity", None)
+        if object_id is None:
+            object_id = f"unsaved-{uuid4().hex}"
+            obj._librenms_cache_identity = object_id
+    return f"librenms_device_id_{obj._meta.model_name}_{object_id}_{server_key}"
+
+
+def stored_librenms_id(obj, server_key):
+    """
+    Return the stored or cached LibreNMS ID of *obj* on *server_key*, without discovery.
+
+    Args:
+        obj: NetBox object with a mapping or a cache identity.
+        server_key (str): The LibreNMS server key.
+
+    Returns:
+        object: The stored ID, the cached value as stored, or None.
+
+    """
+    librenms_id = read_mapping(obj).own_id(server_key)
+    if librenms_id is not None:
+        return librenms_id
+    return cache.get(librenms_id_cache_key(obj, server_key))
+
+
 def normalized_pair_key(first_port, second_port):
     """Return one order-independent key for a port pair, or None when it names a single port."""
     from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
@@ -468,15 +507,11 @@ class LibreNMSAPI:
             int: LibreNMS ID if found in the custom field or cache, None otherwise
 
         """
-        resolved_key = server_key or self.server_key
-        librenms_id = read_mapping(obj).own_id(resolved_key)
-        if librenms_id is not None:
-            return librenms_id
-        return self.get_cached_librenms_id(obj, server_key=resolved_key)
+        return stored_librenms_id(obj, server_key or self.server_key)
 
     def get_cached_librenms_id(self, obj, server_key=None):
         """Return the LibreNMS ID cached for *obj* on the server, or None."""
-        return cache.get(self._get_cache_key(obj, server_key=server_key or self.server_key))
+        return cache.get(librenms_id_cache_key(obj, server_key or self.server_key))
 
     def get_librenms_id(self, obj):
         """
@@ -568,15 +603,9 @@ class LibreNMSAPI:
             str: Cache key
 
         """
-        object_type = obj._meta.model_name
-        object_id = obj.pk
-        if object_id is None:
-            object_id = getattr(obj, "_librenms_cache_identity", None)
-            if object_id is None:
-                object_id = f"unsaved-{uuid4().hex}"
-                obj._librenms_cache_identity = object_id
-        resolved_key = server_key if server_key is not None else getattr(self, "server_key", "default")
-        return f"librenms_device_id_{object_type}_{object_id}_{resolved_key}"
+        return librenms_id_cache_key(
+            obj, server_key if server_key is not None else getattr(self, "server_key", "default")
+        )
 
     def _store_librenms_id(self, obj, librenms_id):
         """
@@ -1019,6 +1048,8 @@ class LibreNMSAPI:
 
             compiled_patterns = []
             for pattern_str in lag_patterns.values():
+                # A caller-supplied recording pattern, not a stored rule; the stored rules come in compiled.
+                # nosemgrep: regex-error-must-raise
                 try:
                     compiled_patterns.append(_re.compile(pattern_str))
                 except (*REGEX_COMPILE_ERRORS, TypeError) as exc:
@@ -1048,6 +1079,8 @@ class LibreNMSAPI:
 
                 compiled_bridge_patterns = []
                 for pattern_str in bridge_patterns.values():
+                    # A caller-supplied recording pattern, not a stored rule; the stored rules come in compiled.
+                    # nosemgrep: regex-error-must-raise
                     try:
                         compiled_bridge_patterns.append(_re.compile(pattern_str))
                     except (*REGEX_COMPILE_ERRORS, TypeError) as exc:

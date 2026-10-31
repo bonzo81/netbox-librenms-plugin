@@ -9,7 +9,6 @@ from django.urls import reverse
 from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
 from netbox.tables.columns import BooleanColumn, ToggleColumn
-from utilities.paginator import EnhancedPaginator
 from utilities.templatetags.helpers import humanize_speed
 
 from netbox_librenms_plugin.constants import NAME_OWNER_STALE, OOB_INVENTORY_SOURCE
@@ -39,9 +38,9 @@ from netbox_librenms_plugin.utils import (
     format_mac_address,
     get_interface_name_field,
     get_missing_vlan_warning,
-    get_table_paginate_count,
     get_tagged_vlan_css_class,
     get_untagged_vlan_css_class,
+    paginate_sync_table,
     render_vc_member_options,
     resolve_interface_row_device,
 )
@@ -1179,15 +1178,8 @@ class LibreNMSInterfaceTable(tables.Table):
 
     def configure(self, request):
         """Configure the table with pagination and other options."""
-        paginate = {
-            "paginator_class": EnhancedPaginator,
-            "per_page": get_table_paginate_count(request, self.prefix),
-        }
         # A sync POST re-renders the tab in place, so it posts the page it was rendered at.
-        if page := request.POST.get(f"{self.prefix}page"):
-            paginate["page"] = page
-
-        tables.RequestConfig(request, paginate).configure(self)
+        paginate_sync_table(self, request, page=request.POST.get(f"{self.prefix}page") or None)
 
 
 class VCInterfaceTable(LibreNMSInterfaceTable):
@@ -1198,7 +1190,7 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         accessor="device",
         orderable=False,
         empty_values=[],
-        attrs={"td": {"data-col": "device_selection"}},
+        attrs={"td": {"class": "device-selection-col", "data-col": "device_selection"}},
     )
 
     def __init__(self, *args, device=None, interface_name_field=None, vlan_groups=None, **kwargs):

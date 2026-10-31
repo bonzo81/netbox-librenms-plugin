@@ -17,6 +17,13 @@ from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views import View
 
+from netbox_librenms_plugin.breakout_cables import (
+    channel_write_endpoints,
+    decide_breakout_cable,
+    decide_channel_far_end,
+    holds_a_cable,
+    is_channel,
+)
 from netbox_librenms_plugin.constants import (
     INTERFACE_NAME_FIELDS,
     OOB_INVENTORY_SOURCE,
@@ -103,6 +110,11 @@ def _termination_topology_columns():
         ("cable_id", "cable_end", *connector, "pk"),
         ("cable_id", "cable_end", "termination_type_id", "termination_id", *optional),
     )
+
+
+def _channel_topology(interface):
+    """Return the channel ID and parent of a channel interface, or None for any other termination."""
+    return (interface.channel_id, interface.parent_id) if is_channel(interface) else None
 
 
 class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -252,16 +264,24 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             sync_device=cache_obj,
         )
 
-    def create_cable(self, local_interface, remote_interface, request, *, sync_settings=None):
+    def create_cable(self, a_terminations, b_terminations, request, *, sync_settings=None, profile=""):
         """
-        Create an enriched cable between the local and remote terminations.
+        Create an enriched cable between the A and B terminations.
 
         Beyond the bare connection, the cable is stamped with provenance so the plugin can later
         recognise its own cables (and protect a future DCIM-driven remodel from being overwritten):
         the ``librenms`` tag, a configured color, and a description carrying the acting server key.
-        The tenant follows the REMOTE side (the target device) — when the two devices are in
-        different tenants the remote's wins, never the terminal-server side. Type is left blank
-        because LibreNMS doesn't tell us the physical cable and NetBox has no serial/rollover type.
+        The tenant follows the REMOTE side (the row's far end, the last B termination). When the
+        two devices are in different tenants the remote's wins, never the terminal-server side.
+        Type is left blank because LibreNMS doesn't tell us the physical cable and NetBox has no
+        serial/rollover type.
+
+        Args:
+            a_terminations (list): The local side.
+            b_terminations (list): The remote side.
+            request (HttpRequest): The request that receives the error message.
+            sync_settings (LibreNMSSettings | None): The settings row, or None to load it.
+            profile (str): The NetBox cable profile of a breakout cable; a profiled cable is validated first.
 
         Returns:
             True on success, False on failure.
@@ -285,13 +305,16 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                     suffix = ""
                 description = f"{base_desc[: description_max_length - len(suffix)]}{suffix}"
                 cable = Cable(
-                    a_terminations=[local_interface],
-                    b_terminations=[remote_interface],
+                    a_terminations=list(a_terminations),
+                    b_terminations=list(b_terminations),
                     status="connected",
                     color=sync_settings.cable_sync_tag_color,
                     description=description,
-                    tenant=getattr(getattr(remote_interface, "device", None), "tenant", None),
+                    tenant=getattr(getattr(b_terminations[-1], "device", None), "tenant", None),
                 )
+                if profile:
+                    cable.profile = profile
+                    cable.full_clean()
                 cable.save()
                 # The tag add merges into the create's change record only inside a NetBox request.
                 cable.snapshot()
@@ -329,10 +352,13 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
                 caller).
 
         """
+        channel_topology = _channel_topology(local_term)
+        extra_endpoints = channel_write_endpoints(local_term)
         with transaction.atomic():
             locked_terms = self._lock_cable_terminations(
                 local_term,
                 remote_term,
+                extra_endpoints=extra_endpoints,
                 displaced=self._displaced_interfaces(local_term, remote_term),
                 port_owner_ids={port_owner_id(link_data, side) for side in ("local", "remote")} - {None},
                 expected_local_owner_id=coerce_librenms_id(
@@ -364,12 +390,24 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             local_term, remote_term = locked_terms
             if not self._locked_ends_may_be_row_ports(local_term, remote_term, link_data):
                 return {"status": "stale", "interface": display_name}
-            locked_cables = self._lock_current_cables(local_term, remote_term)
+            # The path is chosen from the locked rows: a port may have become a channel since the read.
+            if _channel_topology(local_term) != channel_topology:
+                return {"status": "stale", "interface": display_name}
+            locked_parent = next(
+                (self._locked_terminations_by_key[(type(term), term.pk)] for term in extra_endpoints), None
+            )
+            locked_cables = self._lock_current_cables(local_term, remote_term, locked_parent)
             visible_cable_ids = set(
                 self.restricted_queryset(Cable, "view").filter(pk__in=locked_cables).values_list("pk", flat=True)
             )
             if visible_cable_ids != set(locked_cables):
                 return {"status": "denied", "interface": display_name}
+            if channel_topology is not None:
+                return self._apply_breakout_cable_action(
+                    local_term, remote_term, locked_parent, link_data, display_name, locked_cables, port_records
+                )
+            if (decision := decide_channel_far_end(local_term, remote_term, self._may)) is not None:
+                return self._breakout_result(decision, display_name)
             if (
                 local_term.cable_id is not None
                 and remote_term.cable_id is not None
@@ -414,6 +452,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         local_term,
         remote_term,
         *,
+        extra_endpoints=(),
         displaced=None,
         port_owner_ids=(),
         expected_local_owner_id=None,
@@ -426,11 +465,11 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         cable the write may remove. Those rows and their owners, and the *port_owner_ids* that own
         the row's LibreNMS ports, are locked in the same statements, so the rule gate reads their
         bindings and platforms under the lock. They are not the write's endpoints, so they need
-        no change scope.
+        no change scope. The *extra_endpoints* (the parent of a channel) are written, so they need it.
         """
         self._termination_lock_failure = "denied"
         displaced = displaced or {}
-        grouped, expected_owner_by_key = self._group_terminations(local_term, remote_term)
+        grouped, expected_owner_by_key = self._group_terminations(local_term, remote_term, *extra_endpoints)
 
         # Check the submitted candidates before taking locks so a forged request cannot lock
         # rows that are outside its current object scope. The same check runs again after the
@@ -496,11 +535,11 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         )
 
     @staticmethod
-    def _group_terminations(local_term, remote_term):
+    def _group_terminations(*terminations):
         """Group the submitted terminations by model, and record the owner each one claims."""
         grouped = {}
         expected_owner_by_key = {}
-        for termination in (local_term, remote_term):
+        for termination in terminations:
             grouped.setdefault(type(termination), set()).add(termination.pk)
             # Candidate evidence only; the locked rows must still report these exact owners.
             expected_owner_by_key[(type(termination), termination.pk)] = termination.device_id
@@ -517,7 +556,8 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             dict: ``{(Interface, pk): device_id}``, without the endpoints themselves.
 
         """
-        cable_ids = {term.cable_id for term in terminations if term.cable_id is not None}
+        # A channel's cable is its parent's breakout cable, which a write never removes.
+        cable_ids = {term.cable_id for term in terminations if term.cable_id is not None and not is_channel(term)}
         if not cable_ids:
             return {}
         endpoints = {(type(term), term.pk) for term in terminations}
@@ -725,17 +765,10 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         return candidate.virtual_chassis_id is not None and candidate.virtual_chassis_id == initial.virtual_chassis_id
 
     @staticmethod
-    def _lock_current_cables(local_term, remote_term):
-        """Lock the cables currently attached to either locked termination."""
+    def _lock_current_cables(*terminations):
+        """Lock the cables currently attached to the locked terminations."""
         cable_ids = sorted(
-            {
-                cable_id
-                for cable_id in (
-                    getattr(local_term, "cable_id", None),
-                    getattr(remote_term, "cable_id", None),
-                )
-                if cable_id is not None
-            }
+            {cable_id for term in terminations if (cable_id := getattr(term, "cable_id", None)) is not None}
         )
         return {cable.pk: cable for cable in Cable.objects.select_for_update().filter(pk__in=cable_ids).order_by("pk")}
 
@@ -760,6 +793,82 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
         ]
         payload = json.dumps([cable_state, endpoints], separators=(",", ":"))
         return hashlib.sha256(payload.encode()).hexdigest()
+
+    def _apply_breakout_cable_action(
+        self, channel, remote, parent, link_data, display_name, locked_cables, port_records
+    ):
+        """
+        Create or extend the breakout cable on the locked *parent* of *channel*, with this row's far end only.
+
+        This path never removes or rewrites a cable, also with ``force``: the write only adds a far end.
+
+        Returns:
+            dict: A result with ``status`` in ``{valid, duplicate, breakout_refused, blocked_by_rule,
+                denied, stale, failed}``.
+
+        """
+        cable = locked_cables.get(parent.cable_id) if parent is not None and parent.cable_id is not None else None
+        if parent is not None and parent.cable_id is not None and cable is None:
+            return {"status": "stale", "interface": display_name}
+        sync_settings = self._get_cable_sync_settings(lock=True)
+        decision = decide_breakout_cable(
+            channel,
+            remote,
+            self._get_provenance_tag(sync_settings=sync_settings) if cable is not None else None,
+            self._may,
+            parent=parent,
+            cable=cable,
+        )
+        if decision.action in ("matching", "refuse"):
+            return self._breakout_result(decision, display_name)
+        # The rules decide the channel's own port; the parent only holds the cable.
+        blocked = self._rule_block(link_data, [channel, remote], port_records or {})
+        if blocked is not None:
+            logger.info("Cable sync skipped %s: %s", display_name, blocked)
+            return {"status": "blocked_by_rule", "interface": f"{display_name} ({blocked})", "reason": blocked}
+        if decision.action == "create":
+            created = self.create_cable(
+                [parent],
+                decision.b_terminations,
+                self.request,
+                sync_settings=sync_settings,
+                profile=decision.profile,
+            )
+            return {"status": "valid" if created else "failed", "interface": display_name}
+        extended = self._extend_breakout_cable(cable, decision.b_terminations, self.request)
+        return {"status": "valid" if extended else "failed", "interface": display_name}
+
+    def _may(self, action, obj):
+        """Return whether the request user may do *action* (``view`` or ``change``) on *obj*."""
+        return self.restricted_queryset(type(obj), action).filter(pk=obj.pk).exists()
+
+    @staticmethod
+    def _breakout_result(decision, display_name):
+        """Return the result of a breakout decision that writes nothing."""
+        if decision.action == "matching":
+            return {"status": "duplicate", "interface": display_name}
+        logger.info("Cable sync did not write a breakout cable for %s: %s", display_name, decision.reason)
+        return {
+            "status": "breakout_refused",
+            "interface": f"{display_name} ({decision.reason})",
+            "reason": decision.reason,
+        }
+
+    @staticmethod
+    def _extend_breakout_cable(cable, b_terminations, request):
+        """Append the new far end to the B side of *cable*; the existing far ends keep their connectors."""
+        try:
+            with transaction.atomic():
+                cable.snapshot()
+                cable.b_terminations = list(b_terminations)
+                cable.full_clean()
+                cable.save()
+            return True
+        except Exception as exc:
+            if classify_conflict(exc):
+                raise
+            messages.error(request, f"Failed to extend cable: {exception_text_for(exc, Cable, request.user)}")
+            return False
 
     def _apply_locked_cable_action(
         self,
@@ -793,7 +902,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             cable.tags.add(self._get_provenance_tag(create=True, sync_settings=sync_settings))
             return {"status": "tagged", "interface": display_name}
         if action == "create":
-            if self.create_cable(local_term, remote_term, self.request, sync_settings=sync_settings):
+            if self.create_cable([local_term], [remote_term], self.request, sync_settings=sync_settings):
                 return {"status": "valid", "interface": display_name}
             # create_cable already flashed the concrete error; "invalid" would additionally claim
             # the row had no LibreNMS link data.
@@ -821,7 +930,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             # Remove the occupying cable(s) first (NetBox forbids a second cable on a live endpoint).
             for cable in to_remove:
                 cable.delete()
-            if self.create_cable(local_term, remote_term, self.request, sync_settings=sync_settings):
+            if self.create_cable([local_term], [remote_term], self.request, sync_settings=sync_settings):
                 return {"status": "overwritten", "interface": display_name}
             # Create failed AFTER deleting the old cable(s): raise so the per-interface atomic block
             # (process_interface_sync) rolls the deletes back rather than orphaning the connection.
@@ -1157,6 +1266,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             "unsupported": [],
             "patch_path": [],
             "blocked_by_rule": [],
+            "breakout_refused": [],
             "busy": [],
         }
         self._pending_conflicts = []
@@ -1384,6 +1494,7 @@ class SyncCablesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libre
             "Multi-termination cables cannot be changed by cable sync. Update them in NetBox for: {items}.",
         ),
         ("blocked_by_rule", "warning", "Skipped (the interface rules refuse a port): {items}"),
+        ("breakout_refused", "warning", "Cable sync did not write the breakout cable for: {items}"),
         ("duplicate", "warning", "Cable already exists for interfaces: {items}"),
         (
             "skipped",
@@ -1515,7 +1626,7 @@ class CableRemoteCreateView(SyncCablesView):
                     force=False,
                     port_records=port_records,
                 )
-                if result["status"] == "blocked_by_rule":
+                if result["status"] in ("blocked_by_rule", "breakout_refused"):
                     raise _RemoteCreateAborted(f"The cable is not created: {result['reason']}.")
                 if result["status"] != "valid":
                     raise _RemoteCreateAborted(
@@ -1587,7 +1698,7 @@ class CableRemoteCreateView(SyncCablesView):
         )
         if remote_device is None or local_interface is None:
             return None, HttpResponse("The row's NetBox objects are no longer available.", status=404)
-        if local_interface.cable_id is not None:
+        if holds_a_cable(local_interface):
             return None, HttpResponse("The local interface is already connected. Refresh the Cables tab.", status=409)
         port = self._remote_port_record(row)
         if port is None:

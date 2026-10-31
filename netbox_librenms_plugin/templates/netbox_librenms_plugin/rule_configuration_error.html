@@ -1,0 +1,7 @@
+{% extends 'base/layout.html' %}
+
+{% block title %}Invalid rule{% endblock %}
+
+{% block content %}
+{% include "netbox_librenms_plugin/inc/_rule_configuration_error.html" with consequence="This page is not shown, because its content depends on the rule. Fix the rule, then reload this page." %}
+{% endblock %}

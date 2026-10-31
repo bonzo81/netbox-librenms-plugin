@@ -88,6 +88,13 @@ def _linked_device(name, device_id, **kwargs):
     return make_device(name, librenms_cf={SERVER_KEY: device_id}, **kwargs)
 
 
+def _reporting_device(name, server, device_id, os):
+    """A linked device whose LibreNMS device reports *os*."""
+    device = _linked_device(name, device_id)
+    server.device_info_response(device_id=device_id, hostname=name, os=os)
+    return device
+
+
 def _messages(response, level=None):
     return message_texts(response.wsgi_request, level=level)
 
@@ -469,7 +476,7 @@ class TestCreateAndAssignPlatformView:
         from dcim.models import Platform
         from netbox_librenms_plugin.models import PlatformMapping
 
-        device = make_device("platform-create-device")
+        device = _reporting_device("platform-create-device", librenms_server, 6581, " Created-OS ")
         manufacturer = device.device_type.manufacturer
 
         response = _post(
@@ -496,7 +503,7 @@ class TestCreateAndAssignPlatformView:
     def test_existing_platform_is_reused_without_changing_manufacturer(self, logged_in_client, librenms_server):
         from dcim.models import Platform
 
-        device = make_device("platform-reuse-device")
+        device = _reporting_device("platform-reuse-device", librenms_server, 6582, "existing-os")
         manufacturer = device.device_type.manufacturer
         platform = Platform.objects.create(
             name="Existing Platform",
@@ -526,11 +533,12 @@ class TestCreateAndAssignPlatformView:
         assert device.platform is None
         assert any("Platform name is required" in text for text in _messages(response, "error"))
 
-    def test_mapping_conflict_is_reported_without_undoing_assignment(self, logged_in_client, librenms_server):
+    def test_an_os_mapping_that_now_resolves_makes_the_create_stale(self, logged_in_client, librenms_server):
+        """The modal opened while the OS had no platform; a mapping added since then wins over the named create."""
         from dcim.models import Platform
         from netbox_librenms_plugin.models import PlatformMapping
 
-        device = make_device("platform-mapping-conflict")
+        device = _reporting_device("platform-mapping-conflict", librenms_server, 6583, "conflicted-os")
         existing_target = Platform.objects.create(name="Existing mapping target", slug="existing-mapping-target")
         requested = Platform.objects.create(name="Requested target", slug="requested-target")
         PlatformMapping.objects.create(librenms_os="conflicted-os", netbox_platform=existing_target)
@@ -547,9 +555,9 @@ class TestCreateAndAssignPlatformView:
         )
 
         device.refresh_from_db()
-        assert device.platform == requested
+        assert device.platform is None
         assert PlatformMapping.objects.get(librenms_os="conflicted-os").netbox_platform == existing_target
-        assert any("could not be created" in text for text in _messages(response, "warning"))
+        assert any("now matches LibreNMS OS 'conflicted-os'" in text for text in _messages(response, "error"))
 
     def test_invalid_manufacturer_is_rejected_before_platform_creation(self, logged_in_client, librenms_server):
         from dcim.models import Manufacturer, Platform
@@ -573,7 +581,7 @@ class TestCreateAndAssignPlatformView:
     def test_invalid_platform_slug_rolls_back_creation(self, logged_in_client, librenms_server):
         from dcim.models import Platform
 
-        device = make_device("platform-invalid-slug")
+        device = _reporting_device("platform-invalid-slug", librenms_server, 6584, "")
 
         response = _post(
             logged_in_client,
@@ -592,7 +600,7 @@ class TestCreateAndAssignPlatformView:
     ):
         from dcim.models import Manufacturer, Platform
 
-        device = make_device("platform-incompatible-manufacturer")
+        device = _reporting_device("platform-incompatible-manufacturer", librenms_server, 6585, "")
         incompatible = Manufacturer.objects.create(
             name="Incompatible platform manufacturer",
             slug="incompatible-platform-manufacturer",
@@ -620,7 +628,7 @@ class TestCreateAndAssignPlatformView:
     def test_missing_mapping_permission_keeps_the_primary_assignment(self, client, librenms_server):
         from dcim.models import Device, Platform
 
-        device = make_device("platform-no-mapping-permission")
+        device = _reporting_device("platform-no-mapping-permission", librenms_server, 6586, "permission-skipped-os")
         platform = Platform.objects.create(name="Assignable without mapping", slug="assignable-without-mapping")
         user = make_user_with_perms(
             "platform-assignment-without-mapping",
@@ -1386,8 +1394,12 @@ class TestCommonFieldUpdateFailures:
         [
             ("update_device_serial", "device", {}),
             ("convert_legacy_librenms_id", "device", {"object_type": "device"}),
-            ("create_and_assign_platform", "device", {"platform_name": "Wrapped Existing Platform"}),
-            ("create_and_assign_platform", "platform", {"platform_name": "Wrapped New Platform"}),
+            (
+                "create_and_assign_platform",
+                "device",
+                {"platform_name": "Wrapped Existing Platform", "librenms_os": "ios"},
+            ),
+            ("create_and_assign_platform", "platform", {"platform_name": "Wrapped New Platform", "librenms_os": "ios"}),
         ],
         ids=["field-write", "legacy-convert", "platform-assign", "platform-create"],
     )

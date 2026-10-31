@@ -2289,3 +2289,44 @@ class TestCableEnrichment:
         csp.refresh_from_db()
         cable = Cable.objects.get(pk=csp.cable_id)
         assert cable.tenant_id == remote_tenant.pk  # remote side wins, not local
+
+
+@pytest.mark.django_db
+class TestC8300RecordingAsyncLines:
+    """The real C8300 capture: the async lines of its NIM-16A reach the Cables tab as serial rows."""
+
+    def test_the_recorded_async_lines_resolve_to_their_console_server_ports(self, client, live_librenms):
+        from django.core.cache import cache
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+        from netbox_librenms_plugin.tests.recordings import load_recording
+        from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+        recording = load_recording("iosxe-c8300")
+        live_librenms.server.load_recording(recording)
+        # IOS XE numbers the 16 NIM-16A lines 2 to 17; the seeded Cisco pattern names them "Line {N}".
+        lines = [f"Line {number}" for number in range(2, 18)]
+        router, csps, _ = make_serial_device("c8300-async-lines", csp_names=lines)
+        server_key = configured_server_key()
+        seed_mapping(router, server_key, own=recording["device_id"])
+        client.force_login(make_superuser())
+
+        refreshed = client.post(
+            reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[router.pk]),
+            {"server_key": server_key},
+            HTTP_HX_REQUEST="true",
+        )
+
+        assert refreshed.status_code == 200
+        cached = cache.get(object.__new__(SyncCablesView).get_cache_key(router, "links", server_key))
+        serial_rows = [link for link in cached["links"] if link.get("_source") == "serial"]
+        assert [row["local_port"] for row in serial_rows] == lines
+        assert all(row["is_configured"] for row in serial_rows)
+        rendered = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[router.pk]),
+            {"tab": "cables", "server_key": server_key},
+        )
+        records = [row.record for row in rendered.context["cable_sync"]["table"].rows]
+        resolved = {r["local_port"]: r["netbox_local_interface_id"] for r in records if r.get("_source") == "serial"}
+        assert resolved == {csp.name: csp.pk for csp in csps}

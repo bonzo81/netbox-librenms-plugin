@@ -1747,7 +1747,7 @@ class TestVerifyEndpointsServerKeyGuard:
         device = _make_vc_member_device(name="srvkey-mod-dev")
         request = _json_post(
             "/plugins/librenms_plugin/verify-module/",
-            {"device_id": device.pk, "ent_physical_index": 7, "server_key": ["a"]},
+            {"device_id": device.pk, "page_device_id": device.pk, "ent_physical_index": 7, "server_key": ["a"]},
             _superuser("srvkey-mod-su"),
         )
         view = SingleModuleVerifyView()

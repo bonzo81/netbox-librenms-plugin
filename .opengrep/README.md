@@ -44,7 +44,7 @@ unchecked until that review.
 | --- | --- | --- |
 | `import-disclosure` | error | A `warnings`/`issues` message that names a NetBox object no `restrict()` call filtered. |
 | `import-disclosure-sanitizer-shadow` | error | A local definition that impersonates a permission API trusted by `import-disclosure`. |
-| `caught-error-text` | error | A read of a caught error that can be a ValidationError, a database error or an `AbortRequest`, other than through `exception_text_for`, the module logger or a `raise`. |
+| `caught-error-text` | error | A read of a caught error that can be a ValidationError, a database error or an `AbortRequest`, other than through `exception_text_for` or `write_failure_message`, the module logger or a `raise`. |
 | `caught-error-text-shadow` | error | A binding of a name that `caught-error-text` trusts, a logging change, a risky error class under another name, or `except*`. |
 | `no-requests-outside-http-client` | error | Selected imported requests HTTP calls outside the package HTTP client and tests. |
 | `ipaddress-address-needs-netaddr` | error | An ipam `IPAddress` gets an address that is not a `netaddr.IPNetwork(...)` call, or a `**` expansion. |
@@ -63,9 +63,15 @@ unchecked until that review.
 | `no-stored-mapping-access-orm` | error | A `custom_field_data__librenms_id` lookup, projection or ordering, also across a relation such as `device__`; a `has_key`, `has_keys`, `has_any_keys` or `contains` lookup on the container whose value names the key; a projection of the whole container; or a `custom_fields.librenms_id` path. |
 | `no-stored-mapping-access-private` | error | An import or attribute access of a private name of `server_mappings`, or a patch target string that names one. |
 | `no-stored-mapping-access-template` | error | A template that reads `cf.librenms_id` or `custom_field_data.librenms_id`, or looks the key up with a filter. |
+| `no-scroll-wrapper-on-sync-table` | error | A `table-responsive` wrapper directly around `inc/table.html`. It clips a member dropdown that opens inside the table. A wrapper with another class, or one written with `{% if %}` in its class, is outside this check. |
 | `conflict-raised-without-record` | error | A raise of a `TransactionConflict` or `ConcurrentRowChange` class that does not go through `recorded_conflict(...)`. |
 | `no-lock-on-exists` | error | A `select_for_update()` chain that ends in `exists()` or `count()`. |
 | `no-monkeypatch-on-django-proxy` | error | A test calls a monkeypatch `setattr` or `delattr` on the Django cache, settings or connection proxy, or on a `cache` attribute of a module, also as a dotted-string target. |
+| `assert-is-not-parametrized-flag` | error | A test asserts `value is not flag`, where `flag` is a `pytest.mark.parametrize` argument with `True` or `False` values. That identity check also passes for `None`. |
+| `vc-member-name-through-helper` | error | A `_generate_vc_member_name()` call outside `_member_name()`. Such a name skips the serial rules, so it can differ from the name that import creates. Tests are excluded, and an import alias of the function is not followed. |
+| `posted-module-target-needs-resolver` | error | A read of the posted `selected_device_id` from `request.GET` or `request.POST` outside `_resolve_destination(...)` or a module grant's `require(device_id=...)`. |
+| `regex-error-must-raise` | error | A handler that catches `re.error` or `REGEX_COMPILE_ERRORS` and does not raise. A stored rule regex compiles through `models.compile_rule_regex`, which raises `RuleConfigurationError`. |
+| `rule-error-message-needs-projection` | error | A `str()` conversion of the rule error bound by the module-context walrus check, or the exception parameter in `RuleConfigurationErrorMiddleware.process_exception`. These paths use `public_message`. Other aliases and handlers are outside this check. |
 
 ## Scope
 
@@ -158,7 +164,7 @@ also counts. A chained error (`__cause__`, `__context__`, a group's `exceptions`
 returns the current exception (`sys.exc_info()`, `traceback.format_exc()`, `locals()` and others)
 are sources in any function. Each argument or receiver of a call, and each store, return, yield,
 loop or assert message, is a finding. The exceptions are the log methods of the module `logger`, a `raise`,
-and the trusted calls: `exception_text_for`, `classify_conflict`, `database_error_sqlstate`,
+and the trusted calls: `exception_text_for`, `write_failure_message`, `classify_conflict`, `database_error_sqlstate`,
 `isinstance`, `hasattr`, `type`, `validation_error_detail`, and a `TypeRefusal` that the reviewed
 factory `_first_refusal` builds. A trusted call hides the arguments that it gets. A call of a
 helper is a finding at the call, and intrafile analysis also reports the reads inside a helper of
@@ -235,6 +241,19 @@ subclass, add its name to the rule and a fixture line.
 `no-lock-on-exists` checks one method chain. It does not see a locked queryset in a variable that a
 later statement ends with `exists()` or `count()`.
 
+`assert-is-not-parametrized-flag` reads a `pytest.mark.parametrize` decorator on the test function. It does
+not see a parameter that a class decorator or `pytestmark` sets. The decorator must name the parameter,
+as a string, a comma-separated string, or a tuple or list of strings. Its values must contain a `True`
+or `False` literal. With several argument names, the rule does not check which argument has that literal.
+
+`posted-module-target-needs-resolver` excludes tests. It reads the key by its literal name. It does
+not see the key in a variable, or a read through a name other than `GET` or `POST`.
+
+`regex-error-must-raise` reads the class list of the handler. It does not see a regex error caught
+by `except Exception`, or a module alias other than `_re`. A handler that raises only inside a
+nested branch is reported, because its other branch swallows the error. A pattern that is not
+stored rule data, such as a form value or a derived pattern, carries a suppression with its reason.
+
 ## `--taint-intrafile` is required
 
 Both scripts pass it. Taint has to cross into a module-private helper: three warnings in
@@ -290,3 +309,17 @@ its own, and build the message on the next line, where the rule still checks it.
 3. Add the rule to `.opengrep/librenms-rules.yaml`. Run the rule-tests again and confirm they pass.
 4. Flip one `ruleid:` marker to `ok:`. Confirm the rule-test reports that line, then restore it.
 5. Run `./scripts/opengrep-scan.sh`. Report any findings before changing production code.
+
+`netbox-only-controls-use-replaceable-handlers` rejects `addEventListener` in
+`initializeNetBoxOnlyInterfaces`. These controls use event properties so repeated
+initialization replaces the handler and its row references. Other initializers and
+listener registration through aliases are outside this check.
+
+`metadata-ports-skip-vlan-associations` requires `with_vlans=False` for `get_ports`
+calls in the module and cable base views. These callers read port metadata.
+Interface views still request VLAN associations for VLAN comparison. Calls through
+aliases and consumers in other modules are outside this check.
+
+`mapping-create-recovers-validation-races` rejects an IntegrityError-only recovery
+in `_map_os_platform`. The creator must also recover uniqueness errors from
+`full_clean()`. Other creators and exception aliases are outside this check.
