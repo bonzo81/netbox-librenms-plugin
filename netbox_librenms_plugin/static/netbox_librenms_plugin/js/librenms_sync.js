@@ -1983,8 +1983,10 @@ function restoreTableSelection(table) {
         if (row.dataset.verifyPending) return;
         const companionInputs = (entry && entry.inputs) || {};
         const chosen = (entry && entry.chosen) || [];
-        // A disabled row is decided in its rendered VRF, so only another chosen VRF, verified again below, can enable it.
-        if (checkbox.disabled && !_restoresAnotherChosenVrf(row, companionInputs, chosen)) return;
+        // The rendered module row holds the controls of its rendered member, so another member is verified again.
+        const reverify = _restoredModuleMemberSelect(table, row, checkbox.value, companionInputs);
+        // A disabled row is decided in its rendered VRF or member, so only another one, verified again below, can enable it.
+        if (checkbox.disabled && !reverify && !_restoresAnotherChosenVrf(row, companionInputs, chosen)) return;
         // The commit below drops a cleared row from storage, with its member value.
         if (_storedMemberDiffers(table, row, checkbox.value, companionInputs)) {
             cleared += 1;
@@ -1999,8 +2001,6 @@ function restoreTableSelection(table) {
             cleared += 1;
             return;
         }
-        // The rendered module row holds the controls of its rendered member, so another member is verified again.
-        const reverify = _restoredModuleMemberSelect(table, row, checkbox.value, companionInputs);
         if (reverify) _rememberRenderedModuleMember(reverify);
         row.querySelectorAll('select[name], input[type="hidden"][name]').forEach(function (input) {
             if (!_isSelectionCompanionName(input.name)) return;

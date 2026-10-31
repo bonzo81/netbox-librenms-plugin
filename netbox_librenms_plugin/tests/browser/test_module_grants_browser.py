@@ -40,8 +40,15 @@ def _actions_cell(index, member):
     )
 
 
-def _row(index, *, member="1", grant="", checked=False, marked=True):
-    checkbox = f'<input type="checkbox" name="select" value="{index}" id="cb-{index}"{" checked" if checked else ""}>'
+def _checkbox(index, *, checked=False, disabled=False):
+    return (
+        f'<input type="checkbox" name="select" value="{index}" id="cb-{index}"'
+        f"{' checked' if checked else ''}{' disabled' if disabled else ''}>"
+    )
+
+
+def _row(index, *, member="1", grant="", checked=False, marked=True, disabled=False):
+    checkbox = _checkbox(index, checked=checked, disabled=disabled)
     cells = "".join(
         f'<td data-col="{col}">{col}-{index}</td>'
         for col in ("name", "model", "serial", "description", "item_class", "module_bay", "module_type", "status")
@@ -94,10 +101,10 @@ def _first_index(rows):
     return rows[0].split('data-ent-index="', 1)[1].split('"', 1)[0]
 
 
-def _verified_row(index, member, grant):
+def _verified_row(index, member, grant, disabled=False):
     """The formatted row the verify view answers with for *member*."""
     return {
-        "selection": f'<input type="checkbox" name="select" value="{index}" id="cb-{index}">',
+        "selection": _checkbox(index, disabled=disabled),
         "device_selection": _member_cell(index, member, grant, binding=f"verify-{index}-{member}-pinned"),
         "name": f"name-{index}-m{member}",
         "model": "model",
@@ -128,8 +135,8 @@ def _answers(page, *answers):
     return held, bodies
 
 
-def _success(index, member, grant):
-    return {"json": {"status": "success", "formatted_row": _verified_row(index, member, grant)}}
+def _success(index, member, grant, disabled=False):
+    return {"json": {"status": "success", "formatted_row": _verified_row(index, member, grant, disabled)}}
 
 
 REFUSED = {"status": 409, "json": {"status": "error", "message": POLICY_REFUSAL}}
@@ -317,3 +324,36 @@ def test_a_refused_reverify_of_a_select_without_a_marked_option_releases_the_row
     expect(page.locator("#install-selected-btn")).to_be_enabled()
     assert page.locator("#device_selection_30").input_value() == "1"
     assert page.locator('[name="selection_grant_30"]').input_value() == "earlier-override"
+
+
+@pytest.mark.parametrize("enabled_for_member", [True, False])
+def test_a_restored_member_reverifies_a_row_that_its_rendered_member_disables(page, enabled_for_member):
+    """The rendered member disables the row; the stored member decides it again, and only an enabled row posts."""
+    page.route(SUBMIT_URL, lambda route: route.fulfill(body="", content_type="text/html"))
+    restored = _success(30, "2", "override-30-again", disabled=not enabled_for_member)
+    _held, bodies = _answers(page, _success(30, "2", "override-30"), restored)
+    _load(page, [_row(30, disabled=True), _row(31)], url=f"{PAGE_URL}?page=1")
+    with page.expect_response(VERIFY_ROUTE):
+        _change_member(page, 30, "2")
+    page.check("#cb-30")
+    _load(page, [_row(40)], url=f"{PAGE_URL}?page=2")
+
+    with page.expect_response(VERIFY_ROUTE):
+        _load(page, [_row(30, disabled=True), _row(31)], url=f"{PAGE_URL}?page=1")
+
+    expect(page.locator('tr[data-ent-index="30"][data-verify-pending]')).to_have_count(0)
+    assert (bodies[1]["device_id"], bodies[1]["verify_binding"]) == ("2", "verify-30-1")
+    expect(page.locator("#cb-30")).to_be_enabled(enabled=enabled_for_member)
+    expect(page.locator("#cb-30")).to_be_checked(checked=enabled_for_member)
+    stored = page.evaluate("Object.keys(readStoredSelection(document.getElementById('librenms-module-table')))")
+    assert ("30" in stored) is enabled_for_member
+    page.check("#cb-31")
+    with page.expect_request(SUBMIT_URL) as submitted:
+        page.click("#install-selected-btn")
+    pairs = parse_qsl(submitted.value.post_data, keep_blank_values=True)
+
+    expected = ["30", "31"] if enabled_for_member else ["31"]
+    assert sorted(value for name, value in pairs if name == "select") == expected
+    if enabled_for_member:
+        assert ("device_selection_30", "2") in pairs
+        assert ("selection_grant_30", "override-30-again") in pairs
