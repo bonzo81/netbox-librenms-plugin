@@ -675,3 +675,72 @@ class TestMappingFormsShareServerKeyInclude:
         html = self._render(server_key=None, pane=pane)
         form = self._form_containing(html, marker)
         assert 'name="server_key"' not in form
+
+
+IP_IMPORT_DEVICE_ID = 90311
+LIBRENMS_IP = "198.51.100.21"
+
+
+def _primary_ip_cells(body):
+    """Return the NetBox and LibreNMS cells of the modal's Primary IP row, as text."""
+    row = re.search(r"<td[^>]*>\s*Primary IP\s*</td>\s*<td>(.*?)</td>\s*<td>(.*?)</td>", body, flags=re.S)
+    assert row is not None
+    return tuple(re.sub(r"<[^>]+>", "", cell).strip() for cell in row.groups())
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("netbox", ["none", "matched", "matched_with_primary"])
+def test_the_netbox_primary_ip_shows_only_what_netbox_holds(client, librenms_server, settings, netbox):
+    """The NetBox column never shows the LibreNMS IP: an import sets no primary IP."""
+    from html import unescape
+
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import (
+        configure_librenms_servers,
+        make_device,
+        make_interface,
+        make_ip,
+        make_superuser,
+    )
+
+    configure_librenms_servers(
+        settings, {"default": {"librenms_url": librenms_server.url, "api_token": "t", "verify_ssl": False}}
+    )
+    hostname = "primary-ip-cell-host"
+    librenms_server.register(
+        f"/api/v0/devices/{IP_IMPORT_DEVICE_ID}",
+        {
+            "status": "ok",
+            "devices": [
+                {
+                    "device_id": IP_IMPORT_DEVICE_ID,
+                    "hostname": hostname,
+                    "sysName": hostname,
+                    "serial": "",
+                    "os": "ios",
+                    "hardware": "",
+                    "version": "",
+                    "ip": LIBRENMS_IP,
+                }
+            ],
+        },
+        method="GET",
+    )
+    expected = "-"
+    if netbox != "none":
+        device = make_device(hostname)
+        if netbox == "matched_with_primary":
+            device.primary_ip4 = make_ip("192.0.2.9/24", assigned_object=make_interface(device, "mgmt0"))
+            device.save()
+            expected = "192.0.2.9/24"
+    client.force_login(make_superuser("primary-ip-cell-user"))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_validation_details", args=[IP_IMPORT_DEVICE_ID]),
+        {"server_key": "default"},
+        headers={"HX-Request": "true"},
+    )
+
+    assert response.status_code == 200
+    assert _primary_ip_cells(unescape(response.content.decode())) == (expected, LIBRENMS_IP)

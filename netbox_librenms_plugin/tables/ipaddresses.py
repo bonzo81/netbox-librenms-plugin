@@ -3,9 +3,8 @@ import json
 import django_tables2 as tables
 from django.utils.html import format_html, mark_safe
 from netbox.tables.columns import ToggleColumn
-from utilities.paginator import EnhancedPaginator
 
-from netbox_librenms_plugin.utils import get_table_paginate_count, identify_ip_sync_rows, rule_block_html
+from netbox_librenms_plugin.utils import identify_ip_sync_rows, paginate_sync_table, rule_block_html
 
 
 def _shown_vrf_id(row):
@@ -37,7 +36,7 @@ class IPAddressTable(tables.Table):
         # renders empty and paging falls back to the default (Interfaces) tab.
         self.tab = "ipaddresses"
         # Give this table its own pagination namespace. configure() passes self.prefix to
-        # get_table_paginate_count() (and RequestConfig), which keys per_page on
+        # paginate_sync_table() and get_table_paginate_count(), which key per_page on
         # "{prefix}per_page"; left empty, the IP table shares the generic per-page param with
         # other tabs instead of reading "ipaddresses_per_page". Orthogonal to self.tab. Matches
         # the cables/modules/interfaces/vlans tables; preserve an explicit caller override.
@@ -68,7 +67,11 @@ class IPAddressTable(tables.Table):
     selection = ToggleColumn(
         orderable=False,
         visible=True,
-        attrs={"td": {"data-col": "selection"}, "input": {"name": "select"}},
+        attrs={
+            "td": {"data-col": "selection"},
+            # The writer refuses an address an IP mapping ignores, so the row offers no selection.
+            "input": {"name": "select", "disabled": lambda record: "disabled" if record.get("ip_rule_block") else None},
+        },
         accessor="row_id",
     )
 
@@ -109,7 +112,7 @@ class IPAddressTable(tables.Table):
                    title="Suggested from LibreNMS VRF {{ record.vrf_suggested_from.name }} by {{ record.vrf_suggested_from.matched_by }} match"
                    aria-label="Suggested from LibreNMS VRF {{ record.vrf_suggested_from.name }} by {{ record.vrf_suggested_from.matched_by }} match"></i>
             {% endif %}
-            {% if record.vrf_create_url %}
+            {% if record.vrf_create_url and not record.ip_rule_block %}
                 <button type="submit" class="btn btn-sm btn-outline-primary text-nowrap" name="create_vrf" value="{{ record.row_id }}"
                         formaction="{{ record.vrf_create_url }}"
                         data-confirm="Create NetBox VRF '{{ record.librenms_vrf.name }}' with {% if record.librenms_vrf.rd %}route distinguisher {{ record.librenms_vrf.rd }}{% else %}no route distinguisher{% endif %}? The IP address is not synced."
@@ -131,8 +134,9 @@ class IPAddressTable(tables.Table):
         row_id = record.get("row_id", record.get("ip_with_mask"))
         if row_id is None:
             return "Ambiguous source row"
-        if record.get("rule_block") and value != "matched":
-            return rule_block_html(record["rule_block"])
+        rule_block = record.get("ip_rule_block") or record.get("rule_block")
+        if rule_block and value != "matched":
+            return rule_block_html(rule_block)
         if value == "update":
             return format_html(
                 '<button type="submit" class="btn btn-sm btn-warning" name="sync_one" value="{}">'
@@ -163,9 +167,4 @@ class IPAddressTable(tables.Table):
 
     def configure(self, request):
         """Configure the table."""
-        paginate = {
-            "paginator_class": EnhancedPaginator,
-            "per_page": get_table_paginate_count(request, self.prefix),
-        }
-
-        tables.RequestConfig(request, paginate).configure(self)
+        paginate_sync_table(self, request)

@@ -73,7 +73,6 @@ def _make_view():
     view._regex_bay_mappings = []
     view._norm_rules_bay = None
     view._norm_rules_type = None
-    view._generic_module_types = {}
     view._module_type_ambiguities = {}
     view._carrier_install_rules = []
     return view
@@ -87,6 +86,10 @@ def _captured_table_view(view):
         rows_store["rows"] = table_data
 
         class CapturedTable:
+            # The capture keeps rows only, so it signs no grant.
+            selection_allowed = False
+            grants_enabled = False
+
             def __init__(self):
                 self.attrs = {}
 
@@ -102,10 +105,10 @@ def _captured_table_view(view):
 @pytest.mark.django_db
 class TestInventoryClassIncludeRule:
     """
-    Admit an entPhysicalClass the built-in allowlist does not carry.
+    Admit an entPhysicalClass through an include rule.
 
-    A Juniper MX304 reports both Routing Engines with entPhysicalClass "other".
-    INVENTORY_CLASSES has no "other", so the modules tab showed neither of them.
+    A Juniper MX304 reports both Routing Engines with entPhysicalClass "other". Without a rule
+    for "other", the modules tab showed neither of them.
     """
 
     def _inventory(self):
@@ -163,16 +166,18 @@ class TestInventoryClassIncludeRule:
     def _include_rule(self, pattern="other"):
         from netbox_librenms_plugin.models import InventoryIgnoreRule
 
+        # Migration 0025 sets prefer_description on every include rule of a class outside the old list.
         return InventoryIgnoreRule.objects.create(
             name="Routing engines reported as other",
             match_type=InventoryIgnoreRule.MATCH_CLASS_IS,
             pattern=pattern,
             action=InventoryIgnoreRule.ACTION_INCLUDE,
             require_serial_match_parent=False,
+            prefer_description=True,
         )
 
     def test_without_a_rule_the_class_is_dropped(self):
-        """The built-in allowlist still governs when no rule says otherwise."""
+        """An item whose class no include rule admits is no row."""
         assert self._collect(self._inventory(), []) == []
 
     def test_an_include_rule_admits_every_item_of_that_class(self):
@@ -180,20 +185,21 @@ class TestInventoryClassIncludeRule:
 
         assert [item["entPhysicalIndex"] for item in collected] == [38, 39]
 
-    def test_rule_admitted_row_uses_the_cached_inventory_digest(self, settings, librenms_server):
-        """Display annotations must not change the digest used to authorize a later action."""
+    def test_rule_admitted_row_leaves_the_cached_inventory_unchanged(self, settings, librenms_server):
+        """Display annotations must not change the snapshot whose digest authorizes a later action."""
+        from copy import deepcopy
+
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.utils import module_inventory_row_digest
 
         inventory = self._inventory()
-        expected_digest = module_inventory_row_digest(inventory[1])
+        cached = deepcopy(inventory)
         view = _real_api_view(settings, librenms_server, librenms_id=304)
 
         rows = _run_build_context_real(view, inventory, make_device("included-class-digest"))
         row = next(row for row in rows if row["ent_physical_index"] == 38)
 
-        assert row["inventory_digest"] == expected_digest
-        assert "_class_included" not in inventory[1]
+        assert row["name"] == "Routing Engine 0"
+        assert inventory == cached
 
     def test_a_rule_for_another_class_admits_nothing(self):
         assert self._collect(self._inventory(), [self._include_rule(pattern="sensor")]) == []
@@ -278,7 +284,9 @@ class TestInventoryClassIncludeRule:
             },
         ]
 
-        collected = self._collect(items, [self._include_rule()])
+        from netbox_librenms_plugin.tests.conftest import default_inventory_include_rules
+
+        collected = self._collect(items, [*default_inventory_include_rules(), self._include_rule()])
 
         assert [item["entPhysicalIndex"] for item in collected] == [38]
 
@@ -589,7 +597,12 @@ class TestFpcSlotMatchesOnSlashedPositions:
         )
 
         resolved = BaseModuleTableView._lookup_regex_bay_mapping(
-            "QSFP56-DD @ 0/0/0", "port", {bay.name: bay}, [mapping], manufacturer_id=manufacturer.pk
+            "QSFP56-DD @ 0/0/0",
+            "port",
+            {bay.name: bay},
+            [mapping],
+            manufacturer_id=manufacturer.pk,
+            accepted_bay_types=frozenset(),
         )
 
         assert resolved == bay
@@ -671,6 +684,9 @@ class TestMergeTransceiverDataPortIdentity:
         assert item["_librenms_port_id"] == 42
         assert item["_librenms_ifname"] == "Te1/0/1"
         assert item["entPhysicalName"] == "Te1/0/1"
+        port_requests = [request for request in librenms_server.requests if request["path"].endswith("/ports")]
+        assert len(port_requests) == 1
+        assert "with" not in port_requests[0]["query"]
 
     def test_existing_inventory_item_gets_port_identity_metadata(self, settings, librenms_server):
         view = _real_api_view(settings, librenms_server, librenms_id=101)
@@ -1046,6 +1062,9 @@ class TestMergeTransceiverDataPortIdentity:
         assert inventory[0]["_librenms_port_id"] == 56284
         assert inventory[0]["_librenms_ifname"] == "TenGigabitEthernet1/1/1"
         assert inventory[0]["_librenms_ifdescr"] == "Te1/1/1"
+        port_requests = [request for request in librenms_server.requests if request["path"].endswith("/ports")]
+        assert len(port_requests) == 1
+        assert "with" not in port_requests[0]["query"]
 
     def test_enrich_inventory_port_identity_skips_ambiguous_labels(self, settings, librenms_server):
         view = _real_api_view(settings, librenms_server, librenms_id=103)
@@ -1120,6 +1139,30 @@ def _two_server_keys(settings, server, prefix):
     primary, secondary = f"{prefix}-primary", f"{prefix}-secondary"
     configure_servers(settings, {primary: dict(config), secondary: dict(config)})
     return primary, secondary
+
+
+def _refresh_module_rows(device, server_key):
+    """POST a Modules refresh through the real view and return the rendered table rows."""
+    from django.test.signals import template_rendered
+
+    from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    view = DeviceModuleTableView()
+    tables = []
+
+    def capture(sender, template, context, **kwargs):
+        if template.name == view.partial_template_name:
+            tables.append(context["module_sync"]["table"])
+
+    template_rendered.connect(capture)
+    try:
+        response = post(view, make_request("post", {"server_key": server_key}), pk=device.pk)
+    finally:
+        template_rendered.disconnect(capture)
+    assert response.status_code == 200
+    (table,) = tables
+    return list(table.data)
 
 
 def _mapped_device(name, server_key, librenms_id=777):
@@ -1396,6 +1439,7 @@ class TestPostInventoryRefresh:
 
         assert response.status_code == 200
         assert len(port_requests) == 1
+        assert "with" not in port_requests[0]["query"]
         cached = cache.get(view.get_cache_key(device, "inventory", server_key=server_key))
         main_item = next(item for item in cached["inventory"] if item["entPhysicalIndex"] == 1)
         transceiver_item = next(item for item in cached["inventory"] if item["entPhysicalIndex"] == 2)
@@ -1585,6 +1629,7 @@ class TestPostInventoryRefresh:
         """post() now fails closed on malformed inventory before caching, but a stale pre-fix cache entry like {"inventory": [None]} can still be read."""
         from django.core.cache import cache
 
+        from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
         from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
@@ -1594,7 +1639,7 @@ class TestPostInventoryRefresh:
         cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
         # Keep both identity fingerprints valid. This makes the malformed inventory guard the
         # only reason the snapshot is removed.
-        cache.set(cache_key, {"inventory": [None], "librenms_id": 1, "oob_librenms_id": None})
+        cache.set(cache_key, module_inventory_cache_payload([None], 1, None))
         request = make_request("get", {"server_key": server_key})
 
         result = bind_and_call(view, request, "get_context_data", obj=device)
@@ -1843,6 +1888,7 @@ class TestPostInventoryRefresh:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
@@ -1854,7 +1900,7 @@ class TestPostInventoryRefresh:
         cache.set(api._get_cache_key(device, server_key=server_key), True)
         view = DeviceModuleTableView()
         cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
-        cache.set(cache_key, {"inventory": [], "librenms_id": 1, "oob_librenms_id": None})
+        cache.set(cache_key, module_inventory_cache_payload([], 1, None))
         inventory_requests = []
 
         def any_inventory_route(**request_data):
@@ -1876,6 +1922,7 @@ class TestPostInventoryRefresh:
         """No OOB link means get_librenms_oob returns None. This is not a failure. Show a clean success toast and cache the snapshot."""
         from django.core.cache import cache
 
+        from netbox_librenms_plugin.sync_cache import MODULE_INVENTORY_CACHE_VERSION
         from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
@@ -1891,6 +1938,7 @@ class TestPostInventoryRefresh:
         assert message_texts(request, "success") == ["Inventory data refreshed successfully."]
         assert message_texts(request, "warning") == []
         assert cache.get(view.get_cache_key(device, "inventory", server_key=server_key)) == {
+            "version": MODULE_INVENTORY_CACHE_VERSION,
             "inventory": [],
             "librenms_id": 777,
             "oob_librenms_id": None,
@@ -3398,12 +3446,7 @@ class TestInventoryIgnoreRuleMatchesName:
     def _rule(self, match_type, pattern, require_serial=True):
         from netbox_librenms_plugin.models import InventoryIgnoreRule
 
-        rule = InventoryIgnoreRule.__new__(InventoryIgnoreRule)
-        rule.match_type = match_type
-        rule.pattern = pattern
-        rule.require_serial_match_parent = require_serial
-        rule.enabled = True
-        return rule
+        return InventoryIgnoreRule(match_type=match_type, pattern=pattern, require_serial_match_parent=require_serial)
 
     # --- ends_with ---
 
@@ -3525,7 +3568,8 @@ class TestModelMatchesDeviceTypeRule:
         response = client.get(rule.get_absolute_url())
 
         assert response.status_code == 200
-        assert response.content.decode().count('<td><span class="text-muted">\u2014</span></td>') == 2
+        # The pattern, the serial match flag and the three blank filters.
+        assert response.content.decode().count('<td><span class="text-muted">\u2014</span></td>') == 5
 
 
 class TestCheckIgnoreRules:
@@ -3534,13 +3578,9 @@ class TestCheckIgnoreRules:
     def _rule(self, match_type="ends_with", pattern="IDPROM", require_serial=True, action="skip"):
         from netbox_librenms_plugin.models import InventoryIgnoreRule
 
-        rule = InventoryIgnoreRule.__new__(InventoryIgnoreRule)
-        rule.match_type = match_type
-        rule.pattern = pattern
-        rule.require_serial_match_parent = require_serial
-        rule.action = action
-        rule.enabled = True
-        return rule
+        return InventoryIgnoreRule(
+            match_type=match_type, pattern=pattern, require_serial_match_parent=require_serial, action=action
+        )
 
     def _check(self, item, parent_item, rules, index_map=None, device_serial="", type_models=()):
         from netbox_librenms_plugin.views.base.modules_view import DeviceIdentity, _check_ignore_rules
@@ -3616,11 +3656,11 @@ class TestCheckIgnoreRules:
     def test_ancestor_walk_skips_when_grandparent_serial_matches(self):
         """IOS-XR case: IDPROM is child of empty-serial Mother Board, but grandparent serial matches."""
         # Mirrors actual 8201-SYS data: 0/RP0/CPU0-Base Board IDPROM (idx=7)
-        # parent=Mother Board (idx=30, serial=''), grandparent=0/RP0/CPU0 (idx=1, serial='FOC2418NHRK')
+        # parent=Mother Board (idx=30, serial=''), grandparent=0/RP0/CPU0 (idx=1, serial='FOC0000A0AA')
         grandparent = {
             "entPhysicalIndex": 1,
             "entPhysicalName": "0/RP0/CPU0",
-            "entPhysicalSerialNum": "FOC2418NHRK",
+            "entPhysicalSerialNum": "FOC0000A0AA",
             "entPhysicalContainedIn": 0,
         }
         parent = {
@@ -3632,7 +3672,7 @@ class TestCheckIgnoreRules:
         item = {
             "entPhysicalIndex": 7,
             "entPhysicalName": "0/RP0/CPU0-Base Board IDPROM",
-            "entPhysicalSerialNum": "FOC2418NHRK",
+            "entPhysicalSerialNum": "FOC0000A0AA",
             "entPhysicalContainedIn": 30,
         }
         index_map = {1: grandparent, 30: parent, 7: item}
@@ -3655,7 +3695,7 @@ class TestCheckIgnoreRules:
         item = {
             "entPhysicalIndex": 7,
             "entPhysicalName": "Board-IDPROM",
-            "entPhysicalSerialNum": "FOC2418NHRK",
+            "entPhysicalSerialNum": "FOC0000A0AA",
             "entPhysicalContainedIn": 30,
         }
         index_map = {1: grandparent, 30: parent, 7: item}
@@ -3664,14 +3704,14 @@ class TestCheckIgnoreRules:
     def test_serial_matches_device_transparent(self):
         """serial_matches_device rule with action=transparent returns 'transparent'."""
         rule = self._rule(match_type="serial_matches_device", pattern="", action="transparent")
-        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": "FOC2418NHRK", "entPhysicalIndex": 5}
-        assert self._check(item, None, [rule], device_serial="FOC2418NHRK") == "transparent"
+        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": "FOC0000A0AA", "entPhysicalIndex": 5}
+        assert self._check(item, None, [rule], device_serial="FOC0000A0AA") == "transparent"
 
     def test_serial_matches_device_skip(self):
         """serial_matches_device rule with action=skip returns 'skip'."""
         rule = self._rule(match_type="serial_matches_device", pattern="", action="skip")
-        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": "FOC2418NHRK"}
-        assert self._check(item, None, [rule], device_serial="FOC2418NHRK") == "skip"
+        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": "FOC0000A0AA"}
+        assert self._check(item, None, [rule], device_serial="FOC0000A0AA") == "skip"
 
     def test_numeric_serial_matches_device_after_normalization(self):
         """Numeric ENTITY serials use the same text normalization as the device serial."""
@@ -3684,26 +3724,26 @@ class TestCheckIgnoreRules:
         """serial_matches_device: item serial differs from device serial → no match."""
         rule = self._rule(match_type="serial_matches_device", pattern="", action="transparent")
         item = {"entPhysicalName": "Optics0/0/0/0", "entPhysicalSerialNum": "XCVR001"}
-        assert self._check(item, None, [rule], device_serial="FOC2418NHRK") is None
+        assert self._check(item, None, [rule], device_serial="FOC0000A0AA") is None
 
     def test_serial_matches_device_empty_device_serial(self):
         """serial_matches_device: device serial empty → no match (defensive)."""
         rule = self._rule(match_type="serial_matches_device", pattern="", action="transparent")
-        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": "FOC2418NHRK"}
+        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": "FOC0000A0AA"}
         assert self._check(item, None, [rule], device_serial="") is None
 
     def test_serial_matches_device_empty_item_serial(self):
         """serial_matches_device: item serial empty → no match (defensive)."""
         rule = self._rule(match_type="serial_matches_device", pattern="", action="transparent")
         item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": ""}
-        assert self._check(item, None, [rule], device_serial="FOC2418NHRK") is None
+        assert self._check(item, None, [rule], device_serial="FOC0000A0AA") is None
 
     def test_serial_matches_device_fires_when_parent_is_chassis(self):
         """serial_matches_device: matches when direct parent has class='chassis'."""
         rule = self._rule(match_type="serial_matches_device", pattern="", action="transparent")
-        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": "FOC2418NHRK"}
+        item = {"entPhysicalName": "0/RP0/CPU0", "entPhysicalSerialNum": "FOC0000A0AA"}
         chassis = {"entPhysicalName": "Rack 0", "entPhysicalClass": "chassis"}
-        assert self._check(item, chassis, [rule], device_serial="FOC2418NHRK") == "transparent"
+        assert self._check(item, chassis, [rule], device_serial="FOC0000A0AA") == "transparent"
 
     def test_serial_matches_device_skipped_when_parent_is_container(self):
         """Verify serial_matches_device does not promote an item below a container to chassis-level matching."""
@@ -3803,26 +3843,7 @@ class TestModelMatchesDeviceTypeOnFixedIosXe:
     @staticmethod
     def _refresh_depths(device, server_key):
         """POST a Modules refresh through the real view and return each rendered row's depth by index."""
-        from django.test.signals import template_rendered
-
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        view = DeviceModuleTableView()
-        tables = []
-
-        def capture(sender, template, context, **kwargs):
-            if template.name == view.partial_template_name:
-                tables.append(context["module_sync"]["table"])
-
-        template_rendered.connect(capture)
-        try:
-            response = post(view, make_request("post", {"server_key": server_key}), pk=device.pk)
-        finally:
-            template_rendered.disconnect(capture)
-        assert response.status_code == 200
-        (table,) = tables
-        return {row["ent_physical_index"]: row["depth"] for row in table.data}
+        return {row["ent_physical_index"]: row["depth"] for row in _refresh_module_rows(device, server_key)}
 
     def _build_depths(self, device, inventory):
         rows = _run_build_context_real(_make_view(), inventory, device)
@@ -3926,10 +3947,12 @@ class TestModelMatchesDeviceTypeOnFixedIosXe:
         self._transparent_rule()
         with_rule = self._build_depths(device, inventory)
 
-        card_depth = without_rule[22]
-        assert (without_rule[30], without_rule[40]) == (card_depth + 1, card_depth + 2)
+        # The serial-less port cage only holds the transceiver, so it is never a row.
+        assert 30 not in without_rule
+        assert 30 not in with_rule
+        assert (without_rule[22], without_rule[40]) == (0, 1)
         assert 22 not in with_rule
-        assert (with_rule[30], with_rule[40]) == (card_depth, card_depth + 1)
+        assert with_rule[40] == 0
 
     def test_the_serial_rule_does_not_look_through_a_slot_container(self):
         """On a modular chassis a line card in a slot can share the device serial and still be a real FRU."""
@@ -3979,6 +4002,270 @@ class TestModelMatchesDeviceTypeOnFixedIosXe:
         assert 22 in depths
 
 
+@pytest.mark.django_db
+class TestHolderEntitiesAreNotRows:
+    """A fixed NX-OS switch labels its slot, bay and port cage holders with models; none of them is a row."""
+
+    @pytest.fixture
+    def server_key(self, settings, librenms_server):
+        return _two_server_keys(settings, librenms_server, "nxos-fixed")[0]
+
+    @staticmethod
+    def _shape():
+        """Group the recorded entities by class, parent and serial: names and models are pseudonymized."""
+        from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
+
+        recording = load_recording("nxos-fixed-linecard")
+        inventory = recording["responses"][f"GET /api/v0/inventory/{recording['device_id']}/all"]["inventory"]
+
+        def of_class(phys_class):
+            return [entity for entity in inventory if entity["entPhysicalClass"] == phys_class]
+
+        (chassis,) = of_class("chassis")
+        pid = chassis["entPhysicalModelName"]
+        (line_card,) = [entity for entity in of_class("module") if entity["entPhysicalModelName"] == pid]
+        cages = {
+            e["entPhysicalIndex"]
+            for e in of_class("port")
+            if e["entPhysicalContainedIn"] == line_card["entPhysicalIndex"]
+        }
+        shape = SimpleNamespace(
+            recording=recording,
+            entities={entity["entPhysicalIndex"]: entity for entity in inventory},
+            pid=pid,
+            line_card=line_card["entPhysicalIndex"],
+            cages=cages,
+            transceivers={e["entPhysicalIndex"] for e in of_class("module") if e["entPhysicalContainedIn"] in cages},
+            power_supplies=of_class("powerSupply"),
+            fans={e["entPhysicalIndex"] for e in of_class("fan") if e["entPhysicalModelName"]},
+            containers={e["entPhysicalIndex"] for e in of_class("container")},
+        )
+        # The recording keeps the switch's real counts: 54 serial-less cages, 31 optics, 2 supplies, 4 fans.
+        assert (len(shape.cages), len(shape.transceivers), len(shape.power_supplies), len(shape.fans)) == (54, 31, 2, 4)
+        assert all(not e["entPhysicalSerialNum"] for e in of_class("port") + of_class("container"))
+        return shape
+
+    @staticmethod
+    def _mapped_device(name, shape, server_key):
+        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, map_device_to_librenms
+
+        device = make_device_with_module_bays(name, [])
+        device.device_type.model = shape.pid
+        device.device_type.save()
+        map_device_to_librenms(device, shape.recording["device_id"], server_key=server_key)
+        return device
+
+    def test_only_hardware_renders(self, librenms_server, server_key):
+        shape = self._shape()
+        librenms_server.load_recording(shape.recording)
+        device = self._mapped_device("nxos-holders-rows", shape, server_key)
+
+        depths = {row["ent_physical_index"]: row["depth"] for row in _refresh_module_rows(device, server_key)}
+
+        assert not shape.containers & set(depths)
+        assert not shape.cages & set(depths)
+        psus = {e["entPhysicalIndex"] for e in shape.power_supplies}
+        assert set(depths) == {shape.line_card} | shape.transceivers | psus | shape.fans
+        assert {depths[idx] for idx in {shape.line_card} | psus | shape.fans} == {0}
+        assert {depths[idx] for idx in shape.transceivers} == {1}
+
+    def test_the_built_in_line_card_rule_lifts_the_transceivers_to_top_level(self, librenms_server, server_key):
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+        shape = self._shape()
+        librenms_server.load_recording(shape.recording)
+        device = self._mapped_device("nxos-holders-transparent", shape, server_key)
+        InventoryIgnoreRule.objects.create(
+            name="Fixed-platform line card", match_type="model_matches_device_type", pattern="", action="transparent"
+        )
+
+        depths = {row["ent_physical_index"]: row["depth"] for row in _refresh_module_rows(device, server_key)}
+
+        assert shape.line_card not in depths
+        psus = {e["entPhysicalIndex"] for e in shape.power_supplies}
+        assert set(depths) == shape.transceivers | psus | shape.fans
+        assert set(depths.values()) == {0}
+
+    def test_a_regex_mapping_on_the_supply_bay_names_places_each_supply_in_its_own_bay(
+        self, librenms_server, server_key
+    ):
+        """The bay containers carry the names the mapping reads, but only the supplies inside them claim the bays."""
+        from netbox_librenms_plugin.models import ModuleBayMapping
+        from netbox_librenms_plugin.tests.conftest import make_module_bay, make_module_type_with_bays
+
+        shape = self._shape()
+        librenms_server.load_recording(shape.recording)
+        device = self._mapped_device("nxos-holders-psu-bays", shape, server_key)
+        holder_names = {
+            supply["entPhysicalIndex"]: shape.entities[supply["entPhysicalContainedIn"]]["entPhysicalName"]
+            for supply in shape.power_supplies
+        }
+        bay_by_supply = {idx: make_module_bay(device, f"PSU {name}").name for idx, name in holder_names.items()}
+        for supply in shape.power_supplies:
+            make_module_type_with_bays(supply["entPhysicalModelName"])
+        holder_names = "|".join(re.escape(name) for name in holder_names.values())
+        ModuleBayMapping.objects.create(
+            librenms_name=f"({holder_names})", librenms_class="", netbox_bay_name=r"PSU \1", is_regex=True
+        )
+
+        rows = _refresh_module_rows(device, server_key)
+
+        bays = {row["ent_physical_index"]: row["module_bay"] for row in rows}
+        assert {idx: bays[idx] for idx in bay_by_supply} == bay_by_supply
+        claimed = [row["module_bay"] for row in rows if row["module_bay"] in bay_by_supply.values()]
+        assert sorted(claimed) == sorted(bay_by_supply.values())
+
+    @staticmethod
+    def _responses(recording):
+        device_id = recording["device_id"]
+        responses = recording["responses"]
+        return (
+            responses[f"GET /api/v0/inventory/{device_id}/all"]["inventory"],
+            responses[f"GET /api/v0/devices/{device_id}/transceivers"]["transceivers"],
+            responses[f"GET /api/v0/devices/{device_id}/ports"]["ports"],
+        )
+
+    def test_a_cage_the_transceivers_api_confirms_is_an_optic(self, librenms_server, server_key):
+        """The API supplies the cage's model but no serial; its evidence must still make the cage a row."""
+        shape = self._shape()
+        recording = deepcopy(shape.recording)
+        inventory, transceivers, _ports = self._responses(recording)
+        transceiver = transceivers[0]
+        optic = next(e for e in inventory if e["entPhysicalIndex"] == transceiver["entity_physical_index"])
+        cage = next(e for e in inventory if e["entPhysicalIndex"] == optic["entPhysicalContainedIn"])
+        # This switch reports the optic only through the API, which names the cage and gives no serial.
+        inventory.remove(optic)
+        cage["entPhysicalModelName"] = ""
+        transceiver["entity_physical_index"] = cage["entPhysicalIndex"]
+        transceiver["serial"] = None
+        librenms_server.load_recording(recording)
+        device = self._mapped_device("nxos-holders-api-optic", shape, server_key)
+
+        rows = {row["ent_physical_index"]: row for row in _refresh_module_rows(device, server_key)}
+
+        assert rows[cage["entPhysicalIndex"]]["model"] == transceiver["model"]
+        # The line card's branch list is what Install Branch runs.
+        assert cage["entPhysicalIndex"] in {index for index, _target in rows[shape.line_card]["branch_rows"]}
+
+    def test_a_snapshot_cached_before_the_schema_version_is_refetched(self, librenms_server, server_key):
+        """An older writer cached the API-confirmed cage without its marker; the tab must not serve it."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
+        from netbox_librenms_plugin.views.base.modules_view import _TRANSCEIVER_API_MATCH
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        shape = self._shape()
+        recording = deepcopy(shape.recording)
+        inventory, transceivers, _ports = self._responses(recording)
+        transceiver = transceivers[0]
+        optic = next(e for e in inventory if e["entPhysicalIndex"] == transceiver["entity_physical_index"])
+        cage = next(e for e in inventory if e["entPhysicalIndex"] == optic["entPhysicalContainedIn"])
+        inventory.remove(optic)
+        cage["entPhysicalModelName"] = ""
+        transceiver["entity_physical_index"] = cage["entPhysicalIndex"]
+        transceiver["serial"] = None
+        librenms_server.load_recording(recording)
+        device = self._mapped_device("nxos-holders-pre-version", shape, server_key)
+        _refresh_module_rows(device, server_key)
+        view = DeviceModuleTableView()
+        key = view.get_cache_key(device, "inventory", server_key=server_key)
+        fresh = cache.get(key)
+        old_rows = [{k: v for k, v in row.items() if k != _TRANSCEIVER_API_MATCH} for row in fresh["inventory"]]
+        cache.set(
+            key,
+            {"inventory": old_rows, "librenms_id": fresh["librenms_id"], "oob_librenms_id": fresh["oob_librenms_id"]},
+        )
+
+        stale = bind_and_call(view, make_request("get", {"server_key": server_key}), "get_context_data", obj=device)
+
+        assert stale["table"] is None
+        assert cache.get(key) is None
+        rows = {row["ent_physical_index"]: row for row in _refresh_module_rows(device, server_key)}
+        assert rows[cage["entPhysicalIndex"]]["model"] == transceiver["model"]
+
+    @pytest.mark.parametrize("cage_model", ["label", "placeholder"])
+    def test_a_skipped_chassis_level_cage_hides_its_optic(self, librenms_server, server_key, cage_model):
+        """A skip rule on a holder drops the holder's subtree, so the optic below it is no top-level row."""
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+        shape = self._shape()
+        recording = deepcopy(shape.recording)
+        inventory, _transceivers, _ports = self._responses(recording)
+        by_index = {entity["entPhysicalIndex"]: entity for entity in inventory}
+        optic_index = min(shape.transceivers)
+        cage = by_index[by_index[optic_index]["entPhysicalContainedIn"]]
+        (chassis,) = [entity for entity in inventory if entity["entPhysicalClass"] == "chassis"]
+        cage["entPhysicalContainedIn"] = chassis["entPhysicalIndex"]
+        if cage_model == "placeholder":
+            cage["entPhysicalModelName"] = ""
+        InventoryIgnoreRule.objects.create(
+            name="Skip one cage",
+            match_type=InventoryIgnoreRule.MATCH_ENDS_WITH,
+            pattern=cage["entPhysicalName"],
+            action=InventoryIgnoreRule.ACTION_SKIP,
+            require_serial_match_parent=False,
+        )
+        librenms_server.load_recording(recording)
+        device = self._mapped_device(f"nxos-holders-skip-{cage_model}", shape, server_key)
+
+        indexes = {row["ent_physical_index"] for row in _refresh_module_rows(device, server_key)}
+
+        assert optic_index not in indexes
+        assert cage["entPhysicalIndex"] not in indexes
+        assert shape.transceivers - {optic_index} <= indexes
+
+    def test_a_synthetic_optic_below_a_hidden_root_cage_renders_at_top_level(self, librenms_server, server_key):
+        """A transceivers API row with no entity nests under the cage its name points at; the cage is a holder."""
+        shape = self._shape()
+        recording = deepcopy(shape.recording)
+        inventory, transceivers, ports = self._responses(recording)
+        cage = {
+            **deepcopy(next(e for e in inventory if e["entPhysicalIndex"] in shape.cages)),
+            "entPhysicalIndex": 900000,
+            "entPhysicalContainedIn": 0,
+            "entPhysicalName": "Port 1/1",
+            "entPhysicalDescr": "Port 1/1",
+            "ifIndex": None,
+        }
+        inventory.append(cage)
+        with_optic = {t["port_id"] for t in transceivers}
+        port = next(p for p in ports if p["port_id"] not in with_optic)
+        port["ifName"] = "1/1/1"
+        # No entity carries this ifIndex, so the API row becomes a synthetic optic.
+        port["ifIndex"] = 999999999
+        transceivers.append(
+            {
+                **deepcopy(transceivers[0]),
+                "entity_physical_index": 900001,
+                "port_id": port["port_id"],
+                "serial": "SN-SYN-1",
+            }
+        )
+        librenms_server.load_recording(recording)
+        device = self._mapped_device("nxos-holders-synthetic-optic", shape, server_key)
+
+        depths = {row["ent_physical_index"]: row["depth"] for row in _refresh_module_rows(device, server_key)}
+
+        assert cage["entPhysicalIndex"] not in depths
+        assert depths[900001] == 0
+
+    def test_a_juniper_line_card_container_with_a_serial_keeps_its_row_and_bay(self):
+        from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay
+
+        recording = load_recording("junos-subinterfaces")
+        inventory = recording["responses"][f"GET /api/v0/inventory/{recording['device_id']}/all"]["inventory"]
+        (line_card,) = [e for e in inventory if e["entPhysicalClass"] == "container" and e["entPhysicalSerialNum"]]
+        device = make_device("junos-container-line-card")
+        make_module_bay(device, line_card["entPhysicalName"])
+
+        rows = _run_build_context_real(_make_view(), inventory, device)
+
+        row = next(row for row in rows if row["ent_physical_index"] == line_card["entPhysicalIndex"])
+        assert (row["depth"], row["module_bay"]) == (0, line_card["entPhysicalName"])
+
+
 class TestCollectDescendantsIgnoreRules:
     """_collect_descendants must skip items matched by ignore rules."""
 
@@ -3990,13 +4277,9 @@ class TestCollectDescendantsIgnoreRules:
     def _rule(self, match_type="ends_with", pattern="IDPROM", require_serial=True, action="skip"):
         from netbox_librenms_plugin.models import InventoryIgnoreRule
 
-        rule = InventoryIgnoreRule.__new__(InventoryIgnoreRule)
-        rule.match_type = match_type
-        rule.pattern = pattern
-        rule.require_serial_match_parent = require_serial
-        rule.action = action
-        rule.enabled = True
-        return rule
+        return InventoryIgnoreRule(
+            match_type=match_type, pattern=pattern, require_serial_match_parent=require_serial, action=action
+        )
 
     def _build_maps(self, inventory):
         children_by_parent = {}
@@ -4218,7 +4501,7 @@ class TestPositionalMatchClassAware:
         }
         inventory.append(item)
         index_map = {i["entPhysicalIndex"]: i for i in inventory}
-        return BaseModuleTableView._match_bay_by_position(item, index_map, bays)
+        return BaseModuleTableView._match_bay_by_position(item, index_map, bays, frozenset())
 
     @staticmethod
     def _bay(name, position=None):
@@ -4262,7 +4545,7 @@ class TestPositionalMatchClassAware:
         }
         inventory.append(item)
         index_map = {i["entPhysicalIndex"]: i for i in inventory}
-        return BaseModuleTableView._match_bay_by_position(item, index_map, bays)
+        return BaseModuleTableView._match_bay_by_position(item, index_map, bays, frozenset())
 
     def test_fan_does_not_match_slot_bay(self):
         """A fan (class=fan) must not land in a 'Slot 1' bay even when positional says slot 1."""
@@ -5151,6 +5434,42 @@ class TestModelIncompleteFlag:
         assert not any(key.startswith("model_incomplete") for key in parent_row)
 
 
+class TestStatusIconNotesHaveAnAccessibleName:
+    """An icon-only note in the status cell carries its text as an image name, not only as a title."""
+
+    @pytest.mark.parametrize(
+        ("status", "record"),
+        [
+            ("Matched", {"reported_parent": 7}),
+            ("Name Conflict", {"name_conflict_reason": "<b>reason</b>"}),
+            ("Matched", {"model_warning": "<b>warning</b>"}),
+        ],
+        ids=["repaired-parent", "name-conflict", "model-warning"],
+    )
+    def test_each_titled_icon_is_an_image_named_by_its_title(self, status, record):
+        from html.parser import HTMLParser
+
+        from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+
+        class Icons(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.titled = []
+
+            def handle_starttag(self, tag, attrs):
+                attrs = dict(attrs)
+                if tag == "i" and "title" in attrs:
+                    self.titled.append(attrs)
+
+        icons = Icons()
+        icons.feed(str(LibreNMSModuleTable([]).render_status(status, record)))
+
+        assert icons.titled
+        for attrs in icons.titled:
+            assert attrs.get("role") == "img"
+            assert attrs.get("aria-label") == attrs["title"]
+
+
 class TestRenderStatusNoBayOnParent:
     """render_status correctly labels child rows and parent 'Fix Model' badge."""
 
@@ -5947,7 +6266,6 @@ class TestScopePreservedAcrossIntegratedContainer:
             child_bays=[f"x1/c{n}" for n in range(1, 5)],
         )
         device_bays, module_scoped_bays = view._get_module_bays(selected_device)
-        view._generic_module_types = view._get_generic_module_types()
         view._module_type_ambiguities = view._get_module_type_ambiguities()
         view._carrier_install_rules = view._get_carrier_install_rules(selected_device.device_type.manufacturer)
 
@@ -6112,7 +6430,6 @@ class TestBuildRowAmbiguityWiring:
             manufacturer=device.device_type.manufacturer,
         )
         candidate_b = make_module_type("3HE18883AARB01", manufacturer=other_manufacturer)
-        view._generic_module_types = view._get_generic_module_types()
         # Ambiguity preloaded on the view
         view._module_type_ambiguities = view._get_module_type_ambiguities()
         module_bays = {bay.name: bay for bay in device.modulebays.filter(module__isnull=True)}
@@ -6153,7 +6470,6 @@ class TestBuildRowAmbiguityWiring:
         view = self._view()
         device = make_device_with_module_bays("build-row-no-ambiguity", ["Slot 2"])
         manufacturer = device.device_type.manufacturer
-        view._generic_module_types = view._get_generic_module_types()
         view._module_type_ambiguities = view._get_module_type_ambiguities()
         module_bays = {bay.name: bay for bay in device.modulebays.filter(module__isnull=True)}
         item = {
@@ -6439,6 +6755,9 @@ class TestRenderActionsPortIdentityFields:
         table.device = make_device("render-module-install-action")
         table.csrf_token = "csrf123"
         table.server_key = "default"
+        table.inventory_snapshot_digest = "render-actions-snapshot-digest"
+        table.policy_fingerprint = "render-actions-policy-fingerprint"
+        table.render_mode = "attributed"
         table.has_write_permission = True
         table.can_add_module = True
         table.can_change_module = False
@@ -6456,7 +6775,6 @@ class TestRenderActionsPortIdentityFields:
             "module_bay_id": 10,
             "module_type_id": 5,
             "serial": "SN-1",
-            "inventory_digest": "render-actions-row-digest",
         }
 
         html = str(table.render_actions("", record))
@@ -6555,6 +6873,7 @@ class TestGetContextDataOOBCacheFingerprint:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
         from netbox_librenms_plugin.tests.conftest import make_device
         from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
@@ -6566,7 +6885,7 @@ class TestGetContextDataOOBCacheFingerprint:
         cache.set(api._get_cache_key(device, server_key=server_key), True)
         view = DeviceModuleTableView()
         cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
-        cache.set(cache_key, {"inventory": [], "librenms_id": 1, "oob_librenms_id": None})
+        cache.set(cache_key, module_inventory_cache_payload([], 1, None))
         request = make_request("get", {"server_key": server_key})
 
         context = bind_and_call(view, request, "get_context_data", obj=device)
@@ -7075,9 +7394,9 @@ def test_vc_carrier_rules_follow_the_attributed_members_manufacturer():
 
 
 @pytest.mark.django_db
-def test_rule_admission_does_not_change_the_cached_inventory_digest():
-    """Presentation markers must not change the digest used to bind a cached inventory row."""
-    from netbox_librenms_plugin.utils import module_inventory_row_digest
+def test_rule_admission_does_not_change_the_cached_inventory():
+    """Presentation markers must not change the snapshot whose digest binds every module action."""
+    from copy import deepcopy
 
     from netbox_librenms_plugin.tests.conftest import make_device
 
@@ -7091,11 +7410,12 @@ def test_rule_admission_does_not_change_the_cached_inventory_digest():
             "entPhysicalContainedIn": 0,
         }
     ]
-    cached_digest = module_inventory_row_digest(inventory[0])
+    cached = deepcopy(inventory)
 
     rows = _run_build_context_real(_make_view(), inventory, device)
 
-    assert rows[0]["inventory_digest"] == cached_digest
+    assert rows[0]["ent_physical_index"] == 102
+    assert inventory == cached
 
 
 @pytest.mark.django_db

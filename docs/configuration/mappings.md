@@ -1,6 +1,6 @@
 # Mappings
 
-Mappings translate values reported by LibreNMS into the corresponding NetBox object or choice. They are useful when the two systems use different names for the same platform, hardware, location, module, bay, or interface type.
+Mappings translate values reported by LibreNMS into the corresponding NetBox object or choice. They are useful when the two systems use different names for the same platform, hardware, location, module, bay, or interface type. Interface Mappings and IP Mappings can also keep LibreNMS ports and addresses out of the sync.
 
 Open **LibreNMS → Mappings** and use the tabs at the top of the page to switch between mapping types. Each tab supports creating, editing, deleting, filtering, bulk importing, and exporting mappings.
 
@@ -83,6 +83,32 @@ The IP and cable checks need the LibreNMS port record. When the record is missin
 ```
 
 Import rules with a `name_pattern` as YAML or JSON. NetBox's CSV import removes the spaces at the start and end of each cell, so the plugin refuses a CSV import that has a `name_pattern` column. A pattern that does not compile is refused when you save the rule.
+
+## IP Mappings
+
+An IP Mapping keeps the LibreNMS addresses in a prefix out of IP sync. Open them at **LibreNMS → Mappings → IP Mappings**.
+
+A typical use is IPv6 link-local addresses. LibreNMS reports an `fe80::/10` address on most IPv6 interfaces, and these addresses do not belong in NetBox. One IP Mapping with the prefix `fe80::/10` and the action `ignore` keeps all of them out.
+
+| Field | Meaning |
+|---|---|
+| `prefix` | An IPv4 or IPv6 prefix. An address matches when it is in the prefix. A host address is stored as its network, so `fe80::1/10` becomes `fe80::/10`. |
+| `vrf` | The NetBox VRF that the address is synced into. Blank means every VRF and the global table. In an import, use the VRF name. |
+| `action` | `ignore`, the only action. |
+| `description` | An optional note. |
+
+Two mappings cannot have the same `prefix` and `vrf`.
+
+The IP Addresses tab decides each row with the VRF that the row selects. A row that a mapping ignores shows **Ignored** and the mapping. It has no sync button, and you cannot select it. When you select another VRF, the row is decided again. The sync checks every selected address again with the VRF that you submit, and reports a refused address under **Skipped**. A mapping never deletes or changes an address that NetBox has. An address that NetBox has already synced still shows **Synced**.
+
+**Add as OOB** in the device import also reads the IP mappings. It sets the OOB IP in the global table, so only a mapping without a VRF applies. When a mapping ignores the controller's IP, the OOB link is still saved, the OOB IP is not set, and a warning names the mapping.
+
+```yaml
+# Keep IPv6 link-local addresses out of NetBox.
+- prefix: fe80::/10
+  action: ignore
+  description: "IPv6 link-local"
+```
 
 ## Device Type Mappings
 

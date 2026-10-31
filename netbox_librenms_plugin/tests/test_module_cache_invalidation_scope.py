@@ -11,8 +11,18 @@ from netbox_librenms_plugin.tests.cache_test_helpers import (
     seed_inventory,
     snapshot_state,
 )
-from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view, module_row_binding
+from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_view, rendered_modal_form
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
+
+
+def _rendered_replace(page_device, inventory, user):
+    """Cache *inventory*, then build the post of the Replace form in the modal that row 100 opens."""
+    from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
+
+    key = seed_inventory(ReplaceModuleView(), page_device, inventory, librenms_id=7)
+    _action, fields = rendered_modal_form(page_device, 100, "replace-module", user=user)
+    request = make_request("post", fields, user=user)
+    return request, make_view(ReplaceModuleView, request, librenms_api=SimpleNamespace(server_key="default")), key
 
 
 @pytest.mark.django_db
@@ -27,13 +37,12 @@ class TestModuleActionsInvalidateEveryChangedDevice:
 
         from netbox_librenms_plugin.tests.conftest import install_module, make_device, make_module_bay
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
-        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
 
         page_device = make_device("replace-page-device", librenms_cf={"default": 7})
         other_device = make_device("replace-conflict-device", librenms_cf={"default": 8})
         make_module_bay(page_device, "Bay 1")
         make_module_bay(other_device, "Bay 1")
-        installed = install_module(page_device, "Bay 1", "Installed Model", serial="OLD")
+        install_module(page_device, "Bay 1", "Installed Model", serial="OLD")
         conflict = install_module(other_device, "Bay 1", "Conflicting Model", serial="SHARED-SERIAL")
         module_type = conflict.module_type
 
@@ -43,6 +52,7 @@ class TestModuleActionsInvalidateEveryChangedDevice:
                 ("view", Device),
                 ("view", ModuleType),
                 ("view", ModuleBay),
+                ("view", Module),
                 ("add", Module),
                 ("change", Module),
                 ("delete", Module),
@@ -55,28 +65,13 @@ class TestModuleActionsInvalidateEveryChangedDevice:
             {
                 "entPhysicalIndex": 100,
                 "entPhysicalClass": "module",
+                "entPhysicalName": "Bay 1",
                 "entPhysicalModelName": module_type.model,
                 "entPhysicalSerialNum": "SHARED-SERIAL",
                 "entPhysicalContainedIn": 0,
             }
         ]
-        request = make_request(
-            "post",
-            {
-                "module_id": str(installed.pk),
-                "ent_index": "100",
-                "server_key": "default",
-                "inventory_binding": module_row_binding(
-                    page_device,
-                    "replace_module",
-                    inventory[0],
-                    action_target={"module_id": installed.pk},
-                ),
-            },
-            user=user,
-        )
-        view = make_view(ReplaceModuleView, request, librenms_api=SimpleNamespace(server_key="default"))
-        key = seed_inventory(view, page_device, inventory, librenms_id=7)
+        request, view, key = _rendered_replace(page_device, inventory, user)
         seeded = seed_every_tab(other_device)
 
         try:
@@ -155,14 +150,13 @@ class TestModuleActionsInvalidateEveryChangedDevice:
 
         from netbox_librenms_plugin.tests.conftest import install_module, make_device, make_module_bay
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
-        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
 
         page_device = make_device("replace-bystander-page", librenms_cf={"default": 7})
         other_device = make_device("replace-conflict-owner", librenms_cf={"default": 8})
         bystander = make_device("replace-bystander", librenms_cf={"default": 9})
         make_module_bay(page_device, "Bay 1")
         make_module_bay(other_device, "Bay 1")
-        installed = install_module(page_device, "Bay 1", "Installed Model", serial="OLD")
+        install_module(page_device, "Bay 1", "Installed Model", serial="OLD")
         conflict = install_module(other_device, "Bay 1", "Conflicting Model", serial="SHARED-SERIAL")
 
         user = make_user_with_perms(
@@ -171,6 +165,7 @@ class TestModuleActionsInvalidateEveryChangedDevice:
                 ("view", Device),
                 ("view", ModuleType),
                 ("view", ModuleBay),
+                ("view", Module),
                 ("add", Module),
                 ("change", Module),
                 ("delete", Module),
@@ -183,28 +178,13 @@ class TestModuleActionsInvalidateEveryChangedDevice:
             {
                 "entPhysicalIndex": 100,
                 "entPhysicalClass": "module",
+                "entPhysicalName": "Bay 1",
                 "entPhysicalModelName": conflict.module_type.model,
                 "entPhysicalSerialNum": "SHARED-SERIAL",
                 "entPhysicalContainedIn": 0,
             }
         ]
-        request = make_request(
-            "post",
-            {
-                "module_id": str(installed.pk),
-                "ent_index": "100",
-                "server_key": "default",
-                "inventory_binding": module_row_binding(
-                    page_device,
-                    "replace_module",
-                    inventory[0],
-                    action_target={"module_id": installed.pk},
-                ),
-            },
-            user=user,
-        )
-        view = make_view(ReplaceModuleView, request, librenms_api=SimpleNamespace(server_key="default"))
-        key = seed_inventory(view, page_device, inventory, librenms_id=7)
+        request, view, key = _rendered_replace(page_device, inventory, user)
         seeded = seed_every_tab(bystander)
 
         try:

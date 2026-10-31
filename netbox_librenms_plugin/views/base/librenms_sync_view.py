@@ -250,6 +250,8 @@ class BaseLibreNMSSyncView(
         for sync_tab in applicable_tabs:
             query = request.GET.copy()
             query["tab"] = sync_tab.value
+            # The tab link adds the selected name field itself, so a copy here would grow per click.
+            query.pop("interface_name_field", None)
             sync_tab_urls[sync_tab.value] = f"{request.path}?{query.urlencode()}"
 
         # Add our specific context

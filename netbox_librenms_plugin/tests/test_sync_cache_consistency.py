@@ -23,6 +23,7 @@ from netbox_librenms_plugin.sync_cache import (
     SyncTabState,
     apply_request_cache_transition,
     claim_sync_subjects,
+    module_inventory_cache_payload,
     schedule_request_cache_mutation,
     sync_cache_browser_contract,
     sync_subject_key,
@@ -41,7 +42,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change, seed_mapping, seed_stored_mapping
-from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
+from netbox_librenms_plugin.tests.view_test_helpers import render_module_tab, rendered_module_form
 from netbox_librenms_plugin.server_mappings import mark_migrated
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
@@ -348,6 +349,101 @@ def test_cable_cache_fragment_does_not_rewrite_the_snapshot(client, settings, pr
 
 
 @pytest.mark.django_db
+def test_module_cache_status_reads_the_inventory_snapshot_like_the_tab(client, settings):
+    """A snapshot from an older inventory writer is one the Modules tab rejects, so status must not call it ready."""
+    _configure_servers(settings)
+    device = make_device("cache-status-module-version", librenms_cf={"primary": {"id": 6406}})
+    key = _cache_key("inventory", device, "primary")
+    cache.set(key, {"inventory": [], "librenms_id": 6406, "oob_librenms_id": None}, timeout=300)
+    client.force_login(make_superuser("cache-status-module-version-user"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_status",
+        kwargs={"object_type": "device", "pk": device.pk},
+    )
+
+    stale = client.get(url, {"server_key": "primary"})
+    cache.set(key, module_inventory_cache_payload([], 6406, None), timeout=300)
+    current = client.get(url, {"server_key": "primary"})
+
+    assert stale.status_code == current.status_code == 200
+    stale_modules = stale.json()["tabs"]["modules"]
+    current_modules = current.json()["tabs"]["modules"]
+    assert (stale_modules["state"], stale_modules["snapshot_available"]) == ("missing", False)
+    assert (current_modules["state"], current_modules["snapshot_available"]) == ("ready", True)
+
+
+@pytest.mark.django_db
+def test_module_cache_status_rejects_a_snapshot_of_another_oob_link_like_the_tab(client, settings):
+    """A snapshot merged from another OOB controller is one the Modules tab rejects, so status must not call it ready."""
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+    from netbox_librenms_plugin.views.sync.modules import _get_cached_inventory_for_device
+
+    _configure_servers(settings)
+    device = make_device("cache-status-module-oob", librenms_cf={"primary": {"id": 6407, "oob": {"id": 6408}}})
+    key = _cache_key("inventory", device, "primary")
+    client.force_login(make_superuser("cache-status-module-oob-user"))
+    status_url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_status",
+        kwargs={"object_type": "device", "pk": device.pk},
+    )
+    fragment_url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_fragment",
+        kwargs={"object_type": "device", "pk": device.pk, "tab": SyncTab.MODULES.value},
+    )
+
+    get_cache_key = DeviceModuleTableView().get_cache_key
+
+    cache.set(key, module_inventory_cache_payload([], 6407, 6408), timeout=300)
+    current = client.get(status_url, {"server_key": "primary"}).json()["tabs"]["modules"]
+    current_rows = _get_cached_inventory_for_device(device, "primary", get_cache_key)
+    cache.set(key, module_inventory_cache_payload([], 6407, 6499), timeout=300)
+    stale = client.get(status_url, {"server_key": "primary"}).json()["tabs"]["modules"]
+    stale_rows = _get_cached_inventory_for_device(device, "primary", get_cache_key)
+    fragment = client.get(fragment_url, {"server_key": "primary"})
+
+    assert (current["state"], current["snapshot_available"], current_rows) == ("ready", True, [])
+    assert (stale["state"], stale["snapshot_available"], stale_rows) == ("missing", False, None)
+    # The fragment offers no snapshot that the tab would discard.
+    assert fragment.status_code == 404
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("remap", ["save", "concurrent_row_write"])
+def test_module_cache_status_agrees_with_the_tab_after_the_host_mapping_changes(client, settings, remap):
+    """A snapshot of the old host id is one the Modules tab discards, so status must not call it ready."""
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping_row
+
+    _configure_servers(settings)
+    device = make_device("cache-status-module-host", librenms_cf={"primary": {"id": 6407}})
+    client.force_login(make_superuser("cache-status-module-host-user"))
+    status_url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_status",
+        kwargs={"object_type": "device", "pk": device.pk},
+    )
+    fragment_url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_fragment",
+        kwargs={"object_type": "device", "pk": device.pk, "tab": SyncTab.MODULES.value},
+    )
+
+    def status_and_fragment():
+        status = client.get(status_url, {"server_key": "primary"}).json()["tabs"]["modules"]
+        fragment = client.get(fragment_url, {"server_key": "primary"})
+        rendered = fragment.status_code == 200 and fragment.context["module_sync"]["table"] is not None
+        return status["snapshot_available"], rendered
+
+    cache.set(_cache_key("inventory", device, "primary"), module_inventory_cache_payload([], 6407, None), timeout=300)
+    before = status_and_fragment()
+    if remap == "save":
+        seed_mapping(device, "primary", own=6410)
+    else:
+        seed_stored_mapping_row(device, {"primary": {"id": 6410}})
+    after = status_and_fragment()
+
+    assert before == (True, True)
+    assert after == (False, False)
+
+
+@pytest.mark.django_db
 def test_module_cache_fragment_does_not_discover_a_missing_host_id(client, settings, primary_librenms):
     """An OOB-mapped module fragment must not discover a missing host identity."""
     _configure_servers(settings)
@@ -357,7 +453,7 @@ def test_module_cache_fragment_does_not_discover_a_missing_host_id(client, setti
     )
     cache.set(
         _cache_key("inventory", device, "primary"),
-        {"inventory": [], "librenms_id": 9999, "oob_librenms_id": 6405},
+        module_inventory_cache_payload([], 9999, 6405),
         timeout=300,
     )
     client.force_login(make_superuser("cache-only-module-user"))
@@ -370,7 +466,8 @@ def test_module_cache_fragment_does_not_discover_a_missing_host_id(client, setti
     response = client.get(url, {"server_key": "primary"})
 
     assert len(primary_librenms.requests) == request_count
-    assert response.status_code == 200
+    # Without a stored host id the tab cannot render the snapshot, so the status offers none.
+    assert response.status_code == 404
 
 
 @pytest.mark.django_db
@@ -1183,6 +1280,24 @@ def test_module_install_invalidates_other_tabs_after_creating_a_module(
     assert cache.get(_cache_key("ip_addresses", device, "primary")) is None
 
 
+def _module_row(index, bay, module_type, serial):
+    """Return an inventory row that the bay matcher places in *bay* as *module_type*."""
+    return {
+        "entPhysicalIndex": index,
+        "entPhysicalClass": "module",
+        "entPhysicalName": bay.name,
+        "entPhysicalModelName": module_type.model,
+        "entPhysicalSerialNum": serial,
+    }
+
+
+def _rendered_serial_update(device, ent_index, user):
+    """Return the Update Serial form that the cached "primary" Modules tab renders for row *ent_index*."""
+    return rendered_module_form(
+        render_module_tab(device, user=user, server_key="primary"), "update-module-serial", ent_index
+    )
+
+
 @pytest.mark.django_db
 def test_unchanged_module_serial_preserves_other_snapshots(client, settings, django_capture_on_commit_callbacks):
     """Submitting the existing serial must not publish a cache mutation."""
@@ -1195,38 +1310,20 @@ def test_unchanged_module_serial_preserves_other_snapshots(client, settings, dja
         manufacturer=device.device_type.manufacturer,
         model="Cache Existing Module",
     )
-    module = Module.objects.create(
-        device=device,
-        module_bay=bay,
-        module_type=module_type,
-        serial="UNCHANGED-SERIAL",
+    module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, serial="OLD")
+    inventory_payload = module_inventory_cache_payload(
+        [_module_row(8102, bay, module_type, "UNCHANGED-SERIAL")], 641, None
     )
-    inventory_payload = {
-        "librenms_id": 641,
-        "inventory": [{"entPhysicalIndex": 8102, "entPhysicalSerialNum": module.serial}],
-    }
     _seed_snapshot("inventory", device, "primary", inventory_payload)
     _seed_snapshot("ports", device, "primary")
-    client.force_login(make_superuser("cache-module-unchanged-user"))
-    url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": device.pk})
+    user = make_superuser("cache-module-unchanged-user")
+    client.force_login(user)
+    url, fields = _rendered_serial_update(device, 8102, user)
+    # Another writer stores the reported serial after the page renders.
+    Module.objects.filter(pk=module.pk).update(serial="UNCHANGED-SERIAL")
 
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(
-            url,
-            {
-                "server_key": "primary",
-                "module_id": str(module.pk),
-                "ent_index": "8102",
-                "inventory_binding": module_inventory_binding_token(
-                    device.pk,
-                    "primary",
-                    "update_module_serial",
-                    {"module_id": module.pk},
-                    8102,
-                    module_inventory_row_digest(inventory_payload["inventory"][0]),
-                ),
-            },
-        )
+        response = client.post(url, fields)
 
     assert response.status_code == 302
     assert [str(message) for message in get_messages(response.wsgi_request)] == [
@@ -1252,10 +1349,7 @@ def test_module_mutation_without_posted_server_uses_active_namespace(
         model="Cache Scoped Module",
     )
     module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, serial="OLD")
-    inventory_payload = {
-        "librenms_id": 642,
-        "inventory": [{"entPhysicalIndex": 8103, "entPhysicalSerialNum": "NEW"}],
-    }
+    inventory_payload = module_inventory_cache_payload([_module_row(8103, bay, module_type, "NEW")], 642, None)
     _seed_snapshot(
         "inventory",
         device,
@@ -1263,25 +1357,13 @@ def test_module_mutation_without_posted_server_uses_active_namespace(
         inventory_payload,
     )
     _seed_snapshot("ports", device, "primary")
-    client.force_login(make_superuser("cache-module-missing-server-user"))
-    url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": device.pk})
+    user = make_superuser("cache-module-missing-server-user")
+    client.force_login(user)
+    url, fields = _rendered_serial_update(device, 8103, user)
+    del fields["server_key"]
 
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(
-            url,
-            {
-                "module_id": str(module.pk),
-                "ent_index": "8103",
-                "inventory_binding": module_inventory_binding_token(
-                    device.pk,
-                    "primary",
-                    "update_module_serial",
-                    {"module_id": module.pk},
-                    8103,
-                    module_inventory_row_digest(inventory_payload["inventory"][0]),
-                ),
-            },
-        )
+        response = client.post(url, fields)
 
     assert response.status_code == 302
     module.refresh_from_db()

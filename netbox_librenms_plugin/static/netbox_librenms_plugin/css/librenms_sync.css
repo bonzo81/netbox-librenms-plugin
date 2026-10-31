@@ -76,3 +76,128 @@
         min-width: min(23rem, calc(100vw - 2rem));
     }
 }
+
+/* The Virtual Chassis member column, which each sync table opts into with this class. A fixed width
+   keeps the member dropdown from resizing on open, and is narrow enough for the table to fit its card. */
+.device-selection-col {
+    width: 13rem;
+    min-width: 13rem;
+}
+
+.device-selection-col .ts-wrapper {
+    width: 100%;
+    max-width: 100%;
+}
+
+/* A multi-select dropdown wraps its chosen items. */
+.ts-wrapper.multi .ts-control {
+    display: flex !important;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+/* A row an IP mapping ignores has a disabled checkbox; make it clear in the dark theme too. */
+#librenms-ipaddress-table input[name="select"]:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.vlan-sync-group-select {
+    min-width: 180px;
+}
+
+/* At phone width, the sync tables wrap their cell content, so that they fit their card without a scroll wrapper. */
+@media (max-width: 575.98px) {
+    .device-info-sync-table .d-flex,
+    #librenms-cable-table .d-flex,
+    #librenms-cable-table-vc .d-flex,
+    #librenms-ipaddress-table .d-flex,
+    #librenms-vlan-table .d-flex {
+        flex-wrap: wrap;
+        gap: 0.25rem;
+    }
+
+    .sync-tab-primary-toolbar,
+    .sync-tab-primary-toolbar > .d-flex {
+        flex-wrap: wrap;
+        gap: 0.5rem;
+    }
+
+    [id$="-sync-content"] .btn-link {
+        white-space: normal;
+    }
+
+    #librenms-cable-table > :not(caption) > * > *,
+    #librenms-cable-table-vc > :not(caption) > * > *,
+    #librenms-ipaddress-table > :not(caption) > * > *,
+    #librenms-vlan-table > :not(caption) > * > * {
+        padding-inline: 0.25rem;
+    }
+
+    .device-info-sync-table .ms-3,
+    .device-info-sync-table .ms-2 {
+        margin-inline-start: 0 !important;
+    }
+
+    .device-info-sync-table :is(td, .btn, .badge),
+    #librenms-cable-table :is(td, .btn, .badge),
+    #librenms-cable-table-vc :is(td, .btn, .badge),
+    #librenms-ipaddress-table :is(td, .btn, .badge),
+    #librenms-vlan-table :is(td, .btn, .badge) {
+        white-space: normal;
+        overflow-wrap: anywhere;
+    }
+
+    .device-info-sync-table td:first-child {
+        overflow-wrap: normal;
+    }
+
+    .device-info-sync-table th,
+    #librenms-cable-table th,
+    #librenms-cable-table-vc th,
+    #librenms-ipaddress-table th,
+    #librenms-vlan-table th {
+        white-space: normal;
+    }
+
+    /* The IP table has the most columns, so its headers also break inside a word. */
+    #librenms-ipaddress-table th {
+        overflow-wrap: anywhere;
+    }
+
+    #librenms-ipaddress-table tbody td[data-col="vrf"],
+    #librenms-ipaddress-table tbody td[data-col="vrf"] select.form-select {
+        width: auto;
+        min-width: 5rem;
+    }
+
+    .vlan-sync-group-select {
+        width: auto;
+        min-width: 7rem;
+    }
+
+    .ts-wrapper.vlan-sync-group-select {
+        width: 7rem;
+    }
+
+    #librenms-cable-table-vc .device-selection-col {
+        width: auto;
+        min-width: 5rem;
+    }
+
+    /* The member select wraps its name and keeps only the room of its arrow. */
+    #librenms-cable-table-vc .device-selection-col .ts-wrapper .ts-control {
+        padding-inline: 0.5rem 1.75rem;
+    }
+
+    #librenms-cable-table-vc .device-selection-col .ts-control > .item {
+        white-space: normal;
+        overflow-wrap: anywhere;
+    }
+
+    #librenms-cable-table-vc .device-selection-col .ts-control > input {
+        flex-basis: 0;
+        width: 0;
+        min-width: 0;
+    }
+}
