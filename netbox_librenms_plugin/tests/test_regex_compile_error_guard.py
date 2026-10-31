@@ -34,20 +34,8 @@ ALLOWED = [
     ),
     (
         "views/sync/modules.py",
-        "InstallBranchView._find_parent_module_id",
-        "bay_name = match.expand(rm.netbox_bay_name)",
-        TEMPLATE_ONLY,
-    ),
-    (
-        "views/sync/modules.py",
         "AddBayTemplateView._derive_mapping_pattern",
         "if compiled.sub(netbox_replacement, librenms_name) != netbox_name:\n    return None",
-        TEMPLATE_ONLY,
-    ),
-    (
-        "views/base/modules_view.py",
-        "BaseModuleTableView._lookup_regex_bay_mapping",
-        "resolved_bay = match.expand(mapping.netbox_bay_name)",
         TEMPLATE_ONLY,
     ),
 ]

@@ -17,10 +17,23 @@ from django.utils import timezone
 from django.utils.html import escape
 from django.views import View
 
+from netbox_librenms_plugin.breakout_cables import (
+    HIDDEN_REASONS,
+    breakout_far_end,
+    decide_breakout_cable,
+    decide_channel_far_end,
+    hidden_breakout_refusal,
+    holds_a_cable,
+    is_channel,
+)
 from netbox_librenms_plugin.constants import (
     INTERFACE_NAME_FIELDS,
+    MATCHING,
+    MISMATCHED,
+    NOT_IN_NETBOX,
     OOB_INVENTORY_SOURCE,
     SERIAL_INVENTORY_SOURCE,
+    UNCLASSIFIED,
 )
 from netbox_librenms_plugin.interface_rules import PORT_RECORD_KEYS, interface_rules_for_request, row_rule_block
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
@@ -35,6 +48,9 @@ from netbox_librenms_plugin.server_mappings import (
 )
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
+from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_filters
+from netbox_librenms_plugin.sync_query import SyncQuery
+from netbox_librenms_plugin.tables.cables import SYNC_CABLE_LABEL
 from netbox_librenms_plugin.utils import (
     apply_cable_manual_picks,
     assign_cable_row_ids,
@@ -331,6 +347,29 @@ def _extract_cached_links(cached, cache_key=None):
 # re-enrichment — derived fields (netbox_*_id, *_url, cable_status, …) are dropped so stale
 # IDs/URLs can't cause DoesNotExist after the underlying NetBox objects are deleted. Defined
 # once so the strip in _prepare_context and in SingleCableVerifyView stay in lock-step.
+# The query keys that only the remote picker and the remote create modal read: every other key is the page query.
+CABLE_MODAL_QUERY_KEYS = ("row_id", "expected_local_id", "action", "source", "q", "device_id")
+
+
+def _set_cable_state(link, status, comparison):
+    """
+    Set the cable status text of a row and its comparison with the desired connection.
+
+    The comparison is the row's sync-state filter value: ``MATCHING`` (the desired connection is
+    present, also through a patch path), ``MISMATCHED`` (it reaches another endpoint, or the cable
+    still needs adoption), ``NOT_IN_NETBOX`` (the cable is confirmed absent) or ``UNCLASSIFIED``
+    (the evidence is hidden, unresolved or refused). Every status write sets both, so they cannot drift.
+
+    Args:
+        link (dict): The cable row, updated in place.
+        status (str): The text of the Cable Status cell.
+        comparison (str): One of the four comparison values.
+
+    """
+    link["cable_status"] = status
+    link["cable_comparison"] = comparison
+
+
 _RAW_LINK_KEYS = frozenset(
     {
         "local_port",
@@ -455,11 +494,15 @@ class BaseCableTableView(
             ):
                 link["can_create_cable"] = False
 
-    def _cable_has_provenance(self, cable):
-        """Check the request's provenance tag without repeating settings/tag queries per row."""
+    def _provenance_tag(self):
+        """Return the request's provenance tag without repeating settings/tag queries per row."""
         if not hasattr(self, "_cable_provenance_tag"):
             self._cable_provenance_tag = get_librenms_cable_tag(create=False)
-        return cable_has_librenms_tag(cable, self._cable_provenance_tag)
+        return self._cable_provenance_tag
+
+    def _cable_has_provenance(self, cable):
+        """Check the request's provenance tag on *cable*."""
+        return cable_has_librenms_tag(cable, self._provenance_tag())
 
     def _build_trace_visibility(self, paths):
         """Resolve every object permission used by a page of cable traces in bounded queries."""
@@ -701,8 +744,13 @@ class BaseCableTableView(
             candidate_pks.update(Interface.objects.filter(candidate_q).values_list("pk", flat=True))
         catalog_interfaces = list(
             Interface.objects.filter(pk__in=candidate_pks)
-            .select_related("device", "cable")
-            .prefetch_related("cable__tags", "cable__terminations__termination")
+            .select_related("device", "cable", "parent__cable")
+            .prefetch_related(
+                "cable__tags",
+                "cable__terminations__termination",
+                "parent__cable__tags",
+                "parent__cable__terminations__termination",
+            )
         )
         # A manual pick can name an interface on a device no row resolved an owner for.
         owner_ids.update(interface.device_id for interface in catalog_interfaces if interface.pk in manual_ids)
@@ -763,6 +811,7 @@ class BaseCableTableView(
         return (
             local_interface is not None
             and remote_interface is not None
+            and not is_channel(local_interface)
             and local_interface.cable_id is not None
             and remote_interface.cable_id is not None
             and local_interface.cable_id != remote_interface.cable_id
@@ -823,7 +872,7 @@ class BaseCableTableView(
         cached_data = extract_cached_ports(cache.get(ports_cache_key), ports_cache_key)
         if cached_data:
             return cached_data
-        success, data = self.librenms_api.get_ports(librenms_id)
+        success, data = self.librenms_api.get_ports(librenms_id, with_vlans=False)
         if not success:
             return {"ports": []}
         return data
@@ -1214,7 +1263,7 @@ class BaseCableTableView(
                 oob_data.get("message") if isinstance(oob_data, dict) else oob_data,
             )
             return True
-        oob_ports_success, oob_ports_data = self.librenms_api.get_ports(oob_id)
+        oob_ports_success, oob_ports_data = self.librenms_api.get_ports(oob_id, with_vlans=False)
         oob_map, oob_alt_map = self._build_cable_port_name_maps(
             oob_ports_data if oob_ports_success else {}, interface_name_field, alt_name_field
         )
@@ -1644,15 +1693,17 @@ class BaseCableTableView(
                     or local_interface.pk not in visible_interface_ids
                     or remote_interface.pk not in visible_interface_ids
                 ):
-                    link["cable_status"] = "Interface Not Available"
+                    _set_cable_state(link, "Interface Not Available", UNCLASSIFIED)
                     return link
             else:
                 try:
                     local_interface = self._viewable_queryset(Interface).get(pk=local_interface_id)
                     remote_interface = self._viewable_queryset(Interface).get(pk=remote_interface_id)
                 except Interface.DoesNotExist:
-                    link["cable_status"] = "Interface Not Available"
+                    _set_cable_state(link, "Interface Not Available", UNCLASSIFIED)
                     return link
+            if self._is_breakout_row(link, local_interface, remote_interface, actionable):
+                return link
             local_cable = local_interface.cable
             remote_cable = remote_interface.cable
             if normal_context is not None:
@@ -1665,7 +1716,7 @@ class BaseCableTableView(
                     cable is not None and not self._object_is_viewable(cable) for cable in {local_cable, remote_cable}
                 )
             if cable_state_hidden:
-                link["cable_status"] = "Cable State Not Available"
+                _set_cable_state(link, "Cable State Not Available", UNCLASSIFIED)
                 return link
 
             unsupported_cable = next(
@@ -1677,28 +1728,22 @@ class BaseCableTableView(
                 None,
             )
             if unsupported_cable is not None:
-                link.update(
-                    {
-                        "cable_status": "Multi-termination Cable Not Supported",
-                        "cable_url": reverse("dcim:cable", args=[unsupported_cable.pk]),
-                        "_multi_termination_unsupported": True,
-                    }
-                )
+                _set_cable_state(link, "Multi-termination Cable Not Supported", UNCLASSIFIED)
+                link["cable_url"] = reverse("dcim:cable", args=[unsupported_cable.pk])
+                link["_multi_termination_unsupported"] = True
                 return link
 
             if local_cable is None and remote_cable is None:
-                link["cable_status"] = "No Cable"
+                _set_cable_state(link, "No Cable", NOT_IN_NETBOX)
                 link["can_create_cable"] = actionable
             elif local_cable is not None and local_cable == remote_cable:
                 # The desired connection is already cabled directly. Offer a sync only while
                 # the cable is untagged — it then just adopts (tags) the cable, never recreates.
-                link.update(
-                    {
-                        "cable_status": "Cable Found",
-                        "cable_url": reverse("dcim:cable", args=[local_cable.pk]),
-                    }
-                )
-                link["can_create_cable"] = actionable and not self._cable_has_provenance(local_cable)
+                adopted = self._cable_has_provenance(local_cable)
+                # An untagged cable still needs the sync to adopt it, so it does not match yet.
+                _set_cable_state(link, "Cable Found", MATCHING if adopted else MISMATCHED)
+                link["cable_url"] = reverse("dcim:cable", args=[local_cable.pk])
+                link["can_create_cable"] = actionable and not adopted
             elif local_cable is not None and remote_cable is not None:
                 path = (
                     normal_context["trace_paths"].get(local_interface.pk)
@@ -1709,43 +1754,32 @@ class BaseCableTableView(
                     path,
                     (normal_context or {}).get("trace_visibility"),
                 ):
-                    link["cable_status"] = "Cable State Not Available"
+                    _set_cable_state(link, "Cable State Not Available", UNCLASSIFIED)
                     return link
                 if cable_path_reaches(local_interface, remote_termination=remote_interface, path=path):
                     # A remodeled multi-segment path (through patch panels) that still reaches
                     # the LibreNMS target: the link is correct, just modeled in more detail.
-                    link.update(
-                        {
-                            "cable_status": "Connected via Patch Path",
-                            "cable_url": reverse("dcim:cable", args=[local_cable.pk]),
-                        }
-                    )
+                    _set_cable_state(link, "Connected via Patch Path", MATCHING)
                 else:
-                    link.update(
-                        {
-                            "cable_status": "Cable Mismatch",
-                            "cable_url": reverse("dcim:cable", args=[local_cable.pk]),
-                        }
-                    )
+                    _set_cable_state(link, "Cable Mismatch", MISMATCHED)
                     link["can_create_cable"] = actionable
+                link["cable_url"] = reverse("dcim:cable", args=[local_cable.pk])
             else:
                 # Cabled somewhere that does not reach the LibreNMS target: offer a re-sync,
                 # gated by classify_cable_action and explicit confirmation of the current cable.
                 occupying_cable = local_cable or remote_cable
-                link.update(
-                    {
-                        "cable_status": "Cable Mismatch",
-                        "cable_url": reverse("dcim:cable", args=[occupying_cable.pk]),
-                    }
-                )
+                _set_cable_state(link, "Cable Mismatch", MISMATCHED)
+                link["cable_url"] = reverse("dcim:cable", args=[occupying_cable.pk])
                 link["can_create_cable"] = actionable
         else:
-            link["cable_status"] = (
+            _set_cable_state(
+                link,
                 "Both Interfaces Not Found in Netbox"
                 if not (local_interface_id or remote_interface_id)
                 else "Local Interface Not Found in Netbox"
                 if not local_interface_id
-                else "Remote Interface Not Found in Netbox"
+                else "Remote Interface Not Found in Netbox",
+                UNCLASSIFIED,
             )
             # LibreNMS gave only one end, so the row can never be synced. Reporting the cable
             # the resolved end already has keeps a cabled port from reading as unconnected.
@@ -1789,8 +1823,12 @@ class BaseCableTableView(
             if interface is None:
                 return
 
+        # The gate's view step comes first: a channel's connector state belongs to its parent's cable.
+        if is_channel(interface) and (refusal := hidden_breakout_refusal(interface, self._may)) is not None:
+            _set_cable_state(link, f"Breakout Not Synced: {refusal.reason}", UNCLASSIFIED)
+            return
         cable = interface.cable
-        if cable is None:
+        if cable is None or not holds_a_cable(interface):
             return
         if interface.pk == link.get("netbox_local_interface_id"):
             link["_local_end_cabled"] = True
@@ -1799,26 +1837,64 @@ class BaseCableTableView(
         else:
             cable_visible = self._object_is_viewable(cable)
         if not cable_visible:
-            link["cable_status"] = "Cable State Not Available"
+            _set_cable_state(link, "Cable State Not Available", UNCLASSIFIED)
             return
 
         link["cable_url"] = reverse("dcim:cable", args=[cable.pk])
         peer_device = self._viewable_cable_peer_device(interface, cable)
-        link["cable_status"] = f"Cabled to {peer_device.name}" if peer_device is not None else "Cabled in Netbox"
+        _set_cable_state(
+            link, f"Cabled to {peer_device.name}" if peer_device is not None else "Cabled in Netbox", UNCLASSIFIED
+        )
+
+    def _is_breakout_row(self, link, local_interface, remote_interface, actionable):
+        """Return whether an end of the row is a channel; the row then shows the breakout gate's decision."""
+        if is_channel(local_interface):
+            decision = self._breakout_decision(local_interface, remote_interface)
+        elif (decision := decide_channel_far_end(local_interface, remote_interface, self._may)) is None:
+            return False
+        channel = local_interface if is_channel(local_interface) else remote_interface
+        cable = None if channel.parent is None else channel.parent.cable
+        if cable is not None and decision.reason not in HIDDEN_REASONS:
+            link["cable_url"] = reverse("dcim:cable", args=[cable.pk])
+        if decision.action == "matching":
+            _set_cable_state(link, "Cable Found", MATCHING)
+        elif decision.action == "refuse":
+            _set_cable_state(link, f"Breakout Not Synced: {decision.reason}", UNCLASSIFIED)
+        else:
+            _set_cable_state(link, "No Cable", NOT_IN_NETBOX)
+            link["can_create_cable"] = actionable
+        return True
+
+    def _breakout_decision(self, channel, remote):
+        """Return the breakout gate's decision for a channel row of this request."""
+        return decide_breakout_cable(channel, remote, self._provenance_tag(), self._may)
+
+    def _may(self, action, obj):
+        """Return whether the request user may do *action* (``view`` or ``change``) on *obj*."""
+        # The channels of one parent ask the same questions; the writer keeps its own uncached check.
+        memo = self.__dict__.setdefault("_may_memo", {})
+        key = (action, type(obj), obj.pk)
+        if key not in memo:
+            queryset = self._viewable_queryset if action == "view" else self._changeable_queryset
+            memo[key] = queryset(type(obj)).filter(pk=obj.pk).exists()
+        return memo[key]
 
     def _viewable_cable_peer_device(self, interface, cable):
         """Return the device at the far end of *cable*, only when the request may view it."""
-        if not cable_is_point_to_point(cable):
-            return None
-        a_terminations = list(cable.a_terminations)
-        b_terminations = list(cable.b_terminations)
-        if len(a_terminations) != 1 or len(b_terminations) != 1:
-            return None
-        near, far = a_terminations[0], b_terminations[0]
-        if near != interface:
-            near, far = far, near
-        if near != interface:
-            return None
+        if is_channel(interface):
+            far = breakout_far_end(interface, interface.parent, cable)
+        else:
+            if not cable_is_point_to_point(cable):
+                return None
+            a_terminations = list(cable.a_terminations)
+            b_terminations = list(cable.b_terminations)
+            if len(a_terminations) != 1 or len(b_terminations) != 1:
+                return None
+            near, far = a_terminations[0], b_terminations[0]
+            if near != interface:
+                near, far = far, near
+            if near != interface:
+                return None
         peer_device_id = getattr(far, "device_id", None)
         if peer_device_id is None:
             return None
@@ -1847,13 +1923,13 @@ class BaseCableTableView(
         csp_id = link.get("netbox_local_interface_id")
         link["can_create_cable"] = False
         if not csp_id:
-            link["cable_status"] = "Console Server Port Not Found in NetBox"
+            _set_cable_state(link, "Console Server Port Not Found in NetBox", UNCLASSIFIED)
             return link
         if csp is None or csp.pk != csp_id:
             try:
                 csp = self._viewable_queryset(ConsoleServerPort).get(pk=csp_id)
             except ConsoleServerPort.DoesNotExist:
-                link["cable_status"] = "Console Server Port Not Found in NetBox"
+                _set_cable_state(link, "Console Server Port Not Found in NetBox", UNCLASSIFIED)
                 return link
         if csp.cable:
             visible_cable_ids = (remote_context or {}).get("visible_cable_ids")
@@ -1863,20 +1939,17 @@ class BaseCableTableView(
                 else self._object_is_viewable(csp.cable)
             )
             if not cable_is_visible:
-                link["cable_status"] = "Cable State Not Available"
+                _set_cable_state(link, "Cable State Not Available", UNCLASSIFIED)
                 link["_serial_cable_hidden"] = True
                 return link
-            link.update(
-                {
-                    "cable_status": "Cable Found",
-                    "cable_url": reverse("dcim:cable", args=[csp.cable.pk]),
-                }
-            )
+            # The local end alone does not show the desired connection: enrich_serial_remote decides it.
+            _set_cable_state(link, "Cable Found", UNCLASSIFIED)
+            link["cable_url"] = reverse("dcim:cable", args=[csp.cable.pk])
             if not cable_is_point_to_point(csp.cable):
-                link["cable_status"] = "Multi-termination Cable Not Supported"
+                _set_cable_state(link, "Multi-termination Cable Not Supported", UNCLASSIFIED)
                 link["_multi_termination_unsupported"] = True
         else:
-            link["cable_status"] = "No Cable"
+            _set_cable_state(link, "No Cable", UNCLASSIFIED)
         return link
 
     def enrich_serial_remote(self, link, claimed_cp_ids=None, csp=None, remote_context=None):
@@ -2016,13 +2089,8 @@ class BaseCableTableView(
                 .first()
             )
         if manual_cp is None:
-            link.update(
-                {
-                    "manual_remote": True,
-                    "cable_status": "Selected remote port is no longer available",
-                    "can_create_cable": False,
-                }
-            )
+            _set_cable_state(link, "Selected remote port is no longer available", UNCLASSIFIED)
+            link.update({"manual_remote": True, "can_create_cable": False})
             return
         manual_is_actionable = remote_context is None or (
             csp.pk in remote_context["changeable_console_server_port_ids"]
@@ -2070,7 +2138,7 @@ class BaseCableTableView(
                 .first()
             )
         if not uncabled_cp:
-            link["cable_status"] = "Console Port Not Found in NetBox"
+            _set_cable_state(link, "Console Port Not Found in NetBox", UNCLASSIFIED)
             return
         can_create = remote_context is None or (
             csp.pk in remote_context["changeable_console_server_port_ids"]
@@ -2082,6 +2150,11 @@ class BaseCableTableView(
         link["remote_port_name"] = uncabled_cp.name
         link["remote_port_url"] = reverse("dcim:consoleport", args=[uncabled_cp.pk])
         link["can_create_cable"] = can_create
+        # A cabled local end reaches here only after _resolve_cabled_serial_row found a mismatch.
+        if csp.cable is not None:
+            _set_cable_state(link, "Cable Mismatch", MISMATCHED)
+        else:
+            _set_cable_state(link, "No Cable", NOT_IN_NETBOX)
 
     def _resolve_cabled_serial_row(self, link, csp, device, remote_context=None) -> bool:
         """
@@ -2122,7 +2195,10 @@ class BaseCableTableView(
             link["netbox_remote_interface_id"] = far_cp.pk
             link["remote_port_name"] = far_cp.name
             link["remote_port_url"] = reverse("dcim:consoleport", args=[far_cp.pk])
-            link["can_create_cable"] = not self._cable_has_provenance(csp.cable)
+            adopted = self._cable_has_provenance(csp.cable)
+            # An untagged cable still needs the sync to adopt it, so it does not match yet.
+            _set_cable_state(link, "Cable Found", MATCHING if adopted else MISMATCHED)
+            link["can_create_cable"] = not adopted
             return True
         # Trace once and reuse it for both the reach check and the far-end display — trace()
         # walks the full cable path in the DB, so the reach+display branches would otherwise
@@ -2133,7 +2209,7 @@ class BaseCableTableView(
             path = csp.trace()
         trace_visibility = (remote_context or {}).get("trace_visibility")
         if not self._trace_is_viewable(path, trace_visibility):
-            link["cable_status"] = "Cable State Not Available"
+            _set_cable_state(link, "Cable State Not Available", UNCLASSIFIED)
             link["can_create_cable"] = False
             link["_serial_cable_hidden"] = True
             return True
@@ -2145,7 +2221,7 @@ class BaseCableTableView(
         ):
             # Show the END of the traced path (the real console), not the panel port the
             # first segment lands on.
-            link["cable_status"] = "Connected via Patch Path"
+            _set_cable_state(link, "Connected via Patch Path", MATCHING)
             self._display_serial_cable_far_end(
                 link,
                 csp,
@@ -2157,6 +2233,8 @@ class BaseCableTableView(
             # Trust rule: a plugin-tagged cable was placed deliberately; the wrong-name label
             # must not flip it to a mismatch offering a re-point. Display where it
             # really goes (overriding the label-device link the caller set).
+            # The trace does not reach the label device, and the tag does not prove another endpoint.
+            _set_cable_state(link, "Cable Found", UNCLASSIFIED)
             self._display_serial_cable_far_end(
                 link,
                 csp,
@@ -2164,7 +2242,7 @@ class BaseCableTableView(
                 visible_ids=trace_visibility,
             )
             return True
-        link["cable_status"] = "Cable Mismatch"
+        _set_cable_state(link, "Cable Mismatch", MISMATCHED)
         return False
 
     def _display_serial_cable_far_end(self, link, csp, path=None, visible_ids=None):
@@ -2187,7 +2265,7 @@ class BaseCableTableView(
         if path is None:
             path = csp.trace()
         if path and not self._trace_is_viewable(path, visible_ids):
-            link["cable_status"] = "Cable State Not Available"
+            _set_cable_state(link, "Cable State Not Available", UNCLASSIFIED)
             link["can_create_cable"] = False
             link["_serial_cable_hidden"] = True
             return
@@ -2261,7 +2339,7 @@ class BaseCableTableView(
             for current in (cable, target_cable)
         )
         if cable_state_hidden:
-            link["cable_status"] = "Cable State Not Available"
+            _set_cable_state(link, "Cable State Not Available", UNCLASSIFIED)
             link["can_create_cable"] = False
             return
         unsupported_cable = next(
@@ -2273,18 +2351,21 @@ class BaseCableTableView(
             None,
         )
         if unsupported_cable is not None:
-            link["cable_status"] = "Multi-termination Cable Not Supported"
+            _set_cable_state(link, "Multi-termination Cable Not Supported", UNCLASSIFIED)
             link["cable_url"] = reverse("dcim:cable", args=[unsupported_cable.pk])
             link["can_create_cable"] = False
             link["_multi_termination_unsupported"] = True
             link.pop("picker_url", None)
             return
         if cable is None and target_cable is None:
-            link["can_create_cable"] = True  # status is already "No Cable"
+            _set_cable_state(link, "No Cable", NOT_IN_NETBOX)
+            link["can_create_cable"] = True
             return
         if cable is not None and any(termination == target_cp for termination in cable_far_terminations(cable, csp)):
             # The desired connection already exists — offer adopt while untagged.
-            link["can_create_cable"] = not self._cable_has_provenance(cable)
+            adopted = self._cable_has_provenance(cable)
+            _set_cable_state(link, "Cable Found", MATCHING if adopted else MISMATCHED)
+            link["can_create_cable"] = not adopted
             return
         if cable is not None:
             if remote_context is not None and csp.pk in remote_context["trace_paths"]:
@@ -2292,13 +2373,13 @@ class BaseCableTableView(
             else:
                 path = csp.trace()
             if not self._trace_is_viewable(path, (remote_context or {}).get("trace_visibility")):
-                link["cable_status"] = "Cable State Not Available"
+                _set_cable_state(link, "Cable State Not Available", UNCLASSIFIED)
                 link["can_create_cable"] = False
                 return
             if cable_path_reaches(csp, remote_termination=target_cp, path=path):
-                link["cable_status"] = "Connected via Patch Path"
+                _set_cable_state(link, "Connected via Patch Path", MATCHING)
                 return
-        link["cable_status"] = "Cable Mismatch"
+        _set_cable_state(link, "Cable Mismatch", MISMATCHED)
         link["can_create_cable"] = True
 
     def _set_remote_picker_affordance(self, link, obj, server_key):
@@ -2376,6 +2457,12 @@ class BaseCableTableView(
                 return
         except AmbiguousLibreNMSIdError:
             return
+        local = self._viewable_queryset(Interface).filter(pk=link["netbox_local_interface_id"]).first()
+        if is_channel(local):
+            decision = self._breakout_decision(local, None)
+            if decision.action not in ("create", "extend"):
+                _set_cable_state(link, f"Breakout Not Synced: {decision.reason}", UNCLASSIFIED)
+                return
         url = reverse("plugins:netbox_librenms_plugin:cable_remote_create", args=[obj.pk])
         query = f"row_id={quote_plus(str(link.get('row_id', '')))}"
         query += f"&expected_local_id={link['netbox_local_interface_id']}"
@@ -2549,13 +2636,8 @@ class BaseCableTableView(
                 normal_context=normal_context,
             )
 
-        link.update(
-            {
-                "remote_port_name": link["remote_port"],
-                "cable_status": error_message if error_message else "Device Not Found in NetBox",
-                "can_create_cable": False,
-            }
-        )
+        _set_cable_state(link, error_message if error_message else "Device Not Found in NetBox", UNCLASSIFIED)
+        link.update({"remote_port_name": link["remote_port"], "can_create_cable": False})
         return link
 
     def _apply_manual_interface_target(self, link, normal_context=None):
@@ -2578,13 +2660,8 @@ class BaseCableTableView(
                 .first()
             )
         if manual_iface is None:
-            link.update(
-                {
-                    "manual_remote": True,
-                    "cable_status": "Selected remote port is no longer available",
-                    "can_create_cable": False,
-                }
-            )
+            _set_cable_state(link, "Selected remote port is no longer available", UNCLASSIFIED)
+            link.update({"manual_remote": True, "can_create_cable": False})
             return True
         link.update(
             {
@@ -2810,6 +2887,8 @@ class BaseCableTableView(
                 link["can_create_cable"] = False
                 link.pop("remote_create_url", None)
                 link["rule_block"] = row_rule_block(*blocked)
+                # A row the rules refuse is in no sync state, as on the other tabs.
+                link["cable_comparison"] = UNCLASSIFIED
 
     def get_table(self, data, obj):
         """Return the cable table for *data*; concrete subclasses choose the table class."""
@@ -2865,8 +2944,12 @@ class BaseCableTableView(
             self._disable_actions_for_migrated_owners(links_data, obj, cache_device, server_key)
 
         cache_expiry = self._cable_cache_expiry(cache_key)
+        table, filters, filtered_from = self._build_cable_table(request, links_data, obj, server_key)
         return {
-            "table": self._build_cable_table(request, links_data, obj, server_key),
+            "table": table,
+            "filters": filters,
+            # The row count before the filter, shown only while a filter narrows the table.
+            "filtered_from": filtered_from,
             "object": obj,
             "cache_expiry": cache_expiry,
             "server_key": server_key,
@@ -2995,20 +3078,25 @@ class BaseCableTableView(
         return timezone.now() + timezone.timedelta(seconds=cache_ttl)
 
     def _build_cable_table(self, request, links_data, obj, server_key):
-        """Build the row table, scoping its pagination/sort URL to the RESOLVED server."""
-        table = self.get_table(links_data, obj)
-        # Build the follow-up HTMX URL (pagination/sorting) on the RESOLVED server scope —
-        # not the lazy session client, which can point at a different server after a failed
-        # rebind or a global switch, silently swapping the dataset mid-view. Set here rather
-        # than in a get_table override: DeviceCableTableView overrides get_table without
-        # calling super, so a base-class override never ran for the device tab (htmx_url
-        # stayed None). quote_plus mirrors ip_addresses_view (a key isn't a guaranteed slug).
-        table.htmx_url = f"{request.path}?tab=cables" + (f"&server_key={quote_plus(server_key)}" if server_key else "")
+        """
+        Build the table of the rows that match the tab's filters, ordered and paginated for the request.
+
+        The rows carry their row IDs and comparisons from the whole snapshot, so the filter runs after them.
+
+        Returns:
+            tuple[Table, SyncFilters, int | None]: The table, its bound filters, and the row count before them.
+
+        """
+        table, filters, filtered_from = filter_sync_table(
+            request, obj, links_data, lambda rows: self.get_table(rows, obj), server_key=server_key
+        )
         table.configure(request)
-        return table
+        return table, filters, filtered_from
 
     def get_context_data(self, request, obj):
         """Get the context data for the cable sync view."""
+        # The filters show their errors also when no snapshot is cached.
+        filters = parse_table_filters(request.GET, lambda rows: self.get_table(rows, obj))
         # GET render: rebind + scope the cache read to ?server_key (shared helper) so a
         # non-default-server tab reads that server's cache, not the default's.
         scoped, unresolved = self.resolve_get_render_server_key(request)
@@ -3017,11 +3105,12 @@ class BaseCableTableView(
             # links snapshot may still be cached until TTL — render empty scoped to the
             # requested key instead of serving a removed server's cable rows as a live table
             # (mirrors the interfaces/modules/IP tabs' unresolved guards).
-            return {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped}
+            return {"table": None, "filters": filters, "object": obj, "cache_expiry": None, "server_key": scoped}
         context = self._prepare_context(request, obj, fetch_fresh=False, server_key=scoped)
         if context is None:
             # No data found; return context with empty table
             context = {"table": None, "object": obj, "cache_expiry": None, "server_key": scoped}
+        context.setdefault("filters", filters)
         return context
 
     def post(self, request, pk):
@@ -3137,6 +3226,9 @@ class BaseCableTableView(
 
 class SingleCableVerifyView(BaseCableTableView):
     """View to verify a single cable link between two devices."""
+
+    # A fetch() caller reads the answer, so the middleware answers with a JSON error.
+    answers_json = True
 
     # Read-only verify endpoint: require object-view permission (mirrors the interface/module
     # verify views). Without it any user with mere plugin-view rights could POST an arbitrary
@@ -3374,7 +3466,7 @@ class SingleCableVerifyView(BaseCableTableView):
                                         class="btn btn-sm btn-primary"
                                         name="sync_one"
                                         value="{escape(str(row_id))}">
-                                    Sync Cable
+                                    {SYNC_CABLE_LABEL}
                                 </button>
                             """
                     else:
@@ -3640,7 +3732,10 @@ class CableRemotePickerView(BaseCableTableView):
                 "object": obj,
                 "row": row,
                 "server_key": server_key,
-                "post_url": base_url,
+                # The modal posts with the page query, so the re-rendered tab keeps every tab's filters and page.
+                "post_url": SyncQuery.from_request(request).url(
+                    base_url, {"server_key": server_key}, reset=CABLE_MODAL_QUERY_KEYS
+                ),
                 "search_url": f"{base_url}?{base_query}&action=search",
                 "ports_url": f"{base_url}?{base_query}&action=ports",
                 "initial_devices": initial_devices,
@@ -3716,10 +3811,5 @@ class CableRemotePickerView(BaseCableTableView):
         context = view._prepare_context(request, obj, fetch_fresh=False, server_key=resolved_key)
         if context is None:
             context = {"table": None, "object": obj, "cache_expiry": None, "server_key": resolved_key}
-        elif context.get("table") is not None:
-            tab_url = reverse("plugins:netbox_librenms_plugin:device_cable_sync", args=[obj.pk])
-            context["table"].htmx_url = f"{tab_url}?tab=cables" + (
-                f"&server_key={quote_plus(resolved_key)}" if resolved_key else ""
-            )
         context["close_modal"] = True
         return view.render_sync_partial(request, obj, resolved_key, {"cable_sync": context})

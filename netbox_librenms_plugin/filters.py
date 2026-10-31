@@ -1,12 +1,14 @@
 import django_filters
 from dcim.models import Manufacturer, Platform
 from django.db.models import Q
+from ipam.models import VRF
 
 from .models import (
     CarrierAutoInstallRule,
     DeviceTypeMapping,
     InterfaceTypeMapping,
     InventoryIgnoreRule,
+    IPAddressMapping,
     LocationMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
@@ -48,6 +50,25 @@ class InterfaceTypeMappingFilterSet(django_filters.FilterSet):
             "netbox_type",
             "description",
         ]
+
+
+class IPAddressMappingFilterSet(django_filters.FilterSet):
+    """Filter set for IPAddressMapping model."""
+
+    prefix = django_filters.CharFilter(lookup_expr="icontains")
+    description = django_filters.CharFilter(lookup_expr="icontains")
+    vrf_id = django_filters.ModelChoiceFilter(
+        field_name="vrf",
+        queryset=VRF.objects.all(),
+        label="VRF",
+    )
+    vrf__isnull = django_filters.BooleanFilter(field_name="vrf", lookup_expr="isnull")
+
+    class Meta:
+        """Meta options for IPAddressMappingFilterSet."""
+
+        model = IPAddressMapping
+        fields = ["prefix", "vrf_id", "vrf__isnull", "action", "description"]
 
 
 class DeviceTypeMappingFilterSet(django_filters.FilterSet):
@@ -128,12 +149,26 @@ class InventoryIgnoreRuleFilterSet(django_filters.FilterSet):
         queryset=Manufacturer.objects.all(),
         label="Manufacturer",
     )
+    # A text search on the stored expression: a filter value is never run as a regex.
+    name_pattern = django_filters.CharFilter(lookup_expr="icontains")
+    description_pattern = django_filters.CharFilter(lookup_expr="icontains")
+    model_pattern = django_filters.CharFilter(lookup_expr="icontains")
 
     class Meta:
         """Meta options for InventoryIgnoreRuleFilterSet."""
 
         model = InventoryIgnoreRule
-        fields = ["match_type", "action", "enabled", "manufacturer", "manufacturer_id"]
+        fields = [
+            "match_type",
+            "action",
+            "enabled",
+            "prefer_description",
+            "manufacturer",
+            "manufacturer_id",
+            "name_pattern",
+            "description_pattern",
+            "model_pattern",
+        ]
 
 
 class PlatformMappingFilterSet(django_filters.FilterSet):

@@ -40,39 +40,265 @@
     min-width: 23rem;
 }
 
-.sync-tab-refresh-toolbar:not(:has(~ [id$="-sync-content"] .sync-tab-primary-toolbar)),
-.sync-tab-refresh-toolbar:has(~ [id$="-sync-content"] > .alert) {
-    margin-bottom: 1rem !important;
+.sync-tab-primary-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
 }
 
-@media (min-width: 1200px) {
-    .sync-tab-refresh-toolbar:has(~ [id$="-sync-content"] .sync-tab-primary-toolbar):not(
-        :has(~ [id$="-sync-content"] > .alert)
-    ) {
-        position: relative;
-        z-index: 2;
-        height: 0;
-    }
+.sync-tab-actions,
+.sync-tab-actions > .d-flex,
+.sync-tab-filter-refresh {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 0.5rem;
+    min-width: 0;
+    max-width: 100%;
+}
 
-    .sync-tab-refresh-toolbar:has(~ [id$="-sync-content"] .sync-tab-primary-toolbar):not(
-        :has(~ [id$="-sync-content"] > .alert)
-    ) > .btn-list {
-        position: absolute;
-        inset-block-start: 0;
-        inset-inline-end: 0;
-    }
+.sync-tab-filter-refresh {
+    margin-inline-start: auto;
+    justify-content: flex-end;
+}
 
-    .sync-tab-refresh-toolbar:has(~ [id$="-sync-content"] .sync-tab-primary-toolbar):not(
-        :has(~ [id$="-sync-content"] > .alert)
-    ) ~ [id$="-sync-content"] .sync-tab-primary-toolbar {
-        min-height: 1.875rem;
-        padding-inline-end: 21rem;
-    }
+/* The relationship link and colour key use the same text size. */
+.sync-interface-key-row {
+    font-size: 0.75rem;
+}
+
+.sync-interface-key-row .sync-tab-lead-row button,
+.sync-interface-key-row .color-key .badge {
+    font-size: inherit;
+}
+
+.sync-interface-key-row .sync-tab-lead-row button {
+    height: auto;
+    white-space: normal;
+    text-align: start;
+}
+
+.sync-filter-controls {
+    min-width: 0;
+    max-width: 100%;
+}
+
+.sync-filter-controls .form-control,
+.sync-filter-controls .form-select {
+    height: 1.875rem;
+    min-height: 1.875rem;
+    padding-block: 0.25rem;
+}
+
+.sync-filter-controls input[type="search"] {
+    width: 8rem;
+    max-width: 100%;
+}
+
+.sync-tab-refresh-toolbar {
+    flex: 0 0 auto;
+    margin: 0;
+}
+
+.sync-cache-countdown {
+    margin-top: 3px;
+}
+
+.sync-cache-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.375rem;
+    color: var(--tblr-success);
+    font-size: 0.6875rem;
+    line-height: 1;
+}
+
+.sync-cache-track,
+.sync-cache-fill {
+    display: block;
+    height: 3px;
+    border-radius: var(--tblr-border-radius);
+}
+
+.sync-cache-track {
+    flex: 1;
+    background-color: var(--tblr-bg-surface-secondary);
+}
+
+.sync-cache-fill {
+    width: 100%;
+    background-color: currentColor;
+}
+
+.sync-cache-remaining {
+    min-width: 3ch;
+    text-align: end;
+    font-family: var(--tblr-font-monospace, monospace);
+    font-variant-numeric: tabular-nums;
+}
+
+.sync-cache-bar.is-warning {
+    color: var(--tblr-warning);
+}
+
+.sync-cache-bar.is-expired {
+    color: var(--tblr-danger);
+}
+
+.sync-filter-form .collapse.show,
+.sync-filter-form .alert {
+    margin-bottom: 1rem;
 }
 
 @media (max-width: 575.98px) {
+    .sync-tab-filter-refresh {
+        flex: 0 1 auto;
+        justify-content: flex-start;
+    }
+
+    .sync-filter-controls {
+        display: contents !important;
+    }
+
+    .sync-tab-refresh-toolbar {
+        margin-inline-start: auto;
+    }
+
     .interface-sync-options-menu,
     .ip-sync-options-menu {
         min-width: min(23rem, calc(100vw - 2rem));
     }
+}
+
+/* The Virtual Chassis member column, which each sync table opts into with this class. A fixed width
+   keeps the member dropdown from resizing on open, and is narrow enough for the table to fit its card. */
+.device-selection-col {
+    width: 13rem;
+    min-width: 13rem;
+}
+
+.device-selection-col .ts-wrapper {
+    width: 100%;
+    max-width: 100%;
+}
+
+/* A multi-select dropdown wraps its chosen items. */
+.ts-wrapper.multi .ts-control {
+    display: flex !important;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+/* A row an IP mapping ignores has a disabled checkbox; make it clear in the dark theme too. */
+#librenms-ipaddress-table input[name="select"]:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.vlan-sync-group-select {
+    min-width: 180px;
+}
+
+/* At phone width, the sync tables wrap their cell content, so that they fit their card without a scroll wrapper. */
+@media (max-width: 575.98px) {
+    .librenms-info-sync-table .d-flex,
+    #librenms-cable-table .d-flex,
+    #librenms-cable-table-vc .d-flex,
+    #librenms-ipaddress-table .d-flex,
+    #librenms-vlan-table .d-flex {
+        flex-wrap: wrap;
+        gap: 0.25rem;
+    }
+
+    .sync-tab-primary-toolbar,
+    .sync-tab-primary-toolbar > .d-flex {
+        flex-wrap: wrap;
+        gap: 0.5rem;
+    }
+
+    [id$="-sync-content"] .btn-link {
+        white-space: normal;
+    }
+
+    #librenms-cable-table > :not(caption) > * > *,
+    #librenms-cable-table-vc > :not(caption) > * > *,
+    #librenms-ipaddress-table > :not(caption) > * > *,
+    #librenms-vlan-table > :not(caption) > * > * {
+        padding-inline: 0.25rem;
+    }
+
+    .librenms-info-sync-table .ms-3,
+    .librenms-info-sync-table .ms-2 {
+        margin-inline-start: 0 !important;
+    }
+
+    .librenms-info-sync-table :is(td, .btn, .badge),
+    #librenms-cable-table :is(td, .btn, .badge),
+    #librenms-cable-table-vc :is(td, .btn, .badge),
+    #librenms-ipaddress-table :is(td, .btn, .badge),
+    #librenms-vlan-table :is(td, .btn, .badge) {
+        white-space: normal;
+        overflow-wrap: anywhere;
+    }
+
+    .librenms-info-sync-table td:first-child {
+        overflow-wrap: normal;
+    }
+
+    .librenms-info-sync-table th,
+    #librenms-cable-table th,
+    #librenms-cable-table-vc th,
+    #librenms-ipaddress-table th,
+    #librenms-vlan-table th {
+        white-space: normal;
+    }
+
+    /* The IP table has the most columns, so its headers also break inside a word. */
+    #librenms-ipaddress-table th {
+        overflow-wrap: anywhere;
+    }
+
+    #librenms-ipaddress-table tbody td[data-col="vrf"],
+    #librenms-ipaddress-table tbody td[data-col="vrf"] select.form-select {
+        width: auto;
+        min-width: 5rem;
+    }
+
+    .vlan-sync-group-select {
+        width: auto;
+        min-width: 7rem;
+    }
+
+    .ts-wrapper.vlan-sync-group-select {
+        width: 7rem;
+    }
+
+    #librenms-cable-table-vc .device-selection-col {
+        width: auto;
+        min-width: 5rem;
+    }
+
+    /* The member select wraps its name and keeps only the room of its arrow. */
+    #librenms-cable-table-vc .device-selection-col .ts-wrapper .ts-control {
+        padding-inline: 0.5rem 1.75rem;
+    }
+
+    #librenms-cable-table-vc .device-selection-col .ts-control > .item {
+        white-space: normal;
+        overflow-wrap: anywhere;
+    }
+
+    #librenms-cable-table-vc .device-selection-col .ts-control > input {
+        flex-basis: 0;
+        width: 0;
+        min-width: 0;
+    }
+}
+
+/* A long value breaks so the information sync table fits a phone-width card; the field names keep their words. */
+.librenms-info-sync-table td + td {
+    overflow-wrap: anywhere;
 }

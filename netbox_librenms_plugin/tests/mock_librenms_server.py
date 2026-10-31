@@ -178,7 +178,8 @@ class MockLibreNMSServer:
         self._server.quiet = quiet
         self.routes = self._server.routes  # expose on wrapper as documented
         self.requests = self._server.requests
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        # shutdown() waits for the next poll; the 0.5 s default added that wait to each test teardown.
+        self._thread = threading.Thread(target=self._server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
         _, bound_port = self._server.server_address
         client_host = "127.0.0.1" if host in ("", "0.0.0.0", "::") else host
         self.url = f"http://{client_host}:{bound_port}"
@@ -378,6 +379,7 @@ DEFAULT_STUB_RECORDINGS = (
     "iosxe-subinterfaces",
     "junos-subinterfaces",
     "nokia-timos-transceivers",
+    "nxos-fixed-linecard",
 )
 DEFAULT_RECORDINGS_DIR = Path(__file__).resolve().parents[1] / "data_shapes" / "recordings"
 

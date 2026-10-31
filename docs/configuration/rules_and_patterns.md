@@ -12,17 +12,23 @@ The available actions are:
 
 - **Skip** removes the matched item from the sync table. Use this for phantom EEPROM or IDPROM entities that duplicate a parent component.
 - **Transparent** hides the matched row and promotes its children to device-level bay matching. Use this for a fixed-chassis system board whose children should match device-level bays.
-- **Include** admits an `entPhysicalClass` that the plugin's built-in class list omits. This action must be paired with the **Class is** match type.
+- **Include** admits the inventory rows of one `entPhysicalClass` to Module Sync. This action must be paired with the **Class is** match type. See [Inventory classes](#inventory-classes).
 
-Name-based rules can use **Ends with**, **Starts with**, **Contains**, or a Python regular expression against `entPhysicalName`. These comparisons are case-insensitive except for regular expressions, whose behavior is controlled by the expression. **Serial matches device** compares `entPhysicalSerialNum` with the NetBox device serial. **Model matches device type** compares `entPhysicalModelName` case-insensitively with the model and the part number of the NetBox device type. **Class is** compares `entPhysicalClass` case-insensitively and is used only with the Include action.
+Name-based rules can use **Ends with**, **Starts with**, **Contains**, or a Python regular expression against `entPhysicalName`. These comparisons are case-insensitive except for regular expressions, whose behavior is controlled by the expression. **Serial matches device** compares `entPhysicalSerialNum` with the NetBox device serial, after the serial normalization rules apply to both. **Model matches device type** compares `entPhysicalModelName` case-insensitively with the model and the part number of the NetBox device type. **Class is** compares `entPhysicalClass` case-insensitively. The Include action needs it, and a Skip or Transparent rule can use it too. An Include rule ignores **Require serial match parent**.
 
-For name-based rules, **Require serial match parent** adds a safety check: the rule applies only when the item's serial also matches an ancestor entity's serial.
+For name-based rules and for Skip or Transparent **Class is** rules, **Require serial match parent** adds a safety check: the rule applies only when the item's serial also matches an ancestor entity's serial. A row without a serial never passes this check, so clear the flag on a rule that must match such rows.
 
-**Serial matches device** and **Model matches device type** need no pattern, and they ignore **Require serial match parent**. Both match only a chassis-level item: an item with no parent, or an item whose direct parent is the `chassis` entity. **Model matches device type** also matches an item that reaches the chassis through `container` entities only, such as a slot container. It never matches the chassis entity itself. In a virtual chassis, each item is compared with the member that it targets.
+Every rule can also carry the optional filters that [Filters](#filters) describes. A rule then applies only when its match type and every non-blank filter match.
+
+**Serial matches device** and **Model matches device type** need no pattern, and they ignore **Require serial match parent**. Both match only a chassis-level item: an item with no parent, or an item whose direct parent is the `chassis` entity. **Model matches device type** also matches an item that reaches the chassis through `container` entities, such as a slot container, and through other built-in units: entities that report the model or the part number of the device type themselves. It never matches the chassis entity itself. In a virtual chassis, each item is compared with the member that it targets.
 
 Fixed Cisco IOS XE platforms, such as the C8500L-8S4X, report their built-in units as `module` entities directly below the chassis: `module 0` (SPA Interface Processor), `module R0` (route processor) and `module F0` (ESP). These entities report the chassis PID as their model. `module R0` has its own serial, so **Serial matches device** does not match it. A name rule is not safe either, because on a modular platform such as the ASR 1000 the same names are field-replaceable units with their own PIDs. A **Model matches device type** rule with the **Transparent** action hides the three rows and matches their subslots and transceivers against device-level bays.
 
 Fixed Cisco NX-OS platforms, such as the Nexus 93180YC-FX, report their built-in line card as a `module` with the chassis PID inside a `LinecardSlot-1` container. The same rule hides that row. **Serial matches device** does not match it, because that rule only accepts a direct child of the chassis: on a modular chassis, a line card that shares the device serial is a real FRU.
+
+A Nokia 7250 IXR-X reports its system board as `Slot 1` (`ioModule`), `MDA 1/1` (`mdaModule`, below `Slot 1`) and `Slot A` (`cpmModule`). All three report the chassis part number, for example `3HE15789AARF01`. When the device type holds that part number, the same rule hides the three rows, and the transceivers below `MDA 1/1` match device-level bays.
+
+Migration 0026 creates the **Fixed-platform built-in units** rule below once for each Cisco manufacturer (slug `cisco` or `cisco-systems`), scoped to that manufacturer. It skips a manufacturer that already has a rule with the same match type and action and no name, description or model filter, scoped to it or unscoped, enabled or disabled. A NetBox without a Cisco manufacturer gets no rule: import it from `contrib/inventory_ignore_rules.yaml`. Migration 0026 cannot be reversed.
 
 ```yaml
 - name: "Cisco IOS-XR IDPROM phantom"
@@ -41,16 +47,73 @@ Fixed Cisco NX-OS platforms, such as the Nexus 93180YC-FX, report their built-in
   enabled: true
   description: "Hide built-in units that report the chassis PID"
 
-- name: "Additional inventory class"
+- name: "Routing engines reported as class other"
   match_type: class_is
-  pattern: cpmModule
+  pattern: other
   action: include
+  manufacturer: "Juniper"
+  prefer_description: true
   require_serial_match_parent: false
   enabled: true
-  description: "Include CPM inventory rows"
+  description: "Include Juniper Routing Engine rows"
 ```
 
 ![Inventory Ignore Rule List](../img/inventory_ignore_rules/list.png)
+
+### Filters
+
+A rule of every action and match type can narrow what it matches with three optional filters:
+
+- **Name pattern** is searched in `entPhysicalName`.
+- **Description pattern** is searched in `entPhysicalDescr`.
+- **Model pattern** is searched in `entPhysicalModelName`.
+
+Each filter is a Python regular expression, applied with `re.search`. It is case-sensitive unless the expression enables case-insensitive matching, for example with `(?i)`. The plugin stores the expression as typed and does not trim it, so a CSV import that carries a filter column is refused: import these rules as YAML or JSON. A missing value is compared as an empty string. Within one rule, the match type and every non-blank filter must match.
+
+Cisco IOS XE ISR 4000 and Catalyst 8300 routers report their built-in front-panel ports as a `module` entity, `NIM subslot 0/0`, below the built-in `module 0`. It has no serial, and its description starts with `Front Panel`, for example `Front Panel 6 ports Gigabitethernet Module`. A real network interface module or service module in another subslot reports its own description, such as `16 ports Async Serial NIM`, and its own serial. A Transparent **Class is** rule with a description filter hides the built-in module and matches its transceivers against device-level bays. The module has no serial, so the rule clears **Require serial match parent**. `contrib/inventory_ignore_rules.yaml` carries it:
+
+```yaml
+- name: "Cisco IOS XE built-in front-panel modules"
+  match_type: class_is
+  pattern: module
+  action: transparent
+  description_pattern: "^Front Panel"
+  require_serial_match_parent: false
+  manufacturer: "Cisco"
+  enabled: true
+```
+
+When **Model matches device type** also makes `module 0` transparent, the transceivers are at the top level of the table. Without that rule they stay below `module 0`.
+
+A stored filter that does not compile stops the Modules tab with an error that names the rule, and the install actions refuse until the rule is fixed or disabled. This applies to an enabled rule of every action. The rule form and the API reject an invalid expression, so such a filter can only come from a direct database edit.
+
+### Inventory classes
+
+Module Sync shows an ENTITY-MIB row at the top level only when an enabled Include rule admits it. A row below an admitted row shows as its sub-component, also when no Include rule admits its class. Holders get no row, and Skip and Transparent rules still apply to these rows. Migration 0025 seeds one editable rule for each class that earlier releases admitted from a fixed list: `module`, `powerSupply`, `fan`, `port`, `container`, `ioModule`, `cpmModule`, `mdaModule`, `fabricModule` and `xioModule`. Each rule is named `Inventory class: <class>`. To hide a class, disable or delete its rule. When no Include rule applies to a device, or to a virtual chassis member that owns inventory rows, the Modules tab shows a warning that names it, so an empty table does not look like a device without hardware. Rows from the transceivers API do not need a rule.
+
+The migration keeps the existing Include rules working. A rule for a class outside that list gets **Prefer description**, so its rows keep `entPhysicalDescr` as their name. The migration adds a class rule only when no enabled, unscoped Include rule without filters already admits the class.
+
+An Include rule can narrow its class with the [filters](#filters). Between Include rules, one matching rule is enough to admit the row.
+
+**Prefer description** names the row by `entPhysicalDescr` instead of `entPhysicalName`. Use it when the name repeats the model, as on Juniper Routing Engines. It applies to the rows at the top level of the table.
+
+Juniper MX480 and MX960 routers report each Switch Control Board as class `backplane`, with the SKU as the name and the slot as the description, for example `SCBE2-MX-S` and `CB 0`. Other Juniper platforms report `backplane` rows that are not separate boards, such as `JNP10008-CHAS` / `Backplane` or `JNP304-CHAS` / `CB 0`, so the class alone admits too much, and the description does not separate them either. Migration 0025 seeds this rule for each Juniper manufacturer, or unscoped when NetBox has none:
+
+```yaml
+- name: "Juniper MX switch control boards"
+  match_type: class_is
+  pattern: backplane
+  action: include
+  name_pattern: "^SCB"
+  manufacturer: "Juniper"
+  prefer_description: true
+  require_serial_match_parent: false
+  enabled: true
+```
+
+The rows are named `CB 0` and `CB 1`. A Module Bay Mapping from `^CB (\d+)$` to `CB\1` for class `backplane` places them in the NetBox module bays `CB0` and `CB1`. `contrib/module_bay_mappings.yaml` carries it.
+
+Migration 0025 cannot be reversed. To go back to an earlier release, restore a database backup taken before the upgrade.
 
 ## Normalization Rules
 
@@ -61,7 +124,8 @@ The available scopes are:
 - `module_type` normalizes `entPhysicalModelName` before Module Type Mapping lookup.
 - `device_type` normalizes the LibreNMS hardware string before Device Type Mapping, part-number, or model lookup.
 - `module_bay` normalizes `entPhysicalName` before Module Bay Mapping lookup.
-- `serial` normalizes inventory serial numbers before comparison or storage.
+- `serial` normalizes serial numbers before comparison. See [Serials](#serials).
+- `vlan_name` changes the VLAN name that the VLANs tab compares with NetBox and saves.
 
 Rules can optionally be limited to a manufacturer. Regular-expression matching is case-sensitive unless the pattern enables case-insensitive matching, for example with `(?i)`.
 
@@ -77,6 +141,33 @@ The following example removes a Nokia revision suffix so that one Module Type Ma
 ```
 
 For this rule, `3HE16474AARA01` becomes `3HE16474AA`.
+
+### Serials
+
+A `serial` rule applies only when the plugin compares two serials. The plugin stores each device serial as LibreNMS reports it, with the spaces at the start and end removed, and does not store a placeholder such as `-`, `N/A` or `unknown`. Each comparison applies the current rules to both serials: the serial that NetBox stores and the serial that LibreNMS reports. This includes the serial row of the LibreNMS Sync page, the import checks, virtual chassis members and the **Serial matches device** inventory rule. A rule change thus applies to both sides at once. A serial that is a placeholder before or after the rules matches nothing.
+
+The plugin seeds a global rule that removes Juniper's `S/N ` mark. With this rule, a stored `BCFB9793` matches a LibreNMS serial `S/N BCFB9793`, and a device that the plugin imports or syncs shows `S/N BCFB9793`.
+
+Virtual chassis members that an earlier plugin version created store the serial after the rules. A rule that changes its own output again, such as `^X(.+)$` to `\1`, can make such a member stop matching. See [Virtual Chassis Support](../device_sync/virtual_chassis.md#member-serials).
+
+### VLAN names
+
+A `vlan_name` rule changes the name of a VLAN that LibreNMS reports. The VLANs tab compares the changed name with NetBox, and the sync saves it. In the match pattern of a `vlan_name` rule, `{vid}` stands for the VLAN ID of the row. Other scopes cannot use `{vid}`. When a rule changes a name, the VLANs tab shows the LibreNMS name in a note next to the new name.
+
+On Junos devices, LibreNMS reports a VLAN name with the VLAN ID added after a `+`, for example `users+100` for VLAN 100. The following rule removes the suffix only when it is the VLAN ID of the row:
+
+```yaml
+- scope: vlan_name
+  manufacturer: Juniper
+  match_pattern: "^(.+)\\+{vid}$"
+  replacement: "\\1"
+  priority: 100
+  description: "Remove the VLAN ID that LibreNMS adds to Junos VLAN names"
+```
+
+For VLAN 100, `users+100` becomes `users`, and `users+200` does not change. To remove any numeric suffix, type `^(.+)\+\d+$` as the match pattern in the rule form. In a YAML import, write it as `"^(.+)\\+\\d+$"`.
+
+The plugin does not create this rule. Before you add it, look at the names of your NetBox VLANs: a VLAN whose NetBox name still has the suffix shows a name change, which you must confirm before the sync renames it. NetBox requires a unique VLAN name in a VLAN group, so two VLANs that get the same name cannot both be in one group.
 
 ![Normalization Rule List](../img/normalization_rules/list.png)
 

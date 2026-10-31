@@ -80,7 +80,9 @@ slash locator, such as `1/1` or `2/x1`, when the module hierarchy reader needs t
 keeps synthetic transceivers nested without publishing the surrounding label. Model tokens
 stay in the separate `entPhysicalModelName` field. An `entPhysicalDescr` also keeps the
 Junos Virtual Chassis markers that VC detection reads: `Virtual Chassis` on the root, and a
-leading `FPC` or `FPC <n>` on member rows (for example `FPC 1 entity-...`).
+leading `FPC` or `FPC <n>` on member rows (for example `FPC 1 entity-...`). It also keeps the
+Juniper MX `@ fpc/pic/port` locators that the dangling-parent repair reads: `entity-... @ 1/0/2`
+on an optic, `PIC: entity-... @ 1/0/*` and `FPC: entity-... @ 1/*/*`.
 
 Schema version 1 does not capture operator-specific inventory-ignore rules or module-bay mappings.
 It therefore does not promise to replay arbitrary name-based rules. A future schema that declares

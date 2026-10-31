@@ -136,8 +136,9 @@ def test_sync_tab_links_replace_the_server_rendered_region(client, settings):
     marker = 'id="ipaddresses-tab"'
     position = html.index(marker)
     link = html[html.rfind("<a", 0, position) : html.index(">", position) + 1]
-    expected_query = "?tab=ipaddresses&amp;server_key=default&amp;interface_name_field=ifDescr"
-    assert f'href="{response.request["PATH_INFO"]}{expected_query}"' in link
+    expected_query = "?tab=ipaddresses&amp;server_key=default"
+    assert f'href="{response.request["PATH_INFO"]}{expected_query}&amp;interface_name_field=ifDescr"' in link
+    # hx-include adds the selected name field to the HTMX request, so its URL carries none.
     assert f'hx-get="{response.request["PATH_INFO"]}{expected_query}"' in link
     assert 'hx-target="#librenms-sync-tabs"' in link
     assert 'hx-select="#librenms-sync-tabs"' in link
@@ -147,6 +148,27 @@ def test_sync_tab_links_replace_the_server_rendered_region(client, settings):
     assert 'hx-include="#interface-name-field-selector"' in link
     assert 'class="nav-link active"' in link
     assert 'aria-selected="true"' in link
+
+
+@pytest.mark.django_db
+def test_tab_clicks_keep_one_interface_name_field_in_the_url(client, settings):
+    """Each click pushes the link URL plus the included radio, so the field must not pile up."""
+    from urllib.parse import parse_qs, urlsplit
+
+    _device, url = _sync_page(settings, "htmx-sync-tab-name-field")
+    client.force_login(make_superuser("htmx-sync-tab-name-field-user"))
+    pushed = f"{url}?tab=interfaces&server_key=default&interface_name_field=ifName"
+
+    for tab in ("modules", "cables", "modules"):
+        html = client.get(pushed).content.decode()
+        position = html.index(f'id="{tab}-tab"')
+        link = parse_html(html[html.rfind("<a", 0, position) : html.index(">", position) + 1] + "</a>")
+        attributes = dict(link.attributes)
+        # htmx appends the included radio to the hx-get URL and pushes the result.
+        pushed = f"{attributes['hx-get']}&interface_name_field=ifName"
+
+        assert parse_qs(urlsplit(pushed).query)["interface_name_field"] == ["ifName"]
+        assert parse_qs(urlsplit(attributes["href"]).query)["interface_name_field"] == ["ifName"]
 
 
 @pytest.mark.django_db
@@ -254,6 +276,40 @@ def test_interface_name_choice_is_saved_per_user_and_platform(client):
     assert get_interface_name_field(request, nokia_device) == "ifName"
     assert request.user.config.get(GLOBAL_PREFERENCE) == "ifName"
     assert request.user.config.get(PLATFORM_PREFERENCES) == {str(cisco.pk): "ifDescr"}
+
+
+@pytest.mark.django_db
+def test_a_platform_choice_applies_on_its_descendants_until_one_saves_its_own(client):
+    """A version platform reads its nearest ancestor's choice; a save on the version stays on it."""
+    LibreNMSSettings.objects.create(remember_interface_name_per_platform=True)
+    junos = Platform.objects.create(name="Vendor J", slug="vendor-j")
+    version = Platform.objects.create(name="Vendor J 21.2R3", slug="vendor-j-21-2r3", parent=junos)
+    other_version = Platform.objects.create(name="Vendor J 22.4R1", slug="vendor-j-22-4r1", parent=junos)
+    devices = {}
+    for platform in (junos, version, other_version):
+        devices[platform.pk] = make_device(f"tree-preference-{platform.slug}")
+        devices[platform.pk].platform = platform
+        devices[platform.pk].save(update_fields=["platform"])
+    user = make_superuser("tree-interface-name-user")
+    client.force_login(user)
+
+    assert _post_preference(client, "ifDescr").status_code == 200
+    assert _post_preference(client, "ifName", junos.pk).status_code == 200
+    request = _request_for(user)
+    assert [get_interface_name_field(request, devices[p.pk]) for p in (junos, version, other_version)] == [
+        "ifName",
+        "ifName",
+        "ifName",
+    ]
+
+    assert _post_preference(client, "ifDescr", version.pk).status_code == 200
+    request = _request_for(user)
+    assert [get_interface_name_field(request, devices[p.pk]) for p in (junos, version, other_version)] == [
+        "ifName",
+        "ifDescr",
+        "ifName",
+    ]
+    assert request.user.config.get(PLATFORM_PREFERENCES) == {str(junos.pk): "ifName", str(version.pk): "ifDescr"}
 
 
 @pytest.mark.django_db

@@ -4,6 +4,10 @@ Coverage tests for netbox_librenms_plugin/tables/vlans.py.
 Tests cover all render methods and the configure() method of LibreNMSVLANTable.
 """
 
+import re
+from html import unescape
+from urllib.parse import parse_qs
+
 import pytest
 from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory
@@ -355,5 +359,5 @@ class TestLibreNMSVLANTableConfigure:
 
         html = render_to_string("netbox_librenms_plugin/inc/paginator.html", {"table": table}, request=request)
 
-        assert "?tab=vlans&" in html
-        assert "?tab=&" not in html
+        links = [parse_qs(unescape(href)[1:]) for href in re.findall(r'href="(\?[^"]*)"', html)]
+        assert links and all(link["tab"] == ["vlans"] for link in links)

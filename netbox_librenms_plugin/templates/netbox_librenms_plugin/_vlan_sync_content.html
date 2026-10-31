@@ -1,8 +1,24 @@
 {% load helpers %}
+{% load librenms_sync_query %}
 {% if sync_partial_response %}{% include 'inc/messages.html' %}{% endif %}
-{% if request.htmx %}
-{% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=vlan_sync.cache_expiry cache_container_id="vlan-cache-countdown" cache_countdown_id="vlan-countdown-timer" cache_oob=True %}
-{% endif %}
+<div class="noprint sync-tab-primary-toolbar">
+    <div class="sync-tab-actions d-flex align-items-center gap-2">
+        {% if vlan_sync.vlan_table and not migrated_to_marker and not vlan_sync.error_message %}
+        {% if vlan_sync.vlan_table.rows or vlan_sync.filters.in_use %}
+            <button type="submit" form="vlan-sync-form" class="btn btn-primary">
+                <span class="spinner spinner-border d-none" id="sync-spinner"></span>
+                <span>Sync Selected VLANs</span>
+            </button>
+        {% endif %}
+        {% endif %}
+    </div>
+    <div class="sync-tab-filter-refresh">
+        {% if vlan_sync.vlan_table %}{% include "netbox_librenms_plugin/inc/_sync_filter_controls.html" with filters=vlan_sync.filters prefix="vlans_" tab="vlans" section_id="vlanFilterSection" label="Filter VLANs" %}{% endif %}
+        {% firstof vlan_sync.server_key server_key librenms_server_info.server_key as refresh_server_key %}
+        {% include "netbox_librenms_plugin/inc/_vlan_sync_refresh.html" with object=vlan_sync.object server_key=refresh_server_key %}
+    </div>
+</div>
+{% if vlan_sync.vlan_table %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=vlan_sync.filters prefix="vlans_" tab="vlans" section_id="vlanFilterSection" label="Filter VLANs" %}{% endif %}
 
 {% include "netbox_librenms_plugin/inc/_ipam_permission_notice.html" with hidden_ipam_permissions=vlan_sync.hidden_ipam_permissions vlan_scope_incomplete=vlan_sync.vlan_scope_incomplete %}
 
@@ -11,8 +27,10 @@
 <div class="alert alert-danger">
     <i class="mdi mdi-alert-circle"></i> {{ vlan_sync.error_message }}
 </div>
-{% elif not vlan_sync.vlan_table or not vlan_sync.vlan_table.rows %}
+{# An active or invalid filter keeps its form, so it can be cleared even when the snapshot is empty. #}
+{% elif not vlan_sync.vlan_table or not vlan_sync.vlan_table.rows and not vlan_sync.filters.in_use %}
 <!-- No VLAN Data -->
+
 <div class="card">
     <div class="card-body text-center text-muted py-4">
         <i class="mdi mdi-sync-off mdi-48px"></i>
@@ -26,9 +44,10 @@
 <div>
 {% else %}
 {% with model_name=vlan_sync.object|meta:"model_name" %}
-<form method="post"
-      action="{% url 'plugins:netbox_librenms_plugin:sync_selected_vlans' object_type=model_name object_id=vlan_sync.object.pk %}"
-      hx-post="{% url 'plugins:netbox_librenms_plugin:sync_selected_vlans' object_type=model_name object_id=vlan_sync.object.pk %}"
+{% url 'plugins:netbox_librenms_plugin:sync_selected_vlans' object_type=model_name object_id=vlan_sync.object.pk as vlan_sync_url_path %}{% sync_tab_url vlan_sync_url_path as vlan_sync_url %}
+<form method="post" id="vlan-sync-form"
+      action="{{ vlan_sync_url }}"
+      hx-post="{{ vlan_sync_url }}"
       hx-target="#htmx-modal-content"
       hx-swap="innerHTML">
 {% endwith %}
@@ -45,17 +64,6 @@
     <input type="hidden" name="action" value="create_vlans">
     {% endif %}
 
-    {% if not migrated_to_marker %}
-    <div class="noprint d-flex align-items-center mt-0 mb-3 sync-tab-primary-toolbar">
-        <div>
-            <button type="submit" class="btn btn-primary">
-                <span class="spinner spinner-border d-none" id="sync-spinner"></span>
-                <span>Sync Selected VLANs</span>
-            </button>
-        </div>
-    </div>
-    {% endif %}
-
     <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
         <div>
             <small class="text-muted ms-2">
@@ -68,49 +76,20 @@
                 <span class="badge text-warning text-white">Mismatched values</span>
                 <span class="badge text-danger text-white">Not present in NetBox</span>
             </div>
-            <button class="btn btn-sm btn-secondary sync-filter-toggle" type="button" data-bs-toggle="collapse"
-                data-bs-target="#vlanFilterSection" aria-expanded="false" aria-controls="vlanFilterSection">
-                <i class="mdi mdi-filter-outline"></i> Filters
-            </button>
-        </div>
-    </div>
-
-    <div class="collapse mb-3" id="vlanFilterSection">
-        <div class="mb-2">
-            <small class="text-muted">
-                <i class="mdi mdi-information"></i> Filters apply to currently displayed VLANs.
-            </small>
-        </div>
-        <div class="row row-cols-1 row-cols-sm-2 row-cols-xl-5 g-2">
-            <div class="col">
-                <label class="visually-hidden" for="filter-vlan-id">Filter by VLAN ID</label>
-                <input type="text" id="filter-vlan-id" placeholder="Filter by VLAN ID" class="form-control">
-            </div>
-            <div class="col">
-                <label class="visually-hidden" for="filter-vlan-name">Filter by Name</label>
-                <input type="text" id="filter-vlan-name" placeholder="Filter by Name" class="form-control">
-            </div>
-            <div class="col">
-                <label class="visually-hidden" for="filter-vlan-group">Filter by VLAN Group</label>
-                <input type="text" id="filter-vlan-group" placeholder="Filter by VLAN Group" class="form-control">
-            </div>
-            <div class="col">
-                <label class="visually-hidden" for="filter-vlan-type">Filter by Type</label>
-                <input type="text" id="filter-vlan-type" placeholder="Filter by Type" class="form-control">
-            </div>
-            <div class="col">
-                <label class="visually-hidden" for="filter-vlan-state">Filter by State</label>
-                <input type="text" id="filter-vlan-state" placeholder="Filter by State" class="form-control">
-            </div>
         </div>
     </div>
 
     <div class="row mb-3">
         <div class="col col-md-12">
             <div class="card">
-                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=vlan_sync.vlan_table %}
+                {% if vlan_sync.filters.is_valid %}
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=vlan_sync.vlan_table placement="top" filtered_from=vlan_sync.filtered_from %}
                 {% include 'inc/table.html' with table=vlan_sync.vlan_table %}
-                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=vlan_sync.vlan_table %}
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=vlan_sync.vlan_table filtered_from=vlan_sync.filtered_from %}
+                {% else %}
+                {# The error summary above the form says what to correct; no row is shown for an invalid filter. #}
+                <div class="card-body text-center text-muted py-4" data-filter-invalid="true">Correct the filters to show the VLANs.</div>
+                {% endif %}
             </div>
         </div>
     </div>

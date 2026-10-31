@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from dcim.models import Device, Interface
 from django.urls import resolve, reverse
+from users.models import UserConfig
 
 from netbox_librenms_plugin.middleware import REQUEST_FAILED_EVENT, TRY_AGAIN_MESSAGE, LockConflictMiddleware
 from netbox_librenms_plugin.tests.conftest import (
@@ -87,6 +88,25 @@ def test_a_lock_conflict_in_a_relationship_sync_is_a_json_answer(client, setting
     assert response.status_code == 409
     assert response.json() == {"error": TRY_AGAIN_MESSAGE}
     assert Interface.objects.get(device=device, name="eth1").lag_id is None
+
+
+@transactional_db_with_all_apps()
+def test_a_lock_conflict_in_a_preference_save_is_a_json_answer(client):
+    """The toggles post with fetch() and check response.ok, so a followed redirect would read as a saved choice."""
+    user = make_superuser("middleware-save-pref-user")
+    client.force_login(user)
+
+    with second_connection() as other:
+        lock_row(other, UserConfig, user.config.pk)
+        with lock_timeout(LOCK_TIMEOUT_MS):
+            response = client.post(
+                reverse("plugins:netbox_librenms_plugin:save_user_pref"),
+                json.dumps({"key": "use_sysname", "value": False}),
+                content_type="application/json",
+            )
+
+    assert response.status_code == 409
+    assert response.json() == {"error": TRY_AGAIN_MESSAGE}
 
 
 SYNC_SCRIPT = Path(__file__).parents[1] / "static" / "netbox_librenms_plugin" / "js" / "librenms_sync.js"

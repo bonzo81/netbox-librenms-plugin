@@ -1,4 +1,5 @@
 {% load helpers %}
+{% load librenms_sync_query %}
 <div class="modal-header">
   <h5 class="modal-title">
     <i class="mdi mdi-alert-outline text-warning me-1"></i>
@@ -10,10 +11,11 @@
     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
   {% endif %}
 </div>
+{% url 'plugins:netbox_librenms_plugin:sync_selected_vlans' object_type=object_type object_id=object.pk as vlan_sync_url_path %}{% sync_tab_url vlan_sync_url_path as vlan_sync_url %}
 <form method="post"
-      action="{% url 'plugins:netbox_librenms_plugin:sync_selected_vlans' object_type=object_type object_id=object.pk %}"
+      action="{{ vlan_sync_url }}"
       {% if not full_page %}
-      hx-post="{% url 'plugins:netbox_librenms_plugin:sync_selected_vlans' object_type=object_type object_id=object.pk %}"
+      hx-post="{{ vlan_sync_url }}"
       hx-target="#htmx-modal-content"
       hx-swap="innerHTML"
       {% endif %}>
@@ -49,7 +51,7 @@
             <dl class="row small mb-0 mt-2">
               <dt class="col-sm-4 text-muted">Current NetBox name</dt>
               <dd class="col-sm-8">{{ conflict.current_name }}</dd>
-              <dt class="col-sm-4 text-muted">LibreNMS name</dt>
+              <dt class="col-sm-4 text-muted">Proposed name</dt>
               <dd class="col-sm-8 mb-0">{{ conflict.proposed_name }}</dd>
             </dl>
           </label>

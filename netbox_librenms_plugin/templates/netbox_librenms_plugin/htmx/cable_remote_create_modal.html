@@ -61,16 +61,22 @@ proposed_name, proposed_type, type_is_unmapped, existing_interface, post_url.
 
     {% if existing_interface %}
       <div class="alert alert-danger py-2 mt-3 mb-0 small">
-        <i class="mdi mdi-alert me-1"></i>{{ remote_device }} already has
-        <strong>{{ proposed_name }}</strong>, so this row should not have offered to create it.
-        Refresh the cable data: the row then either resolves to that interface, or reports the name
-        as ambiguous.
+        <i class="mdi mdi-alert me-1"></i>
+        <div>
+          {{ remote_device }} already has
+          <strong>{{ proposed_name }}</strong>, so this row should not have offered to create it.
+          Refresh the cable data: the row then either resolves to that interface, or reports the name
+          as ambiguous.
+        </div>
       </div>
     {% elif type_is_unmapped %}
       <div class="alert alert-warning py-2 mt-3 mb-0 small">
-        <i class="mdi mdi-alert me-1"></i>No interface rule sets a type for
-        <code>{{ librenms_port.ifType|default:"this port" }}</code> on this device, so the interface
-        is created as <code>other</code>. Add an interface rule first if you want the real type.
+        <i class="mdi mdi-alert me-1"></i>
+        <div>
+          No interface rule sets a type for
+          <code>{{ librenms_port.ifType|default:"this port" }}</code> on this device, so the interface
+          is created as <code>other</code>. Add an interface rule first if you want the real type.
+        </div>
       </div>
     {% endif %}
 

@@ -534,7 +534,7 @@ rules:
       This code reads a caught error that can be a ValidationError, a database error or an
       AbortRequest. NetBox's clean() messages and admin validators can name objects outside the
       viewer's scope, and PostgreSQL's error text can hold key values. Give the error to
-      exception_text_for, log it through the module logger, or raise it. Every other read is a
+      exception_text_for or write_failure_message, log it through the module logger, or raise it. Every other read is a
       finding, also the call of a helper. A reviewed exception gets a nosemgrep comment with a reason.
     metadata:
       category: security
@@ -792,6 +792,14 @@ rules:
               metavariable: $ERROR
               regex: ^\w+(\.__(cause|context)__)*$
         exact: true
+      # Only the first argument goes through exception_text_for. The other arguments go into the text.
+      - patterns:
+          - pattern: write_failure_message($ERROR, ...)
+          - metavariable-regex:
+              metavariable: $ERROR
+              regex: ^\w+(\.__(cause|context)__)*$
+          - focus-metavariable: $ERROR
+        exact: true
       # Only in the reviewed factory: TypeRefusal.text_for applies the superuser rule to the message.
       # Each call of the factory is still a finding at the call.
       - patterns:
@@ -868,8 +876,8 @@ rules:
     severity: ERROR
     message: >-
       This code hides a caught error or a trusted name from caught-error-text. That rule trusts
-      exception_text_for, classify_conflict, database_error_sqlstate, validation_error_detail,
-      _first_refusal, TypeRefusal, isinstance, hasattr, type and the module logger by name, and it knows a risky error class by
+      exception_text_for, write_failure_message, classify_conflict, database_error_sqlstate,
+      validation_error_detail, _first_refusal, TypeRefusal, isinstance, hasattr, type and the module logger by name, and it knows a risky error class by
       its name. Do not bind those names again, change the logging setup, keep a risky class under
       another name, or use except*, which opengrep cannot parse. In a try statement with a named
       handler, do not use a lambda default (use functools.partial), a decorator or a match
@@ -908,25 +916,25 @@ rules:
               - pattern: setattr($OWNER, "$NAME", ...)
           - metavariable-regex:
               metavariable: $NAME
-              regex: ^(exception_text_for|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|logger)$
+              regex: ^(exception_text_for|write_failure_message|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|logger)$
       # An assignment to a trusted name, also as one target of several.
       - patterns:
           - pattern: $TARGETS = $VALUE
           - metavariable-regex:
               metavariable: $TARGETS
-              regex: (?:^|[\s,(\[*])(?:exception_text_for|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|logger)(?:[\s,)\]]|$)
+              regex: (?:^|[\s,(\[*])(?:exception_text_for|write_failure_message|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|logger)(?:[\s,)\]]|$)
           - pattern-not: logger = logging.getLogger(__name__)
       # A loop or comprehension target, an as or case target, or a walrus. A target holds only names,
       # dots, commas, brackets and stars; it spans lines only in brackets, so prose rarely matches.
       - pattern-regex: >-
-          \bfor[ \t]+(?:(?!\bin\b)[\w \t,()\[\]*.])*?\b(?:exception_text_for|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\b(?:(?!\bin\b)[\w \t,()\[\]*.])*?[ \t]+in\b
+          \bfor[ \t]+(?:(?!\bin\b)[\w \t,()\[\]*.])*?\b(?:exception_text_for|write_failure_message|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\b(?:(?!\bin\b)[\w \t,()\[\]*.])*?[ \t]+in\b
       - pattern-regex: >-
-          \bfor[ \t]*[(\[](?:(?!\bin\b)[\w\s,()\[\]*.])*?\b(?:exception_text_for|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\b(?:(?!\bin\b)[\w\s,()\[\]*.])*?[)\]][ \t]*in\b
-      - pattern-regex: \bas\s+\(?(?:[\w\s,]*,\s*)?(?:exception_text_for|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\b
-      - pattern-regex: (?m)^[ \t]*case\b[^\n]*\b(?:exception_text_for|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\b
+          \bfor[ \t]*[(\[](?:(?!\bin\b)[\w\s,()\[\]*.])*?\b(?:exception_text_for|write_failure_message|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\b(?:(?!\bin\b)[\w\s,()\[\]*.])*?[)\]][ \t]*in\b
+      - pattern-regex: \bas\s+\(?(?:[\w\s,]*,\s*)?(?:exception_text_for|write_failure_message|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\b
+      - pattern-regex: (?m)^[ \t]*case\b[^\n]*\b(?:exception_text_for|write_failure_message|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\b
       - pattern-regex: >-
-          \bcase[ \t]*[(\[](?:[\w\s,()\[\]*.|])*?\b(?:exception_text_for|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\b
-      - pattern-regex: \b(?:exception_text_for|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\s*:=
+          \bcase[ \t]*[(\[](?:[\w\s,()\[\]*.|])*?\b(?:exception_text_for|write_failure_message|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\b
+      - pattern-regex: \b(?:exception_text_for|write_failure_message|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\s*:=
       # A trusted builtin that a function, a parameter or an import binds again.
       - patterns:
           - pattern-either:
@@ -964,7 +972,7 @@ rules:
               metavariable: $TARGETS
               regex: (?:^|[\s,(\[*])(?:isinstance|hasattr|type)(?:[\s,)\]]|$)
       - pattern-regex: >-
-          \blambda\b(?:[^:"'{]|"[^"\n]*"|'[^'\n]*'|\{[^{}]*\})*\b(?:exception_text_for|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\b(?:[^:"'{]|"[^"\n]*"|'[^'\n]*'|\{[^{}]*\})*:
+          \blambda\b(?:[^:"'{]|"[^"\n]*"|'[^'\n]*'|\{[^{}]*\})*\b(?:exception_text_for|write_failure_message|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|isinstance|hasattr|type|logger)\b(?:[^:"'{]|"[^"\n]*"|'[^'\n]*'|\{[^{}]*\})*:
       # A lambda default that calls a function, anywhere: taint analysis does not read it.
       - pattern-regex: \blambda\b(?:[^:"'{]|"[^"\n]*"|'[^'\n]*'|\{[^{}]*\})*=(?:[^:"'{]|"[^"\n]*"|'[^'\n]*'|\{[^{}]*\})*(?:\(|\{[^{}]*\()
       # A lambda default, a decorator or a match statement in a try statement with a named handler:
@@ -1008,7 +1016,7 @@ rules:
           - pattern: from $MODULE import $NAME
           - metavariable-regex:
               metavariable: $NAME
-              regex: ^(exception_text_for|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|logger)$
+              regex: ^(exception_text_for|write_failure_message|classify_conflict|database_error_sqlstate|validation_error_detail|_first_refusal|TypeRefusal|logger)$
           - metavariable-regex:
               metavariable: $MODULE
               regex: ^(?!(netbox_librenms_plugin\.|\.+)(utils|transactions|interface_diff)$)
@@ -1339,6 +1347,42 @@ rules:
           - pattern-regex: \b(?:cf|custom_field_data)\s*\.\s*librenms_id\b
           - pattern-regex: \b(?:cf|custom_field_data)\s*\|\s*\w+\s*:\s*["']librenms_id["']
       - pattern-not-inside: "{# ... #}"
+  - id: no-scroll-wrapper-on-sync-table
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      A table-responsive wrapper scrolls its content, so it clips a member dropdown that opens
+      inside the table. Include the table without the wrapper.
+    metadata:
+      category: correctness
+      references:
+        - ".github/instructions/frontend.instructions.md"
+    paths:
+      include:
+        - "*.html"
+    patterns:
+      - pattern-regex: class=["']table-responsive["'][^>]*>\s*\{%\s*include\s+["']inc/table\.html["']
+  - id: titled-icon-needs-accessible-name
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      This icon gives its text only in a title, and a screen reader does not reliably announce the
+      title of an element that cannot get focus. Add role="img" and an aria-label equal to the
+      title. If visible text next to the icon says the same thing, add aria-hidden="true".
+    metadata:
+      category: accessibility
+    paths:
+      include:
+        - "*.py"
+        - "*.html"
+        - "*.js"
+      exclude:
+        - "**/tests/**"
+    patterns:
+      # The attribute set ends at the first ">", also across concatenated Python literals.
+      - pattern-regex: >-
+          <i\b(?=[^>]*[\s'"]title\s*=)(?![^>]*[\s'"]aria-hidden\s*=\s*["']true["'])(?!(?=[^>]*[\s'"]role\s*=\s*["']img["'])[^>]*[\s'"]aria-label\s*=\s*["'](?=\s*[^\s"']))[^>]*>
+
   - id: conflict-raised-without-record
     languages: [python]
     severity: ERROR
@@ -1409,3 +1453,388 @@ rules:
       - metavariable-regex:
           metavariable: $PATCH
           regex: ^(setattr|delattr)$
+  - id: assert-is-not-parametrized-flag
+    languages: [python]
+    severity: ERROR
+    message: >-
+      `assert value is not flag` is an identity check against one bool. It passes for every value
+      that is not that object, also for None, so the test does not prove the expected flag. Write
+      `assert value is (not flag)`.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/tests/**"]
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              @pytest.mark.parametrize($NAME, $VALUES, ...)
+              def $TEST(..., $FLAG, ...):
+                  ...
+          - pattern-inside: |
+              @pytest.mark.parametrize((..., $NAME, ...), $VALUES, ...)
+              def $TEST(..., $FLAG, ...):
+                  ...
+          - pattern-inside: |
+              @pytest.mark.parametrize([..., $NAME, ...], $VALUES, ...)
+              def $TEST(..., $FLAG, ...):
+                  ...
+      - pattern-either:
+          - pattern: assert $VALUE is not $FLAG
+          - pattern: assert $VALUE is not $FLAG, $MESSAGE
+      # Opengrep parses the name string as Python, so "flag, other" also binds $FLAG.
+      - metavariable-pattern:
+          metavariable: $NAME
+          language: python
+          pattern: $FLAG
+      - metavariable-pattern:
+          metavariable: $VALUES
+          pattern-either:
+            - pattern: "True"
+            - pattern: "False"
+  - id: vc-member-name-through-helper
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This code builds a Virtual Chassis member name with _generate_vc_member_name(). That call
+      does not apply the serial rules, so a `{serial}` name can differ from the name that import
+      creates. Call _member_name() with a vc_serial_key() serial key.
+    metadata:
+      category: correctness
+    paths:
+      exclude:
+        - "**/tests/**"
+    patterns:
+      - pattern-either:
+          - pattern: _generate_vc_member_name(...)
+          - pattern: $MODULE._generate_vc_member_name(...)
+      - pattern-not-inside: |
+          def _member_name(...):
+              ...
+
+  - id: device-serial-compare-through-serials-match
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This code compares a stored serial with == or !=. Device.serial holds the trimmed raw
+      LibreNMS serial, so a comparison must apply the current serial rules to both sides. Call
+      serials_match(stored, incoming, serial_key) from import_utils.virtual_chassis.
+    metadata:
+      category: correctness
+    paths:
+      include:
+        - "**/netbox_librenms_plugin/views/**"
+        - "**/netbox_librenms_plugin/import_utils/**"
+      exclude:
+        - "**/tests/**"
+        # Module writers store a normalized serial, so a Module comparison stays exact.
+        - "**/views/sync/modules.py"
+    pattern-either:
+      - pattern: $X.serial == $Y
+      - pattern: $Y == $X.serial
+      - pattern: $X.serial != $Y
+      - pattern: $Y != $X.serial
+
+  - id: netbox-only-controls-use-replaceable-handlers
+    languages: [javascript]
+    severity: ERROR
+    message: Assign the control handler so a row swap replaces the previous listener.
+    patterns:
+      - pattern-inside: |
+          function initializeNetBoxOnlyInterfaces() { ... }
+      - pattern: $CONTROL.addEventListener(...)
+
+  - id: metadata-ports-skip-vlan-associations
+    languages: [python]
+    severity: ERROR
+    message: Read port metadata without unused VLAN associations.
+    patterns:
+      - pattern: $API.get_ports(...)
+      - pattern-not: $API.get_ports(..., with_vlans=False, ...)
+    paths:
+      include:
+        - '**/views/base/modules_view.py'
+        - '**/views/base/cables_view.py'
+  - id: posted-module-target-needs-resolver
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This code reads the posted selected_device_id outside _resolve_destination(). Pass it to
+      _resolve_destination(page_device, value, restricted Device queryset) and refuse with
+      GrantRefusal.DESTINATION when it returns None. Do not fall back to the page device.
+    metadata:
+      category: security
+      references:
+        - "netbox_librenms_plugin/views/sync/modules.py"
+    paths:
+      exclude:
+        - "**/tests/**"
+    patterns:
+      - pattern-either:
+          - pattern: $REQUEST.$QUERY.get("selected_device_id", ...)
+          - pattern: $REQUEST.$QUERY.getlist("selected_device_id", ...)
+          - pattern: $REQUEST.$QUERY["selected_device_id"]
+      - metavariable-regex:
+          metavariable: $QUERY
+          regex: ^(GET|POST)$
+      - pattern-not-inside: _resolve_destination(...)
+      - pattern-not-inside: $GRANT.require(..., device_id=$VALUE, ...)
+  - id: rule-error-message-needs-projection
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Return RuleConfigurationError.public_message. Converting the exception to text mixes
+      response data with exception diagnostics and triggers the CodeQL exposure check.
+    metadata:
+      category: security
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/migrations/**"
+    pattern-either:
+      - patterns:
+          - pattern-inside: |
+              if ($ERROR := $CONTEXT.get("inventory_rule_error")) is not None:
+                ...
+          - pattern: str($ERROR)
+      - patterns:
+          - pattern-inside: |
+              class RuleConfigurationErrorMiddleware:
+                ...
+          - pattern-inside: |
+              def process_exception($SELF, $REQUEST, $ERROR):
+                ...
+          - pattern: str($ERROR)
+  - id: regex-error-must-raise
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This handler catches a regex error and does not raise, so a broken pattern silently matches
+      nothing. Compile a stored rule regex with models.compile_rule_regex and check its replacement
+      with models.check_rule_replacement: both raise RuleConfigurationError, which names the rule.
+      A pattern that is not stored rule data gets a nosemgrep comment with a reason.
+    metadata:
+      category: correctness
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/migrations/**"
+    patterns:
+      # $CLASS binds the class of the handler, or one element of its tuple.
+      - pattern-either:
+          - pattern: |
+              try:
+                ...
+              except (..., $CLASS, ...):
+                ...
+          - pattern: |
+              try:
+                ...
+              except (..., $CLASS, ...) as $ERROR:
+                ...
+          - pattern: |
+              try:
+                ...
+              except $CLASS as $ERROR:
+                ...
+      - metavariable-regex:
+          metavariable: $CLASS
+          # The module re, its alias _re, or the shared tuple, also unpacked into a tuple.
+          regex: ^\*?(_?re\.error|REGEX_COMPILE_ERRORS)$
+      # A handler that raises, also after other statements, fails closed.
+      - pattern-not: |
+          try:
+            ...
+          except (..., $CLASS, ...):
+            ...
+            raise ...
+      - pattern-not: |
+          try:
+            ...
+          except (..., $CLASS, ...):
+            ...
+            raise $NEW from $CAUSE
+      - pattern-not: |
+          try:
+            ...
+          except (..., $CLASS, ...) as $ERROR:
+            ...
+            raise ...
+      - pattern-not: |
+          try:
+            ...
+          except (..., $CLASS, ...) as $ERROR:
+            ...
+            raise $NEW from $CAUSE
+      - pattern-not: |
+          try:
+            ...
+          except $CLASS as $ERROR:
+            ...
+            raise ...
+      - pattern-not: |
+          try:
+            ...
+          except $CLASS as $ERROR:
+            ...
+            raise $NEW from $CAUSE
+      # A bare raise re-raises the error. The "raise ..." forms above do not match it.
+      - pattern-not: |
+          try:
+            ...
+          except (..., $CLASS, ...):
+            ...
+            raise
+      - pattern-not: |
+          try:
+            ...
+          except (..., $CLASS, ...) as $ERROR:
+            ...
+            raise
+      - pattern-not: |
+          try:
+            ...
+          except $CLASS as $ERROR:
+            ...
+            raise
+
+  - id: mapping-create-recovers-validation-races
+    languages: [python]
+    severity: ERROR
+    message: Recover validation-time and insert-time mapping races together.
+    patterns:
+      - pattern-inside: |
+          def _map_os_platform(...):
+            ...
+      - pattern-either:
+          - pattern: |
+              try:
+                ...
+              except IntegrityError:
+                ...
+          - pattern: |
+              try:
+                ...
+              except IntegrityError as $ERROR:
+                ...
+  - id: post-write-scope-through-helper
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This code reads a row that it just saved through an add or change scope inline. Call
+      transactions.saved_in_scope(obj, user, action), so every post-write read-back uses one rule.
+    metadata:
+      category: correctness
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/migrations/**"
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $OBJ.save(...)
+              ...
+          - pattern-inside: |
+              $OBJ = $MANAGER.create(...)
+              ...
+          - pattern-inside: |
+              try:
+                  ...
+                  $OBJ.save(...)
+              except $ERROR:
+                  ...
+              ...
+          - pattern-inside: |
+              try:
+                  ...
+                  $OBJ.save(...)
+              except $ERROR as $NAME:
+                  ...
+              ...
+          - pattern-inside: |
+              try:
+                  ...
+                  $OBJ = $MANAGER.create(...)
+              except $ERROR:
+                  ...
+              ...
+          - pattern-inside: |
+              try:
+                  ...
+                  $OBJ = $MANAGER.create(...)
+              except $ERROR as $NAME:
+                  ...
+              ...
+      - pattern-either:
+          - pattern: $MODEL.objects.restrict($USER, $ACTION).filter(pk=$OBJ.pk).exists()
+          - pattern: $VIEW.restricted_queryset($MODEL, $ACTION).filter(pk=$OBJ.pk).exists()
+      - metavariable-regex:
+          metavariable: $ACTION
+          regex: ^["'](add|change)["']$
+  - id: sync-script-reads-page-server-key
+    languages: [javascript]
+    severity: ERROR
+    message: >-
+      This script looks up a server_key input in the whole document. The server panel renders a
+      server_key input for each other server, so the first match can name the wrong server. Call
+      syncServerKey(), which reads the server of the sync page from #librenms-sync-tabs.
+    metadata:
+      category: correctness
+    paths:
+      include:
+        - "*.js"
+      exclude:
+        - "**/vendor/**"
+        - "*.min.js"
+    pattern-either:
+      - pattern: document.querySelector("=~/server_key/")
+      - pattern: document.querySelectorAll("=~/server_key/")
+      - pattern: document.getElementsByName("server_key")
+  - id: sync-tab-url-through-sync-query
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      This code writes a sync tab query string by hand, so the link drops the filters, pages and
+      other state of the sync page. Build it with the sync_tab_url tag, SyncQuery or
+      page_query_url from sync_query.py. The Modules tab is outside this check: its module action
+      redirect keeps its own query.
+    metadata:
+      category: correctness
+    paths:
+      include:
+        - "*.py"
+        - "*.html"
+      exclude:
+        - "**/tests/**"
+        - "**/sync_query.py"
+        - "**/views/sync/modules.py"
+    patterns:
+      # A tab key right after "?", "&", "&amp;" or a template tag that follows "?".
+      - pattern-regex: (?:[?&]|&amp;|\?\{%[^%]*%\})tab=
+
+  - id: sync-tab-attributes-through-parser
+    languages: [python]
+    severity: ERROR
+    message: Read the sync container attributes through sync_tab_attributes so added attributes remain valid.
+    patterns:
+      - pattern: re.search($PATTERN, ...)
+      - metavariable-regex:
+          metavariable: $PATTERN
+          regex: '.*librenms-sync-tabs.*data-active-tab=.*">.*'
+    paths:
+      include:
+        - "**/tests/**"
+
+  - id: batch-validation-needs-candidate-keys
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This batch passes a memoized serial_key_for but no candidate_keys. On a VC cache miss, each
+      device then reads the serial rules again. Pass candidate_keys=functools.cache(candidate_vc_serial_keys)
+      from the same batch.
+    metadata:
+      category: performance
+    paths:
+      exclude: ["**/netbox_librenms_plugin/tests/**"]
+    patterns:
+      - pattern: validate_device_for_import(..., serial_key_for=$KEYS, ...)
+      - pattern-not: validate_device_for_import(..., candidate_keys=$CANDIDATES, ...)

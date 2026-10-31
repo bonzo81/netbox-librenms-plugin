@@ -128,3 +128,32 @@ When a token does not match a NetBox object's name exactly, add a [Location Mapp
 - A **rack** parsed from the location is only applied when you have not selected a rack manually in the validation details.
 - `{region}` is accepted in the pattern so you can consume a region segment when splitting the string, but it is not assigned to the device during import and has no Location Mapping. In NetBox, the device inherits its region from its site.
 - If a pattern is set but a particular location string does not match it, the plugin falls back to using the whole string for the site (and location), so unmatched devices still resolve a site.
+
+## Platform Version Tracking
+
+**Track OS versions as platforms** is off by default. Turn it on in **LibreNMS → Settings → Plugin Settings**. The setting applies to devices and virtual machines on every LibreNMS server.
+
+When it is off, a device is in sync when its platform is the **OS platform** (the platform that matches the LibreNMS OS by name or through a [Platform Mapping](mappings.md#platform-mappings)) or any platform nested under it. The sync page does not offer to move a device from a nested platform back to the OS platform.
+
+When it is on, each device or virtual machine gets a **version platform**: a child of the OS platform for the exact version string that LibreNMS reports.
+
+- An existing child of the OS platform is the version platform when its name is the version, or ends with a space and the version (case-insensitive). For example, `Cisco IOS-XR 24.4.2` under `iosxr` is the version platform for `24.4.2`. Hand-made platforms and a renamed OS platform are therefore kept.
+- A missing version platform is created as `<OS platform name> <version>`, for example `Juniper Junos 21.2R3-S4.8`. It has the manufacturer of the OS platform. Its slug turns dots into dashes, so `21.2.1` and `2.12.1` get different slugs. When the slug is already used by a platform of the same manufacturer (for example `6.1.0` and `6.1.0+`), the plugin adds `-2`, `-3`, and so on.
+- When LibreNMS reports no version, the OS platform or any platform nested under it is in sync.
+- Platform Mappings still point at the OS platform.
+- The plugin never moves, renames, or deletes your platforms, and it does not delete version platforms that no device uses.
+
+The sync page and import block the change, with the reason, when:
+
+- two children of the OS platform match the version, or
+- another platform outside the OS platform already has the name of the new version platform.
+
+Creating a version platform needs the NetBox `add` permission on Platform. On the sync page, a user without it sees the reason instead of the **Sync** button. Import then assigns the OS platform and shows the missing version platform as a warning.
+
+The sync page of a device and of a virtual machine both show the platform row. **Create & Sync** reads the current OS and version from LibreNMS, never from the page. With tracking on, if the version differs from the version on the page, or if a platform or Platform Mapping now matches the OS, nothing changes and the page asks you to refresh. A Platform Mapping that cannot be added after the platform is assigned is reported as a warning; the assignment stays.
+
+The **Create Platform** modal on the import page follows the same rules. A platform with the name you enter is used as it is, when you may view it. When the assignment to the matched device or virtual machine is refused, the new platform is not kept either. The Platform Mapping uses the OS that LibreNMS reports for the device. Without a matched object, the modal creates only the OS platform; the import creates the version platform.
+
+Messages and reasons name only platforms that you may view. Another platform is shown as "a platform you cannot view".
+
+Members of a virtual chassis keep the platform of the chassis master.

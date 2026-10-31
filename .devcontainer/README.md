@@ -94,6 +94,7 @@ The default catalog contains these scenarios:
 - IOS-XE subinterfaces (`iosxe-subinterfaces`)
 - Junos subinterfaces (`junos-subinterfaces`)
 - Nokia transceivers (`nokia-timos-transceivers`)
+- NX-OS fixed switch with a built-in line card (`nxos-fixed-linecard`)
 
 The structural device, port, inventory, port-stack, transceiver, and sensor responses come from the committed recordings. For the OOB pair, the controller ports come from the host recording and the stub derives the missing controller device row with the same chassis serial. The stub also adds deterministic development data for API areas that the recordings do not capture. This includes discovery lists, VLANs 100 and 200, IP-to-port associations, one LLDP-style link per device, locations, and poller groups.
 

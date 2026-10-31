@@ -20,6 +20,9 @@ from netbox_librenms_plugin.views.mixins import LibreNMSPermissionMixin, NetBoxO
 class SyncCacheStatusView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, View):
     """Return current cache state without contacting LibreNMS."""
 
+    # A fetch() caller reads the answer, so the middleware answers with a JSON error.
+    answers_json = True
+
     def _model(self, object_type):
         if object_type == "device":
             return Device

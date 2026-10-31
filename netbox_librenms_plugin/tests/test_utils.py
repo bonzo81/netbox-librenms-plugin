@@ -234,70 +234,6 @@ class TestSiteMatching:
 
 
 # =============================================================================
-# TestPlatformMatching - 4 tests
-# =============================================================================
-
-
-@pytest.mark.django_db
-class TestPlatformMatching:
-    """Test platform matching logic."""
-
-    def test_find_platform_for_os_exact_match(self):
-        """OS string matched to platform."""
-        from dcim.models import Platform
-
-        from netbox_librenms_plugin.utils import find_matching_platform
-
-        platform = Platform.objects.create(name="ios", slug="utils-ios")
-        result = find_matching_platform("ios")
-
-        assert result["found"] is True
-        assert result["platform"] == platform
-        assert result["match_type"] == "exact"
-
-    def test_find_platform_for_os_mapping_match(self):
-        """A mapping resolves an OS name that differs from the platform name."""
-        from dcim.models import Platform
-
-        from netbox_librenms_plugin.models import PlatformMapping
-        from netbox_librenms_plugin.utils import find_matching_platform
-
-        platform = Platform.objects.create(name="Network OS", slug="utils-network-os")
-        PlatformMapping.objects.create(librenms_os="vendor_os", netbox_platform=platform)
-
-        result = find_matching_platform("vendor_os")
-
-        assert result == {"found": True, "platform": platform, "match_type": "mapping"}
-
-    def test_find_platform_for_os_not_found(self):
-        """Returns None when no match."""
-        from netbox_librenms_plugin.utils import find_matching_platform
-
-        result = find_matching_platform("unknown_os")
-
-        assert result["found"] is False
-        assert result["platform"] is None
-
-    def test_find_platform_for_os_empty(self):
-        """Empty OS returns None."""
-        from netbox_librenms_plugin.utils import find_matching_platform
-
-        result = find_matching_platform("")
-
-        assert result["found"] is False
-        assert result["platform"] is None
-
-    def test_find_platform_for_os_dash(self):
-        """Dash placeholder returns None."""
-        from netbox_librenms_plugin.utils import find_matching_platform
-
-        result = find_matching_platform("-")
-
-        assert result["found"] is False
-        assert result["platform"] is None
-
-
-# =============================================================================
 # TestConversionHelpers - 4 tests
 # =============================================================================
 
@@ -654,11 +590,11 @@ class TestVirtualChassisHelpers:
 
         assert result == members[1]
 
-    def test_get_module_template_interface_names_rewrites_for_vc_member(self):
+    def test_get_module_adoptable_interface_names_rewrites_for_vc_member(self):
         from dcim.models import InterfaceTemplate, Module
 
         from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type
-        from netbox_librenms_plugin.utils import get_module_template_interface_names
+        from netbox_librenms_plugin.utils import get_module_adoptable_interface_names
 
         _first, _second, device = self._three_member_vc("utils-template-rewrite")
         module_device = make_device_with_module_bays("utils-template-module", ["Bay 1"])
@@ -674,9 +610,9 @@ class TestVirtualChassisHelpers:
             module_type=module_type,
         )
 
-        result = get_module_template_interface_names(device, module)
+        result = get_module_adoptable_interface_names(device, module)
 
-        assert result == ["TenGigabitEthernet3/1/1"]
+        assert result == (["TenGigabitEthernet3/1/1"], False)
 
     def test_zero_id_is_not_a_valid_librenms_id(self):
         """
@@ -832,7 +768,10 @@ class TestPaginationHelpers:
 
         from netbox_librenms_plugin.utils import get_table_paginate_count
 
+        from django.contrib.auth.models import AnonymousUser
+
         request = RequestFactory().get("/", {"table1_per_page": "50"})
+        request.user = AnonymousUser()
 
         result = get_table_paginate_count(request, "table1_")
 
@@ -845,8 +784,11 @@ class TestPaginationHelpers:
 
         from netbox_librenms_plugin.utils import get_table_paginate_count
 
+        from django.contrib.auth.models import AnonymousUser
+
         settings.MAX_PAGE_SIZE = disabled_max
         request = RequestFactory().get("/", {"table1_per_page": "500"})
+        request.user = AnonymousUser()
 
         assert get_table_paginate_count(request, "table1_") == 500
 

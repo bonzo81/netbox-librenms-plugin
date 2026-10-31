@@ -63,14 +63,24 @@ def _seed_device_with_installed_module(name):
         ),
     ],
 )
-def test_module_action_reports_the_missing_server_instead_of_failing(client, settings, url_name, method, payload_for):
-    """Each action reads the LibreNMS server key first, so an unusable configuration must not 500."""
-    configure_no_librenms_servers(settings)
-    device, bay, module_type, module = _seed_device_with_installed_module(f"no-server-{url_name}")
-    client.force_login(make_superuser(f"no-server-{url_name}-user"))
+@pytest.mark.parametrize("posted_keys", [None, ["removed"], ["removed", "default"]], ids=["none", "stale", "repeated"])
+def test_module_action_reports_the_missing_server_instead_of_failing(
+    client, settings, url_name, method, payload_for, posted_keys
+):
+    """An unusable configuration, or a posted key that selects no single configured server, must not 500 or fall back."""
+    if posted_keys is None:
+        configure_no_librenms_servers(settings)
+    else:
+        _configure_default_server(settings)
+    tag = f"{url_name}-{len(posted_keys or ())}"
+    device, bay, module_type, module = _seed_device_with_installed_module(f"no-server-{tag}")
+    client.force_login(make_superuser(f"no-server-{tag}-user"))
     url = reverse(f"plugins:netbox_librenms_plugin:{url_name}", kwargs={"pk": device.pk})
+    payload = payload_for(bay, module_type, module)
+    if posted_keys is not None:
+        payload["server_key"] = posted_keys
 
-    response = getattr(client, method)(url, payload_for(bay, module_type, module))
+    response = getattr(client, method)(url, payload)
 
     if method == "get":
         assert response.status_code == 400
@@ -94,7 +104,7 @@ def test_a_resolved_action_server_key_is_never_blank(settings):
     view = DeviceInterfaceTableView()
 
     assert view.resolve_posted_server_key_or_none({"server_key": ""}) == "default"
-    assert view.resolve_posted_server_key_or_none({"server_key": "forged"}) == "default"
+    assert view.resolve_posted_server_key_or_none({"server_key": "forged"}) is None
 
     configure_no_librenms_servers(settings)
     assert DeviceInterfaceTableView().resolve_posted_server_key_or_none({"server_key": ""}) is None

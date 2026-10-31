@@ -20,7 +20,10 @@ class LibreNMSSyncConfig(PluginConfig):
     base_url = "librenms_plugin"
     min_version = "4.4.0"
     required_settings = []  # Custom validation in ready() method
-    middleware = ["netbox_librenms_plugin.middleware.LockConflictMiddleware"]
+    middleware = [
+        "netbox_librenms_plugin.middleware.LockConflictMiddleware",
+        "netbox_librenms_plugin.middleware.RuleConfigurationErrorMiddleware",
+    ]
     default_settings = {
         "enable_caching": True,
         "verify_ssl": True,

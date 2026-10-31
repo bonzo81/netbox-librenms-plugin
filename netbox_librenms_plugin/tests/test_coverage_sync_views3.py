@@ -509,7 +509,9 @@ class TestVlansGroupedUpdateAndSkip:
         group = VLANGroup.objects.create(name=f"grp-{tag}", slug=f"grp-{tag}")
         vlan = VLAN.objects.create(vid=100, group=group, name=existing_name, status="active")
         dev = make_device(f"vlan-{tag}")
-        req = make_request("post", {"select": ["100"], "vlan_group_100": str(group.pk)})
+        req = make_request(
+            "post", {"select": ["100"], "vlan_group_100": str(group.pk), "expected_vlan_name_100": cached_name}
+        )
         view = make_view(SyncVLANsView, req)
         view._post_server_key = "default"
         cache_key = view.get_cache_key(dev, "vlans", "default")
