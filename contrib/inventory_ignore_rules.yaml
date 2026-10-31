@@ -147,6 +147,7 @@
   pattern: ""
   action: transparent
   require_serial_match_parent: false
+  manufacturer: "Cisco"
   enabled: true
   description: >
     Fixed-form routers report built-in units as chassis-level modules whose

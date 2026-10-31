@@ -130,10 +130,11 @@ def test_running_the_data_step_twice_adds_nothing():
 
 
 def test_the_seed_is_the_contrib_example():
-    """The seeded rule and the documented example are the same rule."""
+    """The seeded rule and the documented example are the same rule, with the same Cisco scope."""
     contrib = Path(__file__).resolve().parents[2] / "contrib" / "inventory_ignore_rules.yaml"
     (record,) = [r for r in yaml.safe_load(contrib.read_text(encoding="utf-8")) if r["name"] == _RULE["name"]]
 
+    assert record.pop("manufacturer", None) == "Cisco"
     assert {**record, "description": record["description"].strip()} == _RULE
 
 
