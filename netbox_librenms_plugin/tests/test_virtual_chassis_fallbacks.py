@@ -870,3 +870,20 @@ def test_serials_match_keys_both_sides_and_never_matches_a_missing_serial(rule, 
 
     assert serials_match(stored, incoming, key) is matches
     assert (key(incoming) == "") == (not matches)
+
+
+@pytest.mark.django_db
+def test_a_serial_lookup_stops_reading_devices_at_its_limit():
+    """Devices that share one serial past the limit add no queries."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    from netbox_librenms_plugin.import_utils.virtual_chassis import devices_with_serial
+
+    def queries_for(serial, count):
+        devices = [make_device(f"{serial.lower()}-{n}", serial=serial) for n in range(count)]
+        with CaptureQueriesContext(connection) as queries:
+            assert devices_with_serial(serial, limit=1) == devices[:1]
+        return len(queries)
+
+    assert queries_for("FEW-SN", 2) == queries_for("MANY-SN", 6)
