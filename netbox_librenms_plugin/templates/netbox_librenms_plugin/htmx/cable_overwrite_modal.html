@@ -1,4 +1,5 @@
 {% load helpers %}
+{% load librenms_sync_query %}
 {% comment %}
 Force-confirm modal for the LibreNMS cable sync. Rendered as the #htmx-modal-content shell and
 injected via an out-of-band swap from _cable_sync_content.html when a sync would overwrite a cable.
@@ -13,9 +14,10 @@ Context: conflicts (list of {interface, row_id, trace}), server_key, device_pk.
     </h5>
     <button type="button" class="btn-close btn-close-white" onclick="closeHtmxModal()" aria-label="Close"></button>
 </div>
+{% url 'plugins:netbox_librenms_plugin:sync_device_cables' device_pk as cable_sync_url_path %}{% sync_tab_url cable_sync_url_path as cable_sync_url %}
 <form method="post"
-      action="{% url 'plugins:netbox_librenms_plugin:sync_device_cables' device_pk %}"
-      hx-post="{% url 'plugins:netbox_librenms_plugin:sync_device_cables' device_pk %}"
+      action="{{ cable_sync_url }}"
+      hx-post="{{ cable_sync_url }}"
       hx-target="#cable-sync-content" hx-swap="innerHTML"
       hx-disabled-elt="find button[type=submit]">
     {% csrf_token %}

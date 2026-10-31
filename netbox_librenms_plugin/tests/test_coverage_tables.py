@@ -6,6 +6,7 @@ from html import unescape
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from django.contrib.auth.models import AnonymousUser
 from django.test import RequestFactory
 from django.urls import reverse
 
@@ -1513,6 +1514,7 @@ class TestInterfaceFormatting:
     def test_configure_uses_the_real_request_and_paginator(self):
         table = _interface_table(data=[_port()])
         request = RequestFactory().get("/", {"interfaces_per_page": "1"})
+        request.user = AnonymousUser()
 
         table.configure(request)
 
@@ -1550,6 +1552,16 @@ class TestVirtualChassisInterfaceTable:
             column.name: column.attrs["td"]["data-col"] for column in table.columns
         }
         assert all("text-wrap" in th["class"].split() for th in headers.values())
+
+    def test_every_vc_member_column_opts_into_the_shared_width_class(self):
+        from netbox_librenms_plugin.tables.cables import VCCableTable
+        from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable
+        from netbox_librenms_plugin.tables.modules import VCModuleTable
+
+        for table_class in (VCInterfaceTable, VCModuleTable, VCCableTable):
+            td = table_class.base_columns["device_selection"].attrs["td"]
+            assert "device-selection-col" in td.get("class", "").split(), table_class.__name__
+            assert td["data-col"] == "device_selection"
 
     def test_physical_rows_select_the_named_member_and_logical_rows_use_the_viewed_member(self):
         from netbox_librenms_plugin.tables.interfaces import VCInterfaceTable

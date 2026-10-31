@@ -3,9 +3,9 @@ Render the real _cable_sync_content.html template in both modes.
 
 In migrated mode the POST form is replaced by a plain <div> (a migrated donor must not POST a
 cable sync). But the cable table still renders interactive controls whose verify-cable fetch
-(handleCableChange) reads document.querySelector('[name=csrfmiddlewaretoken]').value and
-input[name="server_key"] — so standalone CSRF + server_key hidden inputs must be emitted in
-migrated mode too, or those JS requests hit a null token (TypeError/403) / the wrong server.
+(handleCableChange) reads document.querySelector('[name=csrfmiddlewaretoken]').value, so a
+standalone CSRF input must be emitted in migrated mode too, or those JS requests hit a null token
+(TypeError/403). The server key of a script request comes from the sync page.
 """
 
 import pytest
@@ -19,6 +19,7 @@ class TestCableSyncContentTemplateMigratedMode:
         from django.test import RequestFactory
         from django_tables2 import RequestConfig
 
+        from netbox_librenms_plugin.sync_filters import parse_sync_filters
         from netbox_librenms_plugin.tables.cables import LibreNMSCableTable
         from netbox_librenms_plugin.tests.conftest import make_device
 
@@ -30,6 +31,7 @@ class TestCableSyncContentTemplateMigratedMode:
         cable_sync = {
             "object": device,
             "table": table,
+            "filters": parse_sync_filters(request.GET, table.filter_spec()),
             "server_key": server_key,
             "cache_expiry": None,
         }
@@ -41,23 +43,20 @@ class TestCableSyncContentTemplateMigratedMode:
         }
         return render_to_string("netbox_librenms_plugin/_cable_sync_content.html", ctx, request=request)
 
-    def test_migrated_mode_drops_form_but_keeps_csrf_and_server_key(self):
-        # Non-default server so the assertion proves the actual value is emitted.
+    def test_migrated_mode_drops_form_but_keeps_csrf(self):
         html = self._render(
             migrated={"server_key": "prod", "device_id": 1, "at": "now"},
             server_key="prod",
         )
-        # The live POST form must be gone in migrated mode (a donor must not POST a sync).
-        assert "<form" not in html
-        # ...but the CSRF token AND server_key must remain so the JS-driven verify-cable fetch
-        # (handleCableChange) targets the right server with a usable token.
+        # The live POST form must be gone in migrated mode (a donor must not POST a sync). The
+        # filter form is a GET form, so it cannot submit a sync.
+        assert '<form method="post"' not in html
+        # ...but the CSRF token must remain so the JS-driven verify-cable fetch (handleCableChange) authenticates.
         assert "csrfmiddlewaretoken" in html
-        assert 'name="server_key"' in html
-        assert 'value="prod"' in html
 
     def test_normal_mode_emits_form_with_csrf_and_server_key(self):
         html = self._render(migrated=None)
-        assert "<form" in html
+        assert '<form method="post"' in html
         assert "csrfmiddlewaretoken" in html
         assert 'name="server_key"' in html
 
@@ -161,3 +160,29 @@ class TestCableSyncContentTemplateMigratedMode:
         assert 'data-cable-picker-url="/plugins/librenms_plugin/picker/1/"' in html
         assert 'hx-get="/plugins/librenms_plugin/picker/1/"' not in html
         assert 'aria-label="Pick remote end"' in html
+
+    def test_the_cable_table_has_no_scroll_wrapper(self):
+        """A scroll wrapper clips the member dropdown, which opens inside the table."""
+        from html.parser import HTMLParser
+
+        class _TableAncestors(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.stack, self.ancestors = [], None
+
+            def handle_starttag(self, tag, attrs):
+                classes = (dict(attrs).get("class") or "").split()
+                if tag == "table" and self.ancestors is None:
+                    self.ancestors = [c for _, cls in self.stack for c in cls]
+                self.stack.append((tag, classes))
+
+            def handle_endtag(self, tag):
+                while self.stack and self.stack.pop()[0] != tag:
+                    pass
+
+        parser = _TableAncestors()
+        parser.feed(self._render(migrated=None))
+
+        assert parser.ancestors is not None
+        assert "card" in parser.ancestors
+        assert "table-responsive" not in parser.ancestors

@@ -32,7 +32,7 @@
             </td>
             <td{% if type_mismatch %} class="text-danger fw-semibold"{% endif %}>
                 {{ librenms_model }}
-                {% if type_matched %}<i class="mdi mdi-check-decagram text-success ms-1" title="Recognised as NetBox module type {{ installed_module.module_type.model }}"></i>{% endif %}
+                {% if type_matched %}<i class="mdi mdi-check-decagram text-success ms-1" role="img" title="Recognised as NetBox module type {{ installed_module.module_type.model }}" aria-label="Recognised as NetBox module type {{ installed_module.module_type.model }}"></i>{% endif %}
             </td>
         </tr>
         <tr>
@@ -46,8 +46,10 @@
 {% if type_mismatch %}
 <div class="alert alert-warning py-2 mb-3">
     <i class="mdi mdi-alert me-1"></i>
-    <strong>Different module type</strong> — the installed module type does not match LibreNMS.
-    Replacing will delete the current module and install <strong>{{ librenms_model }}</strong>.
+    <div>
+        <strong>Different module type</strong> — the installed module type does not match LibreNMS.
+        Replacing will delete the current module and install <strong>{{ librenms_model }}</strong>.
+    </div>
 </div>
 {% elif serial_mismatch and type_matched %}
 <div class="alert alert-info py-2 mb-3">
@@ -66,25 +68,31 @@
 {% if serial_conflict %}
 <div class="alert alert-danger py-2 mb-3">
     <i class="mdi mdi-alert-circle me-1"></i>
-    <strong>Serial conflict:</strong> <code>{{ librenms_serial }}</code> is currently installed at
-    <strong>{{ serial_conflict.device.name }}</strong> /
-    Bay: <strong>{{ serial_conflict.module_bay.name }}</strong>.
-    <br><small>
-        <em>Replace</em> will also remove it from that location.
-        <em>Move</em> will update its location to this bay instead of creating a new entry.
-    </small>
+    <div>
+        <strong>Serial conflict:</strong> <code>{{ librenms_serial }}</code> is currently installed at
+        <strong>{{ serial_conflict.device.name }}</strong> /
+        Bay: <strong>{{ serial_conflict.module_bay.name }}</strong>.
+        <br><small>
+            <em>Replace</em> will also remove it from that location.
+            <em>Move</em> will update its location to this bay instead of creating a new entry.
+        </small>
+    </div>
 </div>
 {% elif serial_conflict_hidden %}
 <div class="alert alert-warning py-2 mb-3">
     <i class="mdi mdi-alert me-1"></i>
-    <strong>Serial conflict:</strong> This serial is assigned to a module you cannot view.
-    Ask an administrator to resolve the conflict.
+    <div>
+        <strong>Serial conflict:</strong> This serial is assigned to a module you cannot view.
+        Ask an administrator to resolve the conflict.
+    </div>
 </div>
 {% elif serial_conflict_ambiguous %}
 <div class="alert alert-warning py-2 mb-3">
     <i class="mdi mdi-alert me-1"></i>
-    <strong>Ambiguous serial conflict:</strong> Serial <code>{{ librenms_serial }}</code> is assigned to multiple
-    modules. Please resolve the conflict manually before proceeding.
+    <div>
+        <strong>Ambiguous serial conflict:</strong> Serial <code>{{ librenms_serial }}</code> is assigned to multiple
+        modules. Please resolve the conflict manually before proceeding.
+    </div>
 </div>
 {% endif %}
 

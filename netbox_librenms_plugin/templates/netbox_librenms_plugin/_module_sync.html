@@ -1,32 +1,5 @@
 {% load helpers %}
 
-<!-- Action Buttons -->
-<div class="d-flex justify-content-end align-items-center mb-0 sync-tab-refresh-toolbar">
-    <div class="btn-list align-items-center">
-        {% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=module_sync.cache_expiry cache_container_id="module-cache-countdown" cache_countdown_id="module-countdown-timer" %}
-        <form method="post">
-            {% csrf_token %}
-            {% comment %}
-            server_key (not server_info.server_key — that context var never existed, so the
-            input always posted blank and the refresh fell back to the GLOBAL selected server).
-            {% endcomment %}
-            {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
-            {% if has_librenms_id %}
-                {% with model_name=object|meta:"model_name" %}
-                    {% if model_name == "device" %}
-                        <button type="button" hx-post="{% url 'plugins:netbox_librenms_plugin:device_module_sync' pk=object.pk %}"
-                                hx-target="#module-sync-content"
-                                hx-sync="#module-sync-content:drop"
-                                class="btn btn-outline-primary">
-                            Refresh Modules
-                        </button>
-                    {% endif %}
-                {% endwith %}
-            {% endif %}
-        </form>
-    </div>
-</div>
-
 <style>
 /*
  * In-flight row-action feedback (HTMX).

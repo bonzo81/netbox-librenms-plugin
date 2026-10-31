@@ -2,18 +2,20 @@
 The one reader of interface rules (``InterfaceTypeMapping``).
 
 A rule selects LibreNMS ports by platform, ``ifType``, name pattern and minimum speed, and either
-sets a NetBox interface type or ignores the port. Load the rules once per request (or once per job
-batch) and decide every port against that snapshot.
+sets a NetBox interface type or ignores the port. A platform rule applies on that platform and on
+every descendant of it in the NetBox platform tree, a tracked version platform included. Load the
+rules once per request (or once per job batch) and decide every port against that snapshot.
 """
 
 import enum
 import re
 from dataclasses import dataclass
 
+from dcim.models import Platform
 from django.http import HttpRequest
 
-from netbox_librenms_plugin.models import InterfaceTypeMapping
-from netbox_librenms_plugin.utils import REGEX_COMPILE_ERRORS, convert_speed_to_kbps
+from netbox_librenms_plugin.models import InterfaceTypeMapping, compile_rule_regex
+from netbox_librenms_plugin.utils import convert_speed_to_kbps
 
 _REQUEST_CACHE_ATTRIBUTE = "_librenms_interface_rules"
 
@@ -22,10 +24,6 @@ PORT_RECORD_KEYS = ("ifName", "ifDescr", "ifType", "ifSpeed")
 
 # The reason for a blocking port the caller may not view: no port id, name or rule.
 HIDDEN_PORT_REASON = "an interface rule refuses a port on an interface or device you cannot view"
-
-
-class RuleConfigurationError(Exception):
-    """A stored rule cannot be applied, so no decision from this rule set is safe."""
 
 
 class RuleDecisionKind(enum.Enum):
@@ -47,6 +45,10 @@ class InterfaceRule:
     label: str
     action: str
     platform_id: int | None
+    # The rule's platform and its descendants; empty for a rule on every platform.
+    platform_ids: frozenset
+    # The depth of the rule's platform in the tree: a deeper platform is more specific.
+    platform_level: int
     librenms_type: str
     pattern: re.Pattern | None
     librenms_speed: int | None
@@ -54,18 +56,23 @@ class InterfaceRule:
 
     @property
     def rank(self) -> tuple:
-        """Specificity of a Set type rule: platform, then pattern, then type, then speed."""
+        """Specificity of a Set type rule: platform (the deeper first), then pattern, then type, then speed."""
         return (
             self.platform_id is not None,
+            self.platform_level,
             self.pattern is not None,
             bool(self.librenms_type),
             self.librenms_speed is not None,
             self.librenms_speed or 0,
         )
 
+    def applies_on(self, platform_id: int | None) -> bool:
+        """Return whether the rule applies to a port whose owner is on *platform_id*."""
+        return self.platform_id is None or platform_id in self.platform_ids
+
     def matches(self, port: dict, platform_id: int | None, speed: int | None) -> bool:
         """Return whether every selector of this rule matches the port (speed in Kbps)."""
-        if self.platform_id is not None and self.platform_id != platform_id:
+        if not self.applies_on(platform_id):
             return False
         if self.librenms_type and self.librenms_type != port.get("ifType"):
             return False
@@ -123,6 +130,35 @@ class PortSyncBlocked(Exception):
         self.decision = decision
 
 
+def _platform_subtrees(platforms) -> dict:
+    """Return ``{platform pk: (pks of it and its descendants, its depth)}`` from one query."""
+    if not platforms:
+        return {}
+    # The parent links are the tree on both the MPTT and the ltree Platform model.
+    parents = dict(Platform.objects.values_list("pk", "parent_id"))
+    children = {}
+    for pk, parent_id in parents.items():
+        children.setdefault(parent_id, []).append(pk)
+    subtrees = {}
+    for platform in platforms:
+        members, pending = set(), [platform.pk]
+        while pending:
+            pk = pending.pop()
+            if pk not in members:
+                members.add(pk)
+                pending.extend(children.get(pk, ()))
+        depth, parent_id = 0, parents.get(platform.pk)
+        while parent_id is not None:
+            depth, parent_id = depth + 1, parents.get(parent_id)
+        subtrees[platform.pk] = (frozenset(members), depth)
+    return subtrees
+
+
+def rule_tables():
+    """Return a queryset of each table that :meth:`InterfaceRuleMatcher.load` reads."""
+    return InterfaceTypeMapping.objects.all(), Platform.objects.all()
+
+
 class InterfaceRuleMatcher:
     """Decide ports against one snapshot of the interface rules, with no database access."""
 
@@ -134,26 +170,26 @@ class InterfaceRuleMatcher:
     @classmethod
     def load(cls) -> "InterfaceRuleMatcher":
         """
-        Read every rule in one query and compile its name pattern.
+        Read every rule and the platform subtrees they apply to, and compile each name pattern.
 
         Raises:
             RuleConfigurationError: A stored pattern does not compile (it bypassed ``clean()``).
 
         """
+        mappings = list(InterfaceTypeMapping.objects.select_related("platform").order_by("pk"))
+        subtrees = _platform_subtrees({mapping.platform for mapping in mappings if mapping.platform is not None})
         rules = []
-        for mapping in InterfaceTypeMapping.objects.select_related("platform").order_by("pk"):
-            try:
-                pattern = re.compile(mapping.name_pattern) if mapping.name_pattern else None
-            except REGEX_COMPILE_ERRORS as exc:
-                raise RuleConfigurationError(
-                    f"Interface rule {mapping.pk} has a name pattern that does not compile: {exc}"
-                ) from exc
+        for mapping in mappings:
+            pattern = compile_rule_regex(mapping, "name_pattern") if mapping.name_pattern else None
+            platform = mapping.platform
             rules.append(
                 InterfaceRule(
                     pk=mapping.pk,
                     label=str(mapping),
                     action=mapping.action,
                     platform_id=mapping.platform_id,
+                    platform_ids=subtrees[platform.pk][0] if platform is not None else frozenset(),
+                    platform_level=subtrees[platform.pk][1] if platform is not None else 0,
                     librenms_type=mapping.librenms_type,
                     pattern=pattern,
                     librenms_speed=mapping.librenms_speed,
@@ -237,7 +273,7 @@ class InterfaceRuleMatcher:
 
     def may_ignore(self, platform_id: int | None) -> bool:
         """Return whether any Ignore rule could apply to a port on *platform_id*."""
-        return any(rule.platform_id is None or rule.platform_id == platform_id for rule in self._ignore_rules)
+        return any(rule.applies_on(platform_id) for rule in self._ignore_rules)
 
     def check_existing_interface_write(self, port: dict | None, *, platform_id: int | None) -> RuleDecision | None:
         """

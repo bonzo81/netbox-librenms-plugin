@@ -1,8 +1,33 @@
 {% load helpers %}
+{% load librenms_sync_query %}
 {% if sync_partial_response %}{% include 'inc/messages.html' %}{% endif %}
-{% if request.htmx %}
-{% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=cable_sync.cache_expiry cache_container_id="cable-cache-countdown" cache_countdown_id="cable-countdown-timer" cache_oob=True %}
-{% endif %}
+<div class="noprint sync-tab-primary-toolbar">
+    <div id="cable-sync-content-actions" class="sync-tab-actions d-flex align-items-center gap-2">
+        {% if cable_sync.table %}
+            {% if not migrated_to_marker %}
+            <button type="submit" form="cable-sync-form" class="btn btn-primary">
+                <span class="spinner spinner-border d-none" id="sync-spinner"></span>
+                <span>Sync Selected Cables</span>
+            </button>
+            {% endif %}
+            <a href="#" class="ms-1" data-bs-toggle="modal" data-bs-target="#cableSyncHelpModal">
+                <i class="mdi mdi-help-circle"></i> info
+            </a>
+        {% endif %}
+    </div>
+    <div class="sync-tab-filter-refresh">
+        {% if cable_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_controls.html" with filters=cable_sync.filters prefix="cables_" tab="cables" section_id="cableFilterSection" label="Filter cables" %}{% endif %}
+        {% firstof cable_sync.server_key server_key librenms_server_info.server_key as refresh_server_key %}
+        <div id="cable-sync-content-refresh">
+        {% include "netbox_librenms_plugin/inc/_cable_sync_refresh.html" with object=cable_sync.object server_key=refresh_server_key %}
+        </div>
+    </div>
+</div>
+{% if cable_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with owner=cable_sync.object content_id="cable-sync-content" server_key=cable_sync.server_key filters=cable_sync.filters prefix="cables_" tab="cables" section_id="cableFilterSection" label="Filter cables" %}{% endif %}
+{% if cable_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_panel.html" with owner=cable_sync.object content_id="cable-sync-content" server_key=cable_sync.server_key filters=cable_sync.filters prefix="cables_" tab="cables" section_id="cableFilterSection" label="Filter cables" %}{% endif %}
+
+<div id="cable-sync-content-results">
+<div data-sync-filter-tab="cables" data-selection-scope="{% sync_selection_scope cable_sync.object cable_sync.server_key "cables" %}" data-filter-snapshot="{% if cable_sync.table %}true{% else %}false{% endif %}" data-filter-search="{{ cable_sync.filters.form.q.value|default:'' }}" data-filter-state="{{ cable_sync.filters.form.sync_state.value|default:'' }}">
 
 <!-- Cable Sync Table -->
 {% if cable_sync.table %}
@@ -12,23 +37,23 @@
     Refresh cables to retry the missing sources.
 </div>
 {% endif %}
+
 {# Migrated donors must not sync: hiding only the button leaves the POST form live (Enter in a filter still submits), so drop the form in migrated mode. #}
 {% if migrated_to_marker %}
 <div data-cable-verify-url="{% url 'plugins:netbox_librenms_plugin:verify_cable' %}"
      data-cable-origin-device-id="{{ cable_sync.object.pk }}">
     {% comment %}
     No POST form in migrated mode, but the cable table still renders interactive controls whose
-    verify-cable fetch (handleCableChange) reads document.querySelector('[name=csrfmiddlewaretoken]').value
-    and input[name="server_key"]. Emit standalone hidden inputs so those JS-driven requests don't hit a
-    null CSRF token (TypeError/403) or fall back to the default server on a non-default deployment. A bare
+    verify-cable fetch (handleCableChange) reads document.querySelector('[name=csrfmiddlewaretoken]').value.
+    Emit a standalone token so those JS-driven requests don't hit a null CSRF token (TypeError/403). A bare
     hidden input never auto-submits, so it doesn't reintroduce the live-form problem migrated mode avoids.
     Mirrors _interface_sync_content.html.
     {% endcomment %}
     <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
-    {% if cable_sync.server_key %}<input type="hidden" name="server_key" value="{{ cable_sync.server_key }}">{% endif %}
 {% else %}
-<form method="post" action="{% url 'plugins:netbox_librenms_plugin:sync_device_cables' cable_sync.object.pk %}"
-      hx-post="{% url 'plugins:netbox_librenms_plugin:sync_device_cables' cable_sync.object.pk %}"
+{% url 'plugins:netbox_librenms_plugin:sync_device_cables' cable_sync.object.pk as cable_sync_url_path %}{% sync_tab_url cable_sync_url_path as cable_sync_url %}
+<form method="post" id="cable-sync-form" action="{{ cable_sync_url }}"
+      hx-post="{{ cable_sync_url }}"
       hx-target="#cable-sync-content" hx-swap="innerHTML" hx-indicator="#sync-spinner"
       data-cable-verify-url="{% url 'plugins:netbox_librenms_plugin:verify_cable' %}"
       data-cable-origin-device-id="{{ cable_sync.object.pk }}">
@@ -41,63 +66,17 @@
     <input type="hidden" name="origin_device_id" value="{{ cable_sync.object.pk }}">
     {% if cable_sync.server_key %}<input type="hidden" name="server_key" value="{{ cable_sync.server_key }}">{% endif %}
 {% endif %}
-    <div class="noprint d-flex justify-content-between align-items-center mt-0 mb-3 sync-tab-primary-toolbar">
-        <div>
-            {% if not migrated_to_marker %}
-            <button type="submit" class="btn btn-primary">
-                <span class="spinner spinner-border d-none" id="sync-spinner"></span>
-                <span>Sync Selected Cables</span>
-            </button>
-            {% endif %}
-            <a href="#" class="m-2" data-bs-toggle="modal" data-bs-target="#cableSyncHelpModal">
-                <i class="mdi mdi-help-circle"></i> info
-            </a>
-        </div>
-    </div>
 
     <div class="row mb-3">
         <div class="col col-md-12">
-            <div class="d-flex justify-content-end align-items-center mb-3">
-                <button class="btn btn-sm btn-secondary sync-filter-toggle" type="button" data-bs-toggle="collapse" data-bs-target="#cableFilterSection" aria-expanded="false" aria-controls="cableFilterSection">
-                    <i class="mdi mdi-filter-outline"></i> Filters
-                </button>
-            </div>
-            <div class="collapse mb-3" id="cableFilterSection">
-                <div class="mb-2">
-                    <small class="text-muted">
-                        <i class="mdi mdi-information"></i> Filters apply to currently displayed cables.
-                    </small>
-                </div>
-                <div class="filter-container d-flex gap-2">
-                    {% if cable_sync.table.attrs.id == "librenms-cable-table-vc" %}
-                    <input type="text" id="filter-vc-member" placeholder="Filter by VC Member" class="form-control">
-                    {% endif %}
-                    <input type="text" id="filter-local-port" placeholder="Filter by Local Port" class="form-control">
-                    <input type="text" id="filter-remote-port" placeholder="Filter by Remote Port" class="form-control">
-                    <input type="text" id="filter-remote-device" placeholder="Filter by Remote Device" class="form-control">
-                </div>
-            </div>
-            <style>
-                /* Your existing CSS rules */
-                .ts-wrapper.multi .ts-control {
-                    display: flex !important;
-                    flex-wrap: wrap;
-                    align-items: center;
-                }
-                /* Updated rules using min-width */
-                td[data-col="device_selection"] {
-                    width: 300px;
-                    min-width: 200px;
-                }
-                td[data-col="device_selection"] .ts-wrapper {
-                    width: 100%;
-                    max-width: 100%;
-                }
-            </style>
             <div class="card">
-                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=cable_sync.table %}
+                {% if cable_sync.filters.is_valid %}
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=cable_sync.table placement="top" filtered_from=cable_sync.filtered_from %}
                 {% include 'inc/table.html' with table=cable_sync.table %}
-                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=cable_sync.table %}
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=cable_sync.table filtered_from=cable_sync.filtered_from %}
+                {% else %}
+                {% include 'netbox_librenms_plugin/inc/_sync_filter_invalid.html' with table=cable_sync.table text="Correct the filters to show the cables." %}
+                {% endif %}
             </div>
         </div>
     </div>
@@ -107,6 +86,7 @@
 </form>
 {% endif %}
 {% else %}
+
 <div class="card">
     <div class="card-body text-center text-muted py-4">
         <i class="mdi mdi-sync-off mdi-48px"></i>
@@ -176,3 +156,6 @@ Out-of-band swap: empty and hide the shared #htmx-modal after a modal-driven act
     <script>if (typeof closeHtmxModal === 'function') { closeHtmxModal(); }</script>
 </div>
 {% endif %}
+
+</div>
+</div>

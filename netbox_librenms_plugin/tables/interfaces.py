@@ -1,15 +1,13 @@
 import copy
 import json as json_module
 from functools import cached_property
-from typing import NamedTuple
-from urllib.parse import urlencode
+from typing import Callable, NamedTuple
 
 import django_tables2 as tables
 from django.urls import reverse
 from django.utils.html import escape, format_html
 from django.utils.safestring import mark_safe
 from netbox.tables.columns import BooleanColumn, ToggleColumn
-from utilities.paginator import EnhancedPaginator
 from utilities.templatetags.helpers import humanize_speed
 
 from netbox_librenms_plugin.constants import NAME_OWNER_STALE, OOB_INVENTORY_SOURCE
@@ -21,17 +19,23 @@ from netbox_librenms_plugin.interface_diff import (
     NOT_SYNCED,
     ROW_ABSENT,
     ROW_AMBIGUOUS,
+    ROW_DIFFERS,
     ROW_IGNORED,
     ROW_IN_SYNC,
     ROW_INCOMPLETE,
     ROW_OWNER_UNRESOLVED,
-    compute_row_sync_state,
+    blocked_row_state,
     interface_enabled_from_port,
     parse_vlan_group_id,
+    row_sync_state,
+    vlan_row_context,
 )
 from netbox_librenms_plugin.interface_rules import RuleDecisionKind, decision_reason, rule_names
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.server_mappings import read_mapping
+from netbox_librenms_plugin.constants import MATCHING, MISMATCHED, NOT_IN_NETBOX
+from netbox_librenms_plugin.sync_filters import FilterColumn, FilterSpec
+from netbox_librenms_plugin.sync_query import SyncQuery
 from netbox_librenms_plugin.utils import (
     SYNC_TABLE_HEADER_ATTRS,
     check_vlan_group_matches,
@@ -39,9 +43,10 @@ from netbox_librenms_plugin.utils import (
     format_mac_address,
     get_interface_name_field,
     get_missing_vlan_warning,
-    get_table_paginate_count,
     get_tagged_vlan_css_class,
     get_untagged_vlan_css_class,
+    note_icon,
+    paginate_sync_table,
     render_vc_member_options,
     resolve_interface_row_device,
 )
@@ -86,21 +91,41 @@ _MEMBER_TOOLTIP_LIMIT = 15
 # orange "mismatched values", green "matching values".
 _VERDICT_CSS_CLASS = {ABSENT: "text-danger", DIFFERS: "text-warning", MATCHES: "text-success", NOT_SYNCED: "text-muted"}
 
+_NO_MEMBER_OPTION = "Select a member"
+
 _OWNER_UNRESOLVED_HINT = (
     "Select the Virtual Chassis member this interface belongs to: the interface rules depend on its platform."
 )
 
 
-class _VlanRowContext(NamedTuple):
-    """One row's VLAN evidence plus the NetBox assignment it is compared against."""
+# The sync-state filter value of each row state; every other row state is unclassified.
+_FILTER_SYNC_STATE = {ROW_IN_SYNC: MATCHING, ROW_DIFFERS: MISMATCHED, ROW_ABSENT: NOT_IN_NETBOX}
 
-    group_map: dict
-    missing: list
-    exists_in_netbox: bool
-    netbox_untagged_vid: int | None
-    netbox_untagged_group_id: int | None
-    netbox_tagged_vids: set
-    netbox_tagged_group_ids: dict
+# The values a plain column shows as the table default ("—") instead of calling its render method.
+_EMPTY_VALUES = (None, "")
+
+# Each textual column whose text the filters read, in display order; the actions column has no header.
+_FILTER_COLUMNS = (
+    "device_selection",
+    "name",
+    "type",
+    "speed",
+    "vlans",
+    "mac_address",
+    "mtu",
+    "enabled",
+    "description",
+    "librenms_id",
+    "parent",
+    "actions",
+)
+
+
+class _Pill(NamedTuple):
+    """One pill or button of a cell: the text it shows, and a function that returns its markup."""
+
+    label: str
+    markup: Callable[[], str]
 
 
 class LibreNMSInterfaceTable(tables.Table):
@@ -153,6 +178,8 @@ class LibreNMSInterfaceTable(tables.Table):
         # not mutate relationship state. Suppress the per-row relationship sync buttons too,
         # otherwise librenms_sync.js could still POST them and sync a migrated donor.
         self.migrated_to_marker = False
+        # The page query the Rebind button posts with; configure() sets it from the request.
+        self.sync_query = None
 
         # Retarget the two columns per instance. ``base_columns`` and ``_meta`` are class
         # attributes, so writing to them here would retarget every later table in this worker
@@ -185,7 +212,6 @@ class LibreNMSInterfaceTable(tables.Table):
             **kwargs,
         )
         self.tab = "interfaces"
-        self.htmx_url = None
         self.prefix = "interfaces_"
 
     selection = ToggleColumn(
@@ -212,7 +238,8 @@ class LibreNMSInterfaceTable(tables.Table):
         attrs={"td": {"data-col": "mac_address"}},
     )
     mtu = tables.Column(accessor="ifMtu", verbose_name="MTU", attrs={"td": {"data-col": "mtu"}})
-    enabled = BooleanColumn(verbose_name="Enabled", attrs={"td": {"data-col": "enabled"}})
+    # render_enabled reads the row, so the cell never falls back to the empty mark.
+    enabled = BooleanColumn(verbose_name="Enabled", empty_values=(), attrs={"td": {"data-col": "enabled"}})
     description = tables.Column(
         accessor="ifAlias",
         verbose_name="Description",
@@ -243,41 +270,98 @@ class LibreNMSInterfaceTable(tables.Table):
     )
 
     def row_sync_state(self, record):
-        """
-        Return how one row compares to the NetBox interface it resolved to.
-
-        Computed once per row and kept on the row, because every coloured column and the row's
-        sync button read the same verdict. ``format_interface_data`` drops the cached value when
-        it re-resolves a row, so a member switch cannot repaint against the previous member.
-
-        Args:
-            record (dict): The interface table row.
-
-        Returns:
-            RowSyncState: The row state and each field's verdict.
-
-        """
-        state = record.get("_sync_state")
-        if state is None:
-            state = compute_row_sync_state(
-                record,
-                interface_name_field=self.interface_name_field,
-                server_key=self.server_key,
-                decision=record["rule_decision"],
-                vlan_context=self._vlan_row_context(record),
-            )
-            record["_sync_state"] = state
-        return state
+        """Return the row's cached sync state (``interface_diff.row_sync_state``)."""
+        return row_sync_state(record, interface_name_field=self.interface_name_field, server_key=self.server_key)
 
     def _row_rule_state(self, record):
         """Return the blocked row state the browser reads (``data-rule-state``), or an empty string."""
-        state = self.row_sync_state(record).state
-        return state if state in BLOCKED_ROW_STATES else ""
+        # The rule decision alone decides a blocked state, so this reads no NetBox interface.
+        return blocked_row_state(record["rule_decision"]) or ""
+
+    def filter_spec(self):
+        """Return the filter columns of this table variant, each with the text its cell shows."""
+        names = [column.name for column in self.columns.itervisible()]
+        columns = tuple(
+            FilterColumn(
+                name=name,
+                label=str(self.columns[name].header),
+                text=getattr(self, f"text_{name}"),
+                has_field=name != "actions",
+            )
+            for name in _FILTER_COLUMNS
+            if name in names
+        )
+        return FilterSpec(prefix=self.prefix, columns=columns, sync_state=self.filter_sync_state)
+
+    def filter_sync_state(self, record):
+        """Return the row's sync-state filter value, or None for a row no sync-state filter shows."""
+        return _FILTER_SYNC_STATE.get(self.row_sync_state(record).state)
+
+    def _cell_text(self, value):
+        """Return the text a plain cell shows for *value*: the table default for an empty value."""
+        return self.default if value in _EMPTY_VALUES else str(value)
+
+    def text_name(self, record):
+        """Return the visible text of the name cell."""
+        return self._cell_text(record.get(self.interface_name_field))
+
+    def text_speed(self, record):
+        """Return the visible text of the speed cell."""
+        value = record.get("ifSpeed")
+        return self.default if value in _EMPTY_VALUES else humanize_speed(convert_speed_to_kbps(value))
+
+    def text_mac_address(self, record):
+        """Return the visible text of the MAC address cell."""
+        value = record.get("ifPhysAddress")
+        return self.default if value in _EMPTY_VALUES else format_mac_address(value)
+
+    def text_mtu(self, record):
+        """Return the visible text of the MTU cell."""
+        return self._cell_text(record.get("ifMtu"))
+
+    def text_enabled(self, record):
+        """Return the visible text of the enabled cell: the state a sync writes."""
+        return "Enabled" if interface_enabled_from_port(record) else "Disabled"
+
+    def text_description(self, record):
+        """Return the visible text of the description cell."""
+        return self._cell_text(record.get("ifAlias"))
+
+    def text_librenms_id(self, record):
+        """Return the visible text of the LibreNMS ID cell."""
+        return self._cell_text(record.get("port_id"))
+
+    def text_type(self, record):
+        """Return the visible text of the type cell, which names the NetBox type a sync keeps."""
+        value = record.get("ifType")
+        if value in _EMPTY_VALUES:
+            return self.default
+        return str(self._type_cell(value, record)[1])
+
+    def text_vlans(self, record):
+        """Return the visible text of the VLAN summary, without its tooltip or hidden inputs."""
+        all_vlans = self._collect_row_vlans(record)
+        if not all_vlans:
+            return "—"
+        parts = self._vlan_summary_parts(all_vlans, vlan_row_context(record))
+        # A missing-VLAN icon follows a space, so the visible text keeps that space before the comma.
+        text = ", ".join(f"{vid}({vlan_type})" + (" " if warning else "") for vlan_type, vid, _css, warning in parts)
+        hidden = len(all_vlans) - self._MAX_INLINE_VLANS
+        return f"{text} +{hidden} more" if hidden > 0 else text
+
+    def text_parent(self, record):
+        """Return the visible text of the relationship column: the label of each pill."""
+        return " ".join(pill.label for pill in self._relationship_pills(record) if pill.label)
+
+    def text_actions(self, record):
+        """Return the visible text of the actions cell: the rule pill, Rebind or Sync."""
+        action = self._row_action(record)
+        return action.label if action else ""
 
     def render_selection(self, value, bound_column, record):
         """Render the row checkbox, except on a row the interface write check refuses."""
         # An owner-unresolved row keeps its checkbox, so the bulk VC member action can reach it.
-        if self.row_sync_state(record).state in (ROW_IGNORED, ROW_AMBIGUOUS, ROW_INCOMPLETE):
+        if self._row_rule_state(record) in (ROW_IGNORED, ROW_AMBIGUOUS, ROW_INCOMPLETE):
             return ""
         return bound_column.column.render(value=value, bound_column=bound_column, record=record)
 
@@ -309,7 +393,7 @@ class LibreNMSInterfaceTable(tables.Table):
         if not all_vlans:
             return mark_safe("—")
 
-        context = self._vlan_row_context(record)
+        context = vlan_row_context(record)
         summary = self._render_vlan_summary(all_vlans, context)
         inherited = self._render_vlan_inherited_badge(record)
 
@@ -336,11 +420,8 @@ class LibreNMSInterfaceTable(tables.Table):
         donor = record.get("vlan_inherited_from")
         if not donor:
             return ""
-        return format_html(
-            ' <i class="mdi mdi-arrow-right-bottom text-muted" title="Inherited from {}:'
-            ' LibreNMS reported no VLANs on this port"></i>',
-            donor,
-        )
+        note = format_html("Inherited from {}: LibreNMS reported no VLANs on this port", donor)
+        return format_html(" {}", note_icon("mdi-arrow-right-bottom text-muted", note))
 
     @staticmethod
     def _collect_row_vlans(record):
@@ -359,31 +440,6 @@ class LibreNMSInterfaceTable(tables.Table):
         # as "010" would render a key the view never looks up and the override would be dropped.
         canonical_port_id = normalize_librenms_port_id(record.get("port_id"))
         return str(canonical_port_id) if canonical_port_id is not None else str(record.get("port_id") or "")
-
-    @staticmethod
-    def _vlan_row_context(record):
-        """Bundle the row's VLAN evidence with the NetBox assignments it is compared against."""
-        netbox_untagged_vid = None
-        netbox_untagged_group_id = None
-        netbox_tagged_vids = set()
-        netbox_tagged_group_ids = {}
-        netbox_interface = record.get("netbox_interface")
-        if netbox_interface:
-            if netbox_interface.untagged_vlan:
-                netbox_untagged_vid = netbox_interface.untagged_vlan.vid
-                netbox_untagged_group_id = netbox_interface.untagged_vlan.group_id
-            for vlan in netbox_interface.tagged_vlans.all():
-                netbox_tagged_vids.add(vlan.vid)
-                netbox_tagged_group_ids[vlan.vid] = vlan.group_id
-        return _VlanRowContext(
-            group_map=record.get("vlan_group_map", {}),
-            missing=record.get("missing_vlans", []),
-            exists_in_netbox=record.get("exists_in_netbox", False),
-            netbox_untagged_vid=netbox_untagged_vid,
-            netbox_untagged_group_id=netbox_untagged_group_id,
-            netbox_tagged_vids=netbox_tagged_vids,
-            netbox_tagged_group_ids=netbox_tagged_group_ids,
-        )
 
     def _vlan_css_class(self, context, vlan_type, vid):
         """Return one VLAN's colour class. The inline summary and the modal must agree on it."""
@@ -405,22 +461,25 @@ class LibreNMSInterfaceTable(tables.Table):
             vid, context.netbox_tagged_vids, context.exists_in_netbox, context.missing, group_matches
         )
 
+    def _vlan_summary_parts(self, all_vlans, context):
+        """Return ``(type, vid, colour class, warning)`` for each VLAN the summary shows inline."""
+        return [
+            (
+                vlan_type,
+                vid,
+                self._vlan_css_class(context, vlan_type, vid),
+                get_missing_vlan_warning(vid, context.missing),
+            )
+            for vlan_type, vid in all_vlans[: self._MAX_INLINE_VLANS]
+        ]
+
     def _render_vlan_summary(self, all_vlans, context):
         """Render up to three coloured VLANs inline, then count the rest."""
-        inline_parts = []
-        for vlan_type, vid in all_vlans[: self._MAX_INLINE_VLANS]:
-            # Escape the LibreNMS-sourced vid/vlan_type (XSS, issue #105 class). css is an
-            # internal class name; warning is the static icon HTML from get_missing_vlan_warning,
-            # so it is marked safe rather than escaped.
-            inline_parts.append(
-                format_html(
-                    '<span class="{}">{}({}){}</span>',
-                    self._vlan_css_class(context, vlan_type, vid),
-                    vid,
-                    vlan_type,
-                    mark_safe(get_missing_vlan_warning(vid, context.missing)),
-                )
-            )
+        # Escape the LibreNMS-sourced vid/vlan_type (XSS, issue #105 class); the warning is already safe.
+        inline_parts = [
+            format_html('<span class="{}">{}({}){}</span>', css, vid, vlan_type, warning)
+            for vlan_type, vid, css, warning in self._vlan_summary_parts(all_vlans, context)
+        ]
         # inline_parts are already escaped SafeStrings; join them and keep the result safe.
         summary = mark_safe(", ".join(str(part) for part in inline_parts))
         if len(all_vlans) > self._MAX_INLINE_VLANS:
@@ -508,36 +567,34 @@ class LibreNMSInterfaceTable(tables.Table):
             escape(self._vlan_group_options_json(record)),
         )
 
+    # Each render method below shows its column's text function, so a filter matches what the cell shows.
     def render_speed(self, value, record):
         """Render interface speed with appropriate styling based on comparison with NetBox."""
-        kbps_value = convert_speed_to_kbps(value)
-        return self._render_field(humanize_speed(kbps_value), record, "speed")
+        return self._render_field(self.text_speed(record), record, "speed")
 
     def render_name(self, value, record):
         """Render interface name with appropriate styling based on comparison with NetBox."""
         # Row markers (OOB, Shared LOM) belong to the relationship column; see render_parent.
-        return self._render_field(value, record, "name")
+        return self._render_field(self.text_name(record), record, "name")
 
     def render_enabled(self, value, record):
         """Render the enabled state the sync would write, coloured by how NetBox compares."""
         # Read the row, not the column value: the two callers pass different things (the bound
         # column passes the row's parsed "enabled", the row re-render passes raw ifAdminStatus),
         # and only the row carries the rule the writer applies to an absent ifAdminStatus.
-        display_value = "Enabled" if interface_enabled_from_port(record) else "Disabled"
-        return self._render_field(display_value, record, "enabled")
+        return self._render_field(self.text_enabled(record), record, "enabled")
 
     def render_description(self, value, record):
         """Render interface description with appropriate styling based on comparison with NetBox."""
-        return self._render_field(value, record, "description")
+        return self._render_field(self.text_description(record), record, "description")
 
     def render_mac_address(self, value, record):
         """Render MAC address with appropriate styling based on comparison with NetBox."""
-        formatted_mac = format_mac_address(value)
-        return self._render_field(formatted_mac, record, "mac_address")
+        return self._render_field(self.text_mac_address(record), record, "mac_address")
 
     def render_mtu(self, value, record):
         """Render MTU with appropriate styling based on comparison with NetBox."""
-        return self._render_field(value, record, "mtu")
+        return self._render_field(self.text_mtu(record), record, "mtu")
 
     def render_librenms_id(self, value, record):
         """
@@ -555,6 +612,7 @@ class LibreNMSInterfaceTable(tables.Table):
             SafeString: The coloured ``<span>`` markup for the port_id.
 
         """
+        value = self.text_librenms_id(record)
         state = self.row_sync_state(record)
         if state.state in BLOCKED_ROW_STATES:
             return format_html('<span class="text-muted">{}</span>', value)
@@ -578,114 +636,73 @@ class LibreNMSInterfaceTable(tables.Table):
         """
         Render the combined relationship column.
 
-        Show LAG, parent, and bridge relationships stacked vertically.
-        each rendered as a single compact badge combining the relationship type, LibreNMS
-        name, and status icon (see ``_render_relationship_column``). The sync buttons keep
-        Each item keeps its relationship-specific CSS class for the shared JavaScript handler.
+        Each pill of ``_relationship_pills`` is stacked vertically: the row markers, then the LAG,
+        parent and bridge relationships (each a compact badge with its sync button), then the
+        member counts. Each sync button keeps its relationship-specific CSS class for the shared
+        JavaScript handler.
 
         Args:
             value: The cell value (unused; the row drives rendering).
             record (dict): The table row with relationship status and name fields.
 
         Returns:
-            SafeString: The stacked relationship markup, or empty when neither LAG nor
-                parent applies.
+            SafeString: The stacked relationship markup, or empty when no pill applies.
 
         """
-        parts = []
+        return mark_safe("".join(str(pill.markup()) for pill in self._relationship_pills(record)))
+
+    def _relationship_pills(self, record):
+        """Return the pills of the relationship column, in display order."""
+        pills = []
 
         # Where the row came from, before what it is attached to. Both markers describe the row
         # itself rather than a NetBox relationship, so they lead the stack and carry no sync
         # button. The cable and module tables still badge their name column: those have no
         # relationship column to move into.
         if record.get("_source") == OOB_INVENTORY_SOURCE:
-            parts.append(self._render_info_pill("purple", "mdi-chip", "OOB", "From OOB controller"))
+            pills.append(self._info_pill("purple", "mdi-chip", "OOB", "From OOB controller"))
         if record.get("_dedup_conflict"):
-            parts.append(
-                self._render_info_pill(
-                    "warning",
-                    "mdi-content-duplicate",
-                    "Shared LOM",
-                    "Same MAC seen on both main and OOB",
-                )
+            pills.append(
+                self._info_pill("warning", "mdi-content-duplicate", "Shared LOM", "Same MAC seen on both main and OOB")
             )
         rejection_reason = record.get("synced_name_rejection_reason")
         name_owner = record.get("reported_name_owner")
         if rejection_reason and name_owner is not None:
-            parts.append(
-                self._render_info_pill(
-                    "danger",
-                    "mdi-alert-circle",
-                    f"Name held by port {name_owner.port_id}",
-                    name_owner.explanation(),
+            pills.append(
+                self._info_pill(
+                    "danger", "mdi-alert-circle", f"Name held by port {name_owner.port_id}", name_owner.explanation()
                 )
             )
         elif rejection_reason:
             label = "Name conflict" if record.get("synced_name_contested") else "Cannot sync"
-            parts.append(
-                self._render_info_pill(
-                    "danger",
-                    "mdi-alert-circle",
-                    label,
-                    f"The interface is not synced: {rejection_reason}",
-                )
+            pills.append(
+                self._info_pill("danger", "mdi-alert-circle", label, f"The interface is not synced: {rejection_reason}")
             )
         elif record.get("synced_name_is_derived") and not record.get("_dedup_conflict"):
             synced_name = record.get("synced_name")
-            parts.append(
-                self._render_info_pill(
-                    "info",
-                    "mdi-form-textbox",
-                    f"Will sync as {synced_name}",
-                    f"Will sync as {synced_name}",
+            pills.append(
+                self._info_pill(
+                    "info", "mdi-form-textbox", f"Will sync as {synced_name}", f"Will sync as {synced_name}"
                 )
             )
 
-        lag_status = record.get("lag_sync_status")
-        # LAG membership is device-only — VMInterface has no `lag` field and SyncInterfaceLagView
+        # LAG membership is device-only: VMInterface has no `lag` field and SyncInterfaceLagView
         # 404s virtualmachine, so never render a LAG line/button on a VM table (it could only
-        # error). Parent/sub-interface sync is still supported for VMs and rendered below.
-        if lag_status is not None and self.sync_object_type != "virtualmachine":
-            parts.append(
-                self._render_relationship_column(
-                    type_label="LAG",
-                    lnms_name=record.get("librenms_lag_name"),
-                    lnms_port_id=record.get("librenms_lag_port_id"),
-                    sync_status=lag_status,
+        # error). Parent/sub-interface sync is still supported for VMs.
+        for relation, type_label in (("lag", "LAG"), ("parent", "Parent"), ("bridge", "Bridge")):
+            sync_status = record.get(f"{relation}_sync_status")
+            if sync_status is None or (relation == "lag" and self.sync_object_type == "virtualmachine"):
+                continue
+            pills.append(
+                self._relationship_pill(
+                    type_label=type_label,
+                    lnms_name=record.get(f"librenms_{relation}_name"),
+                    lnms_port_id=record.get(f"librenms_{relation}_port_id"),
+                    sync_status=sync_status,
                     record=record,
-                    btn_class="lag-sync-btn",
-                    data_related_key="data-lag-port-id",
-                    target_resolvable=record.get("lag_target_resolvable", True),
-                )
-            )
-
-        parent_status = record.get("parent_sync_status")
-        if parent_status is not None:
-            parts.append(
-                self._render_relationship_column(
-                    type_label="Parent",
-                    lnms_name=record.get("librenms_parent_name"),
-                    lnms_port_id=record.get("librenms_parent_port_id"),
-                    sync_status=parent_status,
-                    record=record,
-                    btn_class="parent-sync-btn",
-                    data_related_key="data-parent-port-id",
-                    target_resolvable=record.get("parent_target_resolvable", True),
-                )
-            )
-
-        bridge_status = record.get("bridge_sync_status")
-        if bridge_status is not None:
-            parts.append(
-                self._render_relationship_column(
-                    type_label="Bridge",
-                    lnms_name=record.get("librenms_bridge_name"),
-                    lnms_port_id=record.get("librenms_bridge_port_id"),
-                    sync_status=bridge_status,
-                    record=record,
-                    btn_class="bridge-sync-btn",
-                    data_related_key="data-bridge-port-id",
-                    target_resolvable=record.get("bridge_target_resolvable", True),
+                    btn_class=f"{relation}-sync-btn",
+                    data_related_key=f"data-{relation}-port-id",
+                    target_resolvable=record.get(f"{relation}_target_resolvable", True),
                 )
             )
 
@@ -696,33 +713,29 @@ class LibreNMSInterfaceTable(tables.Table):
                 continue
             member_names = record.get(row_key) or []
             if member_names:
-                parts.append(self._render_member_count_pill(member_names, icon, singular, plural, tooltip_prefix))
+                pills.append(self._member_count_pill(member_names, icon, singular, plural, tooltip_prefix))
+        return pills
 
-        if not parts:
-            return mark_safe("")
-
-        return mark_safe("".join(str(p) for p in parts))
-
-    def _render_rule_pill(self, record):
-        """Render the pill that says why the interface rules block this row, or an empty string."""
+    def _rule_pill(self, record):
+        """Return the pill that says why the interface rules block this row, or None."""
         state = self._row_rule_state(record)
         if not state:
-            return ""
+            return None
         if state == ROW_IGNORED:
             reason = decision_reason(record["rule_decision"])
-            return self._render_info_pill("secondary", "mdi-eye-off", "Ignored", f"Not synced: {reason}")
+            return self._info_pill("secondary", "mdi-eye-off", "Ignored", f"Not synced: {reason}")
         if state == ROW_AMBIGUOUS:
             reason = decision_reason(record["rule_decision"])
-            return self._render_info_pill("warning", "mdi-alert", "Ambiguous rules", f"Not synced: {reason}")
+            return self._info_pill("warning", "mdi-alert", "Ambiguous rules", f"Not synced: {reason}")
         if state == ROW_INCOMPLETE:
             reason = decision_reason(record["rule_decision"])
-            return self._render_info_pill("warning", "mdi-refresh", "Refresh needed", f"Not synced: {reason}")
+            return self._info_pill("warning", "mdi-refresh", "Refresh needed", f"Not synced: {reason}")
         # A short label on one line keeps the actions column narrow; the title gives the full hint.
-        return self._render_info_pill("warning", "mdi-help-circle", "Select\u00a0member", _OWNER_UNRESOLVED_HINT)
+        return self._info_pill("warning", "mdi-help-circle", "Select\u00a0member", _OWNER_UNRESOLVED_HINT)
 
-    def _render_member_count_pill(self, member_names, icon, singular, plural, tooltip_prefix="In LibreNMS"):
+    def _member_count_pill(self, member_names, icon, singular, plural, tooltip_prefix):
         """
-        Render one "N members" pill naming the LibreNMS ports attached to this row.
+        Return one "N members" pill naming the LibreNMS ports attached to this row.
 
         Args:
             member_names (list[str]): The member names, in the inversion's order.
@@ -732,7 +745,7 @@ class LibreNMSInterfaceTable(tables.Table):
             tooltip_prefix (str): What the tooltip says before the names.
 
         Returns:
-            SafeString: The pill markup.
+            _Pill: The pill.
 
         """
         count = len(member_names)
@@ -740,7 +753,7 @@ class LibreNMSInterfaceTable(tables.Table):
         if count > _MEMBER_TOOLTIP_LIMIT:
             listed = f"{listed}, +{count - _MEMBER_TOOLTIP_LIMIT} more"
         noun = singular if count == 1 else plural
-        return self._render_info_pill("secondary", icon, f"{count} {noun}", f"{tooltip_prefix}: {listed}")
+        return self._info_pill("secondary", icon, f"{count} {noun}", f"{tooltip_prefix}: {listed}")
 
     @cached_property
     def _vc_members(self):
@@ -817,6 +830,19 @@ class LibreNMSInterfaceTable(tables.Table):
                 members_by_position=self._vc_members_by_position or None,
             ).pk
         return self.device.pk if self.device else ""
+
+    def _info_pill(self, color, icon, label, title):
+        """Return one non-status pill; ``_render_info_pill`` gives its markup."""
+        return _Pill(label, lambda: self._render_info_pill(color, icon, label, title))
+
+    def _relationship_pill(self, *, type_label, lnms_name, **render_args):
+        """Return one relationship pill; ``_render_relationship_column`` gives its markup."""
+        display_name = lnms_name or ""
+        label = f"{type_label} {display_name}" if type_label and display_name else display_name or type_label
+        return _Pill(
+            label,
+            lambda: self._render_relationship_column(type_label=type_label, lnms_name=lnms_name, **render_args),
+        )
 
     @staticmethod
     def _render_info_pill(color, icon, label, title):
@@ -1007,54 +1033,59 @@ class LibreNMSInterfaceTable(tables.Table):
             SafeString: The button or pill markup, or an empty cell.
 
         """
-        if rule_pill := self._render_rule_pill(record):
+        action = self._row_action(record)
+        return action.markup() if action else ""
+
+    def _row_action(self, record):
+        """Return what the actions cell offers (the rule pill, Rebind or Sync) as a pill, or None."""
+        if rule_pill := self._rule_pill(record):
             return rule_pill
         # A migrated donor renders no form at all, so a submit button here would do nothing.
         if self.migrated_to_marker or not record.get("sync_target_resolvable", True):
-            return ""
+            return None
         if record.get("_source") == OOB_INVENTORY_SOURCE and (
             record.get("host_name_collision") or record.get("_dedup_conflict")
         ):
-            return ""
-        # A Sync cannot claim a name that a stale port holds, so the row offers Rebind instead.
-        if rebind_button := self._render_rebind_button(record):
-            return rebind_button
-        if self.row_sync_state(record).state == ROW_IN_SYNC:
-            return ""
+            return None
         port_id = normalize_librenms_port_id(record.get("port_id"))
-        if port_id is None:
-            return ""
-        return format_html(
-            '<button type="submit" class="btn btn-sm btn-primary" name="sync_one" value="{}"'
-            ' title="Sync only this interface">Sync</button>',
-            port_id,
+        # A Sync cannot claim a name that a stale port holds, so the row offers Rebind instead.
+        name_owner = record.get("reported_name_owner")
+        if (
+            name_owner is not None
+            and name_owner.status == NAME_OWNER_STALE
+            and record.get("reported_name_owner_changeable")
+            and record.get("netbox_interface") is None
+            and port_id is not None
+            and self.device is not None
+        ):
+            return _Pill("Rebind", lambda: self._render_rebind_button(port_id, name_owner))
+        if self.row_sync_state(record).state == ROW_IN_SYNC or port_id is None:
+            return None
+        return _Pill(
+            "Sync",
+            lambda: format_html(
+                '<button type="submit" class="btn btn-sm btn-primary" name="sync_one" value="{}"'
+                ' title="Sync only this interface">Sync</button>',
+                port_id,
+            ),
         )
 
-    def _render_rebind_button(self, record):
+    def _render_rebind_button(self, port_id, name_owner):
         """
         Render the Rebind button for an unbound row whose reported name a stale port holds.
 
         The button posts the tab's form to the rebind endpoint, which re-derives every fact from
-        the cached snapshot and trusts only the row's port ID.
+        the cached snapshot and trusts only the row's port ID. Its URL carries the page query, so
+        the tab comes back with the same filters and page.
 
         Args:
-            record (dict): The interface table row.
+            port_id (int): The row's LibreNMS port ID.
+            name_owner (ReportedNameOwner): The stale port that holds the row's reported name.
 
         Returns:
-            SafeString | str: The button markup, or an empty string.
+            SafeString: The button markup.
 
         """
-        name_owner = record.get("reported_name_owner")
-        port_id = normalize_librenms_port_id(record.get("port_id"))
-        if (
-            name_owner is None
-            or name_owner.status != NAME_OWNER_STALE
-            or not record.get("reported_name_owner_changeable")
-            or record.get("netbox_interface") is not None
-            or port_id is None
-            or self.device is None
-        ):
-            return ""
         url = reverse(
             "plugins:netbox_librenms_plugin:rebind_interface_port",
             kwargs={"object_type": self.sync_object_type, "object_id": self.device.pk},
@@ -1063,12 +1094,11 @@ class LibreNMSInterfaceTable(tables.Table):
         return format_html(
             '<input type="hidden" name="rebind_expected_port_{}" value="{}">'
             '<button type="submit" class="btn btn-sm btn-warning" name="rebind_one" value="{}"'
-            ' formaction="{}?{}" data-confirm="{}" title="{}">Rebind</button>',
+            ' formaction="{}" data-confirm="{}" title="{}">Rebind</button>',
             port_id,
             name_owner.port_id,
             port_id,
-            url,
-            urlencode({"interface_name_field": self.interface_name_field}),
+            self.sync_query.url(url, {"interface_name_field": self.interface_name_field}),
             f"Move the LibreNMS binding of NetBox interface '{name_owner.name}' from port "
             f"{name_owner.port_id} to port {port_id}? The interface keeps its IP addresses and cables.",
             name_owner.explanation(),
@@ -1076,55 +1106,55 @@ class LibreNMSInterfaceTable(tables.Table):
 
     def render_type(self, value, record):
         """Render the type a sync writes, from the row's rule decision, coloured by how NetBox compares."""
+        css_class, text, note = self._type_cell(value, record)
+        return format_html('<span class="{}">{} {}</span>', css_class, text, note)
+
+    def _type_cell(self, value, record):
+        """
+        Return the type cell as its colour class, its visible text and its note icon.
+
+        Args:
+            value (object): The LibreNMS ifType.
+            record (dict): The interface table row.
+
+        Returns:
+            tuple: The colour class, the text (the type a sync writes or keeps) and the note icon.
+
+        """
         decision = record["rule_decision"]
-        state = self.row_sync_state(record)
         if decision is None:
-            return format_html(
-                '<span class="text-muted">{} <i class="mdi mdi-help-circle-outline" title="{}"></i></span>',
-                value,
-                _OWNER_UNRESOLVED_HINT,
-            )
+            return "text-muted", value, note_icon("mdi-help-circle-outline", _OWNER_UNRESOLVED_HINT)
         if decision.kind in (RuleDecisionKind.IGNORE, RuleDecisionKind.INCOMPLETE):
             icon = "mdi-eye-off" if decision.kind is RuleDecisionKind.IGNORE else "mdi-refresh"
-            return format_html(
-                '<span class="text-muted">{} <i class="mdi {}" title="Not synced: {}"></i></span>',
-                value,
-                icon,
-                decision_reason(decision),
-            )
+            return "text-muted", value, note_icon(icon, format_html("Not synced: {}", decision_reason(decision)))
         if decision.kind is RuleDecisionKind.AMBIGUOUS:
-            return format_html(
-                '<span class="text-warning">{} <i class="mdi mdi-alert" title="Not synced: {}"></i></span>',
-                value,
-                decision_reason(decision),
-            )
+            note = note_icon("mdi-alert", format_html("Not synced: {}", decision_reason(decision)))
+            return "text-warning", value, note
+        state = self.row_sync_state(record)
         if state.type_kept is not None:
             # The sync keeps the NetBox type, so the cell names that type and says why.
-            display = format_html(
-                '{} <i class="mdi mdi-lock-outline" title="{}"></i>',
-                record["netbox_interface"].type,
-                state.type_kept.note_for(self.user),
-            )
+            text = record["netbox_interface"].type
+            note = note_icon("mdi-lock-outline", state.type_kept.note_for(self.user))
         elif decision.kind is RuleDecisionKind.SET_TYPE:
-            display = format_html(
-                '{} <i class="mdi mdi-link-variant" title="Set by interface {} from LibreNMS type {}"></i>',
-                decision.netbox_type,
-                rule_names(decision.rules),
-                value,
+            text = decision.netbox_type
+            note = note_icon(
+                "mdi-link-variant",
+                format_html("Set by interface {} from LibreNMS type {}", rule_names(decision.rules), value),
             )
         else:
             # Name the ifType: the gap is only fixable if the user knows which rule to add.
-            display = format_html(
-                '{} <i class="mdi mdi-link-variant-off" title="No interface rule sets a type for ifType'
-                ' {}; the sync leaves the NetBox type unchanged"></i>',
-                value,
-                value,
+            text = value
+            note = note_icon(
+                "mdi-link-variant-off",
+                format_html(
+                    "No interface rule sets a type for ifType {}; the sync leaves the NetBox type unchanged", value
+                ),
             )
         # An unmapped port stays red even on a matched row: the sync holds no opinion on the type,
         # and the column is the only place that gap is visible. It is not a row difference.
         if state.state == ROW_ABSENT or decision.kind is RuleDecisionKind.UNMAPPED:
-            return format_html('<span class="text-danger">{}</span>', display)
-        return format_html('<span class="{}">{}</span>', self._field_css_class(record, "type"), display)
+            return "text-danger", text, note
+        return self._field_css_class(record, "type"), text, note
 
     def format_interface_data(self, port_data, device):
         """Format one interface row whose netbox_interface the caller resolved by port_id."""
@@ -1178,16 +1208,9 @@ class LibreNMSInterfaceTable(tables.Table):
         return formatted_data
 
     def configure(self, request):
-        """Configure the table with pagination and other options."""
-        paginate = {
-            "paginator_class": EnhancedPaginator,
-            "per_page": get_table_paginate_count(request, self.prefix),
-        }
-        # A sync POST re-renders the tab in place, so it posts the page it was rendered at.
-        if page := request.POST.get(f"{self.prefix}page"):
-            paginate["page"] = page
-
-        tables.RequestConfig(request, paginate).configure(self)
+        """Order and paginate the table from the page query, which every hop of the tab carries."""
+        self.sync_query = SyncQuery.from_request(request)
+        paginate_sync_table(self, request)
 
 
 class VCInterfaceTable(LibreNMSInterfaceTable):
@@ -1198,7 +1221,7 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         accessor="device",
         orderable=False,
         empty_values=[],
-        attrs={"td": {"data-col": "device_selection"}},
+        attrs={"td": {"class": "device-selection-col", "data-col": "device_selection"}},
     )
 
     def __init__(self, *args, device=None, interface_name_field=None, vlan_groups=None, **kwargs):
@@ -1231,17 +1254,10 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         interface_name = record.get(self.interface_name_field)
         port_id = record.get("port_id") or ""
 
-        # Default the dropdown to the same owner the relationship sync button resolves (matched
-        # NetBox interface's device → cross-page selection → name heuristic), so the JS — which
-        # posts this dropdown's value as the sync object id — can't disagree with the button and
-        # 404. Previously non-ethernet rows always defaulted to the viewed member, breaking sync
-        # for a sub-interface owned by a different VC member.
-        # An unresolved owner selects no member, so the sync POST carries none and refuses the row.
-        owner_unresolved = self.row_sync_state(record).state == ROW_OWNER_UNRESOLVED
-        selected_member_id = None if owner_unresolved else self._resolve_row_member_id(record) or self.device.id
+        selected_member_id = self._selected_member_id(record)
         options = render_vc_member_options(members, selected_member_id)
-        if owner_unresolved:
-            options = format_html('<option value="" selected>Select a member</option>{}', options)
+        if selected_member_id is None:
+            options = format_html('<option value="" selected>{}</option>{}', _NO_MEMBER_OPTION, options)
 
         # Create unique base ID for TomSelect components
         base_id = f"device_selection_{port_id}"
@@ -1256,6 +1272,37 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
             options,
             disabled,
         )
+
+    def _selected_member_id(self, record):
+        """
+        Return the member the row's dropdown selects, or None when the row's owner is unresolved.
+
+        The dropdown defaults to the owner the relationship sync button resolves (matched NetBox
+        interface's device, then cross-page selection, then name heuristic), so the JS, which posts
+        this dropdown's value as the sync object id, cannot disagree with the button and 404. An
+        unresolved owner selects no member, so the sync POST carries none and refuses the row.
+
+        Args:
+            record (dict): The interface table row.
+
+        Returns:
+            int | None: The selected member's ID.
+
+        """
+        if blocked_row_state(record["rule_decision"]) == ROW_OWNER_UNRESOLVED:
+            return None
+        return self._resolve_row_member_id(record) or self.device.id
+
+    def text_device_selection(self, record):
+        """Return the label of the option the member dropdown shows as selected."""
+        selected_member_id = self._selected_member_id(record)
+        if selected_member_id is None:
+            return _NO_MEMBER_OPTION
+        members = self._vc_members
+        selected = next((member for member in members if str(member.id) == str(selected_member_id)), None)
+        # With no option marked selected, the browser shows the first one.
+        shown = selected or (members[0] if members else None)
+        return str(shown.name) if shown is not None else ""
 
     def format_interface_data(self, port_data, device):
         """Format interface data including VC device selection column."""

@@ -88,6 +88,13 @@ def _linked_device(name, device_id, **kwargs):
     return make_device(name, librenms_cf={SERVER_KEY: device_id}, **kwargs)
 
 
+def _reporting_device(name, server, device_id, os):
+    """A linked device whose LibreNMS device reports *os*."""
+    device = _linked_device(name, device_id)
+    server.device_info_response(device_id=device_id, hostname=name, os=os)
+    return device
+
+
 def _messages(response, level=None):
     return message_texts(response.wsgi_request, level=level)
 
@@ -242,7 +249,7 @@ class TestUpdateDeviceSerialView:
         assert any("updated from 'OLD-SERIAL'" in text for text in _messages(response, "success"))
         assert_update_logged(device, "serial", "OLD-SERIAL", "NEW-SERIAL")
 
-    @pytest.mark.parametrize("serial", [None, "", "-"])
+    @pytest.mark.parametrize("serial", [None, "", "-", "  ", "unknown", " N/A "])
     def test_missing_live_serial_preserves_the_stored_value(self, logged_in_client, librenms_server, serial):
         device = _linked_device(f"serial-missing-{serial!s}", 6512, serial="KEPT-SERIAL")
         librenms_server.register(
@@ -258,6 +265,15 @@ class TestUpdateDeviceSerialView:
         device.refresh_from_db()
         assert device.serial == "KEPT-SERIAL"
         assert any("No serial number available" in text for text in _messages(response, "warning"))
+
+    def test_a_numeric_zero_serial_is_stored(self, logged_in_client, librenms_server):
+        device = _linked_device("serial-zero", 6514, serial="OLD-ZERO")
+        librenms_server.device_info_response(device_id=6514, hostname=device.name, serial=0)
+
+        _post(logged_in_client, "update_device_serial", device)
+
+        device.refresh_from_db()
+        assert device.serial == "0"
 
     def test_first_serial_uses_the_set_message(self, logged_in_client, librenms_server):
         device = _linked_device("serial-first", 6513)
@@ -469,7 +485,7 @@ class TestCreateAndAssignPlatformView:
         from dcim.models import Platform
         from netbox_librenms_plugin.models import PlatformMapping
 
-        device = make_device("platform-create-device")
+        device = _reporting_device("platform-create-device", librenms_server, 6581, " Created-OS ")
         manufacturer = device.device_type.manufacturer
 
         response = _post(
@@ -496,7 +512,7 @@ class TestCreateAndAssignPlatformView:
     def test_existing_platform_is_reused_without_changing_manufacturer(self, logged_in_client, librenms_server):
         from dcim.models import Platform
 
-        device = make_device("platform-reuse-device")
+        device = _reporting_device("platform-reuse-device", librenms_server, 6582, "existing-os")
         manufacturer = device.device_type.manufacturer
         platform = Platform.objects.create(
             name="Existing Platform",
@@ -526,11 +542,12 @@ class TestCreateAndAssignPlatformView:
         assert device.platform is None
         assert any("Platform name is required" in text for text in _messages(response, "error"))
 
-    def test_mapping_conflict_is_reported_without_undoing_assignment(self, logged_in_client, librenms_server):
+    def test_an_os_mapping_that_now_resolves_makes_the_create_stale(self, logged_in_client, librenms_server):
+        """The modal opened while the OS had no platform; a mapping added since then wins over the named create."""
         from dcim.models import Platform
         from netbox_librenms_plugin.models import PlatformMapping
 
-        device = make_device("platform-mapping-conflict")
+        device = _reporting_device("platform-mapping-conflict", librenms_server, 6583, "conflicted-os")
         existing_target = Platform.objects.create(name="Existing mapping target", slug="existing-mapping-target")
         requested = Platform.objects.create(name="Requested target", slug="requested-target")
         PlatformMapping.objects.create(librenms_os="conflicted-os", netbox_platform=existing_target)
@@ -547,9 +564,9 @@ class TestCreateAndAssignPlatformView:
         )
 
         device.refresh_from_db()
-        assert device.platform == requested
+        assert device.platform is None
         assert PlatformMapping.objects.get(librenms_os="conflicted-os").netbox_platform == existing_target
-        assert any("could not be created" in text for text in _messages(response, "warning"))
+        assert any("now matches LibreNMS OS 'conflicted-os'" in text for text in _messages(response, "error"))
 
     def test_invalid_manufacturer_is_rejected_before_platform_creation(self, logged_in_client, librenms_server):
         from dcim.models import Manufacturer, Platform
@@ -573,7 +590,7 @@ class TestCreateAndAssignPlatformView:
     def test_invalid_platform_slug_rolls_back_creation(self, logged_in_client, librenms_server):
         from dcim.models import Platform
 
-        device = make_device("platform-invalid-slug")
+        device = _reporting_device("platform-invalid-slug", librenms_server, 6584, "")
 
         response = _post(
             logged_in_client,
@@ -592,7 +609,7 @@ class TestCreateAndAssignPlatformView:
     ):
         from dcim.models import Manufacturer, Platform
 
-        device = make_device("platform-incompatible-manufacturer")
+        device = _reporting_device("platform-incompatible-manufacturer", librenms_server, 6585, "")
         incompatible = Manufacturer.objects.create(
             name="Incompatible platform manufacturer",
             slug="incompatible-platform-manufacturer",
@@ -620,7 +637,7 @@ class TestCreateAndAssignPlatformView:
     def test_missing_mapping_permission_keeps_the_primary_assignment(self, client, librenms_server):
         from dcim.models import Device, Platform
 
-        device = make_device("platform-no-mapping-permission")
+        device = _reporting_device("platform-no-mapping-permission", librenms_server, 6586, "permission-skipped-os")
         platform = Platform.objects.create(name="Assignable without mapping", slug="assignable-without-mapping")
         user = make_user_with_perms(
             "platform-assignment-without-mapping",
@@ -656,9 +673,9 @@ class TestAssignVCSerialView:
             "assign_vc_serial",
             first,
             {
-                "serial_1": " FIRST-VC-SERIAL ",
+                "librenms_serial_1": " FIRST-VC-SERIAL ",
                 "member_id_1": str(first.pk),
-                "serial_2": "SECOND-VC-SERIAL",
+                "librenms_serial_2": "SECOND-VC-SERIAL",
                 "member_id_2": str(second.pk),
             },
         )
@@ -688,9 +705,9 @@ class TestAssignVCSerialView:
                     "assign_vc_serial",
                     first,
                     {
-                        "serial_1": "FIRST-LOCKED-SERIAL",
+                        "librenms_serial_1": "FIRST-LOCKED-SERIAL",
                         "member_id_1": str(first.pk),
-                        "serial_2": "SECOND-LOCKED-SERIAL",
+                        "librenms_serial_2": "SECOND-LOCKED-SERIAL",
                         "member_id_2": str(second.pk),
                     },
                 )
@@ -700,6 +717,30 @@ class TestAssignVCSerialView:
         assert (first.serial, second.serial) == ("", "")
         assert response.status_code == 302
         assert messages_on(response.wsgi_request) == [("error", TRY_AGAIN_MESSAGE)]
+
+    def test_a_post_without_the_librenms_serial_writes_nothing(self, logged_in_client, librenms_server):
+        """A page rendered before the raw serial field posts only the keyed serial, so the view refuses it."""
+        first = make_device("vc-serial-stale-first")
+        second = make_device("vc-serial-stale-second")
+        make_virtual_chassis("vc-serial-stale", first, second)
+
+        response = _post(
+            logged_in_client,
+            "assign_vc_serial",
+            first,
+            {
+                "librenms_serial_1": "STALE-FIRST",
+                "member_id_1": str(first.pk),
+                "serial_2": "STALE-SECOND",
+                "member_id_2": str(second.pk),
+            },
+        )
+
+        first.refresh_from_db()
+        second.refresh_from_db()
+        assert (first.serial, second.serial) == ("", "")
+        assert _messages(response, "success") == []
+        assert len(_messages(response, "error")) == 1
 
     def test_wrong_chassis_and_missing_member_are_both_reported(self, logged_in_client, librenms_server):
         root = make_device("vc-serial-root")
@@ -713,11 +754,11 @@ class TestAssignVCSerialView:
             "assign_vc_serial",
             root,
             {
-                "serial_1": "OUTSIDER-SERIAL",
+                "librenms_serial_1": "OUTSIDER-SERIAL",
                 "member_id_1": str(outsider.pk),
-                "serial_2": "MISSING-SERIAL",
+                "librenms_serial_2": "MISSING-SERIAL",
                 "member_id_2": str(outsider.pk + 10000),
-                "serial_3": "GARBLED-SERIAL",
+                "librenms_serial_3": "GARBLED-SERIAL",
                 "member_id_3": "not-a-number",
             },
         )
@@ -740,7 +781,7 @@ class TestAssignVCSerialView:
             {
                 "server_key": SECONDARY_KEY,
                 "tab": "cables",
-                "serial_1": "CONTEXT-SERIAL",
+                "librenms_serial_1": "CONTEXT-SERIAL",
                 "member_id_1": str(second.pk),
             },
         )
@@ -786,7 +827,7 @@ class TestAssignVCSerialView:
             logged_in_client,
             "assign_vc_serial",
             device,
-            {"serial_1": "UNUSED-SERIAL", "member_id_1": ""},
+            {"librenms_serial_1": "UNUSED-SERIAL", "member_id_1": ""},
         )
 
         device.refresh_from_db()
@@ -1133,6 +1174,21 @@ class TestConvertLegacyLibreNMSIdView:
         assert stored_mapping_for_test(device) == 6562
         assert any("Serial number mismatch" in text for text in _messages(response, "error"))
 
+    def test_a_decorated_librenms_serial_confirms_the_stored_serial(self, logged_in_client, librenms_server):
+        """The serial rules key both sides, so a stored "ABC" matches LibreNMS "S/N ABC"."""
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        device = make_device("legacy-decorated", serial="ABC-LEGACY", librenms_cf=6566)
+        librenms_server.device_info_response(device_id=6566, hostname=device.name, serial="S/N ABC-LEGACY")
+
+        _post(logged_in_client, "convert_legacy_librenms_id", device, {"object_type": "device"})
+
+        device.refresh_from_db()
+        assert stored_mapping_for_test(device) == {SERVER_KEY: 6566}
+
     def test_vm_conversion_skips_the_device_serial_gate(self, logged_in_client, librenms_server):
         vm = make_vm("legacy-convert-vm")
         seed_stored_mapping(vm, 6563, save=True)
@@ -1386,8 +1442,12 @@ class TestCommonFieldUpdateFailures:
         [
             ("update_device_serial", "device", {}),
             ("convert_legacy_librenms_id", "device", {"object_type": "device"}),
-            ("create_and_assign_platform", "device", {"platform_name": "Wrapped Existing Platform"}),
-            ("create_and_assign_platform", "platform", {"platform_name": "Wrapped New Platform"}),
+            (
+                "create_and_assign_platform",
+                "device",
+                {"platform_name": "Wrapped Existing Platform", "librenms_os": "ios"},
+            ),
+            ("create_and_assign_platform", "platform", {"platform_name": "Wrapped New Platform", "librenms_os": "ios"}),
         ],
         ids=["field-write", "legacy-convert", "platform-assign", "platform-create"],
     )

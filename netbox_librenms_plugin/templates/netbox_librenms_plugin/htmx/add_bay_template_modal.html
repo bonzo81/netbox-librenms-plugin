@@ -301,10 +301,12 @@
         {% elif mapping_exists %}
         <hr>
         <div class="alert alert-info py-2 small mb-0">
-            <i class="mdi mdi-information-outline"></i>
-            A ModuleBayMapping for LibreNMS
-            <code>{{ librenms_name }}</code> already exists — no extra mapping
-            will be created.
+            <i class="mdi mdi-information-outline me-2"></i>
+            <div>
+                A ModuleBayMapping for LibreNMS
+                <code>{{ librenms_name }}</code> already exists — no extra mapping
+                will be created.
+            </div>
         </div>
         {% endif %}
     </div>

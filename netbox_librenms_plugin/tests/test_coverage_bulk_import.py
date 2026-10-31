@@ -739,7 +739,11 @@ def test_import_validation_reads_location_parse_settings_once():
         )
     assert result["site"]["found"]
     assert result["site"]["site"] == device.site
-    settings_reads = [query["sql"] for query in queries if f'FROM "{settings_model._meta.db_table}"' in query["sql"]]
+    settings_reads = [
+        query["sql"]
+        for query in queries
+        if f'FROM "{settings_model._meta.db_table}"' in query["sql"] and "location_parse_pattern" in query["sql"]
+    ]
     assert len(settings_reads) == 1, settings_reads
 
 

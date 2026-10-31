@@ -418,7 +418,7 @@ class TestIpRowVrfSuggestions:
         enriched = view.enrich_ip_data(rows, device, "ifName", server_key="test")
         tagged = next(row for row in enriched if row["port_id"] == _RD_PORT_ID)
 
-        html = IPAddressTable([tagged]).as_html(_request())
+        html = IPAddressTable([tagged], mgmt_row_vrfs={}).as_html(_request())
 
         label = f"Suggested from LibreNMS VRF {_RD_VRF_NAME} by route distinguisher match"
         assert f'title="{label}"' in html

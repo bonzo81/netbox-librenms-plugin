@@ -657,32 +657,36 @@ class LibreNMSAPIMixin:
 
     def resolve_posted_server_key(self, data):
         """
-        Resolve a requested server key for an ACTION path, degrading to the ACTIVE server.
+        Resolve a requested server key for an ACTION path; a blank key uses the ACTIVE server.
 
         The module install/replace/bind flows scope cache reads AND write LibreNMS custom-field
-        bindings (``custom_field_data["librenms_id"][server_key]``) under this key. A blank fallback
-        alone is not enough: a forged *non-blank* key that names no configured server would otherwise be
-        honoured and address an unconfigured namespace. Only a configured string key is honoured; blank,
-        non-string, or unrecognised falls back to ``self.librenms_api.server_key`` — the active client
-        server — so the port-bind still runs (unlike :meth:`resolve_requested_server_key`, which degrades
-        to ``None`` for cached GET *renders*).
+        bindings (``custom_field_data["librenms_id"][server_key]``) under this key. Only a configured
+        key is honoured, and a blank key falls back to ``self.librenms_api.server_key``, the active
+        client server. A non-blank key that names no configured server (a stale tab or a forged
+        form) or a repeated key selects no single server, so it resolves to ``None`` and the action
+        fails closed instead of running against another server.
 
         Args:
             data: A dict-like request payload (``request.POST`` or ``request.GET``) carrying an optional
                 ``server_key``.
 
         Returns:
-            str: The validated posted key, or the active-server key.
+            str | None: The validated posted key, the active-server key, or ``None``.
 
         """
+        getlist = getattr(data, "getlist", None)
+        if callable(getlist) and len(getlist("server_key")) > 1:
+            return None
         requested_server_key = (data.get("server_key") or "").strip()
-        if requested_server_key and requested_server_key in LibreNMSAPI.get_available_servers():
+        if not requested_server_key:
+            return self.librenms_api.server_key
+        if requested_server_key in LibreNMSAPI.get_available_servers():
             return requested_server_key
-        return self.librenms_api.server_key
+        return None
 
     def resolve_posted_server_key_or_none(self, data):
         """
-        Resolve an ACTION path's server key, degrading to ``None`` on an unusable configuration.
+        Resolve an ACTION path's server key, degrading to ``None`` on an unusable configuration or key.
 
         :meth:`resolve_posted_server_key` reaches the lazy ``librenms_api`` property for its
         fallback, and that property raises KeyError/ValueError when the plugin configuration holds

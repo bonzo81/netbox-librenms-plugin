@@ -1,22 +1,36 @@
 import re
+from html import unescape
 
 import django_tables2 as tables
-from django.utils.html import format_html
+from django.utils.html import conditional_escape, format_html, strip_tags
 from django.utils.safestring import mark_safe
 from netbox.tables.columns import ToggleColumn
-from utilities.paginator import EnhancedPaginator
 
 from netbox_librenms_plugin.constants import SERIAL_INVENTORY_SOURCE
+from netbox_librenms_plugin.constants import UNCLASSIFIED
+from netbox_librenms_plugin.sync_filters import FilterColumn, FilterSpec
 from netbox_librenms_plugin.utils import (
-    get_table_paginate_count,
     oob_badge_html,
+    paginate_sync_table,
     remote_port_html,
     render_vc_member_options,
     rule_block_html,
+    rule_block_label,
 )
 
 # Static trusted markup for the "Serial" console-port badge. The leading space is intentional.
 SERIAL_BADGE_HTML = ' <span class="badge bg-teal text-dark ms-1" title="Serial console port">Serial</span>'
+
+# The values a plain column shows as the table default ("—") instead of calling its render method.
+_EMPTY_VALUES = (None, "")
+
+# The label of the row action that syncs one cable.
+SYNC_CABLE_LABEL = "Sync Cable"
+
+
+def _visible_text(markup):
+    """Return the text a browser shows for the markup of a cell; a plain string is escaped first, as the table does."""
+    return unescape(strip_tags(conditional_escape(markup)))
 
 
 class LibreNMSCableTable(tables.Table):
@@ -70,7 +84,7 @@ class LibreNMSCableTable(tables.Table):
                     class="btn btn-sm btn-primary"
                     name="sync_one"
                     value="{{ record.row_id }}">
-                Sync Cable
+                {{ sync_cable_label }}
             </button>
         {% endif %}
         {% if record.remote_create_url %}
@@ -94,6 +108,7 @@ class LibreNMSCableTable(tables.Table):
             </button>
         {% endif %}
         """,
+        extra_context={"sync_cable_label": SYNC_CABLE_LABEL},
         verbose_name="",
         orderable=False,
         attrs={"td": {"data-col": "actions"}},
@@ -116,8 +131,63 @@ class LibreNMSCableTable(tables.Table):
         self.device = device
         super().__init__(*args, **kwargs)
         self.tab = "cables"
-        self.htmx_url = None
         self.prefix = "cables_"
+
+    def filter_spec(self):
+        """Return the filter columns of this table, each with the text its cell shows."""
+        columns = self.columns
+        return FilterSpec(
+            prefix=self.prefix,
+            columns=(
+                *self._member_filter_columns(),
+                FilterColumn("local_port", str(columns["local_port"].header), self.text_local_port),
+                FilterColumn("remote_port", str(columns["remote_port"].header), self.text_remote_port),
+                FilterColumn("remote_device", str(columns["remote_device"].header), self.text_remote_device),
+                FilterColumn("cable_status", str(columns["cable_status"].header), self.text_cable_status, False),
+                FilterColumn("actions", "Actions", self.text_actions, has_field=False),
+            ),
+            sync_state=self.filter_sync_state,
+        )
+
+    def _member_filter_columns(self):
+        """Return the filter columns that only the virtual chassis variant shows."""
+        return ()
+
+    @staticmethod
+    def filter_sync_state(record):
+        """Return the row's comparison with the desired connection, or None for a row in no sync state."""
+        comparison = record.get("cable_comparison")
+        return None if comparison == UNCLASSIFIED else comparison
+
+    def _rendered_text(self, record, accessor, render):
+        """Return the visible text of a plain cell: the table default for an empty value, else its render."""
+        value = record.get(accessor)
+        return self.default if value in _EMPTY_VALUES else _visible_text(render(value, record))
+
+    def text_local_port(self, record):
+        """Return the visible text of the local port cell: the port name and its badges."""
+        return self._rendered_text(record, "local_port", self.render_local_port)
+
+    def text_remote_port(self, record):
+        """Return the visible text of the remote port cell; its notes are icons with no visible text."""
+        return self._rendered_text(record, "remote_port_name", self.render_remote_port)
+
+    def text_remote_device(self, record):
+        """Return the visible text of the remote device cell: the derived display name or the LibreNMS label."""
+        return self._rendered_text(record, "remote_device", self.render_remote_device)
+
+    def text_cable_status(self, record):
+        """Return the visible text of the cable status cell."""
+        return self._rendered_text(record, "cable_status", self.render_cable_status)
+
+    def text_actions(self, record):
+        """Return the visible text of the actions cell: the rule pill and the sync action; the icon buttons show none."""
+        parts = []
+        if record.get("rule_block"):
+            parts.append(rule_block_label(record["rule_block"]))
+        if record.get("can_create_cable"):
+            parts.append(SYNC_CABLE_LABEL)
+        return " ".join(parts)
 
     def render_remote_device(self, value, record):
         """Render the remote device (preferring the derived display name) as a link if available."""
@@ -166,11 +236,7 @@ class LibreNMSCableTable(tables.Table):
 
     def configure(self, request):
         """Configure pagination for the table using the current request."""
-        paginate = {
-            "paginator_class": EnhancedPaginator,
-            "per_page": get_table_paginate_count(request, self.prefix),
-        }
-        tables.RequestConfig(request, paginate).configure(self)
+        paginate_sync_table(self, request)
 
     class Meta:
         """Define column sequence, row attributes, and table styling."""
@@ -235,6 +301,25 @@ class VCCableTable(LibreNMSCableTable):
             if owner_id and str(owner_id) not in member_ids:
                 row["can_create_cable"] = False
 
+    def _member_filter_columns(self):
+        """Return the member column, whose text is the option its select shows."""
+        return (FilterColumn("vc_member", str(self.columns["device_selection"].header), self.text_vc_member),)
+
+    def _row_member_id(self, record):
+        """Return the member that the row's select marks selected: a serial port's own member, else the port's."""
+        serial_owner_id = record.get("device_id") if record.get("_source") == SERIAL_INVENTORY_SOURCE else None
+        if serial_owner_id and any(str(member.pk) == str(serial_owner_id) for member in self._vc_members):
+            return serial_owner_id
+        return self._selected_member_id(record["local_port"])
+
+    def text_vc_member(self, record):
+        """Return the visible text of the member cell: the selected option, or the first one when none is selected."""
+        selected_id = self._row_member_id(record)
+        names = [member.name for member in self._vc_members if str(member.id) == str(selected_id)]
+        if names:
+            return names[0]
+        return self._vc_members[0].name if self._vc_members else ""
+
     def _selected_member_id(self, port_name):
         """
         Resolve the selected VC member id from the port name.
@@ -259,10 +344,7 @@ class VCCableTable(LibreNMSCableTable):
     def render_device_selection(self, value, record):
         """Render a dropdown to select the virtual chassis member for a port."""
         serial_owner_id = record.get("device_id") if record.get("_source") == SERIAL_INVENTORY_SOURCE else None
-        owner_is_member = bool(serial_owner_id) and any(
-            str(member.pk) == str(serial_owner_id) for member in self._vc_members
-        )
-        selected_member_id = serial_owner_id if owner_is_member else self._selected_member_id(record["local_port"])
+        selected_member_id = self._row_member_id(record)
         row_id = record["row_id"]
 
         if serial_owner_id:

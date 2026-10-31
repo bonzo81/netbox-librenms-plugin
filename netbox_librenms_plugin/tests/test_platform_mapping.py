@@ -1,6 +1,6 @@
 """
 Tests for PlatformMapping model, to_yaml() on all mapping models,
-find_matching_platform ordering, and BulkExportYAML view.
+the OS platform rule, and BulkExportYAML view.
 
 TDD: these tests are written before implementation.
 """
@@ -267,15 +267,14 @@ class TestToYamlOnAllMappingModels:
 
         from netbox_librenms_plugin.models import InventoryIgnoreRule
 
-        rule = InventoryIgnoreRule.__new__(InventoryIgnoreRule)
-        rule.name = "Skip IDPROM"
-        rule.match_type = "ends_with"
-        rule.pattern = "IDPROM"
-        rule.action = "skip"
-        rule.require_serial_match_parent = False
-        rule.manufacturer_id = None
-        rule.enabled = True
-        rule.description = ""
+        # A real unsaved instance: __new__ skips the field defaults that to_yaml() reads.
+        rule = InventoryIgnoreRule(
+            name="Skip IDPROM",
+            match_type="ends_with",
+            pattern="IDPROM",
+            action="skip",
+            require_serial_match_parent=False,
+        )
 
         result = rule.to_yaml()
         assert isinstance(result, str)
@@ -285,13 +284,21 @@ class TestToYamlOnAllMappingModels:
 
 
 # =============================================================================
-# TestFindMatchingPlatformWithMapping
+# TestOSPlatformRuleWithMappings
 # =============================================================================
 
 
+def _os_platform_of(librenms_os):
+    """Return ``(os_platform, reason)`` that the platform rule gives for *librenms_os*."""
+    from netbox_librenms_plugin.platform_versions import PlatformFacts, assess_platform
+
+    assessment = assess_platform(None, PlatformFacts.from_librenms(librenms_os, ""), tracking=False)
+    return assessment.os_platform, assessment.reason
+
+
 @pytest.mark.django_db
-class TestFindMatchingPlatformWithMapping:
-    """find_matching_platform checks PlatformMapping before direct name match."""
+class TestOSPlatformRuleWithMappings:
+    """The OS platform rule: an exact name first, then a Platform Mapping."""
 
     @staticmethod
     def _platform(name, slug=None):
@@ -313,93 +320,54 @@ class TestFindMatchingPlatformWithMapping:
         )
 
     def test_platform_mapping_used_as_fallback_when_no_name_match(self):
-        """When no Platform name matches, PlatformMapping is used as fallback."""
         from netbox_librenms_plugin.models import PlatformMapping
-        from netbox_librenms_plugin.utils import find_matching_platform
+        from netbox_librenms_plugin.platform_versions import PlatformReason
 
         mapped = self._platform("Cisco IOS")
         PlatformMapping.objects.create(librenms_os="ios", netbox_platform=mapped)
 
-        result = find_matching_platform("ios")
+        assert _os_platform_of("ios") == (mapped, PlatformReason.OFF_TARGET)
 
-        assert result["found"] is True
-        assert result["platform"] == mapped
-        assert result["match_type"] == "mapping"
+    def test_returns_missing_when_neither_mapping_nor_platform(self):
+        from netbox_librenms_plugin.platform_versions import PlatformReason
 
-    def test_falls_back_to_name_match_when_no_platform_mapping(self):
-        """When no PlatformMapping exists, falls back to exact Platform name match."""
-        from netbox_librenms_plugin.utils import find_matching_platform
+        assert _os_platform_of("unknown_os") == (None, PlatformReason.OS_PLATFORM_MISSING)
 
-        platform = self._platform("ios")
-
-        result = find_matching_platform("ios")
-
-        assert result["found"] is True
-        assert result["platform"] == platform
-        assert result["match_type"] == "exact"
-
-    def test_returns_not_found_when_neither_mapping_nor_platform(self):
-        """Returns found=False when neither PlatformMapping nor Platform name match exists."""
-        from netbox_librenms_plugin.utils import find_matching_platform
-
-        result = find_matching_platform("unknown_os")
-
-        assert result["found"] is False
-        assert result["platform"] is None
-
-    def test_multiple_platform_mappings_returns_ambiguous(self):
+    def test_multiple_platform_mappings_are_ambiguous(self):
         """Case-variant mapping rows for one OS resolve to nothing rather than an arbitrary pick."""
-        from netbox_librenms_plugin.utils import find_matching_platform
+        from netbox_librenms_plugin.platform_versions import PlatformReason
 
         self._duplicate_mappings("ios", self._platform("Cisco IOS"))
 
-        result = find_matching_platform("ios")
-
-        assert result == {"found": False, "platform": None, "match_type": "ambiguous", "ambiguity_source": "mapping"}
+        assert _os_platform_of("ios") == (None, PlatformReason.OS_MAPPING_AMBIGUOUS)
 
     def test_exact_platform_wins_over_existing_mapping(self):
-        """When a single Platform exists for the OS string, the exact match wins even if a PlatformMapping also exists."""
         from netbox_librenms_plugin.models import PlatformMapping
-        from netbox_librenms_plugin.utils import find_matching_platform
 
         exact = self._platform("ios")
-        other = self._platform("Cisco IOS XE")
-        PlatformMapping.objects.create(librenms_os="ios", netbox_platform=other)
+        PlatformMapping.objects.create(librenms_os="ios", netbox_platform=self._platform("Cisco IOS XE"))
 
-        result = find_matching_platform("ios")
-
-        assert result["found"] is True
-        assert result["platform"] == exact
-        assert result["match_type"] == "exact"
+        assert _os_platform_of("ios")[0] == exact
 
     def test_ambiguous_platform_falls_through_to_mapping_resolution(self):
         """Two Platforms share the name case-insensitively; an explicit mapping breaks the tie."""
         from netbox_librenms_plugin.models import PlatformMapping
-        from netbox_librenms_plugin.utils import find_matching_platform
 
-        # Platform.name is unique case-SENSITIVELY, so these two coexist and name__iexact
-        # matches both — the state the mapping fallback exists to resolve.
+        # Platform.name is unique case-SENSITIVELY, so these two coexist and name__iexact matches both.
         self._platform("ios")
-        self._platform("IOS", slug="ios-upper")  # slug is unique; only the NAME collides
+        self._platform("IOS", slug="ios-upper")
         mapped = self._platform("Cisco IOS")
         PlatformMapping.objects.create(librenms_os="ios", netbox_platform=mapped)
 
-        result = find_matching_platform("ios")
+        assert _os_platform_of("ios")[0] == mapped
 
-        assert result["found"] is True
-        assert result["platform"] == mapped
-        assert result["match_type"] == "mapping"
-
-    def test_ambiguous_platform_with_no_mapping_returns_platform_ambiguous(self):
-        """Two same-name Platforms and no mapping to disambiguate → ambiguity_source='platform'."""
-        from netbox_librenms_plugin.utils import find_matching_platform
+    def test_ambiguous_platform_with_no_mapping_is_blocked(self):
+        from netbox_librenms_plugin.platform_versions import PlatformReason
 
         self._platform("ios")
-        self._platform("IOS", slug="ios-upper")  # slug is unique; only the NAME collides
+        self._platform("IOS", slug="ios-upper")
 
-        result = find_matching_platform("ios")
-
-        assert result == {"found": False, "platform": None, "match_type": "ambiguous", "ambiguity_source": "platform"}
+        assert _os_platform_of("ios") == (None, PlatformReason.OS_PLATFORM_AMBIGUOUS)
 
 
 # =============================================================================

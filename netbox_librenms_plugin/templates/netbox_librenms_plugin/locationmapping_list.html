@@ -7,14 +7,16 @@
 
 {% block content %}
     <div class="alert alert-info">
-        <h4>Location Mappings</h4>
-        <p>Map values parsed from the LibreNMS <code>location</code> string to NetBox
-           organisation objects (Region, Site, Location, Rack, or Tenant). During
-           device import, the plugin first tries an exact, case-insensitive match
-           against NetBox object names and only falls back to these mappings when
-           no exact match exists. This is useful when LibreNMS uses a value that
-           differs from the corresponding NetBox object name.</p>
-        <p>Example: LibreNMS value <code>NYC</code> → NetBox Site <code>New York</code>.</p>
+        <div>
+            <h4>Location Mappings</h4>
+            <p>Map values parsed from the LibreNMS <code>location</code> string to NetBox
+               organisation objects (Region, Site, Location, Rack, or Tenant). During
+               device import, the plugin first tries an exact, case-insensitive match
+               against NetBox object names and only falls back to these mappings when
+               no exact match exists. This is useful when LibreNMS uses a value that
+               differs from the corresponding NetBox object name.</p>
+            <p>Example: LibreNMS value <code>NYC</code> → NetBox Site <code>New York</code>.</p>
+        </div>
     </div>
     {{ block.super }}
 {% endblock %}

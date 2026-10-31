@@ -77,10 +77,6 @@ class TestDeviceTables:
         view = _bind_api(DeviceInterfaceTableView(), request, live_librenms)
 
         assert list(view.get_interfaces(device)) == [first, second]
-        assert view.get_redirect_url(device) == reverse(
-            "plugins:netbox_librenms_plugin:device_interface_sync",
-            kwargs={"pk": device.pk},
-        )
 
     def test_non_chassis_device_uses_standard_interface_table(self, live_librenms):
         device = make_device("device-interface-standard")
@@ -90,7 +86,6 @@ class TestDeviceTables:
         table = view.get_table([_port()], device, "ifName")
 
         assert isinstance(table, LibreNMSInterfaceTable)
-        assert table.htmx_url == "/sync/?tab=interfaces&server_key=default"
 
     def test_chassis_member_uses_virtual_chassis_interface_table(self, live_librenms):
         _chassis, (device, _sibling) = make_virtual_chassis_members("device-interface-vc")
@@ -100,7 +95,6 @@ class TestDeviceTables:
         table = view.get_table([_port()], device, "ifName")
 
         assert isinstance(table, VCInterfaceTable)
-        assert table.htmx_url == "/sync/?tab=interfaces&server_key=default"
 
     def test_cable_table_type_follows_virtual_chassis_membership(self, live_librenms):
         plain = make_device("device-cable-standard")
@@ -123,7 +117,6 @@ class TestDeviceTables:
 
         assert isinstance(plain_table, LibreNMSModuleTable)
         assert isinstance(chassis_table, VCModuleTable)
-        assert plain_table.htmx_url == "/sync/?tab=modules&server_key=default"
         assert plain_table.can_add_module is True
         assert plain_table.can_change_interface is True
 
@@ -136,7 +129,6 @@ class TestDeviceTables:
         table = view.get_table([], device)
 
         assert table.server_key == "secondary"
-        assert table.htmx_url == "/sync/?tab=modules&server_key=secondary"
 
     def test_read_only_user_gets_no_module_mutation_flags(self, live_librenms):
         device = make_device("device-module-read-only")

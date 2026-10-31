@@ -8,6 +8,7 @@ come from real ``InterfaceTypeMapping`` rows and the real owner platform.
 import json
 import re
 from html import unescape
+from urllib.parse import parse_qs
 
 import pytest
 from dcim.models import Interface, Platform
@@ -68,6 +69,16 @@ def _seed(owner, ports, relationships=None):
     cache.set(SyncInterfacesView().get_cache_key(cache_owner, "ports", SERVER_KEY), payload, timeout=300)
 
 
+def _netbox_only(client, owner):
+    """Return the NetBox-only rows that the interfaces tab dialog loads when it opens."""
+    url = reverse(
+        "plugins:netbox_librenms_plugin:netbox_only_interfaces", kwargs={"object_type": "device", "pk": owner.pk}
+    )
+    response = client.get(url, {"server_key": SERVER_KEY, "interface_name_field": "ifName"})
+    assert response.status_code == 200
+    return response.content.decode()
+
+
 def _tab(client, owner, object_type="device", **params):
     url = reverse(
         "plugins:netbox_librenms_plugin:sync_cache_fragment",
@@ -110,6 +121,29 @@ def superuser_client(client, settings):
     configure_default_librenms_server(settings)
     client.force_login(make_superuser("interface-rule-tab-user"))
     return client
+
+
+@pytest.mark.django_db
+class TestRulesFollowThePlatformTree:
+    """A rule on a platform also applies on its descendants, such as a tracked version platform."""
+
+    def test_a_parent_platform_rule_hides_ports_on_a_version_child(self, superuser_client):
+        junos = _platform("rule-tab-junos")
+        version = Platform.objects.create(name="RULE-TAB-JUNOS 21.2R3", slug="rule-tab-junos-21-2r3", parent=junos)
+        InterfaceTypeMapping.objects.create(action=IGNORE, platform=junos, name_pattern="^Vlan")
+        device = _device("rule-tab-on-version", version)
+        _seed(device, _vlan_ports())
+
+        assert sorted(_rows(_tab(superuser_client, device))) == [100]
+
+    def test_a_child_platform_rule_does_not_apply_on_its_parent(self, superuser_client):
+        junos = _platform("rule-tab-junos-parent")
+        version = Platform.objects.create(name="RULE-TAB-JUNOS 22.4R1", slug="rule-tab-junos-22-4r1", parent=junos)
+        InterfaceTypeMapping.objects.create(action=IGNORE, platform=version, name_pattern="^Vlan")
+        device = _device("rule-tab-on-parent", junos)
+        _seed(device, _vlan_ports())
+
+        assert sorted(_rows(_tab(superuser_client, device))) == [100, 101, 102]
 
 
 @pytest.mark.django_db
@@ -186,8 +220,10 @@ class TestIgnoredRowsInTheTab:
         assert "interfaces_show_ignored" not in re.search(r'<ul class="pagination.*?</ul>', hidden, re.S).group(0)
         assert "Showing 1-10 of 42" in shown
         assert "12 ignored" in shown
-        page_links = re.findall(r'href="(\?tab=interfaces[^"]*)" class="page-link"', shown)
-        assert page_links and all("&interfaces_show_ignored=1" in link for link in page_links)
+        page_links = [parse_qs(link[1:]) for link in re.findall(r'href="(\?[^"]*)" class="page-link"', shown)]
+        assert page_links and all(
+            link["tab"] == ["interfaces"] and link["interfaces_show_ignored"] == ["1"] for link in page_links
+        )
         toggle = re.search(r'<a href="([^"]*)"\s+class="[^"]*"\s+id="interfaces-show-ignored-toggle"', shown).group(1)
         # Turning the toggle off starts again at page 1.
         assert "interfaces_page" not in toggle and "interfaces_show_ignored" not in toggle
@@ -206,7 +242,7 @@ class TestIgnoredRowsInTheTab:
         html = _tab(superuser_client, device)
 
         assert "1 NetBox only interfaces" in html
-        assert "stale0" in html
+        assert "stale0" in _netbox_only(superuser_client, device)
         assert sorted(_rows(html)) == [100]
 
     def test_a_virtual_machine_reads_its_own_platform(self, superuser_client):
@@ -315,7 +351,7 @@ class TestVirtualChassisOwners:
         assert f"Not synced: ignored by interface rule {rule.pk} ({rule})" in shown[701]
         assert OWNER_PILL not in shown[701]
 
-    def test_mixed_member_platforms_ignore_an_unresolved_row_by_global_rules_only(self, superuser_client):
+    def test_mixed_member_platforms_ignore_an_unresolved_row_only_when_every_platform_does(self, superuser_client):
         platform_p, platform_q = _platform("rule-tab-mixed-p"), _platform("rule-tab-mixed-q")
         InterfaceTypeMapping.objects.create(action=IGNORE, platform=platform_p, name_pattern="^null0$")
         InterfaceTypeMapping.objects.create(action=IGNORE, platform=None, name_pattern="^lo0$")
@@ -329,6 +365,22 @@ class TestVirtualChassisOwners:
         assert "1 ignored" in hidden
         assert 'data-rule-state="owner_unresolved"' in _row_tag(shown[710])
         assert 'data-rule-state="ignored"' in _row_tag(shown[711])
+
+    def test_members_on_two_versions_of_one_os_ignore_by_the_os_platform_rule(self, superuser_client):
+        junos = _platform("rule-tab-vc-junos")
+        versions = [
+            Platform.objects.create(name=f"RULE-TAB-VC-JUNOS {v}", slug=f"rule-tab-vc-junos-{i}", parent=junos)
+            for i, v in enumerate(("21.2R3", "22.4R1"))
+        ]
+        InterfaceTypeMapping.objects.create(action=IGNORE, platform=junos, name_pattern="^null0$")
+        first = self._members_on("rule-tab-vc-versions", *versions)
+        _seed(first, [_port(720, "Gi1/0/1"), _port(721, "null0", if_type="other")])
+
+        hidden = _tab(superuser_client, first)
+        shown = _rows(_tab(superuser_client, first, interfaces_show_ignored="1"))
+
+        assert sorted(_rows(hidden)) == [720]
+        assert 'data-rule-state="ignored"' in _row_tag(shown[721])
 
     def test_the_verify_repaint_decides_with_the_selected_member(self, superuser_client):
         first, second = self._chassis("rule-tab-verify")
@@ -360,6 +412,31 @@ class TestVirtualChassisOwners:
         assert on_first["selection"] == ""
         assert on_second["rule_state"] == ""
         assert 'name="select"' in on_second["selection"]
+
+    def test_a_rule_broken_after_the_render_answers_the_verify_with_a_json_error(self, superuser_client):
+        """The member select posts with fetch() and parses JSON, so a redirect would lose the rule's name."""
+        first, second = self._chassis("rule-tab-verify-broken")
+        _seed(first, [_port(610, "Gi1/0/1")])
+        rule = InterfaceTypeMapping.objects.get(platform=first.platform)
+        InterfaceTypeMapping.objects.filter(pk=rule.pk).update(name_pattern="(")
+
+        response = superuser_client.post(
+            reverse("plugins:netbox_librenms_plugin:verify_interface"),
+            json.dumps(
+                {
+                    "device_id": second.pk,
+                    "origin_device_id": first.pk,
+                    "port_id": 610,
+                    "interface_name_field": "ifName",
+                    "server_key": SERVER_KEY,
+                }
+            ),
+            content_type="application/json",
+        )
+
+        assert response.status_code == 409
+        assert list(response.json()) == ["error"]
+        assert f"(ID {rule.pk}) stores an invalid name_pattern: (." in response.json()["error"]
 
 
 @pytest.mark.django_db

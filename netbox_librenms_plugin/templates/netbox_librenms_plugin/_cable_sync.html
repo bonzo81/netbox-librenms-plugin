@@ -1,28 +1,6 @@
 {% load helpers %}
 {% load static %}
-
-<!-- Action Buttons -->
-<div class="d-flex justify-content-end align-items-center mb-0 sync-tab-refresh-toolbar">
-    <div class="btn-list align-items-center">
-        {% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=cable_sync.cache_expiry cache_container_id="cable-cache-countdown" cache_countdown_id="cable-countdown-timer" %}
-        <form method="post">
-            {% csrf_token %}
-            {# Carry the tab's server_key so the refresh rebinds to it (mirrors _module_sync.html). #}
-            {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" %}
-            {% if has_librenms_id %}
-                    {% with model_name=object|meta:"model_name" %}
-                        {% if model_name == "device" %}
-                            <button hx-post="{% url 'plugins:netbox_librenms_plugin:device_cable_sync' pk=object.pk %}"
-                                    hx-target="#cable-sync-content"
-                                    class="btn btn-outline-primary">
-                                Refresh Cables
-                            </button>
-                        {% endif %}
-                    {% endwith %}
-            {% endif %}
-        </form>
-    </div>
-</div>
+{% load librenms_sync_query %}
 
 <!-- Container for the cable sync content -->
 <div id="cable-sync-content">

@@ -108,6 +108,11 @@ GENERIC_CONTAINER_MODELS = frozenset({"", "builtin", "default", "n/a"})
 JUNOS_VC_ROOT_DESCR_MARKER = "Virtual Chassis"
 JUNOS_FPC_DESCR_PREFIX = "FPC"
 JUNOS_FPC_MEMBER_DESCR_RE = re.compile(r"^FPC (?P<member>\d+) ")
+# Juniper MX descriptions end with an "@ fpc/pic/port" locator, where "*" marks a level the row spans.
+# The dangling-parent repair and the anonymizer read these.
+JUNOS_PORT_LOCATOR_RE = re.compile(r"\A(?P<text>.+?) @ (?P<locator>(?P<fpc>[0-9]+)/(?P<pic>[0-9]+)/[0-9]+)\Z")
+JUNOS_PIC_LOCATOR_RE = re.compile(r"\APIC: (?P<text>.+?) @ (?P<locator>(?P<fpc>[0-9]+)/(?P<pic>[0-9]+)/\*)\Z")
+JUNOS_FPC_LOCATOR_RE = re.compile(r"\AFPC: (?P<text>.+?) @ (?P<locator>(?P<fpc>[0-9]+)/\*/\*)\Z")
 
 
 # OOB management controller detection
@@ -177,3 +182,11 @@ def normalize_oob_type(os_str: str, hardware_str: str = "") -> str | None:
                 return token  # vendor-specific match wins immediately
             generic = generic or "oob"  # remember the generic fallback, keep scanning
     return generic
+
+
+# The sync-state values every sync tab maps its own row states onto.
+MATCHING = "matching"
+MISMATCHED = "mismatched"
+NOT_IN_NETBOX = "not_in_netbox"
+# The state of a row that no sync-state choice shows, for a tab that stores the state on the row.
+UNCLASSIFIED = "unclassified"

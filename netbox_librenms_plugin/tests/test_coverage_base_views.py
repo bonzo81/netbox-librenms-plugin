@@ -1,7 +1,7 @@
 """Integration tests for the base cable, interface, and IP address views."""
 
 import pytest
-from django.core.cache import cache
+from django.core.cache import cache, caches
 
 from netbox_librenms_plugin.tests.conftest import (
     cable_together,
@@ -399,30 +399,43 @@ class TestInterfaceViewWithRealObjects:
         assert context["netbox_only_interfaces"] == []
         assert live_librenms.server.requests == []
 
-    def test_cached_snapshot_resolves_each_interface_id_once(self, live_librenms, monkeypatch):
+    def test_cached_interface_ids_are_read_in_one_cache_call(self, live_librenms, monkeypatch):
+        from netbox_librenms_plugin import librenms_api
+        from netbox_librenms_plugin.librenms_api import librenms_id_cache_key
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         device = _mapped_device("interface-cache-read-count")
         bound = make_interface(device, "Ethernet1")
-        unbound = make_interface(device, "Ethernet2")
+        renamed = make_interface(device, "Uplink renamed")
+        spare = make_interface(device, "Spare")
         _set_librenms_id(bound, 101)
         ports = _register_ports(live_librenms)
+        ports = _register_ports(live_librenms, ports=[*ports, {**ports[0], "port_id": 102, "ifName": "Ethernet2"}])
+        # Only the cached ID ties the renamed interface to port 102: no name matches it.
+        cache.set(librenms_id_cache_key(renamed, "default"), 102, timeout=300)
         request = _request()
         view = _view(DeviceInterfaceTableView, live_librenms, request)
         cache.set(view.get_cache_key(device, "ports", "default"), {"status": "ok", "ports": ports}, timeout=300)
-        resolved = []
-        original_lookup = view._get_object_librenms_id
+        id_reads = []
+        real_get, real_get_many = librenms_api.cache.get, librenms_api.cache.get_many
 
-        def record_lookup(interface, mapping):
-            resolved.append(interface.pk)
-            return original_lookup(interface, mapping)
+        def get(key, *args, **kwargs):
+            id_reads.append([key])
+            return real_get(key, *args, **kwargs)
 
-        monkeypatch.setattr(view, "_get_object_librenms_id", record_lookup)
+        def get_many(keys, *args, **kwargs):
+            id_reads.append(list(keys))
+            return real_get_many(keys, *args, **kwargs)
+
+        monkeypatch.setattr(caches["default"], "get", get)
+        monkeypatch.setattr(caches["default"], "get_many", get_many)
 
         context = view.get_context_data(request, device, "ifName", server_key="default")
 
-        assert context["table"] is not None
-        assert sorted(resolved) == sorted([bound.pk, unbound.pk])
+        interface_keys = {librenms_id_cache_key(interface, "default") for interface in (renamed, spare)}
+        reads = [keys for keys in id_reads if interface_keys & set(keys)]
+        assert len(reads) == 1 and set(reads[0]) == interface_keys, reads
+        assert [interface["name"] for interface in context["netbox_only_interfaces"]] == ["Spare"]
         assert live_librenms.server.requests == []
 
     def test_hidden_interface_state_is_not_rendered_outside_view_grant(self, client, live_librenms, settings):
@@ -709,8 +722,6 @@ class TestBaseClassContracts:
 
         with pytest.raises(NotImplementedError):
             view.get_interfaces(device)
-        with pytest.raises(NotImplementedError):
-            view.get_redirect_url(device)
         with pytest.raises(NotImplementedError):
             view.get_table([], device, "ifName")
 

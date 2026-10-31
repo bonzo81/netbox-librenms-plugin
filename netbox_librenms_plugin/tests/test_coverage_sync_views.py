@@ -315,7 +315,13 @@ class TestVLANSynchronization:
 
         created = client.post(
             url,
-            {"server_key": SERVER_KEY, "action": "create_vlans", "select": "3091", "vlan_group_3091": ""},
+            {
+                "server_key": SERVER_KEY,
+                "action": "create_vlans",
+                "select": "3091",
+                "vlan_group_3091": "",
+                "expected_vlan_name_3091": "Application",
+            },
         )
 
         assert created.status_code == 302
@@ -335,7 +341,13 @@ class TestVLANSynchronization:
         _seed_snapshot(view, device, "vlans", [{"vlan_vlan": 3093, "vlan_name": "Application Servers"}])
         updated = client.post(
             url,
-            {"server_key": SERVER_KEY, "action": "create_vlans", "select": "3093", "vlan_group_3093": ""},
+            {
+                "server_key": SERVER_KEY,
+                "action": "create_vlans",
+                "select": "3093",
+                "vlan_group_3093": "",
+                "expected_vlan_name_3093": "Application Servers",
+            },
         )
 
         assert updated.status_code == 200

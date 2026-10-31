@@ -14,6 +14,7 @@ cannot produce (a lock ``DatabaseError``, a ``save()`` that raises).
 """
 
 from contextlib import contextmanager
+from html.parser import HTMLParser
 from uuid import uuid4
 
 from netbox_librenms_plugin.constants import PERM_CHANGE_PLUGIN, PERM_VIEW_PLUGIN
@@ -113,19 +114,193 @@ def queued_request(user):
     return copy_safe_request(request)
 
 
-def module_row_binding(target_device, action, row, *, action_target=None, server_key="default"):
-    """Sign the cached module row that a rendered action form would submit."""
-    from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
+def render_module_tab(device, *, user=None, server_key="default"):
+    """Render the Modules tab fragment from its cached snapshot, as a module action re-renders it; return the HTML."""
+    from django.urls import reverse
 
-    ent_index = row.get("entPhysicalIndex")
-    return module_inventory_binding_token(
-        target_device.pk,
-        server_key,
-        action,
-        action_target or {},
-        ent_index,
-        module_inventory_row_digest(row),
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    request = make_request(
+        "get",
+        {"tab": "modules", "server_key": server_key},
+        user=user,
+        path=reverse("plugins:netbox_librenms_plugin:device_librenms_sync", kwargs={"pk": device.pk}),
     )
+    view = DeviceModuleTableView()
+    view.setup(request, pk=device.pk)
+    view.cache_only = True
+    context = view.get_context_data(request, device, server_key=server_key)
+    return view.render_sync_partial(request, device, context["server_key"], {"module_sync": context}).content.decode()
+
+
+class _SyncTabParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.containers = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "div" and attrs.get("id") == "librenms-sync-tabs":
+            self.containers.append(attrs)
+
+
+def sync_tab_attributes(html):
+    """Return the attributes of the one rendered sync container."""
+    parser = _SyncTabParser()
+    parser.feed(str(html))
+    parser.close()
+    assert len(parser.containers) == 1
+    return parser.containers[0]
+
+
+class _TitledIconParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.icons = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "i" and "title" in attrs:
+            self.icons.append(attrs)
+
+
+def titled_icons(html):
+    """Return the attributes of each ``<i>`` with a title, after one HTML unescape."""
+    parser = _TitledIconParser()
+    parser.feed(str(html))
+    parser.close()
+    return parser.icons
+
+
+def assert_titled_icons_are_named(html):
+    """Assert each titled icon is an image named by its title, or hidden beside text; return the icons."""
+    icons = titled_icons(html)
+    assert icons, "the markup has no titled icon"
+    for attrs in icons:
+        if attrs.get("aria-hidden") == "true":
+            continue
+        assert attrs.get("role") == "img", attrs
+        assert attrs.get("aria-label") == attrs["title"], attrs
+    return icons
+
+
+class _ModuleTabParser(HTMLParser):
+    """Collect the forms, the hx-get controls and the member selects of a rendered Modules tab."""
+
+    def __init__(self, html):
+        super().__init__(convert_charrefs=True)
+        self.forms, self.links, self.selects = [], [], []
+        self.manifest = None
+        self.table_attrs = {}
+        self._open_forms = []
+        # The named form <select> that is open, and the open <option> without a value attribute.
+        self._select = self._text_option = None
+        self.feed(html)
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "form":
+            self._open_forms.append({"action": attrs.get("action", ""), "fields": {}})
+            self.forms.append(self._open_forms[-1])
+        elif tag == "table" and attrs.get("id") == "librenms-module-table":
+            self.table_attrs = attrs
+        elif tag == "input" and attrs.get("name"):
+            self._input(attrs)
+        elif tag == "select":
+            self._open_select(attrs)
+        elif tag == "option" and self._select is not None:
+            self._option(attrs)
+        if attrs.get("hx-get"):
+            self.links.append({"hx-get": attrs["hx-get"], "action": attrs.get("data-action", "")})
+
+    handle_startendtag = handle_starttag
+
+    def handle_data(self, data):
+        if self._text_option is not None:
+            self._text_option["fields"][self._text_option["name"]] += data.strip()
+
+    def handle_endtag(self, tag):
+        if tag == "form" and self._open_forms:
+            self._open_forms.pop()
+        elif tag == "option":
+            self._text_option = None
+        elif tag == "select":
+            self._select = self._text_option = None
+
+    def _input(self, attrs):
+        # A browser submits a checkbox or radio only when it is checked, and "on" without a value.
+        toggle = attrs.get("type") in ("checkbox", "radio")
+        if self._open_forms and (not toggle or "checked" in attrs):
+            self._open_forms[-1]["fields"][attrs["name"]] = attrs.get("value", "on" if toggle else "")
+        if attrs.get("type") == "hidden" and attrs["name"].startswith("selection_grant_"):
+            self.links.append({"selection_grant": attrs["name"], "value": attrs.get("value", "")})
+
+    def _open_select(self, attrs):
+        if attrs.get("data-module") is not None:
+            self.selects.append(attrs)
+        if self._open_forms and attrs.get("name"):
+            self._select = {"fields": self._open_forms[-1]["fields"], "name": attrs["name"], "state": None}
+
+    def _option(self, attrs):
+        # A browser submits the first selected option, or the first option when none is selected.
+        select = self._select
+        state = "selected" if "selected" in attrs else "first"
+        if select["state"] is None or (state == "selected" and select["state"] == "first"):
+            select["fields"][select["name"]] = attrs.get("value", "")
+            select["state"] = state
+            self._text_option = None if "value" in attrs else select
+
+
+def module_tab_forms(html):
+    """Return the parsed forms, hx-get controls, member selects and table attributes of a rendered Modules tab."""
+    return _ModuleTabParser(html)
+
+
+def rendered_module_form(html, path_part, ent_index=None):
+    """Return ``(action URL, fields)`` of the one rendered form whose URL holds *path_part* for *ent_index*."""
+    matches = [
+        form
+        for form in module_tab_forms(html).forms
+        if path_part in form["action"]
+        and (
+            ent_index is None or str(ent_index) in (form["fields"].get("ent_index"), form["fields"].get("parent_index"))
+        )
+    ]
+    assert len(matches) == 1, f"expected one {path_part} form for {ent_index}, found {len(matches)}"
+    return matches[0]["action"], dict(matches[0]["fields"])
+
+
+def rendered_preview_url(html, ent_index):
+    """Return the mismatch preview URL the rendered Replace button of row *ent_index* opens."""
+    from urllib.parse import parse_qs, urlsplit
+
+    for link in module_tab_forms(html).links:
+        url = link.get("hx-get", "")
+        if "module-mismatch-preview" in url and parse_qs(urlsplit(url).query).get("ent_index") == [str(ent_index)]:
+            return url
+    raise AssertionError(f"row {ent_index} renders no Replace button")
+
+
+def rendered_preview_query(device, ent_index, *, user=None, server_key="default"):
+    """Return the query that the rendered Replace button of row *ent_index* opens the mismatch preview with."""
+    from urllib.parse import parse_qsl, urlsplit
+
+    url = rendered_preview_url(render_module_tab(device, user=user, server_key=server_key), ent_index)
+    return dict(parse_qsl(urlsplit(url).query))
+
+
+def rendered_modal_form(device, ent_index, path_part, *, user=None, server_key="default"):
+    """Return ``(action URL, fields)`` of a form in the modal that the rendered Replace button of row *ent_index* opens."""
+    from types import SimpleNamespace
+
+    from netbox_librenms_plugin.views.sync.modules import ModuleMismatchPreviewView
+
+    query = rendered_preview_query(device, ent_index, user=user, server_key=server_key)
+    request = make_request("get", query, user=user)
+    view = make_view(ModuleMismatchPreviewView, request, librenms_api=SimpleNamespace(server_key=server_key))
+    response = get(view, request, pk=device.pk)
+    assert response.status_code == 200, response.content
+    return rendered_module_form(response.content.decode(), path_part, ent_index)
 
 
 def _message_level(name):
@@ -201,16 +376,13 @@ def missing_pk(model, offset=1000):
 
 def trusted_module_inventory_payload(device, inventory, *, server_key="default", librenms_id=1):
     """Build a module inventory payload bound to the device's verified current LibreNMS mapping."""
+    from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
     seed_mapping(device, server_key, own=librenms_id)
     # cf is a cached_property over the applicable custom fields: drop it so the next read sees the write.
     device.__dict__.pop("cf", None)
-    return {
-        "inventory": inventory,
-        "librenms_id": librenms_id,
-        "oob_librenms_id": None,
-    }
+    return module_inventory_cache_payload(inventory, librenms_id, None)
 
 
 def assert_locked_before_update(captured, table):

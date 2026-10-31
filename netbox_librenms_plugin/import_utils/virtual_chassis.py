@@ -220,22 +220,28 @@ def _junos_fpc_rows(root: dict, children: list, serial_keys) -> list:
     return []
 
 
-def vc_serial_key(manufacturer=None):
+def vc_serial_key(manufacturer=None, *, preloaded_rules=None):
     """
     Return the function that turns a serial into the form that stack member matching compares.
 
     This is the one member-serial equality: the serial rules of *manufacturer* and the global
-    rules (Juniper's "S/N " mark, for example), then stack normalization, which blanks
-    placeholders. The master decision, module attribution and the serials modal all compare
-    serials through it.
+    rules (Juniper's "S/N " mark, for example). A placeholder gives an empty key, before and
+    after the rules. The master decision, module attribution, the serials modal and
+    :func:`serials_match` all compare serials through it.
 
     Args:
         manufacturer: The Manufacturer whose serial rules apply, or None for global rules only.
+        preloaded_rules (dict | None): Serial rules already loaded, as ``preload_normalization_rules`` returns them.
 
     """
-    rules = preload_normalization_rules("serial", manufacturer=manufacturer)
+    if preloaded_rules is None:
+        preloaded_rules = preload_normalization_rules("serial", manufacturer=manufacturer)
+    rules = preloaded_rules
 
     def key(value) -> str:
+        # A rule such as ^(.+)$ -> X\1 must not turn a placeholder into a real serial.
+        if not normalize_stack_serial(value):
+            return ""
         return normalize_stack_serial(
             normalize_inventory_serial(value, manufacturer=manufacturer, preloaded_rules=rules)
         )
@@ -243,11 +249,51 @@ def vc_serial_key(manufacturer=None):
     return key
 
 
+def serials_match(stored, incoming, serial_key) -> bool:
+    """
+    Return whether a stored ``Device.serial`` and a LibreNMS serial name the same hardware.
+
+    Both sides go through *serial_key*, so a rule change applies to both at once. An empty
+    key matches nothing.
+
+    Args:
+        stored: The serial that NetBox stores.
+        incoming: The serial that LibreNMS reports.
+        serial_key: From :func:`vc_serial_key` or :func:`chassis_serial_key`.
+
+    """
+    stored_key = serial_key(stored)
+    return bool(stored_key) and stored_key == serial_key(incoming)
+
+
 def chassis_serial_key(device):
     """Return :func:`vc_serial_key` for the manufacturer of *device*'s Virtual Chassis master, or of *device*."""
     chassis = getattr(device, "virtual_chassis", None)
     master = getattr(chassis, "master", None) or device
     return vc_serial_key(getattr(getattr(master, "device_type", None), "manufacturer", None))
+
+
+def devices_with_serial(serial, *, exclude_pk=None, limit: int = 2) -> list:
+    """
+    Return up to *limit* Devices that store *serial* and match it under their own serial rules.
+
+    The lookup is exact, as :func:`find_devices_by_serial` is. A stored value that the rules turn
+    into a placeholder is no hardware identity, so it is left out.
+
+    Args:
+        serial: The trimmed LibreNMS serial.
+        exclude_pk: The pk of a Device to leave out, for example the device that the write changes.
+        limit: How many Devices to return, enough to tell a unique match from a duplicate.
+
+    """
+    # The rules decide per device, so filter every exact match before the limit counts it.
+    found = find_devices_by_serial(serial, limit=None)
+    matches = [
+        device
+        for device in found
+        if device.pk != exclude_pk and serials_match(device.serial, serial, chassis_serial_key(device))
+    ]
+    return matches[:limit]
 
 
 def candidate_vc_serial_keys() -> tuple:
@@ -817,8 +863,7 @@ def create_virtual_chassis_with_members(
         ]
 
     """
-    # The ENTITY-MIB serial carries the vendor's decoration ("S/N BCFB9793" on Juniper) while the
-    # stored device serial does not, so member serials go through the same serial key.
+    # Members store the raw serial; names and the duplicate check use the key of the master.
     member_serial = vc_serial_key(getattr(getattr(master_device, "device_type", None), "manufacturer", None))
     # Caller-supplied members can lack positions; the stack rule then numbers them in row order.
     positions = _member_positions([member.get("position") for member in members_info])
@@ -916,14 +961,16 @@ def _create_member_devices(
     member_rack = master_device.rack
     member_location = master_device.location or (member_rack.location if member_rack and member_rack.location else None)
     created = 0
+    created_keys = set()
     for member, position in zip(members_info, positions, strict=True):
         if member is master_member:
             continue
-        serial = member_serial(member.get("serial"))
-        if serial and find_devices_by_serial(serial, limit=1):
-            logger.warning(f"Device with serial '{serial}' already exists, skipping VC member creation")
+        raw_serial = member.get("serial")
+        serial = normalize_serial(raw_serial) if normalize_stack_serial(raw_serial) else ""
+        serial_key = member_serial(raw_serial)
+        if serial_key and _member_serial_taken(serial, serial_key, created_keys, member_serial):
             continue
-        member_name = _member_name(base_name, position, member.get("serial"), vc_pattern, member_serial)
+        member_name = _member_name(base_name, position, raw_serial, vc_pattern, member_serial)
         if Device.objects.filter(name=member_name).exists():
             logger.warning(f"Device with name '{member_name}' already exists, skipping VC member creation")
             continue
@@ -940,5 +987,38 @@ def _create_member_devices(
             vc_position=position,
             comments=f"VC member (LibreNMS: {member.get('name', 'Unknown')})\nAuto-created from stack inventory",
         )
+        if serial_key:
+            created_keys.add(serial_key)
         created += 1
     return created
+
+
+def _member_serial_taken(serial, serial_key, created_keys, member_serial) -> bool:
+    """
+    Return whether a stack member with *serial* exists already, and log why it is skipped.
+
+    The lookups are exact: the raw serial and its key. A device stored as the key that does not
+    key to it again can be a member that an earlier release stored keyed, or another raw serial.
+    The two cannot be told apart, so the member is skipped and the warning names the device.
+
+    Args:
+        serial: The trimmed raw member serial.
+        serial_key: The key of *serial* under *member_serial*; not empty.
+        created_keys: The keys of the members that this batch created.
+        member_serial: The serial key of the chassis master.
+
+    """
+    if serial_key in created_keys or find_devices_by_serial(serial, limit=1):
+        logger.warning(f"Device with serial '{serial}' already exists, skipping VC member creation")
+        return True
+    candidates = find_devices_by_serial(serial_key, limit=1) if serial_key != serial else []
+    if not candidates:
+        return False
+    if member_serial(candidates[0].serial) == serial_key:
+        logger.warning(f"Device with serial '{serial}' already exists, skipping VC member creation")
+    else:
+        logger.warning(
+            f"Skipped VC member with serial '{serial}': device '{candidates[0].name}' stores serial "
+            f"'{serial_key}', which can be the same member. Check the two serials manually."
+        )
+    return True

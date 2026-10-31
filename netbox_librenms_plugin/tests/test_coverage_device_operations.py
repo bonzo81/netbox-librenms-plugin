@@ -970,6 +970,68 @@ class TestValidateDeviceForImport:
         assert result["serial_confirmed"] is True
         assert result["serial_action"] is None
 
+    @pytest.mark.parametrize("match", ["librenms_id", "hostname"])
+    def test_a_stored_decorated_serial_is_no_drift_under_the_serial_rules(self, match):
+        """Stored "S/N ABC" and incoming "ABC" key to one value, so validation offers no serial update."""
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        linked = {SERVER_KEY: 5427} if match == "librenms_id" else None
+        device = make_device(f"validation-keyed-drift-{match}", serial="S/N ABC-DRIFT", librenms_cf=linked)
+        payload = _device_payload(5427, hostname=device.name, sysName=device.name, serial="ABC-DRIFT")
+
+        result = self._validate(payload)
+
+        assert result["existing_device"] == device
+        assert result["serial_confirmed"] is (match == "librenms_id")
+        assert result["serial_action"] is None
+
+    @pytest.mark.parametrize("serial", ["unknown", " N/A ", "none"])
+    def test_a_placeholder_serial_binds_no_device_that_stores_it(self, serial):
+        make_device(f"validation-placeholder-{serial.strip()}", serial=serial.strip())
+
+        result = self._validate(_device_payload(5428, serial=serial))
+
+        assert result["existing_device"] is None
+        assert result["existing_match_type"] is None
+
+    def test_a_serial_that_the_rules_make_a_placeholder_binds_no_device(self):
+        """A rule that turns a vendor value into N/A makes that value no hardware identity."""
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.create(scope="serial", match_pattern=r"^VENDOR-PLACEHOLDER$", replacement="N/A")
+        make_device("validation-rule-placeholder", serial="VENDOR-PLACEHOLDER")
+
+        result = self._validate(_device_payload(5429, serial="VENDOR-PLACEHOLDER"))
+
+        assert result["existing_device"] is None
+        assert result["existing_match_type"] is None
+
+    def test_a_match_that_its_rules_reject_hides_no_duplicate(self):
+        """The serial rules filter the exact matches before they are counted, so a rejected first match hides no twin."""
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        rejected = make_device("validation-rule-a-rejected", serial="SHARED-SERIAL")
+        vendor = Manufacturer.objects.create(name="Placeholder Vendor", slug="placeholder-vendor")
+        rejected.device_type = DeviceType.objects.create(
+            manufacturer=vendor, model="Placeholder Model", slug="placeholder-model"
+        )
+        rejected.save()
+        NormalizationRule.objects.create(
+            scope="serial", manufacturer=vendor, match_pattern=r"^SHARED-SERIAL$", replacement="N/A"
+        )
+        make_device("validation-rule-b-accepted", serial="SHARED-SERIAL")
+        make_device("validation-rule-c-accepted", serial="SHARED-SERIAL")
+
+        result = self._validate(_device_payload(5432, serial="SHARED-SERIAL"))
+
+        assert result["existing_device"] is None
+        assert result["serial_duplicate"] is True
+
     def test_linked_serial_drift_and_duplicate_are_distinguished(self):
         linked = make_device(
             "validation-serial-drift",
@@ -1318,8 +1380,8 @@ class TestValidateDeviceForImport:
 
         result = self._validate(_device_payload(5434, os="Validation shared OS", serial="-"))
 
-        assert result["platform"]["match_type"] == "ambiguous"
-        assert any("Multiple Platforms match OS" in warning for warning in result["warnings"])
+        assert result["platform"]["assessment"].reason == "os_platform_ambiguous"
+        assert any("Multiple platforms match" in warning for warning in result["warnings"])
 
     def test_linked_device_type_drift_is_reported(self):
         from dcim.models import DeviceType, Manufacturer
@@ -1495,6 +1557,31 @@ class TestImportSingleDevice:
         assert read_mapping(result["device"]).own_id(SERVER_KEY) == 5602
         assert result["synced"] == {"interfaces": 0, "cables": 0, "ip_addresses": 0}
 
+    @pytest.mark.parametrize(
+        ("incoming", "stored"), [("unknown", ""), (" N/A ", ""), (0, "0"), (" S/N RAW-5603 ", "S/N RAW-5603")]
+    )
+    def test_import_stores_the_trimmed_raw_serial_and_no_placeholder(self, librenms_api, incoming, stored):
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        site, device_type, role = self._infrastructure("raw-serial")
+        validation = _validation(site=site, device_type=device_type, role=role, resolved_name="raw-serial-import")
+
+        result = import_single_device(
+            5603,
+            SERVER_KEY,
+            validation,
+            sync_options={"sync_interfaces": False, "sync_cables": False},
+            libre_device=_device_payload(5603, serial=incoming),
+        )
+
+        assert result["success"] is True
+        result["device"].refresh_from_db()
+        assert result["device"].serial == stored
+
     def test_manual_mappings_use_real_objects(self, librenms_api):
         from dcim.models import Platform, Rack
 
@@ -1503,7 +1590,7 @@ class TestImportSingleDevice:
 
         _api, _server = librenms_api
         site, device_type, role = self._infrastructure("manual")
-        platform = Platform.objects.create(name="Import platform", slug="import-platform")
+        platform = Platform.objects.create(name="import-manual-os", slug="import-manual-os")
         rack = Rack.objects.create(name="Import manual rack", site=site, status="active")
 
         result = import_single_device(
@@ -1514,10 +1601,9 @@ class TestImportSingleDevice:
                 "site_id": site.pk,
                 "device_type_id": device_type.pk,
                 "device_role_id": role.pk,
-                "platform_id": platform.pk,
                 "rack_id": rack.pk,
             },
-            libre_device=_device_payload(5603),
+            libre_device=_device_payload(5603, os=platform.name),
             user=make_superuser(),
         )
 
@@ -1527,6 +1613,95 @@ class TestImportSingleDevice:
         assert result["device"].role == role
         assert result["device"].platform == platform
         assert result["device"].rack == rack
+
+    @staticmethod
+    def _track_versions():
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"platform_version_tracking": True})
+
+    def test_tracking_creates_the_version_platform_for_an_actor_who_may_add_platforms(self, librenms_api):
+        from dcim.models import Platform
+
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+
+        self._track_versions()
+        site, device_type, role = self._infrastructure("tracked")
+        os_platform = Platform.objects.create(name="import-tracked-os", slug="import-tracked-os")
+
+        result = import_single_device(
+            5611,
+            SERVER_KEY,
+            _validation(site=site, device_type=device_type, role=role, resolved_name="tracked-import"),
+            libre_device=_device_payload(5611, os=os_platform.name, version="7.2.1"),
+            user=make_superuser(),
+        )
+
+        assert result["success"] is True
+        assert result["warnings"] == []
+        assert result["device"].platform.name == "import-tracked-os 7.2.1"
+        assert result["device"].platform.parent == os_platform
+
+    def test_tracking_without_add_platform_assigns_the_os_platform_and_reports_it(self, librenms_api):
+        from dcim.models import Device, DeviceRole, DeviceType, Platform, Site
+
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        self._track_versions()
+        site, device_type, role = self._infrastructure("tracked-denied")
+        os_platform = Platform.objects.create(name="import-denied-os", slug="import-denied-os")
+        actor = make_user_with_perms(
+            "import-no-add-platform",
+            [("add", Device), ("change", Device), ("view", Site), ("view", DeviceType), ("view", DeviceRole)],
+        )
+
+        result = import_single_device(
+            5612,
+            SERVER_KEY,
+            _validation(site=site, device_type=device_type, role=role, resolved_name="tracked-denied-import"),
+            libre_device=_device_payload(5612, os=os_platform.name, version="7.2.2"),
+            user=actor,
+        )
+
+        assert result["success"] is True
+        assert result["device"].platform == os_platform
+        # Saved text names no platform.
+        assert result["warnings"] == [
+            "Imported device 5612 with an OS platform you cannot view: You do not have permission to "
+            "add platforms, so a new version platform for version '7.2.2' cannot be created."
+        ]
+        assert not Platform.objects.filter(parent=os_platform).exists()
+
+    def test_the_import_warning_names_the_platforms_to_a_reader_who_may_view_them(self, librenms_api):
+        from dcim.models import Device, DeviceRole, DeviceType, Platform, Site
+
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        self._track_versions()
+        site, device_type, role = self._infrastructure("tracked-reader")
+        Platform.objects.create(name="import-reader-os", slug="import-reader-os")
+        actor = make_user_with_perms(
+            "import-reader-no-add",
+            [("add", Device), ("change", Device), ("view", Site), ("view", DeviceType), ("view", DeviceRole)],
+        )
+
+        result = import_single_device(
+            5613,
+            SERVER_KEY,
+            _validation(site=site, device_type=device_type, role=role, resolved_name="tracked-reader-import"),
+            libre_device=_device_payload(5613, os="import-reader-os", version="7.2.3"),
+            user=actor,
+            text_viewer=make_superuser("import-reader-su"),
+        )
+
+        assert result["warnings"] == [
+            "Imported device 5613 with OS platform 'import-reader-os': You do not have permission to add "
+            "platforms, so 'import-reader-os 7.2.3' cannot be created."
+        ]
 
     def test_manual_rack_outside_the_user_view_scope_is_rejected(self, librenms_api):
         """The persistence boundary must reject a forged hidden rack ID."""

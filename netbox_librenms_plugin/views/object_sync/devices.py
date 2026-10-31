@@ -3,7 +3,6 @@ import copy
 from dcim.models import Device, Interface
 from django.core.cache import cache
 from django.http import JsonResponse
-from django.urls import reverse
 from django.views import View
 from ipam.models import VLAN, VLANGroup
 from utilities.permissions import get_permission_for_model
@@ -17,7 +16,9 @@ from netbox_librenms_plugin.interface_relationships import (
     resolve_relationship_row,
 )
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
+from netbox_librenms_plugin.module_grants import ACTION_VERIFY_MODULE, GrantRefusal, GrantRefused, read_module_grant
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+from netbox_librenms_plugin.sync_query import SyncQuery
 from netbox_librenms_plugin.tables.cables import (
     LibreNMSCableTable,
     VCCableTable,
@@ -108,13 +109,9 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
         """Return all interfaces for the device."""
         return obj.interfaces.all()
 
-    def get_redirect_url(self, obj):
-        """Return the device interface sync redirect URL."""
-        return reverse("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": obj.pk})
-
     def get_table(self, data, obj, interface_name_field, vlan_groups=None):
         """Return the appropriate interface table, selecting VC variant if needed."""
-        server_key = self.librenms_api.server_key
+        server_key = self._render_server_key()
         if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
             table = VCInterfaceTable(
                 data,
@@ -133,7 +130,6 @@ class DeviceInterfaceTableView(BaseInterfaceTableView):
                 server_key=server_key,
                 user=self.request.user,
             )
-        table.htmx_url = f"{self.request.path}?tab=interfaces" + (f"&server_key={server_key}" if server_key else "")
         return table
 
 
@@ -146,6 +142,9 @@ class SingleInterfaceVerifyView(
     View,
 ):
     """Verify single interface data for a device via cached LibreNMS payload."""
+
+    # A fetch() caller reads the answer, so the middleware answers with a JSON error.
+    answers_json = True
 
     # Read-only verify endpoint: require object-view permission (mirrors SingleModuleVerifyView).
     required_object_permissions = {"POST": [("view", Device)]}
@@ -291,6 +290,8 @@ class SingleInterfaceVerifyView(
                 table.migrated_to_marker = bool(
                     build_migrated_context(origin_device, server_key).get("migrated_to_marker")
                 )
+                # The verify request carries the page query, so a repainted Rebind posts back to the same view.
+                table.sync_query = SyncQuery.from_request(request)
                 raw_port_id = port_data.get("port_id")
                 port_id = normalize_librenms_port_id(raw_port_id)
                 if port_id is not None:
@@ -415,6 +416,9 @@ class SingleModuleVerifyView(
 ):
     """Verify module row data against cached LibreNMS inventory for a selected VC member."""
 
+    # A fetch() caller reads the answer, so the middleware answers with a JSON error.
+    answers_json = True
+
     # JSON endpoint that returns the rendered module row — only viewers of the
     # underlying Device should be able to surface its inventory data.
     required_object_permissions = {"POST": [("view", Device)]}
@@ -433,76 +437,118 @@ class SingleModuleVerifyView(
         # SingleInterfaceVerifyView).
         if error := self.require_object_permissions_json("POST"):
             return error
-        # Coerced like the sibling verify views: a raw JSON value reaching the pk lookup turns a
-        # bad request into a database error and a 500 where the siblings answer 400.
-        selected_device_id = coerce_model_pk(data.get("device_id"))
-        ent_physical_index = data.get("ent_physical_index")
+        parsed = self._parse_request(data)
+        if isinstance(parsed, JsonResponse):
+            return parsed
+        selected_device_id, page_device_id, ent_physical_index, row_depth = parsed
         # Configured-string-key-or-fallback, mirroring SingleInterfaceVerifyView above: a
         # forged/non-string key must neither probe another namespace nor TypeError-500.
         server_key = self.resolve_requested_server_key(data)
-        row_depth = data.get("depth", 0)
 
-        if selected_device_id is None:
-            return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
-        if ent_physical_index in (None, ""):
-            return JsonResponse({"status": "error", "message": "No entPhysicalIndex provided"}, status=400)
-
-        try:
-            ent_physical_index = int(ent_physical_index)
-        except (TypeError, ValueError):
-            return JsonResponse({"status": "error", "message": "Invalid entPhysicalIndex"}, status=400)
-
-        try:
-            row_depth = int(row_depth)
-        except (TypeError, ValueError):
-            row_depth = 0
-
-        # Restrict the lookup to the caller's viewable devices: the gate above only checked the
+        # Restrict the lookups to the caller's viewable devices: the gate above only checked the
         # model-level view_device perm, so a site-scoped grant would otherwise read another
         # device's cached verify payload by raw pk.
+        page_device = self.restrict_object_or_404(Device, pk=page_device_id)
         selected_device = self.restrict_object_or_404(Device, pk=selected_device_id)
+        if selected_device.pk != page_device.pk and (
+            not page_device.virtual_chassis_id or selected_device.virtual_chassis_id != page_device.virtual_chassis_id
+        ):
+            return JsonResponse(
+                {"status": "error", "message": "The selected device is not a member of this Virtual Chassis"},
+                status=400,
+            )
 
         module_table_view = DeviceModuleTableView()
         # Shallow-copy the request so the child view can mutate request.GET /
         # request.POST without affecting this request object.
         module_table_view.request = copy.copy(request)
         module_table_view.cache_only = True
-        context = module_table_view.get_context_data(
+        context = module_table_view.get_verify_context_data(
             module_table_view.request,
+            page_device,
             selected_device,
             server_key=server_key,
-            pin_rows_to_object=True,
         )
-        table = context.get("table")
-        if table is None:
+        if (rule_error := context.get("inventory_rule_error")) is not None:
+            return JsonResponse({"status": "error", "message": rule_error.public_message}, status=409)
+        if context.get("table") is None:
             return JsonResponse({"status": "error", "message": "No cached inventory data"}, status=404)
-        table_data = table.data
+        if context.get("inventory_index_ambiguous"):
+            return JsonResponse({"status": "error", "message": GrantRefusal.AMBIGUOUS_INDEX.message}, status=409)
+        return self._verified_row_response(data, context, page_device, selected_device, ent_physical_index, row_depth)
 
-        # entPhysicalIndex should be unique, depth fallback handles malformed duplicates.
-        row = next(
-            (
-                candidate
-                for candidate in table_data
-                if candidate.get("selected_device_id") == selected_device.pk
-                and candidate.get("ent_physical_index") == ent_physical_index
-                and candidate.get("depth", 0) == row_depth
-            ),
-            None,
-        )
-        if row is None:
-            row = next(
-                (
-                    candidate
-                    for candidate in table_data
-                    if candidate.get("selected_device_id") == selected_device.pk
-                    and candidate.get("ent_physical_index") == ent_physical_index
-                ),
-                None,
+    @staticmethod
+    def _parse_request(data):
+        """Return ``(device id, page device id, index, depth)`` from the request body, or a 400 response."""
+        # Coerced like the sibling verify views: a raw JSON value reaching the pk lookup turns a
+        # bad request into a database error and a 500 where the siblings answer 400.
+        selected_device_id = coerce_model_pk(data.get("device_id"))
+        page_device_id = coerce_model_pk(data.get("page_device_id"))
+        ent_physical_index = data.get("ent_physical_index")
+        if selected_device_id is None:
+            return JsonResponse({"status": "error", "message": "No device ID provided"}, status=400)
+        if page_device_id is None:
+            return JsonResponse({"status": "error", "message": "No page device ID provided"}, status=400)
+        if ent_physical_index in (None, ""):
+            return JsonResponse({"status": "error", "message": "No entPhysicalIndex provided"}, status=400)
+        try:
+            ent_physical_index = int(ent_physical_index)
+        except (TypeError, ValueError):
+            return JsonResponse({"status": "error", "message": "Invalid entPhysicalIndex"}, status=400)
+        try:
+            row_depth = int(data.get("depth", 0))
+        except (TypeError, ValueError):
+            row_depth = 0
+        return selected_device_id, page_device_id, ent_physical_index, row_depth
+
+    def _verified_row_response(self, data, context, page_device, selected_device, ent_physical_index, row_depth):
+        """Return the pinned row with its grants when the verify grant holds and both renders show the row."""
+        table = context["table"]
+        try:
+            grant = read_module_grant(
+                data.get("verify_binding"),
+                action=ACTION_VERIFY_MODULE,
+                page_device_id=page_device.pk,
+                server_key=context["server_key"],
+            ).require(ent_index=ent_physical_index)
+        except GrantRefused as exc:
+            return JsonResponse({"status": "error", "message": exc.refusal.message}, status=409)
+        # The pinned table reads the same snapshot and policy load that a page table would.
+        if grant.inventory_digest != table.inventory_snapshot_digest:
+            return JsonResponse({"status": "error", "message": GrantRefusal.SNAPSHOT.message}, status=409)
+        if grant.policy_fingerprint != table.policy_fingerprint:
+            return JsonResponse({"status": "error", "message": GrantRefusal.POLICY.message}, status=409)
+
+        # A grant needs both renders: the signed page rows show the row, and the table pinned to the member shows it.
+        page_rows = [index for (index,) in grant.rows]
+        row = self._pinned_row(table.data, selected_device.pk, ent_physical_index, row_depth)
+        if row is None or ent_physical_index not in page_rows:
+            return JsonResponse(
+                {"status": "error", "message": "This inventory row is not available for the selected member"},
+                status=404,
             )
-        if row is None:
-            return JsonResponse({"status": "error", "message": "Inventory row not found"}, status=404)
+        row = {
+            **row,
+            "branch_rows": [entry for entry in row.get("branch_rows", []) if entry[0] in page_rows],
+            "verify_rows": page_rows,
+        }
+        if not any(index != ent_physical_index for index, _target in row["branch_rows"]):
+            row["has_installable_children"] = False
+        if row.get("selectable") and table.selection_allowed:
+            row["selection_grant"] = table.selection_override(row)
         formatted_row = table.format_module_data(row)
         return JsonResponse({"status": "success", "formatted_row": formatted_row})
+
+    @staticmethod
+    def _pinned_row(table_data, device_id, ent_physical_index, row_depth):
+        """Return the pinned render's row of one index; the depth separates malformed duplicates."""
+        candidates = [
+            candidate
+            for candidate in table_data
+            if candidate.get("selected_device_id") == device_id
+            and candidate.get("ent_physical_index") == ent_physical_index
+        ]
+        return next((c for c in candidates if c.get("depth", 0) == row_depth), None) or next(iter(candidates), None)
 
 
 class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, CacheMixin, View):
@@ -513,6 +559,9 @@ class SingleVlanGroupVerifyView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
     which VLANs are "missing" (don't exist in selected group) and returns
     updated HTML for the VLANs cell with correct colors.
     """
+
+    # A fetch() caller reads the answer, so the middleware answers with a JSON error.
+    answers_json = True
 
     # Read-only verify endpoint that surfaces a device's interface VLAN assignments —
     # require object-view permission on the underlying Device (mirrors the other verify views).
@@ -665,6 +714,9 @@ class VerifyVlanSyncGroupView(LibreNMSPermissionMixin, NetBoxObjectPermissionMix
     update row colors without a full page reload.
     """
 
+    # A fetch() caller reads the answer, so the middleware answers with a JSON error.
+    answers_json = True
+
     # Read-only verify endpoint that surfaces NetBox VLAN existence + names — require
     # object-view permission on VLAN (there is no device in scope here, unlike the other
     # verify views), so an unauthorized caller can't enumerate VLANs/groups.
@@ -736,6 +788,9 @@ class SaveVlanGroupOverridesView(
     The overrides are stored with the same remaining TTL as the ports
     cache so they expire together.
     """
+
+    # A fetch() caller reads the answer, so the middleware answers with a JSON error.
+    answers_json = True
 
     def post(self, request):
         # Require plugin write permission to persist VLAN group overrides
@@ -858,6 +913,12 @@ class DeviceModuleTableView(BaseModuleTableView):
             can_add_module_type_mapping=(
                 has_write_permission and user.has_perm("netbox_librenms_plugin.add_moduletypemapping")
             ),
+            can_change_device_type=has_write_permission and user.has_perm("dcim.change_devicetype"),
+            can_add_inventory_rule=(
+                has_write_permission and user.has_perm("netbox_librenms_plugin.add_inventoryignorerule")
+            ),
+            can_change_inventory_rule=(
+                has_write_permission and user.has_perm("netbox_librenms_plugin.change_inventoryignorerule")
+            ),
         )
-        table.htmx_url = f"{self.request.path}?tab=modules" + (f"&server_key={server_key}" if server_key else "")
         return table

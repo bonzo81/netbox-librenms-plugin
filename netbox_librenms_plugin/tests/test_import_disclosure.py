@@ -9,12 +9,14 @@ be withheld at DISPLAY time, so every test here drives a real view with a constr
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 from html import unescape
 from pathlib import Path
 
 import pytest
+import yaml
 from django.urls import reverse
 
 from netbox_librenms_plugin.tests.conftest import (
@@ -166,7 +168,7 @@ def test_the_import_row_does_not_link_an_out_of_scope_match(client, librenms_ser
     client.force_login(_viewer_scoped_to("disclosure-row-viewer", elsewhere))
 
     response = client.post(
-        reverse("plugins:netbox_librenms_plugin:device_role_update", args=[IMPORT_DEVICE_ID]),
+        reverse("plugins:netbox_librenms_plugin:device_import_plan_update", args=[IMPORT_DEVICE_ID]),
         {"server_key": server_key},
         headers={"HX-Request": "true"},
     )
@@ -185,7 +187,7 @@ def test_the_import_row_still_links_a_visible_match(client, librenms_server, set
     client.force_login(_viewer_scoped_to("disclosure-row-visible-viewer", match))
 
     response = client.post(
-        reverse("plugins:netbox_librenms_plugin:device_role_update", args=[IMPORT_DEVICE_ID]),
+        reverse("plugins:netbox_librenms_plugin:device_import_plan_update", args=[IMPORT_DEVICE_ID]),
         {"server_key": server_key},
         headers={"HX-Request": "true"},
     )
@@ -505,6 +507,37 @@ def test_the_rule_test_script_removes_its_staging_directory():
         assert list(Path(private_tmp).iterdir()) == [], "the staging directory outlived the run"
 
 
+TRUSTED_BUILTINS = {"isinstance", "hasattr", "type"}
+
+
+def _trusted_name_lists(node):
+    """Yield the names of each regex alternation in *node* that lists exception_text_for or a trusted builtin."""
+    if isinstance(node, dict):
+        node = list(node.values())
+    if isinstance(node, list):
+        for item in node:
+            yield from _trusted_name_lists(item)
+    elif isinstance(node, str):
+        for group in re.findall(r"\((?:\?:)?([\w|]+)\)", node):
+            names = set(group.split("|"))
+            if "exception_text_for" in names or names & TRUSTED_BUILTINS:
+                yield names
+
+
+def test_every_copy_of_the_trusted_names_in_the_shadow_rule_is_the_same():
+    """caught-error-text-shadow repeats the trusted names in many regexes; a copy that misses one opens a gap."""
+    rules = yaml.safe_load((REPOSITORY_ROOT / ".opengrep" / "librenms-rules.yaml").read_text())["rules"]
+    shadow = next(rule for rule in rules if rule["id"] == "caught-error-text-shadow")
+    lists = list(_trusted_name_lists(shadow))
+    named = [names - TRUSTED_BUILTINS for names in lists if "exception_text_for" in names]
+
+    assert len(named) >= 10, "the rule no longer lists the trusted names where this test looks"
+    assert all(names == named[0] for names in named), [sorted(names ^ named[0]) for names in named]
+    # A copy has all trusted builtins or none of them.
+    partial = [sorted(names) for names in lists if names & TRUSTED_BUILTINS not in (set(), TRUSTED_BUILTINS)]
+    assert partial == []
+
+
 def _scan(*args, expect=0):
     """Run the scan script, skipping when opengrep is absent, and return its parsed JSON report."""
     script = REPOSITORY_ROOT / "scripts" / "opengrep-scan.sh"
@@ -553,6 +586,10 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
     http_call = "import requests\nrequests.get(url)\n"
     mapping_write = 'device.custom_field_data["librenms_id"] = {"default": 5}\n'
     conflict_raise = 'raise MappingChanged("changed")\n'
+    titled_icon = '<i class="mdi mdi-alert" title="Missing"></i>'
+    server_key_lookup = "document.querySelector('[name=server_key]');\n"
+    serial_compare = "def same(row, serial):\n    return row.serial == serial\n"
+    tab_url = 'url = f"{path}?tab=vlans"\n'
     sources = {
         # Flagged: a direct HTTP call outside the client.
         "netbox_librenms_plugin/worker.py": http_call,
@@ -567,15 +604,32 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
             http_call + "from django.test import TestCase\n"
             "class TestWorker:\n    def check(self):\n        self.assertEqual(1, 1)\n"
         ),
-        # Flagged: tests and templates are in the scope of the mapping rules.
-        "netbox_librenms_plugin/tests/test_seed.py": mapping_write + conflict_raise,
-        "netbox_librenms_plugin/templates/netbox_librenms_plugin/seed.html": "{{ object.cf.librenms_id }}\n",
+        # Flagged: tests and templates are in the scope of the mapping rules. The icon rule excludes tests.
+        "netbox_librenms_plugin/tests/test_seed.py": mapping_write + conflict_raise + f"ICON = '{titled_icon}'\n",
+        "netbox_librenms_plugin/templates/netbox_librenms_plugin/seed.html": "{{ object.cf.librenms_id }}\n"
+        + titled_icon
+        + "\n",
+        # Flagged: the icon rule covers package scripts too.
+        "netbox_librenms_plugin/static/netbox_librenms_plugin/js/seed.js": f"const ICON = '{titled_icon}';\n",
         # Clean: the mapping module and migrations are the only places that may touch the storage.
         "netbox_librenms_plugin/server_mappings.py": mapping_write,
         "netbox_librenms_plugin/migrations/0099_seed.py": mapping_write,
         # Flagged: a conflict raised without its record. Clean: the runner's own raise.
         "netbox_librenms_plugin/claims.py": conflict_raise,
         "netbox_librenms_plugin/transactions.py": conflict_raise,
+        # Flagged: a page script looks up the server key in the whole document. Clean: vendored code.
+        "netbox_librenms_plugin/static/netbox_librenms_plugin/js/page.js": server_key_lookup,
+        "netbox_librenms_plugin/static/netbox_librenms_plugin/js/vendor/lib.js": server_key_lookup,
+        # Flagged: a stored Device serial in a view or import path compares through serials_match().
+        "netbox_librenms_plugin/views/sync/device_seed.py": serial_compare,
+        "netbox_librenms_plugin/import_utils/seed.py": serial_compare,
+        # Clean: Module writers store a normalized serial, and the rest of the package is out of scope.
+        "netbox_librenms_plugin/views/sync/modules.py": serial_compare + tab_url,
+        "netbox_librenms_plugin/sync_seed.py": serial_compare,
+        # Flagged: a hand-built tab query. Clean: the query module, the Modules tab redirect and tests.
+        "netbox_librenms_plugin/views/sync/vlans_redirect.py": tab_url,
+        "netbox_librenms_plugin/sync_query.py": tab_url,
+        "netbox_librenms_plugin/tests/test_tab_url.py": tab_url,
     }
     for name, source in sources.items():
         staged = tmp_path / name
@@ -592,5 +646,11 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
         ("netbox_librenms_plugin/tests/test_worker.py", "no-unittest-assertions"),
         ("netbox_librenms_plugin/tests/test_seed.py", "no-stored-mapping-access"),
         ("netbox_librenms_plugin/templates/netbox_librenms_plugin/seed.html", "no-stored-mapping-access-template"),
+        ("netbox_librenms_plugin/templates/netbox_librenms_plugin/seed.html", "titled-icon-needs-accessible-name"),
+        ("netbox_librenms_plugin/static/netbox_librenms_plugin/js/seed.js", "titled-icon-needs-accessible-name"),
         ("netbox_librenms_plugin/claims.py", "conflict-raised-without-record"),
+        ("netbox_librenms_plugin/static/netbox_librenms_plugin/js/page.js", "sync-script-reads-page-server-key"),
+        ("netbox_librenms_plugin/views/sync/device_seed.py", "device-serial-compare-through-serials-match"),
+        ("netbox_librenms_plugin/import_utils/seed.py", "device-serial-compare-through-serials-match"),
+        ("netbox_librenms_plugin/views/sync/vlans_redirect.py", "sync-tab-url-through-sync-query"),
     }, found

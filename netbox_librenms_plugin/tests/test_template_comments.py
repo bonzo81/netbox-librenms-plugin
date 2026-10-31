@@ -94,7 +94,11 @@ def _guard_precedes_all(src, needle):
 
 def test_netbox_only_modal_hides_bulk_select_in_migrated_mode():
     """In migrated-donor mode the NetBox-only modal is transfer-only (per-row Move), so the bulk-select controls (select-all header + per-row checkboxes) must be hidden and the copy must describe moving — not deleting — interfaces."""
-    src = (TEMPLATES_DIR / "netbox_librenms_plugin" / "_interface_sync_content.html").read_text(encoding="utf-8")
+    # The dialog text is in the tab; its rows load from their own partial when it opens.
+    src = "".join(
+        (TEMPLATES_DIR / "netbox_librenms_plugin" / name).read_text(encoding="utf-8")
+        for name in ("_interface_sync_content.html", "inc/_netbox_only_interfaces.html")
+    )
 
     # Both bulk-select inputs must sit inside a `not migrated_to_marker` guard — every occurrence.
     assert _guard_precedes_all(src, 'id="select-all-netbox-interfaces"')

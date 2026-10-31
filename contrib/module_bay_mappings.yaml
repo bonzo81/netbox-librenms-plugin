@@ -161,6 +161,15 @@
   is_regex: true
   description: "Juniper transceiver description → Transceiver slot/pic/port"
 
+# Juniper MX switch control boards: the "CB N" description -> bay "CBN" (MX480, MX960)
+# The board's class is backplane; an include rule with name_pattern "^SCB" admits it.
+- librenms_name: "^CB (\\d+)$"
+  librenms_class: "backplane"
+  netbox_bay_name: "CB\\1"
+  is_regex: true
+  manufacturer: "Juniper"
+  description: "Juniper MX switch control board CB N → CBN"
+
 # Juniper fan trays: "Fan Tray N" → "Fan N" (ACX7100, etc.)
 # Runs after exact match, so "Fan Tray 0" → "Fan Tray" (ACX7024) still works
 - librenms_name: "^Fan Tray (\\d+)$"

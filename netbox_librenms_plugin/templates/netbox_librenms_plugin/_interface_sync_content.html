@@ -1,8 +1,35 @@
 {% load helpers %}
+{% load librenms_sync_query %}
 {% if sync_partial_response %}{% include 'inc/messages.html' %}{% endif %}
-{% if request.htmx %}
-{% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=interface_sync.cache_expiry cache_container_id="cache-countdown" cache_countdown_id="countdown-timer" cache_oob=True %}
-{% endif %}
+<div class="noprint sync-tab-primary-toolbar">
+    <div id="interface-sync-content-actions" class="sync-tab-actions d-flex align-items-center gap-2">
+        {% if interface_sync.table %}
+            {% if not migrated_to_marker %}
+            <button type="submit" form="interface-sync-form" class="btn btn-primary">
+                <span class="spinner spinner-border d-none" id="sync-spinner"></span>
+                <span>Sync Selected Interfaces</span>
+            </button>
+            {% include 'netbox_librenms_plugin/inc/_interface_sync_options.html' with sync_options=interface_sync.sync_options sync_form_id="interface-sync-form" %}
+            {% endif %}
+            <a href="#" class="ms-1"
+                onclick="event.preventDefault(); showModal(document.getElementById('interfaceTypeHelpModal'))">
+                <i class="mdi mdi-help-circle"></i> info
+            </a>
+        {% endif %}
+    </div>
+    <div class="sync-tab-filter-refresh">
+        {% if interface_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_controls.html" with filters=interface_sync.filters prefix="interfaces_" tab="interfaces" section_id="interfaceFilterSection" label="Filter interfaces" %}{% endif %}
+        {% firstof interface_sync.server_key server_key librenms_server_info.server_key as refresh_server_key %}
+        <div id="interface-sync-content-refresh">
+        {% include "netbox_librenms_plugin/inc/_interface_sync_refresh.html" with object=interface_sync.object server_key=refresh_server_key %}
+        </div>
+    </div>
+</div>
+{% if interface_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with owner=interface_sync.object content_id="interface-sync-content" server_key=interface_sync.server_key filters=interface_sync.filters prefix="interfaces_" tab="interfaces" section_id="interfaceFilterSection" label="Filter interfaces" %}{% endif %}
+{% if interface_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_panel.html" with owner=interface_sync.object content_id="interface-sync-content" server_key=interface_sync.server_key filters=interface_sync.filters prefix="interfaces_" tab="interfaces" section_id="interfaceFilterSection" label="Filter interfaces" %}{% endif %}
+
+<div id="interface-sync-content-results">
+<div data-sync-filter-tab="interfaces" data-selection-scope="{% sync_selection_scope interface_sync.object interface_sync.server_key "interfaces" %}" data-filter-snapshot="{% if interface_sync.table %}true{% else %}false{% endif %}" data-filter-search="{{ interface_sync.filters.form.q.value|default:'' }}" data-filter-state="{{ interface_sync.filters.form.sync_state.value|default:'' }}">
 
 {% include "netbox_librenms_plugin/inc/_ipam_permission_notice.html" with hidden_ipam_permissions=interface_sync.hidden_ipam_permissions vlan_scope_incomplete=interface_sync.vlan_scope_incomplete %}
 
@@ -23,8 +50,6 @@
 </div>
 {% endif %}
 
-{% include "netbox_librenms_plugin/inc/_relationship_diagnostics.html" with diagnostics=interface_sync.relationship_diagnostics %}
-
 {# Migrated donors must not sync: hiding only the button leaves the POST form live (Enter in a filter still submits), so drop the form in migrated mode. #}
 {% with model_name=interface_sync.object|meta:"model_name" %}
 {% if migrated_to_marker %}
@@ -35,59 +60,30 @@
     document.querySelector('[name=csrfmiddlewaretoken]'). Emit a standalone token so those
     JS-driven requests don't hit a null token (TypeError/403). A bare hidden input never
     auto-submits, so it doesn't reintroduce the live-form problem flagged above.
-    The same JS handlers read input[name="server_key"] to scope verify/sync POSTs to the
-    right LibreNMS server; without it, migrated-mode requests on a non-default server fall
-    back to null and hit the wrong server/cache. Emit it here too (still no auto-submit).
     {% endcomment %}
     <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
-    {% comment %}
-    Prefer the marker-scoped server_key (the server the donor was migrated under), falling back
-    to the active interface_sync.server_key — the same precedence the migrated Move button uses,
-    so JS handlers reading this input target the right LibreNMS server in either case.
-    {% endcomment %}
-    {% with effective_server_key=migrated_to_marker.server_key|default:interface_sync.server_key %}
-    {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" with server_key=effective_server_key %}
-    {% endwith %}
 {% else %}
 {% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_type=model_name object_id=interface_sync.object.pk as sync_url %}
-{# htmx swaps the tab in place, so the page, page size and scroll position survive; method/action stay as the no-JS fallback. #}
-<form method="post"
+{# htmx swaps the tab in place, so the scroll position survives; method/action stay as the no-JS fallback. #}
+{# The URL carries the page query, so the tab comes back with the same filters, page and page size. #}
+{% sync_tab_url sync_url interface_name_field=interface_name_field as sync_action_url %}
+<form method="post" id="interface-sync-form"
     data-interface-origin-device-id="{{ interface_sync.object.pk }}"
     data-blocked-port-ids="{{ interface_sync.blocked_port_ids_json }}"
-    action="{{ sync_url }}?interface_name_field={{ interface_name_field }}"
-    hx-post="{{ sync_url }}?interface_name_field={{ interface_name_field }}"
+    action="{{ sync_action_url }}"
+    hx-post="{{ sync_action_url }}"
     hx-target="#interface-sync-content" hx-swap="innerHTML" hx-sync="#interface-sync-content:drop">
     {# Form-only inputs live inside the form branch so migrated (donor) mode, which renders a plain <div> wrapper, never emits hidden fields outside any <form>. #}
     {% csrf_token %}
     {% if interface_sync.server_key %}<input type="hidden" name="server_key" value="{{ interface_sync.server_key }}">{% endif %}
-    {% with table=interface_sync.table %}{% if table.page %}
-    <input type="hidden" name="{{ table.prefix }}page" value="{{ table.page.number }}">
-    <input type="hidden" name="{{ table.prefix }}per_page" value="{{ table.paginator.per_page }}">
-    {% endif %}{% endwith %}
-    {% if interface_sync.show_ignored %}<input type="hidden" name="interfaces_show_ignored" value="1">{% endif %}
 {% endif %}
     {% endwith %}
-    {% block table_actions %}
-    <div class="noprint d-flex justify-content-between align-items-center mt-0 mb-3 sync-tab-primary-toolbar">
-        <div class="d-flex align-items-center gap-2">
-            {% if not migrated_to_marker %}
-            <button type="submit" class="btn btn-primary">
-                <span class="spinner spinner-border d-none" id="sync-spinner"></span>
-                <span>Sync Selected Interfaces</span>
-            </button>
-            {% include 'netbox_librenms_plugin/inc/_interface_sync_options.html' with sync_options=interface_sync.sync_options %}
-            {% endif %}
-            <a href="#" class="ms-1"
-                onclick="event.preventDefault(); showModal(document.getElementById('interfaceTypeHelpModal'))">
-                <i class="mdi mdi-help-circle"></i> info
-            </a>
-        </div>
-    </div>
-    {% endblock %} <!-- End block table_actions -->
+
     <div class="row mb-3">
         <div class="col col-md-12">
-            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
-                <div>
+            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3 sync-interface-key-row">
+                <div class="d-flex align-items-center flex-wrap gap-2">
+                    {% include "netbox_librenms_plugin/inc/_relationship_diagnostics.html" with diagnostics=interface_sync.relationship_diagnostics %}
                     {% if interface_sync.object.virtual_chassis %}
                     <button type="button" class="btn btn-secondary" id="bulk-vc-member-button" data-bs-toggle="modal"
                         data-bs-target="#bulkVCMemberModal" disabled>
@@ -95,8 +91,8 @@
                     </button>
                     {% endif %}
                     {% if interface_sync.ignored_count or interface_sync.show_ignored %}
-                    {# The toggle starts again at page 1: the page count changes with it. #}
-                    <a href="?tab=interfaces{% if interface_sync.server_key %}&server_key={{ interface_sync.server_key|urlencode }}{% endif %}&interfaces_per_page={{ interface_sync.table.paginator.per_page }}&interface_name_field={{ interface_name_field }}{% if not interface_sync.show_ignored %}&interfaces_show_ignored=1{% endif %}"
+                    {# The toggle keeps the filters and starts again at page 1: the page count changes with it. #}
+                    <a href="{% if interface_sync.show_ignored %}{% sync_tab_url prefix='interfaces_' tab='interfaces' reset='page show_ignored' %}{% else %}{% sync_tab_url prefix='interfaces_' tab='interfaces' reset='page' show_ignored='1' %}{% endif %}"
                         class="btn btn-sm btn-outline-secondary ms-2{% if interface_sync.show_ignored %} active{% endif %}"
                         id="interfaces-show-ignored-toggle" aria-pressed="{% if interface_sync.show_ignored %}true{% else %}false{% endif %}"
                         title="{% if interface_sync.show_ignored %}Hide the ports that interface rules ignore{% else %}Show the ports that interface rules ignore{% endif %}">
@@ -118,51 +114,9 @@
                         <span class="badge text-warning text-white">Mismatched values</span>
                         <span class="badge text-danger text-white">Not present in NetBox</span>
                     </div>
-                    <button class="btn btn-sm btn-secondary sync-filter-toggle" type="button" data-bs-toggle="collapse"
-                        data-bs-target="#interfaceFilterSection" aria-expanded="false"
-                        aria-controls="interfaceFilterSection">
-                        <i class="mdi mdi-filter-outline"></i> Filters
-                    </button>
-                </div>
-            </div>
-            <div class="collapse mb-3" id="interfaceFilterSection">
-                <div class="mb-2">
-                    <small class="text-muted">
-                        <i class="mdi mdi-information"></i> Filters apply to currently displayed interfaces. Adjust the
-                        "per page" setting to apply the filters to more interfaces.
-                    </small>
-                </div>
-                <div class="filter-container d-flex gap-2">
-                    <input type="text" id="filter-name" placeholder="Filter by Name" class="form-control">
-                    {% if interface_sync.table.attrs.id == 'librenms-interface-table' %}
-                    <input type="text" id="filter-type" placeholder="Filter by Type" class="form-control">
-                    <input type="text" id="filter-speed" placeholder="Filter by Speed" class="form-control">
-                    {% endif %}
-                    <input type="text" id="filter-mac" placeholder="Filter by MAC" class="form-control">
-                    <input type="text" id="filter-mtu" placeholder="Filter by MTU" class="form-control">
-                    <input type="text" id="filter-enabled" placeholder="Filter by Status" class="form-control">
-                    <input type="text" id="filter-description" placeholder="Filter by Description" class="form-control">
                 </div>
             </div>
             <style>
-                /* Your existing CSS rules */
-                .ts-wrapper.multi .ts-control {
-                    display: flex !important;
-                    flex-wrap: wrap;
-                    align-items: center;
-                }
-
-                /* A fixed width keeps the member dropdown from resizing on open, and narrow enough for the table to fit its card. */
-                td[data-col="device_selection"] {
-                    width: 13rem;
-                    min-width: 13rem;
-                }
-
-                td[data-col="device_selection"] .ts-wrapper {
-                    width: 100%;
-                    max-width: 100%;
-                }
-
                 /* A row the interface rules ignore is shown greyed, and only on request. */
                 #librenms-interface-table tr[data-rule-state="ignored"] > td,
                 #librenms-interface-table-vm tr[data-rule-state="ignored"] > td {
@@ -182,9 +136,13 @@
             </style>
 
             <div class="card">
-                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=interface_sync.table show_ignored=interface_sync.show_ignored %}
+                {% if interface_sync.filters.is_valid %}
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=interface_sync.table placement="top" filtered_from=interface_sync.filtered_from %}
                 {% include 'inc/table.html' with table=interface_sync.table %}
-                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=interface_sync.table show_ignored=interface_sync.show_ignored %}
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=interface_sync.table filtered_from=interface_sync.filtered_from %}
+                {% else %}
+                {% include 'netbox_librenms_plugin/inc/_sync_filter_invalid.html' with table=interface_sync.table text="Correct the filters to show the interfaces." %}
+                {% endif %}
             </div>
         </div>
     </div>
@@ -214,7 +172,7 @@
                     <div class="form-check">
                         <input class="form-check-input" type="checkbox" id="applyVlanGroupToAll">
                         <label class="form-check-label" for="applyVlanGroupToAll">
-                            Apply group assignments to all interfaces with matching VLANs
+                            Apply these groups to the same VLANs on all interfaces of the device, on every page and in every filter
                         </label>
                     </div>
                 </div>
@@ -231,6 +189,7 @@
 </form>
 {% endif %}
 {% else %}
+
 <div class="card">
     <div class="card-body text-center text-muted py-4">
         <i class="mdi mdi-sync-off mdi-48px"></i>
@@ -270,7 +229,7 @@
                     The most specific scope that contains the VLAN wins. If a VLAN exists in only one group,
                     that group is selected regardless of scope. Click the <i class="mdi mdi-pencil"></i> icon
                     on any row to change the group assignment for individual VLANs.</p>
-                <p>Check <strong>Apply group assignments to all interfaces with matching VLANs</strong> in the
+                <p>Check <strong>Apply these groups to the same VLANs on all interfaces of the device, on every page and in every filter</strong> in the
                     modal to apply your selection to every interface that shares the same VLAN IDs. This choice is
                     saved for the duration of the cache, so subsequent table pages will also use it.</p>
                 <p>VLANs shown with a <i class="mdi mdi-alert text-danger"></i>
@@ -322,83 +281,36 @@
             <div class="modal-body">
                 <div class="alert alert-warning">
                     <i class="mdi mdi-alert me-2"></i>
-                    {% if migrated_to_marker %}
-                    {% if migrated_to_winner %}
-                    {# Migrated donor: this is a transfer-only flow (no bulk delete), so the copy #}
-                    {# must describe moving interfaces to the winner, not deleting them. #}
-                    <strong>Migrated device:</strong> The following interfaces exist in NetBox but are not found in the
-                    LibreNMS data. Use <em>Move</em> on a row to transfer that interface — together with its cables, IPs
-                    and MACs — to {{ migrated_to_winner.name }}.
-                    {% else %}
-                    <strong>Warning:</strong> The following interfaces exist on the migrated donor but are not found in
-                    the LibreNMS data. The migration winner is unavailable, so these interfaces can't be moved until the
-                    stale marker is resolved.
-                    {% endif %}
-                    {% else %}
-                    <strong>Warning:</strong> The following interfaces exist in NetBox but are not found in the LibreNMS
-                    data.
-                    Deleting these interfaces will permanently remove them from NetBox. This action cannot be undone.
-                    {% endif %}
+                    <div>
+                        {% if migrated_to_marker %}
+                        {% if migrated_to_winner %}
+                        {# Migrated donor: this is a transfer-only flow (no bulk delete), so the copy #}
+                        {# must describe moving interfaces to the winner, not deleting them. #}
+                        <strong>Migrated device:</strong> The following interfaces exist in NetBox but are not found in the
+                        LibreNMS data. Use <em>Move</em> on a row to transfer that interface — together with its cables, IPs
+                        and MACs — to {{ migrated_to_winner.name }}.
+                        {% else %}
+                        <strong>Warning:</strong> The following interfaces exist on the migrated donor but are not found in
+                        the LibreNMS data. The migration winner is unavailable, so these interfaces can't be moved until the
+                        stale marker is resolved.
+                        {% endif %}
+                        {% else %}
+                        <strong>Warning:</strong> The following interfaces exist in NetBox but are not found in the LibreNMS
+                        data.
+                        Deleting these interfaces will permanently remove them from NetBox. This action cannot be undone.
+                        {% endif %}
+                    </div>
                 </div>
 
                 {% if interface_sync.netbox_only_interfaces %}
-                <form id="delete-netbox-interfaces-form">
-                    {% csrf_token %}
-                    <div class="table-responsive">
-                        <table class="table table-hover">
-                            <thead>
-                                <tr>
-                                    {# In migrated mode the bulk-delete button is hidden, so the #}
-                                    {# select-all column is a dead control — drop it entirely. #}
-                                    {% if not migrated_to_marker %}
-                                    <th>
-                                        <input type="checkbox" id="select-all-netbox-interfaces"
-                                            class="form-check-input"
-                                            aria-label="Select all NetBox-only interfaces">
-                                    </th>
-                                    {% endif %}
-                                    <th>Interface Name</th>
-                                    <th>Type</th>
-                                    <th>Status</th>
-                                    <th>Description</th>
-                                    {% if migrated_to_marker %}<th class="text-end">Migrate</th>{% endif %}
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {% for interface in interface_sync.netbox_only_interfaces %}
-                                <tr>
-                                    {# Per-row bulk-select checkbox: only meaningful for the bulk #}
-                                    {# delete path, which is hidden in migrated mode. #}
-                                    {% if not migrated_to_marker %}
-                                    <td>
-                                        <input type="checkbox" name="interface_ids" value="{{ interface.id }}"
-                                            class="form-check-input netbox-interface-checkbox"
-                                            aria-label="Select interface {{ interface.name }}">
-                                    </td>
-                                    {% endif %}
-                                    <td>
-                                        <a href="{{ interface.url }}" target="_blank">{{ interface.name }}</a>
-                                    </td>
-                                    <td>{{ interface.type }}</td>
-                                    <td>
-                                        {% if interface.enabled %}
-                                        <span class="text-success">Enabled</span>
-                                        {% else %}
-                                        <span class="text-danger">Disabled</span>
-                                        {% endif %}
-                                    </td>
-                                    <td>{{ interface.description|default:"-" }}</td>
-                                    {% if migrated_to_marker %}
-                                    <td class="text-end">
-                                        {% include "netbox_librenms_plugin/inc/_migrate_move_button.html" with move_url_name="plugins:netbox_librenms_plugin:interface_move_to_winner" obj_id=interface.id obj_label=interface.name entity_word="interface" winner=migrated_to_winner server_key=migrated_to_marker.server_key|default:interface_sync.server_key %}
-                                    </td>
-                                    {% endif %}
-                                </tr>
-                                {% endfor %}
-                            </tbody>
-                        </table>
+                {% with model_name=interface_sync.object|meta:"model_name" %}
+                {% url 'plugins:netbox_librenms_plugin:netbox_only_interfaces' object_type=model_name pk=interface_sync.object.pk as netbox_only_path %}
+                <div id="netbox-only-interfaces-rows" hx-get="{% sync_tab_url netbox_only_path server_key=interface_sync.server_key %}" hx-trigger="intersect once" hx-swap="innerHTML">
+                    <div class="text-center text-muted py-3" role="status">
+                        <span class="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>Loading interfaces
                     </div>
-                </form>
+                </div>
+                {% endwith %}
                 {% else %}
                 <div class="alert alert-info">
                     <i class="mdi mdi-information me-2"></i>
@@ -423,4 +335,7 @@
             </div>
         </div>
     </div>
+</div>
+
+</div>
 </div>
