@@ -49,6 +49,7 @@ Migration 0026 creates the **Fixed-platform built-in units** rule below once for
   match_type: class_is
   pattern: other
   action: include
+  manufacturer: "Juniper"
   prefer_description: true
   require_serial_match_parent: false
   enabled: true
@@ -102,6 +103,7 @@ Juniper MX480 and MX960 routers report each Switch Control Board as class `backp
   pattern: backplane
   action: include
   name_pattern: "^SCB"
+  manufacturer: "Juniper"
   prefer_description: true
   require_serial_match_parent: false
   enabled: true
