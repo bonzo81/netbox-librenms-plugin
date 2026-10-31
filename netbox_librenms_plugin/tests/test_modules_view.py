@@ -4501,7 +4501,7 @@ class TestPositionalMatchClassAware:
         }
         inventory.append(item)
         index_map = {i["entPhysicalIndex"]: i for i in inventory}
-        return BaseModuleTableView._match_bay_by_position(item, index_map, bays)
+        return BaseModuleTableView._match_bay_by_position(item, index_map, bays, frozenset())
 
     @staticmethod
     def _bay(name, position=None):
@@ -4545,7 +4545,7 @@ class TestPositionalMatchClassAware:
         }
         inventory.append(item)
         index_map = {i["entPhysicalIndex"]: i for i in inventory}
-        return BaseModuleTableView._match_bay_by_position(item, index_map, bays)
+        return BaseModuleTableView._match_bay_by_position(item, index_map, bays, frozenset())
 
     def test_fan_does_not_match_slot_bay(self):
         """A fan (class=fan) must not land in a 'Slot 1' bay even when positional says slot 1."""
