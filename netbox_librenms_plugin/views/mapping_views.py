@@ -9,6 +9,7 @@ from netbox_librenms_plugin.filters import (
     DeviceTypeMappingFilterSet,
     InterfaceTypeMappingFilterSet,
     InventoryIgnoreRuleFilterSet,
+    IPAddressMappingFilterSet,
     LocationMappingFilterSet,
     ModuleBayMappingFilterSet,
     ModuleTypeMappingFilterSet,
@@ -30,6 +31,9 @@ from netbox_librenms_plugin.forms import (
     InventoryIgnoreRuleFilterForm,
     InventoryIgnoreRuleForm,
     InventoryIgnoreRuleImportForm,
+    IPAddressMappingFilterForm,
+    IPAddressMappingForm,
+    IPAddressMappingImportForm,
     LocationMappingFilterForm,
     LocationMappingForm,
     LocationMappingImportForm,
@@ -57,6 +61,7 @@ from netbox_librenms_plugin.models import (
     DeviceTypeMapping,
     InterfaceTypeMapping,
     InventoryIgnoreRule,
+    IPAddressMapping,
     LocationMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
@@ -70,6 +75,7 @@ from netbox_librenms_plugin.tables.mappings import (
     DeviceTypeMappingTable,
     InterfaceTypeMappingTable,
     InventoryIgnoreRuleTable,
+    IPAddressMappingTable,
     LocationMappingTable,
     ModuleBayMappingTable,
     ModuleTypeMappingTable,
@@ -103,8 +109,28 @@ class InterfaceTypeMappingCreateView(LibreNMSGenericWritePermissionMixin, generi
     form = InterfaceTypeMappingForm
 
 
+class _RefuseCsvRegexColumnsMixin:
+    """Refuse a CSV import that carries a column in ``verbatim_fields``: NetBox's CSV parser strips every cell."""
+
+    verbatim_fields = ("name_pattern",)
+
+    def create_and_update_objects(self, form, request):
+        """Refuse the import before any row is written when a regex column arrives through CSV."""
+        # NetBox sets _csv_headers (normalized, so "name_pattern.x" is "name_pattern") only for CSV input.
+        headers = getattr(form, "_csv_headers", {})
+        columns = [field for field in self.verbatim_fields if field in headers]
+        if columns:
+            raise ValidationError(
+                "CSV import strips spaces at the start and end of each cell, and spaces are part of a regex, "
+                f"so rules with a {', '.join(columns)} column must be imported as YAML or JSON."
+            )
+        return super().create_and_update_objects(form, request)
+
+
 @register_model_view(InterfaceTypeMapping, "bulk_import", path="import", detail=False)
-class InterfaceTypeMappingBulkImportView(LibreNMSGenericWritePermissionMixin, generic.BulkImportView):
+class InterfaceTypeMappingBulkImportView(
+    _RefuseCsvRegexColumnsMixin, LibreNMSGenericWritePermissionMixin, generic.BulkImportView
+):
     """
     Import `InterfaceTypeMapping` objects from CSV, JSON, or YAML.
 
@@ -113,16 +139,6 @@ class InterfaceTypeMappingBulkImportView(LibreNMSGenericWritePermissionMixin, ge
 
     queryset = InterfaceTypeMapping.objects.all()
     model_form = InterfaceTypeMappingImportForm
-
-    def create_and_update_objects(self, form, request):
-        """Refuse a CSV import with a name_pattern column: NetBox's CSV parser strips every cell."""
-        # NetBox sets _csv_headers (normalized, so "name_pattern.x" is "name_pattern") only for CSV input.
-        if "name_pattern" in getattr(form, "_csv_headers", {}):
-            raise ValidationError(
-                "CSV import strips spaces at the start and end of each cell, and spaces are part of a regex, "
-                "so rules with a name_pattern column must be imported as YAML or JSON."
-            )
-        return super().create_and_update_objects(form, request)
 
 
 class InterfaceTypeMappingView(LibreNMSGenericPermissionMixin, generic.ObjectView):
@@ -155,6 +171,66 @@ class InterfaceTypeMappingChangeLogView(LibreNMSGenericPermissionMixin, generic.
     """Provides a view for displaying the change log of a specific `InterfaceTypeMapping` object."""
 
     queryset = InterfaceTypeMapping.objects.all()
+
+
+# --- IPAddressMapping views ---
+
+
+class IPAddressMappingListView(LibreNMSGenericPermissionMixin, generic.ObjectListView):
+    """Provides a view for listing all IPAddressMapping objects."""
+
+    queryset = IPAddressMapping.objects.select_related("vrf")
+    table = IPAddressMappingTable
+    filterset = IPAddressMappingFilterSet
+    filterset_form = IPAddressMappingFilterForm
+    template_name = "netbox_librenms_plugin/ipaddressmapping_list.html"
+
+
+class IPAddressMappingCreateView(LibreNMSGenericWritePermissionMixin, generic.ObjectEditView):
+    """Provides a view for creating a new IPAddressMapping object."""
+
+    queryset = IPAddressMapping.objects.all()
+    form = IPAddressMappingForm
+
+
+@register_model_view(IPAddressMapping, "bulk_import", path="import", detail=False)
+class IPAddressMappingBulkImportView(LibreNMSGenericWritePermissionMixin, generic.BulkImportView):
+    """Provides a view for bulk importing IPAddressMapping objects."""
+
+    queryset = IPAddressMapping.objects.all()
+    model_form = IPAddressMappingImportForm
+
+
+class IPAddressMappingView(LibreNMSGenericPermissionMixin, generic.ObjectView):
+    """Provides a view for displaying details of a specific IPAddressMapping object."""
+
+    queryset = IPAddressMapping.objects.select_related("vrf")
+
+
+class IPAddressMappingEditView(LibreNMSGenericWritePermissionMixin, generic.ObjectEditView):
+    """Provides a view for editing a specific IPAddressMapping object."""
+
+    queryset = IPAddressMapping.objects.all()
+    form = IPAddressMappingForm
+
+
+class IPAddressMappingDeleteView(LibreNMSGenericWritePermissionMixin, generic.ObjectDeleteView):
+    """Provides a view for deleting a specific IPAddressMapping object."""
+
+    queryset = IPAddressMapping.objects.all()
+
+
+class IPAddressMappingBulkDeleteView(LibreNMSGenericWritePermissionMixin, generic.BulkDeleteView):
+    """Provides a view for deleting multiple IPAddressMapping objects."""
+
+    queryset = IPAddressMapping.objects.all()
+    table = IPAddressMappingTable
+
+
+class IPAddressMappingChangeLogView(LibreNMSGenericPermissionMixin, generic.ObjectChangeLogView):
+    """Provides a view for displaying the change log of a specific IPAddressMapping object."""
+
+    queryset = IPAddressMapping.objects.all()
 
 
 # --- DeviceTypeMapping views ---
@@ -418,11 +494,14 @@ class InventoryIgnoreRuleCreateView(LibreNMSGenericWritePermissionMixin, generic
 
 
 @register_model_view(InventoryIgnoreRule, "bulk_import", path="import", detail=False)
-class InventoryIgnoreRuleBulkImportView(LibreNMSGenericWritePermissionMixin, generic.BulkImportView):
+class InventoryIgnoreRuleBulkImportView(
+    _RefuseCsvRegexColumnsMixin, LibreNMSGenericWritePermissionMixin, generic.BulkImportView
+):
     """Provides a view for bulk importing InventoryIgnoreRule objects."""
 
     queryset = InventoryIgnoreRule.objects.all()
     model_form = InventoryIgnoreRuleImportForm
+    verbatim_fields = tuple(InventoryIgnoreRule.FILTER_SOURCES)
 
 
 class InventoryIgnoreRuleView(LibreNMSGenericPermissionMixin, generic.ObjectView):
@@ -491,6 +570,10 @@ class BulkExportYAMLView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
 
 class InterfaceTypeMappingBulkExportYAMLView(BulkExportYAMLView):
     queryset = InterfaceTypeMapping.objects.select_related("platform")
+
+
+class IPAddressMappingBulkExportYAMLView(BulkExportYAMLView):
+    queryset = IPAddressMapping.objects.select_related("vrf")
 
 
 class DeviceTypeMappingBulkExportYAMLView(BulkExportYAMLView):

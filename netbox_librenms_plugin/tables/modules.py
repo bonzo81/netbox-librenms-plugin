@@ -5,14 +5,27 @@ import django_tables2 as tables
 from django.urls import reverse
 from django.utils.html import format_html, mark_safe
 from netbox.tables.columns import ToggleColumn
-from utilities.paginator import EnhancedPaginator
 
+from netbox_librenms_plugin.module_grants import (
+    ACTION_INSTALL_BRANCH,
+    ACTION_INSTALL_MODULE,
+    ACTION_INSTALL_SELECTED_ROW,
+    ACTION_MARK_BUILT_IN,
+    ACTION_MISMATCH_PREVIEW,
+    ACTION_UPDATE_INTERFACE,
+    ACTION_UPDATE_SERIAL,
+    ACTION_VERIFY_MODULE,
+    RENDER_ATTRIBUTED,
+    RENDER_PINNED,
+    sign_module_grant,
+)
 from netbox_librenms_plugin.utils import (
     SYNC_TABLE_HEADER_ATTRS,
-    get_table_paginate_count,
-    module_inventory_binding_token,
+    coerce_positive_int,
     netbox_relocates_module_subtree,
+    note_icon,
     oob_badge_html,
+    paginate_sync_table,
     render_vc_member_options,
 )
 
@@ -108,6 +121,9 @@ class LibreNMSModuleTable(tables.Table):
         can_add_module_bay_mapping=False,
         can_map_existing_bay=False,
         can_add_module_type_mapping=False,
+        can_change_device_type=False,
+        can_add_inventory_rule=False,
+        can_change_inventory_rule=False,
         **kwargs,
     ):
         """Initialize table with optional device context."""
@@ -115,6 +131,8 @@ class LibreNMSModuleTable(tables.Table):
         self.csrf_token = ""
         self.server_key = server_key
         self.inventory_snapshot_digest = ""
+        self.policy_fingerprint = ""
+        self.render_mode = RENDER_ATTRIBUTED
         self.has_write_permission = has_write_permission
         self.can_add_module = can_add_module
         self.can_change_module = can_change_module
@@ -127,6 +145,9 @@ class LibreNMSModuleTable(tables.Table):
         self.can_add_module_bay_mapping = can_add_module_bay_mapping
         self.can_map_existing_bay = can_map_existing_bay
         self.can_add_module_type_mapping = can_add_module_type_mapping
+        self.can_change_device_type = can_change_device_type
+        self.can_add_inventory_rule = can_add_inventory_rule
+        self.can_change_inventory_rule = can_change_inventory_rule
         super().__init__(*args, **kwargs)
         # Batch-load the installed modules (with module_type + interface templates) referenced by
         # the rows, so render_actions' VC "Report VC issue" diagnostic doesn't run a per-row
@@ -168,6 +189,53 @@ class LibreNMSModuleTable(tables.Table):
         self.htmx_url = None
         self.prefix = "modules_"
 
+    @property
+    def selection_allowed(self) -> bool:
+        """Return whether the viewer may select rows for a selected install."""
+        return bool(self.has_write_permission and self.can_add_module)
+
+    @property
+    def grants_enabled(self) -> bool:
+        """Return whether the table signs indexed actions: it knows its snapshot and an unambiguous policy."""
+        return bool(self.server_key and self.inventory_snapshot_digest and self.policy_fingerprint)
+
+    def grant_index(self, record):
+        """Return the row's index when the table may sign an action for it, else None."""
+        return coerce_positive_int(record.get("ent_physical_index")) if self.grants_enabled else None
+
+    def grant(self, action, record, *, action_target=None, rows=None):
+        """Sign one action of *record* for this page, snapshot, policy and render mode."""
+        return sign_module_grant(
+            page_device_id=self.device.pk,
+            device_id=record.get("selected_device_id") or self.device.pk,
+            server_key=self.server_key,
+            action=action,
+            ent_index=record.get("ent_physical_index"),
+            action_target=action_target,
+            rows=rows,
+            inventory_digest=self.inventory_snapshot_digest,
+            policy_fingerprint=self.policy_fingerprint,
+            render_mode=self.render_mode,
+        )
+
+    def selection_override(self, record):
+        """Sign the selected install of *record* onto its target, for a row a verify render made selectable."""
+        return self.grant(ACTION_INSTALL_SELECTED_ROW, record)
+
+    def render_selection(self, value, record):
+        """Render the row checkbox; a row a selected install can not act on gets a disabled one."""
+        disabled = (
+            ""
+            if record.get("selectable")
+            else mark_safe(' disabled title="A selected install can not act on this row"')
+        )
+        return format_html(
+            '<input type="checkbox" name="select" value="{}" class="form-check-input" aria-label="Select {}"{}>',
+            "" if value is None else value,
+            record.get("name") or value,
+            disabled,
+        )
+
     def configure(self, request):
         """Configure pagination settings and CSRF token."""
         from django.middleware.csrf import get_token
@@ -199,8 +267,7 @@ class LibreNMSModuleTable(tables.Table):
             self.return_url = safe_relative or request.get_full_path()
         else:
             self.return_url = ""
-        paginate = {"paginator_class": EnhancedPaginator, "per_page": get_table_paginate_count(request, self.prefix)}
-        tables.RequestConfig(request, paginate).configure(self)
+        paginate_sync_table(self, request)
 
     def render_name(self, value, record):
         """Render inventory item name with tree indentation for sub-components."""
@@ -380,7 +447,7 @@ class LibreNMSModuleTable(tables.Table):
             )
             else "Installing"
         )
-        badge = self._status_badge_html(value, record)
+        badge = self._status_badge_html(value, record) + self._parent_report_html(record)
         return format_html(
             '<span class="lnms-status-live">{}</span>'
             '<span class="lnms-installing badge bg-primary text-white" role="status" title="{}…">'
@@ -389,6 +456,20 @@ class LibreNMSModuleTable(tables.Table):
             in_flight_label,
             in_flight_label,
         )
+
+    @staticmethod
+    def _parent_report_html(record):
+        """Render the warning for a parent index that is not in the inventory, or the note for a repaired one."""
+        if (dangling := record.get("dangling_parent")) is not None:
+            return format_html(
+                ' <span class="badge bg-warning text-dark" title="{}">'
+                '<i class="mdi mdi-file-tree-outline"></i> Parent Missing</span>',
+                f"LibreNMS reports parent index {dangling}, which is not in the inventory.",
+            )
+        if (reported := record.get("reported_parent")) is not None:
+            note = f"LibreNMS reports parent index {reported}; the @ locator in the description sets the parent."
+            return format_html(" {}", note_icon("mdi-information-outline text-muted", note))
+        return mark_safe("")
 
     def _status_badge_html(self, value, record):
         """Render sync status with badge."""
@@ -471,19 +552,18 @@ class LibreNMSModuleTable(tables.Table):
 
         if value == "Name Conflict" and (conflict_reason := record.get("name_conflict_reason")):
             status_html = format_html(
-                '<span class="badge {}">{}</span> <i class="mdi mdi-alert-outline text-warning" title="{}"></i>',
+                '<span class="badge {}">{}</span> {}',
                 badge_class,
                 display_text,
-                conflict_reason,
+                note_icon("mdi-alert-outline text-warning", conflict_reason),
             )
         elif warning:
             status_html = format_html(
-                '<span class="badge {}" title="{}">{}</span>'
-                ' <i class="mdi mdi-alert-outline text-warning" title="{}"></i>',
+                '<span class="badge {}" title="{}">{}</span> {}',
                 badge_class,
                 warning,
                 display_text,
-                warning,
+                note_icon("mdi-alert-outline text-warning", warning),
             )
         else:
             status_html = format_html('<span class="badge {}">{}</span>', badge_class, display_text)
@@ -625,18 +705,15 @@ class LibreNMSModuleTable(tables.Table):
         # Single install button (requires add permission). The view resolves the row by index, so a
         # row without one can only submit a form the view refuses; the carrier action below has no
         # inventory row of its own and stays indexless.
-        if self.can_add_module and record.get("can_install") and record.get("ent_physical_index"):
+        if self.can_add_module and record.get("can_install") and self.grant_index(record):
             url = reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": self.device.pk})
-            inventory_binding = module_inventory_binding_token(
-                record.get("selected_device_id") or self.device.pk,
-                self.server_key,
-                "install_module",
-                {
+            inventory_binding = self.grant(
+                ACTION_INSTALL_MODULE,
+                record,
+                action_target={
                     "module_bay_id": record.get("module_bay_id"),
                     "module_type_id": record.get("module_type_id"),
                 },
-                record.get("ent_physical_index"),
-                record["inventory_digest"],
             )
             buttons.append(
                 format_html(
@@ -678,18 +755,22 @@ class LibreNMSModuleTable(tables.Table):
         if (
             self.can_add_module
             and record.get("has_installable_children")
-            and record.get("ent_physical_index")
-            and self.inventory_snapshot_digest
+            and record.get("branch_rows")
+            and self.grant_index(record)
         ):
             url = reverse("plugins:netbox_librenms_plugin:install_branch", kwargs={"pk": self.device.pk})
-            inventory_binding = module_inventory_binding_token(
-                record.get("selected_device_id") or self.device.pk,
-                self.server_key,
-                "install_branch",
-                {"parent_index": record.get("ent_physical_index")},
-                record.get("ent_physical_index"),
-                self.inventory_snapshot_digest,
+            inventory_binding = self.grant(
+                ACTION_INSTALL_BRANCH,
+                record,
+                action_target={"parent_index": record.get("ent_physical_index")},
+                rows=record["branch_rows"],
             )
+            branch_title, branch_label = "Install this module and all installable children", "Install Branch"
+            if self.render_mode == RENDER_PINNED:
+                # A verified branch installs onto the member the user picked, so the control names it.
+                member = record.get("selected_device_name") or ""
+                branch_title = f"Install this module and its installable children on {member}"
+                branch_label = f"Install Branch on {member}"
             buttons.append(
                 format_html(
                     # hx-post: the view answers with the module tab fragment, swapped into
@@ -715,9 +796,9 @@ class LibreNMSModuleTable(tables.Table):
                         "install-branch",
                         "btn-primary",
                         mark_safe(' type="submit"'),
-                        "Install this module and all installable children",
+                        branch_title,
                         "mdi-file-tree",
-                        "Install Branch",
+                        branch_label,
                     ),
                 )
             )
@@ -728,16 +809,11 @@ class LibreNMSModuleTable(tables.Table):
             self.can_change_module
             and record.get("can_update_serial")
             and record.get("installed_module_id")
-            and record.get("ent_physical_index")
+            and self.grant_index(record)
         ):
             url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": self.device.pk})
-            inventory_binding = module_inventory_binding_token(
-                record.get("selected_device_id") or self.device.pk,
-                self.server_key,
-                "update_module_serial",
-                {"module_id": record["installed_module_id"]},
-                record.get("ent_physical_index"),
-                record["inventory_digest"],
+            inventory_binding = self.grant(
+                ACTION_UPDATE_SERIAL, record, action_target={"module_id": record["installed_module_id"]}
             )
             buttons.append(
                 format_html(
@@ -777,16 +853,11 @@ class LibreNMSModuleTable(tables.Table):
             getattr(self, "can_change_interface", False)
             and record.get("can_update_interface_binding")
             and record.get("installed_module_id")
-            and record.get("ent_physical_index")
+            and self.grant_index(record)
         ):
             url = reverse("plugins:netbox_librenms_plugin:update_module_interface", kwargs={"pk": self.device.pk})
-            inventory_binding = module_inventory_binding_token(
-                record.get("selected_device_id") or self.device.pk,
-                self.server_key,
-                "update_module_interface",
-                {"module_id": record["installed_module_id"]},
-                record.get("ent_physical_index"),
-                record["inventory_digest"],
+            inventory_binding = self.grant(
+                ACTION_UPDATE_INTERFACE, record, action_target={"module_id": record["installed_module_id"]}
             )
             buttons.append(
                 format_html(
@@ -862,8 +933,7 @@ class LibreNMSModuleTable(tables.Table):
             and self.can_delete_module
             and record.get("can_replace")
             and record.get("installed_module_id")
-            and record.get("ent_physical_index") is not None
-            and record.get("ent_physical_index") != ""
+            and self.grant_index(record)
         ):
             preview_url = reverse(
                 "plugins:netbox_librenms_plugin:module_mismatch_preview", kwargs={"pk": self.device.pk}
@@ -874,6 +944,9 @@ class LibreNMSModuleTable(tables.Table):
                     "ent_index": record.get("ent_physical_index", ""),
                     "server_key": self.server_key or "",
                     "selected_device_id": record.get("selected_device_id") or self.device.pk,
+                    "inventory_binding": self.grant(
+                        ACTION_MISMATCH_PREVIEW, record, action_target={"module_id": record["installed_module_id"]}
+                    ),
                 }
             )
             buttons.append(
@@ -1160,6 +1233,9 @@ class LibreNMSModuleTable(tables.Table):
                 )
             )
 
+        if built_in_control := self._built_in_control(record):
+            buttons.append(built_in_control)
+
         # Report-VC-normalization-issue button: appears only on installed-module rows when
         # the page device is a VC member AND template-name VC rewriting would no-op for
         # the installed module's interface templates (typically: unsupported vendor naming).
@@ -1201,9 +1277,80 @@ class LibreNMSModuleTable(tables.Table):
             '<span class="d-inline-flex flex-wrap align-items-center gap-1">{}</span>', mark_safe("".join(buttons))
         )
 
+    def _built_in_control(self, record):
+        """
+        Render the "Mark built-in" control of a candidate row, or None when the viewer may not use it.
+
+        The confirm modal records the row's model as the part number of a device type without one, or only
+        adds the rule when the device type already holds the model. A device type with another part number
+        keeps it, so the control opens the rule form instead, pre-filled with a transparent class rule that
+        matches this exact model.
+        """
+        built_in = record.get("built_in")
+        if not built_in:
+            return None
+        records = built_in["records_part_number"]
+        if not (records and (built_in["part_number"] or "").strip()):
+            rule_permission = self.can_change_inventory_rule if built_in["rule_id"] else self.can_add_inventory_rule
+            type_permission = self.can_change_device_type or not records
+            if not (type_permission and rule_permission and self.grant_index(record)):
+                return None
+            modal_url = reverse("plugins:netbox_librenms_plugin:mark_built_in", kwargs={"pk": self.device.pk})
+            params = urlencode(
+                {
+                    "server_key": self.server_key or "",
+                    "selected_device_id": record.get("selected_device_id") or self.device.pk,
+                    "ent_index": record.get("ent_physical_index", ""),
+                    "inventory_binding": self.grant(
+                        ACTION_MARK_BUILT_IN, record, action_target={"device_type_id": built_in["device_type_id"]}
+                    ),
+                }
+            )
+            return module_action_control(
+                "button",
+                "mark-built-in",
+                "btn-outline-secondary",
+                format_html(
+                    ' type="button" hx-get="{}?{}" hx-target="#htmx-modal-content" hx-swap="innerHTML"'
+                    ' hx-sync="#htmx-modal-content:replace" hx-disabled-elt="this"',
+                    modal_url,
+                    params,
+                ),
+                "Mark this unit as built into the chassis and hide the units that report its model",
+                "mdi-chip",
+                "Mark Built-in",
+            )
+        if not self.can_add_inventory_rule:
+            return None
+        params = {
+            "name": f"Built-in {built_in['model']}"[:100],
+            "match_type": "class_is",
+            "pattern": record.get("item_class") or "",
+            "action": "transparent",
+            # A filter searches the raw model, which LibreNMS can pad with spaces.
+            "model_pattern": rf"^\s*{re.escape(built_in['model'])}\s*$",
+            # An empty value leaves the checkbox clear: the built-in unit can carry its own serial.
+            "require_serial_match_parent": "",
+            "manufacturer": built_in["manufacturer_id"],
+        }
+        if return_url := getattr(self, "return_url", ""):
+            params["return_url"] = return_url
+        return module_action_control(
+            "a",
+            "mark-built-in",
+            "btn-outline-secondary",
+            format_html(
+                ' href="{}?{}"', reverse("plugins:netbox_librenms_plugin:inventoryignorerule_add"), urlencode(params)
+            ),
+            "Mark this unit as built into the chassis: open a transparent rule for this class and exact model",
+            "mdi-chip",
+            "Mark Built-in",
+        )
+
     def format_module_data(self, record):
         """Format a module row for verify endpoint partial updates."""
         return {
+            "selection": str(self.render_selection(record.get("ent_physical_index"), record)),
             "name": str(self.render_name(record.get("name"), record)),
             "model": str(self.render_model(record.get("model"), record)),
             "serial": str(self.render_serial(record.get("serial"), record)),
@@ -1224,7 +1371,7 @@ class VCModuleTable(LibreNMSModuleTable):
         accessor="selected_device_id",
         orderable=False,
         empty_values=(),
-        attrs={"td": {"data-col": "device_selection"}},
+        attrs={"td": {"class": "device-selection-col", "data-col": "device_selection"}},
         visible=False,
     )
 
@@ -1240,12 +1387,31 @@ class VCModuleTable(LibreNMSModuleTable):
     def render_device_selection(self, value, record):
         selected_device_id = record.get("selected_device_id") or self.device.id
         ent_index = record.get("ent_physical_index", "")
+        # The verify grant signs the page table's rows of this subtree; the grant field carries a verified retarget.
+        verify_rows = record.get("verify_rows")
+        verify_binding = (
+            self.grant(ACTION_VERIFY_MODULE, record, rows=[[index] for index in dict.fromkeys(verify_rows)])
+            if self.grant_index(record) and verify_rows is not None
+            else ""
+        )
+        selection_grant = (
+            format_html(
+                '<input type="hidden" name="selection_grant_{}" value="{}">',
+                ent_index,
+                record.get("selection_grant", ""),
+            )
+            if self.grant_index(record)
+            else ""
+        )
 
         return format_html(
             '<select name="device_selection_{0}" id="device_selection_{0}" '
-            'class="form-select vc-member-select" data-module="{0}" data-row-id="{0}">{1}</select>',
+            'class="form-select vc-member-select" data-module="{0}" data-row-id="{0}"'
+            ' data-verify-binding="{1}">{2}</select>{3}',
             ent_index,
+            verify_binding,
             render_vc_member_options(self._vc_members, selected_device_id),
+            selection_grant,
         )
 
     def format_module_data(self, record):

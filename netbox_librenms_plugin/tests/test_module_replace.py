@@ -16,6 +16,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
 from netbox_librenms_plugin.tests.view_test_helpers import (
+    assert_titled_icons_are_named,
     assert_update_logged,
     change_logging,
     get as view_get,
@@ -23,8 +24,9 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     make_user_with_perms,
     make_view,
     message_texts,
-    module_row_binding,
     post as view_post,
+    rendered_modal_form,
+    rendered_preview_query,
     trusted_module_inventory_payload,
 )
 
@@ -66,6 +68,28 @@ def _cache_inventory(view, device, inventory):
     return cache_key
 
 
+def _cache_preview(view, device, inventory, request):
+    """Cache *inventory* and add the preview grant that the rendered Replace button of the requested row carries."""
+    cache_key = _cache_inventory(view, device, inventory)
+    query = rendered_preview_query(device, request.GET["ent_index"], user=request.user)
+    assert query["module_id"] == request.GET["module_id"]
+    request.GET = request.GET.copy()
+    request.GET["inventory_binding"] = query["inventory_binding"]
+    return cache_key
+
+
+def _row(index, bay, model, serial, **extra):
+    """Return an inventory row that the bay matcher places in *bay*."""
+    return {
+        "entPhysicalIndex": index,
+        "entPhysicalClass": "module",
+        "entPhysicalName": bay.name,
+        "entPhysicalModelName": model,
+        "entPhysicalSerialNum": serial,
+        **extra,
+    }
+
+
 class TestModuleMismatchPreviewView:
     def _setup(self, tag, *, installed_model="INSTALLED", librenms_model=None, installed_serial="OLD", serial="NEW"):
         from netbox_librenms_plugin.views.sync.modules import ModuleMismatchPreviewView
@@ -79,13 +103,7 @@ class TestModuleMismatchPreviewView:
             {"module_id": str(installed.pk), "ent_index": "100", "server_key": "default"},
         )
         view = _view(ModuleMismatchPreviewView, request)
-        inventory = [
-            {
-                "entPhysicalIndex": 100,
-                "entPhysicalModelName": librenms_model or module_type.model,
-                "entPhysicalSerialNum": serial,
-            }
-        ]
+        inventory = [_row(100, bay, librenms_model or module_type.model, serial)]
         return device, installed, request, view, inventory
 
     def test_the_preview_shows_the_serial_without_the_vendor_marker(self):
@@ -95,10 +113,12 @@ class TestModuleMismatchPreviewView:
         Rendering the raw value beside the stored one reads as a mismatch against a module that
         already agrees with its own inventory row.
         """
-        device, _installed, request, view, inventory = self._setup(
-            "marker", installed_serial="NS123", serial="S/N NS123"
-        )
-        cache_key = _cache_inventory(view, device, inventory)
+        from dcim.models import Module
+
+        device, installed, request, view, inventory = self._setup("marker", installed_serial="OLD", serial="S/N NS123")
+        cache_key = _cache_preview(view, device, inventory, request)
+        # Another writer stores the clean serial after the page renders, so the module agrees with its row.
+        Module.objects.filter(pk=installed.pk).update(serial="NS123")
         try:
             response = view_get(view, request, pk=device.pk)
         finally:
@@ -111,18 +131,33 @@ class TestModuleMismatchPreviewView:
         # The reported symptom: the row read as a serial mismatch against itself.
         assert "Only the serial differs" not in html
 
-    def test_the_preview_refuses_an_oob_sourced_row(self):
-        """OOB-controller inventory is read-only, so the dialog that leads to Replace must refuse it."""
+    def test_the_recognised_type_icon_is_named(self):
+        device, installed, request, view, inventory = self._setup("named-icon")
+        cache_key = _cache_preview(view, device, inventory, request)
+        try:
+            response = view_get(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 200
+        icons = assert_titled_icons_are_named(response.content.decode())
+        assert any("mdi-check-decagram" in icon["class"] for icon in icons)
+
+    def test_the_preview_refuses_an_oob_row_named_with_the_grant_of_a_host_row(self):
+        """OOB-controller inventory renders no Replace button, so a crafted index for it carries another row's grant."""
+        from netbox_librenms_plugin.module_grants import GrantRefusal
+
         device, _installed, request, view, inventory = self._setup("oob")
-        inventory[0]["_source"] = "oob"
-        cache_key = _cache_inventory(view, device, inventory)
+        inventory.append({**inventory[0], "entPhysicalIndex": 200, "_source": "oob"})
+        cache_key = _cache_preview(view, device, inventory, request)
+        request.GET["ent_index"] = "200"
         try:
             response = view_get(view, request, pk=device.pk)
         finally:
             cache.delete(cache_key)
 
         assert response.status_code == 400
-        assert b"read-only" in response.content
+        assert GrantRefusal.STALE.message in response.content.decode()
 
     @pytest.mark.parametrize(
         "query",
@@ -145,7 +180,7 @@ class TestModuleMismatchPreviewView:
         device, _installed, request, view, inventory = self._setup("cache")
 
         assert view_get(view, request, pk=device.pk).status_code == 400
-        cache_key = _cache_inventory(view, device, inventory)
+        cache_key = _cache_preview(view, device, inventory, request)
         request.GET = request.GET.copy()
         request.GET["ent_index"] = "999"
         try:
@@ -155,7 +190,7 @@ class TestModuleMismatchPreviewView:
 
     def test_exact_real_module_type_renders_the_match_badge(self):
         device, _installed, request, view, inventory = self._setup("matched")
-        cache_key = _cache_inventory(view, device, inventory)
+        cache_key = _cache_preview(view, device, inventory, request)
         try:
             response = view_get(view, request, pk=device.pk)
         finally:
@@ -181,7 +216,7 @@ class TestModuleMismatchPreviewView:
             netbox_module_type=installed.module_type,
             manufacturer=device.device_type.manufacturer,
         )
-        cache_key = _cache_inventory(view, device, inventory)
+        cache_key = _cache_preview(view, device, inventory, request)
         try:
             response = view_get(view, request, pk=device.pk)
         finally:
@@ -206,7 +241,7 @@ class TestModuleMismatchPreviewView:
             netbox_module_type=other_type,
             manufacturer=device.device_type.manufacturer,
         )
-        cache_key = _cache_inventory(view, device, inventory)
+        cache_key = _cache_preview(view, device, inventory, request)
         try:
             response = view_get(view, request, pk=device.pk)
         finally:
@@ -223,7 +258,7 @@ class TestModuleMismatchPreviewView:
         other_type = make_module_type("PREVIEW-CONFLICT-TYPE")
         other_bay = make_module_bay(other_device, "Conflict Bay")
         conflict = _module(other_device, other_bay, other_type, "CONFLICT-SERIAL")
-        cache_key = _cache_inventory(view, device, inventory)
+        cache_key = _cache_preview(view, device, inventory, request)
         try:
             response = view_get(view, request, pk=device.pk)
         finally:
@@ -238,44 +273,29 @@ class TestReplaceModuleView:
     def _setup(self, tag, *, new_serial="NEW-SERIAL", item_extra=None):
         from dcim.models import Module
 
-        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
-
         device = make_device(f"replace-{tag}")
         old_type = make_module_type(f"REPLACE-OLD-{tag}")
         new_type = make_module_type(f"REPLACE-NEW-{tag}")
         bay = make_module_bay(device, f"Replace Bay {tag}")
         installed = _module(device, bay, old_type, f"OLD-SERIAL-{tag}")
-        inventory = [
-            {
-                "entPhysicalIndex": 100,
-                "entPhysicalModelName": new_type.model,
-                "entPhysicalSerialNum": new_serial,
-                **(item_extra or {}),
-            }
-        ]
-        request = make_request(
-            "post",
-            {
-                "module_id": str(installed.pk),
-                "ent_index": "100",
-                "server_key": "default",
-                "inventory_binding": module_row_binding(
-                    device,
-                    "replace_module",
-                    inventory[0],
-                    action_target={"module_id": installed.pk},
-                ),
-            },
-        )
-        view = _view(ReplaceModuleView, request)
-        return Module, device, old_type, new_type, bay, installed, request, view, inventory
+        inventory = [_row(100, bay, new_type.model, new_serial, **(item_extra or {}))]
+        return Module, device, old_type, new_type, bay, installed, inventory
+
+    @staticmethod
+    def _post(device, inventory, *, user=None, ent_index=100):
+        """Cache *inventory*, then post the Replace form of the modal that the rendered row opens."""
+        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
+
+        user = user or make_superuser()
+        cache_key = _cache_inventory(ReplaceModuleView(), device, inventory)
+        _action, fields = rendered_modal_form(device, ent_index, "replace-module", user=user)
+        request = make_request("post", fields, user=user)
+        return request, _view(ReplaceModuleView, request), cache_key
 
     def test_the_replacement_stores_the_serial_without_the_vendor_marker(self):
         """The stored serial must match what the install path writes for the same inventory row."""
-        Module, device, _old_type, _new_type, bay, _installed, request, view, inventory = self._setup(
-            "marker", new_serial="S/N NS123"
-        )
-        cache_key = _cache_inventory(view, device, inventory)
+        Module, device, _old_type, _new_type, bay, _installed, inventory = self._setup("marker", new_serial="S/N NS123")
+        request, view, cache_key = self._post(device, inventory)
         try:
             response = view_post(view, request, pk=device.pk)
         finally:
@@ -288,11 +308,11 @@ class TestReplaceModuleView:
         """The bind's own savepoint takes a real PostgreSQL error; the replacement still commits."""
         from netbox_librenms_plugin.tests.lock_conflict_helpers import aborting_statement
 
-        Module, device, _old_type, new_type, bay, installed, request, view, inventory = self._setup(
+        Module, device, _old_type, new_type, bay, installed, inventory = self._setup(
             "bind-error", item_extra={"_librenms_port_id": 6690, "_librenms_ifname": "Ethernet69"}
         )
         interface = make_interface(device, "Ethernet69")
-        cache_key = _cache_inventory(view, device, inventory)
+        request, view, cache_key = self._post(device, inventory)
         try:
             with aborting_statement(lambda sql, params: sql.startswith('UPDATE "dcim_interface"')) as failed:
                 response = view_post(view, request, pk=device.pk)
@@ -318,10 +338,8 @@ class TestReplaceModuleView:
             replacement=r"\1",
             priority=100,
         )
-        Module, device, _old_type, _new_type, bay, _installed, request, view, inventory = self._setup(
-            "padded", new_serial="S/N NS123"
-        )
-        cache_key = _cache_inventory(view, device, inventory)
+        Module, device, _old_type, _new_type, bay, _installed, inventory = self._setup("padded", new_serial="S/N NS123")
+        request, view, cache_key = self._post(device, inventory)
         try:
             view_post(view, request, pk=device.pk)
         finally:
@@ -329,11 +347,15 @@ class TestReplaceModuleView:
 
         assert Module.objects.get(device=device, module_bay=bay).serial == "NS123"
 
-    def test_an_oob_sourced_row_cannot_replace_a_host_module(self):
-        """A crafted POST naming an OOB row's index deleted the real module and installed the OOB row."""
-        Module, device, old_type, _new_type, bay, installed, request, view, inventory = self._setup("oob")
-        inventory[0]["_source"] = "oob"
-        cache_key = _cache_inventory(view, device, inventory)
+    def test_an_oob_row_named_with_the_grant_of_a_host_row_cannot_replace_the_module(self):
+        """A crafted POST naming an OOB row's index deleted the real module; the grant now names the host row only."""
+        from netbox_librenms_plugin.module_grants import GrantRefusal
+
+        Module, device, old_type, _new_type, bay, installed, inventory = self._setup("oob")
+        inventory.append({**inventory[0], "entPhysicalIndex": 200, "_source": "oob"})
+        request, view, cache_key = self._post(device, inventory)
+        request.POST = request.POST.copy()
+        request.POST["ent_index"] = "200"
         try:
             view_post(view, request, pk=device.pk)
         finally:
@@ -342,7 +364,7 @@ class TestReplaceModuleView:
         installed.refresh_from_db()
         assert installed.module_type == old_type
         assert Module.objects.filter(device=device, module_bay=bay).count() == 1
-        assert any("read-only" in text for text in message_texts(request))
+        assert message_texts(request, "error") == [GrantRefusal.STALE.message]
 
     def test_invalid_parameters_and_missing_cache_redirect_with_errors(self):
         from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
@@ -353,14 +375,17 @@ class TestReplaceModuleView:
         assert invalid_response.status_code == 302
         assert any("Missing or invalid" in text for text in message_texts(invalid_request))
 
-        _Module, device, _old, _new, _bay, _installed, request, view, _inventory = self._setup("no-cache")
+        _Module, device, _old, _new, _bay, _installed, inventory = self._setup("no-cache")
+        request, view, cache_key = self._post(device, inventory)
+        # The snapshot expires between the render and the click.
+        cache.delete(cache_key)
         response = view_post(view, request, pk=device.pk)
         assert response.status_code == 302
         assert any("cache" in text.lower() for text in message_texts(request))
 
     def test_replacement_deletes_the_old_row_and_creates_the_real_new_module(self):
-        Module, device, old_type, new_type, bay, installed, request, view, inventory = self._setup("success")
-        cache_key = _cache_inventory(view, device, inventory)
+        Module, device, old_type, new_type, bay, installed, inventory = self._setup("success")
+        request, view, cache_key = self._post(device, inventory)
         try:
             response = view_post(view, request, pk=device.pk)
         finally:
@@ -375,7 +400,9 @@ class TestReplaceModuleView:
 
     def test_replacement_refuses_an_inventory_index_reused_after_preview(self):
         """A replacement must not use a new row that reused the previewed inventory index."""
-        Module, device, old_type, _new_type, bay, installed, request, view, inventory = self._setup("stale")
+        from netbox_librenms_plugin.module_grants import GrantRefusal
+
+        Module, device, old_type, _new_type, bay, installed, inventory = self._setup("stale")
         replacement_type = make_module_type("REPLACE-REUSED-TYPE")
         replacement_inventory = [
             {
@@ -384,6 +411,7 @@ class TestReplaceModuleView:
                 "entPhysicalSerialNum": "REUSED-SERIAL",
             }
         ]
+        request, view, _rendered_key = self._post(device, inventory)
         cache_key = _cache_inventory(view, device, replacement_inventory)
         try:
             response = view_post(view, request, pk=device.pk)
@@ -395,13 +423,10 @@ class TestReplaceModuleView:
         assert installed.module_type == old_type
         assert installed.module_bay == bay
         assert Module.objects.filter(device=device, module_bay=bay).count() == 1
-        assert any(
-            message.startswith("Inventory action is stale or does not match this row.")
-            for message in message_texts(request, "error")
-        )
+        assert GrantRefusal.SNAPSHOT.message in message_texts(request, "error")
 
     def test_replacement_removes_the_single_real_serial_conflict(self):
-        Module, device, _old_type, new_type, bay, installed, request, view, inventory = self._setup(
+        Module, device, _old_type, new_type, bay, installed, inventory = self._setup(
             "conflict",
             new_serial="SHARED-NEW-SERIAL",
         )
@@ -409,7 +434,7 @@ class TestReplaceModuleView:
         conflict_type = make_module_type("REPLACE-CONFLICT-OWNER-TYPE")
         conflict_bay = make_module_bay(conflict_device, "Replace Conflict Owner Bay")
         conflict = _module(conflict_device, conflict_bay, conflict_type, "SHARED-NEW-SERIAL")
-        cache_key = _cache_inventory(view, device, inventory)
+        request, view, cache_key = self._post(device, inventory)
         try:
             response = view_post(view, request, pk=device.pk)
         finally:
@@ -426,7 +451,6 @@ class TestReplaceModuleView:
         from dcim.models import Device, Interface, InterfaceTemplate, Module, ModuleType
 
         from netbox_librenms_plugin.tests.view_test_helpers import grant
-        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
 
         device = make_device("replace-adoption-scope")
         old_type = make_module_type("REPLACE-ADOPTION-OLD")
@@ -440,6 +464,7 @@ class TestReplaceModuleView:
             [
                 ("view", Device),
                 ("view", ModuleType),
+                ("view", Module),
                 ("add", Module),
                 ("change", Module),
                 ("delete", Module),
@@ -448,30 +473,8 @@ class TestReplaceModuleView:
             ],
         )
         user = grant(user, "change", Interface, constraints={"device__modules__isnull": True})
-        inventory = [
-            {
-                "entPhysicalIndex": 100,
-                "entPhysicalModelName": new_type.model,
-                "entPhysicalSerialNum": "ADOPTION-NEW-SERIAL",
-            }
-        ]
-        request = make_request(
-            "post",
-            {
-                "module_id": str(installed.pk),
-                "ent_index": "100",
-                "server_key": "default",
-                "inventory_binding": module_row_binding(
-                    device,
-                    "replace_module",
-                    inventory[0],
-                    action_target={"module_id": installed.pk},
-                ),
-            },
-            user=user,
-        )
-        view = _view(ReplaceModuleView, request)
-        cache_key = _cache_inventory(view, device, inventory)
+        inventory = [_row(100, bay, new_type.model, "ADOPTION-NEW-SERIAL")]
+        request, view, cache_key = self._post(device, inventory, user=user)
         try:
             response = view_post(view, request, pk=device.pk)
         finally:

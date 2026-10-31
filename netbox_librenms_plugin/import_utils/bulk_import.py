@@ -23,7 +23,6 @@ from ..transactions import classify_conflict
 from ..utils import (
     cached_row_matches,
     exception_text_for,
-    find_devices_by_serial,
     normalize_serial,
     normalize_stack_serial,
     preload_normalization_rules,
@@ -51,6 +50,7 @@ from .virtual_chassis import (
     VC_MASTER_UNKNOWN_WARNING,
     candidate_vc_serial_keys,
     create_virtual_chassis_with_members,
+    devices_with_serial,
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
     identify_vc_master,
@@ -550,8 +550,6 @@ def bulk_import_devices_shared(  # noqa: C901
                 device_mappings["site_id"] = validation["site"]["site"].id
             if validation["device_type"].get("found") and validation["device_type"].get("device_type"):
                 device_mappings["device_type_id"] = validation["device_type"]["device_type"].id
-            if validation["platform"].get("found") and validation["platform"].get("platform"):
-                device_mappings["platform_id"] = validation["platform"]["platform"].id
 
             # Override with any manual mappings provided for this device
             if manual_mappings_per_device and device_id in manual_mappings_per_device:
@@ -627,6 +625,12 @@ def bulk_import_devices_shared(  # noqa: C901
                 # Log progress after each successful import
                 if job and job.logger:
                     job.logger.info(f"Imported device {idx} of {total}")
+                for warn_msg in result["warnings"]:
+                    warnings_list.append(warn_msg)
+                    if job and job.logger:
+                        job.logger.warning(warn_msg)
+                    else:
+                        logger.warning(warn_msg)
 
                 if vc_data.get("is_stack", False) and not creates_vc:
                     warn_msg = VC_MASTER_UNKNOWN_WARNING.format(device_id=device_id)
@@ -1189,8 +1193,8 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             ambiguous_fallback = False
             if not import_as_vm:
                 serial = normalize_serial(libre_device.get("serial"))
-                if serial and serial != "-":
-                    serial_matches = find_devices_by_serial(serial)
+                if normalize_stack_serial(serial):
+                    serial_matches = devices_with_serial(serial)
                     if len(serial_matches) > 1:
                         ambiguous_fallback = True
                     elif serial_matches:

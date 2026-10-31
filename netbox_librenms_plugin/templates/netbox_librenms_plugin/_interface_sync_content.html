@@ -35,19 +35,8 @@
     document.querySelector('[name=csrfmiddlewaretoken]'). Emit a standalone token so those
     JS-driven requests don't hit a null token (TypeError/403). A bare hidden input never
     auto-submits, so it doesn't reintroduce the live-form problem flagged above.
-    The same JS handlers read input[name="server_key"] to scope verify/sync POSTs to the
-    right LibreNMS server; without it, migrated-mode requests on a non-default server fall
-    back to null and hit the wrong server/cache. Emit it here too (still no auto-submit).
     {% endcomment %}
     <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
-    {% comment %}
-    Prefer the marker-scoped server_key (the server the donor was migrated under), falling back
-    to the active interface_sync.server_key — the same precedence the migrated Move button uses,
-    so JS handlers reading this input target the right LibreNMS server in either case.
-    {% endcomment %}
-    {% with effective_server_key=migrated_to_marker.server_key|default:interface_sync.server_key %}
-    {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" with server_key=effective_server_key %}
-    {% endwith %}
 {% else %}
 {% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_type=model_name object_id=interface_sync.object.pk as sync_url %}
 {# htmx swaps the tab in place, so the page, page size and scroll position survive; method/action stay as the no-JS fallback. #}
@@ -145,24 +134,6 @@
                 </div>
             </div>
             <style>
-                /* Your existing CSS rules */
-                .ts-wrapper.multi .ts-control {
-                    display: flex !important;
-                    flex-wrap: wrap;
-                    align-items: center;
-                }
-
-                /* A fixed width keeps the member dropdown from resizing on open, and narrow enough for the table to fit its card. */
-                td[data-col="device_selection"] {
-                    width: 13rem;
-                    min-width: 13rem;
-                }
-
-                td[data-col="device_selection"] .ts-wrapper {
-                    width: 100%;
-                    max-width: 100%;
-                }
-
                 /* A row the interface rules ignore is shown greyed, and only on request. */
                 #librenms-interface-table tr[data-rule-state="ignored"] > td,
                 #librenms-interface-table-vm tr[data-rule-state="ignored"] > td {
@@ -322,23 +293,25 @@
             <div class="modal-body">
                 <div class="alert alert-warning">
                     <i class="mdi mdi-alert me-2"></i>
-                    {% if migrated_to_marker %}
-                    {% if migrated_to_winner %}
-                    {# Migrated donor: this is a transfer-only flow (no bulk delete), so the copy #}
-                    {# must describe moving interfaces to the winner, not deleting them. #}
-                    <strong>Migrated device:</strong> The following interfaces exist in NetBox but are not found in the
-                    LibreNMS data. Use <em>Move</em> on a row to transfer that interface — together with its cables, IPs
-                    and MACs — to {{ migrated_to_winner.name }}.
-                    {% else %}
-                    <strong>Warning:</strong> The following interfaces exist on the migrated donor but are not found in
-                    the LibreNMS data. The migration winner is unavailable, so these interfaces can't be moved until the
-                    stale marker is resolved.
-                    {% endif %}
-                    {% else %}
-                    <strong>Warning:</strong> The following interfaces exist in NetBox but are not found in the LibreNMS
-                    data.
-                    Deleting these interfaces will permanently remove them from NetBox. This action cannot be undone.
-                    {% endif %}
+                    <div>
+                        {% if migrated_to_marker %}
+                        {% if migrated_to_winner %}
+                        {# Migrated donor: this is a transfer-only flow (no bulk delete), so the copy #}
+                        {# must describe moving interfaces to the winner, not deleting them. #}
+                        <strong>Migrated device:</strong> The following interfaces exist in NetBox but are not found in the
+                        LibreNMS data. Use <em>Move</em> on a row to transfer that interface — together with its cables, IPs
+                        and MACs — to {{ migrated_to_winner.name }}.
+                        {% else %}
+                        <strong>Warning:</strong> The following interfaces exist on the migrated donor but are not found in
+                        the LibreNMS data. The migration winner is unavailable, so these interfaces can't be moved until the
+                        stale marker is resolved.
+                        {% endif %}
+                        {% else %}
+                        <strong>Warning:</strong> The following interfaces exist in NetBox but are not found in the LibreNMS
+                        data.
+                        Deleting these interfaces will permanently remove them from NetBox. This action cannot be undone.
+                        {% endif %}
+                    </div>
                 </div>
 
                 {% if interface_sync.netbox_only_interfaces %}
