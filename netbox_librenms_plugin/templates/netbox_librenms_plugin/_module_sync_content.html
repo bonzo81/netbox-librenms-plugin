@@ -5,7 +5,33 @@
 {% endif %}
 
 <!-- Module Sync Table -->
-{% if module_sync.table %}
+{% if module_sync.inventory_rule_error %}
+{% with rule_error=module_sync.inventory_rule_error %}
+<div class="alert alert-danger" role="alert" id="module-inventory-rule-error">
+    <i class="mdi mdi-alert-circle me-2"></i>
+    <div>
+        Inventory Ignore Rule
+        <a href="{% url 'plugins:netbox_librenms_plugin:inventoryignorerule_detail' pk=rule_error.rule_pk %}">{{ rule_error.rule_name }}</a>
+        stores an invalid <code>{{ rule_error.field }}</code> regex, so no module rows are shown.
+        Fix or disable the rule, then reload this tab.
+    </div>
+</div>
+{% endwith %}
+{% elif module_sync.table %}
+{% with refused=module_sync.devices_without_inventory_class %}
+{% if refused %}
+<div class="alert alert-warning" role="alert" id="module-no-inventory-class">
+    <i class="mdi mdi-alert me-2"></i>
+    <div>
+        No inventory class is admitted for
+        {% for device in refused %}<strong>{{ device }}</strong>{% if not forloop.last %}, {% endif %}{% endfor %}:
+        no enabled include rule applies, so the table shows no ENTITY-MIB rows for {{ refused|length|pluralize:"it,them" }}.
+        Add or enable one in
+        <a href="{% url 'plugins:netbox_librenms_plugin:inventoryignorerule_list' %}">Inventory Ignore Rules</a>.
+    </div>
+</div>
+{% endif %}
+{% endwith %}
 {# Migrated donors must not install: drop the whole form (not just the button) so install_selected isn't a live POST target / wired JS handler in migrated mode — matching the other sync-content templates. #}
 {% if has_write_permission and not migrated_to_marker %}
 {# Separate form for Install Selected — uses JS to collect checked rows before submit #}

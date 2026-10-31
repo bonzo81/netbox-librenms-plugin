@@ -98,7 +98,7 @@ class TestInterfaceMacContract:
         with CaptureQueriesContext(connection) as queries:
             changed = assign_interface_mac(interface, "00:11:22:33:44:55")
 
-        assert changed is not primary
+        assert changed is (not primary)
         assert interface.primary_mac_address_id == mac.pk
         assert [query["sql"] for query in queries.captured_queries if query["sql"].startswith("UPDATE")] == []
 

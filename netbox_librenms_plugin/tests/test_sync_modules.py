@@ -31,6 +31,7 @@ from netbox_librenms_plugin.tests.lock_conflict_helpers import (
     second_connection,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import (
+    get as view_get,
     make_request,
     message_texts,
     module_row_binding,
@@ -56,6 +57,7 @@ class TestInstallSerialRulePreloading:
 
         from dcim.models import Interface, ModuleBay
 
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView, _module_component_specs
 
         items = [
@@ -72,7 +74,7 @@ class TestInstallSerialRulePreloading:
         remaining = list(bays)
         with (
             patch.object(InstallBranchView, "_find_parent_module_id", return_value=None),
-            patch.object(InstallBranchView, "_match_bay", side_effect=lambda *a, **kw: remaining.pop(0)),
+            patch.object(BaseModuleTableView, "_match_bay_for_item", side_effect=lambda *a, **kw: remaining.pop(0)),
         ):
             for item in items:
                 InstallBranchView._install_single(
@@ -276,12 +278,15 @@ class TestInventoryCacheContract:
             ([], None),
             ({"inventory": "bad"}, None),
             ({"inventory": ["bad"]}, None),
+            ({"version": True, "inventory": []}, None),
         ],
     )
     def test_inventory_container_validation(self, payload, expected):
-        from netbox_librenms_plugin.views.sync.modules import _extract_inventory_list
+        from netbox_librenms_plugin.sync_cache import MODULE_INVENTORY_CACHE_VERSION, cached_module_inventory
 
-        assert _extract_inventory_list(payload) == expected
+        if isinstance(payload, dict) and "version" not in payload:
+            payload = {"version": MODULE_INVENTORY_CACHE_VERSION, **payload}
+        assert cached_module_inventory(payload) == expected
 
     def test_current_fingerprint_returns_the_real_cached_rows(self, live_librenms):
         from netbox_librenms_plugin.views.sync.modules import _get_cached_inventory_for_device
@@ -304,7 +309,7 @@ class TestInventoryCacheContract:
         assert _get_cached_inventory_for_device(device, "default", view.get_cache_key) is None
 
     def test_resolve_posted_inventory_row_returns_the_cache_row_for_ent_index(self, live_librenms):
-        """The resolver hands back the cached row itself, so the caller reads its _source marker."""
+        """The resolver hands back the cached row itself and the authenticated inventory it is in."""
         from netbox_librenms_plugin.views.sync.modules import _resolve_posted_inventory_row
 
         device = make_device("resolve-row-hit", librenms_cf={"default": 771})
@@ -327,7 +332,7 @@ class TestInventoryCacheContract:
             }
         )
 
-        row, refusal = _resolve_posted_inventory_row(
+        row, inventory, refusal = _resolve_posted_inventory_row(
             request,
             device,
             device,
@@ -340,6 +345,8 @@ class TestInventoryCacheContract:
         assert refusal is None
         assert row["_librenms_port_id"] == 42
         assert row["_librenms_ifname"] == "Te1/1/1"
+        assert inventory == [item]
+        assert any(entry is row for entry in inventory)
 
     def test_resolve_posted_inventory_row_refuses_a_missing_ent_index(self, live_librenms):
         """Without an index there is no row to read, so the resolver refuses instead of guessing."""
@@ -351,7 +358,7 @@ class TestInventoryCacheContract:
         # The identity the deleted fallback used to read, with no index to resolve it against.
         request = _post_request({"librenms_port_id": "56284", "librenms_ifname": "Te1/1/1", "server_key": "default"})
 
-        row, refusal = _resolve_posted_inventory_row(
+        row, inventory, refusal = _resolve_posted_inventory_row(
             request,
             device,
             device,
@@ -361,7 +368,7 @@ class TestInventoryCacheContract:
             action_target={"module_id": 17},
         )
 
-        assert row is None
+        assert (row, inventory) == (None, None)
         assert refusal is not None
         assert "Missing or invalid inventory index." in message_texts(request, "error")
 
@@ -374,7 +381,7 @@ class TestInventoryCacheContract:
         seed_inventory(view, device, [_inventory_item(77, "CARD", "Te1/1/1")], librenms_id=555)
         request = _post_request({"ent_index": "77", "server_key": "default"})
 
-        row, refusal = _resolve_posted_inventory_row(
+        row, inventory, refusal = _resolve_posted_inventory_row(
             request,
             device,
             device,
@@ -384,7 +391,7 @@ class TestInventoryCacheContract:
             action_target={"module_id": 17},
         )
 
-        assert row is None
+        assert (row, inventory) == (None, None)
         assert refusal is not None
         assert "No cached inventory data. Please refresh modules first." in message_texts(request, "error")
 
@@ -949,6 +956,42 @@ class TestInstallAndUpdateViews:
         assert module.module_type == module_type
         assert module.serial == "VIEW-SERIAL"
         assert any("Installed VIEW-INSTALL-CARD" in text for text in message_texts(request))
+
+    @pytest.mark.parametrize(("phys_class", "model"), [("port", "Linecard-Port"), ("container", "")])
+    def test_single_install_refuses_a_holder_row_with_a_valid_binding(self, live_librenms, phys_class, model):
+        """A binding signed for a holder row, e.g. on a page rendered before a rule change, installs nothing."""
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        device = make_device(f"view-install-holder-{phys_class}", librenms_cf={"default": 52})
+        bay = make_module_bay(device, "Holder Bay")
+        module_type = make_module_type(f"HOLDER-CARD-{phys_class.upper()}")
+        item = _inventory_item(520, model, bay.name, phys_class=phys_class)
+        request = _post_request(
+            {
+                "module_bay_id": bay.pk,
+                "module_type_id": module_type.pk,
+                "ent_index": 520,
+                "server_key": "default",
+                "inventory_binding": module_inventory_binding_token(
+                    device.pk,
+                    "default",
+                    "install_module",
+                    {"module_bay_id": bay.pk, "module_type_id": module_type.pk},
+                    520,
+                    module_inventory_row_digest(item),
+                ),
+            }
+        )
+        view = _view(InstallModuleView, request, live_librenms)
+        seed_inventory(view, device, [item], librenms_id=52)
+
+        response = view_post(view, request, pk=device.pk)
+
+        assert response.status_code == 302
+        assert not Module.objects.filter(device=device).exists()
+        assert message_texts(request, "error") == ["Nothing was installed: not hardware."]
 
     def test_a_database_error_in_the_bind_keeps_the_install(self, live_librenms):
         """The bind's own savepoint takes a real PostgreSQL error; the install still commits."""
@@ -1546,6 +1589,59 @@ class TestInstallAndUpdateViews:
         # Without this, a regression in bay matching or module-type resolution also installs
         # nothing and keeps the test green for a reason the rule never caused.
         assert any("matched ignore rule" in text for text in message_texts(request)), message_texts(request)
+
+    def test_an_ancestor_skip_rule_of_another_member_does_not_hide_a_selected_row(self, live_librenms):
+        """The parent belongs to the page member, so only that member's rules decide whether it hides the row."""
+        from dcim.models import Manufacturer, Module, ModuleType, VirtualChassis
+
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+        from netbox_librenms_plugin.tests.test_modules_view import _make_view, _run_build_context_real
+        from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
+
+        page_mfr = Manufacturer.objects.create(name="Ancestor Page Vendor", slug="ancestor-page-vendor")
+        member_mfr = Manufacturer.objects.create(name="Ancestor Member Vendor", slug="ancestor-member-vendor")
+        page = make_device_with_module_bays("ancestor-rules-page", [], manufacturer=page_mfr, serial="SN-PAGE")
+        member = make_device_with_module_bays(
+            "ancestor-rules-member", ["Optic B"], manufacturer=member_mfr, serial="SN-MEMBER"
+        )
+        vc = VirtualChassis.objects.create(name="ancestor-rules-vc")
+        for position, device in ((1, page), (2, member)):
+            device.virtual_chassis = vc
+            device.vc_position = position
+            device.save()
+        seed_stored_mapping(page, {"default": {"id": 78}}, save=True)
+        module_type = ModuleType.objects.create(manufacturer=member_mfr, model="AncestorRulesOptic")
+        # Scoped to the member's vendor: the serial-less parent stays with the page member, its child goes to the member.
+        InventoryIgnoreRule.objects.create(
+            name="ancestor-rules-skip",
+            match_type=InventoryIgnoreRule.MATCH_ENDS_WITH,
+            pattern="Card A",
+            action=InventoryIgnoreRule.ACTION_SKIP,
+            require_serial_match_parent=False,
+            manufacturer=member_mfr,
+        )
+        rows = [
+            _inventory_item(100, "ANCESTOR-PAGE-CARD", "Card A"),
+            _inventory_item(101, module_type.model, "Optic B", parent=100, serial="SN-MEMBER"),
+        ]
+        table_indexes = {row["ent_physical_index"] for row in _run_build_context_real(_make_view(), rows, page)}
+        request = _post_request(
+            {
+                "select": ["101"],
+                "server_key": "default",
+                "device_selection_101": str(member.pk),
+                "inventory_binding": _bulk_inventory_binding(page, "install_selected", rows),
+            }
+        )
+        view = _view(InstallSelectedView, request, live_librenms)
+        seed_inventory(view, page, rows, librenms_id=78)
+
+        view_post(view, request, pk=page.pk)
+
+        assert {100, 101} <= table_indexes
+        assert not any("matched ignore rule" in text for text in message_texts(request)), message_texts(request)
+        assert Module.objects.get(device=member, module_type=module_type).module_bay.name == "Optic B"
 
     def test_install_selected_uses_real_cache_mapping_and_models(self, live_librenms):
         from dcim.models import Module
@@ -3853,8 +3949,14 @@ def test_module_advisory_lock_sections_do_not_render_responses():
 
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("selected_member, deleted", [(False, False), (True, False), (True, True)])
-def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(client, selected_member, deleted):
-    """An edit before lock acquisition must reach the selected install's ignore-policy planning."""
+@pytest.mark.parametrize("matched_row", ["selected", "ancestor"])
+def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(
+    client, selected_member, deleted, matched_row
+):
+    """An edit before lock acquisition must reach the selected install's ignore-policy planning.
+
+    The rule matches the selected row itself, or the top-level parent of a selected child.
+    """
     from dcim.models import Device, Module
     from django.core.cache import cache
     from django.db import close_old_connections, connection
@@ -3891,6 +3993,21 @@ def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(cli
             "entPhysicalSerialNum": "CURRENT-PAGE-SERIAL",
         }
     ]
+    selected_index = 1
+    if matched_row == "ancestor":
+        # The rule now matches the top-level parent; the selected child is the row that fits the "System" bay.
+        rows[0].update(entPhysicalName="Chassis unit", entPhysicalModelName="Chassis Unit Model")
+        rows.append(
+            {
+                "entPhysicalIndex": 2,
+                "entPhysicalContainedIn": 1,
+                "entPhysicalClass": "module",
+                "entPhysicalName": "System",
+                "entPhysicalModelName": module_type.model,
+                "entPhysicalSerialNum": "CHILD-SERIAL",
+            }
+        )
+        selected_index = 2
     key = CacheMixin().get_cache_key(page, "inventory", "default")
     cache.set(key, trusted_module_inventory_payload(page, rows))
     changed = []
@@ -3920,8 +4037,8 @@ def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(cli
             response = client.post(
                 reverse("plugins:netbox_librenms_plugin:install_selected", args=[page.pk]),
                 {
-                    "select": ["1"],
-                    "device_selection_1": str(target.pk),
+                    "select": [str(selected_index)],
+                    f"device_selection_{selected_index}": str(target.pk),
                     "server_key": "default",
                     "inventory_binding": module_inventory_binding_token(
                         page.pk,
@@ -3988,3 +4105,129 @@ def test_install_branch_non_numeric_parent_index(client):
     )
     assert response.status_code == 302
     assert "Invalid parent inventory index." in message_texts(response.wsgi_request)
+
+
+@pytest.mark.django_db
+class TestGenericModuleTypeFallback:
+    """A model the table resolves only through the Generic manufacturer must resolve the same way in every writer."""
+
+    @staticmethod
+    def _generic_only_type(model):
+        """Create *model* under a vendor and under Generic, so only the Generic index can resolve it."""
+        from dcim.models import Manufacturer
+
+        generic, _ = Manufacturer.objects.get_or_create(name="Generic", defaults={"slug": "generic"})
+        make_module_type(model)
+        return make_module_type(model, manufacturer=generic)
+
+    def test_a_manufacturer_renamed_to_generic_rebuilds_the_cached_index(self):
+        from dcim.models import Manufacturer
+
+        from netbox_librenms_plugin.utils import get_module_types_indexed, resolve_module_type
+
+        manufacturer = Manufacturer.objects.create(name="Soon Generic", slug="soon-generic")
+        make_module_type("GENERIC-RENAMED")
+        renamed_type = make_module_type("GENERIC-RENAMED", manufacturer=manufacturer)
+        assert resolve_module_type(renamed_type.model, get_module_types_indexed()) is None
+
+        manufacturer.name = "Generic"
+        manufacturer.save()
+
+        assert resolve_module_type(renamed_type.model, get_module_types_indexed()) == renamed_type
+
+    def test_the_branch_install_uses_the_generic_type(self, live_librenms):
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
+        device = make_device("generic-branch", librenms_cf={"default": 91})
+        make_module_bay(device, "Generic Slot")
+        generic_type = self._generic_only_type("GENERIC-SHARED-BRANCH")
+        rows = [
+            {
+                "entPhysicalIndex": 910,
+                "entPhysicalModelName": generic_type.model,
+                "entPhysicalName": "Generic Slot",
+                "entPhysicalDescr": "Generic Slot",
+                "entPhysicalClass": "module",
+                "entPhysicalContainedIn": 0,
+                "entPhysicalSerialNum": "SN-GENERIC-BRANCH",
+            }
+        ]
+        request = _post_request(
+            {
+                "parent_index": "910",
+                "server_key": "default",
+                "inventory_binding": module_inventory_binding_token(
+                    device.pk,
+                    "default",
+                    "install_branch",
+                    {"parent_index": 910},
+                    910,
+                    module_inventory_snapshot_digest(rows),
+                ),
+            }
+        )
+        view = _view(InstallBranchView, request, live_librenms)
+        seed_inventory(view, device, rows, librenms_id=91)
+
+        view_post(view, request, pk=device.pk)
+
+        assert Module.objects.filter(device=device, module_type=generic_type).exists()
+
+    def test_the_replace_uses_the_generic_type(self, live_librenms):
+        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
+
+        device = make_device("generic-replace", librenms_cf={"default": 92})
+        bay = make_module_bay(device, "Generic Replace Bay")
+        installed = install_module(device, bay.name, "GENERIC-REPLACE-OLD")
+        generic_type = self._generic_only_type("GENERIC-SHARED-REPLACE")
+        item = {
+            "entPhysicalIndex": 920,
+            "entPhysicalModelName": generic_type.model,
+            "entPhysicalName": bay.name,
+            "entPhysicalClass": "module",
+            "entPhysicalSerialNum": "SN-GENERIC-REPLACE",
+        }
+        request = _post_request(
+            {
+                "module_id": installed.pk,
+                "ent_index": 920,
+                "server_key": "default",
+                "inventory_binding": module_row_binding(
+                    device, "replace_module", item, action_target={"module_id": installed.pk}
+                ),
+            }
+        )
+        view = _view(ReplaceModuleView, request, live_librenms)
+        seed_inventory(view, device, [item], librenms_id=92)
+
+        view_post(view, request, pk=device.pk)
+
+        assert device.modules.get(module_bay=bay).module_type == generic_type
+
+    def test_the_replace_preview_recognises_the_generic_type(self, live_librenms):
+        from netbox_librenms_plugin.views.sync.modules import ModuleMismatchPreviewView
+
+        device = make_device("generic-preview", librenms_cf={"default": 93})
+        bay = make_module_bay(device, "Generic Preview Bay")
+        generic_type = self._generic_only_type("GENERIC-SHARED-PREVIEW")
+        installed = install_module(device, bay.name, generic_type.model, manufacturer=generic_type.manufacturer)
+        item = {
+            "entPhysicalIndex": 930,
+            "entPhysicalModelName": generic_type.model,
+            "entPhysicalSerialNum": "SN-GENERIC-PREVIEW",
+        }
+        request = make_request(
+            "get",
+            {"module_id": str(installed.pk), "ent_index": "930", "server_key": "default"},
+            user=make_superuser(),
+        )
+        view = _view(ModuleMismatchPreviewView, request, live_librenms)
+        seed_inventory(view, device, [item], librenms_id=93)
+
+        response = view_get(view, request, pk=device.pk)
+
+        assert response.status_code == 200
+        # The badge marks a LibreNMS model that resolved to the installed module's type.
+        assert b"mdi-check-decagram" in response.content

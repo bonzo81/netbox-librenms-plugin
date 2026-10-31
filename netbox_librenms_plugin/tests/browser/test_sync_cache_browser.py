@@ -614,12 +614,13 @@ class TestAMovedCableMemberIsNotRestored:
 class TestADetachedVerifyChangesNothing:
     """A verify answer for a row the tab swap replaced must not touch the new page or storage."""
 
-    def test_an_old_answer_after_a_tab_swap_changes_neither_storage_nor_the_blocked_set(self, page):
+    def test_an_old_answer_after_a_tab_swap_changes_neither_storage_nor_the_blocked_set(self, page, fetches):
         rows = [
             {"port_id": "10", "name": "et-0/0/0", "member": "1"},
             {"port_id": "20", "name": "et-0/0/1", "member": "1"},
         ]
         _load_verify_page(page, rows)
+        fetches.install()
         page.check("#cb-20")
         held = _hold_verify(page)
         page.evaluate(
@@ -641,7 +642,7 @@ class TestADetachedVerifyChangesNothing:
         )
         page.uncheck("#cb-20")
         _answer(held[0], _verified_row(rule_state="ignored", selection=""))
-        page.wait_for_timeout(300)
+        fetches.wait_until_settled()
 
         assert _stored_selection(page) == {}
         assert page.evaluate("() => document.querySelector('[data-blocked-port-ids]').dataset.blockedPortIds") == "[]"
@@ -1456,6 +1457,82 @@ def test_an_hx_confirm_question_asks_in_the_plugin_modal(page, accept):
     expect(modal).to_be_hidden()
 
     assert requests == ([f"{HTMX_SYNC_URL}/transfer"] if accept else [])
+    assert page.evaluate("window.confirmCalls") == []
+
+
+def _render_remove_mapping_form(page, server_key):
+    """Render the sync page's real remove-mapping form, cut out of its template, with the page script."""
+    from django.template import Context, Engine, Library
+
+    urls = Library()
+
+    @urls.simple_tag(name="url")
+    def url(name, **kwargs):
+        return "/remove-mapping/"
+
+    engine = Engine()
+    engine.template_builtins.append(urls)
+    source = (TEMPLATE_DIR / "librenms_sync_base.html").read_text(encoding="utf-8")
+    form = re.search(r"<form[^>]*remove_server_mapping.*?</form>", source, flags=re.S).group(0)
+    fragment = engine.from_string(form).render(
+        Context(
+            {
+                "mapping": {"server_key": server_key},
+                "server_key": "production",
+                "lookup_device_pk": 7,
+                "lookup_device_model_name": "device",
+                "csrf_token": "token",
+            },
+            use_l10n=False,
+        )
+    )
+    page.set_content(MODAL_CSS + fragment)
+    _add_page_scripts(page)
+    _spy_on_window_confirm(page)
+    page.evaluate(
+        """() => {
+            window.submitted = [];
+            document.querySelector('form').addEventListener('submit', event => {
+                event.preventDefault();
+                window.submitted.push(Array.from(new FormData(event.target, event.submitter).entries()));
+            });
+        }"""
+    )
+
+
+@pytest.mark.parametrize("dismiss", ["cancel", "escape", "backdrop"])
+def test_remove_mapping_asks_in_the_plugin_modal_and_a_dismissal_submits_nothing(page, dismiss):
+    _render_remove_mapping_form(page, "old-lab")
+
+    page.get_by_role("button", name="Remove").click()
+
+    modal = page.locator(CONFIRM_MODAL)
+    expect(modal.locator("[data-confirm-message]")).to_have_text(
+        "Remove mapping for server 'old-lab'? This cannot be undone."
+    )
+    if dismiss == "cancel":
+        modal.get_by_role("button", name="Cancel").click()
+    elif dismiss == "escape":
+        page.keyboard.press("Escape")
+    else:
+        page.mouse.click(5, 5)
+    expect(modal).to_be_hidden()
+    assert page.evaluate("window.submitted") == []
+    assert page.evaluate("window.confirmCalls") == []
+
+
+def test_remove_mapping_confirmed_in_the_modal_submits_once_and_shows_the_key_as_text(page):
+    _render_remove_mapping_form(page, "o'lab <b>x</b>")
+
+    page.get_by_role("button", name="Remove").click()
+    message = page.locator(f"{CONFIRM_MODAL} [data-confirm-message]")
+    expect(message).to_have_text("Remove mapping for server 'o'lab <b>x</b>'? This cannot be undone.")
+    assert message.locator("b").count() == 0
+    page.locator(CONFIRM_MODAL).get_by_role("button", name="Confirm").click()
+
+    [pairs] = page.evaluate("window.submitted")
+    assert ["server_key", "o'lab <b>x</b>"] in pairs
+    assert ["active_server_key", "production"] in pairs
     assert page.evaluate("window.confirmCalls") == []
 
 
@@ -4619,11 +4696,11 @@ FIT_TABLES = {
 def _render_fit_table(page, table_id, card_width):
     """Render one sync table inside a card of the given width, with the page script initialized."""
     spec = FIT_TABLES[table_id]
-    # The VC member column width comes from the interface template's style block.
-    vc_width = "width: 13rem; min-width: 13rem;"
     head = "".join(f'<th class="text-wrap" data-col="{col}">{label}</th>' for col, label in spec["headers"])
+    # The VC member column opts into the shared width class from librenms_sync.css, as the tables do.
     row = "".join(
-        f'<td data-col="{col}" style="{vc_width if col == "device_selection" else ""}">{spec["cells"][col]}</td>'
+        f'<td data-col="{col}" class="{"device-selection-col" if col == "device_selection" else ""}">'
+        f"{spec['cells'][col]}</td>"
         for col, _label in spec["headers"]
     )
     page.set_content(
@@ -4632,6 +4709,7 @@ def _render_fit_table(page, table_id, card_width):
         f'<table class="table" id="{table_id}"><thead><tr>{head}</tr></thead>'
         f"<tbody>{f'<tr>{row}</tr>' * 3}</tbody></table></div></div>"
     )
+    page.add_style_tag(path=str(STYLE_PATH))
     _add_page_scripts(page)
     page.evaluate("initializeScripts()")
 

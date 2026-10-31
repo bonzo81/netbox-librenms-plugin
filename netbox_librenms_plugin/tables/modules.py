@@ -380,7 +380,7 @@ class LibreNMSModuleTable(tables.Table):
             )
             else "Installing"
         )
-        badge = self._status_badge_html(value, record)
+        badge = self._status_badge_html(value, record) + self._parent_report_html(record)
         return format_html(
             '<span class="lnms-status-live">{}</span>'
             '<span class="lnms-installing badge bg-primary text-white" role="status" title="{}…">'
@@ -389,6 +389,24 @@ class LibreNMSModuleTable(tables.Table):
             in_flight_label,
             in_flight_label,
         )
+
+    @staticmethod
+    def _parent_report_html(record):
+        """Render the warning for a parent index that is not in the inventory, or the note for a repaired one."""
+        if (dangling := record.get("dangling_parent")) is not None:
+            return format_html(
+                ' <span class="badge bg-warning text-dark" title="{}">'
+                '<i class="mdi mdi-file-tree-outline"></i> Parent Missing</span>',
+                f"LibreNMS reports parent index {dangling}, which is not in the inventory.",
+            )
+        if (reported := record.get("reported_parent")) is not None:
+            note = f"LibreNMS reports parent index {reported}; the @ locator in the description sets the parent."
+            return format_html(
+                ' <i class="mdi mdi-information-outline text-muted" role="img" title="{}" aria-label="{}"></i>',
+                note,
+                note,
+            )
+        return mark_safe("")
 
     def _status_badge_html(self, value, record):
         """Render sync status with badge."""
@@ -471,18 +489,21 @@ class LibreNMSModuleTable(tables.Table):
 
         if value == "Name Conflict" and (conflict_reason := record.get("name_conflict_reason")):
             status_html = format_html(
-                '<span class="badge {}">{}</span> <i class="mdi mdi-alert-outline text-warning" title="{}"></i>',
+                '<span class="badge {}">{}</span>'
+                ' <i class="mdi mdi-alert-outline text-warning" role="img" title="{}" aria-label="{}"></i>',
                 badge_class,
                 display_text,
+                conflict_reason,
                 conflict_reason,
             )
         elif warning:
             status_html = format_html(
                 '<span class="badge {}" title="{}">{}</span>'
-                ' <i class="mdi mdi-alert-outline text-warning" title="{}"></i>',
+                ' <i class="mdi mdi-alert-outline text-warning" role="img" title="{}" aria-label="{}"></i>',
                 badge_class,
                 warning,
                 display_text,
+                warning,
                 warning,
             )
         else:
@@ -1224,7 +1245,7 @@ class VCModuleTable(LibreNMSModuleTable):
         accessor="selected_device_id",
         orderable=False,
         empty_values=(),
-        attrs={"td": {"data-col": "device_selection"}},
+        attrs={"td": {"class": "device-selection-col", "data-col": "device_selection"}},
         visible=False,
     )
 

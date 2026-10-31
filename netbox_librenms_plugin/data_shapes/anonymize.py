@@ -23,7 +23,10 @@ from typing import NamedTuple
 from netbox_librenms_plugin.constants import (
     GENERIC_CONTAINER_MODELS,
     JUNOS_FPC_DESCR_PREFIX,
+    JUNOS_FPC_LOCATOR_RE,
     JUNOS_FPC_MEMBER_DESCR_RE,
+    JUNOS_PIC_LOCATOR_RE,
+    JUNOS_PORT_LOCATOR_RE,
     JUNOS_VC_ROOT_DESCR_MARKER,
     LIBRENMS_EMPTY_MESSAGES,
     LIBRENMS_GLOBAL_ROUTING_INSTANCE,
@@ -114,7 +117,7 @@ _MODEL_PLACEHOLDERS = GENERIC_CONTAINER_MODELS | LIBRENMS_PLACEHOLDER_VALUES
 # reasoning: it names the vendor the os-hash masks, and no sync logic reads it.
 MFG_KEYS = frozenset({"entPhysicalMfgName", "vendor"})
 # Replace private ENTITY display text. Structural fields and model tokens keep joins.
-# A description keeps only the Junos Virtual Chassis markers that VC detection reads.
+# A description keeps only the Junos Virtual Chassis markers that VC detection reads and a leading "Front Panel".
 ENTITY_TEXT_KEYS = frozenset({"entPhysicalName", "entPhysicalDescr"})
 # The transceiver OUI is the IEEE-registered manufacturer prefix as an integer: 36965 is 0x009065,
 # Finisar. Where "vendor" is null it is the only vendor identifier on the row, so masking the name
@@ -244,6 +247,8 @@ _IPV6_RE = re.compile(
     rf"|:(?:(?::{_H16}){{1,7}}|:)"  # ::2:3:4:5:6:7:8  ::
     r")(?![0-9A-Fa-f:])"
 )
+# SNMP module-qualified names are not addresses. Keep address-shaped suffixes for the IPv6 scan.
+_MIB_QUALIFIED_NAME_RE = re.compile(r"\b[A-Za-z][\w-]*-MIB::(?P<suffix>[\w:]+)")
 _MAC_RE = re.compile(r"\b(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}\b")
 # Match a full email AND the dotless internal-domain form (``user@host``): internal mail domains and
 # short-hostname contacts (e.g. ``netops@corp``) carry no dot, so requiring one let a real leak slip
@@ -348,6 +353,11 @@ _ENTITY_LOCATOR = r"\d+(?:/(?:\d+|[xc]\d+))+"
 _ENTITY_LOCATOR_RE = re.compile(rf"^{_ENTITY_LOCATOR}$")
 _ENTITY_LOCATOR_SUFFIX_RE = re.compile(rf"(?<![A-Za-z0-9])(?P<locator>{_ENTITY_LOCATOR})$")
 _ENTITY_TOKEN_RE = re.compile(rf"^entity-[0-9a-f]{{6}}(?: {_ENTITY_LOCATOR})?$")
+# Juniper names a Switch Control Board by its SKU ("SCBE2-MX-S"); an include rule matches the prefix.
+_SCB_NAME_PREFIX = "SCB"
+_SCB_NAME_TOKEN_RE = re.compile(r"^SCB entity-[0-9a-f]{6}$")
+# An IOS XE built-in front-panel module is matched by a description rule on this prefix.
+_FRONT_PANEL_DESCR_RE = re.compile(r"^\s*front panel(?P<separator>\s*)", re.IGNORECASE)
 
 
 def pseudonymize_os(os_name):
@@ -551,11 +561,42 @@ def _anon_junos_vc_descr(normalized, rules):
     return None
 
 
-def _anon_entity_text(value, rules, *, keep_vc_markers=False):
+def _anon_junos_located_descr(normalized, rules):
+    """Keep the "@ fpc/pic/port" locator of a Junos description and its PIC/FPC label or VC markers, or return None."""
+    for pattern, label in ((JUNOS_PIC_LOCATOR_RE, "PIC:"), (JUNOS_FPC_LOCATOR_RE, "FPC:")):
+        if located := pattern.fullmatch(normalized):
+            return f"{label} {_entity_token(located['text'], rules)} @ {located['locator']}"
+    located = JUNOS_PORT_LOCATOR_RE.fullmatch(normalized)
+    if located is None:
+        return None
+    prefix = _anon_junos_vc_descr(located["text"], rules)
+    if prefix is None:
+        prefix = _entity_token(located["text"], rules)
+    return f"{prefix} @ {located['locator']}"
+
+
+def _anon_front_panel_descr(value, rules):
+    """Keep a leading "Front Panel" of a description as typed and anonymize the rest, or return None."""
+    front = _FRONT_PANEL_DESCR_RE.match(value)
+    if front is None:
+        return None
+    rest = _anon_entity_text(value[front.end() :], rules, keep_descr_markers=True)
+    return f"{front.group(0)}{rest}" if rest else front.group(0).rstrip()
+
+
+def _anon_entity_text(value, rules, *, keep_descr_markers=False, keep_scb_prefix=False):
     """Replace private ENTITY text while keeping a bounded terminal hierarchy locator."""
-    normalized = value.strip()
-    if keep_vc_markers and (kept := _anon_junos_vc_descr(normalized, rules)) is not None:
+    if keep_descr_markers and (kept := _anon_front_panel_descr(value, rules)) is not None:
         return kept
+    normalized = value.strip()
+    if keep_descr_markers:
+        for keep in (_anon_junos_located_descr, _anon_junos_vc_descr):
+            if (kept := keep(normalized, rules)) is not None:
+                return kept
+    if keep_scb_prefix and normalized.startswith(_SCB_NAME_PREFIX):
+        if _SCB_NAME_TOKEN_RE.fullmatch(normalized):
+            return normalized
+        return f"{_SCB_NAME_PREFIX} entity-{_hash(normalized, rules.salt)}"
     return _entity_token(normalized, rules)
 
 
@@ -793,7 +834,12 @@ def _anon_value(key, value, rules, container=None):  # noqa: C901
     if key in MFG_KEYS:
         return f"MFG-{_hash(value, salt)}"
     if key in ENTITY_TEXT_KEYS:
-        return _anon_entity_text(value, rules, keep_vc_markers=key == "entPhysicalDescr")
+        return _anon_entity_text(
+            value,
+            rules,
+            keep_descr_markers=key == "entPhysicalDescr",
+            keep_scb_prefix=key == "entPhysicalName",
+        )
     if key in VERSION_KEYS:
         return f"fw-{_hash(value, salt)}"
     if key == "os":
@@ -1029,7 +1075,12 @@ def find_pii(recording):
             ):
                 if ip_exempt and kind in ("ipv4", "ipv6", "fqdn"):
                     continue
-                for match in regex.findall(obj):
+                text = (
+                    _MIB_QUALIFIED_NAME_RE.sub(lambda mib: " " + mib["suffix"] if ":" in mib["suffix"] else " ", obj)
+                    if kind == "ipv6"
+                    else obj
+                )
+                for match in regex.findall(text):
                     # IPv6 hex is case-insensitive, so lower-case before the documentation-range
                     # check (e.g. 2001:DB8::1 must still be exempted like 2001:db8::1).
                     if kind in ("ipv4", "ipv6") and _is_documentation_address(match):

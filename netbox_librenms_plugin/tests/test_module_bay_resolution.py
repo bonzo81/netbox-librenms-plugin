@@ -61,7 +61,21 @@ def _bays(device):
 def _find_parent(item, index_map, bays, exact=(), regex=()):
     from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
-    return InstallBranchView._find_parent_module_id(item, index_map, bays, list(exact), list(regex))
+    return InstallBranchView._find_parent_module_id(item, index_map, bays, list(exact), list(regex), None)
+
+
+def _match_bay(item, index_map, module_bays, *, exact=(), regex=()):
+    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+    return BaseModuleTableView._match_bay_for_item(
+        item,
+        index_map,
+        module_bays,
+        exact_mappings=list(exact),
+        regex_mappings=list(regex),
+        manufacturer_id=None,
+        norm_rules_bay={},
+    )
 
 
 def _mapping(**kwargs):
@@ -294,7 +308,7 @@ class TestCandidateBaysForItem:
 class TestBayEligibilityPredicates:
     """The two questions the fallback answers, asked one at a time.
 
-    They share one candidate set in production because _match_bay's method order would otherwise
+    They share one candidate set in production because _match_bay_for_item's method order would otherwise
     be split across two searches. Asking them separately here is what keeps each rule legible.
     """
 
@@ -373,8 +387,6 @@ class TestMatchBay:
     """Bay matching falls through mappings, direct names, and finally position."""
 
     def test_a_regex_mapping_resolves_a_vendor_optics_label(self):
-        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
-
         device = make_device("match-bay-regex")
         bay = make_module_bay(device, "Optics0/0/0/5")
         mapping = _mapping(
@@ -385,7 +397,7 @@ class TestMatchBay:
         )
         item = _item(30, "SFP-X", "Optics 0/0/0/5", phys_class="")
 
-        matched = InstallBranchView._match_bay(item, {30: item}, {bay.name: bay}, [], [mapping])
+        matched = _match_bay(item, {30: item}, {bay.name: bay}, regex=[mapping])
 
         assert matched == bay
 
@@ -395,8 +407,6 @@ class TestMatchBay:
     )
     def test_an_unnamed_container_slot_is_matched_by_its_position(self, container_index, expected_bay):
         """A transceiver in an unnamed cage resolves by which cage slot it sits in."""
-        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
-
         device = make_device(f"match-bay-position-{container_index}")
         bays = {name: make_module_bay(device, name) for name in ("SFP 1", "SFP 2")}
         rows = [
@@ -407,7 +417,7 @@ class TestMatchBay:
         ]
         index_map = {row["entPhysicalIndex"]: row for row in rows}
 
-        matched = InstallBranchView._match_bay(index_map[30], index_map, dict(bays), [], [])
+        matched = _match_bay(index_map[30], index_map, dict(bays))
 
         assert matched == bays[expected_bay]
 
@@ -700,7 +710,8 @@ class TestInstallSingleResolutionPaths:
         rows = [
             _item(1, "CARRIER-4X", "subslot 1/1"),
             _item(10, "", "", parent=1, phys_class="container", entPhysicalParentRelPos=0),
-            _item(30, module_type.model, "Te1/1/2", parent=10, phys_class="port"),
+            # A port without a serial only holds hardware, so the optic carries one.
+            _item(30, module_type.model, "Te1/1/2", parent=10, phys_class="port", serial="SN-TE-1-1-2"),
         ]
         index_map = {row["entPhysicalIndex"]: row for row in rows}
 
@@ -743,6 +754,101 @@ class TestInstallSingleResolutionPaths:
 
         assert result["status"] == "installed"
         assert result["name"] == f"{module_type.model} → PS1"
+
+    def test_a_class_with_surrounding_whitespace_still_takes_its_class_mapping(self):
+        """The installer trims the class the same way the table does before a class-scoped mapping compares it."""
+        device = make_device_with_module_bays("install-class-whitespace", ["PSU Bay A"])
+        module_type = make_module_type("INSTALL-CLASS-WS-PSU")
+        mapping = _mapping(librenms_name="Power Supply 1", librenms_class="powerSupply", netbox_bay_name="PSU Bay A")
+        item = _item(42, module_type.model, "Power Supply 1", phys_class=" powerSupply ")
+
+        result = self._install(
+            device, item, module_types=[module_type], exact_mappings=[mapping], regex_mappings=[], norm_rules_bay={}
+        )
+
+        assert result["status"] == "installed", result
+        assert result["name"] == f"{module_type.model} → PSU Bay A"
+
+    def test_bay_normalization_rules_apply_when_the_caller_preloads_none(self):
+        """Normalized candidates are always part of the chain; without preloaded rules they are read from the database."""
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.create(
+            scope="module_bay", match_pattern=r"^Power Supply (\d+)$", replacement=r"PSU\1"
+        )
+        device = make_device_with_module_bays("install-norm-not-preloaded", ["PSU1"])
+        module_type = make_module_type("INSTALL-NORM-PSU")
+        item = _item(43, module_type.model, "Power Supply 1", phys_class="powerSupply")
+
+        result = self._install(device, item, module_types=[module_type], exact_mappings=[], regex_mappings=[])
+
+        assert result["status"] == "installed", result
+        assert result["name"] == f"{module_type.model} → PSU1"
+
+    def _two_cards_with_one_transceiver_bay_each(self, tag):
+        """Two installed cards whose child bays share one name, so only the resolved parent tells them apart."""
+        device = make_device_with_module_bays(tag, ["Slot 1", "Slot 2"])
+        first = install_module(device, "Slot 1", f"{tag}-CARD", child_bays=("Transceiver 1",))
+        second = install_module(device, "Slot 2", f"{tag}-CARD", child_bays=("Transceiver 1",))
+        return device, first, second
+
+    def test_a_manufacturer_scoped_parent_mapping_wins_over_a_global_one(self):
+        from dcim.models import Module
+
+        device, _first, second = self._two_cards_with_one_transceiver_bay_each("parent-mfr-scope")
+        optic = make_module_type("PARENT-MFR-SCOPE-SFP")
+        # The global row is older, so a first-row-wins lookup picks it.
+        _mapping(librenms_name="Linecard A", librenms_class="container", netbox_bay_name="Slot 1")
+        _mapping(
+            librenms_name="Linecard A",
+            librenms_class="container",
+            netbox_bay_name="Slot 2",
+            manufacturer=device.device_type.manufacturer,
+        )
+        index_map = {
+            10: _item(10, "", "Linecard A", phys_class="container"),
+            20: _item(20, optic.model, "Transceiver 1", parent=10),
+        }
+
+        result = self._install(device, index_map[20], index_map, module_types=[optic])
+
+        assert result["status"] == "installed", result
+        assert Module.objects.get(device=device, module_type=optic).module_bay.module_id == second.pk
+
+    def test_a_parent_regex_mapping_to_an_empty_bay_gives_way_to_one_to_an_occupied_bay(self):
+        from dcim.models import Module
+
+        device, _first, second = self._two_cards_with_one_transceiver_bay_each("parent-regex-empty-first")
+        make_module_bay(device, "Spare A")
+        optic = make_module_type("PARENT-REGEX-EMPTY-SFP")
+        # Both rules match the ancestor; the older one names a bay that holds no module.
+        _mapping(librenms_name=r"Linecard (A)", librenms_class="", netbox_bay_name=r"Spare \1", is_regex=True)
+        _mapping(librenms_name=r"Linecard A", librenms_class="", netbox_bay_name="Slot 2", is_regex=True)
+        index_map = {
+            10: _item(10, "", "Linecard A", phys_class="container"),
+            20: _item(20, optic.model, "Transceiver 1", parent=10),
+        }
+
+        result = self._install(device, index_map[20], index_map, module_types=[optic])
+
+        assert result["status"] == "installed", result
+        assert Module.objects.get(device=device, module_type=optic).module_bay.module_id == second.pk
+
+    def test_a_parent_class_with_surrounding_whitespace_still_takes_its_class_mapping(self):
+        from dcim.models import Module
+
+        device, first, _second = self._two_cards_with_one_transceiver_bay_each("parent-class-whitespace")
+        optic = make_module_type("PARENT-CLASS-WS-SFP")
+        _mapping(librenms_name="Linecard A", librenms_class="container", netbox_bay_name="Slot 1")
+        index_map = {
+            10: _item(10, "", "Linecard A", phys_class=" container "),
+            20: _item(20, optic.model, "Transceiver 1", parent=10),
+        }
+
+        result = self._install(device, index_map[20], index_map, module_types=[optic])
+
+        assert result["status"] == "installed", result
+        assert Module.objects.get(device=device, module_type=optic).module_bay.module_id == first.pk
 
     def test_an_unmatched_bay_skips_without_installing(self):
         from dcim.models import Module
