@@ -578,19 +578,20 @@ class TestCreateAndAssignPlatformView:
         assert not Platform.objects.filter(name="Manufacturer Rejected Platform").exists()
         assert any("manufacturer is not available" in text for text in _messages(response, "error"))
 
-    def test_invalid_platform_slug_rolls_back_creation(self, logged_in_client, librenms_server):
+    def test_a_platform_netbox_refuses_rolls_back_creation(self, logged_in_client, librenms_server):
         from dcim.models import Platform
 
-        device = _reporting_device("platform-invalid-slug", librenms_server, 6584, "")
+        device = _reporting_device("platform-invalid-name", librenms_server, 6584, "")
+        name = "x" * (Platform._meta.get_field("name").max_length + 1)
 
         response = _post(
             logged_in_client,
             "create_and_assign_platform",
             device,
-            {"platform_name": "!!!"},
+            {"platform_name": name},
         )
 
-        assert not Platform.objects.filter(name="!!!").exists()
+        assert not Platform.objects.filter(name=name).exists()
         assert any("could not be created" in text for text in _messages(response, "error"))
 
     def test_incompatible_manufacturer_rolls_back_platform_and_assignment(
