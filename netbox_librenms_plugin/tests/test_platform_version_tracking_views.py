@@ -730,6 +730,26 @@ class TestImportCreatePlatformModal:
         assert created.slug == "juniper-junos-2"
         assert device.platform == created
 
+    def test_a_name_without_ascii_letters_gets_a_fallback_slug(self, client, librenms_server):
+        from dcim.models import Platform
+
+        _tracking(False)
+        device = _import_linked("import-unicode-slug", librenms_server, 7402)
+        manufacturer = device.device_type.manufacturer
+        client.force_login(make_superuser("import-unicode-slug-su"))
+
+        _import_post(
+            client,
+            device,
+            7402,
+            {"platform_name": "华为", "librenms_os": "junos", "manufacturer": str(manufacturer.pk)},
+        )
+
+        created = Platform.objects.get(name="华为")
+        device.refresh_from_db()
+        assert created.slug == "platform"
+        assert device.platform == created
+
     def test_a_constrained_add_grant_that_excludes_the_new_platform_creates_nothing(self, client, librenms_server):
         from dcim.models import Platform
 
