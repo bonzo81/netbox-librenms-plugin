@@ -4383,8 +4383,9 @@ document.addEventListener('htmx:afterSwap', function () {
     });
 });
 
-// HTMX must bind the new Refresh control before cache expiry moves it.
+// HTMX must bind the new Refresh control before cache expiry moves it. Only a filter response reports expiry.
 document.addEventListener('htmx:afterSettle', function (event) {
+    if (!event.detail?.requestConfig?.elt?.matches?.('.sync-filter-form')) return;
     const settled = event.detail?.elt || event.target;
     if (!(settled instanceof Element)) return;
     const pane = settled.closest('.tab-pane[data-tab-id]');
