@@ -516,6 +516,39 @@ def test_filter_settle_preserves_an_untouched_tab_without_a_snapshot(page):
     assert page.evaluate("syncCacheController().status.ipaddresses.state") == "missing"
 
 
+def test_a_failed_refresh_keeps_its_error_instead_of_expiring_the_tab(page):
+    from test_sync_cache_browser import _page_html, _state
+
+    page.clock.install(time=NOW)
+    initial = {"interfaces": _state("ready"), "ipaddresses": _state("ready-ip")}
+    page.route("**/status?*", lambda route: route.fulfill(json={"tabs": initial}))
+    page.set_content(f"<style>{CSS}</style>" + _page_html(initial))
+    page.locator("#interface-sync-content").evaluate(
+        "(e, html) => e.innerHTML = html", render_tab("interface", "interface_sync", partial=True)
+    )
+    _add_page_scripts(page)
+    page.evaluate("initializeScripts()")
+    failed = '<div class="alert alert-danger" id="refresh-error">Device not found in LibreNMS.</div>'
+    page.route(
+        "**/endpoint/device_interface_sync/**",
+        lambda route: route.fulfill(
+            body=failed + render_tab("interface", "interface_sync", partial=True, cached=False)
+        ),
+    )
+
+    page.evaluate("""() => {
+        window.refreshSettled = false;
+        document.addEventListener('htmx:afterSettle', () => { window.refreshSettled = true; }, {once: true});
+    }""")
+    page.locator("#interface-sync-content .sync-tab-refresh-toolbar button").click()
+    page.clock.run_for(100)
+    page.wait_for_function("window.refreshSettled")
+
+    expect(page.locator("#interface-sync-content #refresh-error")).to_have_count(1)
+    assert "cache expired" not in page.locator("#interface-sync-content").inner_text()
+    assert page.evaluate("[...syncCacheController().invalidatedLocally]") == []
+
+
 @pytest.mark.parametrize(("width", "wrapping"), [(1440, "nowrap"), (390, "wrap")])
 def test_table_cells_wrap_only_at_phone_width(page, width, wrapping):
     load_tab(page, "vlan", "vlan_sync")
