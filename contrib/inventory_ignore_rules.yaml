@@ -35,6 +35,9 @@
 #       cell, so it refuses these columns.
 #   prefer_description:
 #       (include rules only) true names the row by entPhysicalDescr
+#   manufacturer:
+#       optional; the import finds the manufacturer by its NetBox name. Change
+#       "Cisco" or "Juniper" below to the name your manufacturer has in NetBox.
 #   enabled:     true | false
 #   description: optional notes
 #
