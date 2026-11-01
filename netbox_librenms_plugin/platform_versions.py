@@ -201,8 +201,8 @@ def version_platform_slug(name):
 
 def _free_slug(base, manufacturer):
     """Return *base*, or *base* with the first free ``-2``, ``-3``, ... suffix for *manufacturer*."""
-    if not base:
-        return base
+    # slugify drops every character that is not ASCII, so a name such as "华为" has no base.
+    base = base or "platform"
     taken = Platform.objects.filter(manufacturer=manufacturer)
     candidate, number = base[:_SLUG_MAX_LENGTH], 1
     while taken.filter(slug=candidate).exists():
