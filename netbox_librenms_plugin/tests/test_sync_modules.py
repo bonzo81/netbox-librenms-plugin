@@ -4223,6 +4223,89 @@ def test_a_writer_waiting_for_the_page_lock_refuses_a_change_committed_during_th
     assert not Module.objects.filter(device=page).exists()
 
 
+@pytest.mark.django_db(transaction=True)
+def test_an_install_waits_for_the_serial_lock_of_another_member_page_of_its_chassis(client):
+    """A writer on one member page may install onto another member, so both pages take one serial lock."""
+    import time
+    from threading import Event
+
+    from dcim.models import Device, Module
+    from django.db import close_old_connections, connection, transaction
+
+    from netbox_librenms_plugin.tests.conftest import (
+        make_device_with_module_bays,
+        make_module_type,
+        make_superuser,
+        make_virtual_chassis,
+    )
+    from netbox_librenms_plugin.tests.view_test_helpers import render_module_tab, rendered_module_form
+    from netbox_librenms_plugin.views.mixins import CacheMixin
+    from netbox_librenms_plugin.views.sync.modules import _lock_page_device_serials
+
+    page = make_device_with_module_bays("chassis-lock-page", ["Slot 1"])
+    member = make_device_with_module_bays("chassis-lock-member", ["Slot 1"])
+    make_virtual_chassis("chassis-lock", page, member)
+    card = make_module_type("Chassis Lock Card", manufacturer=page.device_type.manufacturer)
+    rows = [
+        {"entPhysicalIndex": 1, "entPhysicalContainedIn": 0, "entPhysicalClass": "chassis"},
+        {
+            "entPhysicalIndex": 2,
+            "entPhysicalContainedIn": 1,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Slot 1",
+            "entPhysicalModelName": card.model,
+            "entPhysicalSerialNum": "SN-CHASSIS-LOCK",
+        },
+    ]
+    key = CacheMixin().get_cache_key(page, "inventory", "default")
+    cache.set(key, trusted_module_inventory_payload(page, rows))
+    action, fields = rendered_module_form(render_module_tab(page), "install-module", 2)
+    user = make_superuser("chassis-lock-user")
+    held, release, holder = Event(), Event(), {}
+
+    def hold_the_member_page_lock():
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                _lock_page_device_serials(Device.objects.get(pk=member.pk))
+                with connection.cursor() as cursor:
+                    cursor.execute("SELECT pg_backend_pid()")
+                    holder["pid"] = cursor.fetchone()[0]
+                held.set()
+                assert release.wait(10)
+        finally:
+            close_old_connections()
+
+    def install_from_the_page():
+        close_old_connections()
+        try:
+            client.force_login(user)
+            return client.post(action, fields)
+        finally:
+            close_old_connections()
+
+    try:
+        with second_connection() as observer, bounded_executor(2) as executor:
+            holding = executor.submit(hold_the_member_page_lock)
+            assert held.wait(5)
+            posted = executor.submit(install_from_the_page)
+            deadline = time.monotonic() + 5
+            try:
+                while not _backends_blocked_by(observer, holder["pid"]):
+                    assert time.monotonic() < deadline, "the install never waited for the member page lock"
+                    assert not posted.done(), "the install finished while the member page lock was held"
+                    time.sleep(0.02)
+            finally:
+                release.set()
+            holding.result(timeout=10)
+            response = posted.result(timeout=10)
+    finally:
+        cache.delete(key)
+
+    assert response.status_code == 302
+    assert list(Module.objects.filter(device=page).values_list("serial", flat=True)) == ["SN-CHASSIS-LOCK"]
+
+
 @pytest.mark.parametrize(
     "details, expected",
     [

@@ -192,16 +192,22 @@ def _module_bind_result_changed(bind_result):
 
 def _lock_page_device_serials(page_device):
     """
-    Serialise serial checks for one sync page, before any row lock is taken.
+    Serialise the serial checks of every device that a sync page can write, before any row lock is taken.
 
     Must be the FIRST lock in the transaction. A bulk install holds one transaction across its
     whole loop, so acquiring this after a bay lock lets a bulk run holding the advisory lock wait
     on a bay a single install holds, while that install waits on the advisory lock.
 
-    One key per page device, so a transaction never acquires a second key of this kind and the
-    incremental-acquisition ordering problem cannot arise.
+    A page writes to its device or to a member of its Virtual Chassis, so every page of one chassis
+    takes the one key of that chassis. A transaction then never acquires a second key of this kind,
+    and the incremental-acquisition ordering problem cannot arise.
     """
-    acquire_advisory_transaction_lock(f"netbox-librenms-plugin:module-serial:{page_device.pk}")
+    if page_device.virtual_chassis_id:
+        acquire_advisory_transaction_lock(
+            f"netbox-librenms-plugin:module-serial-chassis:{page_device.virtual_chassis_id}"
+        )
+    else:
+        acquire_advisory_transaction_lock(f"netbox-librenms-plugin:module-serial:{page_device.pk}")
 
 
 def _module_holder_map(device):
