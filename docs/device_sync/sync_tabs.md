@@ -24,7 +24,7 @@ The `librenms_id` custom field on interfaces improves matching when interface na
 
 Available for Devices and Virtual Machines. This tab creates IP addresses and assigns them to matching interfaces. It can also create a missing interface before assigning an address.
 
-An [IP Mapping](../configuration/mappings.md#ip-mappings) keeps the addresses in a prefix out of the sync, for example the IPv6 link-local prefix `fe80::/10`. Such a row shows **Ignored** and cannot be synced.
+An [IP Mapping](../configuration/mappings.md#ip-mappings) keeps the addresses in a prefix out of the sync, for example the IPv6 link-local prefix `fe80::/10`. Such a row shows **Ignored** and cannot be synced. An address that NetBox already holds on the interface of the row still shows **Synced**.
 
 **Set Primary IP** sets the NetBox Primary IP when the synchronized address matches the LibreNMS management address. Existing assignments or conflicting addresses require confirmation before they are changed.
 
