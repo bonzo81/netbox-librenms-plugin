@@ -1445,7 +1445,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         from netbox_librenms_plugin.utils import module_type_lookup_candidates, resolve_module_type
 
-        model_name = (item.get("entPhysicalModelName") or "").strip()
+        model_name = normalize_serial(item.get("entPhysicalModelName"))
         # The serial-scope rules strip vendor markers such as Juniper's "S/N ", and the
         # coercion handles the all-digit serials LibreNMS sends as JSON numbers.
         serial = normalize_inventory_serial(

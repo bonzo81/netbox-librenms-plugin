@@ -3084,6 +3084,52 @@ def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint,
     assert len(serial_queries) <= (6 if mixed_manufacturers else 2), serial_queries
 
 
+def _install_selected(client, device, rows, select):
+    """Cache *rows* for *device*, then post Install Selected with *select* in that order, as a superuser."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_superuser
+    from netbox_librenms_plugin.views.mixins import CacheMixin
+
+    cache.set(
+        CacheMixin().get_cache_key(device, "inventory", "default"), trusted_module_inventory_payload(device, rows)
+    )
+    user = make_superuser(f"{device.name}-user")
+    data = {**_rendered_fields(device, "install-selected", user=user), "select": select}
+    client.force_login(user)
+    response = client.post(reverse("plugins:netbox_librenms_plugin:install_selected", args=[device.pk]), data)
+    assert response.status_code == 302
+    return response
+
+
+@pytest.mark.django_db
+def test_install_selected_installs_a_row_whose_model_is_a_json_number(client):
+    """LibreNMS sends an all-digit model as a JSON number; the install matches it as text."""
+    from dcim.models import Module
+
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type
+
+    device = make_device_with_module_bays("selected-numeric-model", ["Slot 1"])
+    make_module_type("1000", manufacturer=device.device_type.manufacturer)
+    rows = [
+        {"entPhysicalIndex": 1, "entPhysicalClass": "chassis", "entPhysicalContainedIn": 0},
+        {
+            "entPhysicalIndex": 2,
+            "entPhysicalContainedIn": 1,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Slot 1",
+            "entPhysicalModelName": 1000,
+            "entPhysicalSerialNum": "SN-NUMERIC",
+        },
+    ]
+
+    _install_selected(client, device, rows, ["2"])
+
+    assert list(Module.objects.filter(device=device).values_list("module_type__model", "serial")) == [
+        ("1000", "SN-NUMERIC")
+    ]
+
+
 @pytest.mark.django_db
 @pytest.mark.parametrize("index", [None, "", 200])
 def test_replace_action_requires_a_source_inventory_index(index):
