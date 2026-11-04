@@ -994,6 +994,8 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
         """Meta options for InventoryIgnoreRule."""
 
         ordering = ["name", "pk"]
+        verbose_name = "Inventory Rule"
+        verbose_name_plural = "Inventory Rules"
 
     def __str__(self):
         if not self.uses_pattern:

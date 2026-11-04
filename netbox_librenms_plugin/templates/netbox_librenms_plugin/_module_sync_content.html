@@ -10,7 +10,7 @@
 <div class="alert alert-danger" role="alert" id="module-inventory-rule-error">
     <i class="mdi mdi-alert-circle me-2"></i>
     <div>
-        Inventory Ignore Rule
+        Inventory Rule
         <a href="{% url 'plugins:netbox_librenms_plugin:inventoryignorerule_detail' pk=rule_error.rule_pk %}">{{ rule_error.rule_name }}</a>
         stores an invalid <code>{{ rule_error.field }}</code> regex, so no module rows are shown.
         Fix or disable the rule, then reload this tab.
@@ -27,7 +27,7 @@
         {% for device in refused %}<strong>{{ device }}</strong>{% if not forloop.last %}, {% endif %}{% endfor %}:
         no enabled include rule applies, so the table shows no ENTITY-MIB rows for {{ refused|length|pluralize:"it,them" }}.
         Add or enable one in
-        <a href="{% url 'plugins:netbox_librenms_plugin:inventoryignorerule_list' %}">Inventory Ignore Rules</a>.
+        <a href="{% url 'plugins:netbox_librenms_plugin:inventoryignorerule_list' %}">Inventory Rules</a>.
     </div>
 </div>
 {% endif %}

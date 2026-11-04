@@ -94,11 +94,11 @@ OOB_INVENTORY_READ_ONLY_REASON = "OOB controller inventory is read-only"
 
 # Fixed text: the Modules tab names the rule, and the exception detail goes to the log only.
 INVALID_INVENTORY_RULE_MESSAGE = (
-    "An enabled Inventory Ignore Rule stores an invalid filter regex, so nothing was installed. "
+    "An enabled Inventory Rule stores an invalid filter regex, so nothing was installed. "
     "Fix or disable the rule that the Modules tab names."
 )
 IGNORED_INVENTORY_ROW_MESSAGE = (
-    "An enabled Inventory Ignore Rule now hides this inventory row, so nothing was installed. "
+    "An enabled Inventory Rule now hides this inventory row, so nothing was installed. "
     "Refresh Modules to see the current table."
 )
 

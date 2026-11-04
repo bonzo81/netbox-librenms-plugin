@@ -198,6 +198,14 @@ class Migration(migrations.Migration):
                 "serial_matches_device and model_matches_device_type rules.",
             ),
         ),
+        migrations.AlterModelOptions(
+            name="inventoryignorerule",
+            options={
+                "ordering": ["name", "pk"],
+                "verbose_name": "Inventory Rule",
+                "verbose_name_plural": "Inventory Rules",
+            },
+        ),
         # No reverse: the seeded rows and the converted flags cannot be told apart from operator edits.
         migrations.RunPython(seed_inventory_class_rules),
     ]

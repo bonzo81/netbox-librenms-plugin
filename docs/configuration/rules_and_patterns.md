@@ -4,9 +4,9 @@ Rules and patterns transform or filter LibreNMS data when a direct mapping is no
 
 Each tab supports creating, editing, deleting, filtering, bulk importing, and exporting rules or patterns.
 
-## Inventory Ignore Rules
+## Inventory Rules
 
-Inventory Ignore Rules control which ENTITY-MIB inventory items appear in Module Sync and how their children are handled.
+Inventory Rules control which ENTITY-MIB inventory items appear in Module Sync and how their children are handled.
 
 The available actions are:
 
@@ -57,7 +57,7 @@ Migration 0026 creates the **Fixed-platform built-in units** rule below once for
   description: "Include Juniper Routing Engine rows"
 ```
 
-![Inventory Ignore Rule List](../img/inventory_ignore_rules/list.png)
+![Inventory Rule List](../img/inventory_ignore_rules/list.png)
 
 ### Filters
 
@@ -231,6 +231,6 @@ Ships pre-seeded with Avocent ACS (`acsSerialPortTable` → `ttyS{N}`) and Cisco
 
 All Rules & Patterns tabs support NetBox's standard CSV, JSON, and YAML bulk import. Select **Import** on the relevant list and provide records using that rule type's field names.
 
-To back up or move rules between NetBox installations, select records in a list and use the YAML export action. Example files for Normalization, Inventory Ignore, and Carrier Auto-Install rules are available in the repository's [`contrib/`](../../contrib/) directory.
+To back up or move rules between NetBox installations, select records in a list and use the YAML export action. Example files for Normalization, Inventory, and Carrier Auto-Install rules are available in the repository's [`contrib/`](../../contrib/) directory.
 
 For the complete module synchronization workflow, see the [Module Sync guide](../device_sync/module_sync.md).

@@ -1,4 +1,4 @@
-# Inventory Ignore Rules: filter ENTITY-MIB items during module sync
+# Inventory Rules: filter ENTITY-MIB items during module sync
 #
 # Three actions are supported:
 #   skip       : remove the item from the sync table entirely
@@ -19,7 +19,7 @@
 #   class_is              : compare entPhysicalClass, ignoring case (include needs it;
 #                           skip and transparent can use it too)
 #
-# Import via: LibreNMS Plugin → Settings → Inventory Ignore Rules → Import
+# Import via: LibreNMS Plugin → Rules & Patterns → Inventory Rules → Import
 #
 # Additional fields:
 #   require_serial_match_parent:

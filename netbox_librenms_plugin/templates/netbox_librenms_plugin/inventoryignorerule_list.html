@@ -8,11 +8,15 @@
 {% block content %}
     <div class="alert alert-info">
         <div>
-            <h4>Inventory Ignore Rules</h4>
-            <p>Configurable rules to skip ENTITY-MIB entries during module sync.
+            <h4>Inventory Rules</h4>
+            <p>Configurable rules that control which ENTITY-MIB entries appear in module sync, and how they are handled.
                Some vendors (e.g. Cisco IOS-XR) report EEPROM/IDPROM chips as child
                entities with the same model name and serial as their parent hardware.
-               These phantom entries would appear as duplicate modules in the sync UI.</p>
+               These phantom entries would appear as duplicate modules in the sync UI.
+               A rule with the Skip action removes them.</p>
+            <p>Each rule has an Action: <strong>Include</strong> shows matching entries, <strong>Skip</strong>
+               removes them with their children, and <strong>Transparent</strong> hides them but keeps their
+               children. Disabling a rule stops its action.</p>
             <p>Each rule matches an entity using one of the following strategies:</p>
             <ul>
                 <li><strong>ends_with / starts_with / contains / regex</strong> — matches the entity <em>name</em> string.</li>
