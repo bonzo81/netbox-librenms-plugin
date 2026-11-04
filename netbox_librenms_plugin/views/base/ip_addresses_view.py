@@ -1482,7 +1482,7 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
             if ip_rule is not None and self._held_on_row_interface(
                 obj, updated_record, original_port_id, vrf_id, server_key
             ):
-                status_html = IPAddressTable(data=[]).render_status("matched", updated_record)
+                status_html = IPAddressTable([], mgmt_row_vrfs={}).render_status("matched", updated_record)
             elif ip_rule is not None:
                 status_html = rule_block_html(row_ip_rule_block(ip_rule))
             else:
