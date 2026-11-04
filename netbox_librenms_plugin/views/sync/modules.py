@@ -2603,6 +2603,11 @@ class ApplyModuleInterfaceTypesView(
         return _modules_action_response(request, page_device, server_key)
 
 
+def _replace_target(module):
+    """Return the module, type and bay that a replace grant signs: the state the operator reviewed in the preview."""
+    return {"module_id": module.pk, "module_type_id": module.module_type_id, "module_bay_id": module.module_bay_id}
+
+
 class ModuleMismatchPreviewView(
     LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View
 ):
@@ -2735,12 +2740,14 @@ class ModuleMismatchPreviewView(
                 "server_key": server_key or "",
                 "selected_device_id": target_device.pk,
                 "serial_inventory_binding": self._derived_grant(grant, ACTION_UPDATE_SERIAL),
-                "replace_inventory_binding": self._derived_grant(grant, ACTION_REPLACE_MODULE),
+                "replace_inventory_binding": self._derived_grant(
+                    grant, ACTION_REPLACE_MODULE, action_target=_replace_target(installed_module)
+                ),
             },
         )
 
     @staticmethod
-    def _derived_grant(grant, action):
+    def _derived_grant(grant, action, action_target=None):
         """Sign a modal action with the page, target, snapshot, policy and render mode of the preview grant."""
         return sign_module_grant(
             page_device_id=grant.page_device_id,
@@ -2748,7 +2755,7 @@ class ModuleMismatchPreviewView(
             server_key=grant.server_key,
             action=action,
             ent_index=grant.ent_index,
-            action_target=grant.action_target,
+            action_target=action_target or grant.action_target,
             inventory_digest=grant.inventory_digest,
             policy_fingerprint=grant.policy_fingerprint,
             render_mode=grant.render_mode,
@@ -2877,11 +2884,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 granted = _authorize_module_grant(
                     self, page_device, server_key, ACTION_REPLACE_MODULE, request.POST.get("inventory_binding")
                 )
-                granted.grant.require(
-                    device_id=target_device.pk,
-                    ent_index=request.POST.get("ent_index", ""),
-                    action_target={"module_id": module_id},
-                )
+                granted.grant.require(device_id=target_device.pk, ent_index=request.POST.get("ent_index", ""))
                 librenms_item = granted.row(granted.grant.ent_index)
                 model_name = normalize_serial(librenms_item.get("entPhysicalModelName"))
                 # The replacement is stored and matched against serials the install path already
@@ -2916,6 +2919,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 )
                 if not installed_module:
                     raise _ModuleActionRefused("Module no longer exists.")
+                granted.grant.require(action_target=_replace_target(installed_module))
 
                 # Read bay/type from locked row to avoid stale snapshot
                 target_bay = installed_module.module_bay
