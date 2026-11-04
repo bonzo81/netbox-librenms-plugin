@@ -366,6 +366,8 @@ def test_a_rule_that_does_not_work_renders_no_table_and_no_grant(ui, c8300, brea
 @pytest.mark.parametrize("breakage", list(BREAKAGES))
 @pytest.mark.parametrize("writer", list(WRITERS))
 def test_a_rule_broken_after_render_refuses_every_writer(ui, c8300, writer, breakage):
+    from netbox_librenms_plugin.module_grants import GrantRefusal
+
     device, entities = c8300
     form = WRITERS[writer](ui, device, entities)
     BREAKAGES[breakage]()
@@ -373,9 +375,7 @@ def test_a_rule_broken_after_render_refuses_every_writer(ui, c8300, writer, brea
 
     response = post(ui, *form)
 
-    assert any(
-        text.startswith("An Inventory Ignore Rule or a serial Normalization Rule") for text in messages_of(response)
-    )
+    assert GrantRefusal.RULE_ERROR.message in messages_of(response)
     assert written_state(device) == before
 
 

@@ -85,7 +85,7 @@ class GrantRefusal(enum.Enum):
     DESTINATION = "Inventory destination changed. Refresh Modules and try again."
     CACHE_MISSING = "No cached inventory data. Please refresh modules first."
     RULE_ERROR = (
-        "An Inventory Ignore Rule or a serial Normalization Rule stores an invalid regex or replacement, "
+        "An Inventory Rule or a serial Normalization Rule stores an invalid regex or replacement, "
         "so nothing was changed. Fix the rule that the Modules tab names."
     )
 
