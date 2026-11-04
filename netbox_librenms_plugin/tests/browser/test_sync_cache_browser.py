@@ -716,6 +716,20 @@ class TestTheOrderedSelectionCommit:
         # The row was held for C, so it is released with C, not kept as a choice of the user's.
         assert _checked_values(page) == set()
 
+    def test_a_checkbox_the_verify_adds_takes_part_in_a_shift_click_range(self, page):
+        rows = [
+            {"port_id": "10", "name": "Gi1/0/1", "member": "1", "rule_state": "ignored"},
+            {"port_id": "20", "name": "Gi1/0/2", "member": "1"},
+            {"port_id": "30", "name": "Gi1/0/3", "member": "1"},
+        ]
+        _load_verify_page(page, rows)
+        _verify_row(page, "10", "2", _verified_row(rule_state="", selection=_checkbox_markup("10")))
+
+        page.click("#cb-10")
+        page.click("#cb-30", modifiers=["Shift"])
+
+        assert _checked_values(page) == {"10", "20", "30"}
+
     def test_the_bulk_member_apply_commits_every_verified_row(self, page):
         verify = {
             "10": _verified_row(rule_state="", selection=_checkbox_markup("10")),

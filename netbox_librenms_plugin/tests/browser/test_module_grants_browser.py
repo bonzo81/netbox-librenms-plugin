@@ -184,6 +184,23 @@ def test_a_pending_member_verify_locks_the_row_writes_and_install_selected(page)
     assert page.locator('[name="selection_grant_30"]').input_value() == "override-30"
 
 
+def test_a_verified_row_checkbox_starts_and_ends_a_shift_click_range(page):
+    """The verify writes a new checkbox, which takes part in a shift-click range like a rendered one."""
+    _answers(page, _success(30, "2", "override-30"))
+    _load(page, [_row(30), _row(31), _row(32)])
+    with page.expect_response(VERIFY_ROUTE):
+        _change_member(page, 30, "2")
+    expect(page.locator("#cb-30")).to_be_enabled()
+
+    page.click("#cb-30")
+    page.click("#cb-32", modifiers=["Shift"])
+
+    expect(page.locator("#cb-31")).to_be_checked()
+    page.click("#cb-32")
+    page.click("#cb-30", modifiers=["Shift"])
+    expect(page.locator("#cb-31")).not_to_be_checked()
+
+
 def test_a_refused_member_verify_restores_the_member_and_its_grant_and_says_why(page):
     _answers(page, REFUSED)
     _load(page, [_row(30, grant="earlier-override", member="1")])
