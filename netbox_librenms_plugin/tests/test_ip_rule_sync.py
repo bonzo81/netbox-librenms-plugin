@@ -232,6 +232,45 @@ class TestTheWriterRefusesAnIgnoredAddress:
             assert list(created.values_list("vrf", flat=True)) == [vrf.pk if vrf is not None else None]
             assert "Skipped" not in _messages(response)
 
+    @pytest.mark.parametrize("ignored", [True, False], ids=["ignored", "control"])
+    def test_an_ignored_address_creates_no_missing_interface(self, client, settings, live_librenms, ignored):
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.tests.test_ip_address_sync_safety import (
+            _configure_test_server,
+            _serve_librenms_ip_rows,
+        )
+
+        _configure_test_server(settings)
+        device = make_device("ip-rule-create-missing", librenms_cf={SERVER_KEY: {"id": 42}})
+        client.force_login(make_superuser("ip-rule-create-missing-user"))
+        rows = [{"address": "fe80::1", "prefix_length": 64, "port_id": 7502, "interface": "Ethernet7"}]
+        _serve_librenms_ip_rows(live_librenms.server, rows, device_name=device.name)
+        refreshed = client.post(
+            reverse("plugins:netbox_librenms_plugin:device_ipaddress_sync", args=[device.pk]),
+            {"server_key": SERVER_KEY, "interface_name_field": "ifName"},
+            HTTP_HX_REQUEST="true",
+        )
+        assert refreshed.status_code == 200
+        if ignored:
+            IPAddressMapping.objects.create(prefix="fe80::/10")
+
+        response = client.post(
+            reverse(
+                "plugins:netbox_librenms_plugin:sync_device_ip_addresses",
+                kwargs={"object_type": "device", "pk": device.pk},
+            ),
+            {
+                "server_key": SERVER_KEY,
+                "create-missing-interfaces-toggle": "on",
+                "select": [LINK_LOCAL],
+                f"vrf_{LINK_LOCAL}": "",
+            },
+        )
+
+        assert Interface.objects.filter(device=device, name="Ethernet7").exists() is (not ignored), _messages(response)
+        assert IPAddress.objects.filter(address=LINK_LOCAL).exists() is (not ignored)
+
 
 class TestAVrfChangeRedecidesTheRow:
     def test_the_ignored_state_follows_the_chosen_vrf(self, client, device, blue, red):
