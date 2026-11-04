@@ -17,6 +17,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_interface,
     make_superuser,
     persist_test_server_mapping,
+    transactional_db_with_all_apps,
 )
 from netbox_librenms_plugin.tests.test_cable_overwrite import _rendered_sync_data
 
@@ -396,6 +397,44 @@ def test_a_channel_reads_the_far_end_at_its_connector_and_never_its_parent():
         [setup.far_ends[1]],
     ]
     assert record["cable_status"] == f"Cabled to {setup.peer.name}"
+
+
+def _post_sync_as(user_pk, device, data):
+    """POST the Sync Cable form *data* of *device* as the user *user_pk*, and return the flashed messages."""
+    from django.contrib.auth import get_user_model
+
+    from netbox_librenms_plugin.tests.view_test_helpers import messages_on
+
+    client = Client()
+    client.force_login(get_user_model().objects.get(pk=user_pk))
+    response = client.post(reverse("plugins:netbox_librenms_plugin:sync_device_cables", args=[device.pk]), data)
+    return messages_on(response.wsgi_request)
+
+
+@requires_channels
+@transactional_db_with_all_apps()
+@pytest.mark.usefixtures("breakout_server")
+def test_two_extensions_of_one_breakout_cable_wait_on_each_other():
+    from netbox_librenms_plugin.tests.test_interface_port_claim_race import _race, _second_waits_on_first
+
+    setup = _Breakout("extend-race")
+    setup.seed(setup.row(1), setup.row(2))
+    setup.sync(1)
+    user_pk = make_superuser("extend-race-user").pk
+    data = _rendered_sync_data(setup.client, setup.device, "102")
+
+    # Two submits of channel 2: the second waits on the locks of the first, then reads the far end it wrote.
+    _first, second_messages, second_waited = _race(
+        (_post_sync_as, user_pk, setup.device, data),
+        (_post_sync_as, user_pk, setup.device, data),
+        _second_waits_on_first,
+    )
+
+    cable = setup.parent_cable()
+    assert second_waited, "the second extension did not wait on the first extension's backend"
+    assert setup.b_side(cable) == [(1, setup.far_ends[0]), (2, setup.far_ends[1])]
+    assert list(cable.a_terminations) == [setup.parent]
+    assert second_messages == [("warning", "Cable already exists for interfaces: et-0/0/1:1")]
 
 
 @requires_channels
