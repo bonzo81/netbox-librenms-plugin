@@ -1354,6 +1354,7 @@ rules:
         - "*.html"
     patterns:
       - pattern-regex: class=["']table-responsive["'][^>]*>\s*\{%\s*include\s+["']inc/table\.html["']
+      - pattern-not-inside: "{# ... #}"
 
   - id: conflict-raised-without-record
     languages: [python]
