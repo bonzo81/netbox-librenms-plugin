@@ -283,6 +283,26 @@ def test_each_writer_refuses_a_changed_input_before_any_write(ui, c8300, writer,
     assert written_state(device) == before
 
 
+@pytest.mark.parametrize("writer", list(WRITERS))
+def test_each_writer_refuses_a_row_its_include_rule_no_longer_admits(ui, c8300, writer):
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+    from netbox_librenms_plugin.module_grants import GrantRefusal
+
+    device, entities = c8300
+    form = WRITERS[writer](ui, device, entities)
+    assert InventoryIgnoreRule.objects.filter(name="Inventory class: module").update(enabled=False) == 1
+    assert not any(
+        str(REAL_NIM) in (rendered["fields"].get("ent_index"), rendered["fields"].get("parent_index"))
+        for rendered in module_tab_forms(render(ui, device)).forms
+    )
+    before = written_state(device)
+
+    response = post(ui, *form)
+
+    assert GrantRefusal.POLICY.message in messages_of(response)
+    assert written_state(device) == before
+
+
 # --- Rows the table does not render ----------------------------------------------------------------
 
 BUILT_IN_UNIT = 1000  # module 0: the seeded model rule makes it transparent, so the table hides it.
