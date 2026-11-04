@@ -629,6 +629,25 @@ def _post_create_remote(setup, channel_id):
 
 @requires_channels
 @pytest.mark.usefixtures("breakout_server")
+def test_a_cable_on_the_far_end_that_the_user_may_not_view_is_never_reported():
+    setup = _Breakout("hidden-far-cable")
+    setup.seed(setup.row(1), setup.row(2))
+    setup.sync(1)
+    Cable.objects.filter(pk=setup.parent_cable().pk).update(label="permitted")
+    # The far end of channel 2 already has a cable, which the user may not view.
+    Cable(a_terminations=[setup.far_ends[1]], b_terminations=[make_interface(setup.peer, "Ethernet9")]).save()
+    setup.client.force_login(_constrained_user("breakout-hidden-far-cable", cable_view={"label": "permitted"}))
+
+    record = setup.records()["102"]
+    verified = setup.verify(2)
+
+    reason = "Breakout Not Synced: the cable of the far end is not available"
+    assert (record["cable_status"], record["can_create_cable"]) == (reason, False)
+    assert (reason in verified["cable_status"], verified["can_create_cable"]) == (True, False)
+
+
+@requires_channels
+@pytest.mark.usefixtures("breakout_server")
 def test_a_direct_post_never_names_a_hidden_parent():
     setup = _Breakout("hidden-parent-post")
     setup.seed(setup.row(1), setup.row(2))

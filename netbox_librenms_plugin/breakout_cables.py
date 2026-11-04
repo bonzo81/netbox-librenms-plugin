@@ -87,6 +87,7 @@ def _sync_first(channel_id, parent):
 HIDDEN_PARENT_REASON = "the parent interface of this channel is not available"
 HIDDEN_CABLE_REASON = "the cable of the parent interface of this channel is not available"
 HIDDEN_REASONS = frozenset({HIDDEN_PARENT_REASON, HIDDEN_CABLE_REASON})
+HIDDEN_FAR_END_CABLE_REASON = "the cable of the far end is not available"
 
 
 def _far_end_refusal(remote):
@@ -129,8 +130,8 @@ def decide_breakout_cable(channel, remote, provenance_tag, may, *, parent=None, 
     Decide the cable sync of one channel row: the one gate of every breakout path.
 
     Channel 1 creates the cable. Channel N appends its far end only when connectors 1 to N - 1 hold one.
-    The gate reads the parent and its cable only when *may* lets the user view them, and offers a write
-    only when the user may change the parent (and the cable, for an extend).
+    The gate reads the parent, its cable and the cable of the far end only when *may* lets the user view
+    them, and offers a write only when the user may change the parent (and the cable, for an extend).
 
     Args:
         channel (Interface): The local channel interface.
@@ -149,6 +150,8 @@ def decide_breakout_cable(channel, remote, provenance_tag, may, *, parent=None, 
         cable = None if parent is None else parent.cable
     if refusal := _hidden_refusal(parent, cable, may):
         return refusal
+    if remote is not None and remote.cable_id is not None and not may("view", remote.cable):
+        return _refuse(HIDDEN_FAR_END_CABLE_REASON)
     decision = _decide(channel, parent, cable, remote, provenance_tag)
     if decision.action in ("create", "extend") and not may("change", parent):
         return _refuse(f"you may not change {parent.name}")
