@@ -214,6 +214,11 @@ def sign_module_grant(
     return signing.dumps(payload, salt=_SALT, compress=True)
 
 
+def _is_pk(value) -> bool:
+    """Return True for a positive int; ``coerce_positive_int(None)`` is None, so None needs its own refusal."""
+    return value is not None and coerce_positive_int(value) == value
+
+
 def _valid_row(row, shape) -> bool:
     if not isinstance(row, list) or len(row) != len(shape):
         return False
@@ -221,7 +226,7 @@ def _valid_row(row, shape) -> bool:
         if kind is bool:
             if not isinstance(value, bool):
                 return False
-        elif coerce_positive_int(value) != value:
+        elif not _is_pk(value):
             return False
     return True
 
@@ -239,19 +244,19 @@ def _payload_shape_error(payload):
     if not isinstance(payload["render_mode"], str) or payload["render_mode"] not in RENDER_MODES:
         return "render mode"
     for key in ("page_device_id", "device_id"):
-        if coerce_positive_int(payload[key]) != payload[key]:
+        if not _is_pk(payload[key]):
             return key
     if not all(isinstance(payload[key], str) and payload[key] for key in ("server_key", "inventory_digest")):
         return "server or digest"
     if not isinstance(payload["policy_fingerprint"], str) or not payload["policy_fingerprint"]:
         return "fingerprint"
     target = payload["action_target"]
-    if not isinstance(target, dict) or any(coerce_positive_int(value) != value for value in target.values()):
+    if not isinstance(target, dict) or not all(_is_pk(value) for value in target.values()):
         return "action target"
     indexless = payload["action"] in _INDEXLESS_ACTIONS
     if (payload["ent_index"] is None) != indexless:
         return "index"
-    if not indexless and coerce_positive_int(payload["ent_index"]) != payload["ent_index"]:
+    if not indexless and not _is_pk(payload["ent_index"]):
         return "index"
     shape = _ROW_SHAPES.get(payload["action"])
     rows = payload["rows"]

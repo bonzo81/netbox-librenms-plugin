@@ -731,6 +731,36 @@ def test_a_grant_does_not_outlive_the_permission_it_was_rendered_for(client, c83
     assert written_state(device) == before
 
 
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"page_device_id": None},
+        {"device_id": None},
+        {"device_id": "not-a-pk"},
+        {"action_target": {"module_id": None}},
+        {"action": "install_branch", "ent_index": 30, "rows": [[30, None]]},
+    ],
+    ids=["page-device", "device", "device-text", "action-target", "row-target"],
+)
+def test_a_grant_never_signs_a_missing_netbox_id(fields):
+    from netbox_librenms_plugin.module_grants import sign_module_grant
+
+    grant = {
+        "page_device_id": 1,
+        "device_id": 2,
+        "server_key": SERVER_KEY,
+        "action": "replace_module",
+        "inventory_digest": "digest",
+        "policy_fingerprint": "fingerprint",
+        "render_mode": "attributed",
+        "ent_index": 30,
+        "action_target": {"module_id": 5},
+    }
+
+    with pytest.raises(ValueError, match="invalid module grant payload"):
+        sign_module_grant(**{**grant, **fields})
+
+
 def test_the_tab_parser_reads_a_form_the_way_a_browser_submits_it():
     html = """
     <form action="/install/">
