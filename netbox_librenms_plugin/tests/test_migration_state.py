@@ -282,10 +282,16 @@ def test_conftest_restores_exactly_the_rules_migration_0010_seeds():
 def _seeded_ignore_rule_count():
     """Count the ignore rules the restore declares, across every migration that seeds one."""
     from netbox_librenms_plugin.models import InventoryIgnoreRule
-    from netbox_librenms_plugin.tests.conftest import _seeded_ignore_rule_signatures, _seeded_rule_rows
+    from netbox_librenms_plugin.tests.conftest import (
+        _seeded_ignore_rule_signatures,
+        _seeded_rule_rows,
+        seeded_class_rule_rows,
+        seeded_fixed_platform_rule_rows,
+    )
 
     declarative = sum(1 for model, _lookup, _defaults in _seeded_rule_rows() if model is InventoryIgnoreRule)
-    return len(list(_seeded_ignore_rule_signatures())) + declarative
+    migrations = len(list(seeded_class_rule_rows())) + len(list(seeded_fixed_platform_rule_rows()))
+    return len(list(_seeded_ignore_rule_signatures())) + declarative + migrations
 
 
 @pytest.mark.django_db
@@ -302,6 +308,27 @@ def test_the_seeded_ignore_rules_survive_a_seed_restore():
     # A second pass must not duplicate them.
     restore_seeded_state(force=True)
     assert InventoryIgnoreRule.objects.count() == expected
+
+
+@pytest.mark.django_db
+def test_a_seed_restore_puts_back_the_rule_of_each_cisco_manufacturer():
+    """Migration 0026 seeds one rule per Cisco manufacturer, so the restore and the intactness probe cover each."""
+    from dcim.models import Manufacturer
+
+    from netbox_librenms_plugin.models import InventoryIgnoreRule
+    from netbox_librenms_plugin.tests.conftest import _seeds_are_intact, restore_seeded_state
+
+    cisco = [Manufacturer.objects.create(name=f"Cisco {slug}", slug=slug) for slug in ("cisco", "cisco-systems")]
+    assert not _seeds_are_intact()
+    InventoryIgnoreRule.objects.all().delete()
+
+    assert restore_seeded_state(force=False) is True
+    assert _seeds_are_intact()
+    seeded = InventoryIgnoreRule.objects.filter(match_type="model_matches_device_type")
+    assert sorted(seeded.values_list("manufacturer_id", flat=True)) == sorted(m.pk for m in cisco)
+    assert InventoryIgnoreRule.objects.count() == _seeded_ignore_rule_count()
+    restore_seeded_state(force=True)
+    assert InventoryIgnoreRule.objects.count() == _seeded_ignore_rule_count()
 
 
 @pytest.mark.django_db

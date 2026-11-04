@@ -378,6 +378,7 @@ DEFAULT_STUB_RECORDINGS = (
     "iosxe-subinterfaces",
     "junos-subinterfaces",
     "nokia-timos-transceivers",
+    "nxos-fixed-linecard",
 )
 DEFAULT_RECORDINGS_DIR = Path(__file__).resolve().parents[1] / "data_shapes" / "recordings"
 

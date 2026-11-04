@@ -116,6 +116,34 @@
     }
   },
   {
+    "name": "iosxe-c8300",
+    "signature": {
+      "os": "os-48b51d",
+      "virtual_chassis": {
+        "present": false,
+        "root_class": "chassis",
+        "member_count": 0,
+        "position_base": null,
+        "member_shape": null
+      },
+      "lag": {
+        "present": false,
+        "ieee8023ad": false,
+        "name_prefix": null
+      },
+      "sub_interfaces": {
+        "present": false,
+        "styles": []
+      },
+      "port_stack": false,
+      "vlans": true,
+      "transceivers": true,
+      "serial": true,
+      "vrf": false,
+      "oob": false
+    }
+  },
+  {
     "name": "iosxe-subinterfaces",
     "signature": {
       "os": "os-48b51d",
@@ -198,6 +226,96 @@
       "transceivers": false,
       "serial": false,
       "vrf": false,
+      "oob": false
+    }
+  },
+  {
+    "name": "junos-evo-ptx10008",
+    "signature": {
+      "os": "os-990f10",
+      "virtual_chassis": {
+        "present": false,
+        "root_class": "chassis",
+        "member_count": 0,
+        "position_base": null,
+        "member_shape": null
+      },
+      "lag": {
+        "present": true,
+        "ieee8023ad": true,
+        "name_prefix": "ae"
+      },
+      "sub_interfaces": {
+        "present": true,
+        "styles": [
+          "dot-numeric"
+        ]
+      },
+      "port_stack": true,
+      "vlans": false,
+      "transceivers": true,
+      "serial": false,
+      "vrf": true,
+      "oob": false
+    }
+  },
+  {
+    "name": "junos-mx-dangling",
+    "signature": {
+      "os": "os-990f10",
+      "virtual_chassis": {
+        "present": false,
+        "root_class": "chassis",
+        "member_count": 0,
+        "position_base": null,
+        "member_shape": null
+      },
+      "lag": {
+        "present": true,
+        "ieee8023ad": true,
+        "name_prefix": "ae"
+      },
+      "sub_interfaces": {
+        "present": true,
+        "styles": [
+          "dot-numeric"
+        ]
+      },
+      "port_stack": true,
+      "vlans": true,
+      "transceivers": true,
+      "serial": false,
+      "vrf": true,
+      "oob": false
+    }
+  },
+  {
+    "name": "junos-mx-scb",
+    "signature": {
+      "os": "os-990f10",
+      "virtual_chassis": {
+        "present": false,
+        "root_class": "chassis",
+        "member_count": 0,
+        "position_base": null,
+        "member_shape": null
+      },
+      "lag": {
+        "present": true,
+        "ieee8023ad": true,
+        "name_prefix": "ae"
+      },
+      "sub_interfaces": {
+        "present": true,
+        "styles": [
+          "dot-numeric"
+        ]
+      },
+      "port_stack": true,
+      "vlans": false,
+      "transceivers": true,
+      "serial": false,
+      "vrf": true,
       "oob": false
     }
   },
@@ -342,6 +460,34 @@
       "transceivers": true,
       "serial": false,
       "vrf": true,
+      "oob": false
+    }
+  },
+  {
+    "name": "nxos-fixed-linecard",
+    "signature": {
+      "os": "os-dbc9fb",
+      "virtual_chassis": {
+        "present": false,
+        "root_class": "stack",
+        "member_count": 0,
+        "position_base": null,
+        "member_shape": null
+      },
+      "lag": {
+        "present": true,
+        "ieee8023ad": true,
+        "name_prefix": "custom"
+      },
+      "sub_interfaces": {
+        "present": false,
+        "styles": []
+      },
+      "port_stack": true,
+      "vlans": true,
+      "transceivers": true,
+      "serial": false,
+      "vrf": false,
       "oob": false
     }
   }

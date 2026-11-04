@@ -128,12 +128,26 @@ class InventoryIgnoreRuleFilterSet(django_filters.FilterSet):
         queryset=Manufacturer.objects.all(),
         label="Manufacturer",
     )
+    # A text search on the stored expression: a filter value is never run as a regex.
+    name_pattern = django_filters.CharFilter(lookup_expr="icontains")
+    description_pattern = django_filters.CharFilter(lookup_expr="icontains")
+    model_pattern = django_filters.CharFilter(lookup_expr="icontains")
 
     class Meta:
         """Meta options for InventoryIgnoreRuleFilterSet."""
 
         model = InventoryIgnoreRule
-        fields = ["match_type", "action", "enabled", "manufacturer", "manufacturer_id"]
+        fields = [
+            "match_type",
+            "action",
+            "enabled",
+            "prefer_description",
+            "manufacturer",
+            "manufacturer_id",
+            "name_pattern",
+            "description_pattern",
+            "model_pattern",
+        ]
 
 
 class PlatformMappingFilterSet(django_filters.FilterSet):

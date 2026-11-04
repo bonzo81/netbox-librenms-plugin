@@ -41,6 +41,50 @@
         }
       ]
     },
+    "GET /api/v0/inventory/384090667/all": {
+      "status": "ok",
+      "inventory": [
+        {
+          "entPhysicalIndex": 1,
+          "entPhysicalClass": "stack",
+          "entPhysicalName": "entity-a33df5 0/0",
+          "entPhysicalDescr": "entity-a457e9",
+          "entPhysicalSerialNum": "",
+          "entPhysicalModelName": "",
+          "entPhysicalContainedIn": 0
+        },
+        {
+          "entPhysicalIndex": 100,
+          "entPhysicalClass": "chassis",
+          "entPhysicalSerialNum": "SN-58cf46",
+          "entPhysicalModelName": "MODEL-f93a92",
+          "entPhysicalName": "entity-0beaae",
+          "entPhysicalDescr": "entity-bf3b65",
+          "entPhysicalParentRelPos": 1,
+          "entPhysicalContainedIn": 1
+        },
+        {
+          "entPhysicalIndex": 200,
+          "entPhysicalClass": "chassis",
+          "entPhysicalSerialNum": "SN-dbd32d",
+          "entPhysicalModelName": "MODEL-f93a92",
+          "entPhysicalName": "entity-7fc92a",
+          "entPhysicalDescr": "entity-bf3b65",
+          "entPhysicalParentRelPos": 2,
+          "entPhysicalContainedIn": 1
+        },
+        {
+          "entPhysicalIndex": 300,
+          "entPhysicalClass": "chassis",
+          "entPhysicalSerialNum": "SN-a47104",
+          "entPhysicalModelName": "MODEL-fbbcbf",
+          "entPhysicalName": "entity-a2f6ed",
+          "entPhysicalDescr": "entity-6ebd1d",
+          "entPhysicalParentRelPos": 3,
+          "entPhysicalContainedIn": 1
+        }
+      ]
+    },
     "GET /api/v0/devices/384090667/ports": {
       "status": "ok",
       "ports": []

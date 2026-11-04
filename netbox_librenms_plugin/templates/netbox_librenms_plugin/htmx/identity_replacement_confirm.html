@@ -10,8 +10,10 @@
 <div class="modal-body">
   <div class="alert alert-danger mb-3">
     <i class="mdi mdi-alert-octagon me-1"></i>
-    <strong>{{ object_name }}</strong> is already linked to a different LibreNMS host on this
-    server. <em>{{ action_label }}</em> was blocked and nothing has changed yet.
+    <div>
+      <strong>{{ object_name }}</strong> is already linked to a different LibreNMS host on this
+      server. <em>{{ action_label }}</em> was blocked and nothing has changed yet.
+    </div>
   </div>
 
   <div class="border border-danger rounded-3 p-3 mb-3">
@@ -29,10 +31,12 @@
 
   <div class="alert alert-info mb-0 small">
     <i class="mdi mdi-information-outline me-1"></i>
-    Replacing changes only this server's mapping entry: its out-of-band link, every other server
-    mapping, and the preferred server are kept. The rest of <em>{{ action_label }}</em> still runs,
-    so it can also update the name, serial, or device type from LibreNMS. Confirm only if
-    {{ object_name }} really is LibreNMS host {{ proposed_host_id }} on {{ server_display_name }}.
+    <div>
+      Replacing changes only this server's mapping entry: its out-of-band link, every other server
+      mapping, and the preferred server are kept. The rest of <em>{{ action_label }}</em> still runs,
+      so it can also update the name, serial, or device type from LibreNMS. Confirm only if
+      {{ object_name }} really is LibreNMS host {{ proposed_host_id }} on {{ server_display_name }}.
+    </div>
   </div>
 </div>
 <div class="modal-footer">

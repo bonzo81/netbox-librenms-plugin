@@ -13,6 +13,7 @@ import pytest
 from django.conf import settings
 from django.test import override_settings
 
+from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
 from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts
 from netbox_librenms_plugin.tests.view_test_helpers import post as _post
@@ -149,7 +150,7 @@ class TestPartialModuleRefreshRendersEmpty:
         # Built by the production helper, so a change to the key scheme cannot silently make
         # the assertion below vacuous.
         cache_key = sync_snapshot_key(device, "inventory", SERVER_KEY)
-        cache.set(cache_key, {"inventory": INVENTORY, "librenms_id": 42, "oob_librenms_id": None}, timeout=300)
+        cache.set(cache_key, module_inventory_cache_payload(INVENTORY, 42, None), timeout=300)
         assert cache.get(cache_key) is not None, "the seed never landed, so the drop assertion proves nothing"
         state_key = SyncCacheConsistency(device).state_key(SyncTab.MODULES, SERVER_KEY)
 

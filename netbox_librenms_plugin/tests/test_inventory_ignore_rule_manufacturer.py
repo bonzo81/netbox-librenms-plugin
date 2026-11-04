@@ -97,7 +97,7 @@ class TestScopedIncludeRuleAdmission:
     def test_another_vendors_class_rule_does_not_admit_the_row(self):
         from netbox_librenms_plugin.models import InventoryIgnoreRule
         from netbox_librenms_plugin.utils import get_enabled_ignore_rules
-        from netbox_librenms_plugin.views.base.modules_view import _class_is_included
+        from netbox_librenms_plugin.views.base.modules_view import _admitting_rules
 
         # The seeded rule is vendor-agnostic until migration 0019 runs against a NetBox that
         # knows Juniper, and its own scoping is covered by TestSeededRuleScoping.
@@ -109,19 +109,19 @@ class TestScopedIncludeRuleAdmission:
         _include_rule("admit-juniper-routing-engines", juniper)
         item = {"entPhysicalClass": "other", "entPhysicalName": "RE0"}
 
-        assert _class_is_included(item, get_enabled_ignore_rules(juniper)) is True
-        assert _class_is_included(item, get_enabled_ignore_rules(cisco)) is False
+        assert _admitting_rules(item, get_enabled_ignore_rules(juniper))
+        assert not _admitting_rules(item, get_enabled_ignore_rules(cisco))
 
     def test_an_unscoped_rule_still_admits_every_vendor(self):
         """Existing installs have vendor-agnostic rules, which must keep working."""
         from netbox_librenms_plugin.utils import get_enabled_ignore_rules
-        from netbox_librenms_plugin.views.base.modules_view import _class_is_included
+        from netbox_librenms_plugin.views.base.modules_view import _admitting_rules
 
         cisco = _manufacturer("Global Cisco", "global-cisco")
         _include_rule("global-any-vendor")
         item = {"entPhysicalClass": "other", "entPhysicalName": "RE0"}
 
-        assert _class_is_included(item, get_enabled_ignore_rules(cisco)) is True
+        assert _admitting_rules(item, get_enabled_ignore_rules(cisco))
 
 
 @pytest.mark.django_db
@@ -176,7 +176,7 @@ class TestSeededRuleScoping:
         import importlib
 
         from netbox_librenms_plugin.utils import get_enabled_ignore_rules
-        from netbox_librenms_plugin.views.base.modules_view import _class_is_included
+        from netbox_librenms_plugin.views.base.modules_view import _admitting_rules
 
         from netbox_librenms_plugin.models import InventoryIgnoreRule
 
@@ -188,8 +188,8 @@ class TestSeededRuleScoping:
         self._run_migration_scoping()
 
         item = {"entPhysicalClass": "other", "entPhysicalName": "RE0"}
-        assert _class_is_included(item, get_enabled_ignore_rules(juniper)) is True
-        assert _class_is_included(item, get_enabled_ignore_rules(juniper_networks)) is True
+        assert _admitting_rules(item, get_enabled_ignore_rules(juniper))
+        assert _admitting_rules(item, get_enabled_ignore_rules(juniper_networks))
 
     def test_scoping_preserves_operator_edits_in_every_clone(self):
         import importlib

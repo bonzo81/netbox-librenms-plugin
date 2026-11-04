@@ -7,14 +7,16 @@
 
 {% block content %}
     <div class="alert alert-info">
-        <h4>Serial Sensor Types</h4>
-        <p>Console servers expose their serial lines as LibreNMS <strong>state sensors</strong>, not
-           interface-table rows. Each entry here makes one vendor's <code>sensor_type</code> recognized
-           by the Cables tab's serial console-port sync and names the matching local
-           ConsoleServerPorts — <code>{N}</code> is replaced by the sensor's port number.</p>
-        <p>Ships with Avocent ACS (<code>acsSerialPortTable</code> → <code>ttyS{N}</code>) and Cisco IOS
-           async lines (<code>OLD-CISCO-TS-MIB::ltsLineTable</code> → <code>Line {N}</code>). Add a row to surface a new
-           vendor; delete a row to stop recognizing one — matching is exact, including case.</p>
+        <div>
+            <h4>Serial Sensor Types</h4>
+            <p>Console servers expose their serial lines as LibreNMS <strong>state sensors</strong>, not
+               interface-table rows. Each entry here makes one vendor's <code>sensor_type</code> recognized
+               by the Cables tab's serial console-port sync and names the matching local
+               ConsoleServerPorts — <code>{N}</code> is replaced by the sensor's port number.</p>
+            <p>Ships with Avocent ACS (<code>acsSerialPortTable</code> → <code>ttyS{N}</code>) and Cisco IOS
+               async lines (<code>OLD-CISCO-TS-MIB::ltsLineTable</code> → <code>Line {N}</code>). Add a row to surface a new
+               vendor; delete a row to stop recognizing one — matching is exact, including case.</p>
+        </div>
     </div>
     {{ block.super }}
 {% endblock %}

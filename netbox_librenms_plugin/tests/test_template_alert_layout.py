@@ -1,0 +1,173 @@
+"""Template guards: a Tabler ``.alert`` holds one content block, and a template style rule styles only its own table."""
+
+from html.parser import HTMLParser
+from pathlib import Path
+import subprocess
+import sys
+
+import pytest
+import re2
+
+TEMPLATES_DIR = Path(__file__).parents[1] / "templates"
+TABLES_DIR = Path(__file__).parents[1] / "tables"
+ICON_CLASSES = {"mdi", "ti"}
+VOID_TAGS = {"br", "img", "input", "hr", "meta", "link", "source", "wbr"}
+# Alerts that choose their own layout keep it: d-flex rows of badges, or block/column alerts.
+OWN_LAYOUT_CLASSES = {"d-flex", "d-block", "flex-column"}
+TEMPLATE_TAGS_ONLY = re2.compile(r"(?s)^(\s|\{%.*?%\}|\{#.*?#\})*$")
+STYLE_BLOCK = re2.compile(r"(?s)<style[^>]*>(.*?)</style>")
+CSS_COMMENT = re2.compile(r"(?s)/\*.*?\*/")
+CSS_SELECTORS = re2.compile(r"([^{}]+)\{")
+CSS_ID = re2.compile(r"#([\w-]+)")
+# Table ids come from the django-tables2 attrs and from literal <table> tags in the templates.
+TABLE_IDS = {
+    table_id
+    for path in [*TABLES_DIR.glob("*.py"), *TEMPLATES_DIR.rglob("*.html")]
+    for table_id in re2.findall(r'(?:"id": "|<table[^>]*\sid=")([\w-]+)"', path.read_text(encoding="utf-8"))
+}
+
+
+class _AlertScanner(HTMLParser):
+    """Collect the flex items of every Tabler alert (``display: flex``, row direction)."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.stack = []
+        self.offenders = []
+
+    def handle_starttag(self, tag, attrs):
+        classes = (dict(attrs).get("class") or "").split()
+        if self.stack and self.stack[-1]["alert"]:
+            self.stack[-1]["items"].append(("element", tag, classes))
+        if tag in VOID_TAGS:
+            return
+        alert = "alert" in classes and not OWN_LAYOUT_CLASSES & set(classes)
+        self.stack.append({"tag": tag, "alert": alert, "items": [], "line": self.getpos()[0]})
+
+    def handle_data(self, data):
+        if self.stack and self.stack[-1]["alert"]:
+            items = self.stack[-1]["items"]
+            if items and items[-1][0] == "text":
+                items[-1] = ("text", items[-1][1] + data, [])
+            else:
+                items.append(("text", data, []))
+
+    def handle_endtag(self, tag):
+        # A void tag (<br/>, </br>) has no open element, so it must not close the enclosing alert.
+        if not any(entry["tag"] == tag for entry in self.stack):
+            return
+        while self.stack:
+            entry = self.stack.pop()
+            if entry["alert"]:
+                self._check(entry)
+            if entry["tag"] == tag:
+                break
+
+    def _check(self, entry):
+        items = [
+            item
+            for item in entry["items"]
+            if not (item[0] == "text" and TEMPLATE_TAGS_ONLY.match(item[1]))
+            and not (item[0] == "element" and "btn-close" in item[2])
+        ]
+        if items and items[0][:2] == ("element", "i") and ICON_CLASSES & set(items[0][2]):
+            items = items[1:]
+        if len(items) > 1:
+            self.offenders.append((entry["line"], [name if kind == "element" else "text" for kind, name, _ in items]))
+
+
+def _offenders(source):
+    scanner = _AlertScanner()
+    scanner.feed(source)
+    return scanner.offenders
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        '<div class="alert"><i class="mdi mdi-alert"></i> Run <code>x</code> first.</div>',
+        '<div class="alert"><h4>Title</h4><p>Body.</p></div>',
+        '<div class="alert"><strong>Note:</strong> text</div>',
+        '<div class="alert"><br/>Text<div>Body</div></div>',
+        '<div class="alert"></br>Text<div>Body</div></div>',
+        '<div class="alert"><i>Note</i><span>Details</span></div>',
+    ],
+)
+def test_the_guard_flags_an_alert_with_several_flex_items(source):
+    """Each shape renders as side-by-side columns under Tabler's flex .alert."""
+    assert _offenders(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        '<div class="alert"><i class="mdi mdi-alert"></i><div>Run <code>x</code> first.</div></div>',
+        '<div class="alert">Plain text with {{ value }} only.</div>',
+        '<div class="alert d-flex gap-1"><span class="badge">a</span><span class="badge">b</span></div>',
+        '<div class="alert alert-dismissible"><div>Text <b>x</b></div><button class="btn-close"></button></div>',
+        '<div class="alert">{% if a %}<div>A <b>x</b></div>{% endif %}</div>',
+    ],
+)
+def test_the_guard_accepts_an_icon_plus_one_content_block(source):
+    """An icon plus one block, own-layout alerts, and a close button are all valid."""
+    assert _offenders(source) == []
+
+
+def test_every_template_alert_holds_one_content_block():
+    """Text, <code>, <strong> or <p> directly inside a flex .alert would render as separate columns."""
+    offenders = [
+        f"{path.relative_to(TEMPLATES_DIR)}:{line} {items}"
+        for path in sorted(TEMPLATES_DIR.rglob("*.html"))
+        for line, items in _offenders(path.read_text(encoding="utf-8"))
+    ]
+    assert offenders == []
+
+
+@pytest.mark.parametrize("token", ["{% if flag %}", "{# comment #}"])
+def test_the_guard_handles_repeated_template_tags_before_visible_text(token):
+    """Repeated tags must not stall the scanner when visible text follows them."""
+    probe = """
+import runpy
+import sys
+scan = runpy.run_path(sys.argv[1])["_offenders"]
+source = '<div class="alert">' + sys.argv[2] * 128 + 'Text<div>Body</div></div>'
+assert scan(source) == [(1, ["text", "div"])]
+"""
+    subprocess.run(
+        [sys.executable, "-c", probe, str(Path(__file__)), token],
+        check=True,
+        timeout=5,
+    )
+
+
+def _unscoped_column_selectors(source, table_ids):
+    """Return the template style selectors that pick a table column without naming the table by its id."""
+    return [
+        selector.strip()
+        for block in STYLE_BLOCK.findall(source)
+        for selectors in CSS_SELECTORS.findall(CSS_COMMENT.sub("", block))
+        for selector in selectors.split(",")
+        if "[data-col=" in selector and not table_ids & set(CSS_ID.findall(selector))
+    ]
+
+
+def test_the_style_guard_flags_a_column_rule_that_names_no_table():
+    source = '<style>td[data-col="device_selection"] { width: 300px; } #t td[data-col="vrf"] { width: 1px; }</style>'
+
+    assert _unscoped_column_selectors(source, {"t"}) == ['td[data-col="device_selection"]']
+
+
+def test_the_style_guard_flags_a_column_rule_scoped_to_a_shared_container():
+    source = '<style>#shared-tab-content td[data-col="vrf"] { width: 1px; }</style>'
+
+    assert _unscoped_column_selectors(source, {"t"}) == ['#shared-tab-content td[data-col="vrf"]']
+
+
+def test_no_template_style_rule_styles_a_column_of_another_tab_table():
+    """Every tab template is on the same page, so an unscoped column rule also styles the other tabs' tables."""
+    offenders = [
+        f"{path.relative_to(TEMPLATES_DIR)}: {selector}"
+        for path in sorted(TEMPLATES_DIR.rglob("*.html"))
+        for selector in _unscoped_column_selectors(path.read_text(encoding="utf-8"), TABLE_IDS)
+    ]
+    assert offenders == []

@@ -7,11 +7,13 @@
 
 {% block content %}
     <div class="alert alert-info">
-        <h4>Module Type Mapping</h4>
-        <p>Map LibreNMS inventory model names (entPhysicalModelName) to NetBox module types.
-           When synchronizing modules from LibreNMS, these mappings are checked first before
-           falling back to exact model / part number matching.</p>
-        <p>Example: Map "710-017414" to module type "WS-X4908-10GE"</p>
+        <div>
+            <h4>Module Type Mapping</h4>
+            <p>Map LibreNMS inventory model names (entPhysicalModelName) to NetBox module types.
+               When synchronizing modules from LibreNMS, these mappings are checked first before
+               falling back to exact model / part number matching.</p>
+            <p>Example: Map "710-017414" to module type "WS-X4908-10GE"</p>
+        </div>
     </div>
     {{ block.super }}
 {% endblock %}

@@ -1198,7 +1198,7 @@ class VCInterfaceTable(LibreNMSInterfaceTable):
         accessor="device",
         orderable=False,
         empty_values=[],
-        attrs={"td": {"data-col": "device_selection"}},
+        attrs={"td": {"class": "device-selection-col", "data-col": "device_selection"}},
     )
 
     def __init__(self, *args, device=None, interface_name_field=None, vlan_groups=None, **kwargs):

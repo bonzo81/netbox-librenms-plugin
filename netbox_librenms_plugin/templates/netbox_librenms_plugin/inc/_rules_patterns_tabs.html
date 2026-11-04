@@ -9,7 +9,7 @@ adds the model.
 {% endcomment %}
 <ul class="nav nav-pills mb-3">
     <li class="nav-item">
-        <a class="nav-link{% if rules_tab_active == "inventoryignorerule" %} active{% endif %}" href="{% url 'plugins:netbox_librenms_plugin:inventoryignorerule_list' %}"{% if rules_tab_active == "inventoryignorerule" %} aria-current="page"{% endif %}>Inventory Ignore Rules</a>
+        <a class="nav-link{% if rules_tab_active == "inventoryignorerule" %} active{% endif %}" href="{% url 'plugins:netbox_librenms_plugin:inventoryignorerule_list' %}"{% if rules_tab_active == "inventoryignorerule" %} aria-current="page"{% endif %}>Inventory Rules</a>
     </li>
     <li class="nav-item">
         <a class="nav-link{% if rules_tab_active == "normalizationrule" %} active{% endif %}" href="{% url 'plugins:netbox_librenms_plugin:normalizationrule_list' %}"{% if rules_tab_active == "normalizationrule" %} aria-current="page"{% endif %}>Normalization Rules</a>

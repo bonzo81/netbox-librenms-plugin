@@ -501,7 +501,9 @@ class TestLagPatternSharedLoad:
         result = mock_librenms_api.resolve_port_relationships(ports, port_stack, device_os="storedos")
 
         assert result["lag_members"] == {101: 102}
-        assert 200 not in result["lag_members"], "the stored SAP rule was not read"
+        # An ipForward port is never a LAG member, so only the skip count proves the rule was read.
+        assert result["diagnostics"]["pairs_skipped_sap"] == 1, "the stored SAP rule was not read"
+        assert 200 not in result["sub_interfaces"]
 
     def test_string_zero_high_id_sentinel_is_skipped(self, mock_librenms_api):
         """A string "0" port ID (the ifStack 'no port' sentinel) is skipped, not looked up."""

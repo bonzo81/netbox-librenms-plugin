@@ -4,6 +4,7 @@ from copy import deepcopy
 
 import pytest
 
+from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
 from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_superuser
 
 pytestmark = pytest.mark.django_db
@@ -142,7 +143,7 @@ class TestConfiguredServerCacheScoping:
         view = DeviceModuleTableView()
         request = _request("production")
         key = view.get_cache_key(device, "inventory", "production")
-        cache.set(key, {"inventory": [], "librenms_id": 14, "oob_librenms_id": None})
+        cache.set(key, module_inventory_cache_payload([], 14, None))
 
         context = _bind(view, request).get_context_data(request, device)
 
@@ -213,7 +214,6 @@ class TestRemovedServerFailsClosed:
         extra_args,
     ):
         from django.core.cache import cache
-
         from django.utils.module_loading import import_string
 
         view_class = import_string(view_path)
