@@ -4153,25 +4153,33 @@ function applyFilterDisclosureState(section, button, expanded) {
     }
 }
 
+const liveSearchTimers = new WeakMap();
+
 function initializeSyncFilters() {
     document.querySelectorAll('.sync-filter-form').forEach((form) => {
         if (form.dataset.liveSearchBound) return;
         form.dataset.liveSearchBound = 'true';
-        let timer;
-        const submit = () => { clearTimeout(timer); form.requestSubmit(); };
+        const cancel = () => clearTimeout(liveSearchTimers.get(form));
+        const submit = () => { cancel(); form.requestSubmit(); };
         Array.from(form.elements).forEach((field) => {
             if (field.type === 'search') {
                 field.addEventListener('input', () => {
-                    clearTimeout(timer);
-                    timer = setTimeout(submit, 400);
+                    cancel();
+                    liveSearchTimers.set(form, setTimeout(submit, 400));
                 });
             } else if (field.name.endsWith('_sync_state')) {
                 field.addEventListener('change', submit);
             }
         });
-        form.addEventListener('submit', () => clearTimeout(timer));
+        form.addEventListener('submit', cancel);
     });
 }
+
+// A tab request cancels the pending live search, so the old form cannot load its own tab again.
+document.addEventListener('htmx:beforeRequest', (event) => {
+    if (event.detail.target?.id !== 'librenms-sync-tabs') return;
+    event.detail.target.querySelectorAll('.sync-filter-form').forEach((form) => clearTimeout(liveSearchTimers.get(form)));
+});
 
 function initializeFilterDisclosures() {
     document.querySelectorAll('.sync-filter-toggle[aria-controls]').forEach((button) => {

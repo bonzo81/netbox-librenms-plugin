@@ -600,3 +600,49 @@ def test_apply_clears_the_stale_marks_and_a_later_repaint_marks_again(page):
     expect(page.locator('tr[data-port-id="101"][data-filter-stale="true"]')).to_have_count(1)
     expect(page.locator(".filter-stale-badge")).to_have_count(1)
     expect(page.locator(f"#{TABLE}-filter-stale-notice")).to_have_count(1)
+
+
+def _tab_page(tab):
+    return f"""<!doctype html><html><body>
+        <div id="librenms-sync-tabs" data-active-tab="{tab}">
+          <a class="nav-link" id="cables-tab" data-tab="cables" href="{PAGE_URL}?tab=cables" hx-get="{PAGE_URL}?tab=cables"
+            hx-target="#librenms-sync-tabs" hx-select="#librenms-sync-tabs" hx-swap="outerHTML"
+            hx-sync="#librenms-sync-tabs:replace">Cables</a>
+          <form method="get" id="interfaces_filter-form" class="sync-filter-form">
+            <input type="hidden" name="tab" value="{tab}"></form>
+          <input type="search" form="interfaces_filter-form" name="interfaces_q" id="search">
+        </div></body></html>"""
+
+
+def test_a_tab_click_cancels_the_pending_live_search_of_the_old_tab(page):
+    held = []
+    navigations = []
+
+    def answer(route):
+        if route.request.headers.get("hx-request"):
+            held.append(route)
+        else:
+            route.fulfill(status=200, content_type="text/html", body=_tab_page("interfaces"))
+
+    page.route(f"{PAGE_URL}**", answer)
+    page.goto(f"{PAGE_URL}?tab=interfaces")
+    _add_page_scripts(page)
+    page.evaluate("htmxTest.process(document.body); initializeSyncFilters()")
+    page.on("request", lambda request: request.is_navigation_request() and navigations.append(request.url))
+
+    page.fill("#search", "eth")
+    page.click("#cables-tab")
+    page.wait_for_timeout(700)
+    # The old form must not load its own tab while the tab request is in flight.
+    assert navigations == []
+    assert len(held) == 1
+
+    held[0].fulfill(status=200, content_type="text/html", body=_tab_page("cables"))
+    expect(page.locator("#librenms-sync-tabs")).to_have_attribute("data-active-tab", "cables")
+    page.wait_for_timeout(500)
+    assert navigations == []
+
+    # The form of the new tab keeps its live search.
+    with page.expect_navigation() as navigation:
+        page.fill("#search", "po")
+    assert parse_qs(urlsplit(navigation.value.url).query) == {"tab": ["cables"], "interfaces_q": ["po"]}
