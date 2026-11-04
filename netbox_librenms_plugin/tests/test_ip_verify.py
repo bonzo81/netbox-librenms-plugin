@@ -89,17 +89,18 @@ class TestVerifyPostServerCacheNamespace:
     """The endpoint reads the selected configured namespace or the default namespace."""
 
     @pytest.mark.parametrize(
-        ("server_key", "include_server_key", "selected_vrf"),
-        [("production", True, 20), (None, True, 10), (None, False, 10)],
+        ("server_key", "include_server_key", "selected_namespace"),
+        [("production", True, "production"), (None, True, "default"), (None, False, "default")],
     )
     def test_configured_missing_and_null_server_keys_select_the_expected_cache(
         self,
         configure_librenms,
         server_key,
         include_server_key,
-        selected_vrf,
+        selected_namespace,
     ):
         from django.core.cache import cache
+        from ipam.models import VRF
 
         configure_librenms(
             {
@@ -113,10 +114,14 @@ class TestVerifyPostServerCacheNamespace:
                 },
             }
         )
-        device = make_device(f"ip-verify-namespace-{selected_vrf}-{include_server_key}")
+        device = make_device(f"ip-verify-namespace-{selected_namespace}-{include_server_key}")
         view = _make_view()
         address = "198.18.40.1/32"
-        for namespace, vrf_id in (("default", 10), ("production", 20)):
+        # The verify decides only in a VRF the user can view, so each namespace names a real VRF.
+        vrf_ids = {
+            namespace: VRF.objects.create(name=f"ip-verify-{namespace}").pk for namespace in ("default", "production")
+        }
+        for namespace, vrf_id in vrf_ids.items():
             cache.set(
                 view.get_cache_key(device, "ip_addresses", namespace),
                 {"ip_addresses": [{"ip_with_mask": address, "vrf_id": vrf_id}]},
@@ -127,7 +132,7 @@ class TestVerifyPostServerCacheNamespace:
             "device_id": device.pk,
             "object_type": "device",
             "ip_address": address,
-            "vrf_id": selected_vrf,
+            "vrf_id": vrf_ids[selected_namespace],
         }
         if include_server_key:
             body["server_key"] = server_key
