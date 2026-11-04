@@ -1688,4 +1688,9 @@ rules:
       exclude: ["**/netbox_librenms_plugin/tests/**"]
     patterns:
       - pattern: validate_device_for_import(..., serial_key_for=$KEYS, ...)
-      - pattern-not: validate_device_for_import(..., candidate_keys=$CANDIDATES, ...)
+      # An explicit None is the default: each device then reads the serial rules again.
+      - pattern-either:
+          - patterns:
+              - pattern: validate_device_for_import(...)
+              - pattern-not: validate_device_for_import(..., candidate_keys=$CANDIDATES, ...)
+          - pattern: validate_device_for_import(..., candidate_keys=None, ...)
