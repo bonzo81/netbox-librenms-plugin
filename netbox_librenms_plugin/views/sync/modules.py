@@ -977,6 +977,16 @@ def _record_bind_outcome(bind_result, result, skipped):
     return _module_bind_result_changed(bind_result)
 
 
+def _inventory_depth(index_map, index):
+    """Return how many ancestors the row *index* has in *index_map*; a containment loop ends the walk."""
+    seen = {index}
+    parent = index_map.get(index, {}).get("entPhysicalContainedIn")
+    while parent in index_map and parent not in seen:
+        seen.add(parent)
+        parent = index_map[parent].get("entPhysicalContainedIn")
+    return len(seen) - 1
+
+
 def _never_installable_reason(item):
     """
     Return why an inventory row can never install onto the host, or None.
@@ -2097,6 +2107,8 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     refused.append(index)
                     continue
             plan.append((index, target_id, pinned))
+        # A parent install creates the bays of its children, so a row runs after every selected ancestor.
+        plan.sort(key=lambda entry: _inventory_depth(granted.index_map, entry[0]))
         if refused:
             names = [str(granted.index_map.get(index, {}).get("entPhysicalName") or index) for index in refused]
             raise _ModuleActionRefused(SELECTED_ROWS_REFUSED_MESSAGE.format(rows=", ".join(names)))

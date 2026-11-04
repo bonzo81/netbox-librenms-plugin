@@ -3103,6 +3103,50 @@ def _install_selected(client, device, rows, select):
 
 
 @pytest.mark.django_db
+def test_install_selected_installs_a_parent_before_a_child_posted_first(client):
+    """A child row posted before its parent still finds the bay that the parent install creates."""
+    from dcim.models import Module
+
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type_with_bays
+
+    device = make_device_with_module_bays("selected-order", ["Carrier Slot"])
+    make_module_type_with_bays("ORDER-CARRIER", bay_names=["Cage 1"])
+    make_module_type_with_bays("ORDER-OPTIC")
+    rows = [
+        {"entPhysicalIndex": 1, "entPhysicalClass": "chassis", "entPhysicalContainedIn": 0},
+        {
+            "entPhysicalIndex": 2,
+            "entPhysicalContainedIn": 1,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Carrier Slot",
+            "entPhysicalModelName": "ORDER-CARRIER",
+            "entPhysicalSerialNum": "SN-CARRIER",
+        },
+        {
+            "entPhysicalIndex": 3,
+            "entPhysicalContainedIn": 2,
+            "entPhysicalClass": "container",
+            "entPhysicalName": "Cage 1",
+        },
+        {
+            "entPhysicalIndex": 4,
+            "entPhysicalContainedIn": 3,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Optic 1",
+            "entPhysicalModelName": "ORDER-OPTIC",
+            "entPhysicalSerialNum": "SN-OPTIC",
+        },
+    ]
+
+    _install_selected(client, device, rows, ["4", "2"])
+
+    assert set(Module.objects.filter(device=device).values_list("module_bay__name", "module_type__model")) == {
+        ("Carrier Slot", "ORDER-CARRIER"),
+        ("Cage 1", "ORDER-OPTIC"),
+    }
+
+
+@pytest.mark.django_db
 def test_install_selected_installs_a_row_whose_model_is_a_json_number(client):
     """LibreNMS sends an all-digit model as a JSON number; the install matches it as text."""
     from dcim.models import Module
