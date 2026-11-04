@@ -32,10 +32,23 @@ _PYTHON_STRIP_WHITESPACE = (
 )
 
 
+HIDDEN_RULE_ERROR_MESSAGE = "A stored rule does not work, and you may not view it. Ask an administrator to fix it."
+
+
+class _HiddenRuleConfigurationError:
+    """A broken stored rule as a viewer without view permission on the rule sees it: without the rule details."""
+
+    visible = False
+    public_message = HIDDEN_RULE_ERROR_MESSAGE
+
+
 class RuleConfigurationError(Exception):
     """A stored rule holds a regex or a replacement that does not work, so no decision from its rule set is safe."""
 
+    visible = True
+
     def __init__(self, rule, field):
+        self.rule_model = type(rule)
         self.rule_pk = rule.pk
         self.rule_name = getattr(rule, "name", "") or str(rule)
         self.rule_kind = str(rule._meta.verbose_name)
@@ -43,6 +56,12 @@ class RuleConfigurationError(Exception):
         self.field = field
         self.value = getattr(rule, field)
         super().__init__(self.public_message)
+
+    def shown_to(self, user):
+        """Return this error as *user* may see it: the rule details need view permission on the rule."""
+        if self.rule_model.objects.restrict(user, "view").filter(pk=self.rule_pk).exists():
+            return self
+        return _HiddenRuleConfigurationError()
 
     @property
     def public_message(self):

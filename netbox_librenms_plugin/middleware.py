@@ -102,8 +102,9 @@ class RuleConfigurationErrorMiddleware:
         if not isinstance(exception, RuleConfigurationError) or is_api_request(request) or not _is_plugin_view(request):
             return None
         logger.error("Rule configuration error in %s: %s", request.path, exception)
+        shown = exception.shown_to(request.user)
         if request.method == "GET" and not request.htmx and not getattr(_resolved_view(request), "answers_json", False):
             return render(
-                request, "netbox_librenms_plugin/rule_configuration_error.html", {"rule_error": exception}, status=409
+                request, "netbox_librenms_plugin/rule_configuration_error.html", {"rule_error": shown}, status=409
             )
-        return _answer(request, exception.public_message)
+        return _answer(request, shown.public_message)
