@@ -838,6 +838,53 @@ class TestMarkBuiltInScope:
         assert changed
         assert DeviceType.objects.get(pk=device.device_type_id).part_number == ""
 
+    def test_a_reused_rule_disabled_before_the_lock_refuses_the_mark(self):
+        from dcim.models import DeviceType
+        from django.db import connection
+
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+        from netbox_librenms_plugin.module_grants import GrantRefusal
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts
+
+        device = ixr_device("ixr-scope-rule-disabled", part_number="")
+        rule = model_rule(manufacturer=device.device_type.manufacturer)
+        fields = modal_form(device, SLOT_1)
+        changed = []
+
+        def concurrent_edit(execute, sql, params, many, context):
+            # Another session disables the reused rule just before the writer locks the device type.
+            if not changed and "FOR UPDATE" in sql and '"dcim_devicetype"' in sql:
+                changed.append(sql)
+                table = InventoryIgnoreRule._meta.db_table
+                execute(f'UPDATE "{table}" SET "enabled" = false WHERE "id" = %s', [rule.pk], False, context)
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(concurrent_edit):
+            refused = mark(device, fields)
+
+        assert changed
+        assert message_texts(refused, "error") == [GrantRefusal.STALE.message]
+        assert DeviceType.objects.get(pk=device.device_type_id).part_number == ""
+
+    def test_a_refused_rule_names_the_rule_field(self, settings):
+        from dcim.models import DeviceType
+
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+        from netbox_librenms_plugin.tests.test_validation_error_text_modules import _Refuses
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts
+
+        device = ixr_device("ixr-scope-rule-refused", part_number="")
+        user = user_with("ixr-scope-rule-refused", ("change", DeviceType), ("add", InventoryIgnoreRule))
+        fields = modal_form(device, SLOT_1, user=user)
+        settings.CUSTOM_VALIDATORS = {"netbox_librenms_plugin.inventoryignorerule": [_Refuses("Refused.", "action")]}
+
+        refused = mark(device, fields, user=user)
+
+        assert message_texts(refused, "error") == [
+            "Failed to mark the unit built-in: NetBox refuses the action field (only a superuser sees the message)"
+        ]
+        assert DeviceType.objects.get(pk=device.device_type_id).part_number == ""
+
 
 class TestMarkBuiltInRuleOnly:
     """A unit that already reports the device type's model or part number needs only the rule."""
