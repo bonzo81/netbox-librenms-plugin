@@ -19,3 +19,10 @@ def memoized_batch(rows, api):
 def one_device(row, api):
     # ok: batch-validation-needs-candidate-keys
     validate_device_for_import(row, api=api)
+
+
+def explicit_none_batch(rows, api):
+    serial_key_for = functools.cache(vc_serial_key)
+    for row in rows:
+        # ruleid: batch-validation-needs-candidate-keys
+        validate_device_for_import(row, api=api, serial_key_for=serial_key_for, candidate_keys=None)
