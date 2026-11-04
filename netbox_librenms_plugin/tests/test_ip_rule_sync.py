@@ -254,6 +254,17 @@ class TestAVrfChangeRedecidesTheRow:
             assert "Create</button>" in verdict["status"]
             assert verdict["selectable"] is True
 
+    def test_an_ignored_address_netbox_holds_unassigned_in_the_chosen_vrf_shows_the_mapping(self, client, device, blue):
+        IPAddressMapping.objects.create(prefix="fe80::/10", vrf=blue)
+        IPAddress.objects.create(address=LINK_LOCAL, vrf=blue)
+        _seed(device, [_row(LINK_LOCAL)])
+
+        verdict = _verify(client, device, LINK_LOCAL, blue)
+
+        assert "IP mapping fe80::/10 ignores this address" in verdict["status"]
+        assert "Synced" not in verdict["status"]
+        assert verdict["selectable"] is False
+
 
 class TestTheReasonNamesNoVrf:
     """A user who cannot view the mapping's VRF must not learn its name, so the reason names the prefix only."""

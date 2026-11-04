@@ -40,6 +40,7 @@ from netbox_librenms_plugin.utils import (
     resolve_create_missing_interfaces,
     resolve_ip_source_interface,
     resolve_set_primary_ip,
+    rule_block_html,
     same_host,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -1443,12 +1444,11 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
             )
 
             ip_rule = ip_rules_for_request(request).decide(ip_interface(updated_record["ip_with_mask"]).ip, vrf_id)
+            # The verify does not check the interface assignment, so an ignored row shows its mapping, never Synced.
             if ip_rule is not None:
-                updated_record["ip_rule_block"] = row_ip_rule_block(ip_rule)
-
-            # Render status HTML
-            table = IPAddressTable(data=[])
-            status_html = table.render_status(updated_record["status"], updated_record)
+                status_html = rule_block_html(row_ip_rule_block(ip_rule))
+            else:
+                status_html = IPAddressTable(data=[]).render_status(updated_record["status"], updated_record)
 
             return JsonResponse(
                 {
