@@ -4274,6 +4274,12 @@ function updateInterfaceNameField() {
             const url = new URL(window.location);
             url.searchParams.set('interface_name_field', this.value);
             window.history.pushState({}, '', url);
+            // A tab link opened without htmx reads the field from its href, so each href names the new value.
+            document.querySelectorAll('#librenms-sync-tabs a[data-tab]').forEach(link => {
+                const linkUrl = new URL(link.getAttribute('href'), window.location.href);
+                linkUrl.searchParams.set('interface_name_field', this.value);
+                link.setAttribute('href', linkUrl.pathname + linkUrl.search + linkUrl.hash);
+            });
 
             // Set HTMX headers for subsequent requests
             if (typeof htmx !== 'undefined') {
