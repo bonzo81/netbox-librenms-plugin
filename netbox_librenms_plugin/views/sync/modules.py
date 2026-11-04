@@ -3944,13 +3944,25 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
             # A constrained grant decides on the saved row; a denial rolls the whole mark back.
             if not saved_in_scope(locked, self.request.user, "change"):
                 raise _MarkBuiltInOutOfScope
-        rule = plan.rule
-        if rule is not None:
-            if not self.restricted_queryset(InventoryIgnoreRule, "change").filter(pk=rule.pk).exists():
+        if plan.rule is not None:
+            # A rule edit after the policy read must not leave a mark that no rule covers.
+            rule = (
+                self.restricted_queryset(InventoryIgnoreRule, "change")
+                .select_for_update(of=("self",))
+                .filter(pk=plan.rule.pk)
+                .first()
+            )
+            if rule is None:
                 raise _MarkBuiltInOutOfScope
+            if not rule.hides_built_in_units or rule.manufacturer_id not in {None, plan.manufacturer_id}:
+                raise GrantRefused(GrantRefusal.STALE)
             return rule
         rule = InventoryIgnoreRule(**BUILT_IN_UNITS_RULE, manufacturer_id=plan.manufacturer_id)
-        rule.full_clean()
+        try:
+            rule.full_clean()
+        except ValidationError as exc:
+            detail = exception_text_for(exc, InventoryIgnoreRule, self.request.user)
+            raise _ModuleActionRefused(f"Failed to mark the unit built-in: {detail}") from exc
         rule.save()
         if not saved_in_scope(rule, self.request.user, "add"):
             raise _MarkBuiltInOutOfScope
