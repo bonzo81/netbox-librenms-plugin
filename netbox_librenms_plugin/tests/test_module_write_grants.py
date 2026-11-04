@@ -309,10 +309,11 @@ def test_each_writer_refuses_a_row_its_include_rule_no_longer_admits(ui, c8300, 
 BUILT_IN_UNIT = 1000  # module 0: the seeded model rule makes it transparent, so the table hides it.
 
 
-@pytest.mark.parametrize("change", ["module-type", "module-bay"])
+@pytest.mark.parametrize("change", ["module-type", "module-bay", "replacement-type-mapping"])
 def test_replace_refuses_a_module_changed_after_its_preview(ui, c8300, change):
     from dcim.models import Module, ModuleBay, ModuleType
 
+    from netbox_librenms_plugin.models import ModuleTypeMapping
     from netbox_librenms_plugin.module_grants import GrantRefusal
 
     device, entities = c8300
@@ -320,6 +321,10 @@ def test_replace_refuses_a_module_changed_after_its_preview(ui, c8300, change):
     module = Module.objects.get(device=device, pk=form[1]["module_id"])
     if change == "module-type":
         Module.objects.filter(pk=module.pk).update(module_type=ModuleType.objects.get(model=_nim(entities)[0]))
+    elif change == "replacement-type-mapping":
+        # The preview resolved the row to the NIM type; a new mapping now resolves it to another type.
+        other = ModuleType.objects.create(manufacturer=module.module_type.manufacturer, model="GRANT-OTHER")
+        ModuleTypeMapping.objects.create(librenms_model=_nim(entities)[0], netbox_module_type=other)
     else:
         free_bay = (
             ModuleBay.objects.filter(device=device, installed_module__isnull=True)

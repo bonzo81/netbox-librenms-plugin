@@ -2621,9 +2621,12 @@ class ApplyModuleInterfaceTypesView(
         return _modules_action_response(request, page_device, server_key)
 
 
-def _replace_target(module):
-    """Return the module, type and bay that a replace grant signs: the state the operator reviewed in the preview."""
-    return {"module_id": module.pk, "module_type_id": module.module_type_id, "module_bay_id": module.module_bay_id}
+def _replace_target(module, replacement_type):
+    """Return what a replace grant signs: the module, type and bay the preview showed, and the type it resolved."""
+    target = {"module_id": module.pk, "module_type_id": module.module_type_id, "module_bay_id": module.module_bay_id}
+    if replacement_type is not None:
+        target["replacement_module_type_id"] = replacement_type.pk
+    return target
 
 
 class ModuleMismatchPreviewView(
@@ -2759,7 +2762,7 @@ class ModuleMismatchPreviewView(
                 "selected_device_id": target_device.pk,
                 "serial_inventory_binding": self._derived_grant(grant, ACTION_UPDATE_SERIAL),
                 "replace_inventory_binding": self._derived_grant(
-                    grant, ACTION_REPLACE_MODULE, action_target=_replace_target(installed_module)
+                    grant, ACTION_REPLACE_MODULE, action_target=_replace_target(installed_module, matched_type)
                 ),
             },
         )
@@ -2937,7 +2940,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 )
                 if not installed_module:
                     raise _ModuleActionRefused("Module no longer exists.")
-                granted.grant.require(action_target=_replace_target(installed_module))
+                granted.grant.require(action_target=_replace_target(installed_module, matched_type))
 
                 # Read bay/type from locked row to avoid stale snapshot
                 target_bay = installed_module.module_bay
