@@ -40,12 +40,12 @@ def _row(ip_with_mask):
     }
 
 
-def _seed(device, rows):
+def _seed(device, rows, mgmt_ip=""):
     cache.set(
         sync_snapshot_key(device, TAB_SPECS[SyncTab.IP_ADDRESSES].data_type, SERVER_KEY),
         {
             "ip_addresses": rows,
-            "mgmt_ip": "",
+            "mgmt_ip": mgmt_ip,
             "ports_by_id": {PORT_ID: _port(PORT_ID, "eth0")},
             "bound_ports_by_id": {},
             "interface_name_field": "ifName",
@@ -164,6 +164,19 @@ class TestTheTableShowsAnIgnoredAddress:
 
         assert "Ignored" in _cell(_row_html(client, device, LINK_LOCAL), "status")
         assert "Update</button>" in _cell(_row_html(client, device, "fe80::2/64"), "status")
+
+    def test_an_ignored_management_row_is_no_set_primary_ip_candidate(self, client, device):
+        IPAddressMapping.objects.create(prefix="fe80::/10")
+        _seed(device, [_row(LINK_LOCAL), _row(GLOBAL_V4)], mgmt_ip="fe80::1")
+
+        response = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
+            {"tab": "ipaddresses", "server_key": SERVER_KEY},
+        )
+
+        table = response.context["ip_sync"]["table"]
+        assert [row.get("is_mgmt_ip") for row in table.data if row["ip_with_mask"] == LINK_LOCAL] == [True]
+        assert json.loads(table.attrs["data-mgmt-rows"]) == []
 
 
 class TestTheWriterRefusesAnIgnoredAddress:

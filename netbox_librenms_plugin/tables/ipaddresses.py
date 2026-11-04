@@ -26,8 +26,11 @@ class IPAddressTable(tables.Table):
             kwargs["data"] = identify_ip_sync_rows(list(kwargs["data"]))
         super().__init__(*args, **kwargs)
         # Set Primary IP selects the management row also from a page that does not render it, with the VRF it shows.
+        # The writer refuses an address that an IP mapping ignores, so that row is no candidate.
         mgmt_row_vrfs = {
-            row["row_id"]: _shown_vrf_id(row) for row in self.data if row.get("is_mgmt_ip") and row["row_id"]
+            row["row_id"]: _shown_vrf_id(row)
+            for row in self.data
+            if row.get("is_mgmt_ip") and row["row_id"] and not row.get("ip_rule_block")
         }
         self.attrs["data-mgmt-rows"] = json.dumps(list(mgmt_row_vrfs))
         self.attrs["data-mgmt-row-vrfs"] = json.dumps(mgmt_row_vrfs)

@@ -2289,7 +2289,7 @@ def test_cache_reads_carry_the_browser_url(page):
 SAVE_PREF_URL = "https://plugin.example.com/save-pref"
 
 
-def _ipaddress_toggle_fragment():
+def _ipaddress_toggle_fragment(extra_rows=""):
     """Build an IP address fragment around the template's own "Sync options" menu."""
     from django.template import Context, Engine, Library
 
@@ -2308,7 +2308,7 @@ def _ipaddress_toggle_fragment():
         + '<table id="librenms-ipaddress-table"><tbody>'
         '<tr data-mgmt-ip="true"><td><input type="checkbox" name="select" value="10.0.0.1"></td></tr>'
         '<tr><td><input type="checkbox" name="select" value="10.0.0.2"></td></tr>'
-        "</tbody></table>"
+        f"{extra_rows}</tbody></table>"
     )
 
 
@@ -2350,6 +2350,24 @@ def test_a_cache_fragment_binds_the_primary_ip_toggle(page):
     page.check("#set-primary-ip-toggle-cb")
 
     assert mgmt_row.is_checked()
+
+
+def test_set_primary_ip_leaves_an_ignored_management_row_unselected(page):
+    """The writer refuses an address that an IP mapping ignores, so its disabled row is never selected."""
+    ignored = '<tr data-mgmt-ip="true"><td><input type="checkbox" name="select" value="fe80::1/64" disabled></td></tr>'
+    page.route(
+        "https://plugin.example.com/fragment/ipaddresses*",
+        lambda route: route.fulfill(body=_ipaddress_toggle_fragment(ignored), content_type="text/html"),
+    )
+    page.route(SAVE_PREF_URL, lambda route: route.fulfill(json={"status": "ok"}))
+    initial = {"interfaces": _state("interfaces-ready"), "ipaddresses": _state("ipaddresses-ready")}
+    _serve_sync_page(
+        page, '<input type="hidden" name="csrfmiddlewaretoken" value="test-csrf-token">' + _page_html(initial)
+    )
+    page.evaluate("async () => { initializeSyncCacheConsistency(); await loadSyncCacheFragment('ipaddresses'); }")
+
+    assert page.locator('input[name="select"][value="10.0.0.1"]').is_checked()
+    assert not page.locator('input[name="select"][value="fe80::1/64"]').is_checked()
 
 
 def test_a_cache_fragment_load_does_not_recheck_the_cache_status(page):

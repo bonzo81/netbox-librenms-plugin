@@ -1263,7 +1263,8 @@ function initializePrimaryIpToggle() {
         if (!table || !toggle.checked) return;
         const seeded = again ? new Set() : readSeededManagementRows(table);
         const visible = new Set(Array.from(table.querySelectorAll('td input[name="select"]'), (box) => box.value));
-        table.querySelectorAll('tr[data-mgmt-ip="true"] input[name="select"]').forEach((box) => {
+        // An IP mapping disables the row of an ignored address, and the writer refuses it.
+        table.querySelectorAll('tr[data-mgmt-ip="true"] input[name="select"]:not(:disabled)').forEach((box) => {
             if (!seeded.has(box.value)) box.checked = true;
             seeded.add(box.value);
         });
