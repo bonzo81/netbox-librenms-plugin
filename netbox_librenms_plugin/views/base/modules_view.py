@@ -856,7 +856,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                         "table": None,
                         "cache_expiry": None,
                         "server_key": server_key,
-                        "inventory_rule_error": exc,
+                        "inventory_rule_error": exc.shown_to(request.user),
                     }
                 },
             )
@@ -1080,7 +1080,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 "table": None,
                 "object": page_device,
                 "server_key": scoped_server,
-                "inventory_rule_error": exc,
+                "inventory_rule_error": exc.shown_to(request.user),
             }
         if policy.member(member.pk) is None:
             return {"table": None, "object": page_device, "server_key": scoped_server}
@@ -1148,7 +1148,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 "object": obj,
                 "cache_expiry": None,
                 "server_key": self._active_server_key,
-                "inventory_rule_error": exc,
+                "inventory_rule_error": exc.shown_to(request.user),
             }
 
     def _build_table_context(self, request, obj, inventory_data, sync_device, *, policy, pin_to):

@@ -219,6 +219,32 @@ def test_a_read_only_page_shows_a_banner_that_names_the_broken_rule(client, serv
     assert f"(ID {rule.pk}) stores an invalid <code>match_pattern</code>" in content
 
 
+@pytest.mark.parametrize("htmx", [False, True], ids=["banner", "htmx"])
+@pytest.mark.parametrize("may_view_rule", [False, True], ids=["hidden", "viewable"])
+def test_only_a_viewer_of_the_rule_sees_its_details(client, server, htmx, may_view_rule):
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.models import HIDDEN_RULE_ERROR_MESSAGE, NormalizationRule
+    from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+    device = make_device(f"rule-error-viewer-{htmx}-{may_view_rule}", librenms_cf={server.server_key: {"id": 4714}})
+    server.device_info_response(device_id=4714, hostname=device.name, hardware="WS-C9300")
+    rule = _break_device_type_normalization()
+    perms = [("view", Device)] + ([("view", NormalizationRule)] if may_view_rule else [])
+    client.force_login(make_user_with_perms(f"rule-error-viewer-{htmx}-{may_view_rule}", perms))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
+        {"server_key": server.server_key},
+        **({"HTTP_HX_REQUEST": "true"} if htmx else {}),
+    )
+
+    answer = response.content.decode() + response.get("HX-Trigger", "")
+    assert (rule.get_absolute_url() in answer or f"ID {rule.pk}" in answer) is may_view_rule
+    assert ("match_pattern" in answer) is may_view_rule
+    assert (HIDDEN_RULE_ERROR_MESSAGE in answer) is (not may_view_rule)
+
+
 def test_the_chassis_fallback_of_the_device_type_match_does_not_swallow_a_broken_rule(server):
     """A hardware placeholder skips the rules, so only the chassis fallback evaluates them."""
     from netbox_librenms_plugin.import_utils.device_operations import match_import_device_type
