@@ -3828,7 +3828,7 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
             raise GrantRefused(GrantRefusal.STALE)
         if candidate.records_part_number and (device_type.part_number or "").strip():
             raise _ModuleActionRefused(
-                f"Device type {device_type} already has a part number. Add an Inventory Ignore Rule instead."
+                f"Device type {device_type} already has a part number. Add an Inventory Rule instead."
             )
         return _BuiltInPlan(
             target=target,

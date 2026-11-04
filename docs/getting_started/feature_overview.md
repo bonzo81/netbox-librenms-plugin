@@ -42,7 +42,7 @@
 ## [Rules & Patterns](../configuration/rules_and_patterns.md)
 
 * **Normalization Rules** — regex-based string transformation before matching (strips vendor suffixes etc.)
-* **Inventory Ignore Rules** — include, skip, or make transparent selected ENTITY-MIB inventory items
+* **Inventory Rules** — include, skip, or make transparent selected ENTITY-MIB inventory items
 * **Carrier Auto-Install Rules** — suggest carrier module installation for vendors that omit them from SNMP
 * **Port Stack LAG Patterns** — identify LAG interfaces and service access points by LibreNMS OS
 * Bulk YAML import/export for all rule and pattern types
