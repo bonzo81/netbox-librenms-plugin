@@ -1,6 +1,7 @@
 """Sync action views for module/inventory installation from LibreNMS."""
 
 import copy
+import hashlib
 import json
 import logging
 import re
@@ -2621,9 +2622,19 @@ class ApplyModuleInterfaceTypesView(
         return _modules_action_response(request, page_device, server_key)
 
 
+def _serial_digest(serial):
+    """Return a positive int that names the stripped stored serial, so the id-only action target can sign it."""
+    return int.from_bytes(hashlib.sha256((serial or "").strip().encode()).digest()[:7], "big") + 1
+
+
 def _replace_target(module, replacement_type):
-    """Return what a replace grant signs: the module, type and bay the preview showed, and the type it resolved."""
-    target = {"module_id": module.pk, "module_type_id": module.module_type_id, "module_bay_id": module.module_bay_id}
+    """Return what a replace grant signs: the module, type, bay and serial the preview showed, and the type it resolved."""
+    target = {
+        "module_id": module.pk,
+        "module_type_id": module.module_type_id,
+        "module_bay_id": module.module_bay_id,
+        "module_serial_digest": _serial_digest(module.serial),
+    }
     if replacement_type is not None:
         target["replacement_module_type_id"] = replacement_type.pk
     return target

@@ -309,7 +309,7 @@ def test_each_writer_refuses_a_row_its_include_rule_no_longer_admits(ui, c8300, 
 BUILT_IN_UNIT = 1000  # module 0: the seeded model rule makes it transparent, so the table hides it.
 
 
-@pytest.mark.parametrize("change", ["module-type", "module-bay", "replacement-type-mapping"])
+@pytest.mark.parametrize("change", ["module-type", "module-bay", "module-serial", "replacement-type-mapping"])
 def test_replace_refuses_a_module_changed_after_its_preview(ui, c8300, change):
     from dcim.models import Module, ModuleBay, ModuleType
 
@@ -321,6 +321,8 @@ def test_replace_refuses_a_module_changed_after_its_preview(ui, c8300, change):
     module = Module.objects.get(device=device, pk=form[1]["module_id"])
     if change == "module-type":
         Module.objects.filter(pk=module.pk).update(module_type=ModuleType.objects.get(model=_nim(entities)[0]))
+    elif change == "module-serial":
+        Module.objects.filter(pk=module.pk).update(serial="CHANGED-AFTER-PREVIEW")
     elif change == "replacement-type-mapping":
         # The preview resolved the row to the NIM type; a new mapping now resolves it to another type.
         other = ModuleType.objects.create(manufacturer=module.module_type.manufacturer, model="GRANT-OTHER")
