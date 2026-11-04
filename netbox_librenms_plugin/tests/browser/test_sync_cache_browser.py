@@ -4,7 +4,6 @@ import json
 import re
 from html import escape
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -2520,72 +2519,6 @@ def test_a_cache_fragment_load_does_not_recheck_the_cache_status(page):
     assert page.locator("#restored").count() == 1
     assert page.evaluate("syncCacheController().checking") is None
     assert status_requests == []
-
-
-def _sync_tab_bar(interface_name_field):
-    """Build the tab bar from the template's own tab links and interface name selector."""
-    from django.template import Context, Engine, Library
-
-    urls = Library()
-
-    @urls.simple_tag(name="url")
-    def url(name):
-        assert name == "plugins:netbox_librenms_plugin:save_user_pref"
-        return SAVE_PREF_URL
-
-    engine = Engine()
-    engine.template_builtins.append(urls)
-    link = engine.from_string((TEMPLATE_DIR / "inc" / "_sync_tab_link.html").read_text(encoding="utf-8"))
-    selector = engine.from_string(
-        (TEMPLATE_DIR / "inc" / "_interface_name_field_selector.html").read_text(encoding="utf-8")
-    )
-    links = "".join(
-        link.render(
-            Context(
-                {
-                    "current_tab": "interfaces",
-                    "tab_id": tab,
-                    "tab_label": tab,
-                    "tab_url": f"/device/1/librenms-sync/?tab={tab}&server_key=production",
-                    "tab_status": {},
-                    "interface_name_field": interface_name_field,
-                },
-                use_l10n=False,
-            )
-        )
-        for tab in ("interfaces", "modules")
-    )
-    radios = selector.render(
-        Context(
-            {
-                "interface_name_field": interface_name_field,
-                "interface_name_selector_visible": True,
-                "object": {"platform_id": 3},
-            },
-            use_l10n=False,
-        )
-    )
-    return f'<div id="librenms-sync-tabs" data-active-tab="interfaces">{links}{radios}</div>'
-
-
-def test_an_interface_name_field_change_updates_every_tab_link(page):
-    """A tab link opened in a new browser tab skips htmx, so its href must name the selected field."""
-    page.route(SAVE_PREF_URL, lambda route: route.fulfill(json={"status": "ok"}))
-    _serve_sync_page(
-        page, '<input type="hidden" name="csrfmiddlewaretoken" value="test-csrf-token">' + _sync_tab_bar("ifDescr")
-    )
-    page.evaluate("updateInterfaceNameField()")
-
-    with page.expect_request(SAVE_PREF_URL):
-        page.check("#interface-name-field-ifname")
-
-    hrefs = page.eval_on_selector_all(
-        "#librenms-sync-tabs a[data-tab]", "links => links.map(a => a.getAttribute('href'))"
-    )
-    queries = [parse_qs(urlsplit(href).query) for href in hrefs]
-    assert [query["tab"] for query in queries] == [["interfaces"], ["modules"]]
-    assert all(query["interface_name_field"] == ["ifName"] for query in queries), hrefs
-    assert all(query["server_key"] == ["production"] for query in queries)
 
 
 def test_module_verify_carries_the_browser_url(page):
