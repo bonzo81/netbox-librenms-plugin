@@ -328,6 +328,18 @@ class TestAVrfChangeRedecidesTheRow:
         assert "Ignored" not in verdict["status"]
         assert verdict["selectable"] is False
 
+    def test_an_ignored_address_that_two_interfaces_hold_stays_synced_on_the_row_interface(self, client, device, blue):
+        other = make_interface(device, "eth1", iface_type="virtual")
+        IPAddressMapping.objects.create(prefix="fe80::/10", vrf=blue)
+        IPAddress.objects.create(address=LINK_LOCAL, vrf=blue, assigned_object=device.interfaces.get(name="eth0"))
+        IPAddress.objects.create(address=LINK_LOCAL, vrf=blue, assigned_object=other)
+        _seed(device, [_row(LINK_LOCAL)])
+
+        verdict = _verify(client, device, LINK_LOCAL, blue)
+
+        assert "Synced" in verdict["status"]
+        assert verdict["selectable"] is False
+
     def test_a_vrf_the_user_cannot_view_decides_nothing(self, client, device, blue):
         from dcim.models import Device
 
