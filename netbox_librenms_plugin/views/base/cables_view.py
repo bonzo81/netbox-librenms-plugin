@@ -2457,6 +2457,9 @@ class BaseCableTableView(
         except AmbiguousLibreNMSIdError:
             return
         local = self._viewable_queryset(Interface).filter(pk=link["netbox_local_interface_id"]).first()
+        # The endpoint cables only a local interface that the user may change.
+        if local is None or not self._may("change", local):
+            return
         if is_channel(local):
             decision = self._breakout_decision(local, None)
             if decision.action not in ("create", "extend"):

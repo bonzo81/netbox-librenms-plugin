@@ -682,6 +682,44 @@ def test_create_remote_is_not_offered_under_a_hidden_parent(librenms_server):
 
 @requires_channels
 @pytest.mark.usefixtures("breakout_server")
+@pytest.mark.parametrize(
+    ("channel", "interface_change"),
+    [(True, {"channel_id__isnull": True}), (False, {"name__startswith": "et-0/0/1"})],
+    ids=["channel", "plain"],
+)
+def test_create_remote_is_not_offered_on_a_local_port_the_user_may_not_change(
+    librenms_server, channel, interface_change
+):
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+    setup = _Breakout(f"create-far-unchangeable-{channel}")
+    row = _missing_far_end(setup, librenms_server, 2, 9005)
+    if channel:
+        setup.seed(setup.row(1), row)
+        setup.sync(1)
+        channel_id = 2
+    else:
+        plain = make_interface(setup.device, "et-0/0/9")
+        setup.seed({**row, "local_port_id": 109, "local_port": plain.name})
+        channel_id = 9
+    user = make_user_with_perms(
+        f"breakout-create-unchangeable-{channel}",
+        [("view", Device), ("view", Interface), ("view", Cable), ("add", Cable), ("change", Cable), ("add", Interface)],
+    )
+    # The user may change the parent and the peer ports, but not the local port of the row.
+    setup.client.force_login(grant(user, "change", Interface, constraints=interface_change))
+
+    record = setup.records()[str(100 + channel_id)]
+    verified = setup.verify(channel_id)
+
+    assert record.get("remote_create_url") is None
+    assert "cable-remote-create" not in verified["actions"]
+
+
+@requires_channels
+@pytest.mark.usefixtures("breakout_server")
 def test_an_ignore_rule_on_the_parent_port_does_not_block_the_channel(librenms_server):
     from netbox_librenms_plugin.models import InterfaceTypeMapping
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
