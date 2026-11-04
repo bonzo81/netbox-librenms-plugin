@@ -865,10 +865,18 @@ class DeviceModuleTableView(BaseModuleTableView):
         user = self.request.user
         has_write_permission = self.has_write_permission()
         server_key = getattr(self, "_active_server_key", None) or self.librenms_api.server_key
-        table_class = VCModuleTable if hasattr(obj, "virtual_chassis") and obj.virtual_chassis else LibreNMSModuleTable
+        table_class, member_kwargs = LibreNMSModuleTable, {}
+        if hasattr(obj, "virtual_chassis") and obj.virtual_chassis:
+            table_class = VCModuleTable
+            member_kwargs["allowed_vc_member_ids"] = set(
+                self.restricted_queryset(Device)
+                .filter(virtual_chassis=obj.virtual_chassis)
+                .values_list("pk", flat=True)
+            )
         table = table_class(
             data,
             device=obj,
+            **member_kwargs,
             server_key=server_key,
             has_write_permission=has_write_permission,
             can_add_module=has_write_permission and user.has_perm("dcim.add_module"),

@@ -6,6 +6,7 @@ carries, changes one input, and posts the form. A writer must refuse a changed i
 """
 
 import json
+import re
 from copy import deepcopy
 from urllib.parse import parse_qs, urlsplit
 
@@ -701,6 +702,29 @@ def test_a_member_serial_change_after_render_refuses_the_member_row(ui, vc_grant
 
     assert "Inventory rules or device identity changed. Refresh Modules and try again." in messages_of(response)
     assert _installed(member) == set()
+
+
+def test_the_member_select_names_only_the_members_the_user_may_view(client, vc_grants):
+    """Optic 1 belongs to the hidden member by its serial, so its select names no member."""
+    from dcim.models import Device, ModuleBay, ModuleType
+
+    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+    page, member = vc_grants(optic_1_on_member=True)
+    user = make_user_with_perms("module-grants-page-only", [("view", Device)], constraints={"pk": page.pk})
+    for model in (ModuleBay, ModuleType):
+        user = grant(user, "view", model)
+    client.force_login(user)
+
+    content = render(client, page)
+
+    def options(index):
+        (select,) = re.findall(rf'<select name="device_selection_{index}".*?</select>', content, flags=re.S)
+        return re.findall(r'<option value="([^"]*)"( selected)?', select)
+
+    assert member.name not in content
+    assert options(OPTIC_1) == [("", " selected"), (str(page.pk), "")]
+    assert options(CARD) == [(str(page.pk), " selected")]
 
 
 def test_a_grant_does_not_outlive_the_permission_it_was_rendered_for(client, c8300):

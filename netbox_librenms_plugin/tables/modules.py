@@ -1302,13 +1302,16 @@ class VCModuleTable(LibreNMSModuleTable):
         visible=False,
     )
 
-    def __init__(self, *args, device=None, **kwargs):
+    def __init__(self, *args, device=None, allowed_vc_member_ids=None, **kwargs):
         super().__init__(*args, device=device, **kwargs)
         # Cache VC members once so render_device_selection doesn't re-query for
         # every row in large module tables.
         self._vc_members = []
         if hasattr(self.device, "virtual_chassis") and self.device.virtual_chassis:
-            self._vc_members = list(self.device.virtual_chassis.members.all())
+            members = self.device.virtual_chassis.members.all()
+            if allowed_vc_member_ids is not None:
+                members = members.filter(pk__in=allowed_vc_member_ids)
+            self._vc_members = list(members)
             self.columns.show("device_selection")
 
     def render_device_selection(self, value, record):
@@ -1326,13 +1329,17 @@ class VCModuleTable(LibreNMSModuleTable):
             else ""
         )
 
+        options = render_vc_member_options(self._vc_members, selected_device_id)
+        # A row on a member the user may not view names no member.
+        if not any(str(member.pk) == str(selected_device_id) for member in self._vc_members):
+            options = format_html('<option value="" selected>Select a member</option>{}', options)
         return format_html(
             '<select name="device_selection_{0}" id="device_selection_{0}" '
             'class="form-select vc-member-select" data-module="{0}" data-row-id="{0}"'
             ' data-verify-binding="{1}">{2}</select>{3}',
             ent_index,
             verify_binding,
-            render_vc_member_options(self._vc_members, selected_device_id),
+            options,
             selection_grant,
         )
 
