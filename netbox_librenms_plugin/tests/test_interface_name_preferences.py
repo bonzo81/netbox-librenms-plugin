@@ -1,6 +1,7 @@
 """Integration tests for interface-name preference behavior on sync pages."""
 
 import json
+import re
 from copy import deepcopy
 
 import pytest
@@ -26,6 +27,13 @@ def _selector_tag(html):
     marker = 'id="interface-name-field-selector"'
     position = html.index(marker)
     return html[html.rfind("<div", 0, position) : html.index(">", position) + 1]
+
+
+def _checked_selector_radio(html):
+    """Return the checked radio inside the selector that the tab links name in hx-include."""
+    selector = html[html.index('id="interface-name-field-selector"') :]
+    selector = selector[: selector.index("</div>")]
+    return re.search(r"<input\b[^>]*\bchecked\b[^>]*>", selector).group(0)
 
 
 @pytest.mark.django_db
@@ -164,8 +172,9 @@ def test_tab_clicks_keep_one_interface_name_field_in_the_url(client, settings):
         position = html.index(f'id="{tab}-tab"')
         link = parse_html(html[html.rfind("<a", 0, position) : html.index(">", position) + 1] + "</a>")
         attributes = dict(link.attributes)
-        # htmx appends the included radio to the hx-get URL and pushes the result.
-        pushed = f"{attributes['hx-get']}&interface_name_field=ifName"
+        # htmx appends the checked radio of the included selector to the hx-get URL and pushes the result.
+        included = dict(parse_html(_checked_selector_radio(html)).attributes)
+        pushed = f"{attributes['hx-get']}&{included['name']}={included['value']}"
 
         assert parse_qs(urlsplit(pushed).query)["interface_name_field"] == ["ifName"]
         assert parse_qs(urlsplit(attributes["href"]).query)["interface_name_field"] == ["ifName"]
