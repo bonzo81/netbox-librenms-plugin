@@ -145,6 +145,7 @@ class TestNormalLinkContextResolution:
             "visible_interface_ids",
             "visible_owner_ids",
             "visible_cable_ids",
+            "visible_termination_ids",
             "trace_paths",
             "trace_visibility",
         }

@@ -944,6 +944,44 @@ def test_a_one_sided_channel_row_reveals_nothing_of_a_hidden_parent_or_cable(hid
     assert rendered == [(f"Breakout Not Synced: {reason}", None, False)] * 2
 
 
+@pytest.mark.usefixtures("breakout_server")
+@pytest.mark.parametrize("channel", [pytest.param(True, marks=requires_channels), False], ids=["channel", "plain"])
+def test_a_one_sided_row_never_names_the_device_of_a_hidden_far_end(channel):
+    from netbox_librenms_plugin.views.sync.cables import SyncCablesView
+
+    if channel:
+        setup = _Breakout("hidden-far-end")
+        setup.seed(setup.row(1))
+        setup.sync(1)
+        device, row, peer = setup.device, setup.row(1), setup.peer
+    else:
+        device, local, remote, row = _plain_pair("hidden-far-end")
+        Cable(a_terminations=[local], b_terminations=[remote]).save()
+        peer = remote.device
+    # The neighbour is not in NetBox, so the row reports the cable that its local end has.
+    row = {**row, "remote_device": "hidden-far-end-unknown"}
+    cache_key = object.__new__(SyncCablesView).get_cache_key(device, "links", SERVER_KEY)
+    cache.set(cache_key, {"links": [row], "snapshot_token": f"hidden-far-end-{device.pk}"}, timeout=300)
+    client = Client()
+    # The user may view the peer device and the cable, but no interface of the peer.
+    client.force_login(_constrained_user(f"hidden-far-end-{channel}", interface_view={"device_id": device.pk}))
+
+    rendered = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
+        {"tab": "cables", "server_key": SERVER_KEY},
+    )
+    verified = client.post(
+        reverse("plugins:netbox_librenms_plugin:verify_cable"),
+        data=json.dumps({"device_id": device.pk, "row_id": str(row["local_port_id"]), "server_key": SERVER_KEY}),
+        content_type="application/json",
+    ).json()["formatted_row"]
+
+    (record,) = [table_row.record for table_row in rendered.context["cable_sync"]["table"].rows]
+    assert (record["cable_status"], bool(record.get("cable_url"))) == ("Cabled in Netbox", True)
+    assert "Cabled in Netbox" in verified["cable_status"]
+    assert peer.name not in verified["cable_status"]
+
+
 @requires_channels
 @requires_cable_profiles
 @pytest.mark.usefixtures("breakout_server")

@@ -734,6 +734,12 @@ class BaseCableTableView(
             if interface_librenms_id is not None:
                 interface_ids_by_device[(interface.device_id, interface_librenms_id)].append(interface)
         cable_ids = {interface.cable_id for interface in catalog_interfaces if interface.cable_id is not None}
+        termination_ids = defaultdict(set)
+        for interface in catalog_interfaces:
+            for cable in (interface.cable, interface.parent.cable if interface.parent_id is not None else None):
+                for end in cable.terminations.all() if cable is not None else ():
+                    if end.termination is not None:
+                        termination_ids[type(end.termination)].add(end.termination.pk)
         return {
             "server_key": server_key,
             "interfaces_by_pk": interfaces_by_pk,
@@ -748,6 +754,11 @@ class BaseCableTableView(
             "visible_cable_ids": set(
                 self._viewable_queryset(Cable).filter(pk__in=cable_ids).values_list("pk", flat=True)
             ),
+            # The cable ends of every catalog interface, for the far end that a one-sided row names.
+            "visible_termination_ids": {
+                model: set(self._viewable_queryset(model).filter(pk__in=ids).values_list("pk", flat=True))
+                for model, ids in termination_ids.items()
+            },
         }
 
     def _load_link_traces(self, normal_links, context, local_owner_by_link, remote_owner_by_link):
@@ -1779,7 +1790,7 @@ class BaseCableTableView(
         Report the NetBox cable on the end of a one-sided row that did resolve.
 
         Scoped throughout: a cable the request cannot view is never linked, and the far end is
-        named only when its device is viewable. ``can_create_cable`` is left off, because there
+        named only when the far end and its device are viewable. ``can_create_cable`` is left off, because there
         is still no NetBox remote to cable to.
 
         Args:
@@ -1828,7 +1839,7 @@ class BaseCableTableView(
             return
 
         link["cable_url"] = reverse("dcim:cable", args=[cable.pk])
-        peer_device = self._viewable_cable_peer_device(interface, cable)
+        peer_device = self._viewable_cable_peer_device(interface, cable, normal_context)
         link["cable_status"] = f"Cabled to {peer_device.name}" if peer_device is not None else "Cabled in Netbox"
 
     def _is_breakout_row(self, link, local_interface, remote_interface, actionable):
@@ -1864,8 +1875,8 @@ class BaseCableTableView(
             memo[key] = queryset(type(obj)).filter(pk=obj.pk).exists()
         return memo[key]
 
-    def _viewable_cable_peer_device(self, interface, cable):
-        """Return the device at the far end of *cable*, only when the request may view it."""
+    def _viewable_cable_peer_device(self, interface, cable, normal_context=None):
+        """Return the device at the far end of *cable*, only when the request may view the far end and its device."""
         if is_channel(interface):
             far = breakout_far_end(interface, interface.parent, cable)
         else:
@@ -1880,6 +1891,14 @@ class BaseCableTableView(
                 near, far = far, near
             if near != interface:
                 return None
+        if far is None:
+            return None
+        if normal_context is not None:
+            far_visible = far.pk in normal_context["visible_termination_ids"].get(type(far), set())
+        else:
+            far_visible = self._may("view", far)
+        if not far_visible:
+            return None
         peer_device_id = getattr(far, "device_id", None)
         if peer_device_id is None:
             return None
