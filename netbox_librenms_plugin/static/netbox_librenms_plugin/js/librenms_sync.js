@@ -3628,6 +3628,29 @@ document.addEventListener('click', function (event) {
 });
 
 /**
+ * Send the modal requests of controls written with innerHTML through the module tab's [data-modal-loader].
+ *
+ * htmx never binds an hx-get written with innerHTML, so the click handler below sends its URL instead.
+ *
+ * @param {Element} cell - The cell the verify wrote.
+ * @returns {void}
+ */
+function routeModalControlsToLoader(cell) {
+    cell.querySelectorAll('[hx-get][hx-target="#htmx-modal-content"]').forEach((control) => {
+        control.dataset.modalUrl = control.getAttribute('hx-get');
+        control.removeAttribute('hx-get');
+    });
+}
+
+document.addEventListener('click', function (event) {
+    const control = event.target.closest('[data-modal-url]');
+    const loader = document.querySelector('[data-modal-loader]');
+    if (!control || control.disabled || !loader) return;
+    event.preventDefault();
+    loader.dispatchEvent(new CustomEvent('librenms:open-modal', { detail: { url: control.dataset.modalUrl } }));
+});
+
+/**
  * Lock or release a module row's writes while its member verify is in flight.
  *
  * The row's action forms and its install grant were signed for the previous member, so a click or
@@ -3800,6 +3823,7 @@ function handleModuleChange(select, value, options = {}) {
                 const cell = row.querySelector(`td[data-col="${col}"]`);
                 if (cell) {
                     cell.innerHTML = html;
+                    routeModalControlsToLoader(cell);
                 } else {
                     console.warn(`Module row missing data-col="${col}" cell — skipping update`);
                 }
@@ -4765,13 +4789,13 @@ document.addEventListener('DOMContentLoaded', function () {
     // Configure HTMX to include CSRF token in all requests
     document.body.addEventListener('htmx:configRequest', function (event) {
         const csrfToken = getCsrfToken();
-        if (event.detail.elt?.matches('[data-cable-picker-loader]')) {
-            const pickerUrl = event.detail.triggeringEvent?.detail?.url;
-            if (!pickerUrl || !csrfToken) {
+        if (event.detail.elt?.matches('[data-cable-picker-loader], [data-modal-loader]')) {
+            const loaderUrl = event.detail.triggeringEvent?.detail?.url;
+            if (!loaderUrl || !csrfToken) {
                 event.preventDefault();
                 return;
             }
-            event.detail.path = pickerUrl;
+            event.detail.path = loaderUrl;
         }
         if (csrfToken) {
             event.detail.headers['X-CSRFToken'] = csrfToken;

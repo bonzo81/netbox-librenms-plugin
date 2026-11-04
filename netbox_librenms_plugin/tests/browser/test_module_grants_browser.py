@@ -1,12 +1,13 @@
 """Browser checks for module grants: member verifies lock row writes, and a verified override travels with its row."""
 
 import json
+import re
 from urllib.parse import parse_qsl
 
 import pytest
 from playwright.sync_api import expect
 
-from test_sync_cache_browser import HTMX_SCRIPT, SCRIPT_PATH
+from test_sync_cache_browser import HTMX_SCRIPT, SCRIPT_PATH, TEMPLATE_DIR
 
 PAGE_URL = "https://plugin.example.com/dcim/devices/1/librenms-sync/"
 SUBMIT_URL = "https://plugin.example.com/install-selected/"
@@ -60,7 +61,7 @@ def _row(index, *, member="1", grant="", checked=False, marked=True, disabled=Fa
     )
 
 
-def _module_page(rows, mode):
+def _module_page(rows, mode, extra=""):
     disable = " hx-disable" if mode == "htmx-disabled" else ""
     return f"""<!doctype html><html><body>
         <div id="django-messages"></div>
@@ -75,12 +76,13 @@ def _module_page(rows, mode):
           <tbody>{"".join(rows)}</tbody>
         </table>
         </div>
+        {extra}
         </body></html>"""
 
 
-def _load(page, rows, url=PAGE_URL, mode="htmx"):
+def _load(page, rows, url=PAGE_URL, mode="htmx", extra=""):
     """Serve one page of the module table; *mode* "htmx-absent" loads no htmx, as when its script fails."""
-    html = _module_page(rows, mode)
+    html = _module_page(rows, mode, extra)
     page.route(
         lambda candidate: candidate.split("?")[0] == PAGE_URL,
         lambda route: route.fulfill(body=html, content_type="text/html"),
@@ -357,3 +359,40 @@ def test_a_restored_member_reverifies_a_row_that_its_rendered_member_disables(pa
     if enabled_for_member:
         assert ("device_selection_30", "2") in pairs
         assert ("selection_grant_30", "override-30-again") in pairs
+
+
+PREVIEW_PATH = "/plugins/librenms_plugin/devices/1/module-mismatch-preview/"
+PREVIEW_URL = f"{PREVIEW_PATH}?module_id=5&ent_index=30&inventory_binding=preview-30-2"
+
+
+def _modal_loader():
+    """Cut the module tab's modal loader out of librenms_sync_base.html, so the page carries its exact markup."""
+    source = (TEMPLATE_DIR / "librenms_sync_base.html").read_text(encoding="utf-8")
+    return re.search(r"<span[^>]*data-modal-loader.*?</span>", source, flags=re.S).group(0)
+
+
+def test_a_verified_row_opens_its_replace_preview_in_the_modal(page):
+    """The verify writes the actions cell with innerHTML, which htmx never binds, so the loader sends the request."""
+    answer = _success(30, "2", "override-30")
+    # The attributes module_action_control renders on the Replace button (tables/modules.py).
+    answer["json"]["formatted_row"]["actions"] += (
+        f'<button type="button" id="replace-30" hx-get="{PREVIEW_URL.replace("&", "&amp;")}"'
+        ' hx-target="#htmx-modal-content" hx-swap="innerHTML" hx-sync="#htmx-modal-content:replace"'
+        ' hx-disabled-elt="this">Replace</button>'
+    )
+    _answers(page, answer)
+    page.route(
+        f"**{PREVIEW_PATH}*",
+        lambda route: route.fulfill(body='<p id="mismatch-preview">Preview</p>', content_type="text/html"),
+    )
+    shell = '<div id="htmx-modal"><div id="htmx-modal-content"></div></div>'
+    _load(page, [_row(30)], extra=_modal_loader() + shell)
+    with page.expect_response(VERIFY_ROUTE):
+        _change_member(page, 30, "2")
+    expect(page.locator("#install-30")).to_be_enabled()
+
+    with page.expect_request(f"**{PREVIEW_PATH}*", timeout=3000) as preview:
+        page.click("#replace-30")
+
+    assert (preview.value.method, preview.value.url) == ("GET", f"https://plugin.example.com{PREVIEW_URL}")
+    expect(page.locator("#htmx-modal-content #mismatch-preview")).to_have_text("Preview")

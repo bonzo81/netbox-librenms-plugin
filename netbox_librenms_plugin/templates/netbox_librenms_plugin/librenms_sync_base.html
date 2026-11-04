@@ -904,6 +904,9 @@ that may well be correct.
             hx-trigger="librenms:load-fragment" hx-target="#module-sync-content"
             hx-sync="#module-sync-content:abort" hx-swap="innerHTML"></span>
         {% endif %}
+        {# A verified row is written with innerHTML, so its modal buttons send their hx-get through this loader. #}
+        <span class="d-none" data-modal-loader hx-get="" hx-trigger="librenms:open-modal"
+            hx-target="#htmx-modal-content" hx-sync="#htmx-modal-content:replace" hx-swap="innerHTML"></span>
         {% include 'netbox_librenms_plugin/_module_sync.html' %}
     </div>
     {% endif %}
