@@ -23,10 +23,13 @@ from netbox_librenms_plugin.tests.test_cable_overwrite import _rendered_sync_dat
 SERVER_KEY = configured_server_key()
 PROFILE = "breakout-1c4p-4c1p"
 
-pytestmark = [
-    pytest.mark.django_db,
-    pytest.mark.skipif(not hasattr(Interface, "channel_id"), reason="NetBox before 4.7 has no channel interfaces"),
-]
+pytestmark = pytest.mark.django_db
+requires_channels = pytest.mark.skipif(
+    not hasattr(Interface, "channel_id"), reason="NetBox before 4.7 has no channel interfaces"
+)
+requires_cable_profiles = pytest.mark.skipif(
+    not hasattr(Cable, "profile"), reason="NetBox before 4.5 has no cable profiles"
+)
 
 
 class _Breakout:
@@ -120,6 +123,7 @@ def breakout_server(librenms_server, settings):
     bind_librenms_server(settings, librenms_server, server_key=SERVER_KEY)
 
 
+@requires_channels
 @pytest.mark.usefixtures("breakout_server")
 class TestBreakoutCableWrites:
     def test_channel_one_creates_a_profiled_cable_on_the_parent(self):
@@ -326,6 +330,7 @@ class TestBreakoutCableWrites:
         assert setup.parent_cable() is None
 
 
+@requires_channels
 @pytest.mark.usefixtures("breakout_server")
 def test_a_port_that_is_not_a_channel_still_gets_a_plain_cable():
     setup = _Breakout("plain")
@@ -341,6 +346,7 @@ def test_a_port_that_is_not_a_channel_still_gets_a_plain_cable():
     assert (list(cable.a_terminations), list(cable.b_terminations)) == ([plain], [setup.far_ends[0]])
 
 
+@requires_channels
 @pytest.mark.usefixtures("breakout_server")
 def test_a_plain_port_whose_far_end_is_a_channel_is_refused_until_the_channel_side_writes_the_cable():
     setup = _Breakout("peer-side")
@@ -369,6 +375,7 @@ def test_a_plain_port_whose_far_end_is_a_channel_is_refused_until_the_channel_si
     assert (after["cable_status"], after["can_create_cable"]) == ("Cable Found", False)
 
 
+@requires_channels
 @pytest.mark.usefixtures("breakout_server")
 def test_a_channel_reads_the_far_end_at_its_connector_and_never_its_parent():
     from netbox_librenms_plugin.utils import cable_far_terminations
@@ -391,6 +398,7 @@ def test_a_channel_reads_the_far_end_at_its_connector_and_never_its_parent():
     assert record["cable_status"] == f"Cabled to {setup.peer.name}"
 
 
+@requires_channels
 @pytest.mark.usefixtures("breakout_server")
 def test_a_port_that_becomes_a_channel_before_the_lock_gets_no_cable(monkeypatch):
     from netbox_librenms_plugin.views.sync.cables import SyncCablesView
@@ -416,6 +424,7 @@ def test_a_port_that_becomes_a_channel_before_the_lock_gets_no_cable(monkeypatch
     assert Cable.objects.count() == 0
 
 
+@requires_channels
 @pytest.mark.usefixtures("breakout_server")
 def test_a_channel_with_an_empty_connector_offers_to_create_its_far_end(librenms_server):
     from urllib.parse import parse_qs, urlsplit
@@ -474,6 +483,7 @@ def _records_row(channel_id, setup, record):
     }
 
 
+@requires_channels
 @pytest.mark.usefixtures("breakout_server")
 def test_creating_the_far_end_of_a_channel_needs_no_record_of_a_bound_parent(librenms_server):
     from urllib.parse import parse_qs, urlsplit
@@ -512,6 +522,7 @@ def test_creating_the_far_end_of_a_channel_needs_no_record_of_a_bound_parent(lib
     assert setup.b_side(setup.parent_cable()) == [(1, setup.far_ends[0]), (2, created)], texts
 
 
+@requires_channels
 @pytest.mark.usefixtures("breakout_server")
 def test_a_user_who_may_not_change_the_parent_gets_no_sync_action():
     from dcim.models import Device
@@ -544,6 +555,7 @@ def _constrained_user(name, *, interface_view=None, cable_change=None, cable_vie
     return grant(user, "change", Cable, constraints=cable_change)
 
 
+@requires_channels
 @pytest.mark.usefixtures("breakout_server")
 def test_a_hidden_parent_is_never_named_and_its_channels_get_no_action():
     setup = _Breakout("hidden-parent")
@@ -562,6 +574,7 @@ def test_a_hidden_parent_is_never_named_and_its_channels_get_no_action():
     assert setup.parent.name not in verified["cable_status"]
 
 
+@requires_channels
 @pytest.mark.usefixtures("breakout_server")
 def test_an_extend_needs_change_on_the_existing_parent_cable():
     setup = _Breakout("cable-scope")
@@ -614,6 +627,7 @@ def _post_create_remote(setup, channel_id):
     )
 
 
+@requires_channels
 @pytest.mark.usefixtures("breakout_server")
 def test_a_direct_post_never_names_a_hidden_parent():
     setup = _Breakout("hidden-parent-post")
@@ -627,6 +641,7 @@ def test_a_direct_post_never_names_a_hidden_parent():
     assert setup.parent_cable() is None
 
 
+@requires_channels
 @pytest.mark.usefixtures("breakout_server")
 def test_create_remote_is_offered_only_on_the_next_channel(librenms_server):
     setup = _Breakout("create-far-gap")
@@ -646,6 +661,7 @@ def test_create_remote_is_offered_only_on_the_next_channel(librenms_server):
     assert setup.b_side(setup.parent_cable()) == [(1, setup.far_ends[0])]
 
 
+@requires_channels
 @pytest.mark.usefixtures("breakout_server")
 def test_create_remote_is_not_offered_under_a_hidden_parent(librenms_server):
     setup = _Breakout("create-far-hidden")
@@ -664,6 +680,7 @@ def test_create_remote_is_not_offered_under_a_hidden_parent(librenms_server):
     assert not Interface.objects.filter(device=setup.peer, name="Ethernet20").exists()
 
 
+@requires_channels
 @pytest.mark.usefixtures("breakout_server")
 def test_an_ignore_rule_on_the_parent_port_does_not_block_the_channel(librenms_server):
     from netbox_librenms_plugin.models import InterfaceTypeMapping
@@ -688,6 +705,7 @@ def test_an_ignore_rule_on_the_parent_port_does_not_block_the_channel(librenms_s
     assert setup.b_side(setup.parent_cable()) == [(1, setup.far_ends[0])]
 
 
+@requires_channels
 @pytest.mark.usefixtures("breakout_server")
 def test_the_channels_of_one_parent_share_its_permission_checks():
     from django.db import connection
@@ -710,6 +728,7 @@ def test_the_channels_of_one_parent_share_its_permission_checks():
     assert checks(2, 3, 4) == one_row
 
 
+@requires_channels
 @pytest.mark.usefixtures("breakout_server")
 def test_a_cached_render_of_a_channel_row_never_calls_librenms(librenms_server):
     from netbox_librenms_plugin.models import InterfaceTypeMapping
@@ -743,6 +762,7 @@ def test_a_cached_render_of_a_channel_row_never_calls_librenms(librenms_server):
     assert [request["path"] for request in librenms_server.requests[after_page:]] == []
 
 
+@requires_channels
 @pytest.mark.usefixtures("breakout_server")
 def test_a_confirmed_overwrite_from_a_far_end_never_removes_the_breakout_cable():
     from netbox_librenms_plugin.tests.test_cable_overwrite import _confirmed_intent
@@ -811,6 +831,7 @@ def _sync_plain(client, device, data):
     return [str(message) for message in get_messages(response.wsgi_request)]
 
 
+@requires_cable_profiles
 @pytest.mark.usefixtures("breakout_server")
 class TestASingleProfileCableIsPointToPoint:
     """A single-* profile has one connector on each side, so the plain path treats it as an unprofiled cable."""
@@ -879,6 +900,7 @@ class TestASingleProfileCableIsPointToPoint:
         assert local.cable_id is not None and local.cable_id == remote.cable_id
 
 
+@requires_cable_profiles
 def test_a_single_profile_serial_cable_reads_as_found():
     from netbox_librenms_plugin.tests.conftest import make_serial_device, make_serial_row
     from netbox_librenms_plugin.tests.test_serial_cables_view import _make_view
@@ -894,6 +916,7 @@ def test_a_single_profile_serial_cable_reads_as_found():
     assert (link["cable_status"], link["can_create_cable"]) == ("Cable Found", False)
 
 
+@requires_channels
 @pytest.mark.usefixtures("breakout_server")
 @pytest.mark.parametrize(
     ("hidden", "reason"),
@@ -921,6 +944,8 @@ def test_a_one_sided_channel_row_reveals_nothing_of_a_hidden_parent_or_cable(hid
     assert rendered == [(f"Breakout Not Synced: {reason}", None, False)] * 2
 
 
+@requires_channels
+@requires_cable_profiles
 @pytest.mark.usefixtures("breakout_server")
 def test_a_cable_with_an_unknown_profile_renders_and_is_not_point_to_point():
     from netbox_librenms_plugin.utils import cable_is_point_to_point
