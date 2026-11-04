@@ -1519,7 +1519,9 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
             elif ip_rule is not None:
                 status_html = rule_block_html(row_ip_rule_block(ip_rule))
             else:
-                status_html = IPAddressTable([], mgmt_row_vrfs={}).render_status(updated_record["status"], updated_record)
+                status_html = IPAddressTable([], mgmt_row_vrfs={}).render_status(
+                    updated_record["status"], updated_record
+                )
 
             return JsonResponse(
                 {
