@@ -317,6 +317,31 @@ class TestAVrfChangeRedecidesTheRow:
         assert "Synced" not in verdict["status"]
         assert verdict["selectable"] is False
 
+    def test_an_ignored_address_netbox_holds_on_the_row_interface_stays_synced(self, client, device, blue):
+        IPAddressMapping.objects.create(prefix="fe80::/10", vrf=blue)
+        IPAddress.objects.create(address=LINK_LOCAL, vrf=blue, assigned_object=device.interfaces.get(name="eth0"))
+        _seed(device, [_row(LINK_LOCAL)])
+
+        verdict = _verify(client, device, LINK_LOCAL, blue)
+
+        assert "Synced" in verdict["status"]
+        assert "Ignored" not in verdict["status"]
+        assert verdict["selectable"] is False
+
+    def test_a_vrf_the_user_cannot_view_decides_nothing(self, client, device, blue):
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        IPAddressMapping.objects.create(prefix="fe80::/10", vrf=blue)
+        _seed(device, [_row(LINK_LOCAL)])
+        client.force_login(make_user_with_perms("ip-rule-no-vrf-view", [("view", Device)]))
+
+        verdict = _verify(client, device, LINK_LOCAL, blue)
+
+        assert "Ignored" not in verdict["status"]
+        assert verdict["selectable"] is True
+
 
 class TestTheReasonNamesNoVrf:
     """A user who cannot view the mapping's VRF must not learn its name, so the reason names the prefix only."""
