@@ -1515,7 +1515,7 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
                 IPAddress.objects.filter(address=updated_record["ip_with_mask"]),
             )
             if held:
-                status_html = IPAddressTable(data=[]).render_status("matched", updated_record)
+                status_html = IPAddressTable([], mgmt_row_vrfs={}).render_status("matched", updated_record)
             elif ip_rule is not None:
                 status_html = rule_block_html(row_ip_rule_block(ip_rule))
             else:
