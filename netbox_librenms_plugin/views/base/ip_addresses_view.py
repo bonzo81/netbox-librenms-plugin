@@ -1396,6 +1396,9 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
                     vrf_id = int(vrf_id)
                 except (TypeError, ValueError):
                     return JsonResponse({"status": "error", "message": "Invalid VRF ID"}, status=400)
+                # The dropdown lists only viewable VRFs, so a VRF the user cannot view decides nothing.
+                if not self.restricted_queryset(VRF).filter(pk=vrf_id).exists():
+                    vrf_id = None
 
             # Get the object (Device or VirtualMachine)
             try:
@@ -1476,13 +1479,7 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
                 exists_any_vrf, exists_specific_vrf, original_vrf_id, vrf_id
             )
 
-            # The dropdown lists only viewable VRFs, so a VRF the user cannot view decides no mapping.
-            mapping_vrf_id = (
-                vrf_id if vrf_id is None or self.restricted_queryset(VRF).filter(pk=vrf_id).exists() else None
-            )
-            ip_rule = ip_rules_for_request(request).decide(
-                ip_interface(updated_record["ip_with_mask"]).ip, mapping_vrf_id
-            )
+            ip_rule = ip_rules_for_request(request).decide(ip_interface(updated_record["ip_with_mask"]).ip, vrf_id)
             # An ignored row stays Synced only when the address is on the row's interface, as the table decides.
             if ip_rule is not None and self._held_on_row_interface(
                 obj, updated_record, original_port_id, vrf_id, server_key
