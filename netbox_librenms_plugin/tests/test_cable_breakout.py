@@ -1040,6 +1040,29 @@ def test_a_one_sided_channel_row_reveals_nothing_of_a_hidden_parent_or_cable(hid
     assert rendered == [(f"Breakout Not Synced: {reason}", None, False)] * 2
 
 
+@requires_channels
+@requires_cable_profiles
+@pytest.mark.usefixtures("breakout_server")
+def test_a_one_sided_channel_row_reports_a_parent_cable_on_another_profile():
+    setup = _Breakout("one-sided-shuffle")
+    shuffle = Cable(
+        a_terminations=[setup.parent], b_terminations=setup.far_ends[:3], profile="breakout-2c4p-8c1p-shuffle"
+    )
+    shuffle.save()
+    # The neighbour is not in NetBox, so only the local channel resolves.
+    setup.seed({**setup.row(3), "remote_device": "one-sided-shuffle-unknown"})
+
+    record = setup.records()["103"]
+    verified = setup.verify(3)
+
+    cable_url = reverse("dcim:cable", args=[shuffle.pk])
+    expected = "Breakout Not Synced: the cable on et-0/0/1 uses profile breakout-2c4p-8c1p-shuffle"
+    assert (record["cable_status"].startswith(expected), record.get("cable_url")) == (True, cable_url)
+    assert record["can_create_cable"] is False
+    assert expected in verified["cable_status"]
+    assert cable_url in verified["cable_status"]
+
+
 @pytest.mark.usefixtures("breakout_server")
 @pytest.mark.parametrize("channel", [pytest.param(True, marks=requires_channels), False], ids=["channel", "plain"])
 def test_a_one_sided_row_never_names_the_device_of_a_hidden_far_end(channel):

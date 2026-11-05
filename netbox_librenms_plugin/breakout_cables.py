@@ -112,6 +112,19 @@ def hidden_breakout_refusal(channel, may):
     return _hidden_refusal(parent, None if parent is None else parent.cable, may)
 
 
+def _unread_cable_refusal(parent, cable):
+    return _refuse(f"the cable on {parent.name} uses profile {cable.profile or 'none'}, which this sync does not read")
+
+
+def unread_breakout_cable_refusal(channel):
+    """Return the gate's refusal when the parent of *channel* has a cable in a layout this sync does not read."""
+    parent = channel.parent
+    cable = None if parent is None else parent.cable
+    if cable is None or _readable_b_side(cable, parent) is not None:
+        return None
+    return _unread_cable_refusal(parent, cable)
+
+
 def decide_channel_far_end(local, remote, may):
     """Decide a row whose far end is a channel and whose local end is not, or return None for another row."""
     if not is_channel(remote):
@@ -176,9 +189,7 @@ def _decide(channel, parent, cable, remote, provenance_tag):
             return _sync_first(1, parent)
         return BreakoutDecision("create", profile=profile, b_terminations=(remote,))
     if (b_side := _readable_b_side(cable, parent)) is None:
-        return _refuse(
-            f"the cable on {parent.name} uses profile {cable.profile or 'none'}, which this sync does not read"
-        )
+        return _unread_cable_refusal(parent, cable)
     if remote is not None and b_side.get(channel.channel_id) == remote:
         return BreakoutDecision("matching", profile=profile)
     return _decide_extension(channel, parent, cable, b_side, remote, profile, provenance_tag)

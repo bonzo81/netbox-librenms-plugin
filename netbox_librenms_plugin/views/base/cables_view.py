@@ -25,6 +25,7 @@ from netbox_librenms_plugin.breakout_cables import (
     hidden_breakout_refusal,
     holds_a_cable,
     is_channel,
+    unread_breakout_cable_refusal,
 )
 from netbox_librenms_plugin.constants import (
     INTERFACE_NAME_FIELDS,
@@ -1824,6 +1825,11 @@ class BaseCableTableView(
         # The gate's view step comes first: a channel's connector state belongs to its parent's cable.
         if is_channel(interface) and (refusal := hidden_breakout_refusal(interface, self._may)) is not None:
             link["cable_status"] = f"Breakout Not Synced: {refusal.reason}"
+            return
+        # A parent cable on another profile is visible here, so the row links it, as the two-sided path does.
+        if is_channel(interface) and (refusal := unread_breakout_cable_refusal(interface)) is not None:
+            link["cable_status"] = f"Breakout Not Synced: {refusal.reason}"
+            link["cable_url"] = reverse("dcim:cable", args=[interface.parent.cable.pk])
             return
         cable = interface.cable
         if cable is None or not holds_a_cable(interface):
