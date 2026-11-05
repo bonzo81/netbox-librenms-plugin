@@ -325,8 +325,6 @@ def test_a_member_change_left_before_its_verify_never_installs_on_the_previous_m
     page.check("#cb-30")
     with page.expect_request(VERIFY_ROUTE):
         _change_member(page, 30, "2")
-    # Another selection stores the page while the verify is in flight.
-    page.check("#cb-31")
 
     pairs = _swap_page_2_and_install_selected(page)
 

@@ -3826,6 +3826,8 @@ function handleModuleChange(select, value, options = {}) {
     }
     if (grantField) grantField.value = '';
     if (row) _setModuleRowPending(row, true, Boolean(options.restored));
+    // The stored selection takes the new member without a grant now, so a page change cannot keep the previous member.
+    if (table && !options.restored) commitSelectionChange(table);
 
     // The operator sees why the member was refused, and that the row went back to its verified member.
     const rollbackToLastVerified = (reason) => {
