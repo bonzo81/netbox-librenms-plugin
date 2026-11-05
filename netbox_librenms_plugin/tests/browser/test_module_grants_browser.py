@@ -61,11 +61,9 @@ def _row(index, *, member="1", grant="", checked=False, marked=True, disabled=Fa
     )
 
 
-def _module_page(rows, mode, extra=""):
-    disable = " hx-disable" if mode == "htmx-disabled" else ""
-    return f"""<!doctype html><html><body>
-        <div id="django-messages"></div>
-        <div id="module-sync-content"{disable}>
+def _module_content(rows):
+    """The module tab fragment that a refresh or a table page swaps into #module-sync-content."""
+    return f"""
         <input type="hidden" name="csrfmiddlewaretoken" value="test-csrf-token">
         <form id="install-selected-form" {FORM_ATTRS}>
           <input type="hidden" name="server_key" value="production">
@@ -74,7 +72,14 @@ def _module_page(rows, mode, extra=""):
         </form>
         <table id="librenms-module-table" data-page-device="1" data-selection-snapshot="snapshot:policy">
           <tbody>{"".join(rows)}</tbody>
-        </table>
+        </table>"""
+
+
+def _module_page(rows, mode, extra=""):
+    disable = " hx-disable" if mode == "htmx-disabled" else ""
+    return f"""<!doctype html><html><body>
+        <div id="django-messages"></div>
+        <div id="module-sync-content"{disable}>{_module_content(rows)}
         </div>
         {extra}
         </body></html>"""
@@ -277,6 +282,34 @@ def test_a_restored_retarget_writes_nothing_until_its_member_is_verified_again(p
     assert page.locator('[name="selection_grant_30"]').input_value() == "override-30-again"
     expect(page.locator("#cb-30")).to_be_checked()
     expect(page.locator("#install-selected-btn")).to_be_enabled()
+
+
+def test_a_restored_member_left_before_its_verify_keeps_its_verified_grant(page):
+    """The restore pass verifies the stored member again; a page change before the answer keeps the stored pair."""
+    page.route(SUBMIT_URL, lambda route: route.fulfill(body="", content_type="text/html"))
+    _held, _bodies = _answers(page, _success(30, "2", "override-30"), None)
+    _load(page, [_row(30), _row(31)], url=f"{PAGE_URL}?page=1")
+    with page.expect_response(VERIFY_ROUTE):
+        _change_member(page, 30, "2")
+    page.check("#cb-30")
+    _load(page, [_row(40)], url=f"{PAGE_URL}?page=2")
+    with page.expect_request(VERIFY_ROUTE):
+        _load(page, [_row(30), _row(31)], url=f"{PAGE_URL}?page=1")
+
+    # The table pagination swaps page 2 in while the verify of the restored member is still in flight.
+    page.route(f"{PAGE_URL}?page=2&swap=1", lambda route: route.fulfill(body=_module_content([_row(40)])))
+    page.evaluate(
+        "htmxTest.ajax('GET', %s, {target: '#module-sync-content', swap: 'innerHTML'})"
+        % json.dumps(f"{PAGE_URL}?page=2&swap=1")
+    )
+    page.locator("#cb-40").wait_for()
+    page.check("#cb-40")
+    with page.expect_request(SUBMIT_URL) as submitted:
+        page.click("#install-selected-btn")
+    pairs = parse_qsl(submitted.value.post_data, keep_blank_values=True)
+
+    assert ("device_selection_30", "2") in pairs
+    assert [value for name, value in pairs if name == "selection_grant_30"] == ["override-30"]
 
 
 def test_a_restored_row_on_its_rendered_member_submits_the_grant_of_its_render(page):

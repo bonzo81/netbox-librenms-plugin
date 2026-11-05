@@ -1946,6 +1946,8 @@ function persistTableSelection(table) {
     table.querySelectorAll('td input[name="select"]').forEach(function (checkbox) {
         const row = checkbox.closest('tr');
         if (!row) return;
+        // A row whose member verify is in flight keeps its stored pair of member and grant until the verify settles.
+        if (row.dataset.verifyPending) return;
         if (checkbox.checked) {
             selection[checkbox.value] = {
                 inputs: _rowCompanionInputs(row),
@@ -2035,10 +2037,11 @@ function restoreTableSelection(table) {
         _applySelectionMarker(checkbox, entry.auto);
         if (reverify) reverified.push(reverify);
     });
+    // The verify locks its row first, so the commit below keeps the stored member and grant of that row.
+    reverified.forEach((select) => handleModuleChange(select, select.value, {restored: true}));
     commitSelectionChange(table);
     _showClearedSelectionNotice(table, cleared);
     restoredVrfs.forEach((select) => handleVRFChange(select, select.value));
-    reverified.forEach((select) => handleModuleChange(select, select.value, {restored: true}));
 }
 
 /**
