@@ -390,7 +390,9 @@ class TestAVrfChangeRedecidesTheRow:
             )
             return response.status_code, response.json()
 
-        assert verify(blue.pk) == verify(gone_pk)
+        hidden = verify(blue.pk)
+        assert hidden[0] == 200, hidden
+        assert hidden == verify(gone_pk)
 
 
 def _two_holders(device, mapping_vrf, holder_vrf):
