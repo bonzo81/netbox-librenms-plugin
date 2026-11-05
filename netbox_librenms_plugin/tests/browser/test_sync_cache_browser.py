@@ -3238,9 +3238,11 @@ def test_a_failed_verification_of_a_superseded_group_neither_rolls_back_nor_hide
     page.locator("#in-b").wait_for()
     select.select_option("1")
     wait_for_requests(3)
-    answer(held[0], 500, {"status": "error", "message": "x"})
     # The first answer settles before the latest one, as a slow failure does.
-    page.wait_for_timeout(200)
+    answer(held[0], 500, {"status": "error", "message": "x"})
+    # The answer arrives, or the request was aborted; either way the page handles it before the next answer.
+    held[0].request.response()
+    page.evaluate("() => new Promise((resolve) => setTimeout(resolve))")
     answer(held[2], 200, {"status": "success", "css_class": "text-success", "status_html": '<span id="in-a">A</span>'})
     page.locator("#in-a").wait_for(timeout=3000)
 
@@ -5336,7 +5338,8 @@ def test_a_late_verify_answer_for_a_swapped_out_row_leaves_the_cleared_selection
     page.evaluate(f"() => htmxTest.ajax('GET', '/page-2', {{target: '#{table_id}', swap: 'outerHTML'}})")
     page.wait_for_selector('input[value="row-2"]')
     page.evaluate(f"() => writeStoredSelection(document.getElementById('{table_id}'), {{}})")
-    held[0].fulfill(status=answer[0], content_type="application/json", body=json.dumps(answer[1]))
-    page.wait_for_timeout(200)
+    with page.expect_response(verify_route):
+        held[0].fulfill(status=answer[0], content_type="application/json", body=json.dumps(answer[1]))
+    page.evaluate("() => new Promise((resolve) => setTimeout(resolve))")
 
     assert page.evaluate(stored) == []

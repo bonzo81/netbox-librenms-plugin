@@ -219,9 +219,11 @@ def test_a_failed_verify_of_a_superseded_vrf_neither_rolls_back_nor_hides_the_la
     page.wait_for_function("document.querySelector('td[data-col=status]').textContent === 'Create'")
     select.select_option(IGNORED)
     _wait_for(page, lambda: len(held) == 3)
-    held[0].fulfill(status=500, content_type="application/json", body=json.dumps({"status": "error"}))
     # The first answer settles before the latest one, as a slow failure does.
-    page.wait_for_timeout(200)
+    held[0].fulfill(status=500, content_type="application/json", body=json.dumps({"status": "error"}))
+    # The answer arrives, or the request was aborted; either way the page handles it before the next answer.
+    held[0].request.response()
+    page.evaluate("() => new Promise((resolve) => setTimeout(resolve))")
     held[2].fulfill(status=200, content_type="application/json", body=_verdict("Ignored", False))
     page.wait_for_function("document.querySelector('td[data-col=status]').textContent === 'Ignored'", timeout=3000)
 
