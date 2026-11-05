@@ -354,6 +354,44 @@ class TestAVrfChangeRedecidesTheRow:
         assert "Ignored" not in verdict["status"]
         assert verdict["selectable"] is True
 
+    @pytest.mark.parametrize("mapping", ["none", "all-vrf", "blue"])
+    @pytest.mark.parametrize("held", [False, True], ids=["not-held", "held-on-eth0"])
+    def test_a_vrf_the_user_cannot_view_decides_as_a_vrf_that_does_not_exist(
+        self, client, device, blue, red, mapping, held
+    ):
+        from dcim.models import Device, Interface
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+        if mapping != "none":
+            IPAddressMapping.objects.create(prefix="fe80::/10", vrf=blue if mapping == "blue" else None)
+        if held:
+            IPAddress.objects.create(address=LINK_LOCAL, vrf=blue, assigned_object=device.interfaces.get(name="eth0"))
+        gone = VRF.objects.create(name="ip-rule-gone")
+        gone_pk = gone.pk
+        gone.delete()
+        _seed(device, [_row(LINK_LOCAL)])
+        user = make_user_with_perms("ip-rule-red-only", [("view", Device), ("view", Interface), ("view", IPAddress)])
+        client.force_login(grant(user, "view", VRF, constraints={"name": red.name}))
+
+        def verify(vrf_pk):
+            body = {
+                "device_id": device.pk,
+                "object_type": "device",
+                "ip_address": LINK_LOCAL,
+                "row_id": LINK_LOCAL,
+                "vrf_id": vrf_pk,
+                "server_key": SERVER_KEY,
+            }
+            response = client.post(
+                reverse("plugins:netbox_librenms_plugin:verify_ipaddress"),
+                json.dumps(body),
+                content_type="application/json",
+            )
+            return response.status_code, response.json()
+
+        assert verify(blue.pk) == verify(gone_pk)
+
 
 def _two_holders(device, mapping_vrf, holder_vrf):
     """Map fe80::/10 in *mapping_vrf* and let eth0 and eth1 each hold LINK_LOCAL in *holder_vrf*."""
