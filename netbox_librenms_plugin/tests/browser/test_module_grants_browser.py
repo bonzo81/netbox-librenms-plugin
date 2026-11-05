@@ -179,7 +179,7 @@ def test_a_pending_member_verify_locks_the_row_writes_and_install_selected(page)
     expect(page.locator("#install-selected-btn")).to_be_disabled()
     assert page.locator('[name="selection_grant_30"]').input_value() == ""
 
-    page.wait_for_function("document.querySelector('tr[data-ent-index=\"30\"]').dataset.verifyPending === 'true'")
+    page.wait_for_function("document.querySelector('tr[data-ent-index=\"30\"]').dataset.verifyPending === 'change'")
     held[0].fulfill(**_success(30, "2", "override-30"))
 
     expect(page.locator('td[data-col="name"]')).to_have_text("name-30-m2")
@@ -266,7 +266,7 @@ def test_a_restored_retarget_writes_nothing_until_its_member_is_verified_again(p
 
     _load(page, [_row(30), _row(31)], url=f"{PAGE_URL}?page=1")
 
-    page.wait_for_function("document.querySelector('tr[data-ent-index=\"30\"]').dataset.verifyPending === 'true'")
+    page.wait_for_function("document.querySelector('tr[data-ent-index=\"30\"]').dataset.verifyPending === 'restore'")
     assert (bodies[1]["device_id"], bodies[1]["verify_binding"]) == ("2", "verify-30-1")
     assert page.locator("#device_selection_30").input_value() == "2"
     # The stored grant is not reused, and the rendered forms of member 1 stay locked.
@@ -297,6 +297,14 @@ def test_a_restored_member_left_before_its_verify_keeps_its_verified_grant(page)
         _load(page, [_row(30), _row(31)], url=f"{PAGE_URL}?page=1")
 
     # The table pagination swaps page 2 in while the verify of the restored member is still in flight.
+    pairs = _swap_page_2_and_install_selected(page)
+
+    assert ("device_selection_30", "2") in pairs
+    assert [value for name, value in pairs if name == "selection_grant_30"] == ["override-30"]
+
+
+def _swap_page_2_and_install_selected(page):
+    """Swap page 2 in through the table pagination, select its row and return the Install Selected fields."""
     page.route(f"{PAGE_URL}?page=2&swap=1", lambda route: route.fulfill(body=_module_content([_row(40)])))
     page.evaluate(
         "htmxTest.ajax('GET', %s, {target: '#module-sync-content', swap: 'innerHTML'})"
@@ -306,10 +314,26 @@ def test_a_restored_member_left_before_its_verify_keeps_its_verified_grant(page)
     page.check("#cb-40")
     with page.expect_request(SUBMIT_URL) as submitted:
         page.click("#install-selected-btn")
-    pairs = parse_qsl(submitted.value.post_data, keep_blank_values=True)
+    return parse_qsl(submitted.value.post_data, keep_blank_values=True)
 
+
+def test_a_member_change_left_before_its_verify_never_installs_on_the_previous_member(page):
+    """The user picked member 2, so a page change before the answer must not keep the row on member 1."""
+    page.route(SUBMIT_URL, lambda route: route.fulfill(body="", content_type="text/html"))
+    _answers(page, None)
+    _load(page, [_row(30), _row(31)], url=f"{PAGE_URL}?page=1")
+    page.check("#cb-30")
+    with page.expect_request(VERIFY_ROUTE):
+        _change_member(page, 30, "2")
+    # Another selection stores the page while the verify is in flight.
+    page.check("#cb-31")
+
+    pairs = _swap_page_2_and_install_selected(page)
+
+    assert ("device_selection_30", "1") not in pairs
+    # The new member travels without a grant, so the writer refuses the batch instead of installing on member 1.
     assert ("device_selection_30", "2") in pairs
-    assert [value for name, value in pairs if name == "selection_grant_30"] == ["override-30"]
+    assert [value for name, value in pairs if name == "selection_grant_30"] == [""]
 
 
 def test_a_restored_row_on_its_rendered_member_submits_the_grant_of_its_render(page):

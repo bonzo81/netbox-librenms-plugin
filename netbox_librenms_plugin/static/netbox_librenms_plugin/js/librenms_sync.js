@@ -1925,8 +1925,8 @@ function persistTableSelection(table) {
     table.querySelectorAll('td input[name="select"]').forEach(function (checkbox) {
         const row = checkbox.closest('tr');
         if (!row) return;
-        // A row whose member verify is in flight keeps its stored pair of member and grant until the verify settles.
-        if (row.dataset.verifyPending) return;
+        // A restored row keeps its stored member and grant until its verify settles; a user's new member stores no grant.
+        if (row.dataset.verifyPending === 'restore') return;
         if (checkbox.checked) {
             selection[checkbox.value] = {
                 inputs: _rowCompanionInputs(row),
@@ -3738,11 +3738,12 @@ function _setRowFormSending(form, sending) {
  *
  * @param {HTMLTableRowElement} row - The module row.
  * @param {boolean} pending - True while the verify request is in flight.
+ * @param {boolean} [restored=false] - True when the verify checks a member that the restore pass set.
  * @returns {void}
  */
-function _setModuleRowPending(row, pending) {
+function _setModuleRowPending(row, pending, restored = false) {
     if (pending) {
-        row.dataset.verifyPending = 'true';
+        row.dataset.verifyPending = restored ? 'restore' : 'change';
         row.querySelectorAll('td[data-col="actions"] button:not([disabled]), td[data-col="selection"] input[name="select"]:not([disabled])')
             .forEach((control) => {
                 control.disabled = true;
@@ -3805,7 +3806,7 @@ function handleModuleChange(select, value, options = {}) {
         select._lastVerifiedGrant = grantField.value;
     }
     if (grantField) grantField.value = '';
-    if (row) _setModuleRowPending(row, true);
+    if (row) _setModuleRowPending(row, true, Boolean(options.restored));
 
     // The operator sees why the member was refused, and that the row went back to its verified member.
     const rollbackToLastVerified = (reason) => {
