@@ -175,3 +175,28 @@ def test_a_checkbox_that_a_vrf_verify_enables_takes_part_in_a_shift_click_range(
     page.click('input[value="row-3"]', modifiers=["Shift"])
 
     assert page.locator('input[value="row-2"]').is_checked()
+
+
+@pytest.mark.parametrize(
+    ("status", "body"),
+    [(500, json.dumps({"status": "error", "message": "x"})), (200, json.dumps({"status": "error", "message": "x"}))],
+    ids=["http-error", "rejected"],
+)
+def test_a_failed_vrf_verify_restores_the_last_verified_vrf(page, status, body):
+    answers = [(200, _verdict("Ignored", False)), (status, body)]
+    page.route(
+        VERIFY_ROUTE,
+        lambda route: route.fulfill(status=answers[0][0], content_type="application/json", body=answers.pop(0)[1]),
+    )
+    _load(page, [_row("row-1")])
+    page.evaluate("initializeScripts()")
+    page.wait_for_selector("select[data-vrf-select-initialized]", state="attached")
+    select, checkbox = page.locator("#vrf_select_row-1"), page.locator('input[value="row-1"]')
+
+    select.select_option(IGNORED)
+    page.wait_for_function("document.querySelector('input[value=row-1]').disabled")
+    select.select_option(ALLOWED)
+    page.wait_for_function(f"document.getElementById('vrf_select_row-1').value === '{IGNORED}'", timeout=5000)
+
+    assert not answers
+    assert checkbox.is_disabled()

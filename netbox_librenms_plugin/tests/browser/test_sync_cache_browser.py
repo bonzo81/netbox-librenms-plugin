@@ -3165,6 +3165,52 @@ def test_vlan_group_verification_ignores_a_late_response_for_an_old_selection(pa
     assert page.locator('td[data-col="vlan_id"] span').get_attribute("class") == "text-warning"
 
 
+@pytest.mark.parametrize("http_status", [500, 200], ids=["http-error", "rejected"])
+def test_a_failed_vlan_group_verification_restores_the_last_verified_group(page, http_status):
+    """The row shows the verdict of the last verified group, so a failed verify selects that group again."""
+    page.set_content(
+        """
+        <input name="csrfmiddlewaretoken" value="test-token">
+        <form>
+          <table id="librenms-vlan-table"><tbody><tr>
+            <td data-col="vlan_id"><span class="text-danger">501</span></td>
+            <td data-col="name"><span class="text-danger">Users</span></td>
+            <td data-col="vlan_group_selection">
+              <select class="vlan-sync-group-select" name="vlan_group_501"
+                      data-vlan-id="501" data-vlan-name="Users">
+                <option value="" selected>Global</option>
+                <option value="1">Group A</option>
+                <option value="2">Group B</option>
+              </select>
+            </td>
+            <td data-col="status">Not in NetBox</td>
+          </tr></tbody></table>
+        </form>
+        """
+    )
+    answers = [
+        (200, {"status": "success", "css_class": "text-success", "status_html": '<span id="in-a">In A</span>'}),
+        (http_status, {"status": "error", "message": "x"}),
+    ]
+
+    def answer(route):
+        status, body = answers.pop(0)
+        route.fulfill(status=status, content_type="application/json", body=json.dumps(body))
+
+    page.route("**/plugins/librenms_plugin/verify-vlan-sync-group/", answer)
+    _add_page_scripts(page)
+    page.evaluate("initializeVlanSyncGroupSelects()")
+    select = page.locator(".vlan-sync-group-select")
+
+    select.select_option("1")
+    page.locator("#in-a").wait_for()
+    select.select_option("2")
+    page.wait_for_function("document.querySelector('.vlan-sync-group-select').value === '1'", timeout=5000)
+
+    assert not answers
+    assert page.locator("#in-a").count() == 1
+
+
 def test_vlan_modal_group_verification_ignores_a_late_response_for_an_old_selection(page):
     """A late modal response must not replace the selected group's saved row state."""
     page.set_content(

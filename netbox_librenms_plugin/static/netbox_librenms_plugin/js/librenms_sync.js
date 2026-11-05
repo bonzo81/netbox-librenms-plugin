@@ -3131,6 +3131,22 @@ function initializeVlanSyncGroupSelects() {
 function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
     const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]');
     if (!csrfToken) return;
+    // The row's colours and status show the verdict of the last verified group; the rendered group comes first.
+    if (typeof select._lastVerifiedGroup === 'undefined') {
+        const rendered = Array.from(select.options).find((option) => option.defaultSelected);
+        select._lastVerifiedGroup = rendered ? rendered.value : '';
+    }
+    const rollbackToLastVerified = () => {
+        // A later choice owns the select.
+        if (select.value !== groupId) return;
+        if (select.tomselect && typeof select.tomselect.setValue === 'function') {
+            select.tomselect.setValue(select._lastVerifiedGroup, true);
+        } else {
+            select.value = select._lastVerifiedGroup;
+        }
+        const table = select.closest('table');
+        if (table) commitSelectionChange(table);
+    };
 
     fetch('/plugins/librenms_plugin/verify-vlan-sync-group/', {
         method: 'POST',
@@ -3152,8 +3168,12 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
             return response.json();
         })
         .then(data => {
-            if (data.status !== 'success') return;
+            if (data.status !== 'success') {
+                rollbackToLastVerified();
+                return;
+            }
             if (select.value !== groupId) return;
+            select._lastVerifiedGroup = groupId;
 
             const row = select.closest('tr');
             if (!row) return;
@@ -3186,6 +3206,7 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
         })
         .catch(error => {
             console.error('VLAN sync group verification error:', error);
+            rollbackToLastVerified();
         });
 }
 
@@ -3218,6 +3239,23 @@ function handleVRFChange(select, value) {
     }
     const controller = new AbortController();
     select._vrfVerifyController = controller;
+    // The row's status and checkbox show the verdict of the last verified VRF; the rendered VRF comes first.
+    if (typeof select._lastVerifiedVrf === 'undefined') {
+        const rendered = Array.from(select.options).find((option) => option.defaultSelected);
+        select._lastVerifiedVrf = rendered ? rendered.value : '';
+    }
+    const rollbackToLastVerified = () => {
+        if (select.tomselect && typeof select.tomselect.setValue === 'function') {
+            select.tomselect.setValue(select._lastVerifiedVrf, true);
+        } else {
+            select.value = select._lastVerifiedVrf;
+        }
+        const row = select.closest('tr');
+        const checkbox = row?.querySelector('input[name="select"]');
+        // A restored selection can check a disabled row before its verify answers.
+        if (checkbox?.disabled) checkbox.checked = false;
+        if (row) commitSelectionChange(row.closest('table'));
+    };
 
     fetch('/plugins/librenms_plugin/verify-ipaddress/', {
         method: 'POST',
@@ -3256,11 +3294,16 @@ function handleVRFChange(select, value) {
                     if (checkbox.disabled) checkbox.checked = false;
                     commitSelectionChange(row.closest('table'));
                 }
+                select._lastVerifiedVrf = value;
+            } else {
+                console.error('VRF verification rejected:', data.message || 'Unknown error');
+                rollbackToLastVerified();
             }
         })
         .catch(error => {
             if (error.name === 'AbortError') return;
             console.error('VRF verification failed:', error.message);
+            rollbackToLastVerified();
         });
 }
 
