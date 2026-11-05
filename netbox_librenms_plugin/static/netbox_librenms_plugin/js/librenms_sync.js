@@ -3722,9 +3722,23 @@ document.addEventListener('submit', function (event) {
  * @returns {void}
  */
 function _setRowFormSending(form, sending) {
-    form.closest('tr')?.classList.toggle('htmx-request', sending);
-    form.querySelectorAll('button').forEach((button) => {
-        button.disabled = sending;
+    const row = form.closest('tr');
+    row?.classList.toggle('htmx-request', sending);
+    if (sending) {
+        form.querySelectorAll('button:not([disabled])').forEach((button) => {
+            button.disabled = true;
+            button.dataset.rowFormLocked = '1';
+        });
+        return;
+    }
+    form.querySelectorAll('button[data-row-form-locked]').forEach((button) => {
+        delete button.dataset.rowFormLocked;
+        // A member verify that started during the post keeps the button locked until it settles.
+        if (row?.dataset.verifyPending) {
+            button.dataset.verifyLocked = '1';
+        } else {
+            button.disabled = false;
+        }
     });
 }
 

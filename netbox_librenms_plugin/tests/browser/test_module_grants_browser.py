@@ -532,3 +532,27 @@ def test_a_verified_row_form_posts_natively_when_htmx_did_not_load(page):
     request = install.value
     assert (request.method, request.headers.get("hx-request")) == ("POST", None)
     assert ("inventory_binding", "install-30-2") in parse_qsl(request.post_data)
+
+
+def test_a_failed_row_post_keeps_the_buttons_locked_while_a_member_verify_runs(page):
+    """The member changed during the post, so a failed post must not release the form of the previous member."""
+    held_verify, _bodies = _answers(page, _verified_install_form(), None)
+    held_post = []
+    page.route(f"**{INSTALL_PATH}", lambda route: held_post.append(route))
+    _load(page, [_row(30)], extra=_loader("data-row-form-loader"))
+    with page.expect_response(VERIFY_ROUTE):
+        _change_member(page, 30, "2")
+    page.wait_for_function("document.getElementById('device_selection_30').dataset.moduleSelectInitialized")
+    with page.expect_request(f"**{INSTALL_PATH}", timeout=3000):
+        page.click("#install-30")
+    with page.expect_request(VERIFY_ROUTE):
+        _change_member(page, 30, "1")
+
+    with page.expect_response(f"**{INSTALL_PATH}"):
+        held_post[0].fulfill(status=500, body="failed", content_type="text/html")
+
+    expect(page.locator('tr[data-ent-index="30"]')).not_to_have_class(re.compile(r"\bhtmx-request\b"))
+    expect(page.locator("#install-30")).to_be_disabled()
+    # A refused verify puts the row back on member 2, whose form may post again.
+    held_verify[0].fulfill(**REFUSED)
+    expect(page.locator("#install-30")).to_be_enabled()
