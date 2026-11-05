@@ -79,7 +79,7 @@ class GrantRefusal(enum.Enum):
     SNAPSHOT = "The LibreNMS inventory changed since the Modules table was rendered. Refresh Modules and try again."
     POLICY = "Inventory rules or device identity changed. Refresh Modules and try again."
     AMBIGUOUS_INDEX = (
-        "LibreNMS reports one entPhysicalIndex for more than one inventory row, so no module action can run. "
+        "LibreNMS reports one entPhysicalIndex for more than one inventory row, so no inventory action can run. "
         "Refresh Modules when LibreNMS reports each index once."
     )
     DESTINATION = "Inventory destination changed. Refresh Modules and try again."
