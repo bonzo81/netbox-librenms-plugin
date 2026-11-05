@@ -1,0 +1,17 @@
+# IP Mappings
+#
+# Keeps the LibreNMS addresses in a prefix out of IP sync.
+# Import via: LibreNMS > Mappings > IP Mappings > Import (YAML, JSON or CSV).
+#
+# Fields:
+#   prefix      : IPv4 or IPv6 prefix; a host address is stored as its network
+#   vrf         : NetBox VRF name (optional, blank = every VRF and the global table)
+#   action      : ignore (the default and the only action)
+#   description : Optional note
+#
+# See docs/configuration/mappings.md.
+
+# LibreNMS reports a link-local address on most IPv6 interfaces.
+- prefix: fe80::/10
+  action: ignore
+  description: "IPv6 link-local"

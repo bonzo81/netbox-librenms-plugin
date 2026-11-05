@@ -2,7 +2,7 @@
 
 The **LibreNMS Sync** page is available from a NetBox Device or Virtual Machine. It compares the object with LibreNMS and lets you apply selected changes to NetBox.
 
-The page shows whether the object was found in LibreNMS and which LibreNMS server is active. For Devices, it can also compare the name, device type, serial number, platform, and location. If the object is not found, the page can add it to LibreNMS.
+The page shows whether the object was found in LibreNMS and which LibreNMS server is active. For Devices, it can also compare the name, device type, serial number, platform, and location. For Virtual Machines, it compares the platform. If the object is not found, the page can add it to LibreNMS.
 
 The available sync tabs depend on the NetBox object:
 

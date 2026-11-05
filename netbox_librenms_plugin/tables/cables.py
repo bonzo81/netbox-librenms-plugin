@@ -4,12 +4,11 @@ import django_tables2 as tables
 from django.utils.html import format_html
 from django.utils.safestring import mark_safe
 from netbox.tables.columns import ToggleColumn
-from utilities.paginator import EnhancedPaginator
 
 from netbox_librenms_plugin.constants import SERIAL_INVENTORY_SOURCE
 from netbox_librenms_plugin.utils import (
-    get_table_paginate_count,
     oob_badge_html,
+    paginate_sync_table,
     remote_port_html,
     render_vc_member_options,
     rule_block_html,
@@ -166,11 +165,7 @@ class LibreNMSCableTable(tables.Table):
 
     def configure(self, request):
         """Configure pagination for the table using the current request."""
-        paginate = {
-            "paginator_class": EnhancedPaginator,
-            "per_page": get_table_paginate_count(request, self.prefix),
-        }
-        tables.RequestConfig(request, paginate).configure(self)
+        paginate_sync_table(self, request)
 
     class Meta:
         """Define column sequence, row attributes, and table styling."""

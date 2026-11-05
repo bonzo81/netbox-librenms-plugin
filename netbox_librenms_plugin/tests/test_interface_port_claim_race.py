@@ -32,7 +32,15 @@ RELEASE_TIMEOUT_SECONDS = 2 * PAUSE_TIMEOUT_SECONDS
 # A blocked query fails after this time instead of hanging the suite; it is longer than the pause.
 DB_TIMEOUT = "30s"
 _INTERFACE_UPDATE = 'UPDATE "dcim_interface"'
-_INVENTORY_ITEM = {"entPhysicalIndex": ENT_INDEX, "_librenms_port_id": PORT, "_librenms_ifname": SHORT_NAME}
+# The row matches the installed module, so the table renders its Update Interface form.
+_INVENTORY_ITEM = {
+    "entPhysicalIndex": ENT_INDEX,
+    "entPhysicalClass": "module",
+    "entPhysicalName": "port-claim-bay",
+    "entPhysicalModelName": "port-claim-mt",
+    "_librenms_port_id": PORT,
+    "_librenms_ifname": SHORT_NAME,
+}
 _SNAPSHOT_FIELDS = ("name", "mtu", "description", "enabled", "custom_field_data", "last_updated", "module_id")
 
 pytestmark = pytest.mark.django_db(
@@ -120,34 +128,24 @@ def _interface_sync(user_pk, device, name_field):
     return messages_on(response.wsgi_request)
 
 
-def _module_bind(user_pk, device, module):
-    """Post the module "Update Interface" action for the cached inventory row, through the middleware."""
+def _rendered_bind(device):
+    """Return the Update Interface form that the cached Modules tab renders for the inventory row."""
+    from netbox_librenms_plugin.tests.view_test_helpers import render_module_tab, rendered_module_form
+
+    return rendered_module_form(render_module_tab(device, server_key=SERVER_KEY), "update-module-interface", ENT_INDEX)
+
+
+def _module_bind(user_pk, form):
+    """Post the rendered module "Update Interface" form, through the middleware."""
     from django.contrib.auth import get_user_model
     from django.test import Client
-    from django.urls import reverse
 
     from netbox_librenms_plugin.tests.view_test_helpers import messages_on
-    from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
 
-    token = module_inventory_binding_token(
-        device.pk,
-        SERVER_KEY,
-        "update_module_interface",
-        {"module_id": module.pk},
-        ENT_INDEX,
-        module_inventory_row_digest(_INVENTORY_ITEM),
-    )
+    action, fields = form
     client = Client()
     client.force_login(get_user_model().objects.get(pk=user_pk))
-    response = client.post(
-        reverse("plugins:netbox_librenms_plugin:update_module_interface", kwargs={"pk": device.pk}),
-        data={
-            "module_id": str(module.pk),
-            "server_key": SERVER_KEY,
-            "ent_index": str(ENT_INDEX),
-            "inventory_binding": token,
-        },
-    )
+    response = client.post(action, data=fields)
     return messages_on(response.wsgi_request)
 
 
@@ -252,7 +250,7 @@ def test_module_bind_and_interface_sync_of_one_device_leave_one_holder(settings,
     device, module, short, long = _seed()
     user_pk = make_superuser("port-claim-user").pk
     sync = (_interface_sync, user_pk, device, "ifDescr")
-    bind = (_module_bind, user_pk, device, module)
+    bind = (_module_bind, user_pk, _rendered_bind(device))
     first, second = (sync, bind) if first_writer == "interface_sync" else (bind, sync)
     winner, loser = (long, short) if first_writer == "interface_sync" else (short, long)
     before = _persisted(loser)

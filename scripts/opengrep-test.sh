@@ -3,7 +3,7 @@
 # Run opengrep rule-tests for the ruleset (.opengrep/librenms-rules.yaml) against the annotated
 # fixtures in .opengrep/tests/. Each fixture carries `ruleid:` / `ok:` markers asserting which
 # lines must (and must not) match. A .py fixture writes them as `#` comments, a .html fixture as
-# `<!-- -->` comments.
+# `<!-- -->` comments, a .js fixture as `//` comments.
 #
 # `opengrep test` pairs a <stem>.yaml rule file with each same-stem fixture inside one directory. To
 # keep a single source of truth (.opengrep/librenms-rules.yaml) we stage a temp directory pairing a
@@ -23,13 +23,13 @@ trap 'rm -rf "$tmp"' EXIT
 for fixture in "$repo_root"/.opengrep/tests/*; do
   name="$(basename "$fixture")"
   case "$name" in
-    *.py | *.html) ;;
+    *.py | *.html | *.js) ;;
     *)
-      echo "error: unsupported rule-test fixture $name (use .py or .html)" >&2
+      echo "error: unsupported rule-test fixture $name (use .py, .html or .js)" >&2
       exit 1
       ;;
   esac
-  if ! grep -Eq '(#|<!--) *ruleid: *[a-z0-9]' "$fixture"; then
+  if ! grep -Eq '(#|<!--|//) *ruleid: *[a-z0-9]' "$fixture"; then
     echo "error: rule-test fixture $name has no ruleid: marker, so it tests nothing" >&2
     exit 1
   fi

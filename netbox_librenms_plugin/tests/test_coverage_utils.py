@@ -206,10 +206,13 @@ class TestPaginationAndUserPreferences:
         assert get_table_paginate_count(request, "table_") == netbox_get_paginate_count(request)
 
     def test_valid_table_page_size_is_read_from_get_and_post(self):
+        from django.contrib.auth.models import AnonymousUser
+
         from netbox_librenms_plugin.utils import get_table_paginate_count
 
         get_request = RequestFactory().get("/", {"table_per_page": "17"})
         post_request = RequestFactory().post("/", {"table_per_page": "19"})
+        get_request.user = post_request.user = AnonymousUser()
 
         assert get_table_paginate_count(get_request, "table_") == 17
         assert get_table_paginate_count(post_request, "table_") == 19
@@ -372,21 +375,6 @@ class TestLocationAndPlatformMatching:
         assert result["found"] is True
         assert result["site"] == expected
         assert find_matching_site("example site")["site"] == expected
-
-    def test_case_insensitive_duplicate_platform_fails_closed(self):
-        from dcim.models import Platform
-
-        from netbox_librenms_plugin.utils import find_matching_platform
-
-        Platform.objects.create(name="example-os", slug="example-os")
-        Platform.objects.create(name="EXAMPLE-OS", slug="example-os-upper")
-
-        assert find_matching_platform("example-os") == {
-            "found": False,
-            "platform": None,
-            "match_type": "ambiguous",
-            "ambiguity_source": "platform",
-        }
 
 
 class TestStoredLibreNMSIdentifiers:

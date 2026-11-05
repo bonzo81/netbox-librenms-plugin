@@ -21,6 +21,7 @@ from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE, is_supported_
 from netbox_librenms_plugin.interface_rules import PortSyncBlocked, interface_rules_for_request
 from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
 from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix
+from netbox_librenms_plugin.ip_rules import ip_rules_for_request
 from netbox_librenms_plugin.librenms_api import LibreNMSIDConflictError
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.server_mappings import name_match_may_be_port, read_mapping
@@ -30,7 +31,7 @@ from netbox_librenms_plugin.sync_cache import (
     render_sync_cache_miss,
     schedule_request_cache_mutation,
 )
-from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, update_existing_row
+from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, saved_in_scope, update_existing_row
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
     build_migrated_context,
@@ -1126,6 +1127,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             "primary_interface_not_eligible": [],
             "skipped_no_interface": [],
             "skipped_by_rule": [],
+            "skipped_by_ip_rule": [],
             "errors": {},
             "conflicts": [],
             "mutated": False,
@@ -1200,6 +1202,11 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         vrf = self._resolve_vrf_id(force_payload.get("target_vrf_id"))
                     else:
                         vrf = self.get_vrf_selection(request, row_id)
+                    # Decided in the VRF this request writes to, before any write; the table pill is a preview.
+                    ip_rule = ip_rules_for_request(request).decide(parsed.ip, vrf.pk if vrf is not None else None)
+                    if ip_rule is not None:
+                        row_results.append(("skipped_by_ip_rule", f"{display_address} ({ip_rule.reason})"))
+                        continue
                     if _ip_host_lock_identity(parsed, vrf) not in prelocked_host_locks:
                         _acquire_ip_host_lock(parsed, vrf)
 
@@ -1392,6 +1399,11 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                 request,
                 f"Skipped (the interface rules refuse the interface): {', '.join(results['skipped_by_rule'])}.",
             )
+        if results.get("skipped_by_ip_rule"):
+            messages.warning(
+                request,
+                f"Skipped: {', '.join(results['skipped_by_ip_rule'])}.",
+            )
         if results.get("skipped_no_interface"):
             messages.warning(
                 request,
@@ -1499,7 +1511,8 @@ class CreateVRFFromIPRowView(SyncIPAddressesView):
             dict: The row's ``{"name", "rd"}`` LibreNMS VRF identity.
 
         Raises:
-            _VRFCreateRefusedError: When the row does not carry the Create VRF action.
+            _VRFCreateRefusedError: When the row does not carry the Create VRF action, or an IP mapping
+                ignores its address.
 
         """
         from netbox_librenms_plugin.views.base.ip_addresses_view import BaseIPAddressTableView
@@ -1521,6 +1534,13 @@ class CreateVRFFromIPRowView(SyncIPAddressesView):
         )
         index, duplicates = index_ip_sync_rows(rows)
         row = index.get(row_id) if row_id not in duplicates else None
+        if row is not None and row.get("vrf_create_url"):
+            # As in the IP sync: the VRF does not exist yet, so only a mapping without a VRF can match.
+            ip_rule = ip_rules_for_request(self.request).decide(parse_address_with_prefix(row["ip_with_mask"]).ip, None)
+            if ip_rule is not None:
+                raise _VRFCreateRefusedError(
+                    f"IP row {row_id} is not synced, so the NetBox VRF is not created: {ip_rule.reason}."
+                )
         if row is None or not row.get("vrf_create_url"):
             raise _VRFCreateRefusedError(
                 f"IP row {row_id} has no LibreNMS VRF that NetBox lacks. Refresh the IP data and try again."
@@ -1566,6 +1586,6 @@ class CreateVRFFromIPRowView(SyncIPAddressesView):
             detail = exception_text_for(exc, VRF, request.user)
             raise _VRFCreateRefusedError(f"NetBox does not accept the LibreNMS VRF '{name}': {detail}") from exc
         # The model-level grant says nothing about WHICH VRFs the user may add; a constrained grant rolls back.
-        if not VRF.objects.restrict(request.user, "add").filter(pk=vrf.pk).exists():
+        if not saved_in_scope(vrf, request.user, "add"):
             raise _VRFCreateRefusedError(f"You may not add the NetBox VRF '{name}'.")
         return vrf

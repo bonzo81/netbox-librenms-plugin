@@ -75,6 +75,7 @@ def _match_bay(item, index_map, module_bays, *, exact=(), regex=()):
         regex_mappings=list(regex),
         manufacturer_id=None,
         norm_rules_bay={},
+        foreign_indices=frozenset(),
     )
 
 
@@ -175,11 +176,11 @@ class TestFindParentModuleId:
 
         assert resolved == module.pk
 
-    def test_a_regex_row_whose_replacement_cannot_expand_is_stepped_over(self):
-        from netbox_librenms_plugin.models import ModuleBayMapping
+    def test_a_regex_row_whose_replacement_cannot_expand_names_the_row(self):
+        from netbox_librenms_plugin.models import ModuleBayMapping, RuleConfigurationError
 
         device = make_device_with_module_bays("parent-regex-badref", ["Slot 6"])
-        module = install_module(device, "Slot 6", "PARENT-REGEX-BADREF-CARD")
+        install_module(device, "Slot 6", "PARENT-REGEX-BADREF-CARD")
         # A row from before replacement validation existed: saved without full_clean.
         ModuleBayMapping.objects.bulk_create(
             [ModuleBayMapping(librenms_name=r"Slot (\d+)/\d+", netbox_bay_name=r"Slot \2", is_regex=True)]
@@ -189,7 +190,10 @@ class TestFindParentModuleId:
         index_map = {10: _item(10, "", "Slot 6/0", phys_class="container")}
         child = _item(20, "SFP-X", "Transceiver 1", parent=10)
 
-        assert _find_parent(child, index_map, _bays(device), regex=[broken, good]) == module.pk
+        with pytest.raises(RuleConfigurationError) as excinfo:
+            _find_parent(child, index_map, _bays(device), regex=[broken, good])
+
+        assert (excinfo.value.rule_pk, excinfo.value.field) == (broken.pk, "netbox_bay_name")
 
     def test_an_unknown_ancestor_resolves_nothing(self):
         device = make_device_with_module_bays("parent-unknown", ["Slot 7"])
@@ -441,12 +445,9 @@ class TestInstallSingleResolutionPaths:
             "manufacturer_id": device.device_type.manufacturer_id,
         }
         kwargs.update(overrides)
+        index_map = index_map if index_map is not None else {item["entPhysicalIndex"]: item}
         return InstallBranchView._install_single(
-            device,
-            item,
-            index_map if index_map is not None else {item["entPhysicalIndex"]: item},
-            module_types,
-            **kwargs,
+            device, item, module_types, naming_map=index_map, ancestry_map=index_map, **kwargs
         )
 
     def test_a_resolved_parent_narrows_the_search_without_hiding_a_device_level_bay(self):

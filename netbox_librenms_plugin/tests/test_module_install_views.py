@@ -14,12 +14,10 @@ from netbox_librenms_plugin.tests.conftest import (
     make_superuser,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
-from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post as view_post
-from netbox_librenms_plugin.utils import (
-    module_inventory_binding_token,
-    module_inventory_row_digest,
-    module_inventory_snapshot_digest,
-)
+from netbox_librenms_plugin.views.sync.modules import SELECTED_ROWS_REFUSED_MESSAGE
+from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, module_tab_forms
+from netbox_librenms_plugin.tests.view_test_helpers import post as view_post
+from netbox_librenms_plugin.tests.view_test_helpers import render_module_tab, rendered_module_form
 
 pytestmark = pytest.mark.django_db
 
@@ -46,32 +44,65 @@ def _drive(view_class, device, data, live_librenms):
     return view, request, view_post(view, request, pk=device.pk)
 
 
+def _table_rows(device):
+    """Return the rows the Modules tab renders from the cached snapshot of *device*."""
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    request = make_request("get", {"server_key": "default"}, user=make_superuser(), path="/modules/")
+    view = DeviceModuleTableView()
+    view.setup(request, pk=device.pk)
+    view.cache_only = True
+    return list(view.get_context_data(request, device, server_key="default")["table"].data)
+
+
+def _branch_post(device, parent_index):
+    """Return the fields of the Install Branch form that the cached Modules tab renders for row *parent_index*, or None."""
+    forms = [
+        form["fields"]
+        for form in module_tab_forms(render_module_tab(device)).forms
+        if "install-branch" in form["action"] and form["fields"].get("parent_index") == str(parent_index)
+    ]
+    return forms[0] if forms else None
+
+
+def _with_installable_child(rows, parent_index, tag):
+    """Add an optic with a module type below row *parent_index*, so the table renders that row's branch button."""
+    optic = make_module_type(f"{tag.upper()}-CHILD-OPTIC")
+    return [*rows, _item(parent_index + 1, optic.model, f"{tag} optic", parent=parent_index)]
+
+
+def _branch_names(rows_by_index, parent_index):
+    """Return the names of the rows that the branch list of top-level row *parent_index* holds."""
+    return {rows_by_index[index]["name"] for index, _target in rows_by_index[parent_index]["branch_rows"]}
+
+
 def _post_branch(device, rows, parent_index, librenms_id, live_librenms):
-    """POST a branch install of *parent_index* over a seeded snapshot of *rows* and return the request."""
+    """POST the rendered Install Branch form of *parent_index* over a seeded snapshot of *rows*."""
     from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
-    request = make_request(
-        "post",
-        {
-            "parent_index": str(parent_index),
-            "server_key": "default",
-            "inventory_binding": module_inventory_binding_token(
-                device.pk,
-                "default",
-                "install_branch",
-                {"parent_index": parent_index},
-                parent_index,
-                module_inventory_snapshot_digest(rows),
-            ),
-        },
-        user=make_superuser(),
-        path="/modules/",
-    )
     view = InstallBranchView()
     view._librenms_api = live_librenms.api
     seed_inventory(view, device, rows, librenms_id=librenms_id)
+    data = _branch_post(device, parent_index)
+    assert data is not None, f"the table renders no branch for row {parent_index}"
+    request = make_request("post", data, user=make_superuser(), path="/modules/")
     response = view_post(view, request, pk=device.pk)
     assert response.status_code == 302
+    return request
+
+
+def _post_selected(device, rows, indices, librenms_id, live_librenms):
+    """POST the rendered Install Selected form for *indices* over a seeded snapshot of *rows*."""
+    from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
+
+    view = InstallSelectedView()
+    view._librenms_api = live_librenms.api
+    seed_inventory(view, device, rows, librenms_id=librenms_id)
+    _action, fields = rendered_module_form(render_module_tab(device), "install-selected")
+    request = make_request(
+        "post", {**fields, "select": [str(index) for index in indices]}, user=make_superuser(), path="/modules/"
+    )
+    view_post(view, request, pk=device.pk)
     return request
 
 
@@ -137,6 +168,28 @@ class TestInstallModuleView:
         assert response.status_code == 302
         assert "Missing or invalid module bay/module type ID." in message_texts(request, "error")
         assert not Module.objects.filter(device=device).exists()
+
+    @pytest.mark.parametrize("placeholder", ["N/A", "BUILTIN", "null"])
+    def test_a_placeholder_serial_installs_as_blank(self, live_librenms, placeholder):
+        """The serial comes from the cached row, so a placeholder there must land as blank."""
+        from dcim.models import Module
+
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView
+
+        device = make_device_with_module_bays(f"install-placeholder-{len(placeholder)}", ["Slot 1"])
+        seed_mapping(device, "default", own=68)
+        module_type = make_module_type(f"INSTALL-PLACEHOLDER-CARD-{len(placeholder)}")
+        rows = [_item(11, module_type.model, "Slot 1", entPhysicalSerialNum=placeholder)]
+        view = InstallModuleView()
+        view._librenms_api = live_librenms.api
+        seed_inventory(view, device, rows, librenms_id=68)
+        _action, fields = rendered_module_form(render_module_tab(device), "install-module", 11)
+        request = make_request("post", fields, user=make_superuser(), path="/modules/")
+
+        response = view_post(view, request, pk=device.pk)
+
+        assert response.status_code == 302
+        assert Module.objects.get(device=device, module_type=module_type).serial == ""
 
     def test_posted_row_metadata_binds_nothing_without_an_ent_index(self, live_librenms):
         """With no index there is no cached row, so posted identity and serial must not be read."""
@@ -209,8 +262,6 @@ class TestInstallBranchView:
     def test_a_branch_install_creates_the_module_and_binds_its_port(self, live_librenms):
         from dcim.models import Module
 
-        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
-
         device = make_device_with_module_bays("branch-install", ["Slot 1"])
         seed_mapping(device, "default", own=65)
         module_type = make_module_type("BRANCH-CARD")
@@ -225,30 +276,9 @@ class TestInstallBranchView:
             )
         ]
 
-        request = make_request(
-            "post",
-            {
-                "parent_index": "10",
-                "server_key": "default",
-                "inventory_binding": module_inventory_binding_token(
-                    device.pk,
-                    "default",
-                    "install_branch",
-                    {"parent_index": 10},
-                    10,
-                    module_inventory_snapshot_digest(rows),
-                ),
-            },
-            user=make_superuser(),
-            path="/modules/",
-        )
-        view = InstallBranchView()
-        view._librenms_api = live_librenms.api
-        seed_inventory(view, device, rows, librenms_id=65)
-        response = view_post(view, request, pk=device.pk)
+        request = _post_branch(device, _with_installable_child(rows, 10, "branch-install"), 10, 65, live_librenms)
 
         interface.refresh_from_db()
-        assert response.status_code == 302
         assert Module.objects.filter(device=device, module_type=module_type).exists()
         assert read_mapping(interface).own_id("default") == 6501
         assert any("Installed" in text for text in message_texts(request, "success"))
@@ -256,36 +286,13 @@ class TestInstallBranchView:
     def test_a_bind_failure_is_reported_next_to_the_install(self, live_librenms):
         from dcim.models import Module
 
-        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
-
         device = make_device_with_module_bays("branch-bind-miss", ["Slot 1"])
         seed_mapping(device, "default", own=66)
         module_type = make_module_type("BRANCH-MISS-CARD")
         rows = [_item(10, module_type.model, "Slot 1", _librenms_port_id=6601, _librenms_ifname="No Such Interface")]
 
-        request = make_request(
-            "post",
-            {
-                "parent_index": "10",
-                "server_key": "default",
-                "inventory_binding": module_inventory_binding_token(
-                    device.pk,
-                    "default",
-                    "install_branch",
-                    {"parent_index": 10},
-                    10,
-                    module_inventory_snapshot_digest(rows),
-                ),
-            },
-            user=make_superuser(),
-            path="/modules/",
-        )
-        view = InstallBranchView()
-        view._librenms_api = live_librenms.api
-        seed_inventory(view, device, rows, librenms_id=66)
-        response = view_post(view, request, pk=device.pk)
+        request = _post_branch(device, _with_installable_child(rows, 10, "branch-bind-miss"), 10, 66, live_librenms)
 
-        assert response.status_code == 302
         assert Module.objects.filter(device=device, module_type=module_type).exists()
         assert any("no matching interface found for port_id 6601" in text for text in message_texts(request))
 
@@ -295,7 +302,6 @@ class TestInstallBranchView:
 
         from netbox_librenms_plugin.models import ModuleBayMapping
         from netbox_librenms_plugin.tests.test_modules_view import _make_view, _run_build_context_real
-        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
         # The decoy bay carries the item's own name, so a class mismatch falls through to it.
         device = make_device_with_module_bays("branch-same-bay", ["PSU Bay A", "Power Supply 1"])
@@ -304,37 +310,20 @@ class TestInstallBranchView:
         ModuleBayMapping.objects.create(
             librenms_name="Power Supply 1", librenms_class="powerSupply", netbox_bay_name="PSU Bay A"
         )
-        rows = [_item(10, module_type.model, "Power Supply 1", phys_class=" powerSupply ")]
-
-        (table_row,) = _run_build_context_real(_make_view(), rows, device)
-        request = make_request(
-            "post",
-            {
-                "parent_index": "10",
-                "server_key": "default",
-                "inventory_binding": module_inventory_binding_token(
-                    device.pk,
-                    "default",
-                    "install_branch",
-                    {"parent_index": 10},
-                    10,
-                    module_inventory_snapshot_digest(rows),
-                ),
-            },
-            user=make_superuser(),
-            path="/modules/",
+        rows = _with_installable_child(
+            [_item(10, module_type.model, "Power Supply 1", phys_class=" powerSupply ")], 10, "branch-same-bay"
         )
-        view = InstallBranchView()
-        view._librenms_api = live_librenms.api
-        seed_inventory(view, device, rows, librenms_id=69)
-        response = view_post(view, request, pk=device.pk)
 
-        assert response.status_code == 302
+        table_row = next(row for row in _run_build_context_real(_make_view(), rows, device) if row["depth"] == 0)
+        _post_branch(device, rows, 10, 69, live_librenms)
+
         assert table_row["module_bay"] == "PSU Bay A"
         assert Module.objects.get(device=device, module_type=module_type).module_bay.name == "PSU Bay A"
 
-    def test_a_branch_install_of_a_fixed_nxos_line_card_does_not_attempt_its_port_cages(self, live_librenms):
-        """The serial-less cages only hold the optics, so the branch reports the card and the optics only."""
+    def test_the_branch_of_a_fixed_nxos_line_card_holds_no_port_cage(self, live_librenms):
+        """The serial-less cages only hold the optics, so the branch list holds the card and the optics only."""
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+
         from netbox_librenms_plugin.data_shapes.recordings_store import load_recording
 
         recording = load_recording("nxos-fixed-linecard")
@@ -353,16 +342,14 @@ class TestInstallBranchView:
         assert not cage_names & optic_names
         device = make_device("branch-nxos-line-card")
         seed_mapping(device, "default", own=recording["device_id"])
+        seed_inventory(InstallBranchView(), device, rows, librenms_id=recording["device_id"])
 
-        request = _post_branch(device, rows, line_card["entPhysicalIndex"], recording["device_id"], live_librenms)
+        rendered = {row["ent_physical_index"]: row for row in _table_rows(device)}
 
-        # No module type exists, so every attempted item skips as "no matching type".
-        (summary,) = message_texts(request, "info")
-        attempted = {entry.rsplit(": ", 1)[0] for entry in summary.split(": ", 1)[1].split("; ")}
-        assert attempted == {line_card["entPhysicalName"]} | optic_names
+        assert _branch_names(rendered, line_card["entPhysicalIndex"]) == {line_card["entPhysicalName"]} | optic_names
 
-    def test_a_branch_install_skips_placeholder_models_the_table_hides(self, live_librenms):
-        from netbox_librenms_plugin.tests.test_modules_view import _make_view, _run_build_context_real
+    def test_the_branch_holds_no_placeholder_model_the_table_hides(self, live_librenms):
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
         device = make_device("branch-placeholder-models")
         seed_mapping(device, "default", own=70)
@@ -372,13 +359,11 @@ class TestInstallBranchView:
             _item(21, "N/A", "Unknown unit", parent=10),
             _item(30, "BRANCH-PLACEHOLDER-SFP", "Optic", parent=20),
         ]
+        seed_inventory(InstallBranchView(), device, rows, librenms_id=70)
 
-        table_names = {row["name"] for row in _run_build_context_real(_make_view(), rows, device)}
-        request = _post_branch(device, rows, 10, 70, live_librenms)
+        rendered = {row["ent_physical_index"]: row for row in _table_rows(device)}
 
-        (summary,) = message_texts(request, "info")
-        attempted = {entry.rsplit(": ", 1)[0] for entry in summary.split(": ", 1)[1].split("; ")}
-        assert table_names == attempted == {"Card", "Optic"}
+        assert {row["name"] for row in rendered.values()} == _branch_names(rendered, 10) == {"Card", "Optic"}
 
     def test_a_snapshot_cached_before_the_schema_version_is_a_missing_snapshot(self, live_librenms):
         """Rows from an older writer lack markers the readers rely on, so the branch install must not use them."""
@@ -390,26 +375,12 @@ class TestInstallBranchView:
         device = make_device_with_module_bays("branch-pre-version", ["Slot 1"])
         seed_mapping(device, "default", own=72)
         module_type = make_module_type("BRANCH-PRE-VERSION-CARD")
-        rows = [_item(10, module_type.model, "Slot 1")]
-        request = make_request(
-            "post",
-            {
-                "parent_index": "10",
-                "server_key": "default",
-                "inventory_binding": module_inventory_binding_token(
-                    device.pk,
-                    "default",
-                    "install_branch",
-                    {"parent_index": 10},
-                    10,
-                    module_inventory_snapshot_digest(rows),
-                ),
-            },
-            user=make_superuser(),
-            path="/modules/",
-        )
+        rows = _with_installable_child([_item(10, module_type.model, "Slot 1")], 10, "branch-pre-version")
         view = InstallBranchView()
         view._librenms_api = live_librenms.api
+        # The page renders from the current payload; an older writer then replaces it.
+        seed_inventory(view, device, rows, librenms_id=72)
+        request = make_request("post", _branch_post(device, 10), user=make_superuser(), path="/modules/")
         key = _seed_pre_version_snapshot(view, device, rows, 72)
 
         response = view_post(view, request, pk=device.pk)
@@ -420,15 +391,14 @@ class TestInstallBranchView:
         assert cache.get(key) is None
 
     @SKIPPED_HOLDER_SHAPES
-    def test_a_branch_below_a_skipped_holder_installs_nothing(self, live_librenms, holder_class, holder_model):
-        from dcim.models import Module
+    def test_a_row_below_a_skipped_holder_has_no_branch(self, live_librenms, holder_class, holder_model):
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
         device, rows = _optic_below_a_skipped_holder("branch-skipped-holder", holder_class, holder_model, 74)
+        seed_inventory(InstallBranchView(), device, rows, librenms_id=74)
 
-        request = _post_branch(device, rows, 20, 74, live_librenms)
-
-        assert message_texts(request, "warning") == ["No installable items found in this branch."]
-        assert not Module.objects.filter(device=device).exists()
+        assert 20 not in {row["ent_physical_index"] for row in _table_rows(device)}
+        assert _branch_post(device, 20) is None
 
 
 class TestInstallSelectedView:
@@ -460,33 +430,16 @@ class TestInstallSelectedView:
         """The table never renders a serial-less labelled container, so a crafted selection must not install it."""
         from dcim.models import Module
 
-        from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
-
         device = make_device_with_module_bays("selected-holder", ["Holder Slot"])
         seed_mapping(device, "default", own=71)
         # A module type and a bay match the holder, so only the holder rule can stop the install.
         module_type = make_module_type("SELECTED-HOLDER-LABEL")
         rows = [_item(10, module_type.model, "Holder Slot", phys_class="container")]
-        request = make_request(
-            "post",
-            {
-                "select": ["10"],
-                "server_key": "default",
-                "inventory_binding": module_inventory_binding_token(
-                    device.pk, "default", "install_selected", {}, None, module_inventory_snapshot_digest(rows)
-                ),
-            },
-            user=make_superuser(),
-            path="/modules/",
-        )
-        view = InstallSelectedView()
-        view._librenms_api = live_librenms.api
-        seed_inventory(view, device, rows, librenms_id=71)
 
-        view_post(view, request, pk=device.pk)
+        request = _post_selected(device, rows, [10], 71, live_librenms)
 
         assert not Module.objects.filter(device=device).exists()
-        assert message_texts(request, "info") == ["Skipped 1: Holder Slot: not hardware"]
+        assert message_texts(request, "error") == [SELECTED_ROWS_REFUSED_MESSAGE.format(rows="Holder Slot")]
 
     def test_a_snapshot_cached_before_the_schema_version_is_a_missing_snapshot(self, live_librenms):
         from dcim.models import Module
@@ -498,20 +451,12 @@ class TestInstallSelectedView:
         seed_mapping(device, "default", own=73)
         module_type = make_module_type("SELECTED-PRE-VERSION-CARD")
         rows = [_item(10, module_type.model, "Slot 1")]
-        request = make_request(
-            "post",
-            {
-                "select": ["10"],
-                "server_key": "default",
-                "inventory_binding": module_inventory_binding_token(
-                    device.pk, "default", "install_selected", {}, None, module_inventory_snapshot_digest(rows)
-                ),
-            },
-            user=make_superuser(),
-            path="/modules/",
-        )
         view = InstallSelectedView()
         view._librenms_api = live_librenms.api
+        # The page renders from the current payload; an older writer then replaces it.
+        seed_inventory(view, device, rows, librenms_id=73)
+        _action, fields = rendered_module_form(render_module_tab(device), "install-selected")
+        request = make_request("post", {**fields, "select": ["10"]}, user=make_superuser(), path="/modules/")
         key = _seed_pre_version_snapshot(view, device, rows, 73)
 
         view_post(view, request, pk=device.pk)
@@ -524,35 +469,19 @@ class TestInstallSelectedView:
     def test_a_selected_row_below_a_skipped_holder_installs_nothing(self, live_librenms, holder_class, holder_model):
         from dcim.models import Module
 
-        from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
-
         device, rows = _optic_below_a_skipped_holder("selected-skipped-holder", holder_class, holder_model, 75)
-        request = make_request(
-            "post",
-            {
-                "select": ["20"],
-                "server_key": "default",
-                "inventory_binding": module_inventory_binding_token(
-                    device.pk, "default", "install_selected", {}, None, module_inventory_snapshot_digest(rows)
-                ),
-            },
-            user=make_superuser(),
-            path="/modules/",
-        )
-        view = InstallSelectedView()
-        view._librenms_api = live_librenms.api
-        seed_inventory(view, device, rows, librenms_id=75)
 
-        view_post(view, request, pk=device.pk)
+        request = _post_selected(device, rows, [20], 75, live_librenms)
 
-        assert message_texts(request, "info") == ["Skipped 1: Optic 1: matched ignore rule"]
+        assert message_texts(request, "error") == [SELECTED_ROWS_REFUSED_MESSAGE.format(rows="Optic 1")]
         assert not Module.objects.filter(device=device).exists()
 
 
 class TestUpdateModuleSerialView:
     """The serial update validates its inputs before touching the module."""
 
-    def test_an_invalid_selected_device_and_module_id_are_both_reported(self, live_librenms):
+    def test_an_invalid_selected_device_is_refused_without_a_fallback(self, live_librenms):
+        from netbox_librenms_plugin.module_grants import GrantRefusal
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
 
         device = make_device("serial-bad-inputs", librenms_cf={"default": 68})
@@ -565,49 +494,65 @@ class TestUpdateModuleSerialView:
         )
 
         assert response.status_code == 302
-        assert any("falling back to the page device" in text for text in message_texts(request, "warning"))
-        assert "Missing or invalid module ID." in message_texts(request, "error")
+        assert message_texts(request, "error") == [GrantRefusal.DESTINATION.message]
+        assert message_texts(request, "warning") == []
 
     @pytest.mark.parametrize("placeholder", ["N/A", "BUILTIN", "null"])
-    def test_a_placeholder_serial_is_stored_as_blank(self, live_librenms, placeholder):
-        """The serial comes from the cached row, so a placeholder there must land as blank."""
-        from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
+    def test_a_placeholder_serial_updates_as_blank(self, live_librenms, placeholder):
+        """A grant signed for a placeholder row, e.g. by an older page, must store a blank serial."""
+        from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+        from netbox_librenms_plugin.module_grants import (
+            ACTION_UPDATE_SERIAL,
+            RENDER_ATTRIBUTED,
+            installed_module_target,
+            module_inventory_snapshot_digest,
+            sign_module_grant,
+        )
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView, _get_cached_inventory_for_device
 
         device = make_device_with_module_bays(f"serial-placeholder-{len(placeholder)}", ["Slot 1"])
         seed_mapping(device, "default", own=68)
         module = install_module(device, "Slot 1", f"SERIAL-PLACEHOLDER-CARD-{len(placeholder)}", serial="OLD")
-        rows = [_item(11, module.module_type.model, "Slot 1", entPhysicalSerialNum=placeholder)]
-
-        request = make_request(
-            "post",
-            {
-                "module_id": str(module.pk),
-                "ent_index": "11",
-                "server_key": "default",
-                "inventory_binding": module_inventory_binding_token(
-                    device.pk,
-                    "default",
-                    "update_module_serial",
-                    {"module_id": module.pk},
-                    11,
-                    module_inventory_row_digest(rows[0]),
-                ),
-            },
-            user=make_superuser(),
-            path="/modules/",
-        )
         view = UpdateModuleSerialView()
         view._librenms_api = live_librenms.api
+        rows = [_item(11, module.module_type.model, "Slot 1", entPhysicalSerialNum=placeholder)]
         seed_inventory(view, device, rows, librenms_id=68)
+        inventory = _get_cached_inventory_for_device(device, "default", view.get_cache_key)
+        grant = sign_module_grant(
+            page_device_id=device.pk,
+            device_id=device.pk,
+            server_key="default",
+            action=ACTION_UPDATE_SERIAL,
+            inventory_digest=module_inventory_snapshot_digest(inventory),
+            policy_fingerprint=load_inventory_policy(device.pk).fingerprint,
+            render_mode=RENDER_ATTRIBUTED,
+            ent_index=11,
+            action_target=installed_module_target(module.pk, module.module_bay_id),
+        )
+        data = {"module_id": module.pk, "ent_index": 11, "server_key": "default", "inventory_binding": grant}
+        request = make_request("post", data, user=make_superuser(), path="/modules/")
+
         response = view_post(view, request, pk=device.pk)
 
-        module.refresh_from_db()
         assert response.status_code == 302
+        module.refresh_from_db()
         assert module.serial == ""
+
+    def test_an_invalid_module_id_is_reported(self, live_librenms):
+        from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView
+
+        device = make_device("serial-bad-module", librenms_cf={"default": 68})
+
+        _view, request, response = _drive(
+            UpdateModuleSerialView, device, {"module_id": "", "server_key": "default"}, live_librenms
+        )
+
+        assert response.status_code == 302
+        assert "Missing or invalid module ID." in message_texts(request, "error")
 
 
 class TestInventoryIgnoreRulesDuringCollection:
-    """Branch collection honours the same skip/transparent rules the table renders with."""
+    """The branch list is the table's own: it honours the skip and transparent rules the table renders with."""
 
     @staticmethod
     def _rule(name, pattern, action):
@@ -621,12 +566,15 @@ class TestInventoryIgnoreRulesDuringCollection:
             require_serial_match_parent=False,
         )
 
-    def _collect(self, parent_index, rows, rules):
-        from netbox_librenms_plugin.views.base.modules_view import DeviceIdentity
-        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
+    @staticmethod
+    def _rows(rows, tag):
+        from netbox_librenms_plugin.tests.test_modules_view import _make_view, _run_build_context_real
 
-        index_map = {row["entPhysicalIndex"]: row for row in rows}
-        return InstallBranchView()._collect_branch(parent_index, rows, rules, DeviceIdentity(), index_map)
+        return {row["ent_physical_index"]: row for row in _run_build_context_real(_make_view(), rows, make_device(tag))}
+
+    @staticmethod
+    def _branch(rows, index):
+        return [entry_index for entry_index, _target in rows[index]["branch_rows"]]
 
     def test_a_skip_rule_drops_the_item_and_its_subtree(self):
         rows = [
@@ -635,11 +583,9 @@ class TestInventoryIgnoreRulesDuringCollection:
             _item(3, "DEEP-SKIP", "FT-IDPROM-child", parent=2),
             _item(4, "KEEP-ME", "NormalChild", parent=1),
         ]
-        rules = [self._rule("idprom-skip", "IDPROM", "skip")]
+        self._rule("idprom-skip", "IDPROM", "skip")
 
-        collected = self._collect(1, rows, rules)
-
-        assert [row["entPhysicalModelName"] for row in collected] == ["PARENT", "KEEP-ME"]
+        assert self._branch(self._rows(rows, "branch-skip"), 1) == [1, 4]
 
     def test_a_transparent_rule_promotes_the_children(self):
         rows = [
@@ -647,28 +593,27 @@ class TestInventoryIgnoreRulesDuringCollection:
             _item(2, "TRANSPARENT", "T-IDPROM", parent=1),
             _item(3, "GRANDCHILD", "Optic 1", parent=2),
         ]
-        rules = [self._rule("idprom-transparent", "IDPROM", "transparent")]
+        self._rule("idprom-transparent", "IDPROM", "transparent")
 
-        collected = self._collect(1, rows, rules)
-
-        assert [row["entPhysicalModelName"] for row in collected] == ["PARENT", "GRANDCHILD"]
+        assert self._branch(self._rows(rows, "branch-transparent"), 1) == [1, 3]
 
     def test_a_transparent_root_is_replaced_by_its_children(self):
         rows = [
             _item(1, "ROOT", "RP-IDPROM"),
             _item(2, "CHILD", "Optic 1", parent=1),
         ]
-        rules = [self._rule("root-transparent", "IDPROM", "transparent")]
+        self._rule("root-transparent", "IDPROM", "transparent")
 
-        collected = self._collect(1, rows, rules)
+        rendered = self._rows(rows, "branch-transparent-root")
 
-        assert [row["entPhysicalModelName"] for row in collected] == ["CHILD"]
+        assert set(rendered) == {2}
+        assert self._branch(rendered, 2) == [2]
 
     def test_a_skipped_root_collects_nothing(self):
         rows = [
             _item(1, "ROOT", "RP-IDPROM"),
             _item(2, "CHILD", "Optic 1", parent=1),
         ]
-        rules = [self._rule("root-skip", "IDPROM", "skip")]
+        self._rule("root-skip", "IDPROM", "skip")
 
-        assert self._collect(1, rows, rules) == []
+        assert self._rows(rows, "branch-skip-root") == {}
