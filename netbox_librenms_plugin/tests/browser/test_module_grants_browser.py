@@ -475,10 +475,9 @@ def test_a_verified_row_opens_its_replace_preview_in_the_modal(page):
 INSTALL_PATH = "/plugins/librenms_plugin/devices/1/install-module/"
 
 
-def test_a_verified_row_form_posts_through_htmx_and_swaps_the_tab(page):
-    """The verify writes the actions cell with innerHTML, so the row form posts through the loader, not natively."""
+def _verified_install_form():
+    """A verify answer whose actions cell holds the Install form with the attributes render_actions puts on it."""
     answer = _success(30, "2", "override-30")
-    # The attributes render_actions puts on the Install form (tables/modules.py).
     answer["json"]["formatted_row"]["actions"] = (
         f'<form method="post" action="{INSTALL_PATH}" hx-post="{INSTALL_PATH}" hx-target="#module-sync-content"'
         ' hx-swap="innerHTML" hx-sync="#module-sync-content:drop" hx-indicator="closest tr"'
@@ -488,7 +487,12 @@ def test_a_verified_row_form_posts_through_htmx_and_swaps_the_tab(page):
         '<input type="hidden" name="inventory_binding" value="install-30-2">'
         '<button type="submit" data-action="install" id="install-30">Install</button></form>'
     )
-    _answers(page, answer)
+    return answer
+
+
+def test_a_verified_row_form_posts_through_htmx_and_swaps_the_tab(page):
+    """The verify writes the actions cell with innerHTML, so the row form posts through the loader, not natively."""
+    _answers(page, _verified_install_form())
     held = []
     page.route(f"**{INSTALL_PATH}", lambda route: held.append(route))
     _load(page, [_row(30)], extra=_loader("data-row-form-loader"))
@@ -511,3 +515,20 @@ def test_a_verified_row_form_posts_through_htmx_and_swaps_the_tab(page):
 
     expect(page.locator("#module-sync-content #installed")).to_have_text("Installed")
     assert page.url == PAGE_URL
+
+
+def test_a_verified_row_form_posts_natively_when_htmx_did_not_load(page):
+    """The table and the verify work without htmx, so an unbound loader leaves the form to its native post."""
+    _answers(page, _verified_install_form())
+    page.route(f"**{INSTALL_PATH}", lambda route: route.fulfill(body="<p>installed</p>", content_type="text/html"))
+    _load(page, [_row(30)], mode="htmx-absent", extra=_loader("data-row-form-loader"))
+    with page.expect_response(VERIFY_ROUTE):
+        _change_member(page, 30, "2")
+    expect(page.locator("#install-30")).to_be_enabled()
+
+    with page.expect_request(f"**{INSTALL_PATH}", timeout=3000) as install:
+        page.click("#install-30")
+
+    request = install.value
+    assert (request.method, request.headers.get("hx-request")) == ("POST", None)
+    assert ("inventory_binding", "install-30-2") in parse_qsl(request.post_data)

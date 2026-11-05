@@ -3705,8 +3705,13 @@ document.addEventListener('submit', function (event) {
     const form = event.target;
     const loader = document.querySelector('[data-row-form-loader]');
     if (!(form instanceof HTMLFormElement) || !form.dataset.rowFormUrl || !loader) return;
-    event.preventDefault();
+    // htmx answers the trigger with htmx:confirm before its hx-sync check; without it, the form posts natively.
+    let handled = false;
+    const onConfirm = () => { handled = true; };
+    loader.addEventListener('htmx:confirm', onConfirm);
     loader.dispatchEvent(new CustomEvent('librenms:submit-row-form', { detail: { url: form.dataset.rowFormUrl, form } }));
+    loader.removeEventListener('htmx:confirm', onConfirm);
+    if (handled) event.preventDefault();
 });
 
 /**
