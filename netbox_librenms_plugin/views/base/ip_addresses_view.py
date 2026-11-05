@@ -6,6 +6,7 @@ from urllib.parse import quote_plus
 
 from dcim.models import Device, Interface
 from django.contrib import messages
+from django.contrib.contenttypes.models import ContentType
 from django.core.cache import cache
 from django.db.models import Q
 from django.http import Http404, JsonResponse
@@ -114,6 +115,37 @@ def ip_assignment_ports(ports_by_id, bound_ports_by_id, source_port_id, interfac
         )
         for port_id in port_ids
     ]
+
+
+def decide_ip_row_rule(rules, ip_with_mask, vrf_id, interface, netbox_addresses):
+    """
+    Return the IP mapping that ignores a row in *vrf_id*, and whether the ignored row shows Synced.
+
+    The table and the VRF verify both decide a row here. An ignored row shows Synced when NetBox
+    holds the address in *vrf_id* on the row's interface, also when another interface holds it too.
+
+    Args:
+        rules (IPRuleMatcher): The request's IP mappings.
+        ip_with_mask (str): The row's address with its prefix length.
+        vrf_id (int | None): The VRF the row's select shows; None is Global.
+        interface (Interface | VMInterface | None): The interface the row resolves to.
+        netbox_addresses (Iterable[IPAddress]): The NetBox addresses equal to the row's address.
+
+    Returns:
+        tuple[IPRule | None, bool]: The ignoring mapping, and whether the row shows Synced.
+
+    """
+    rule = rules.decide(ip_interface(ip_with_mask).ip, vrf_id)
+    if rule is None or interface is None:
+        return rule, False
+    interface_type_id = ContentType.objects.get_for_model(interface).pk
+    held = any(
+        ip.vrf_id == vrf_id
+        and ip.assigned_object_type_id == interface_type_id
+        and ip.assigned_object_id == interface.pk
+        for ip in netbox_addresses
+    )
+    return rule, held
 
 
 def _valid_librenms_vrf_identity(value):
@@ -235,7 +267,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
         )
 
         enriched_data = []
-        assignments = []
+        row_interfaces = []
 
         # Process each IP address from LibreNMS
         for ip_entry in ip_data:
@@ -302,8 +334,7 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
                 librenms_interface_name,
                 prefetched_data,
             )
-            if interface is not None:
-                assignments.append((enriched_ip, interface))
+            row_interfaces.append((enriched_ip, interface))
 
             self._add_vrf_suggestion(
                 enriched_ip,
@@ -317,12 +348,12 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             enriched_data.append(enriched_ip)
 
         self._add_rule_blocks(
-            assignments,
+            [(enriched_ip, interface) for enriched_ip, interface in row_interfaces if interface is not None],
             (port_data_cache, bound_port_cache),
             server_key or self._render_server_key(),
             prefetched_data,
         )
-        self._add_ip_rule_blocks(enriched_data, visible_vrf_ids)
+        self._add_ip_rule_blocks(row_interfaces, prefetched_data["ip_addresses_map"], visible_vrf_ids)
         self._flag_management_ip(enriched_data, mgmt_ip)
         return identify_ip_sync_rows(enriched_data)
 
@@ -731,25 +762,36 @@ class BaseIPAddressTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxOb
             if (blocked := rules.first_blocked_port(ports, disclose)) is not None:
                 enriched_ip["rule_block"] = row_rule_block(*blocked)
 
-    def _add_ip_rule_blocks(self, enriched_data, visible_vrf_ids):
+    def _add_ip_rule_blocks(self, row_interfaces, ip_addresses_map, visible_vrf_ids):
         """
         Stamp each row whose address an IP mapping ignores in the VRF the row selects first.
 
         The VRF select shows the row's NetBox VRF or its suggested VRF when the user may view it,
-        else Global. A VRF change re-decides the row in ``SingleIPAddressVerifyView``.
+        else Global. A VRF change re-decides the row in ``SingleIPAddressVerifyView``, with the same
+        :func:`decide_ip_row_rule`.
 
         Args:
-            enriched_data (list[dict]): The enriched rows.
+            row_interfaces (list[tuple[dict, Interface | VMInterface | None]]): Each row and its interface.
+            ip_addresses_map (dict): The NetBox addresses by ``address/prefix``.
             visible_vrf_ids (set[int]): The VRFs the select lists.
 
         """
         rules = ip_rules_for_request(self.request)
-        for enriched_ip in enriched_data:
+        for enriched_ip, interface in row_interfaces:
             shown = (enriched_ip["vrf_id"], enriched_ip.get("suggested_vrf_id"))
             vrf_id = next((pk for pk in shown if pk is not None and pk in visible_vrf_ids), None)
-            rule = rules.decide(ip_interface(enriched_ip["ip_with_mask"]).ip, vrf_id)
-            if rule is not None:
-                enriched_ip["ip_rule_block"] = row_ip_rule_block(rule)
+            ip_with_mask = enriched_ip["ip_with_mask"]
+            rule, held = decide_ip_row_rule(
+                rules, ip_with_mask, vrf_id, interface, ip_addresses_map.get(ip_with_mask, ())
+            )
+            if rule is None:
+                continue
+            enriched_ip["ip_rule_block"] = row_ip_rule_block(rule)
+            if held:
+                enriched_ip["status"] = "matched"
+            elif enriched_ip["status"] == "matched":
+                # The row's interface holds the address only in a VRF that the select does not show.
+                enriched_ip["status"] = "update"
 
     @staticmethod
     def _interface_owner_id(interface):
@@ -1263,15 +1305,13 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
             return None, None, None
         return row, row.get("vrf_id"), row.get("port_id")
 
-    def _held_on_row_interface(self, obj, record, port_id, vrf_id, server_key):
-        """Return whether NetBox holds the row's address in *vrf_id* on the interface that the row resolves to."""
-        from django.contrib.contenttypes.models import ContentType
-
+    def _row_interface(self, obj, record, port_id, server_key):
+        """Return the interface that the row resolves to, with the table's resolver and scope."""
         _owners, interfaces = ip_interface_scope(self, obj)
         by_librenms_id, by_name, by_pk = index_ip_source_interfaces(
             interfaces, server_key, obj.pk if isinstance(obj, Device) else None
         )
-        interface = resolve_ip_source_interface(
+        return resolve_ip_source_interface(
             {
                 "port_id": port_id,
                 "interface_name": record.get("interface_name"),
@@ -1281,16 +1321,6 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
             by_name,
             by_pk,
             server_key=server_key,
-        )
-        # Two interfaces can hold one link-local address in a VRF, so the check is per interface, as in the table.
-        return (
-            interface is not None
-            and IPAddress.objects.filter(
-                address=record["ip_with_mask"],
-                vrf_id=vrf_id,
-                assigned_object_type=ContentType.objects.get_for_model(interface),
-                assigned_object_id=interface.pk,
-            ).exists()
         )
 
     def _find_existing_ip(self, address_no_mask, prefix_len, vrf_id=None):
@@ -1477,13 +1507,14 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
             mapping_vrf_id = (
                 vrf_id if vrf_id is None or self.restricted_queryset(VRF).filter(pk=vrf_id).exists() else None
             )
-            ip_rule = ip_rules_for_request(request).decide(
-                ip_interface(updated_record["ip_with_mask"]).ip, mapping_vrf_id
+            ip_rule, held = decide_ip_row_rule(
+                ip_rules_for_request(request),
+                updated_record["ip_with_mask"],
+                mapping_vrf_id,
+                self._row_interface(obj, updated_record, original_port_id, server_key),
+                IPAddress.objects.filter(address=updated_record["ip_with_mask"]),
             )
-            # An ignored row stays Synced only when the address is on the row's interface, as the table decides.
-            if ip_rule is not None and self._held_on_row_interface(
-                obj, updated_record, original_port_id, vrf_id, server_key
-            ):
+            if held:
                 status_html = IPAddressTable(data=[]).render_status("matched", updated_record)
             elif ip_rule is not None:
                 status_html = rule_block_html(row_ip_rule_block(ip_rule))

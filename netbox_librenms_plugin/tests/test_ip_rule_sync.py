@@ -355,6 +355,57 @@ class TestAVrfChangeRedecidesTheRow:
         assert verdict["selectable"] is True
 
 
+def _two_holders(device, mapping_vrf, holder_vrf):
+    """Map fe80::/10 in *mapping_vrf* and let eth0 and eth1 each hold LINK_LOCAL in *holder_vrf*."""
+    IPAddressMapping.objects.create(prefix="fe80::/10", vrf=mapping_vrf)
+    IPAddress.objects.create(address=LINK_LOCAL, vrf=holder_vrf, assigned_object=device.interfaces.get(name="eth0"))
+    IPAddress.objects.create(
+        address=LINK_LOCAL, vrf=holder_vrf, assigned_object=make_interface(device, "eth1", iface_type="virtual")
+    )
+
+
+class TestTheTableAndTheVerifyDecideARowAlike:
+    """Two NetBox addresses match one source row; the table and a verify of the VRF it shows give one verdict."""
+
+    @pytest.mark.parametrize(
+        ("mapping_in_blue", "holders_in_blue", "synced"),
+        [(False, False, True), (True, True, False), (False, True, False)],
+        ids=["all-vrf-mapping-global-holders", "blue-mapping-blue-holders", "all-vrf-mapping-blue-holders"],
+    )
+    def test_the_verdicts_agree(self, client, device, blue, mapping_in_blue, holders_in_blue, synced):
+        _two_holders(device, blue if mapping_in_blue else None, blue if holders_in_blue else None)
+        _seed(device, [_row(LINK_LOCAL)])
+
+        row = _row_html(client, device, LINK_LOCAL)
+        shown = re.search(r'<option value="(\d*)"\s*selected', row)
+        verdict = _verify(client, device, LINK_LOCAL, VRF.objects.get(pk=shown.group(1)) if shown else None)
+
+        def verdict_of(status, disabled):
+            return {"synced": "Synced" in status, "ignored": "Ignored" in status, "disabled": disabled}
+
+        table = verdict_of(_cell(row, "status"), "disabled" in _checkbox(row))
+        assert table == verdict_of(verdict["status"], not verdict["selectable"])
+        assert table["synced"] is synced
+
+    def test_an_address_held_in_a_vrf_the_user_cannot_view_is_decided_in_global(self, client, device, blue):
+        from dcim.models import Device, Interface
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+
+        IPAddressMapping.objects.create(prefix="fe80::/10")
+        IPAddress.objects.create(address=LINK_LOCAL, vrf=blue, assigned_object=device.interfaces.get(name="eth0"))
+        _seed(device, [_row(LINK_LOCAL)])
+        perms = [("view", Device), ("view", Interface), ("view", IPAddress)]
+        client.force_login(make_user_with_perms("ip-rule-hidden-holder", perms))
+
+        row = _row_html(client, device, LINK_LOCAL)
+        verdict = _verify(client, device, LINK_LOCAL, None)
+
+        assert "Ignored" in _cell(row, "status")
+        assert "Synced" not in _cell(row, "status")
+        assert "Ignored" in verdict["status"]
+
+
 class TestTheReasonNamesNoVrf:
     """A user who cannot view the mapping's VRF must not learn its name, so the reason names the prefix only."""
 
