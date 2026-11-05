@@ -1841,7 +1841,7 @@ class BaseCableTableView(
             return
         # A parent cable on another profile is visible here, so the row links it, as the two-sided path does.
         if is_channel(interface) and (refusal := unread_breakout_cable_refusal(interface)) is not None:
-            link["cable_status"] = f"Breakout Not Synced: {refusal.reason}"
+            _set_cable_state(link, f"Breakout Not Synced: {refusal.reason}", UNCLASSIFIED)
             link["cable_url"] = reverse("dcim:cable", args=[interface.parent.cable.pk])
             return
         cable = interface.cable
