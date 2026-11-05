@@ -6279,6 +6279,7 @@ class TestScopePreservedAcrossIntegratedContainer:
             "interfaces_by_module": {},
             "port_holders": {},
             "server_key": "test-server",
+            "withheld": False,
         }
 
         xiom_item = {

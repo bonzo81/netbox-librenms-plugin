@@ -768,6 +768,36 @@ def test_the_member_select_names_only_the_members_the_user_may_view(client, vc_g
     assert options(CARD) == [(str(page.pk), " selected")]
 
 
+def test_a_row_on_a_hidden_member_shows_no_bay_module_or_action_of_that_member(client, vc_grants):
+    """Optic 1 belongs to the hidden member by its serial: the table withholds that member's bays and module."""
+    from dcim.models import Device, Module, ModuleBay, ModuleType
+
+    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+    page, member = vc_grants(optic_1_on_member=True)
+    member_bay = ModuleBay.objects.get(device=member, name="Cage 1")
+    member_module = Module.objects.create(
+        device=member, module_bay=member_bay, module_type=ModuleType.objects.get(model="GR-OPTIC"), serial="OLD"
+    )
+    user = make_user_with_perms("module-grants-hidden-bays", [("view", Device)], constraints={"pk": page.pk})
+    for action, model in (("view", ModuleBay), ("view", ModuleType), ("view", Module), ("add", Module)):
+        user = grant(user, action, model)
+    user = grant(user, "change", Module)
+    client.force_login(user)
+
+    content = render(client, page)
+    parsed = module_tab_forms(content)
+
+    assert member_bay.get_absolute_url() not in content
+    assert member_module.get_absolute_url() not in content
+    assert not [form for form in parsed.forms if str(OPTIC_1) in form["fields"].values()]
+    assert not any(f"ent_index={OPTIC_1}" in link.get("hx-get", "") for link in parsed.links)
+    (checkbox,) = re.findall(rf'<input type="checkbox" name="select" value="{OPTIC_1}"[^>]*>', content)
+    assert " disabled" in checkbox
+    # The page member keeps its rows: Card Slot still offers its install.
+    assert rendered_module_form(content, "install-module", CARD)
+
+
 def test_a_grant_does_not_outlive_the_permission_it_was_rendered_for(client, c8300):
     """The grant authorizes the rendered row, never the writer: a revoked permission still refuses."""
     from dcim.models import Device, Interface, Module, ModuleBay, ModuleType

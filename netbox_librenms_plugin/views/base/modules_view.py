@@ -1267,9 +1267,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         """
         Mark the rows a selected or branch install may act on, and give each top-level row its branch list.
 
-        A row is selectable when it is main inventory with a positive index that one row alone shows, and it
-        is not Integrated. A branch list holds the top-level row and its sub-rows that are selectable, in
-        table order, each with its write target.
+        A row is selectable when it is main inventory with a positive index that one row alone shows, it is
+        not Integrated, and it is not on a member that the user may not view. A branch list holds the
+        top-level row and its sub-rows that are selectable, in table order, each with its write target.
         """
         emitted = Counter(coerce_positive_int(row.get("ent_physical_index")) for row in table_data)
         branch = None
@@ -1281,6 +1281,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 and emitted[index] == 1
                 and row.get("_source") != OOB_INVENTORY_SOURCE
                 and row.get("status") != "Integrated"
+                and not row.get("member_withheld")
             )
             if row.get("depth", 0) == 0:
                 branch = row["branch_rows"] = []
@@ -1629,7 +1630,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
     def _build_member_contexts(self, obj, vc_members, items):
         """Build per-member bay context data used for row resolution of the inventory *items*."""
-        from dcim.models import Interface
+        from dcim.models import Device, Interface
 
         server_key = getattr(self, "_active_server_key", None) or self.librenms_api.server_key
         # One lookup for every row: the writer binds a held port only to its one holder.
@@ -1649,11 +1650,19 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             .values_list("device_id", "pk")
         ):
             changeable_ids_by_member[member_id].add(interface_id)
+        viewable_member_ids = set(
+            self.restricted_queryset(Device).filter(pk__in=member_ids).values_list("pk", flat=True)
+        )
         for member in context_members:
-            device_bays, module_scoped_bays = self._get_module_bays(member)
-            interfaces_by_pk, interfaces_by_name, interfaces_by_module = self._build_interface_indexes(member)
+            # A member the user may not view contributes no bay, module or interface to its rows.
+            withheld = member.pk not in viewable_member_ids
+            device_bays, module_scoped_bays = ({}, {}) if withheld else self._get_module_bays(member)
+            interfaces_by_pk, interfaces_by_name, interfaces_by_module = (
+                ({}, {}, {}) if withheld else self._build_interface_indexes(member)
+            )
             member_contexts[member.id] = {
                 "device": member,
+                "withheld": withheld,
                 "device_bays": device_bays,
                 "module_scoped_bays": module_scoped_bays,
                 "all_bays": self._compute_all_bays(device_bays, module_scoped_bays),
@@ -1833,6 +1842,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         row["selected_device_id"] = selected_device.id
         row["selected_device_name"] = selected_device.name
         row["member_resolution_source"] = resolution_source
+        row["member_withheld"] = target_context["withheld"]
         self._apply_carrier_install_rules(row, item, selected_device)
         self._attach_interface_match(row, item, target_context)
         parent_row_idx = len(table_data)
@@ -1844,7 +1854,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # _build_row already ran the same pure _suggest_bay_mapping(item, all_bays,
         # scope_preserved=False) and only omits model_suggestion when it returned nothing, so
         # there is no second suggestion to recover here.
-        if row.get("status") == "No Bay" and "model_suggestion" not in row:
+        if row.get("status") == "No Bay" and "model_suggestion" not in row and not row["member_withheld"]:
             device_type = getattr(selected_device, "device_type", None)
             if device_type:
                 row["device_type_incomplete"] = True
@@ -1950,6 +1960,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             sub_row["selected_device_id"] = sub_selected_device.id
             sub_row["selected_device_name"] = sub_selected_device.name
             sub_row["member_resolution_source"] = sub_resolution_source
+            sub_row["member_withheld"] = sub_target_context["withheld"]
             self._apply_carrier_install_rules(sub_row, sub_item, sub_selected_device)
             self._attach_interface_match(sub_row, sub_item, sub_target_context)
             table_data.append(sub_row)

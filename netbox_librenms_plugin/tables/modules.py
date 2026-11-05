@@ -700,6 +700,9 @@ class LibreNMSModuleTable(tables.Table):
         # nothing to install, so no actions.
         if record.get("status") == "Integrated":
             return ""
+        # A row on a member the user may not view names none of its objects, so it offers no action.
+        if record.get("member_withheld"):
+            return ""
 
         buttons = []
 
