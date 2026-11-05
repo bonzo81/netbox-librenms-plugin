@@ -3131,14 +3131,18 @@ function initializeVlanSyncGroupSelects() {
 function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
     const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]');
     if (!csrfToken) return;
+    // Only the latest group choice may repaint or roll back the row, as in handleVRFChange.
+    if (select._vlanGroupVerifyController) {
+        select._vlanGroupVerifyController.abort();
+    }
+    const controller = new AbortController();
+    select._vlanGroupVerifyController = controller;
     // The row's colours and status show the verdict of the last verified group; the rendered group comes first.
     if (typeof select._lastVerifiedGroup === 'undefined') {
         const rendered = Array.from(select.options).find((option) => option.defaultSelected);
         select._lastVerifiedGroup = rendered ? rendered.value : '';
     }
     const rollbackToLastVerified = () => {
-        // A later choice owns the select.
-        if (select.value !== groupId) return;
         if (select.tomselect && typeof select.tomselect.setValue === 'function') {
             select.tomselect.setValue(select._lastVerifiedGroup, true);
         } else {
@@ -3150,6 +3154,7 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
 
     fetch('/plugins/librenms_plugin/verify-vlan-sync-group/', {
         method: 'POST',
+        signal: controller.signal,
         headers: {
             'Content-Type': 'application/json',
             'X-CSRFToken': csrfToken.value
@@ -3168,11 +3173,11 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
             return response.json();
         })
         .then(data => {
+            if (controller.signal.aborted) return;
             if (data.status !== 'success') {
                 rollbackToLastVerified();
                 return;
             }
-            if (select.value !== groupId) return;
             select._lastVerifiedGroup = groupId;
 
             const row = select.closest('tr');
@@ -3205,6 +3210,7 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
             }
         })
         .catch(error => {
+            if (error.name === 'AbortError' || controller.signal.aborted) return;
             console.error('VLAN sync group verification error:', error);
             rollbackToLastVerified();
         });

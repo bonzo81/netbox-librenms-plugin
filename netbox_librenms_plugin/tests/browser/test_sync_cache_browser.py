@@ -3165,29 +3165,29 @@ def test_vlan_group_verification_ignores_a_late_response_for_an_old_selection(pa
     assert page.locator('td[data-col="vlan_id"] span').get_attribute("class") == "text-warning"
 
 
+VLAN_GROUP_ROW_PAGE = """
+<input name="csrfmiddlewaretoken" value="test-token">
+<form>
+  <table id="librenms-vlan-table"><tbody><tr>
+    <td data-col="vlan_id"><span class="text-danger">501</span></td>
+    <td data-col="name"><span class="text-danger">Users</span></td>
+    <td data-col="vlan_group_selection">
+      <select class="vlan-sync-group-select" name="vlan_group_501" data-vlan-id="501" data-vlan-name="Users">
+        <option value="" selected>Global</option>
+        <option value="1">Group A</option>
+        <option value="2">Group B</option>
+      </select>
+    </td>
+    <td data-col="status">Not in NetBox</td>
+  </tr></tbody></table>
+</form>
+"""
+
+
 @pytest.mark.parametrize("http_status", [500, 200], ids=["http-error", "rejected"])
 def test_a_failed_vlan_group_verification_restores_the_last_verified_group(page, http_status):
     """The row shows the verdict of the last verified group, so a failed verify selects that group again."""
-    page.set_content(
-        """
-        <input name="csrfmiddlewaretoken" value="test-token">
-        <form>
-          <table id="librenms-vlan-table"><tbody><tr>
-            <td data-col="vlan_id"><span class="text-danger">501</span></td>
-            <td data-col="name"><span class="text-danger">Users</span></td>
-            <td data-col="vlan_group_selection">
-              <select class="vlan-sync-group-select" name="vlan_group_501"
-                      data-vlan-id="501" data-vlan-name="Users">
-                <option value="" selected>Global</option>
-                <option value="1">Group A</option>
-                <option value="2">Group B</option>
-              </select>
-            </td>
-            <td data-col="status">Not in NetBox</td>
-          </tr></tbody></table>
-        </form>
-        """
-    )
+    page.set_content(VLAN_GROUP_ROW_PAGE)
     answers = [
         (200, {"status": "success", "css_class": "text-success", "status_html": '<span id="in-a">In A</span>'}),
         (http_status, {"status": "error", "message": "x"}),
@@ -3209,6 +3209,42 @@ def test_a_failed_vlan_group_verification_restores_the_last_verified_group(page,
 
     assert not answers
     assert page.locator("#in-a").count() == 1
+
+
+def test_a_failed_verification_of_a_superseded_group_neither_rolls_back_nor_hides_the_latest(page):
+    """A, then B, then A again: the first A request fails late, and the latest A request still decides the row."""
+    page.set_content(VLAN_GROUP_ROW_PAGE)
+    held = []
+    page.route("**/plugins/librenms_plugin/verify-vlan-sync-group/", lambda route: held.append(route))
+    _add_page_scripts(page)
+    page.evaluate("initializeVlanSyncGroupSelects()")
+    select = page.locator(".vlan-sync-group-select")
+
+    def answer(route, status, body):
+        route.fulfill(status=status, content_type="application/json", body=json.dumps(body))
+
+    def wait_for_requests(count):
+        for _attempt in range(200):
+            if len(held) == count:
+                return
+            page.wait_for_timeout(10)
+        raise AssertionError(f"expected {count} verify requests, got {len(held)}")
+
+    select.select_option("1")
+    wait_for_requests(1)
+    select.select_option("2")
+    wait_for_requests(2)
+    answer(held[1], 200, {"status": "success", "css_class": "text-success", "status_html": '<span id="in-b">B</span>'})
+    page.locator("#in-b").wait_for()
+    select.select_option("1")
+    wait_for_requests(3)
+    answer(held[0], 500, {"status": "error", "message": "x"})
+    # The first answer settles before the latest one, as a slow failure does.
+    page.wait_for_timeout(200)
+    answer(held[2], 200, {"status": "success", "css_class": "text-success", "status_html": '<span id="in-a">A</span>'})
+    page.locator("#in-a").wait_for(timeout=3000)
+
+    assert select.input_value() == "1"
 
 
 def test_vlan_modal_group_verification_ignores_a_late_response_for_an_old_selection(page):

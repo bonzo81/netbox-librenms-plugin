@@ -200,3 +200,30 @@ def test_a_failed_vrf_verify_restores_the_last_verified_vrf(page, status, body):
 
     assert not answers
     assert checkbox.is_disabled()
+
+
+def test_a_failed_verify_of_a_superseded_vrf_neither_rolls_back_nor_hides_the_latest(page):
+    """Ignored, then allowed, then ignored again: the first request fails late, and the latest one decides the row."""
+    held = []
+    page.route(VERIFY_ROUTE, lambda route: held.append(route))
+    _load(page, [_row("row-1")])
+    page.evaluate("initializeScripts()")
+    page.wait_for_selector("select[data-vrf-select-initialized]", state="attached")
+    select = page.locator("#vrf_select_row-1")
+
+    select.select_option(IGNORED)
+    _wait_for(page, lambda: len(held) == 1)
+    select.select_option(ALLOWED)
+    _wait_for(page, lambda: len(held) == 2)
+    held[1].fulfill(status=200, content_type="application/json", body=_verdict("Create", True))
+    page.wait_for_function("document.querySelector('td[data-col=status]').textContent === 'Create'")
+    select.select_option(IGNORED)
+    _wait_for(page, lambda: len(held) == 3)
+    held[0].fulfill(status=500, content_type="application/json", body=json.dumps({"status": "error"}))
+    # The first answer settles before the latest one, as a slow failure does.
+    page.wait_for_timeout(200)
+    held[2].fulfill(status=200, content_type="application/json", body=_verdict("Ignored", False))
+    page.wait_for_function("document.querySelector('td[data-col=status]').textContent === 'Ignored'", timeout=3000)
+
+    assert select.input_value() == IGNORED
+    assert page.locator('input[value="row-1"]').is_disabled()
