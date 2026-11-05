@@ -586,6 +586,7 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
     http_call = "import requests\nrequests.get(url)\n"
     mapping_write = 'device.custom_field_data["librenms_id"] = {"default": 5}\n'
     conflict_raise = 'raise MappingChanged("changed")\n'
+    ports_read = "api.get_ports(device_id)\n"
     sources = {
         # Flagged: a direct HTTP call outside the client.
         "netbox_librenms_plugin/worker.py": http_call,
@@ -609,6 +610,10 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
         # Flagged: a conflict raised without its record. Clean: the runner's own raise.
         "netbox_librenms_plugin/claims.py": conflict_raise,
         "netbox_librenms_plugin/transactions.py": conflict_raise,
+        # Flagged: the module and cable tabs read port metadata without VLANs. Clean: the interface tab needs them.
+        "netbox_librenms_plugin/views/base/modules_view.py": ports_read,
+        "netbox_librenms_plugin/views/base/cables_view.py": ports_read,
+        "netbox_librenms_plugin/views/base/interfaces_view.py": ports_read,
     }
     for name, source in sources.items():
         staged = tmp_path / name
@@ -626,4 +631,6 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
         ("netbox_librenms_plugin/tests/test_seed.py", "no-stored-mapping-access"),
         ("netbox_librenms_plugin/templates/netbox_librenms_plugin/seed.html", "no-stored-mapping-access-template"),
         ("netbox_librenms_plugin/claims.py", "conflict-raised-without-record"),
+        ("netbox_librenms_plugin/views/base/modules_view.py", "metadata-ports-skip-vlan-associations"),
+        ("netbox_librenms_plugin/views/base/cables_view.py", "metadata-ports-skip-vlan-associations"),
     }, found
