@@ -3668,6 +3668,51 @@ document.addEventListener('click', function (event) {
 });
 
 /**
+ * Send the hx-post forms of cells written with innerHTML through the module tab's [data-row-form-loader].
+ *
+ * htmx never binds an hx-post written with innerHTML, so the submit handler below posts the form's fields
+ * through the loader. The form keeps its method and action for a page without the loader.
+ *
+ * @param {Element} cell - The cell the verify wrote.
+ * @returns {void}
+ */
+function routeRowFormsToLoader(cell) {
+    cell.querySelectorAll('form[hx-post][hx-target="#module-sync-content"]').forEach((form) => {
+        form.dataset.rowFormUrl = form.getAttribute('hx-post');
+        form.removeAttribute('hx-post');
+    });
+}
+
+document.addEventListener('submit', function (event) {
+    const form = event.target;
+    const loader = document.querySelector('[data-row-form-loader]');
+    if (!(form instanceof HTMLFormElement) || !form.dataset.rowFormUrl || !loader) return;
+    event.preventDefault();
+    loader.dispatchEvent(new CustomEvent('librenms:submit-row-form', { detail: { url: form.dataset.rowFormUrl, form } }));
+});
+
+/**
+ * Show a routed row form's request on its row and lock its buttons, as hx-indicator and hx-disabled-elt do.
+ *
+ * @param {HTMLFormElement} form - The submitted row form.
+ * @param {boolean} sending - True while the loader's request is in flight.
+ * @returns {void}
+ */
+function _setRowFormSending(form, sending) {
+    form.closest('tr')?.classList.toggle('htmx-request', sending);
+    form.querySelectorAll('button').forEach((button) => {
+        button.disabled = sending;
+    });
+}
+
+['htmx:beforeRequest', 'htmx:afterRequest'].forEach((eventName) => {
+    document.addEventListener(eventName, function (event) {
+        const form = event.detail.elt?.matches?.('[data-row-form-loader]') && event.detail.requestConfig?.triggeringEvent?.detail?.form;
+        if (form) _setRowFormSending(form, eventName === 'htmx:beforeRequest');
+    });
+});
+
+/**
  * Lock or release a module row's writes while its member verify is in flight.
  *
  * The row's action forms and its install grant were signed for the previous member, so a click or
@@ -3844,6 +3889,7 @@ function handleModuleChange(select, value, options = {}) {
                 if (cell) {
                     cell.innerHTML = html;
                     routeModalControlsToLoader(cell);
+                    routeRowFormsToLoader(cell);
                 } else {
                     console.warn(`Module row missing data-col="${col}" cell — skipping update`);
                 }
@@ -4815,13 +4861,16 @@ document.addEventListener('DOMContentLoaded', function () {
     // Configure HTMX to include CSRF token in all requests
     document.body.addEventListener('htmx:configRequest', function (event) {
         const csrfToken = getCsrfToken();
-        if (event.detail.elt?.matches('[data-cable-picker-loader], [data-modal-loader]')) {
+        if (event.detail.elt?.matches('[data-cable-picker-loader], [data-modal-loader], [data-row-form-loader]')) {
             const loaderUrl = event.detail.triggeringEvent?.detail?.url;
             if (!loaderUrl || !csrfToken) {
                 event.preventDefault();
                 return;
             }
             event.detail.path = loaderUrl;
+            // A routed row form posts its own fields.
+            const rowForm = event.detail.triggeringEvent.detail.form;
+            if (rowForm) new FormData(rowForm).forEach((value, name) => event.detail.parameters.append(name, value));
         }
         if (csrfToken) {
             event.detail.headers['X-CSRFToken'] = csrfToken;

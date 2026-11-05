@@ -907,6 +907,9 @@ that may well be correct.
         {# A verified row is written with innerHTML, so its modal buttons send their hx-get through this loader. #}
         <span class="d-none" data-modal-loader hx-get="" hx-trigger="librenms:open-modal"
             hx-target="#htmx-modal-content" hx-sync="#htmx-modal-content:replace" hx-swap="innerHTML"></span>
+        {# Its hx-post forms post their fields through this loader, with the target, swap and sync of the row forms. #}
+        <span class="d-none" data-row-form-loader hx-post="" hx-trigger="librenms:submit-row-form"
+            hx-target="#module-sync-content" hx-sync="#module-sync-content:drop" hx-swap="innerHTML"></span>
         {% include 'netbox_librenms_plugin/_module_sync.html' %}
     </div>
     {% endif %}

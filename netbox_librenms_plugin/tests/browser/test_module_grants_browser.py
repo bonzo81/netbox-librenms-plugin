@@ -415,10 +415,10 @@ PREVIEW_PATH = "/plugins/librenms_plugin/devices/1/module-mismatch-preview/"
 PREVIEW_URL = f"{PREVIEW_PATH}?module_id=5&ent_index=30&inventory_binding=preview-30-2"
 
 
-def _modal_loader():
-    """Cut the module tab's modal loader out of librenms_sync_base.html, so the page carries its exact markup."""
+def _loader(marker="data-modal-loader"):
+    """Cut a module tab loader out of librenms_sync_base.html, so the page carries its exact markup."""
     source = (TEMPLATE_DIR / "librenms_sync_base.html").read_text(encoding="utf-8")
-    return re.search(r"<span[^>]*data-modal-loader.*?</span>", source, flags=re.S).group(0)
+    return re.search(rf"<span[^>]*{marker}.*?</span>", source, flags=re.S).group(0)
 
 
 def test_a_verified_row_opens_its_replace_preview_in_the_modal(page):
@@ -436,7 +436,7 @@ def test_a_verified_row_opens_its_replace_preview_in_the_modal(page):
         lambda route: route.fulfill(body='<p id="mismatch-preview">Preview</p>', content_type="text/html"),
     )
     shell = '<div id="htmx-modal"><div id="htmx-modal-content"></div></div>'
-    _load(page, [_row(30)], extra=_modal_loader() + shell)
+    _load(page, [_row(30)], extra=_loader() + shell)
     with page.expect_response(VERIFY_ROUTE):
         _change_member(page, 30, "2")
     expect(page.locator("#install-30")).to_be_enabled()
@@ -446,3 +446,44 @@ def test_a_verified_row_opens_its_replace_preview_in_the_modal(page):
 
     assert (preview.value.method, preview.value.url) == ("GET", f"https://plugin.example.com{PREVIEW_URL}")
     expect(page.locator("#htmx-modal-content #mismatch-preview")).to_have_text("Preview")
+
+
+INSTALL_PATH = "/plugins/librenms_plugin/devices/1/install-module/"
+
+
+def test_a_verified_row_form_posts_through_htmx_and_swaps_the_tab(page):
+    """The verify writes the actions cell with innerHTML, so the row form posts through the loader, not natively."""
+    answer = _success(30, "2", "override-30")
+    # The attributes render_actions puts on the Install form (tables/modules.py).
+    answer["json"]["formatted_row"]["actions"] = (
+        f'<form method="post" action="{INSTALL_PATH}" hx-post="{INSTALL_PATH}" hx-target="#module-sync-content"'
+        ' hx-swap="innerHTML" hx-sync="#module-sync-content:drop" hx-indicator="closest tr"'
+        ' hx-disabled-elt="find button" style="display:inline">'
+        '<input type="hidden" name="csrfmiddlewaretoken" value="test-csrf-token">'
+        '<input type="hidden" name="selected_device_id" value="2">'
+        '<input type="hidden" name="inventory_binding" value="install-30-2">'
+        '<button type="submit" data-action="install" id="install-30">Install</button></form>'
+    )
+    _answers(page, answer)
+    held = []
+    page.route(f"**{INSTALL_PATH}", lambda route: held.append(route))
+    _load(page, [_row(30)], extra=_loader("data-row-form-loader"))
+    with page.expect_response(VERIFY_ROUTE):
+        _change_member(page, 30, "2")
+    expect(page.locator("#install-30")).to_be_enabled()
+
+    with page.expect_request(f"**{INSTALL_PATH}", timeout=3000) as install:
+        page.click("#install-30")
+
+    request = install.value
+    assert (request.method, request.headers.get("hx-request")) == ("POST", "true")
+    pairs = parse_qsl(request.post_data)
+    assert ("selected_device_id", "2") in pairs
+    assert ("inventory_binding", "install-30-2") in pairs
+    # The row shows its progress and locks its button, as hx-indicator and hx-disabled-elt do on a bound form.
+    expect(page.locator('tr[data-ent-index="30"]')).to_have_class(re.compile(r"\bhtmx-request\b"))
+    expect(page.locator("#install-30")).to_be_disabled()
+    held[0].fulfill(body='<p id="installed">Installed</p>', content_type="text/html")
+
+    expect(page.locator("#module-sync-content #installed")).to_have_text("Installed")
+    assert page.url == PAGE_URL
