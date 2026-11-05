@@ -3173,7 +3173,8 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
             return response.json();
         })
         .then(data => {
-            if (controller.signal.aborted) return;
+            // A tab swap replaced this row, and its table no longer owns the stored selection.
+            if (controller.signal.aborted || !_isLiveRow(select.closest('tr'))) return;
             if (data.status !== 'success') {
                 rollbackToLastVerified();
                 return;
@@ -3210,7 +3211,7 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
             }
         })
         .catch(error => {
-            if (error.name === 'AbortError' || controller.signal.aborted) return;
+            if (error.name === 'AbortError' || controller.signal.aborted || !_isLiveRow(select.closest('tr'))) return;
             console.error('VLAN sync group verification error:', error);
             rollbackToLastVerified();
         });
@@ -3286,7 +3287,8 @@ function handleVRFChange(select, value) {
         })
         .then(data => {
             const row = select.closest('tr');
-            if (controller.signal.aborted) return;
+            // A tab swap replaced this row, and its table no longer owns the stored selection.
+            if (controller.signal.aborted || !_isLiveRow(row)) return;
 
             if (data.status === 'success' && row && data.formatted_row) {
                 const statusCell = row.querySelector('td[data-col="status"]');
@@ -3307,7 +3309,7 @@ function handleVRFChange(select, value) {
             }
         })
         .catch(error => {
-            if (error.name === 'AbortError') return;
+            if (error.name === 'AbortError' || !_isLiveRow(select.closest('tr'))) return;
             console.error('VRF verification failed:', error.message);
             rollbackToLastVerified();
         });

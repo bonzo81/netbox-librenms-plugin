@@ -5268,3 +5268,75 @@ def test_netbox_only_select_all_uses_only_the_current_rows_after_reinitializatio
 
     assert page.locator(".netbox-interface-checkbox").is_checked()
     assert page.evaluate("oldNetboxCheckbox.checked") is False
+
+
+DEVICE_SYNC_PAGE_URL = "https://plugin.example.com/dcim/devices/1/librenms-sync/"
+
+
+def _vrf_table(row_id):
+    return f"""<table id="librenms-ipaddress-table"><tbody><tr data-interface="{row_id}" data-name="fe80::1/64">
+      <td data-col="selection"><input type="checkbox" name="select" value="{row_id}"></td>
+      <td data-col="vrf"><select class="form-select vrf-select" data-ip="fe80::1" data-prefix="64"
+          data-row-id="{row_id}" name="vrf_{row_id}"><option value="" selected>Global</option>
+          <option value="2">blue</option></select></td>
+      <td data-col="status">rendered</td></tr></tbody></table>"""
+
+
+def _vlan_table(row_id):
+    return f"""<table id="librenms-vlan-table"><tbody><tr>
+      <td data-col="selection"><input type="checkbox" name="select" value="{row_id}"></td>
+      <td data-col="vlan_id"><span>501</span></td><td data-col="name"><span>Users</span></td>
+      <td data-col="vlan_group_selection"><select class="vlan-sync-group-select" name="vlan_group_{row_id}"
+          data-vlan-id="501" data-vlan-name="Users"><option value="" selected>Global</option>
+          <option value="2">Group B</option></select></td>
+      <td data-col="status">Not in NetBox</td></tr></tbody></table>"""
+
+
+@pytest.mark.parametrize(
+    ("table_of", "table_id", "select_name", "verify_route"),
+    [
+        (_vrf_table, "librenms-ipaddress-table", "vrf_row-1", "**/plugins/librenms_plugin/verify-ipaddress/"),
+        (_vlan_table, "librenms-vlan-table", "vlan_group_row-1", "**/plugins/librenms_plugin/verify-vlan-sync-group/"),
+    ],
+    ids=["vrf", "vlan-group"],
+)
+@pytest.mark.parametrize(
+    "answer",
+    [
+        (500, {"status": "error"}),
+        (200, {"status": "success", "formatted_row": {"status": "Create", "selectable": True}, "status_html": "x"}),
+    ],
+    ids=["failure", "success"],
+)
+def test_a_late_verify_answer_for_a_swapped_out_row_leaves_the_cleared_selection_alone(
+    page, table_of, table_id, select_name, verify_route, answer
+):
+    """The user pages away and clears the selection; the answer for the old page must not store its row again."""
+    held = []
+    page.route(verify_route, lambda route: held.append(route))
+    page.route("**/page-2", lambda route: route.fulfill(status=200, content_type="text/html", body=table_of("row-2")))
+    _serve_sync_page(
+        page,
+        '<input type="hidden" name="csrfmiddlewaretoken" value="test-csrf-token">'
+        f'<form><input type="hidden" name="server_key" value="default">{table_of("row-1")}</form>',
+        url=DEVICE_SYNC_PAGE_URL,
+    )
+    page.evaluate("initializeScripts()")
+    stored = f"() => Object.keys(readStoredSelection(document.getElementById('{table_id}')))"
+    page.check('input[value="row-1"]')
+    assert page.evaluate(stored) == ["row-1"]
+
+    page.wait_for_timeout(200)
+    page.select_option(f'select[name="{select_name}"]', "2")
+    for _attempt in range(200):
+        if held:
+            break
+        page.wait_for_timeout(10)
+    assert len(held) == 1
+    page.evaluate(f"() => htmxTest.ajax('GET', '/page-2', {{target: '#{table_id}', swap: 'outerHTML'}})")
+    page.wait_for_selector('input[value="row-2"]')
+    page.evaluate(f"() => writeStoredSelection(document.getElementById('{table_id}'), {{}})")
+    held[0].fulfill(status=answer[0], content_type="application/json", body=json.dumps(answer[1]))
+    page.wait_for_timeout(200)
+
+    assert page.evaluate(stored) == []
