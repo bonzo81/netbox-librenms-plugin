@@ -654,11 +654,11 @@ class TestVirtualChassisHelpers:
 
         assert result == members[1]
 
-    def test_get_module_template_interface_names_rewrites_for_vc_member(self):
+    def test_get_module_adoptable_interface_names_rewrites_for_vc_member(self):
         from dcim.models import InterfaceTemplate, Module
 
         from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type
-        from netbox_librenms_plugin.utils import get_module_template_interface_names
+        from netbox_librenms_plugin.utils import get_module_adoptable_interface_names
 
         _first, _second, device = self._three_member_vc("utils-template-rewrite")
         module_device = make_device_with_module_bays("utils-template-module", ["Bay 1"])
@@ -674,9 +674,9 @@ class TestVirtualChassisHelpers:
             module_type=module_type,
         )
 
-        result = get_module_template_interface_names(device, module)
+        result = get_module_adoptable_interface_names(device, module)
 
-        assert result == ["TenGigabitEthernet3/1/1"]
+        assert result == (["TenGigabitEthernet3/1/1"], False)
 
     def test_zero_id_is_not_a_valid_librenms_id(self):
         """
@@ -832,7 +832,10 @@ class TestPaginationHelpers:
 
         from netbox_librenms_plugin.utils import get_table_paginate_count
 
+        from django.contrib.auth.models import AnonymousUser
+
         request = RequestFactory().get("/", {"table1_per_page": "50"})
+        request.user = AnonymousUser()
 
         result = get_table_paginate_count(request, "table1_")
 
@@ -845,8 +848,11 @@ class TestPaginationHelpers:
 
         from netbox_librenms_plugin.utils import get_table_paginate_count
 
+        from django.contrib.auth.models import AnonymousUser
+
         settings.MAX_PAGE_SIZE = disabled_max
         request = RequestFactory().get("/", {"table1_per_page": "500"})
+        request.user = AnonymousUser()
 
         assert get_table_paginate_count(request, "table1_") == 500
 

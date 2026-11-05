@@ -17,6 +17,7 @@ feature in the NetBox UI.
 | File | Description |
 |------|-------------|
 | `interface_type_mappings.yaml` | Maps LibreNMS interface types + speeds to NetBox interface types |
+| `ip_address_mappings.yaml` | Keeps LibreNMS addresses in a prefix (e.g. IPv6 link-local `fe80::/10`) out of IP sync |
 | `device_type_mappings.yaml` | Maps LibreNMS hardware strings to NetBox device types |
 | `module_type_mappings.yaml` | Maps LibreNMS inventory model names to NetBox module types (incl. transceivers) |
 | `module_bay_mappings.yaml` | Maps LibreNMS inventory container names to NetBox module bay names |

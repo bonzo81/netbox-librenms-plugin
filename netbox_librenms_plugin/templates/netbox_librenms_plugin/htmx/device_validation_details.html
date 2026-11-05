@@ -475,12 +475,11 @@
               <tr>
                 <td style="padding-left: 0.75rem;">Primary IP</td>
                 <td>
+                  {# An import sets no primary IP, so only a matched device's own value is shown. #}
                   {% if validation.existing_device and validation.existing_device.primary_ip %}
                     {{ validation.existing_device.primary_ip }}
-                  {% elif libre_device.ip %}
-                    {{ libre_device.ip }}
                   {% else %}
-                    <span class="text-muted">No primary IP</span>
+                    <span class="text-muted">-</span>
                   {% endif %}
                 </td>
                 <td>{{ libre_device.ip|default:"—" }}</td>

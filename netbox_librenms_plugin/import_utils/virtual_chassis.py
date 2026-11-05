@@ -220,7 +220,7 @@ def _junos_fpc_rows(root: dict, children: list, serial_keys) -> list:
     return []
 
 
-def vc_serial_key(manufacturer=None):
+def vc_serial_key(manufacturer=None, *, preloaded_rules=None):
     """
     Return the function that turns a serial into the form that stack member matching compares.
 
@@ -231,9 +231,12 @@ def vc_serial_key(manufacturer=None):
 
     Args:
         manufacturer: The Manufacturer whose serial rules apply, or None for global rules only.
+        preloaded_rules (dict | None): Serial rules already loaded, as ``preload_normalization_rules`` returns them.
 
     """
-    rules = preload_normalization_rules("serial", manufacturer=manufacturer)
+    if preloaded_rules is None:
+        preloaded_rules = preload_normalization_rules("serial", manufacturer=manufacturer)
+    rules = preloaded_rules
 
     def key(value) -> str:
         return normalize_stack_serial(

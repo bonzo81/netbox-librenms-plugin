@@ -395,13 +395,15 @@ class TestInvalidStoredFilter:
         assert state["state"] == SyncTabState.REFRESH_FAILED.value
 
     def test_the_rule_loader_raises_a_typed_error_naming_rule_and_field(self):
+        from netbox_librenms_plugin.inventory_policy import load_inventory_policy
         from netbox_librenms_plugin.models import InventoryRuleFilterError
-        from netbox_librenms_plugin.utils import get_enabled_ignore_rules
+        from netbox_librenms_plugin.tests.conftest import make_device
 
+        device = make_device("broken-filter-loader")
         rule = _break_the_scb_filter()
 
         with pytest.raises(InventoryRuleFilterError) as excinfo:
-            get_enabled_ignore_rules(None)
+            load_inventory_policy(device.pk)
 
         assert (excinfo.value.rule_pk, excinfo.value.field) == (rule.pk, "name_pattern")
         assert f"pk={rule.pk}" in str(excinfo.value)
@@ -412,25 +414,29 @@ class TestInvalidStoredFilter:
 
         from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
         from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type_with_bays
+        from netbox_librenms_plugin.module_grants import GrantRefusal
         from netbox_librenms_plugin.tests.view_test_helpers import (
             make_request,
             make_user_with_perms,
             make_view,
             message_texts,
             post,
+            render_module_tab,
+            rendered_module_form,
         )
-        from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_snapshot_digest
-        from netbox_librenms_plugin.views.sync.modules import (
-            INVALID_INVENTORY_RULE_MESSAGE,
-            InstallBranchView,
-            InstallSelectedView,
-        )
+        from netbox_librenms_plugin.views.sync.modules import InstallBranchView, InstallSelectedView
         from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
         device = make_device_with_module_bays(f"broken-filter-{action}", ["Slot 1"])
         seed_mapping(device, "default", own=7)
         make_module_type_with_bays("CARD-1")
-        inventory = [_chassis(), _entity(2, "module", "Slot 1", "Line card", model="CARD-1")]
+        make_module_type_with_bays("CARD-1-OPTIC")
+        # The optic below the card is what makes the table render the card's branch button.
+        inventory = [
+            _chassis(),
+            _entity(2, "module", "Slot 1", "Line card", model="CARD-1"),
+            _entity(3, "module", "Optic", "SFP", model="CARD-1-OPTIC", contained_in=2),
+        ]
         user = make_user_with_perms(
             f"broken-filter-{action}",
             [
@@ -443,21 +449,19 @@ class TestInvalidStoredFilter:
                 ("delete", Interface),
             ],
         )
-        digest = module_inventory_snapshot_digest(inventory)
+        view_class = InstallSelectedView if action == "install_selected" else InstallBranchView
+        seed_inventory(view_class(), device, inventory, librenms_id=7)
+        content = render_module_tab(device, user=user)
         if action == "install_selected":
-            view_class = InstallSelectedView
-            binding = module_inventory_binding_token(device.pk, "default", action, {}, None, digest)
-            data = {"select": ["2"], "server_key": "default", "inventory_binding": binding}
+            _action, data = rendered_module_form(content, "install-selected")
+            data["select"] = ["2"]
         else:
-            view_class = InstallBranchView
-            binding = module_inventory_binding_token(device.pk, "default", action, {"parent_index": 2}, 2, digest)
-            data = {"parent_index": "2", "server_key": "default", "inventory_binding": binding}
+            _action, data = rendered_module_form(content, "install-branch", 2)
         request = make_request("post", data, user=user)
         view = make_view(view_class, request, librenms_api=SimpleNamespace(server_key="default"))
-        seed_inventory(view, device, inventory, librenms_id=7)
         _break_the_scb_filter()
 
         post(view, request, pk=device.pk)
 
-        assert INVALID_INVENTORY_RULE_MESSAGE in message_texts(request)
+        assert GrantRefusal.RULE_ERROR.message in message_texts(request)
         assert not Module.objects.filter(device=device).exists()
