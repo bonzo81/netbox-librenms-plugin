@@ -5,7 +5,10 @@ SyncInterfacesView + DeleteNetBoxInterfacesView
 Target: 95%+ coverage
 """
 
+from urllib.parse import urlencode
+
 import pytest
+from django.http import QueryDict
 
 from netbox_librenms_plugin.interface_relationships import (
     build_interface_index,
@@ -48,7 +51,9 @@ def _make_request(post_data=None, get_data=None, user=None):
     if post_data is None and get_data:
         return make_request("get", get_data, user=user)
     request = make_request("post", post_data or {}, user=user)
-    request.GET = get_data or request.GET
+    if get_data:
+        # The action URL carries this query, so it is a QueryDict as on a real request.
+        request.GET = QueryDict(urlencode(get_data, doseq=True))
     return request
 
 
@@ -430,11 +435,14 @@ def test_interface_bulk_selection_ignores_disabled_rows():
     """Client bulk actions must match the browser form contract for disabled controls."""
     source = _js_source()
     table_handler = _js_block(source, "function initializeTableCheckboxes(tableId)", "function initializeCheckboxes()")
-    bulk_handler = _js_block(source, "function initializeBulkEditApply()", "// TABLE FILTERING")
+    bulk_handler = _js_block(source, "function initializeBulkEditApply()", "function initializeCheckboxListeners()")
+    listeners = _js_block(source, "function initializeCheckboxListeners()", "function updateBulkActionButton()")
+    button_state = _js_block(source, "function updateBulkActionButton()", "// FILTER STALE MARKS")
 
     assert 'td input[name="select"]:not(:disabled)' in table_handler
     assert 'input[name="select"]:checked:not(:disabled)' in bulk_handler
-    assert 'input[name="select"]:not(:disabled)' in bulk_handler
+    assert 'input[name="select"]:not(:disabled)' in listeners
+    assert 'input[name="select"]:checked:not(:disabled)' in button_state
 
 
 # ===========================================================================
@@ -4947,14 +4955,28 @@ class TestSyncLagAndParentRelationships:
         assert m1.lag_id == agg.pk
         assert m2.lag_id is None
 
-    def test_large_bulk_relationship_set_avoids_unbounded_candidate_predicates(self, client, settings, monkeypatch):
+    @pytest.mark.parametrize("collide_owner_id", [False, True])
+    def test_large_bulk_relationship_set_avoids_unbounded_candidate_predicates(
+        self, client, settings, monkeypatch, collide_owner_id
+    ):
         """A large selection must bound SQL without locking unrelated interfaces."""
         from django.db import connection
 
         from netbox_librenms_plugin.views.sync.interfaces import SyncInterfacesView
 
+        if collide_owner_id:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT GREATEST(nextval(pg_get_serial_sequence('dcim_device', 'id')), "
+                    "nextval(pg_get_serial_sequence('dcim_interface', 'id')))"
+                )
+                next_id = cursor.fetchone()[0]
+                for table in ("dcim_device", "dcim_interface"):
+                    cursor.execute("SELECT setval(pg_get_serial_sequence(%s, 'id'), %s, false)", [table, next_id])
         device = self._make_device()
         unrelated = make_interface(device, "unrelated")
+        if collide_owner_id:
+            assert unrelated.pk == device.pk
         source_ids = range(1, 301)
         ports_data = [
             {**_PORT_KEYS_UNSET, "ifName": f"Ethernet{port_id}", "port_id": port_id} for port_id in source_ids
@@ -4964,14 +4986,20 @@ class TestSyncLagAndParentRelationships:
         ]
         relationships = {"lag_members": {port_id: 10_000 + port_id for port_id in source_ids}}
         parameter_counts = []
-        locked_interface_parameters = []
+        locked_interface_ids = set()
         real_pass = SyncInterfacesView._sync_interface_relationships
 
         def capture_parameters(execute, sql, params, many, context):
             parameter_counts.append(len(params or ()))
-            if "FOR UPDATE" in sql.upper() and '"dcim_interface"' in sql:
-                locked_interface_parameters.extend(params or ())
-            return execute(sql, params, many, context)
+            result = execute(sql, params, many, context)
+            table = ' FROM "dcim_interface"'
+            if "FOR UPDATE" in sql.upper() and table in sql:
+                _, predicate = sql.split(table, 1)
+                # Read the locked IDs without consuming the ORM cursor or calling this wrapper again.
+                with connection.connection.cursor() as cursor:
+                    cursor.execute('SELECT "dcim_interface"."id"' + table + predicate, params)
+                    locked_interface_ids.update(row[0] for row in cursor.fetchall())
+            return result
 
         def observed_pass(self, *args, **kwargs):
             # The real attempt calls the pass with its own selection; this only records the SQL of the pass.
@@ -4983,7 +5011,8 @@ class TestSyncLagAndParentRelationships:
 
         assert parameter_counts, "the attempt did not run the relationship pass"
         assert max(parameter_counts) < 2_000
-        assert unrelated.pk not in locked_interface_parameters
+        assert locked_interface_ids
+        assert unrelated.pk not in locked_interface_ids
 
     def test_member_selected_only_by_stable_id_is_linked(self, client, settings):
         """A selected stable port ID is processed by the relationship sync."""

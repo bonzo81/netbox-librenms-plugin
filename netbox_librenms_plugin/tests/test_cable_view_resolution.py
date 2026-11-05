@@ -35,11 +35,13 @@ SERVER_KEY = "default"
 
 @pytest.mark.django_db
 def test_htmx_cable_page_size_uses_the_new_post_value_over_a_stale_query_value():
+    from django.contrib.auth.models import AnonymousUser
     from django.test import RequestFactory
 
     from netbox_librenms_plugin.utils import get_table_paginate_count
 
     request = RequestFactory().post("/cables/?cables_per_page=25", {"cables_per_page": "50"})
+    request.user = AnonymousUser()
 
     assert get_table_paginate_count(request, "cables_") == 50
 
@@ -143,6 +145,7 @@ class TestNormalLinkContextResolution:
             "visible_interface_ids",
             "visible_owner_ids",
             "visible_cable_ids",
+            "visible_termination_ids",
             "trace_paths",
             "trace_visibility",
         }

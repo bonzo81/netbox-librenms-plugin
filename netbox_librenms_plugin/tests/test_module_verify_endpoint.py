@@ -13,6 +13,7 @@ import json
 import pytest
 
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.view_test_helpers import module_tab_forms
 
 
 SERVER_KEY = "default"
@@ -80,15 +81,29 @@ def _refresh_modules(client, device):
     )
 
 
-def _verify_module(client, body):
-    """POST a JSON body to the single-module verify endpoint."""
+def _verify_module(client, refreshed, page, body):
+    """POST the verify request that the member select of the asked row on the refreshed tab sends."""
     from django.urls import reverse
 
+    (select,) = [
+        attrs
+        for attrs in module_tab_forms(refreshed.content.decode()).selects
+        if attrs.get("data-module") == str(body["ent_physical_index"])
+    ]
     return client.post(
         reverse("plugins:netbox_librenms_plugin:verify_module"),
-        data=json.dumps(body),
+        data=json.dumps({"page_device_id": page.pk, "verify_binding": select["data-verify-binding"], **body}),
         content_type="application/json",
     )
+
+
+def _in_a_chassis(device):
+    """Enroll *device* in a two-member Virtual Chassis, so its Modules table renders a member select per row."""
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_virtual_chassis
+
+    make_virtual_chassis(f"{device.name}-vc", device, make_device_with_module_bays(f"{device.name}-member", []))
+    device.refresh_from_db()
+    return device
 
 
 @pytest.mark.django_db
@@ -106,10 +121,13 @@ class TestSingleModuleVerifyRow:
         _register_inventory(librenms_server, INVENTORY)
         client.force_login(make_superuser("module-verify-row-user"))
 
-        assert _refresh_modules(client, device).status_code == 200
+        refreshed = _refresh_modules(client, _in_a_chassis(device))
+        assert refreshed.status_code == 200
 
         response = _verify_module(
             client,
+            refreshed,
+            device,
             {"device_id": device.pk, "ent_physical_index": 1, "server_key": SERVER_KEY},
         )
 
@@ -141,10 +159,13 @@ class TestSingleModuleVerifyRow:
         _register_inventory(librenms_server, INVENTORY)
         client.force_login(make_superuser("module-verify-depth-user"))
 
-        assert _refresh_modules(client, device).status_code == 200
+        refreshed = _refresh_modules(client, _in_a_chassis(device))
+        assert refreshed.status_code == 200
 
         response = _verify_module(
             client,
+            refreshed,
+            device,
             {"device_id": device.pk, "ent_physical_index": 1, "depth": 5, "server_key": SERVER_KEY},
         )
 
@@ -153,6 +174,38 @@ class TestSingleModuleVerifyRow:
         assert body["status"] == "success"
         assert body["formatted_row"]["name"] == "Bay 1"
         assert "MOD-SERIAL-1" in body["formatted_row"]["serial"]
+
+    def test_a_rule_broken_after_the_render_is_named_in_the_verify_answer(self, client, librenms_server):
+        """A refresh may never evaluate the broken rule, so the verify answer itself must identify it."""
+        from netbox_librenms_plugin.models import ModuleBayMapping
+        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type, make_superuser
+
+        device = make_device_with_module_bays("module-verify-broken-rule", ["Bay 1"], serial="CHASSIS-6")
+        seed_mapping(device, SERVER_KEY, own=LIBRENMS_ID, save=False)
+        device.save()
+        make_module_type("LC-24")
+        _register_inventory(librenms_server, INVENTORY)
+        client.force_login(make_superuser("module-verify-broken-rule-user"))
+        refreshed = _refresh_modules(client, _in_a_chassis(device))
+        assert refreshed.status_code == 200
+        # bulk_create skips clean(), the way an import or old data stores a broken pattern.
+        (mapping,) = ModuleBayMapping.objects.bulk_create(
+            [ModuleBayMapping(librenms_name="(", librenms_class="", netbox_bay_name="Bay 1", is_regex=True)]
+        )
+
+        response = _verify_module(
+            client,
+            refreshed,
+            device,
+            {"device_id": device.pk, "ent_physical_index": 1, "server_key": SERVER_KEY},
+        )
+
+        assert response.status_code == 409
+        from netbox_librenms_plugin.models import RuleConfigurationError
+
+        assert response.json() == {"status": "error", "message": str(RuleConfigurationError(mapping, "librenms_name"))}
+        assert "Traceback" not in response.json()["message"]
+        assert "unterminated subpattern" not in response.json()["message"]
 
     def test_a_verified_row_uses_the_same_carrier_rules_as_the_modules_table(self, client, librenms_server):
         """The verify adapter must preserve the production table builder's carrier-rule state."""
@@ -189,10 +242,13 @@ class TestSingleModuleVerifyRow:
         _register_inventory(librenms_server, inventory)
         client.force_login(make_superuser("module-verify-carrier-user"))
 
-        assert _refresh_modules(client, device).status_code == 200
+        refreshed = _refresh_modules(client, _in_a_chassis(device))
+        assert refreshed.status_code == 200
 
         response = _verify_module(
             client,
+            refreshed,
+            device,
             {"device_id": device.pk, "ent_physical_index": 3, "server_key": SERVER_KEY},
         )
 
@@ -221,10 +277,13 @@ class TestSingleModuleVerifyRow:
         _register_inventory(librenms_server, inventory)
         client.force_login(make_superuser("module-verify-vc-user"))
 
-        assert _refresh_modules(client, first).status_code == 200
+        refreshed = _refresh_modules(client, first)
+        assert refreshed.status_code == 200
 
         response = _verify_module(
             client,
+            refreshed,
+            first,
             {"device_id": selected.pk, "ent_physical_index": 1, "server_key": SERVER_KEY},
         )
 
@@ -257,3 +316,93 @@ class TestSingleInterfaceVerifyChassisGuard:
 
         assert response.status_code == 404
         assert response.json() == {"status": "error", "message": "No sync device found for virtual chassis"}
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("endpoint", ["cached-page", "refresh", "verify"])
+def test_a_module_render_refuses_a_page_that_leaves_its_chassis_during_the_policy_read(
+    client, librenms_server, endpoint
+):
+    from dcim.models import Device, VirtualChassis
+    from django.db import close_old_connections, connection, transaction
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import (
+        bounded_executor,
+        make_device_with_module_bays,
+        make_module_type,
+        make_superuser,
+    )
+
+    device = _in_a_chassis(make_device_with_module_bays("module-policy-race", ["Bay 1"], serial="CHASSIS-6"))
+    seed_mapping(device, SERVER_KEY, own=LIBRENMS_ID, save=False)
+    device.save()
+    make_module_type("LC-24")
+    _register_inventory(librenms_server, INVENTORY)
+    client.force_login(make_superuser("module-policy-race-user"))
+    refreshed = _refresh_modules(client, device)
+    assert refreshed.status_code == 200
+    page_query, page_params = (
+        Device.objects.select_related("virtual_chassis").filter(pk=device.pk).order_by().query.sql_with_params()
+    )
+    page_read = False
+    changed = False
+
+    def leave_chassis():
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                VirtualChassis.objects.filter(pk=device.virtual_chassis_id).update(master=None)
+                Device.objects.filter(pk=device.pk).update(virtual_chassis=None, vc_position=None)
+        finally:
+            connection.close()
+
+    with bounded_executor(max_workers=1) as executor:
+
+        def change_between_policy_reads(execute, sql, params, many, context):
+            nonlocal page_read, changed
+            if sql.startswith(page_query) and tuple(params) == tuple(page_params):
+                page_read = True
+            elif (
+                page_read
+                and not changed
+                and '"dcim_manufacturer"' in sql
+                and '"dcim_device"."virtual_chassis_id" = %s' in sql
+            ):
+                # Commit on another connection after the page read and before its member read.
+                executor.submit(leave_chassis).result(timeout=10)
+                changed = True
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(change_between_policy_reads):
+            if endpoint == "cached-page":
+                response = client.get(
+                    reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
+                    {"tab": "modules", "server_key": SERVER_KEY},
+                )
+            elif endpoint == "refresh":
+                response = _refresh_modules(client, device)
+            else:
+                response = _verify_module(
+                    client,
+                    refreshed,
+                    device,
+                    {"device_id": device.pk, "ent_physical_index": 1, "server_key": SERVER_KEY},
+                )
+
+    assert changed, "the competing transaction did not reach the policy read"
+    if endpoint == "verify":
+        assert response.status_code == 404
+        assert response.json() == {"status": "error", "message": "No cached inventory data"}
+    else:
+        assert response.status_code == 200
+        assert response.context["module_sync"]["table"] is None
+        assert "inventory_binding" not in response.content.decode()
+        if endpoint == "refresh":
+            from django.core.cache import cache
+
+            from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
+
+            assert "Inventory data refreshed successfully." not in response.content.decode()
+            state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.MODULES, SERVER_KEY))
+            assert state["state"] == SyncTabState.REFRESH_FAILED.value

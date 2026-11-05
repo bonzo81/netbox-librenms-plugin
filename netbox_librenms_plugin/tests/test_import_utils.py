@@ -546,7 +546,7 @@ class TestDeviceValidation:
             include_vc_detection=False,
         )
 
-        assert result[result_key]["found"] is False
+        assert result[result_key][result_key] is None
 
     def test_unknown_prerequisites_report_real_validation_results(self):
         from netbox_librenms_plugin.import_utils import validate_device_for_import
@@ -563,7 +563,7 @@ class TestDeviceValidation:
         )
 
         assert result["site"]["found"] is False
-        assert result["platform"]["found"] is False
+        assert result["platform"]["platform"] is None
         assert result["device_type"]["found"] is False
         assert any("site" in issue.lower() for issue in result["issues"])
         assert any("device type" in issue.lower() for issue in result["issues"])
@@ -1170,6 +1170,7 @@ class TestBuildSyncInfo:
         result = DeviceValidationDetailsView._build_sync_info(
             {"serial": existing.serial, "os": platform.name, "hardware": existing.device_type.model},
             existing,
+            None,
         )
 
         assert result["all_synced"] is True
@@ -1185,6 +1186,7 @@ class TestBuildSyncInfo:
         result = DeviceValidationDetailsView._build_sync_info(
             {"serial": "NEW456", "os": "-", "hardware": "-"},
             existing,
+            None,
         )
 
         assert result["serial_synced"] is False
@@ -1202,6 +1204,7 @@ class TestBuildSyncInfo:
         result = DeviceValidationDetailsView._build_sync_info(
             {"serial": existing.serial, "os": new_platform.name, "hardware": "-"},
             existing,
+            None,
         )
 
         assert result["platform_synced"] is False
@@ -1219,6 +1222,7 @@ class TestBuildSyncInfo:
         result = DeviceValidationDetailsView._build_sync_info(
             {"serial": existing.serial, "os": os_name, "hardware": "-"},
             existing,
+            None,
         )
 
         assert result["platform_synced"] is False
@@ -1232,6 +1236,7 @@ class TestBuildSyncInfo:
         result = DeviceValidationDetailsView._build_sync_info(
             {"serial": existing.serial, "os": "-", "hardware": "Unknown Hardware"},
             existing,
+            None,
         )
 
         assert result["device_type_synced"] is False
@@ -2143,6 +2148,34 @@ class TestRefreshExistingDeviceCrossModelIdWins:
         assert validation["can_import"] is False
         assert validation["existing_match_type"] == "ambiguous_hostname_or_serial"
         assert any("Multiple NetBox devices match" in i for i in validation.get("issues", []))
+
+    def test_serial_fallback_ignores_a_serial_that_the_rules_make_a_placeholder(self):
+        """A stored serial that the serial rules turn into N/A binds no device on the refresh re-check."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        NormalizationRule.objects.create(scope="serial", match_pattern=r"^VENDOR-PLACEHOLDER$", replacement="N/A")
+        make_device("rule-placeholder-host", serial="VENDOR-PLACEHOLDER")
+        libre_device = {
+            "device_id": 556,
+            "hostname": "no-name-match",
+            "sysName": "no-name-match",
+            "serial": "VENDOR-PLACEHOLDER",
+        }
+        validation = {
+            "existing_device": None,
+            "existing_vm": None,
+            "import_as_vm": False,
+            "is_ready": True,
+            "can_import": True,
+            "issues": [],
+        }
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation["existing_device"] is None
+        assert validation.get("existing_match_type") != "serial"
 
     def test_stale_serial_ip_ambiguity_blocker_cleared_on_refresh(self):
         """A cached serial/IP ambiguity blocker must be cleared on refresh re-check once the duplicate is resolved (now a single match), so the row isn't stuck blocked on the stale issue until cache expiry."""

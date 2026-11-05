@@ -74,16 +74,16 @@ ALLOWED = [
     ("import_utils/device_operations.py", "import_single_device", "Exception", _OWN_TRANSACTION),
     ("import_utils/vm_operations.py", "bulk_import_vms", "Exception", _OWN_TRANSACTION),
     (
-        "views/sync/device_fields.py",
-        "CreateAndAssignPlatformView.post",
-        "ValidationError",
-        "The platform is a root insert, which takes no tree lock, and a Device is not an ltree model.",
+        "platform_versions.py",
+        "map_os_platform",
+        "DatabaseError, ValidationError",
+        "The platform work committed before it; a conflict on the optional mapping is reported as a "
+        "mapping not created, through exception_text_for, not as a try-again for committed work.",
     ),
     *(
         (path, function, caught, _NOT_LTREE)
         for path, function, caught in (
             ("views/imports/actions.py", "_save_device", "ValidationError"),
-            ("views/imports/actions.py", "CreatePlatformFromImportView._create_platform_attempt", "ValidationError"),
             ("views/imports/actions.py", "AddAsOOBView.post", "ValidationError"),
             ("views/imports/actions.py", "AddAsOOBView._resolve_oob_interface", "DataError, ValidationError"),
             ("views/settings_views.py", "LibreNMSSettingsView.post", "ValidationError"),

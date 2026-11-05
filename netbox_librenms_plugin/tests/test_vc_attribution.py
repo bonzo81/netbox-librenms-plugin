@@ -355,3 +355,30 @@ class TestRecognizedStack:
         assert owner[120] == first
         assert (owner[121], owner[1210]) == (second, second)
         assert owner[4] == second
+
+
+@pytest.mark.parametrize("stored", ["ABC-SMD", "S/N ABC-SMD"])
+def test_serial_matches_device_keys_the_serial_of_the_attributed_member(stored):
+    """A chassis-level "S/N ABC" row matches a member stored as "ABC" or as "S/N ABC" under the seeded rule."""
+    from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+    from netbox_librenms_plugin.models import InventoryIgnoreRule, NormalizationRule
+    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView, _check_ignore_rules
+
+    NormalizationRule.objects.get_or_create(
+        scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+    )
+    InventoryIgnoreRule.objects.all().delete()
+    InventoryIgnoreRule.objects.create(
+        name="Hide the member board", match_type="serial_matches_device", pattern="", action="skip"
+    )
+    page, member = _vc_members(["PAGE-SMD", stored])
+    row = _row(5, "module", 0, entPhysicalSerialNum="S/N ABC-SMD")
+    policy = load_inventory_policy(page.pk)
+
+    _default, contexts = BaseModuleTableView._build_inventory_ignore_contexts(
+        policy.page_device, [row], policy.vc_members, policy
+    )
+
+    context = contexts[("index", 5)]
+    assert context["selected_device"].pk == member.pk
+    assert _check_ignore_rules(row, None, context["ignore_rules"], {5: row}, context["device_identity"]) == "skip"

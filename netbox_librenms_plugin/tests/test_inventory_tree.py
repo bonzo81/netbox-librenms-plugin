@@ -183,8 +183,12 @@ class TestBranchInstall:
             make_module_type,
             make_superuser,
         )
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
-        from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_snapshot_digest
+        from netbox_librenms_plugin.tests.view_test_helpers import (
+            make_request,
+            message_texts,
+            post,
+            rendered_module_form,
+        )
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
         recording = _recording(RECORDING)
@@ -205,25 +209,10 @@ class TestBranchInstall:
         device = _mapped_device("dangling-branch", recording, server_key)
         make_module_bay(device, "FPC1", position="1")
         fpc_module = install_module(device, "FPC1", fpc["entPhysicalModelName"], child_bays=("Port 2", "Port 5"))
-        _refresh(device, server_key)
-        rows = list(_cached_inventory(device, server_key).values())
-        request = make_request(
-            "post",
-            {
-                "parent_index": "67",
-                "server_key": server_key,
-                "inventory_binding": module_inventory_binding_token(
-                    device.pk,
-                    server_key,
-                    "install_branch",
-                    {"parent_index": 67},
-                    67,
-                    module_inventory_snapshot_digest(rows),
-                ),
-            },
-            user=make_superuser(),
-            path="/modules/",
-        )
+        response, _module_sync = _refresh(device, server_key)
+        # The holder PIC is no row, so its optics sit in the branch of the FPC 1 row.
+        _action, fields = rendered_module_form(response.content.decode(), "install-branch", fpc["entPhysicalIndex"])
+        request = make_request("post", fields, user=make_superuser(), path="/modules/")
 
         response = post(InstallBranchView(), request, pk=device.pk)
 
@@ -617,7 +606,6 @@ class TestEvoPicRepair:
 
     def test_a_pic_below_a_mic_of_its_fpc_stays_there(self, librenms_server, server_key):
         """Chassis -> FPC -> MIC -> PIC -> optic: the PIC reaches its FPC through the MIC, so nothing moves."""
-        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
 
         recording = _recording(EVO_RECORDING)
         rows = _inventory(recording)
@@ -646,9 +634,9 @@ class TestEvoPicRepair:
         placed = _depth_and_parent(rendered)
         assert placed[mic] == (placed[EVO_FPC][0] + 1, EVO_FPC)
         assert {idx: placed[idx] for idx in optics} == dict.fromkeys(optics, (placed[mic][0] + 1, mic))
-        snapshot = list(cached.values())
-        branch = InstallBranchView()._collect_branch(mic, snapshot, index_map=cached)
-        assert {item["entPhysicalIndex"] for item in branch} >= set(optics)
+        # The top-level row above the MIC signs a branch list that holds the MIC and its optics.
+        branches = [{index for index, _target in row["branch_rows"]} for row in rendered if row["depth"] == 0]
+        assert any(branch >= {mic, *optics} for branch in branches)
 
 
 def _second_slot_0_fpc(rows):

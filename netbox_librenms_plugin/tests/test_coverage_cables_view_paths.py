@@ -309,6 +309,38 @@ class TestCableRefreshFetchFailure:
 
 @pytest.mark.django_db
 class TestCableRefreshOobMerge:
+    @pytest.mark.parametrize("port_device_id", [161, 162])
+    def test_cable_port_names_are_fetched_without_vlan_expansion(self, librenms_server, settings, port_device_id):
+        from django.core.cache import cache
+
+        device = _map_device(make_device("cable-oob-port-names"), 161, oob={"id": 162, "type": "idrac"})
+        librenms_server.ports_response(device_id=161, ports=[])
+        librenms_server.ports_response(device_id=162, ports=[{"port_id": 7, "ifName": "mgmt0"}])
+        _links_route(librenms_server, 161, [])
+        _links_route(
+            librenms_server,
+            162,
+            [{"id": 2, "local_port_id": 7, "remote_hostname": "peer.example.net", "remote_port": "e1"}],
+        )
+        view = _cable_view(settings, librenms_server)
+        request = make_request("post", {"server_key": SERVER_KEY}, user=make_superuser())
+
+        response = _post(view, request, pk=device.pk)
+
+        assert response.status_code == 200
+        cached = cache.get(view.get_cache_key(device, "links", SERVER_KEY))
+        assert len(cached["links"]) == 1
+        assert cached["links"][0]["local_port"] == "mgmt0"
+        assert cached["links"][0]["_source"] == "oob"
+        assert message_texts(request, "warning") == []
+        port_requests = [
+            request
+            for request in librenms_server.requests
+            if request["path"] == f"/api/v0/devices/{port_device_id}/ports"
+        ]
+        assert len(port_requests) == 1
+        assert "with" not in port_requests[0]["query"]
+
     def test_a_corrupt_oob_id_warns_instead_of_dropping_the_rows_silently(self, librenms_server, settings):
         """A linked OOB controller with an uncoercible id must warn, not be skipped in silence."""
         device = _map_device(make_device("cable-oob-corrupt"), 111, oob={"id": "not-an-id", "type": "idrac"})

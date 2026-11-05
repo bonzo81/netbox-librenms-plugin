@@ -1,0 +1,34 @@
+{% load librenms_sync_query %}
+{# The GET form owns the toolbar fields and the column filters. #}
+{% with form=filters.form %}
+<form method="get" id="{{ prefix }}filter-form" class="sync-filter-form noprint" role="search" aria-label="{{ label }}" data-sync-filter-tab="{{ tab }}">
+    {% sync_tab_query_items prefix=prefix tab=tab reset="page filters" as hidden_items %}
+    {% for key, value in hidden_items %}<input type="hidden" name="{{ key }}" value="{{ value }}">{% endfor %}
+    {% if form.errors %}
+    <div class="alert alert-danger" role="alert" id="{{ prefix }}filter-errors">
+        <div>
+            <div>The filters are not valid, so the table is not shown. Correct them, or clear the filters.</div>
+            <ul class="mb-0">
+                {% for error in form.non_field_errors %}<li>{{ error }}</li>{% endfor %}
+                {% for field in form %}{% for error in field.errors %}<li>{{ field.label }}: {{ error }}</li>{% endfor %}{% endfor %}
+            </ul>
+        </div>
+    </div>
+    {% endif %}
+
+    <div class="collapse mt-2{% if form.columns_have_input %} show{% endif %}" id="{{ section_id }}"{% if form.columns_have_input %} data-filter-open="true"{% endif %}>
+        <div class="row g-2">
+            {% for field in form.column_fields %}
+            <div class="col-6 col-md-4 col-xl-2">
+                <label class="form-label small mb-1" for="{{ field.auto_id }}">{{ field.label }}</label>
+                <input type="text" name="{{ field.html_name }}" id="{{ field.auto_id }}" value="{{ field.value|default:'' }}"
+                    class="form-control form-control-sm{% if field.errors %} is-invalid{% endif %}"
+                    {% if field.errors %}aria-invalid="true" aria-describedby="{{ field.auto_id }}-error"{% endif %}>
+                {% if field.errors %}<div class="invalid-feedback" id="{{ field.auto_id }}-error">{{ field.errors|join:" " }}</div>{% endif %}
+            </div>
+            {% endfor %}
+        </div>
+        <button type="submit" class="btn btn-primary mt-2">Apply</button>
+    </div>
+</form>
+{% endwith %}

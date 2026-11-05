@@ -26,6 +26,7 @@ from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.server_mappings import read_mapping, read_mappings
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
+from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_filters
 from netbox_librenms_plugin.utils import (
     apply_lag_vlan_fill,
     build_migrated_context,
@@ -46,7 +47,6 @@ from netbox_librenms_plugin.views.mixins import (
     LibreNMSPermissionMixin,
     NetBoxObjectPermissionMixin,
     VlanAssignmentMixin,
-    redirect_with_server_key,
 )
 
 logger = logging.getLogger(__name__)
@@ -91,40 +91,44 @@ class BaseInterfaceTableView(
         """
         raise NotImplementedError
 
-    def get_redirect_url(self, obj):
+    def _render_tab(self, request, obj, interface_name_field, server_key, sync_device):
         """
-        Get the redirect URL for the object.
-
-        Should be implemented in subclasses.
+        Render the interfaces tab partial from the current cache, which is the answer to every refresh POST.
 
         Args:
-            obj (Device | VirtualMachine): Object whose redirect URL to retrieve.
-
-        Raises:
-            NotImplementedError: Always, because subclasses must implement this method.
-
-        """
-        raise NotImplementedError
-
-    def _failure_redirect(self, request, obj, server_key):
-        """
-        Redirect to the sync tab after a refresh failure, preserving the POST-scoped server_key.
-
-        Preserving server_key keeps the user on the server they were working in (otherwise the next
-        retry/sync can target the session/default LibreNMS instance instead).
-
-        server_key is POST-derived, so the candidate URL is gated by Django's
-        ``url_has_allowed_host_and_scheme`` (sink inside the validated branch) — the open-redirect
-        barrier CodeQL recognises for py/url-redirection (CWE-601). The bare ``url`` fallback is a
-        pure ``reverse()`` path with no user input.
-
-        Args:
-            request (HttpRequest): Current request, used for the host-allowlist check.
-            obj (Device | VirtualMachine): Object whose sync tab to return to.
-            server_key (str | None): POST-scoped server key to carry on the redirect URL.
+            request (HttpRequest): Current request.
+            obj (Device | VirtualMachine): Object of the sync page.
+            interface_name_field (str): Name field of the LibreNMS ports.
+            server_key (str): POST-scoped server key; the tab stays on this server.
+            sync_device (Device | VirtualMachine): Object that owns the cache, the VC sync device for a member.
 
         Returns:
-            HttpResponseRedirect: Redirect to the sync tab (with server_key when it validates).
+            HttpResponse: The rendered partial.
+
+        """
+        context = {
+            "interface_sync": self.get_context_data(
+                request, obj, interface_name_field, server_key, sync_device=sync_device
+            ),
+            "interface_name_field": interface_name_field,
+        }
+        return self.render_sync_partial(request, obj, server_key, context)
+
+    def _failure_response(self, request, obj, interface_name_field, server_key, sync_device):
+        """
+        Record a failed refresh and render the tab, which has no snapshot now.
+
+        The refresh URL accepts only POST, so a redirect to it would answer 405.
+
+        Args:
+            request (HttpRequest): Current request.
+            obj (Device | VirtualMachine): Object of the sync page.
+            interface_name_field (str): Name field of the LibreNMS ports.
+            server_key (str): POST-scoped server key; the tab stays on this server.
+            sync_device (Device | VirtualMachine): Object that owns the cache, the VC sync device for a member.
+
+        Returns:
+            HttpResponse: The rendered partial.
 
         """
         SyncCacheConsistency(obj).mark_refresh_failure(
@@ -132,8 +136,7 @@ class BaseInterfaceTableView(
             server_key,
             actor_id=request_actor_id(request),
         )
-        url = self.get_redirect_url(obj)
-        return redirect_with_server_key(request, url, server_key)
+        return self._render_tab(request, obj, interface_name_field, server_key, sync_device)
 
     def get_select_related_field(self, obj):
         """Determine the appropriate select_related field based on object type."""
@@ -199,11 +202,13 @@ class BaseInterfaceTableView(
             )
         else:
             extra_related = ["parent", "bridge"] if related_field == "virtual_machine" else ["lag", "parent", "bridge"]
+            # The planned type check asks each device interface whether it has LAG members.
+            extra_prefetch = [] if related_field == "virtual_machine" else ["member_interfaces"]
             interfaces = (
                 (interface, read_mapping(interface))
                 for interface in queryset.select_related(
                     related_field, "untagged_vlan", *extra_related
-                ).prefetch_related("tagged_vlans", "tagged_vlans__group", "mac_addresses")
+                ).prefetch_related("tagged_vlans", "tagged_vlans__group", "mac_addresses", *extra_prefetch)
             )
         for interface, mapping in interfaces:
             by_name[interface.name] = interface
@@ -287,13 +292,13 @@ class BaseInterfaceTableView(
                 request,
                 self.scoped_lookup_message(lookup_error) if lookup_error else "Device not found in LibreNMS.",
             )
-            return self._failure_redirect(request, obj, _server_key)
+            return self._failure_response(request, obj, interface_name_field, _server_key, lookup_device)
 
         success, librenms_data = self.librenms_api.get_ports(self.librenms_id)
 
         if not success:
             messages.error(request, librenms_data)
-            return self._failure_redirect(request, obj, _server_key)
+            return self._failure_response(request, obj, interface_name_field, _server_key, lookup_device)
 
         # get_ports is an external boundary: a truthy success doesn't guarantee a dict with a list
         # of dict port rows (the OOB branch below guards the same way). The old cache was already
@@ -301,7 +306,7 @@ class BaseInterfaceTableView(
         # enrichment below.
         if not is_valid_ports_payload(librenms_data):
             messages.error(request, "Unexpected response from LibreNMS (malformed ports payload).")
-            return self._failure_redirect(request, obj, _server_key)
+            return self._failure_response(request, obj, interface_name_field, _server_key, lookup_device)
 
         # The guard above already proved a dict whose "ports" is a list of dicts, so index directly.
         ports = librenms_data["ports"]
@@ -457,18 +462,7 @@ class BaseInterfaceTableView(
                 "Refresh again; see server logs for details.",
             )
 
-        context = self.get_context_data(
-            request,
-            obj,
-            interface_name_field,
-            _server_key,
-            sync_device=lookup_device,
-        )
-        context = {"interface_sync": context}
-        context["interface_name_field"] = interface_name_field
-        # render_sync_partial injects the migrated-donor flags (hidden sync button + Migrate
-        # column) so the HTMX tab refresh stays consistent with the full page.
-        return self.render_sync_partial(request, obj, _server_key, context)
+        return self._render_tab(request, obj, interface_name_field, _server_key, lookup_device)
 
     def _enrich_port_stack_relationships(self, request, librenms_data, host_ports, interface_name_field):
         """Fetch and resolve the host port relationships LibreNMS reports for this device."""
@@ -661,10 +655,14 @@ class BaseInterfaceTableView(
         netbox_only_interfaces = []
         ignored_count = 0
         blocked_port_ids = []
-        show_ignored = "1" in (request.GET.get("interfaces_show_ignored"), request.POST.get("interfaces_show_ignored"))
+        filtered_from = None
+        # Every hop of the tab carries the page query, so the toggle is read from it only.
+        show_ignored = request.GET.get("interfaces_show_ignored") == "1"
 
         if interface_name_field is None:
             interface_name_field = get_interface_name_field(request, obj)
+        # The filters show their errors also when no snapshot is cached.
+        filters = parse_table_filters(request.GET, lambda rows: self.get_table(rows, obj, interface_name_field))
 
         unresolved = False
         if server_key is None:
@@ -875,9 +873,8 @@ class BaseInterfaceTableView(
             )
 
             rules = interface_rules_for_request(request)
-            # A row with no resolved member is decided for any member: on their shared platform, else global rules only.
-            member_platform_ids = {member.platform_id for member in virtual_chassis_members}
-            any_member_platform_id = member_platform_ids.pop() if len(member_platform_ids) == 1 else None
+            # A row with no resolved member is decided on every member's platform.
+            member_platform_ids = sorted({member.platform_id for member in virtual_chassis_members}, key=str)
             target_device_ids = {}
             for port in ports_data:
                 port_id = normalize_librenms_port_id(port.get("port_id"))
@@ -929,8 +926,9 @@ class BaseInterfaceTableView(
                     port["rule_decision"] = rules.check_interface_write(port, platform_id=rule_owner.platform_id)
                 else:
                     # Ignored only when the writer refuses every member the user can pick; else it asks for one.
-                    any_member = rules.check_interface_write(port, platform_id=any_member_platform_id)
-                    port["rule_decision"] = any_member if any_member.kind is RuleDecisionKind.IGNORE else None
+                    decisions = [rules.check_interface_write(port, platform_id=pk) for pk in member_platform_ids]
+                    ignored = bool(decisions) and all(d.kind is RuleDecisionKind.IGNORE for d in decisions)
+                    port["rule_decision"] = decisions[0] if ignored else None
 
                 netbox_interface = resolve_relationship_row(
                     relationship_context,
@@ -987,12 +985,28 @@ class BaseInterfaceTableView(
                 for port in ports_data
                 if port["rule_decision"] is None or decision_reason(port["rule_decision"]) is not None
             ]
-            table = self.get_table(table_rows, obj, interface_name_field, vlan_groups=vlan_groups)
-            table.allowed_vc_member_ids = actionable_owner_ids
             # Propagate donor "migrated mode" so the table suppresses per-row relationship sync
             # buttons (the bulk form is already hidden by the template; the row buttons POST
             # directly, so they must be stripped here too to keep a migrated donor read-only).
-            table.migrated_to_marker = bool(build_migrated_context(obj, server_key).get("migrated_to_marker"))
+            migrated = bool(build_migrated_context(obj, server_key).get("migrated_to_marker"))
+
+            def build_table(rows):
+                built = self.get_table(rows, obj, interface_name_field, vlan_groups=vlan_groups)
+                built.allowed_vc_member_ids = actionable_owner_ids
+                built.migrated_to_marker = migrated
+                return built
+
+            # The filter runs after every whole-snapshot step above, so the counts, the ignored
+            # split and the blocked IDs describe the whole device. A new name field or ignored
+            # toggle starts an empty browser selection too.
+            table, filters, filtered_from = filter_sync_table(
+                request,
+                obj,
+                table_rows,
+                build_table,
+                server_key=server_key,
+                interfaces_show_ignored=int(show_ignored),
+            )
             table.configure(request)
 
             netbox_only_interfaces = []
@@ -1058,6 +1072,9 @@ class BaseInterfaceTableView(
             "vlan_scope_incomplete": vlan_scope_incomplete,
             "show_ignored": show_ignored,
             "ignored_count": ignored_count,
+            "filters": filters,
+            # The row count before the filter, shown only while a filter narrows the table.
+            "filtered_from": filtered_from,
             "sync_options": interface_sync_options_menu(request),
             # The browser's related-row walk skips these, on this page and on every other.
             "blocked_port_ids_json": json.dumps([str(port_id) for port_id in blocked_port_ids if port_id is not None]),

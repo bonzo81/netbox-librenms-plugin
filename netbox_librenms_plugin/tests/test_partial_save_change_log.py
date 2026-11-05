@@ -29,8 +29,12 @@ from netbox_librenms_plugin.tests.conftest import (
     make_virtual_chassis,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import mapping_from_change_record, stored_mapping_for_test
-from netbox_librenms_plugin.tests.view_test_helpers import make_request, trusted_module_inventory_payload
-from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
+from netbox_librenms_plugin.tests.view_test_helpers import (
+    make_request,
+    render_module_tab,
+    rendered_module_form,
+    trusted_module_inventory_payload,
+)
 from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
 pytestmark = pytest.mark.django_db
@@ -132,14 +136,13 @@ def _seed_inventory(device, row, librenms_id):
 
 
 def _post_module_action(client, url_name, device, row, action_target, **data):
-    """Post a module action for the cached *row*, with the binding that the rendered button carries."""
-    binding = module_inventory_binding_token(
-        device.pk, SERVER_KEY, url_name, action_target, ENT_INDEX, module_inventory_row_digest(row)
-    )
+    """Post the module action form that the Modules tab renders for the cached *row*."""
     url = reverse(f"plugins:netbox_librenms_plugin:{url_name}", kwargs={"pk": device.pk})
-    return client.post(
-        url, {"server_key": SERVER_KEY, "ent_index": str(ENT_INDEX), "inventory_binding": binding, **data}
+    _action, fields = rendered_module_form(
+        render_module_tab(device, server_key=SERVER_KEY), url, row["entPhysicalIndex"]
     )
+    assert {name: fields[name] for name in action_target} == {name: str(value) for name, value in action_target.items()}
+    return client.post(url, {**fields, **{name: str(value) for name, value in data.items()}})
 
 
 def _installed_module(device, model):

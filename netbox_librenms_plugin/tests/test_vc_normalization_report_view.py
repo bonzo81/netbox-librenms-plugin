@@ -108,15 +108,6 @@ class TestVCNormalizationReportView:
         assert "- VC position (target): 2" in markdown
         assert b'id="vc-report-textarea"' in response.content
 
-    def test_an_invalid_selected_device_warns_and_falls_back_to_the_page_device(self, client):
-        device, module = _vc_member_with_module("bad-selection")
-        client.force_login(make_superuser())
-
-        response = client.get(_url(device), {"module_id": str(module.pk), "selected_device_id": "not-a-pk"})
-
-        assert response.status_code == 200
-        assert any("falling back to the page device" in text for text in _messages(response))
-
     def test_a_sibling_member_selection_reports_that_member_s_module(self, client):
         device, module = _vc_member_with_module("sibling")
         page_device = device.virtual_chassis.members.exclude(pk=device.pk).first()

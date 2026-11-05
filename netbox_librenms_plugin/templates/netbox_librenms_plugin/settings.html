@@ -222,6 +222,27 @@
                             </div>
                         </div>
 
+                        <!-- Platform Version Tracking Card -->
+                        <div class="card mb-3">
+                            <div class="card-header">
+                                <h3 class="card-title">
+                                    <i class="ti ti-versions me-2"></i>
+                                    Platform Version Tracking
+                                </h3>
+                            </div>
+                            <div class="card-body">
+                                <div class="form-check form-switch">
+                                    {{ import_form.platform_version_tracking }}
+                                    <label class="form-check-label" for="{{ import_form.platform_version_tracking.id_for_label }}">
+                                        {{ import_form.platform_version_tracking.label }}
+                                    </label>
+                                    {% if import_form.platform_version_tracking.help_text %}
+                                        <small class="form-text text-muted d-block">{{ import_form.platform_version_tracking.help_text }}</small>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+
                         <!-- Virtual Chassis Card -->
                         <div class="card mb-3">
                             <div class="card-header">
@@ -499,6 +520,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const locationPatternInput = document.getElementById('id_location_parse_pattern');
     const locationRegexCheckbox = document.getElementById('id_location_parse_is_regex');
     const rememberInterfaceNameCheckbox = document.getElementById('id_remember_interface_name_per_platform');
+    const platformVersionTrackingCheckbox = document.getElementById('id_platform_version_tracking');
 
     // Store the initial values to detect changes
     const initialServerValue = serverSelect.value;
@@ -508,6 +530,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const initialLocationPatternValue = locationPatternInput ? locationPatternInput.value : '';
     const initialLocationRegexValue = locationRegexCheckbox ? locationRegexCheckbox.checked : false;
     const initialRememberInterfaceNameValue = rememberInterfaceNameCheckbox ? rememberInterfaceNameCheckbox.checked : false;
+    const initialPlatformVersionTrackingValue = platformVersionTrackingCheckbox ? platformVersionTrackingCheckbox.checked : false;
 
     // Enable/disable server save button based on changes
     function updateServerSaveButton() {
@@ -525,7 +548,8 @@ document.addEventListener('DOMContentLoaded', function() {
         const locationPatternChanged = locationPatternInput ? (locationPatternInput.value !== initialLocationPatternValue) : false;
         const locationRegexChanged = locationRegexCheckbox ? (locationRegexCheckbox.checked !== initialLocationRegexValue) : false;
         const rememberInterfaceNameChanged = rememberInterfaceNameCheckbox ? (rememberInterfaceNameCheckbox.checked !== initialRememberInterfaceNameValue) : false;
-        const hasChanges = vcPatternChanged || useSysnameChanged || stripDomainChanged || locationPatternChanged || locationRegexChanged || rememberInterfaceNameChanged;
+        const platformVersionTrackingChanged = platformVersionTrackingCheckbox ? (platformVersionTrackingCheckbox.checked !== initialPlatformVersionTrackingValue) : false;
+        const hasChanges = vcPatternChanged || useSysnameChanged || stripDomainChanged || locationPatternChanged || locationRegexChanged || rememberInterfaceNameChanged || platformVersionTrackingChanged;
         saveImportBtn.disabled = !hasChanges;
         saveImportBtn.classList.toggle('btn-primary', hasChanges);
         saveImportBtn.classList.toggle('btn-secondary', !hasChanges);
@@ -539,6 +563,7 @@ document.addEventListener('DOMContentLoaded', function() {
     if (locationPatternInput) locationPatternInput.addEventListener('input', updateImportSaveButton);
     if (locationRegexCheckbox) locationRegexCheckbox.addEventListener('change', updateImportSaveButton);
     if (rememberInterfaceNameCheckbox) rememberInterfaceNameCheckbox.addEventListener('change', updateImportSaveButton);
+    if (platformVersionTrackingCheckbox) platformVersionTrackingCheckbox.addEventListener('change', updateImportSaveButton);
 
     // Cable-sync form: same enable-on-change pattern
     const cableSyncFields = ['id_cable_sync_tag', 'id_cable_sync_tag_color', 'id_cable_sync_description']

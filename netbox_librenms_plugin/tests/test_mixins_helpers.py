@@ -104,12 +104,10 @@ class TestResolveRequestedServerKey:
 
 class TestResolvePostedServerKey:
     """
-    resolve_posted_server_key honours only a configured key, else falls back to the ACTIVE server.
+    resolve_posted_server_key honours only a configured key; a blank key falls back to the ACTIVE server.
 
-    Unlike resolve_requested_server_key (which degrades to _render_server_key()/None for GET renders),
-    the module install/bind ACTION paths fall back to the active client server so the port-bind still
-    runs — but a forged non-blank key must still be rejected so a binding is never written under an
-    unconfigured namespace.
+    A non-blank key that names no configured server, or a repeated key, resolves to None, so the
+    action fails closed instead of running against another server.
     """
 
     def _view(self, active="active-server"):
@@ -125,12 +123,17 @@ class TestResolvePostedServerKey:
             view = self._view()
             assert view.resolve_posted_server_key({"server_key": "prod"}) == "prod"
 
-    def test_forged_nonblank_key_falls_back_to_active(self):
+    def test_forged_nonblank_key_resolves_to_none(self):
         with _configured_servers("active-server", "default"):
             view = self._view()
-            # 'evil' names no configured server → must NOT be honoured (would scope a bind under a
-            # bogus namespace); fall back to the active server instead.
-            assert view.resolve_posted_server_key({"server_key": "evil"}) == "active-server"
+            assert view.resolve_posted_server_key({"server_key": "evil"}) is None
+
+    def test_repeated_key_resolves_to_none(self):
+        from django.http import QueryDict
+
+        with _configured_servers("active-server", "prod", "default"):
+            view = self._view()
+            assert view.resolve_posted_server_key(QueryDict("server_key=evil&server_key=prod")) is None
 
     def test_blank_key_falls_back_to_active(self):
         with _configured_servers("active-server", "default"):

@@ -66,10 +66,54 @@ def test_relationship_diagnostics_modal_opens_without_bootstrap(page):
     assert page.locator(".modal-backdrop").count() == 0
 
 
+def test_the_platform_row_opens_the_create_platform_modal_without_bootstrap(page):
+    """The device and VM sync pages share the platform row; its Create & Sync button opens the real modal form."""
+    from types import SimpleNamespace
+
+    from django.template import Context, Engine
+
+    engine = Engine(dirs=[str(TEMPLATE_DIR.parent)])
+    assessment = SimpleNamespace(
+        reason="os_platform_missing", state="proposed", operation="create_os_platform", tracks_version=False
+    )
+    row = engine.get_template("netbox_librenms_plugin/inc/_platform_sync_row.html").render(
+        Context(
+            {"object": SimpleNamespace(platform=None), "platform_info": {"assessment": assessment}, "csrf_token": "t"},
+            use_l10n=False,
+        )
+    )
+    form = engine.get_template("netbox_librenms_plugin/htmx/create_platform_modal.html").render(
+        Context(
+            {"librenms_os": "junos", "platform_name": "junos", "form_action": "/c/", "device_pk": 1, "csrf_token": "t"},
+            use_l10n=False,
+        )
+    )
+    page.set_content(
+        "<style>.modal { display: none; } .modal.show { display: block; }</style>"
+        f"<table><tbody>{row}</tbody></table>"
+        '<div class="modal fade" id="create-platform-modal" tabindex="-1" aria-hidden="true">'
+        f'<div class="modal-dialog"><div class="modal-content">{form}</div></div></div>'
+    )
+    _add_page_scripts(page)
+
+    assert page.evaluate("typeof bootstrap") == "undefined"
+    modal = page.locator("#create-platform-modal")
+    assert not modal.is_visible()
+    page.get_by_role("button", name="Create & Sync").click()
+    assert modal.is_visible()
+    assert modal.get_attribute("aria-modal") == "true"
+    assert modal.locator("input[name=librenms_os]").get_attribute("value") == "junos"
+
+    modal.get_by_role("button", name="Cancel").click()
+    assert not modal.is_visible()
+    assert page.locator(".modal-backdrop").count() == 0
+
+
 # ===========================================================================
 # Interface selection: the requirement cascade and cross-page state
 # ===========================================================================
 SELECTION_PAGE_URL = "https://plugin.example.com/device/1/sync"
+MODULE_VERIFY_ROUTE = "**/plugins/librenms_plugin/verify-module/"
 
 # Verbatim relationship shape of a live Junos MX304 (LibreNMS device 20): et-0/0/6.0 is a unit of
 # et-0/0/6, et-0/0/6 is a member of ae2, and ae2.0 is a unit of ae2.
@@ -137,6 +181,7 @@ def _selection_page_html(
     blocked_attr = escape(json.dumps(list(blocked_port_ids)))
     return f"""<!doctype html><html><body>
         <input type="checkbox" id="autoSelectLagMembers" {checked}>
+        <input type="hidden" name="csrfmiddlewaretoken" value="selection-csrf-token">
         <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit" data-blocked-port-ids="{blocked_attr}">
           <input type="hidden" name="server_key" value="production">
           <table id="{escape(table_id)}"{snapshot_attr}>
@@ -496,6 +541,28 @@ class TestAMovedMemberIsNotRestored:
         assert ("device_selection_10", "2") in pairs
 
 
+def test_a_refused_member_check_shows_the_server_reason_and_keeps_the_member(page):
+    """The middleware answers a broken rule with a 409 JSON error, and the operator must see its text."""
+    reason = 'Interface type mapping "Gi" (ID 7) stores an invalid name_pattern: (. Fix the rule, then try again.'
+    _load_verify_page(page, OTHER_PAGE_ROWS)
+    page.evaluate("document.body.insertAdjacentHTML('afterbegin', '<div id=\"django-messages\"></div>')")
+    page.route(
+        "**/plugins/librenms_plugin/verify-interface/",
+        lambda route: route.fulfill(status=409, content_type="application/json", body=json.dumps({"error": reason})),
+    )
+
+    page.evaluate(
+        """() => {
+            const select = document.querySelector('tr[data-port-id="40"] .vc-member-select');
+            select.value = '2';
+            handleInterfaceChange(select, '2');
+        }"""
+    )
+
+    expect(page.locator("#django-messages .toast-body")).to_have_text(f"{reason} The row keeps its previous member.")
+    expect(page.locator('tr[data-port-id="40"] .vc-member-select')).to_have_value("1")
+
+
 CABLE_VERIFY_URL = "https://plugin.example.com/verify-cable/"
 
 
@@ -611,6 +678,44 @@ class TestAMovedCableMemberIsNotRestored:
         assert ("device_selection_cable-10", "2") in pairs
 
 
+class TestTheCableVerifyAnswerSetsTheCheckbox:
+    """After a member change, the cable row's checkbox follows can_create_cable of the verify answer."""
+
+    @pytest.mark.parametrize("can_create", [True, False], ids=["writable", "not-writable"])
+    def test_the_checkbox_follows_the_answer(self, page, can_create):
+        _load_cable_member_page(page, ["cable-10"])
+        formatted_row = {
+            "local_port": "Ethernet1",
+            "remote_port": "",
+            "remote_device": "",
+            "cable_status": "No Cable",
+            "actions": "",
+            "can_create_cable": can_create,
+        }
+        page.route(
+            f"{CABLE_VERIFY_URL}**",
+            lambda route: route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({"status": "success", "formatted_row": formatted_row}),
+            ),
+        )
+        with page.expect_response(f"{CABLE_VERIFY_URL}**"):
+            page.evaluate(
+                """() => {
+                    const select = document.getElementById('device_selection_cable-10');
+                    select.value = '2';
+                    handleCableChange(select, '2');
+                }"""
+            )
+
+        checkbox = page.locator("#cb-cable-10")
+        if can_create:
+            expect(checkbox).to_be_enabled()
+        else:
+            expect(checkbox).to_be_disabled()
+
+
 class TestADetachedVerifyChangesNothing:
     """A verify answer for a row the tab swap replaced must not touch the new page or storage."""
 
@@ -674,6 +779,20 @@ class TestTheOrderedSelectionCommit:
 
         # The row was held for C, so it is released with C, not kept as a choice of the user's.
         assert _checked_values(page) == set()
+
+    def test_a_checkbox_the_verify_adds_takes_part_in_a_shift_click_range(self, page):
+        rows = [
+            {"port_id": "10", "name": "Gi1/0/1", "member": "1", "rule_state": "ignored"},
+            {"port_id": "20", "name": "Gi1/0/2", "member": "1"},
+            {"port_id": "30", "name": "Gi1/0/3", "member": "1"},
+        ]
+        _load_verify_page(page, rows)
+        _verify_row(page, "10", "2", _verified_row(rule_state="", selection=_checkbox_markup("10")))
+
+        page.click("#cb-10")
+        page.click("#cb-30", modifiers=["Shift"])
+
+        assert _checked_values(page) == {"10", "20", "30"}
 
     def test_the_bulk_member_apply_commits_every_verified_row(self, page):
         verify = {
@@ -1080,7 +1199,7 @@ class TestCrossPageSelection:
         _load_selection_page(page, [JUNOS_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=2")
 
         notice = page.locator("#librenms-interface-table-offpage-selection")
-        assert "2 more rows are selected on other pages." in notice.inner_text()
+        assert notice.inner_text().split()[0] == "2"
 
     def test_rows_selected_on_another_page_are_submitted(self, page):
         _load_selection_page(page, JUNOS_ROWS, url=f"{SELECTION_PAGE_URL}?page=1")
@@ -1198,8 +1317,9 @@ class TestCrossPageSelection:
         submitted = dict(_selection_form_pairs(request_info.value.post_data))
         assert {name: submitted.get(name) for name in expected_fields} == expected_fields
 
-    def test_a_companion_input_is_restored_when_its_row_returns(self, page):
-        # The module table restores a stored member; the member-verified tables clear it instead.
+    def test_a_restored_module_member_is_verified_again(self, page):
+        # The module table verifies a restored member again; the member-verified tables clear it instead.
+        page.route(MODULE_VERIFY_ROUTE, lambda route: None)
         rows = [dict(JUNOS_ROWS[0], companion=True), JUNOS_ROWS[2]]
         table = "librenms-module-table"
         _load_selection_page(page, rows, url=f"{SELECTION_PAGE_URL}?page=1", table_id=table)
@@ -1207,8 +1327,10 @@ class TestCrossPageSelection:
         page.check("#cb-4303")
 
         _load_selection_page(page, [JUNOS_ROWS[1]], url=f"{SELECTION_PAGE_URL}?page=2", table_id=table)
-        _load_selection_page(page, rows, url=f"{SELECTION_PAGE_URL}?page=1", table_id=table)
+        with page.expect_request(MODULE_VERIFY_ROUTE) as verify:
+            _load_selection_page(page, rows, url=f"{SELECTION_PAGE_URL}?page=1", table_id=table)
 
+        assert json.loads(verify.value.post_data)["device_id"] == "9"
         assert "4303" in _checked_values(page)
         assert page.locator('[name="device_selection_4303"]').input_value() == "9"
 
@@ -1224,6 +1346,8 @@ class TestCrossPageSelection:
             },
         )
         table = "librenms-module-table"
+        # The restored member is verified again; the request stays open so the row keeps what the restore set.
+        page.route(MODULE_VERIFY_ROUTE, lambda route: None)
         _load_selection_page(page, [old_row, JUNOS_ROWS[2]], url=f"{SELECTION_PAGE_URL}?page=1", table_id=table)
         page.select_option('[name="device_selection_4303"]', "9")
         page.check("#cb-4303")
@@ -1242,8 +1366,9 @@ class TestCrossPageSelection:
 
         assert "4303" in _checked_values(page)
         assert page.locator('[name="device_selection_4303"]').input_value() == "9"
+        row = page.locator('tr[data-port-id="4303"]')
         for name, expected in new_row["hidden_fields"].items():
-            assert page.locator(f'[name="{name}"]').input_value() == expected
+            assert row.locator(f'[name="{name}"]').input_value() == expected
 
 
 def test_vlan_row_submit_keeps_another_page_selection_and_group(page):
@@ -1253,7 +1378,8 @@ def test_vlan_row_submit_keeps_another_page_selection_and_group(page):
         <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit">
           <table id="librenms-vlan-table"><tbody><tr>
             <td><input id="vlan-101" type="checkbox" name="select" value="101"></td>
-            <td><select name="vlan_group_101">
+            <td><input type="hidden" name="expected_vlan_name_101" value="users">
+              <select name="vlan_group_101">
               <option value="1">Group A</option><option value="2">Group B</option>
             </select></td>
           </tr></tbody></table>
@@ -1291,6 +1417,52 @@ def test_vlan_row_submit_keeps_another_page_selection_and_group(page):
     assert [pair for pair in posted if pair[0] == "sync_one"] == [["sync_one", "201"]]
     assert [pair for pair in posted if pair == ["select", "101"]] == []
     assert stored["101"]["inputs"]["vlan_group_101"] == "2"
+    assert stored["101"]["inputs"]["expected_vlan_name_101"] == "users"
+
+
+@pytest.mark.parametrize(
+    ("table_id", "field", "selected_value", "shown_value"),
+    [
+        # A VLAN name rule changed the name.
+        ("librenms-vlan-table", "expected_vlan_name_300", "web+300", "web"),
+        # The far end of the cable now resolves to another NetBox interface.
+        ("librenms-cable-table", "expected_remote_id_300", "100", "200"),
+        ("librenms-cable-table-vc", "expected_remote_id_300", "100", "200"),
+    ],
+)
+def test_a_restored_row_posts_the_value_it_shows_now(page, table_id, field, selected_value, shown_value):
+    """A restored selection must post the value the row shows now, not the value it showed when it was selected."""
+
+    def sync_page(value):
+        return f"""
+        <input name="server_key" value="production">
+        <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit">
+          <table id="{table_id}"><tbody><tr data-interface="300">
+            <td><input id="row-300" type="checkbox" name="select" value="300"></td>
+            <td><select name="device_selection_300"><option value="1" selected>m1</option></select>
+              <input type="hidden" name="{field}" value="{value}"></td>
+          </tr></tbody></table>
+        </form>
+        """
+
+    shown = {"value": selected_value}
+    page.route(
+        f"{SELECTION_PAGE_URL}**",
+        lambda route: route.fulfill(status=200, content_type="text/html", body=sync_page(shown["value"])),
+    )
+    page.goto(SELECTION_PAGE_URL)
+    _add_page_scripts(page)
+    page.check("#row-300")
+
+    shown["value"] = shown_value
+    page.goto(SELECTION_PAGE_URL)
+    _add_page_scripts(page)
+    page.evaluate(f"restoreTableSelection(document.getElementById('{table_id}'))")
+
+    assert page.locator("#row-300").is_checked()
+    assert page.locator(f'[name="{field}"]').input_value() == shown_value
+    stored = page.evaluate(f"readStoredSelection(document.getElementById('{table_id}'))")
+    assert stored["300"]["inputs"][field] == shown_value
 
 
 # Tabler's modal layout: the open modal covers the viewport, so a click beside the dialog hits the modal itself.
@@ -1633,10 +1805,12 @@ def test_a_standalone_confirmation_leaves_no_backdrop_or_scroll_lock(page):
 )
 def test_bulk_submit_still_consumes_off_page_selection_for_other_row_action_tabs(page, table_id):
     """Bulk actions still submit and clear off-page rows for every other row-action tab."""
+    bulk_url = "https://plugin.example.com/bulk"
+    page.route(bulk_url, lambda route: route.fulfill(body="", content_type="text/html"))
     page.set_content(
         f"""
         <input name="server_key" value="production">
-        <form id="sync-form" method="post" action="/bulk">
+        <form id="sync-form" method="post" action="{bulk_url}">
           <table id="{table_id}"><tbody><tr>
             <td><input type="checkbox" name="select" value="201"></td>
           </tr></tbody></table>
@@ -1645,20 +1819,20 @@ def test_bulk_submit_still_consumes_off_page_selection_for_other_row_action_tabs
         """
     )
     _add_page_scripts(page)
-    page.evaluate(
+    storage_key = page.evaluate(
         """() => {
             const table = document.querySelector('table');
             writeStoredSelection(table, {'101': {inputs: {}, auto: ''}});
-            document.getElementById('sync-form').addEventListener('submit', event => event.preventDefault());
+            return _selectionStorageKey(table);
         }"""
     )
 
-    page.click("#bulk-submit")
+    # A listener that cancels the submit would stand in for htmx, so the native submit really navigates.
+    with page.expect_request(bulk_url) as submitted:
+        page.click("#bulk-submit")
 
-    posted = page.locator("#sync-form").evaluate("form => Array.from(new FormData(form).entries())")
-    stored = page.evaluate("readStoredSelection(document.querySelector('table'))")
-    assert ["select", "101"] in posted
-    assert stored == {}
+    assert ("select", "101") in _selection_form_pairs(submitted.value.post_data)
+    assert page.evaluate("key => window.sessionStorage.getItem(key)", storage_key) is None
 
 
 HTMX_SYNC_URL = "https://plugin.example.com/htmx-sync"
@@ -1763,7 +1937,7 @@ def test_a_retry_after_a_failed_htmx_submit_still_carries_the_off_page_selection
     )
 
     page.click("#bulk-submit")
-    expect(page.locator("#librenms-interface-table-offpage-selection")).to_contain_text("1 more row")
+    expect(page.locator("#librenms-interface-table-offpage-selection")).to_contain_text("1 more")
     page.click("#bulk-submit")
     page.locator("#swapped").wait_for()
 
@@ -1792,7 +1966,7 @@ def test_a_dropped_row_submit_keeps_the_pending_bulk_submit_recoverable(page):
         page.click("#bulk-submit")
     page.click("#row-sync")
     held[0].fulfill(status=500, content_type="text/html", body="Server error")
-    expect(page.locator("#librenms-interface-table-offpage-selection")).to_contain_text("1 more row")
+    expect(page.locator("#librenms-interface-table-offpage-selection")).to_contain_text("1 more")
     page.click("#bulk-submit")
     page.locator("#swapped").wait_for()
 
@@ -1845,7 +2019,7 @@ def test_a_retry_after_a_failed_module_install_still_carries_the_off_page_select
           </form>
           <table id="librenms-module-table"><tbody><tr>
             <td><input type="checkbox" name="select" value="201" checked>
-                <select id="device_selection_201"><option value="7" selected>m7</option></select></td>
+                <select id="device_selection_201" name="device_selection_201"><option value="7" selected>m7</option></select></td>
           </tr></tbody></table>
         </div>
         """
@@ -1859,7 +2033,7 @@ def test_a_retry_after_a_failed_module_install_still_carries_the_off_page_select
     )
 
     page.click("#install-submit")
-    expect(page.locator("#librenms-module-table-offpage-selection")).to_contain_text("1 more row")
+    expect(page.locator("#librenms-module-table-offpage-selection")).to_contain_text("1 more")
     page.click("#install-submit")
     page.locator("#swapped").wait_for()
 
@@ -2240,7 +2414,7 @@ def test_cache_reads_carry_the_browser_url(page):
 SAVE_PREF_URL = "https://plugin.example.com/save-pref"
 
 
-def _ipaddress_toggle_fragment():
+def _ipaddress_toggle_fragment(extra_rows=""):
     """Build an IP address fragment around the template's own "Sync options" menu."""
     from django.template import Context, Engine, Library
 
@@ -2259,7 +2433,7 @@ def _ipaddress_toggle_fragment():
         + '<table id="librenms-ipaddress-table"><tbody>'
         '<tr data-mgmt-ip="true"><td><input type="checkbox" name="select" value="10.0.0.1"></td></tr>'
         '<tr><td><input type="checkbox" name="select" value="10.0.0.2"></td></tr>'
-        "</tbody></table>"
+        f"{extra_rows}</tbody></table>"
     )
 
 
@@ -2301,6 +2475,24 @@ def test_a_cache_fragment_binds_the_primary_ip_toggle(page):
     page.check("#set-primary-ip-toggle-cb")
 
     assert mgmt_row.is_checked()
+
+
+def test_set_primary_ip_leaves_an_ignored_management_row_unselected(page):
+    """The writer refuses an address that an IP mapping ignores, so its disabled row is never selected."""
+    ignored = '<tr data-mgmt-ip="true"><td><input type="checkbox" name="select" value="fe80::1/64" disabled></td></tr>'
+    page.route(
+        "https://plugin.example.com/fragment/ipaddresses*",
+        lambda route: route.fulfill(body=_ipaddress_toggle_fragment(ignored), content_type="text/html"),
+    )
+    page.route(SAVE_PREF_URL, lambda route: route.fulfill(json={"status": "ok"}))
+    initial = {"interfaces": _state("interfaces-ready"), "ipaddresses": _state("ipaddresses-ready")}
+    _serve_sync_page(
+        page, '<input type="hidden" name="csrfmiddlewaretoken" value="test-csrf-token">' + _page_html(initial)
+    )
+    page.evaluate("async () => { initializeSyncCacheConsistency(); await loadSyncCacheFragment('ipaddresses'); }")
+
+    assert page.locator('input[name="select"][value="10.0.0.1"]').is_checked()
+    assert not page.locator('input[name="select"][value="fe80::1/64"]').is_checked()
 
 
 def test_a_cache_fragment_load_does_not_recheck_the_cache_status(page):
@@ -2743,200 +2935,20 @@ def test_verified_missing_snapshot_restores_pane_controls_but_not_modal_controls
     assert "could not be verified" in page.locator("#interface-sync-content").inner_text()
 
 
-@pytest.mark.parametrize(
-    ("template", "content_id"),
-    [
-        ("_interface_sync.html", "interface-sync-content"),
-        ("_ipaddress_sync.html", "ipaddress-sync-content"),
-        ("_module_sync.html", "module-sync-content"),
-        ("_vlan_sync.html", "vlan-sync-content"),
-        ("_cable_sync.html", "cable-sync-content"),
-    ],
-)
-def test_the_tab_templates_keep_the_refresh_button_outside_the_cached_content(template, content_id):
-    """The pane refresh button the fail-closed test injects must mirror the real templates."""
-    markup = (TEMPLATE_DIR / template).read_text()
-    refresh = markup.index("Refresh ")
-    content = markup.index(f'id="{content_id}"')
-    assert refresh < content, f"{template}: the refresh button moved inside #{content_id}"
+@pytest.mark.parametrize("tab", ["interface", "ipaddress", "module", "vlan", "cable"])
+def test_refresh_forms_and_countdowns_live_in_the_swapped_content(tab):
+    wrapper = (TEMPLATE_DIR / f"_{tab}_sync.html").read_text()
+    content = (TEMPLATE_DIR / f"_{tab}_sync_content.html").read_text()
+    refresh = (TEMPLATE_DIR / "inc" / f"_{tab}_sync_refresh.html").read_text()
 
-
-@pytest.mark.parametrize(
-    ("template", "heading", "countdown_id"),
-    [
-        ("_interface_sync.html", "Interface Sync", "cache-countdown"),
-        ("_ipaddress_sync.html", "IP Address Sync", "ip-cache-countdown"),
-        ("_module_sync.html", "Module Sync", "module-cache-countdown"),
-        ("_vlan_sync.html", "VLAN Sync", "vlan-cache-countdown"),
-        ("_cable_sync.html", "Cable Sync", "cable-cache-countdown"),
-    ],
-)
-def test_tab_toolbars_put_the_shared_countdown_before_refresh(template, heading, countdown_id):
-    """Every tab uses one compact header toolbar without a redundant title."""
-    markup = (TEMPLATE_DIR / template).read_text()
-
-    assert f"<h2>{heading}</h2>" not in markup
-    countdown = markup.index(f'cache_container_id="{countdown_id}"')
-    refresh = markup.index("Refresh ")
-    assert countdown < refresh
-
-
-@pytest.mark.parametrize(
-    ("template", "countdown_id"),
-    [
-        ("_interface_sync_content.html", "cache-countdown"),
-        ("_ipaddress_sync_content.html", "ip-cache-countdown"),
-        ("_module_sync_content.html", "module-cache-countdown"),
-        ("_vlan_sync_content.html", "vlan-cache-countdown"),
-        ("_cable_sync_content.html", "cable-cache-countdown"),
-    ],
-)
-def test_refreshed_tab_content_replaces_the_header_countdown_out_of_band(template, countdown_id):
-    """A tab refresh updates the countdown even though its toolbar is outside the swap target."""
-    markup = (TEMPLATE_DIR / template).read_text()
-
-    assert "{% if request.htmx %}" in markup
-    assert f'cache_container_id="{countdown_id}"' in markup
-    assert "cache_oob=True" in markup
-
-
-@pytest.mark.parametrize(
-    ("wrapper_template", "content_template"),
-    [
-        ("_interface_sync.html", "_interface_sync_content.html"),
-        ("_ipaddress_sync.html", "_ipaddress_sync_content.html"),
-        ("_module_sync.html", "_module_sync_content.html"),
-        ("_vlan_sync.html", "_vlan_sync_content.html"),
-        ("_cable_sync.html", "_cable_sync_content.html"),
-    ],
-)
-def test_tab_toolbars_do_not_stack_extra_vertical_margins(wrapper_template, content_template):
-    """The refresh and primary action rows use one compact vertical rhythm."""
-    wrapper = (TEMPLATE_DIR / wrapper_template).read_text()
-    content = (TEMPLATE_DIR / content_template).read_text()
-
-    assert 'class="d-flex justify-content-end align-items-center mb-0 sync-tab-refresh-toolbar"' in wrapper
+    assert f'id="{tab}-sync-content"' in wrapper
+    assert f"_{tab}_sync_content.html" in wrapper
+    assert "sync-tab-refresh-toolbar" not in wrapper
     assert "sync-tab-primary-toolbar" in content
-    assert "mt-0" in content
-
-
-def test_tab_toolbars_share_a_row_only_when_the_viewport_has_room(page):
-    """Wide tabs align their actions with refresh controls, while narrow tabs stack them."""
-    page.set_content(
-        """
-        <style>
-          * { box-sizing: border-box; }
-          .sync-shell { width: 100%; }
-          .sync-tab-refresh-toolbar { display: flex; justify-content: flex-end; height: 30px; }
-          .sync-tab-refresh-toolbar > .btn-list { display: flex; width: 300px; height: 30px; }
-          .sync-tab-primary-toolbar { display: flex; width: 100%; height: 30px; }
-          .sync-tab-primary-toolbar > .primary-actions { width: 390px; height: 30px; }
-        </style>
-        <div class="sync-shell">
-          <div class="sync-tab-refresh-toolbar">
-            <div class="btn-list" id="refresh-actions"></div>
-          </div>
-          <div id="interface-sync-content">
-            <div class="sync-tab-primary-toolbar">
-              <div class="primary-actions" id="sync-actions"></div>
-            </div>
-          </div>
-        </div>
-        <div class="sync-shell" id="empty-sync-tab">
-          <div class="sync-tab-refresh-toolbar">
-            <div class="btn-list" id="empty-refresh-actions"></div>
-          </div>
-          <div id="cable-sync-content">
-            <div class="card" id="empty-state-card" style="height: 100px;"></div>
-          </div>
-        </div>
-        <div class="sync-shell" id="module-sync-tab">
-          <div class="sync-tab-refresh-toolbar">
-            <div class="btn-list" id="module-refresh-actions"></div>
-          </div>
-          <style id="module-inline-styles"></style>
-          <div id="module-sync-content">
-            <div class="sync-tab-primary-toolbar">
-              <div class="primary-actions" id="module-install-actions"></div>
-            </div>
-          </div>
-        </div>
-        <div class="sync-shell" id="warning-sync-tab">
-          <div class="sync-tab-refresh-toolbar">
-            <div class="btn-list" id="warning-refresh-actions"></div>
-          </div>
-          <div id="warning-sync-content">
-            <div class="alert" id="sync-warning" style="height: 30px;"></div>
-            <div class="sync-tab-primary-toolbar">
-              <div class="primary-actions"></div>
-            </div>
-          </div>
-        </div>
-        """
-    )
-    page.add_style_tag(path=str(STYLE_PATH))
-
-    page.set_viewport_size({"width": 1440, "height": 800})
-    refresh_rect = page.locator("#refresh-actions").bounding_box()
-    sync_rect = page.locator("#sync-actions").bounding_box()
-    assert refresh_rect["y"] == pytest.approx(sync_rect["y"], abs=1)
-    assert sync_rect["x"] + sync_rect["width"] < refresh_rect["x"]
-    module_refresh_rect = page.locator("#module-refresh-actions").bounding_box()
-    module_install_rect = page.locator("#module-install-actions").bounding_box()
-    assert module_refresh_rect["y"] == pytest.approx(module_install_rect["y"], abs=1)
-
-    page.set_viewport_size({"width": 900, "height": 800})
-    refresh_rect = page.locator("#refresh-actions").bounding_box()
-    sync_rect = page.locator("#sync-actions").bounding_box()
-    assert refresh_rect["y"] + refresh_rect["height"] <= sync_rect["y"]
-
-    empty_refresh_rect = page.locator("#empty-refresh-actions").bounding_box()
-    empty_card_rect = page.locator("#empty-state-card").bounding_box()
-    assert empty_refresh_rect["y"] + empty_refresh_rect["height"] + 16 <= empty_card_rect["y"]
-    warning_refresh_rect = page.locator("#warning-refresh-actions").bounding_box()
-    warning_rect = page.locator("#sync-warning").bounding_box()
-    assert warning_refresh_rect["y"] + warning_refresh_rect["height"] + 16 <= warning_rect["y"]
-
-
-def test_vlan_filters_hide_nonmatching_vlan_rows(page):
-    """VLAN filters match the visible values in VLAN rows."""
-    page.set_content(
-        """
-        <input id="filter-vlan-id">
-        <input id="filter-vlan-name">
-        <input id="filter-vlan-group">
-        <input id="filter-vlan-type">
-        <input id="filter-vlan-state">
-        <table id="librenms-vlan-table"><tbody>
-          <tr class="empty"><td colspan="5">No matching VLANs</td></tr>
-          <tr data-vlan-id="10" id="users-vlan">
-            <td data-col="vlan_id"><span>10</span></td>
-            <td data-col="name"><span>Users</span></td>
-            <td data-col="vlan_group_selection"><div class="ts-control"><span class="item">Campus</span></div></td>
-            <td data-col="type">Ethernet</td>
-            <td data-col="state"><span>Active</span></td>
-          </tr>
-          <tr data-vlan-id="20" id="guests-vlan">
-            <td data-col="vlan_id"><span>20</span></td>
-            <td data-col="name"><span>Guests</span></td>
-            <td data-col="vlan_group_selection"><div class="ts-control"><span class="item">Edge</span></div></td>
-            <td data-col="type">QinQ</td>
-            <td data-col="state"><span>Inactive</span></td>
-          </tr>
-        </tbody></table>
-        """
-    )
-    _add_page_scripts(page)
-    page.evaluate("initializeFilters()")
-
-    page.locator("#filter-vlan-name").fill("guest")
-    assert page.locator("#users-vlan").evaluate("row => row.style.display") == "none"
-    assert page.locator("#guests-vlan").evaluate("row => row.style.display") == ""
-
-    page.locator("#filter-vlan-name").fill("")
-    page.locator("#filter-vlan-group").fill("campus")
-    assert page.locator("#users-vlan").evaluate("row => row.style.display") == ""
-    assert page.locator("#guests-vlan").evaluate("row => row.style.display") == "none"
+    assert f"_{tab}_sync_refresh.html" in content
+    assert "cache_oob" not in content
+    assert refresh.index("</button>") < refresh.index("_sync_cache_countdown.html")
+    assert "_hidden_server_key.html" in refresh
 
 
 def test_vlan_group_verification_ignores_a_late_response_for_an_old_selection(page):
@@ -3016,6 +3028,90 @@ def test_vlan_group_verification_ignores_a_late_response_for_an_old_selection(pa
     assert page.locator("#group-a-status").count() == 0
     assert page.locator('td[data-col="status"]').inner_text() == "Update B"
     assert page.locator('td[data-col="vlan_id"] span').get_attribute("class") == "text-warning"
+
+
+VLAN_GROUP_ROW_PAGE = """
+<input name="csrfmiddlewaretoken" value="test-token">
+<form>
+  <table id="librenms-vlan-table"><tbody><tr>
+    <td data-col="vlan_id"><span class="text-danger">501</span></td>
+    <td data-col="name"><span class="text-danger">Users</span></td>
+    <td data-col="vlan_group_selection">
+      <select class="vlan-sync-group-select" name="vlan_group_501" data-vlan-id="501" data-vlan-name="Users">
+        <option value="" selected>Global</option>
+        <option value="1">Group A</option>
+        <option value="2">Group B</option>
+      </select>
+    </td>
+    <td data-col="status">Not in NetBox</td>
+  </tr></tbody></table>
+</form>
+"""
+
+
+@pytest.mark.parametrize("http_status", [500, 200], ids=["http-error", "rejected"])
+def test_a_failed_vlan_group_verification_restores_the_last_verified_group(page, http_status):
+    """The row shows the verdict of the last verified group, so a failed verify selects that group again."""
+    page.set_content(VLAN_GROUP_ROW_PAGE)
+    answers = [
+        (200, {"status": "success", "css_class": "text-success", "status_html": '<span id="in-a">In A</span>'}),
+        (http_status, {"status": "error", "message": "x"}),
+    ]
+
+    def answer(route):
+        status, body = answers.pop(0)
+        route.fulfill(status=status, content_type="application/json", body=json.dumps(body))
+
+    page.route("**/plugins/librenms_plugin/verify-vlan-sync-group/", answer)
+    _add_page_scripts(page)
+    page.evaluate("initializeVlanSyncGroupSelects()")
+    select = page.locator(".vlan-sync-group-select")
+
+    select.select_option("1")
+    page.locator("#in-a").wait_for()
+    select.select_option("2")
+    page.wait_for_function("document.querySelector('.vlan-sync-group-select').value === '1'", timeout=5000)
+
+    assert not answers
+    assert page.locator("#in-a").count() == 1
+
+
+def test_a_failed_verification_of_a_superseded_group_neither_rolls_back_nor_hides_the_latest(page):
+    """A, then B, then A again: the first A request fails late, and the latest A request still decides the row."""
+    page.set_content(VLAN_GROUP_ROW_PAGE)
+    held = []
+    page.route("**/plugins/librenms_plugin/verify-vlan-sync-group/", lambda route: held.append(route))
+    _add_page_scripts(page)
+    page.evaluate("initializeVlanSyncGroupSelects()")
+    select = page.locator(".vlan-sync-group-select")
+
+    def answer(route, status, body):
+        route.fulfill(status=status, content_type="application/json", body=json.dumps(body))
+
+    def wait_for_requests(count):
+        for _attempt in range(200):
+            if len(held) == count:
+                return
+            page.wait_for_timeout(10)
+        raise AssertionError(f"expected {count} verify requests, got {len(held)}")
+
+    select.select_option("1")
+    wait_for_requests(1)
+    select.select_option("2")
+    wait_for_requests(2)
+    answer(held[1], 200, {"status": "success", "css_class": "text-success", "status_html": '<span id="in-b">B</span>'})
+    page.locator("#in-b").wait_for()
+    select.select_option("1")
+    wait_for_requests(3)
+    # The first answer settles before the latest one, as a slow failure does.
+    answer(held[0], 500, {"status": "error", "message": "x"})
+    # The answer arrives, or the request was aborted; either way the page handles it before the next answer.
+    held[0].request.response()
+    page.evaluate("() => new Promise((resolve) => setTimeout(resolve))")
+    answer(held[2], 200, {"status": "success", "css_class": "text-success", "status_html": '<span id="in-a">A</span>'})
+    page.locator("#in-a").wait_for(timeout=3000)
+
+    assert select.input_value() == "1"
 
 
 def test_vlan_modal_group_verification_ignores_a_late_response_for_an_old_selection(page):
@@ -3212,6 +3308,41 @@ def test_filter_disclosure_state_survives_fragment_replacement(page):
     assert "btn-secondary" in button.get_attribute("class").split()
     assert button.get_attribute("aria-expanded") == "false"
     assert button.locator("i").evaluate("icon => icon.classList.contains('mdi-filter-outline')")
+
+
+def test_a_closed_filter_panel_stays_closed_when_the_server_opened_it(page):
+    """The server opens a panel that holds a filter value once; a later settle keeps the user's close."""
+    markup = """
+      <div id="filter-host">
+        <button class="btn btn-sm btn-secondary sync-filter-toggle" type="button"
+                data-bs-target="#interfaceFilterSection" aria-expanded="false"
+                aria-controls="interfaceFilterSection">
+          <i class="mdi mdi-filter-outline"></i> Filters
+        </button>
+        <div class="collapse show" id="interfaceFilterSection" data-filter-open="true"></div>
+      </div>
+    """
+    page.set_content(markup)
+    _add_page_scripts(page)
+    page.evaluate("initializeScripts()")
+    section = page.locator("#interfaceFilterSection")
+    assert section.evaluate("section => section.classList.contains('show')")
+
+    section.evaluate(
+        """section => {
+            section.classList.remove('show');
+            section.dispatchEvent(new Event('hidden.bs.collapse', { bubbles: true }));
+        }"""
+    )
+    page.evaluate("document.body.dispatchEvent(new CustomEvent('htmx:afterSettle'))")
+
+    assert not section.evaluate("section => section.classList.contains('show')")
+    assert page.locator(".sync-filter-toggle").get_attribute("aria-expanded") == "false"
+
+    # A new render with a filter value opens the panel again.
+    page.locator("#filter-host").evaluate("(host, markup) => { host.innerHTML = markup; }", markup)
+    page.evaluate("initializeScripts()")
+    assert section.evaluate("section => section.classList.contains('show')")
 
 
 def test_available_status_without_a_usable_fragment_keeps_modal_controls_disabled(page):
@@ -3738,6 +3869,51 @@ def test_hidden_tab_countdown_changes_available_rail_to_unavailable_without_inte
     assert not tab.evaluate("node => node.classList.contains('sync-cache-ready')")
     assert tab.evaluate("node => node.classList.contains('sync-cache-unavailable')")
     assert page.locator("#ip-action").count() == 0
+
+
+def test_a_browser_clock_ahead_of_the_server_keeps_a_valid_cached_tab(page):
+    """The countdown measures the cache lifetime on the server clock that rendered it."""
+    from datetime import UTC, datetime, timedelta
+
+    from django.conf import settings
+    from django.template import Context, Engine, Library
+
+    if not settings.configured:
+        settings.configure(USE_I18N=False, USE_TZ=True)
+    query = Library()
+    query.simple_tag(lambda server_key: 600, name="sync_cache_timeout")
+    engine = Engine()
+    engine.template_libraries["librenms_sync_query"] = query
+    countdown = engine.from_string((TEMPLATE_DIR / "inc" / "_sync_cache_countdown.html").read_text()).render(
+        Context(
+            {
+                "cache_expiry": datetime.now(UTC) + timedelta(minutes=5),
+                "cache_container_id": "cache-countdown",
+                "cache_countdown_id": "countdown-timer",
+                "cache_server_key": "primary",
+            }
+        )
+    )
+    initial = {"interfaces": _state("before"), "ipaddresses": _state("before-ip")}
+
+    page.clock.install(time=datetime.now(UTC) + timedelta(days=1))
+    page.set_content(
+        _replace_fixture_markup(
+            _page_html(initial),
+            '<button id="interface-action">Sync</button>',
+            '<table id="interface-rows"><tr><td>Ethernet1</td></tr></table>'
+            + countdown
+            + '<button id="interface-action">Sync</button>',
+        )
+    )
+    _add_page_scripts(page)
+    page.evaluate("initializeSyncCacheConsistency(); initializeCountdown('countdown-timer')")
+
+    assert page.locator("#interface-rows").count() == 1
+    assert page.locator("#interface-action").count() == 1
+    assert page.evaluate("syncCacheController().invalidatedLocally.size") == 0
+    assert page.locator("#interfaces-tab").evaluate("node => node.classList.contains('sync-cache-ready')")
+    assert not page.locator("#countdown-timer").evaluate("node => node.classList.contains('is-expired')")
 
 
 def test_failed_retry_updates_an_already_invalidated_tab_without_a_new_revision(page):
@@ -4612,7 +4788,7 @@ NETBOX_TABLE_CSS = """
 body { margin: 0; font: 14px/1.4 sans-serif; }
 .table { width: 100%; border-collapse: collapse; }
 .table th, .table td { padding: .5rem; vertical-align: top; }
-.table thead th { font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
+.table thead th { font-size: .625rem; text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; }
 .badge { display: inline-flex; gap: .25rem; padding: .25em .5em; font-size: .857em; white-space: nowrap; }
 .btn { display: inline-flex; padding: .25rem .5rem; white-space: nowrap; }
 .d-none { display: none !important; }
@@ -4789,3 +4965,362 @@ def test_sync_table_shows_hidden_columns_again_when_the_card_widens(page, table_
     state = _fit_state(page, table_id)
     assert state["cells"] == narrow["cells"]
     assert state["scrollWidth"] <= state["clientWidth"] + 1
+
+
+# ===========================================================================
+# Phone width: the cable, IP, VLAN and device info tables wrap to fit 375 px
+# ===========================================================================
+PHONE_WIDTH = 375
+
+# The Bootstrap utilities and TomSelect bootstrap5 rules that set how far the phone fixtures can shrink.
+PHONE_UTILITY_CSS = """
+*, ::before, ::after { box-sizing: border-box; }
+.container-fluid { padding: 0 .5rem; }
+.card { border: 1px solid #ccc; }
+.d-flex { display: flex !important; }
+.align-items-center { align-items: center !important; }
+.justify-content-between { justify-content: space-between !important; }
+.gap-1 { gap: .25rem !important; }
+.gap-2 { gap: .5rem !important; }
+.ms-1 { margin-left: .25rem !important; }
+.ms-2 { margin-left: .5rem !important; }
+.ms-3 { margin-left: 1rem !important; }
+.m-2 { margin: .5rem !important; }
+.text-nowrap { white-space: nowrap !important; }
+.btn { padding: .375rem .75rem; border: 1px solid; }
+.form-select { display: block; width: 100%; padding: .375rem 2.25rem .375rem .75rem; font: inherit; }
+.form-select-sm { padding: .25rem 2rem .25rem .5rem; }
+.ts-hidden-accessible { position: absolute !important; width: 1px !important; height: 1px !important; overflow: hidden !important; clip: rect(0 0 0 0) !important; padding: 0 !important; border: 0 !important; }
+.ts-wrapper { position: relative; display: flex; }
+.ts-wrapper.form-select { padding: 0 !important; }
+.ts-control { display: flex; flex-wrap: wrap; width: 100%; overflow: hidden; padding: .375rem 2.25rem .375rem .75rem; }
+.ts-control > input { flex: 1 1 auto; min-width: 7rem; max-width: 100% !important; padding: 0 !important; border: 0 !important; }
+"""
+
+
+def _tom_select(select_classes, item):
+    """Return a select the way NetBox's TomSelect renders it: a wrapper with the select's classes."""
+    return (
+        f'<select class="{select_classes} tomselected ts-hidden-accessible"><option selected>{item}</option></select>'
+        f'<div class="ts-wrapper {select_classes} single full has-items"><div class="ts-control">'
+        f'<div class="item">{item}</div><input type="select-one" autocomplete="off" size="1"></div></div>'
+    )
+
+
+# The IP tab sets the VRF column widths in an inline style block; the phone rule must override it.
+IP_VRF_CSS = re.search(r"<style>(.*?)</style>", (TEMPLATE_DIR / "_ipaddress_sync_content.html").read_text(), re.S)[1]
+
+_CABLE_CELLS = (
+    '<td data-col="selection"><input type="checkbox" name="select"></td>'
+    '<td data-col="local_port"><a href="#">GigabitEthernet0/0/0/10.4094</a>'
+    ' <span class="badge bg-purple text-white ms-1">OOB</span>'
+    ' <span class="badge bg-teal text-dark ms-1">Serial</span></td>'
+    '<td data-col="remote_port"><a href="#">TenGigabitEthernet1/1/48</a>'
+    ' <i class="mdi mdi-gesture-tap-button text-muted"></i> <i class="mdi mdi-lan-connect text-muted"></i></td>'
+    '<td data-col="remote_device"><a href="#">core-switch-02.dc-west.example.com</a></td>'
+    '<td data-col="cable_status"><a href="#">Connected to a different interface</a></td>'
+    '<td data-col="actions"><span class="badge bg-warning-lt fw-normal d-inline-flex align-items-center gap-1">'
+    '<i class="mdi mdi-refresh"></i>Refresh needed</span>'
+    '<button type="submit" class="btn btn-sm btn-primary" name="sync_one">Sync Cable</button>'
+    '<button type="button" class="btn btn-sm btn-outline-primary"><i class="mdi mdi-plus-network"></i></button>'
+    '<button type="button" class="btn btn-sm btn-outline-secondary"><i class="mdi mdi-connection"></i></button></td>'
+)
+_CABLE_HEAD = "<th></th><th>Local Port</th><th>Remote Port</th><th>Remote Device</th><th>Cable Status</th><th></th>"
+_CABLE_TOOLBAR = (
+    '<div class="noprint d-flex justify-content-between align-items-center mt-0 mb-3 sync-tab-primary-toolbar">'
+    '<div><button type="submit" class="btn btn-primary"><span>Sync Selected Cables</span></button>'
+    '<a href="#" class="m-2"><i class="mdi mdi-help-circle"></i> info</a></div></div>'
+)
+
+# Markup in the shape the real tables and templates render, with long values.
+PHONE_TABLES = {
+    "librenms-cable-table": {
+        "toolbar": _CABLE_TOOLBAR,
+        "table": '<table class="table table-hover object-list" id="librenms-cable-table">'
+        f"<thead><tr>{_CABLE_HEAD}</tr></thead><tbody>{f'<tr>{_CABLE_CELLS}</tr>' * 3}</tbody></table>",
+    },
+    "librenms-cable-table-vc": {
+        "toolbar": _CABLE_TOOLBAR,
+        "table": '<table class="table table-hover object-list" id="librenms-cable-table-vc">'
+        f"<thead><tr><th>Virtual Chassis Member</th>{_CABLE_HEAD}</tr></thead><tbody>"
+        + (
+            '<tr><td class="device-selection-col" data-col="device_selection">'
+            f"{_tom_select('form-select', 'edge-router-01-member-2')}</td>"
+            f"{_CABLE_CELLS}</tr>"
+        )
+        * 3
+        + "</tbody></table>",
+    },
+    "librenms-ipaddress-table": {
+        "toolbar": (
+            '<div class="noprint d-flex align-items-center mt-0 mb-3 sync-tab-primary-toolbar">'
+            '<div class="d-flex align-items-center gap-2">'
+            '<button type="submit" class="btn btn-primary"><span>Sync Selected IP Addresses</span></button>'
+            '<div class="dropdown" id="ip-sync-options"><button class="btn btn-outline-secondary dropdown-toggle"'
+            ' type="button"><i class="mdi mdi-tune-variant"></i> Sync options'
+            ' <span class="badge bg-secondary-lt ms-1">0</span></button></div></div></div>'
+        ),
+        "table": '<table class="table table-hover object-list" id="librenms-ipaddress-table">'
+        "<thead><tr><th></th><th>IP Address</th><th>Prefix Length</th><th>Device</th><th>Interface</th>"
+        "<th>VRF</th><th>Status</th></tr></thead><tbody>"
+        + (
+            '<tr><td data-col="selection"><input type="checkbox" name="select"></td>'
+            '<td data-col="address"><a href="#">2001:db8:4100:ffff::1234</a></td>'
+            '<td data-col="prefix">64</td>'
+            '<td data-col="device"><a href="#">edge-router-01.dc-west.example.com</a></td>'
+            '<td data-col="interface"><a href="#">GigabitEthernet0/0/0/10.4094</a></td>'
+            '<td data-col="vrf"><div class="d-flex align-items-center gap-1">'
+            f"{_tom_select('form-select vrf-select', 'customer-internet-transit')}"
+            '<i class="mdi mdi-lightbulb-on-outline text-muted"></i>'
+            '<button type="submit" class="btn btn-sm btn-outline-primary text-nowrap" name="create_vrf">'
+            '<i class="mdi mdi-plus-thick" aria-hidden="true"></i> VRF</button></div></td>'
+            '<td data-col="status"><button type="submit" class="btn btn-sm btn-primary" name="sync_one">'
+            '<i class="mdi mdi-plus-thick" aria-hidden="true"></i> Create</button></td></tr>'
+        )
+        * 3
+        + "</tbody></table>",
+    },
+    "librenms-vlan-table": {
+        "toolbar": (
+            '<div class="noprint d-flex align-items-center mt-0 mb-3 sync-tab-primary-toolbar">'
+            '<div><button type="submit" class="btn btn-primary"><span>Sync Selected VLANs</span></button></div></div>'
+        ),
+        "table": '<table class="table table-hover object-list" id="librenms-vlan-table">'
+        "<thead><tr><th></th><th>VLAN ID</th><th>Name</th><th>VLAN Group</th><th>Type</th><th>State</th>"
+        "<th>Status</th></tr></thead><tbody>"
+        + (
+            '<tr data-vlan-id="4094"><td data-col="selection"><input type="checkbox" name="select"></td>'
+            '<td data-col="vlan_id"><span class="text-danger">4094</span></td>'
+            '<td data-col="name"><span class="text-danger">customer-internet-transit</span></td>'
+            '<td data-col="vlan_group_selection">'
+            f"{_tom_select('form-select form-select-sm vlan-sync-group-select', 'datacenter-west (dc-west)')}"
+            '<i class="mdi mdi-alert text-warning ms-1"></i></td>'
+            '<td data-col="type">ethernet</td>'
+            '<td data-col="state"><span class="text-success">Active</span></td>'
+            '<td data-col="status"><button type="submit" class="btn btn-sm btn-primary" name="sync_one">'
+            '<i class="mdi mdi-plus-thick" aria-hidden="true"></i> Create</button></td></tr>'
+        )
+        * 3
+        + "</tbody></table>",
+    },
+    "librenms-info-sync-table": {
+        "toolbar": "",
+        "table": '<table class="table table-sm table-hover mb-0 librenms-info-sync-table" id="librenms-info-sync-table">'
+        '<thead><tr><th style="width: 20%; padding-left: 1rem;">Field</th><th style="width: 40%;">NetBox Value</th>'
+        '<th style="width: 40%;">LibreNMS Value</th></tr></thead><tbody>'
+        '<tr><td style="padding-left: 1rem;">Name <i class="mdi mdi-information-outline text-muted ms-1"></i></td>'
+        '<td><div class="d-flex align-items-center"><div>edge-router-01.dc-west.example.com</div>'
+        '<div class="ms-3"><form method="post" style="display: inline;">'
+        '<button type="submit" class="btn btn-sm btn-outline-primary"><i class="mdi mdi-sync"></i> Sync to NetBox'
+        "</button></form></div></div></td><td>edge-router-01.dc-west.example.com</td></tr>"
+        '<tr><td style="padding-left: 1rem;">Device Type</td>'
+        '<td><div class="d-flex align-items-center"><div><a href="#">Juniper Networks MX10003-PREMIUM</a></div>'
+        '<div class="ms-3"><form method="post" style="display: inline;">'
+        '<button type="submit" class="btn btn-sm btn-outline-danger"><i class="mdi mdi-sync"></i> Sync to NetBox'
+        "</button></form></div></div></td>"
+        '<td>MX10003-PREMIUM-CHASSIS <a href="#" class="btn btn-sm btn-outline-secondary ms-2">'
+        '<i class="mdi mdi-open-in-new"></i> DeviceTypes</a></td></tr>'
+        '<tr><td style="padding-left: 1rem;">Serial Number</td>'
+        '<td><div class="d-flex align-items-center"><div>JN1234567890ABCDEF</div><div class="ms-3">'
+        '<button type="button" class="btn btn-sm btn-outline-info"><i class="mdi mdi-server-network"></i>'
+        " VC Serials (4)</button></div></div></td><td>JN1234567890ABCDEF</td></tr></tbody></table>",
+    },
+}
+
+
+@pytest.mark.parametrize("table_id", sorted(PHONE_TABLES))
+def test_sync_table_fits_the_page_at_phone_width(page, table_id):
+    """The phone rules are a viewport media query, so the viewport itself is 375 px wide."""
+    spec = PHONE_TABLES[table_id]
+    page.set_viewport_size({"width": PHONE_WIDTH, "height": 800})
+    page.set_content(
+        f"<style>{NETBOX_TABLE_CSS}{PHONE_UTILITY_CSS}{IP_VRF_CSS}</style>"
+        f'<div class="container-fluid"><div id="{table_id.removeprefix("librenms-")}-sync-content">'
+        f'{spec["toolbar"]}<div class="card">{spec["table"]}</div></div></div>'
+    )
+    page.add_style_tag(path=str(STYLE_PATH))
+
+    state = page.evaluate(
+        """(tableId) => {
+            const table = document.getElementById(tableId);
+            const toolbar = document.querySelector('.sync-tab-primary-toolbar');
+            return {
+                page: document.documentElement.scrollWidth,
+                table: table.scrollWidth,
+                card: table.parentElement.clientWidth,
+                toolbar: toolbar ? toolbar.scrollWidth : 0,
+                toolbarBox: toolbar ? toolbar.clientWidth : 0,
+            };
+        }""",
+        table_id,
+    )
+    assert state["page"] <= PHONE_WIDTH, state
+    assert state["table"] <= state["card"] + 1, state
+    assert state["toolbar"] <= state["toolbarBox"] + 1, state
+
+
+def _load_netbox_only_controls(page):
+    html = """<input name="csrfmiddlewaretoken" value="test-token">
+      <input type="checkbox" id="select-all-netbox-interfaces">
+      <div id="netbox-only-interfaces-rows">
+        <input type="checkbox" class="netbox-interface-checkbox" value="7">
+      </div>
+      <button id="confirm-delete-interfaces">Delete</button>"""
+    page.route(
+        "https://plugin.example.com/dcim/devices/1/librenms-sync/",
+        lambda route: route.fulfill(body=html, content_type="text/html"),
+    )
+    page.goto("https://plugin.example.com/dcim/devices/1/librenms-sync/")
+    _add_page_scripts(page)
+    page.evaluate("initializeScripts()")
+
+
+def test_netbox_only_delete_sends_one_request_after_reinitialization(page):
+    requests = []
+    page.route(
+        "**/delete-netbox-interfaces/",
+        lambda route: (requests.append(route.request), route.fulfill(json={"status": "success"}))[-1],
+    )
+    _load_netbox_only_controls(page)
+    page.route(
+        "**/netbox-only-rows/",
+        lambda route: route.fulfill(
+            body='<input type="checkbox" class="netbox-interface-checkbox" value="7">',
+            content_type="text/html",
+        ),
+    )
+    page.evaluate("""async () => {
+      await htmxTest.ajax('GET', '/netbox-only-rows/', {target: '#netbox-only-interfaces-rows'});
+    }""")
+    page.locator(".netbox-interface-checkbox").check()
+
+    page.locator("#confirm-delete-interfaces").click()
+    page.wait_for_load_state("networkidle")
+
+    assert len(requests) == 1
+    assert requests[0].method == "POST"
+    assert 'name="interface_ids"\r\n\r\n7' in requests[0].post_data
+
+
+def test_netbox_only_select_all_uses_only_the_current_rows_after_reinitialization(page):
+    _load_netbox_only_controls(page)
+    page.evaluate("""() => {
+      window.oldNetboxCheckbox = document.querySelector('.netbox-interface-checkbox');
+      document.getElementById('netbox-only-interfaces-rows').innerHTML =
+        '<input type="checkbox" class="netbox-interface-checkbox" value="8">';
+      initializeScripts();
+    }""")
+
+    page.locator("#select-all-netbox-interfaces").check()
+
+    assert page.locator(".netbox-interface-checkbox").is_checked()
+    assert page.evaluate("oldNetboxCheckbox.checked") is False
+
+
+DEVICE_SYNC_PAGE_URL = "https://plugin.example.com/dcim/devices/1/librenms-sync/"
+
+
+def _vrf_table(row_id):
+    return f"""<table id="librenms-ipaddress-table"><tbody><tr data-interface="{row_id}" data-name="fe80::1/64">
+      <td data-col="selection"><input type="checkbox" name="select" value="{row_id}"></td>
+      <td data-col="vrf"><select class="form-select vrf-select" data-ip="fe80::1" data-prefix="64"
+          data-row-id="{row_id}" name="vrf_{row_id}"><option value="" selected>Global</option>
+          <option value="2">blue</option></select></td>
+      <td data-col="status">rendered</td></tr></tbody></table>"""
+
+
+def _vlan_table(row_id):
+    return f"""<table id="librenms-vlan-table"><tbody><tr>
+      <td data-col="selection"><input type="checkbox" name="select" value="{row_id}"></td>
+      <td data-col="vlan_id"><span>501</span></td><td data-col="name"><span>Users</span></td>
+      <td data-col="vlan_group_selection"><select class="vlan-sync-group-select" name="vlan_group_{row_id}"
+          data-vlan-id="501" data-vlan-name="Users"><option value="" selected>Global</option>
+          <option value="2">Group B</option></select></td>
+      <td data-col="status">Not in NetBox</td></tr></tbody></table>"""
+
+
+@pytest.mark.parametrize(
+    ("table_of", "table_id", "select_name", "verify_route"),
+    [
+        (_vrf_table, "librenms-ipaddress-table", "vrf_row-1", "**/plugins/librenms_plugin/verify-ipaddress/"),
+        (_vlan_table, "librenms-vlan-table", "vlan_group_row-1", "**/plugins/librenms_plugin/verify-vlan-sync-group/"),
+    ],
+    ids=["vrf", "vlan-group"],
+)
+@pytest.mark.parametrize(
+    "answer",
+    [
+        (500, {"status": "error"}),
+        (200, {"status": "success", "formatted_row": {"status": "Create", "selectable": True}, "status_html": "x"}),
+    ],
+    ids=["failure", "success"],
+)
+def test_a_late_verify_answer_for_a_swapped_out_row_leaves_the_cleared_selection_alone(
+    page, table_of, table_id, select_name, verify_route, answer
+):
+    """The user pages away and clears the selection; the answer for the old page must not store its row again."""
+    held = []
+    page.route(verify_route, lambda route: held.append(route))
+    page.route("**/page-2", lambda route: route.fulfill(status=200, content_type="text/html", body=table_of("row-2")))
+    _serve_sync_page(
+        page,
+        '<input type="hidden" name="csrfmiddlewaretoken" value="test-csrf-token">'
+        f'<form><input type="hidden" name="server_key" value="default">{table_of("row-1")}</form>',
+        url=DEVICE_SYNC_PAGE_URL,
+    )
+    page.evaluate("initializeScripts()")
+    stored = f"() => Object.keys(readStoredSelection(document.getElementById('{table_id}')))"
+    page.check('input[value="row-1"]')
+    assert page.evaluate(stored) == ["row-1"]
+
+    page.wait_for_timeout(200)
+    page.select_option(f'select[name="{select_name}"]', "2")
+    for _attempt in range(200):
+        if held:
+            break
+        page.wait_for_timeout(10)
+    assert len(held) == 1
+    page.evaluate(f"() => htmxTest.ajax('GET', '/page-2', {{target: '#{table_id}', swap: 'outerHTML'}})")
+    page.wait_for_selector('input[value="row-2"]')
+    page.evaluate(f"() => writeStoredSelection(document.getElementById('{table_id}'), {{}})")
+    with page.expect_response(verify_route):
+        held[0].fulfill(status=answer[0], content_type="application/json", body=json.dumps(answer[1]))
+    page.evaluate("() => new Promise((resolve) => setTimeout(resolve))")
+
+    assert page.evaluate(stored) == []
+
+
+def test_vlan_modal_warning_icons_are_named_by_their_titles(page):
+    """The missing-VLAN warnings carry their text only in the title, so it is also their accessible name."""
+    vlans = [{"vid": 501, "type": "T", "missing": True}, {"vid": 502, "type": "T", "missing": False, "group_id": ""}]
+    groups = [{"id": "", "name": "Global"}, {"id": 1, "name": "Group A"}]
+    page.set_content(
+        f"""
+        <input name="csrfmiddlewaretoken" value="test-token">
+        <span id="vlanModalInterfaceName"></span>
+        <div id="vlanDetailModal"><table><tbody id="vlanDetailTableBody"></tbody></table></div>
+        <button id="edit" data-interface="Ethernet1" data-row-key="port-1" data-device-id="7"
+                data-vlans='{escape(json.dumps(vlans))}' data-vlan-groups='{escape(json.dumps(groups))}'>Edit</button>
+        """
+    )
+    page.route(
+        "**/plugins/librenms_plugin/verify-vlan-group/",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"status": "success", "css_class": "text-danger", "is_missing": True}),
+        ),
+    )
+    _add_page_scripts(page)
+
+    page.evaluate("openVlanDetailModal(document.getElementById('edit'))")
+    second = page.locator("#vlanDetailTableBody tr").nth(1)
+    second.locator("select").select_option("1")
+    expect(second.locator("i.mdi-alert")).to_have_count(1)
+
+    icons = page.locator("#vlanDetailTableBody i[title]")
+    expect(icons).to_have_count(2)
+    for index in range(2):
+        icon = icons.nth(index)
+        assert icon.get_attribute("role") == "img"
+        assert icon.get_attribute("aria-label") == icon.get_attribute("title")
