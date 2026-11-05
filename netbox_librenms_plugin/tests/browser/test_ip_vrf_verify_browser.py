@@ -159,3 +159,19 @@ def test_a_selected_allowed_vrf_is_verified_before_restoring_an_ignored_row(page
     posted = page.evaluate("[...new FormData(document.getElementById('sync-form'))]")
     assert (["select", "row-1"] in posted) == allowed_on_return
     assert ["vrf_row-1", ALLOWED] in posted
+
+
+def test_a_checkbox_that_a_vrf_verify_enables_takes_part_in_a_shift_click_range(page):
+    page.route(
+        VERIFY_ROUTE, lambda route: route.fulfill(status=200, content_type="application/json", body=_verdict("", True))
+    )
+    _load(page, [_row("row-1", disabled=True), _row("row-2"), _row("row-3")])
+    page.evaluate("initializeScripts()")
+    page.wait_for_selector("select[data-vrf-select-initialized]", state="attached")
+
+    page.select_option("#vrf_select_row-1", ALLOWED)
+    page.wait_for_function("!document.querySelector('input[value=row-1]').disabled")
+    page.click('input[value="row-1"]')
+    page.click('input[value="row-3"]', modifiers=["Shift"])
+
+    assert page.locator('input[value="row-2"]').is_checked()

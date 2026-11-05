@@ -1347,60 +1347,39 @@ function initializeTableCheckboxes(tableId) {
         });
     }
 
-    liveCheckboxes().forEach(checkbox => bindTableCheckboxClick(table, checkbox));
+    // One delegated listener serves every row checkbox, also one that a verify enables or writes later.
+    if (table.dataset.tableClickInitialized !== 'true') {
+        table.dataset.tableClickInitialized = 'true';
+        table.addEventListener('click', function (e) {
+            const checkbox = e.target;
+            if (!(checkbox instanceof HTMLInputElement) || !checkbox.matches('td input[name="select"]')) return;
+            if (checkbox.closest('table') !== table) return;
+            // The shift-range anchor lives on the table, so rows from different swaps share it.
+            const anchor = table._lnmsLastChecked || null;
+            if (e.shiftKey && anchor) {
+                const current = liveCheckboxes();
+                const start = current.indexOf(checkbox);
+                const end = current.indexOf(anchor);
+                // Skip the range when the prior anchor was swapped out (indexOf -1) rather than
+                // slicing a bogus range off the live list.
+                if (start !== -1 && end !== -1) {
+                    // Index the member rows once for the batch: a per-row selector query would be quadratic.
+                    const membersByLag = _membersByLag();
+                    current.slice(Math.min(start, end), Math.max(start, end) + 1).forEach(cb => {
+                        const changed = cb.checked !== anchor.checked;
+                        cb.checked = anchor.checked;
+                        applyRowSelection(cb, membersByLag, changed);
+                    });
+                    commitSelectionChange(table);
+                }
+            }
+            table._lnmsLastChecked = checkbox;
+        });
+    }
 
     // Re-check whatever this table had selected on another page. Runs after the handlers are
     // bound so the requirement cascade sees the restored rows.
     restoreTableSelection(table);
-}
-
-/**
- * Bind the shift-click range handler of one row checkbox, once per element.
- *
- * @param {HTMLTableElement} table - The table that holds the checkbox.
- * @param {HTMLInputElement} checkbox - The row checkbox.
- */
-function bindTableCheckboxClick(table, checkbox) {
-    if (checkbox.dataset.tableClickInitialized === 'true') return;
-    checkbox.dataset.tableClickInitialized = 'true';
-    const liveCheckboxes = () => Array.from(table.querySelectorAll('td input[name="select"]:not(:disabled)'));
-    // Persist the shift-range anchor on the TABLE element, not in a per-call closure. This
-    // initializer re-runs on every htmx:afterSwap: checkboxes bound in an earlier run keep their
-    // handlers (the dataset guard skips re-binding), so a closure-scoped anchor would leave old
-    // rows referencing a stale `lastChecked` while rows added by a later swap use a fresh one —
-    // shift-clicking between the two then uses disconnected anchors and selects nothing. One
-    // anchor on the shared table node keeps every row's handler in sync across swaps.
-    const getAnchor = () => table._lnmsLastChecked || null;
-    const setAnchor = (cb) => {
-        table._lnmsLastChecked = cb;
-    };
-    checkbox.addEventListener('click', function (e) {
-        const anchor = getAnchor();
-        if (!anchor) {
-            setAnchor(checkbox);
-            return;
-        }
-
-        if (e.shiftKey) {
-            const current = liveCheckboxes();
-            const start = current.indexOf(checkbox);
-            const end = current.indexOf(anchor);
-            // Skip the range when the prior anchor was swapped out (indexOf -1) rather than
-            // slicing a bogus range off the live list.
-            if (start !== -1 && end !== -1) {
-                // Index the member rows once for the batch: a per-row selector query would be quadratic.
-                const membersByLag = _membersByLag();
-                current.slice(Math.min(start, end), Math.max(start, end) + 1).forEach(cb => {
-                    const changed = cb.checked !== anchor.checked;
-                    cb.checked = anchor.checked;
-                    applyRowSelection(cb, membersByLag, changed);
-                });
-                commitSelectionChange(table);
-            }
-        }
-
-        setAnchor(checkbox);
-    });
 }
 
 /**
@@ -3414,11 +3393,7 @@ function handleInterfaceChange(select, value) {
                 if (selectionCell && typeof formattedRow.selection !== 'undefined') {
                     const hadCheckbox = Boolean(selectionCell.querySelector('input[name="select"]'));
                     const hasCheckbox = formattedRow.selection.includes('name="select"');
-                    if (hadCheckbox !== hasCheckbox) {
-                        selectionCell.innerHTML = formattedRow.selection;
-                        const checkbox = selectionCell.querySelector('input[name="select"]');
-                        if (checkbox) bindTableCheckboxClick(row.closest('table'), checkbox);
-                    }
+                    if (hadCheckbox !== hasCheckbox) selectionCell.innerHTML = formattedRow.selection;
                 }
                 row.querySelector('td[data-col="name"]').innerHTML = formattedRow.name;
                 row.querySelector('td[data-col="type"]').innerHTML = formattedRow.type;
@@ -3862,10 +3837,7 @@ function handleModuleChange(select, value, options = {}) {
                 const wasChecked = Boolean(selectionCell.querySelector('input[name="select"]:checked'));
                 selectionCell.innerHTML = formattedRow.selection;
                 const checkbox = selectionCell.querySelector('input[name="select"]');
-                if (checkbox) {
-                    checkbox.checked = wasChecked && !checkbox.disabled;
-                    bindTableCheckboxClick(table, checkbox);
-                }
+                if (checkbox) checkbox.checked = wasChecked && !checkbox.disabled;
             }
             const deviceSelCell = row.querySelector('td[data-col="device_selection"]');
             if (deviceSelCell) {
