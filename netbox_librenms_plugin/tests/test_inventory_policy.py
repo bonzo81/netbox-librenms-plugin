@@ -249,3 +249,43 @@ def test_rules_for_a_manufacturer_are_its_own_and_the_unscoped_ones_in_pk_order(
 
     assert policy.rules_for(member.device_type.manufacturer) == [member_rule, global_rule]
     assert policy.rules_for(None) == [global_rule]
+
+
+def _page_leaves(page, other_chassis):
+    from dcim.models import Device
+
+    _update(Device, page.pk, virtual_chassis=None, vc_position=None)
+
+
+def _page_joins(page, other_chassis):
+    from dcim.models import Device
+
+    _update(Device, page.pk, virtual_chassis=other_chassis, vc_position=9)
+
+
+@pytest.mark.parametrize(
+    ("in_chassis", "change"), [(True, _page_leaves), (False, _page_joins)], ids=["leaves", "joins"]
+)
+def test_a_chassis_change_between_the_two_device_reads_refuses_the_load(chassis, in_chassis, change):
+    """The policy reads the page device, then its members; a chassis change between the reads refuses."""
+    from dcim.models import Device, VirtualChassis
+    from django.db import connection
+
+    from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+
+    member_page, _member, _virtual_chassis = chassis
+    page = member_page if in_chassis else make_device_with_module_bays("policy-standalone", ["Slot 1"])
+    other_chassis = VirtualChassis.objects.create(name="policy-other-vc")
+    changed = []
+
+    def change_after_the_page_read(execute, sql, params, many, context):
+        result = execute(sql, params, many, context)
+        if not changed and 'FROM "dcim_device"' in sql:
+            changed.append(sql)
+            change(page, other_chassis)
+        return result
+
+    with connection.execute_wrapper(change_after_the_page_read), pytest.raises(Device.DoesNotExist):
+        load_inventory_policy(page.pk)
+    assert changed

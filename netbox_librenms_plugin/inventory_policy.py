@@ -157,8 +157,9 @@ def load_inventory_policy(page_device_id) -> InventoryPolicy:
         members = tuple(devices.filter(virtual_chassis_id=page.virtual_chassis_id))
     else:
         members = tuple(devices.filter(pk=page.pk))
-    if page.pk not in {member.pk for member in members}:
-        # The page device left its Virtual Chassis between the two reads.
+    page_member = next((member for member in members if member.pk == page.pk), None)
+    if page_member is None or page_member.virtual_chassis_id != page.virtual_chassis_id:
+        # The page device left or joined a Virtual Chassis between the two reads.
         raise Device.DoesNotExist(f"Device {page_device_id} changed while its inventory policy was read")
     inventory_rules = tuple(InventoryIgnoreRule.objects.order_by("pk"))
     serial_rules = tuple(NormalizationRule.objects.filter(scope=_SERIAL_SCOPE).order_by("pk"))
