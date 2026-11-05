@@ -282,12 +282,13 @@ class TestActionRendering:
         ("action", "record"),
         [
             ("install", {"can_install": True, "module_bay_id": 5, "module_type_id": 10}),
-            ("update-serial", {"can_update_serial": True, "installed_module_id": 99}),
+            ("update-serial", {"can_update_serial": True, "installed_module_id": 99, "module_bay_id": 7}),
             (
                 "update-interface",
                 {
                     "can_update_interface_binding": True,
                     "installed_module_id": 99,
+                    "module_bay_id": 7,
                     "librenms_port_id": 4501,
                 },
             ),
@@ -307,6 +308,7 @@ class TestActionRendering:
             "can_update_serial": True,
             "can_update_interface_binding": True,
             "installed_module_id": 42,
+            "module_bay_id": 7,
             "ent_physical_index": "77",
             "librenms_port_id": 56_284,
             "serial": "NEW-SERIAL",
@@ -324,7 +326,11 @@ class TestActionRendering:
         ]
         for binding, action in ((serial, "update_module_serial"), (interface, "update_module_interface")):
             grant = _grant(binding, action, device)
-            assert (grant.device_id, grant.ent_index, grant.action_target) == (device.pk, 77, {"module_id": 42})
+            assert (grant.device_id, grant.ent_index, grant.action_target) == (
+                device.pk,
+                77,
+                {"module_id": 42, "module_bay_id": 7},
+            )
             assert grant.inventory_digest == "table-snapshot-digest"
         assert "NEW-SERIAL" not in rendered
         assert 'hx-indicator="closest tr"' in rendered
@@ -350,6 +356,7 @@ class TestActionRendering:
         record = {
             "can_update_serial": True,
             "installed_module_id": 99,
+            "module_bay_id": 7,
             "ent_physical_index": "",
         }
 
@@ -363,6 +370,7 @@ class TestActionRendering:
         record = {
             "can_update_interface_binding": True,
             "installed_module_id": 99,
+            "module_bay_id": 7,
             "librenms_port_id": 4501,
             "ent_physical_index": "",
         }
@@ -376,6 +384,7 @@ class TestActionRendering:
         record = {
             "can_update_interface_binding": True,
             "installed_module_id": 42,
+            "module_bay_id": 7,
             "ent_physical_index": 77,
         }
 
@@ -402,7 +411,7 @@ class TestActionRendering:
 
     def test_replace_requires_add_change_and_delete_permissions(self):
         device = make_device("table-replace")
-        record = {"can_replace": True, "installed_module_id": 55, "ent_physical_index": 200}
+        record = {"can_replace": True, "installed_module_id": 55, "module_bay_id": 7, "ent_physical_index": 200}
 
         for denied in ("can_add_module", "can_change_module", "can_delete_module"):
             assert "replace" not in _actions(str(_table(device, **{denied: False}).render_actions(None, record)))
@@ -410,7 +419,13 @@ class TestActionRendering:
 
     def test_replace_opens_the_preview_through_an_htmx_swap(self):
         device = make_device("table-replace-preview")
-        record = {"can_replace": True, "installed_module_id": 55, "ent_physical_index": 200, "serial": "S1"}
+        record = {
+            "can_replace": True,
+            "installed_module_id": 55,
+            "module_bay_id": 7,
+            "ent_physical_index": 200,
+            "serial": "S1",
+        }
         preview_url = reverse("plugins:netbox_librenms_plugin:module_mismatch_preview", kwargs={"pk": device.pk})
 
         rendered = str(_table(device).render_actions(None, record))
@@ -431,7 +446,7 @@ class TestActionRendering:
         }
         # The preview signs the replace and serial actions only for a row the table rendered.
         preview = _grant(binding, "mismatch_preview", device)
-        assert (preview.ent_index, preview.action_target) == (200, {"module_id": 55})
+        assert (preview.ent_index, preview.action_target) == (200, {"module_id": 55, "module_bay_id": 7})
         assert button["hx-target"] == "#htmx-modal-content"
         assert button["hx-swap"] == "innerHTML"
         # A newer click supersedes an older in-flight preview, as the AbortController did.
@@ -450,12 +465,14 @@ class TestActionRendering:
         "update_serial": {
             "can_update_serial": True,
             "installed_module_id": 42,
+            "module_bay_id": 7,
             "ent_physical_index": 77,
             "serial": "S2",
         },
         "update_interface": {
             "can_update_interface_binding": True,
             "installed_module_id": 42,
+            "module_bay_id": 7,
             "ent_physical_index": 77,
             "librenms_port_id": 56284,
         },
@@ -581,6 +598,7 @@ class TestActionRendering:
                     "interface_type_mismatch_count": 2,
                     "can_replace": True,
                     "installed_module_id": 42,
+                    "module_bay_id": 7,
                     "ent_physical_index": 77,
                 },
             ),

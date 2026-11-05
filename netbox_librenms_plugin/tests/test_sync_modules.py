@@ -303,7 +303,7 @@ class TestInventoryCacheContract:
 
     def test_an_authorized_grant_hands_back_the_cached_row_itself(self, live_librenms):
         """The writer reads the row from the authenticated snapshot it checked the grant against."""
-        from netbox_librenms_plugin.module_grants import ACTION_UPDATE_SERIAL
+        from netbox_librenms_plugin.module_grants import ACTION_UPDATE_SERIAL, installed_module_target
         from netbox_librenms_plugin.views.sync.modules import _authorize_module_grant
 
         device = make_device("resolve-row-hit", librenms_cf={"default": 771})
@@ -314,7 +314,9 @@ class TestInventoryCacheContract:
         token = _rendered_fields(device, "update-module-serial", 77)["inventory_binding"]
 
         granted = _authorize_module_grant(view, device, "default", ACTION_UPDATE_SERIAL, token)
-        row = granted.grant.require(device_id=device.pk, ent_index="77", action_target={"module_id": module.pk})
+        row = granted.grant.require(
+            device_id=device.pk, ent_index="77", action_target=installed_module_target(module.pk, module.module_bay_id)
+        )
         row = granted.row(row.ent_index)
 
         assert row["_librenms_port_id"] == 42
@@ -324,7 +326,12 @@ class TestInventoryCacheContract:
 
     def test_a_grant_posted_without_its_index_is_stale(self, live_librenms):
         """Without the posted index there is no row to read, so the grant does not match the post."""
-        from netbox_librenms_plugin.module_grants import ACTION_UPDATE_SERIAL, GrantRefusal, GrantRefused
+        from netbox_librenms_plugin.module_grants import (
+            ACTION_UPDATE_SERIAL,
+            GrantRefusal,
+            GrantRefused,
+            installed_module_target,
+        )
         from netbox_librenms_plugin.views.sync.modules import _authorize_module_grant
 
         device = make_device("resolve-row-no-index", librenms_cf={"default": 772})
@@ -336,7 +343,11 @@ class TestInventoryCacheContract:
         granted = _authorize_module_grant(view, device, "default", ACTION_UPDATE_SERIAL, token)
 
         with pytest.raises(GrantRefused) as excinfo:
-            granted.grant.require(device_id=device.pk, ent_index="", action_target={"module_id": module.pk})
+            granted.grant.require(
+                device_id=device.pk,
+                ent_index="",
+                action_target=installed_module_target(module.pk, module.module_bay_id),
+            )
 
         assert excinfo.value.refusal is GrantRefusal.STALE
 
@@ -3194,7 +3205,9 @@ def test_replace_action_requires_a_source_inventory_index(index):
     table.inventory_snapshot_digest = "replace-source-snapshot"
     table.policy_fingerprint = "replace-source-policy"
     html = str(
-        table.render_actions(None, {"can_replace": True, "installed_module_id": 55, "ent_physical_index": index})
+        table.render_actions(
+            None, {"can_replace": True, "installed_module_id": 55, "module_bay_id": 7, "ent_physical_index": index}
+        )
     )
     assert ('data-action="replace"' in html) is (index == 200)
 

@@ -16,6 +16,7 @@ from netbox_librenms_plugin.module_grants import (
     ACTION_VERIFY_MODULE,
     RENDER_ATTRIBUTED,
     RENDER_PINNED,
+    installed_module_target,
     sign_module_grant,
 )
 from netbox_librenms_plugin.utils import (
@@ -813,7 +814,9 @@ class LibreNMSModuleTable(tables.Table):
         ):
             url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": self.device.pk})
             inventory_binding = self.grant(
-                ACTION_UPDATE_SERIAL, record, action_target={"module_id": record["installed_module_id"]}
+                ACTION_UPDATE_SERIAL,
+                record,
+                action_target=installed_module_target(record["installed_module_id"], record["module_bay_id"]),
             )
             buttons.append(
                 format_html(
@@ -857,7 +860,9 @@ class LibreNMSModuleTable(tables.Table):
         ):
             url = reverse("plugins:netbox_librenms_plugin:update_module_interface", kwargs={"pk": self.device.pk})
             inventory_binding = self.grant(
-                ACTION_UPDATE_INTERFACE, record, action_target={"module_id": record["installed_module_id"]}
+                ACTION_UPDATE_INTERFACE,
+                record,
+                action_target=installed_module_target(record["installed_module_id"], record["module_bay_id"]),
             )
             buttons.append(
                 format_html(
@@ -945,7 +950,9 @@ class LibreNMSModuleTable(tables.Table):
                     "server_key": self.server_key or "",
                     "selected_device_id": record.get("selected_device_id") or self.device.pk,
                     "inventory_binding": self.grant(
-                        ACTION_MISMATCH_PREVIEW, record, action_target={"module_id": record["installed_module_id"]}
+                        ACTION_MISMATCH_PREVIEW,
+                        record,
+                        action_target=installed_module_target(record["installed_module_id"], record["module_bay_id"]),
                     ),
                 }
             )

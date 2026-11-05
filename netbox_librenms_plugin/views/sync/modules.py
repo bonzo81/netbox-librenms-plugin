@@ -33,6 +33,7 @@ from netbox_librenms_plugin.module_grants import (
     RENDER_PINNED,
     GrantRefusal,
     GrantRefused,
+    installed_module_target,
     read_module_grant,
     sign_module_grant,
 )
@@ -2174,11 +2175,7 @@ class UpdateModuleSerialView(
                 granted = _authorize_module_grant(
                     self, page_device, server_key, ACTION_UPDATE_SERIAL, request.POST.get("inventory_binding")
                 )
-                granted.grant.require(
-                    device_id=target_device.pk,
-                    ent_index=request.POST.get("ent_index", ""),
-                    action_target={"module_id": module_id},
-                )
+                granted.grant.require(device_id=target_device.pk, ent_index=request.POST.get("ent_index", ""))
                 librenms_item = granted.row(granted.grant.ent_index)
                 serial = normalize_inventory_serial(
                     librenms_item.get("entPhysicalSerialNum"),
@@ -2196,6 +2193,7 @@ class UpdateModuleSerialView(
                 )
                 if not module:
                     raise _ModuleActionRefused("Module no longer exists.")
+                granted.grant.require(action_target=installed_module_target(module.pk, module.module_bay_id))
                 changed = module.serial != serial
                 if changed:
                     module.snapshot()
@@ -2267,11 +2265,16 @@ class UpdateModuleInterfaceView(
                 granted = _authorize_module_grant(
                     self, page_device, server_key, ACTION_UPDATE_INTERFACE, request.POST.get("inventory_binding")
                 )
-                granted.grant.require(
-                    device_id=target_device.pk,
-                    ent_index=request.POST.get("ent_index", ""),
-                    action_target={"module_id": module_id},
+                granted.grant.require(device_id=target_device.pk, ent_index=request.POST.get("ent_index", ""))
+                # Lock the module row, so it stays in the bay that the row matched while the bind runs.
+                module_bay_id = (
+                    self.restricted_queryset(Module, "view")
+                    .select_for_update(of=("self",))
+                    .filter(pk=module.pk)
+                    .values_list("module_bay_id", flat=True)
+                    .first()
                 )
+                granted.grant.require(action_target=installed_module_target(module.pk, module_bay_id))
                 bind_item = granted.row(granted.grant.ent_index)
                 bind_result, adoption_failed = self._bind_and_adopt(
                     target_device, module, bind_item, server_key, changeable_interfaces
@@ -2630,9 +2633,8 @@ def _serial_digest(serial):
 def _replace_target(module, replacement_type):
     """Return what a replace grant signs: the module, type, bay and serial the preview showed, and the type it resolved."""
     target = {
-        "module_id": module.pk,
+        **installed_module_target(module.pk, module.module_bay_id),
         "module_type_id": module.module_type_id,
-        "module_bay_id": module.module_bay_id,
         "module_serial_digest": _serial_digest(module.serial),
     }
     if replacement_type is not None:
@@ -2683,7 +2685,7 @@ class ModuleMismatchPreviewView(
         )
 
         # The preview signs the replace and serial actions, so it needs the table's own grant for this row.
-        action_target = {"module_id": installed_module.pk}
+        action_target = installed_module_target(installed_module.pk, installed_module.module_bay_id)
         try:
             granted = _authorize_module_grant(
                 self, page_device, server_key, ACTION_MISMATCH_PREVIEW, request.GET.get("inventory_binding")

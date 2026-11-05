@@ -504,6 +504,7 @@ class TestUpdateModuleSerialView:
         from netbox_librenms_plugin.module_grants import (
             ACTION_UPDATE_SERIAL,
             RENDER_ATTRIBUTED,
+            installed_module_target,
             module_inventory_snapshot_digest,
             sign_module_grant,
         )
@@ -526,7 +527,7 @@ class TestUpdateModuleSerialView:
             policy_fingerprint=load_inventory_policy(device.pk).fingerprint,
             render_mode=RENDER_ATTRIBUTED,
             ent_index=11,
-            action_target={"module_id": module.pk},
+            action_target=installed_module_target(module.pk, module.module_bay_id),
         )
         data = {"module_id": module.pk, "ent_index": 11, "server_key": "default", "inventory_binding": grant}
         request = make_request("post", data, user=make_superuser(), path="/modules/")

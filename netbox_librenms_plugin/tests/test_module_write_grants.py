@@ -342,6 +342,40 @@ def test_replace_refuses_a_module_changed_after_its_preview(ui, c8300, change):
     assert written_state(device) == before
 
 
+def _preview_serial_form(client, device, entities):
+    install_module(
+        device, entities[entities[REAL_NIM]["entPhysicalContainedIn"]]["entPhysicalName"], *_nim(entities, "OLD")
+    )
+    preview = client.get(rendered_preview_url(render(client, device), REAL_NIM), HTTP_HX_REQUEST="true")
+    assert preview.status_code == 200, preview.content
+    return rendered_module_form(preview.content.decode(), "update-module-serial", REAL_NIM)
+
+
+MODULE_WRITERS = {"serial": _serial_form, "interface": _interface_form, "preview-serial": _preview_serial_form}
+
+
+@pytest.mark.parametrize("writer", list(MODULE_WRITERS))
+def test_a_module_write_refuses_a_module_moved_to_another_bay_after_render(ui, c8300, writer):
+    """The row matched the module in its bay, so the module in another bay is not the row's module."""
+    from dcim.models import Module, ModuleBay
+
+    from netbox_librenms_plugin.module_grants import GrantRefusal
+
+    device, entities = c8300
+    form = MODULE_WRITERS[writer](ui, device, entities)
+    module = Module.objects.get(device=device, pk=form[1]["module_id"])
+    free_bay = (
+        ModuleBay.objects.filter(device=device, installed_module__isnull=True).exclude(pk=module.module_bay_id).first()
+    )
+    Module.objects.filter(pk=module.pk).update(module_bay=free_bay)
+    before = written_state(device)
+
+    response = post(ui, *form)
+
+    assert GrantRefusal.STALE.message in messages_of(response)
+    assert written_state(device) == before
+
+
 def test_a_selected_install_naming_a_hidden_row_refuses_every_row(ui, c8300):
     device, entities = c8300
     action, fields = _selected_form(ui, device, entities)

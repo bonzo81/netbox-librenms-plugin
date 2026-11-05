@@ -158,6 +158,11 @@ class ModuleGrant:
         return self
 
 
+def installed_module_target(module_id, module_bay_id) -> dict:
+    """Return the action target of a write to an installed module: the module and the bay the row matched."""
+    return {"module_id": module_id, "module_bay_id": module_bay_id}
+
+
 def _canonical_target(action_target) -> dict:
     return {key: coerce_positive_int(value) for key, value in sorted((action_target or {}).items())}
 
