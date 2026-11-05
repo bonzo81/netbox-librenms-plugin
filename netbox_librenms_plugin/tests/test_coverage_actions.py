@@ -1418,7 +1418,7 @@ class TestDeviceImportHelperMixin:
     @staticmethod
     def _view(settings, server, server_key):
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.views.imports.actions import DeviceRoleUpdateView
+        from netbox_librenms_plugin.views.imports.actions import DeviceImportPlanUpdateView
 
         configure_test_servers(
             settings,
@@ -1430,7 +1430,7 @@ class TestDeviceImportHelperMixin:
                 }
             },
         )
-        view = DeviceRoleUpdateView()
+        view = DeviceImportPlanUpdateView()
         view._librenms_api = LibreNMSAPI(server_key=server_key)
         return view
 
@@ -1465,11 +1465,11 @@ class TestDeviceImportHelperMixin:
 
     def test_post_commit_refresh_fallback_renders_real_messages(self):
         from django.contrib import messages
-        from netbox_librenms_plugin.views.imports.actions import DeviceRoleUpdateView
+        from netbox_librenms_plugin.views.imports.actions import DeviceImportPlanUpdateView
 
         request = make_view_request("post")
 
-        response = DeviceRoleUpdateView().post_commit_refresh_fallback(
+        response = DeviceImportPlanUpdateView().post_commit_refresh_fallback(
             request,
             "closeModal",
             deferred_messages=[(messages.INFO, "OOB attached")],
@@ -1593,6 +1593,34 @@ class TestDeviceValidationDetailsView:
         assert response.content.count(existing.serial.encode()) >= 2
         assert b"mdi-check-circle" in response.content
 
+    def test_a_viewer_who_cannot_view_platforms_sees_no_platform_name(self):
+        from dcim.models import Platform
+
+        from netbox_librenms_plugin.models import LibreNMSSettings, PlatformMapping
+        from netbox_librenms_plugin.platform_versions import HIDDEN_PLATFORM
+        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
+
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"platform_version_tracking": True})
+        os_platform = Platform.objects.create(name="Secret Junos", slug="secret-junos")
+        PlatformMapping.objects.create(librenms_os="junos", netbox_platform=os_platform)
+        Platform.objects.create(name="Secret Junos 21.2R1", slug="secret-junos-elsewhere")
+        self.primary_server.device_info_response(
+            device_id=1, hostname="details-hidden", os="junos", version="21.2R1", serial="-", ip="198.18.0.9"
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+        request = make_view_request(
+            "get",
+            {"server_key": "default"},
+            user=make_view_user("details-platform-blind", []),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = get_view(DeviceValidationDetailsView(), request, device_id=1)
+
+        assert response.status_code == 200
+        assert b"Secret" not in response.content
+        assert HIDDEN_PLATFORM.encode() in response.content
+
     def test_get_rebinds_to_request_server_key(self):
         view, response = self._get("secondary")
 
@@ -1624,7 +1652,7 @@ class TestBuildSyncInfo:
         libre_device = {"serial": "SN001", "os": "-", "hardware": "-"}
         existing = make_device("sync-info-serial-match", serial="SN001")
 
-        result = build_sync_info(libre_device, existing)
+        result = build_sync_info(libre_device, existing, None)
 
         assert result["serial_synced"] is True
 
@@ -1633,7 +1661,7 @@ class TestBuildSyncInfo:
         libre_device = {"serial": "SN_LIBRENMS", "os": "-", "hardware": "-"}
         existing = make_device("sync-info-serial-mismatch", serial="SN_NETBOX")
 
-        result = build_sync_info(libre_device, existing)
+        result = build_sync_info(libre_device, existing, None)
         assert result["serial_synced"] is False
 
     def test_padded_incoming_serial_counts_as_synced(self):
@@ -1642,7 +1670,7 @@ class TestBuildSyncInfo:
         libre_device = {"serial": " SN001 ", "os": "-", "hardware": "-"}
         existing = make_device("sync-info-padded-incoming", serial="SN001")
 
-        result = build_sync_info(libre_device, existing)
+        result = build_sync_info(libre_device, existing, None)
 
         assert result["serial_synced"] is True
 
@@ -1652,7 +1680,7 @@ class TestBuildSyncInfo:
         existing = make_device("sync-info-padded-serial", serial=" SN-STORED-1 ")
         libre_device = {"serial": "SN-STORED-1", "os": "-", "hardware": "-"}
 
-        result = build_sync_info(libre_device, existing)
+        result = build_sync_info(libre_device, existing, None)
 
         assert result["serial_synced"] is True, "padded stored serial reported as drift"
         assert result["all_synced"] is True
@@ -1667,17 +1695,17 @@ class TestBuildSyncInfo:
         existing.save(update_fields=["platform"])
         libre_device = {"serial": "-", "os": platform.name, "hardware": "-"}
 
-        result = build_sync_info(libre_device, existing)
+        result = build_sync_info(libre_device, existing, None)
 
         assert result["platform_synced"] is True
-        assert result["platform_info"]["matching_platform"] == platform
+        assert result["platform_info"]["assessment"].target == platform
 
     def test_device_type_synced_when_matched(self):
         build_sync_info = self._get_method()
         existing = make_device("sync-info-type-match")
         libre_device = {"serial": "-", "os": "-", "hardware": existing.device_type.model}
 
-        result = build_sync_info(libre_device, existing)
+        result = build_sync_info(libre_device, existing, None)
 
         assert result["device_type_synced"] is True
         assert result["librenms_device_type"] == existing.device_type
@@ -1694,7 +1722,7 @@ class TestBuildSyncInfo:
         )
         libre_device = {"serial": "-", "os": "-", "hardware": librenms_type.model}
 
-        result = build_sync_info(libre_device, existing)
+        result = build_sync_info(libre_device, existing, None)
 
         assert result["device_type_synced"] is False
         assert result["librenms_device_type"] == librenms_type
@@ -1706,6 +1734,7 @@ class TestBuildSyncInfo:
         result = build_sync_info(
             {"serial": "-", "os": "-", "hardware": "-"},
             existing,
+            None,
         )
 
         assert result["platform_synced"] is True
@@ -1818,10 +1847,8 @@ class TestBuildIdServerInfo:
 
 
 @pytest.mark.django_db
-class TestRowUpdateViews:
-    """Exercise role, cluster, and rack row updates through real server rebinding."""
-
-    VIEWS = ["DeviceRoleUpdateView", "DeviceClusterUpdateView", "DeviceRackUpdateView"]
+class TestImportPlanUpdateView:
+    """Exercise the import-row refresh through real server rebinding."""
 
     @pytest.fixture
     def librenms_server(self, monkeypatch):
@@ -1831,10 +1858,10 @@ class TestRowUpdateViews:
             yield server
 
     @staticmethod
-    def _view(view_name):
-        from netbox_librenms_plugin.views.imports import actions
+    def _view():
+        from netbox_librenms_plugin.views.imports.actions import DeviceImportPlanUpdateView
 
-        return getattr(actions, view_name)()
+        return DeviceImportPlanUpdateView()
 
     @staticmethod
     def _configure(settings, server, server_key):
@@ -1849,22 +1876,20 @@ class TestRowUpdateViews:
             },
         )
 
-    @pytest.mark.parametrize("view_name", VIEWS)
-    def test_stale_server_key_fails_closed_without_http(self, settings, librenms_server, view_name):
+    def test_stale_server_key_fails_closed_without_http(self, settings, librenms_server):
         self._configure(settings, librenms_server, "row-active")
         request = make_view_request("post", {"server_key": "ghost"})
 
-        result = post_view(self._view(view_name), request, device_id=42)
+        result = post_view(self._view(), request, device_id=42)
 
         assert result.headers.get("HX-Reswap") == "none"
         assert b"no longer configured" in result.content
         assert librenms_server.requests == []
 
-    @pytest.mark.parametrize("view_name", VIEWS)
-    def test_rebinds_before_real_missing_device_lookup(self, settings, librenms_server, view_name):
-        server_key = f"row-{view_name.lower()}"
+    def test_rebinds_before_real_missing_device_lookup(self, settings, librenms_server):
+        server_key = "row-plan-update"
         self._configure(settings, librenms_server, server_key)
-        view = self._view(view_name)
+        view = self._view()
         request = make_view_request("post", {"server_key": server_key})
 
         result = post_view(view, request, device_id=42)
@@ -1876,7 +1901,6 @@ class TestRowUpdateViews:
         assert [(item["method"], item["path"]) for item in librenms_server.requests] == [("GET", "/api/v0/devices/42")]
 
 
-@pytest.mark.django_db
 @pytest.mark.django_db
 class TestDeviceConflictActionView:
     """DeviceConflictActionView.post — input guards + real-DB lookup paths."""
@@ -3847,6 +3871,44 @@ class TestDeviceConflictActionBranches:
         self._assert_success(response)
         assert Device.objects.get(pk=target.pk).platform_id == platform.pk
 
+    @pytest.mark.parametrize("may_add_platforms", [True, False], ids=["add-platform", "no-add-platform"])
+    def test_sync_platform_follows_platform_version_tracking(self, may_add_platforms):
+        from dcim.models import Device, Platform
+
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"platform_version_tracking": True})
+        view = self._make_view()
+        target = make_device(f"branches-sync-version-{may_add_platforms}")
+        os_platform = Platform.objects.create(name="branches-version-os", slug="branches-version-os")
+        Device.objects.filter(pk=target.pk).update(platform=os_platform)
+        self.librenms_server.device_info_response(
+            device_id=42,
+            hostname=target.name,
+            hardware="Branches unmatched chassis",
+            os=os_platform.name,
+            version="9.9",
+            serial="",
+            ip="",
+        )
+        self.librenms_server.vc_inventory_callable(42, [], {})
+        perms = [("change", Device)] + ([("add", Platform)] if may_add_platforms else [])
+        request = self._request("sync_platform", target, f"branches-sync-version-user-{may_add_platforms}", perms)
+
+        response = post_view(view, request, device_id=42)
+
+        target.refresh_from_db()
+        if may_add_platforms:
+            self._assert_success(response)
+            assert (target.platform.name, target.platform.parent) == ("branches-version-os 9.9", os_platform)
+        else:
+            self._assert_htmx_error(
+                response,
+                "You do not have permission to add platforms, so a new version platform for version '9.9' "
+                "cannot be created.",
+            )
+            assert target.platform == os_platform
+
     def test_sync_platform_reports_when_no_platform_matches(self):
         from dcim.models import Device
 
@@ -3868,7 +3930,7 @@ class TestDeviceConflictActionBranches:
 
         self._assert_htmx_error(
             response,
-            f"Platform '{librenms_os}' not found in NetBox",
+            f"No NetBox platform matches LibreNMS OS '{librenms_os}'.",
         )
         assert Device.objects.get(pk=target.pk).platform_id is None
 
@@ -3887,7 +3949,7 @@ class TestDeviceConflictActionBranches:
             slug="branches-sync-platform-ambiguous-upper",
         )
         # Platform names are unique case-sensitively. Both real rows therefore exist, while
-        # find_matching_platform uses name__iexact and reports the pair as ambiguous.
+        # the OS platform rule matches names case-insensitively and reports the pair as ambiguous.
         self._register_device(
             42,
             target.name,
@@ -3903,8 +3965,27 @@ class TestDeviceConflictActionBranches:
 
         self._assert_htmx_error(
             response,
-            f"Multiple Platforms match OS '{librenms_os}' — resolve the conflict in Platforms",
+            f"Multiple platforms match '{librenms_os}'. Resolve the ambiguity with a Platform Mapping.",
         )
+        assert Device.objects.get(pk=target.pk).platform_id is None
+
+    def test_sync_platform_reports_a_refused_assignment_like_the_sync_page(self):
+        from dcim.models import Device, Manufacturer, Platform
+
+        view = self._make_view()
+        target = make_device("branches-sync-platform-refused-target")
+        other = Manufacturer.objects.create(name="Branches other vendor", slug="branches-other-vendor")
+        platform = Platform.objects.create(
+            name="branches-sync-platform-refused-os", slug="branches-sync-platform-refused-os", manufacturer=other
+        )
+        self._register_device(42, target.name, os=platform.name)
+        request = self._request(
+            "sync_platform", target, "branches-sync-platform-refused-user", [("change", Device), ("view", Platform)]
+        )
+
+        response = post_view(view, request, device_id=42)
+
+        self._assert_htmx_error(response, f"Failed to assign platform '{platform.name}' to the device: ")
         assert Device.objects.get(pk=target.pk).platform_id is None
 
     def test_sync_device_type_sets_the_matching_real_type_then_renders_the_row(self):
@@ -4629,7 +4710,7 @@ class TestCreatePlatformAssignmentIndependence:
         self.librenms_server.vc_inventory_callable(device_id, [], {})
         return device
 
-    def _post(self, device, platform_name, manufacturer_id):
+    def _post(self, device, platform_name, manufacturer_id, **extra):
         from netbox_librenms_plugin.views.imports.actions import CreatePlatformFromImportView
 
         request = make_view_request(
@@ -4637,8 +4718,10 @@ class TestCreatePlatformAssignmentIndependence:
             {
                 "server_key": self.server_key,
                 "platform_name": platform_name,
+                "librenms_os": "test-os",
                 "manufacturer": str(manufacturer_id),
                 "device_pk": str(device.pk),
+                **extra,
             },
             user=make_superuser(),
             HTTP_HX_REQUEST="true",
@@ -4646,8 +4729,10 @@ class TestCreatePlatformAssignmentIndependence:
         with change_logging(request):
             return post_view(CreatePlatformFromImportView(), request, device_id=42)
 
-    def test_platform_persists_and_error_is_surfaced_when_legacy_target_is_invalid(self):
-        """A failed optional assignment keeps the platform and returns an error instead of a success swap."""
+    def test_an_invalid_legacy_target_rolls_back_the_platform_and_reports_the_refusal(self):
+        """A refused assignment rolls the new platform back with it and returns an error instead of a success swap."""
+        from html import unescape
+
         from dcim.models import Device, Platform
 
         target = self._mapped_device("platform-legacy-target")
@@ -4656,10 +4741,10 @@ class TestCreatePlatformAssignmentIndependence:
 
         response = self._post(target, "Legacy Target OS", manufacturer.pk)
 
-        assert Platform.objects.filter(name="Legacy Target OS").exists()
+        assert not Platform.objects.filter(name="Legacy Target OS").exists()
         target.refresh_from_db()
         assert target.platform is None
-        assert b"could not be assigned" in response.content
+        assert "assign platform 'Legacy Target OS' to the device" in unescape(response.content.decode())
         assert b"htmx-modal-content" not in response.content
 
     def test_invalid_manufacturer_id_is_rejected(self):
@@ -4672,19 +4757,6 @@ class TestCreatePlatformAssignmentIndependence:
 
         assert b"Selected manufacturer not found" in response.content
         assert not Platform.objects.filter(name="Missing Manufacturer OS").exists()
-
-    def test_device_platform_manufacturer_mismatch_is_surfaced_and_platform_is_kept(self):
-        from dcim.models import Manufacturer, Platform
-
-        target = self._mapped_device("platform-manufacturer-mismatch-target")
-        other_manufacturer = Manufacturer.objects.create(name="Other Platform Manufacturer", slug="other-platform-mfr")
-
-        response = self._post(target, "Mismatch OS", other_manufacturer.pk)
-
-        assert Platform.objects.filter(name="Mismatch OS", manufacturer=other_manufacturer).exists()
-        target.refresh_from_db()
-        assert target.platform is None
-        assert b"could not be assigned" in response.content
 
     def test_device_platform_manufacturer_match_assigns_and_renders_updates(self):
         from dcim.models import Platform
@@ -4700,6 +4772,31 @@ class TestCreatePlatformAssignmentIndependence:
         assert response.status_code == 200
         assert b' id="htmx-modal-content"' in response.content
         assert b"hx-swap-oob" in response.content
+
+    def test_tracking_also_creates_the_version_platform_and_assigns_it(self):
+        from dcim.models import Platform
+
+        from netbox_librenms_plugin.models import LibreNMSSettings
+
+        LibreNMSSettings.objects.update_or_create(pk=1, defaults={"platform_version_tracking": True})
+        target = self._mapped_device("platform-tracked-target")
+        self.librenms_server.device_info_response(
+            device_id=42,
+            hostname=target.name,
+            hardware=target.device_type.model,
+            os="test-os",
+            serial=target.serial,
+            ip="198.18.0.42",
+            version="17.3.1",
+        )
+
+        self._post(target, "Tracked OS", target.device_type.manufacturer_id, librenms_version="17.3.1")
+
+        os_platform = Platform.objects.get(name="Tracked OS")
+        target.refresh_from_db()
+        assert target.platform.name == "Tracked OS 17.3.1"
+        assert target.platform.parent == os_platform
+        assert target.platform.manufacturer == os_platform.manufacturer
 
     def test_the_assignment_change_record_keeps_the_previous_platform(self, client):
         from core.models import ObjectChange
@@ -4733,6 +4830,7 @@ class TestCreatePlatformAssignmentIndependence:
             {
                 "server_key": self.server_key,
                 "platform_name": platform_name,
+                "librenms_os": "test-os",
                 "manufacturer": str(device.device_type.manufacturer_id),
                 "device_pk": str(device.pk),
             },
@@ -4741,28 +4839,27 @@ class TestCreatePlatformAssignmentIndependence:
 
     @transactional_db_with_all_apps()
     def test_a_lock_conflict_on_the_assignment_retries_and_assigns_the_platform(self, client):
-        """The conflict rolls back the platform with the assignment, so the second attempt creates it again."""
+        """The first attempt meets the subject's row lock; the second attempt creates the platform and assigns it."""
         from dcim.models import Device, Platform
-        from django.db.models.signals import pre_save
+        from django.db import connection
 
         target = self._mapped_device("platform-lock-retry-target")
-        attempts = []
+        locks = []
         with second_connection() as other:
             lock_row(other, Device, target.pk)
 
-            def count_attempt(sender, instance, **kwargs):
-                attempts.append(instance.name)
-                if len(attempts) == 2:
-                    other.rollback()
+            def release_before_the_second_lock(execute, sql, params, many, context):
+                is_lock = sql.startswith("SELECT") and '"dcim_device"' in sql and "FOR UPDATE" in sql
+                if is_lock and params and target.pk in params:
+                    locks.append(sql)
+                    if len(locks) == 2:
+                        other.rollback()
+                return execute(sql, params, many, context)
 
-            pre_save.connect(count_attempt, sender=Platform, weak=False)
-            try:
-                with lock_timeout(200):
-                    response = self._client_post(client, target, "Retried OS")
-            finally:
-                pre_save.disconnect(count_attempt, sender=Platform)
+            with connection.execute_wrapper(release_before_the_second_lock), lock_timeout(200):
+                response = self._client_post(client, target, "Retried OS")
 
-        assert attempts == ["Retried OS", "Retried OS"]
+        assert len(locks) == 2
         platform = Platform.objects.get(name="Retried OS")
         target.refresh_from_db()
         assert target.platform_id == platform.pk

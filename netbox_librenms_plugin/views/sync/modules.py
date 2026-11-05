@@ -1,9 +1,11 @@
 """Sync action views for module/inventory installation from LibreNMS."""
 
 import copy
+import hashlib
 import json
 import logging
 import re
+from dataclasses import dataclass
 from urllib.parse import quote_plus, urlsplit
 
 from django.contrib import messages
@@ -13,11 +15,30 @@ from django.db import IntegrityError, models, transaction
 from django.http import HttpResponse, QueryDict
 from django.shortcuts import redirect, render
 from django.urls import reverse
+from django.utils.html import escape
 from django.views import View
 from utilities.exceptions import AbortRequest
 
 from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE, is_librenms_placeholder
 from netbox_librenms_plugin.interface_diff import type_change_refusal
+from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+from netbox_librenms_plugin.module_grants import (
+    ACTION_INSTALL_BRANCH,
+    ACTION_INSTALL_MODULE,
+    ACTION_INSTALL_SELECTED,
+    ACTION_INSTALL_SELECTED_ROW,
+    ACTION_MARK_BUILT_IN,
+    ACTION_MISMATCH_PREVIEW,
+    ACTION_REPLACE_MODULE,
+    ACTION_UPDATE_INTERFACE,
+    ACTION_UPDATE_SERIAL,
+    RENDER_PINNED,
+    GrantRefusal,
+    GrantRefused,
+    installed_module_target,
+    read_module_grant,
+    sign_module_grant,
+)
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
     assign_own,
@@ -34,20 +55,16 @@ from netbox_librenms_plugin.sync_cache import (
     module_inventory_oob_matches,
     schedule_request_cache_mutation,
 )
-from netbox_librenms_plugin.transactions import classify_conflict, update_existing_row
+from netbox_librenms_plugin.transactions import classify_conflict, saved_in_scope, update_existing_row
 from netbox_librenms_plugin.utils import (
     REGEX_COMPILE_ERRORS,
     acquire_advisory_transaction_lock,
-    get_module_template_interface_names,
+    get_module_adoptable_interface_names,
     get_module_template_interface_specs,
     get_module_types_indexed,
     get_vc_member_positions,
     load_module_type_bay_types,
     is_vc_position,
-    module_inventory_binding_matches,
-    module_inventory_binding_token,
-    module_inventory_row_digest,
-    module_inventory_snapshot_digest,
     module_type_bay_type_ids,
     netbox_relocates_module_subtree,
     normalize_inventory_serial,
@@ -59,16 +76,14 @@ from netbox_librenms_plugin.utils import (
 from netbox_librenms_plugin.utils import coerce_positive_int as _coerce_positive_int
 from netbox_librenms_plugin.views.base.modules_view import (
     BaseModuleTableView,
+    DeviceIdentity,
     _get_item_port_identity,
     _inventory_item_key,
-    _has_skipped_ancestor,
     _is_holder,
-    _own_ignore_action,
     _normalize_librenms_text,
+    built_in_candidate,
+    reusable_built_in_rule,
     select_module_interface,
-    NO_DEVICE_IDENTITY,
-    DeviceIdentity,
-    _check_ignore_rules,
 )
 from netbox_librenms_plugin.views.mixins import (
     CacheMixin,
@@ -84,7 +99,8 @@ logger = logging.getLogger(__name__)
 # Every module action below scopes its cache reads and its LibreNMS id writes by server key.
 MODULE_MOVE_REQUIRES_NETBOX_MESSAGE = "Moving a module needs NetBox 4.7 or later. Earlier releases move only the module itself and leave its interfaces, its module bays and any modules installed in them on the original device."
 NO_LIBRENMS_SERVER_MESSAGE = (
-    "No LibreNMS server is configured. Add a server to the plugin configuration before syncing modules."
+    "The selected LibreNMS server is not configured. Reload the page, or add the server to the plugin "
+    "configuration before syncing modules."
 )
 
 # OOB-controller rows are merged into the cached snapshot for display only, and every entry point
@@ -92,14 +108,10 @@ NO_LIBRENMS_SERVER_MESSAGE = (
 # constants.py; only the wording of the refusal belongs to this module.
 OOB_INVENTORY_READ_ONLY_REASON = "OOB controller inventory is read-only"
 
-# Fixed text: the Modules tab names the rule, and the exception detail goes to the log only.
-INVALID_INVENTORY_RULE_MESSAGE = (
-    "An enabled Inventory Rule stores an invalid filter regex, so nothing was installed. "
-    "Fix or disable the rule that the Modules tab names."
-)
-IGNORED_INVENTORY_ROW_MESSAGE = (
-    "An enabled Inventory Rule now hides this inventory row, so nothing was installed. "
-    "Refresh Modules to see the current table."
+# A selected install runs every selected row or none of them.
+SELECTED_ROWS_REFUSED_MESSAGE = (
+    "Nothing was installed: the Modules table does not offer {rows} for install on the chosen member. "
+    "Refresh Modules and try again."
 )
 
 
@@ -172,12 +184,6 @@ def _modules_action_response(request, page_device, server_key=None):
     return apply_request_cache_transition(request, response)
 
 
-def _modules_cache_missing_response(request, page_device, server_key):
-    """Report the missing inventory snapshot, then answer with the module tab."""
-    messages.error(request, "No cached inventory data. Please refresh modules first.")
-    return _modules_action_response(request, page_device, server_key)
-
-
 def _schedule_module_cache_mutation(request, page_device, server_key):
     """Publish one module-tab transition after a committed module action."""
     schedule_request_cache_mutation(request, page_device, SyncTab.MODULES, server_key)
@@ -194,16 +200,22 @@ def _module_bind_result_changed(bind_result):
 
 def _lock_page_device_serials(page_device):
     """
-    Serialise serial checks for one sync page, before any row lock is taken.
+    Serialise the serial checks of every device that a sync page can write, before any row lock is taken.
 
     Must be the FIRST lock in the transaction. A bulk install holds one transaction across its
     whole loop, so acquiring this after a bay lock lets a bulk run holding the advisory lock wait
     on a bay a single install holds, while that install waits on the advisory lock.
 
-    One key per page device, so a transaction never acquires a second key of this kind and the
-    incremental-acquisition ordering problem cannot arise.
+    A page writes to its device or to a member of its Virtual Chassis, so every page of one chassis
+    takes the one key of that chassis. A transaction then never acquires a second key of this kind,
+    and the incremental-acquisition ordering problem cannot arise.
     """
-    acquire_advisory_transaction_lock(f"netbox-librenms-plugin:module-serial:{page_device.pk}")
+    if page_device.virtual_chassis_id:
+        acquire_advisory_transaction_lock(
+            f"netbox-librenms-plugin:module-serial-chassis:{page_device.virtual_chassis_id}"
+        )
+    else:
+        acquire_advisory_transaction_lock(f"netbox-librenms-plugin:module-serial:{page_device.pk}")
 
 
 def _module_holder_map(device):
@@ -306,34 +318,92 @@ def _report_install_results(request, installed, skipped, failed):
         messages.warning(request, f"Failed {len(failed)}: {'; '.join(failed)}")
 
 
-def _resolve_target_device_with_validation(page_device, selected_device_id, devices):
-    """Resolve a target device and indicate whether selection input was invalid."""
-    if not selected_device_id:
-        return page_device, False
+def _resolve_destination(page_device, selected_device_id, devices):
+    """
+    Return the posted target: the page device, or a member of its Virtual Chassis in *devices*.
 
-    try:
-        selected_device_id = int(selected_device_id)
-    except (TypeError, ValueError):
-        return page_device, True
+    Every module view refuses an invalid target instead of falling back to the page device.
 
-    if selected_device_id == getattr(page_device, "pk", None):
-        return page_device, False
+    Args:
+        page_device (Device): The device whose Modules page posted the action.
+        selected_device_id (str | None): The posted target; blank means the page device.
+        devices (QuerySet): The devices the user may view.
 
-    if not getattr(page_device, "virtual_chassis", None):
-        return page_device, True
+    Returns:
+        Device | None: The target, or None when the posted value names no valid target.
 
-    member = devices.filter(pk=selected_device_id, virtual_chassis=page_device.virtual_chassis).first()
-    if member is None:
-        return page_device, True
-    return member, False
-
-
-def _warn_invalid_selected_device(request):
-    """Warn the user that selected device input was invalid and fallback was applied."""
-    messages.warning(
-        request,
-        "Invalid selected device context detected; falling back to the page device for this operation.",
+    """
+    if selected_device_id in (None, ""):
+        return page_device
+    device_id = _coerce_positive_int(selected_device_id)
+    if device_id is None:
+        return None
+    if device_id == page_device.pk:
+        return page_device
+    if not page_device.virtual_chassis_id:
+        return None
+    return (
+        devices.filter(pk=device_id, virtual_chassis_id=page_device.virtual_chassis_id)
+        .select_related("device_type__manufacturer")
+        .first()
     )
+
+
+@dataclass(frozen=True)
+class _GrantedInventory:
+    """An authenticated grant with the snapshot and the policy it was checked against."""
+
+    grant: object
+    inventory: list
+    index_map: dict
+    policy: object
+
+    def row(self, index):
+        """Return the cached main-inventory row of a granted index."""
+        item = self.index_map.get(index)
+        if item is None:
+            raise GrantRefused(GrantRefusal.STALE)
+        if refusal := _never_installable_reason(item):
+            raise _ModuleActionRefused(f"Nothing was changed: {refusal}.")
+        return item
+
+
+def _authorize_module_grant(view, page_device, server_key, action, token):
+    """
+    Return the posted grant of *action* with the current snapshot and policy, or raise GrantRefused.
+
+    A writer calls it inside its write transaction, after the page lock where it takes one, and
+    before any write. A change committed after this read is not detected.
+
+    Args:
+        view (View): The writer, for its cache key.
+        page_device (Device): The device whose Modules page posted the action.
+        server_key (str): The posted LibreNMS server.
+        action (str): The action the grant must name.
+        token (str | None): The posted grant.
+
+    Returns:
+        _GrantedInventory: The grant, the cached snapshot, its index map and the policy.
+
+    """
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.models import RuleConfigurationError
+
+    sync_device = _get_sync_device_for_inventory(page_device, server_key)
+    inventory = _get_cached_inventory_for_device(sync_device, server_key, view.get_cache_key)
+    if inventory is None:
+        raise GrantRefused(GrantRefusal.CACHE_MISSING)
+    try:
+        policy = load_inventory_policy(page_device.pk)
+    except Device.DoesNotExist as exc:
+        raise GrantRefused(GrantRefusal.DESTINATION) from exc
+    except RuleConfigurationError as exc:
+        logger.error("Module action %s on %s refused: %s", action, page_device, exc)
+        raise GrantRefused(GrantRefusal.RULE_ERROR) from exc
+    grant = read_module_grant(token, action=action, page_device_id=page_device.pk, server_key=server_key)
+    grant.check_state(inventory, policy)
+    return _GrantedInventory(grant, inventory, _inventory_index_map(inventory), policy)
 
 
 class _SerialConflictAmbiguous(Exception):
@@ -512,7 +582,7 @@ def _save_module_with_scoped_component_adoption(module, component_querysets):
 
 def _adopt_existing_template_interfaces(device, module, interfaces):
     """Adopt existing standalone interfaces into an already-installed module by template name."""
-    template_names = get_module_template_interface_names(device, module)
+    template_names = get_module_adoptable_interface_names(device, module).names
     if not template_names:
         return {
             "status": "skipped",
@@ -760,6 +830,14 @@ def _select_bind_candidate(device, item, module_pk, server_key, interfaces, port
     return candidate, None
 
 
+def _module_may_own_interface(device, module_pk, name):
+    """Return whether the bind may move the interface named *name* into the module."""
+    from dcim.models import Module
+
+    module = Module.objects.select_related("module_type").get(pk=module_pk)
+    return get_module_adoptable_interface_names(device, module).may_move(name)
+
+
 # Its own savepoint: callers catch a non-conflict error and keep their transaction.
 @transaction.atomic
 def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces):
@@ -821,7 +899,7 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
                 "status": "conflict",
                 "reason": (f"{candidate.name} already attached to module {candidate_module_id}; not reassigning"),
             }
-        set_module = not candidate_module_id
+        set_module = not candidate_module_id and _module_may_own_interface(device, module_pk, candidate.name)
 
     current_port_id = _coerce_positive_int(read_mapping(candidate).own_id(server_key))
     if current_port_id and current_port_id != port_id:
@@ -847,63 +925,6 @@ def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces)
     else:
         save(candidate)
     return {"status": "bound", "interface": candidate.name, "port_id": port_id, "changed": True}
-
-
-def _resolve_posted_inventory_row(
-    request,
-    page_device,
-    target_device,
-    server_key,
-    get_cache_key,
-    *,
-    action,
-    action_target,
-):
-    """Resolve one posted inventory action to its current cached row and the authenticated inventory it is in."""
-    ent_index = _coerce_positive_int(request.POST.get("ent_index"))
-    if ent_index is None:
-        messages.error(request, "Missing or invalid inventory index.")
-        return None, None, _modules_action_response(request, page_device, server_key)
-    sync_device = _get_sync_device_for_inventory(target_device, server_key)
-    cached_data = _get_cached_inventory_for_device(sync_device, server_key, get_cache_key)
-    if cached_data is None:
-        return None, None, _modules_cache_missing_response(request, page_device, server_key)
-    librenms_item = next(
-        (item for item in cached_data if _coerce_positive_int(item.get("entPhysicalIndex")) == ent_index),
-        None,
-    )
-    if librenms_item is None:
-        messages.error(request, "Inventory item not found in cache.")
-        return None, None, _modules_action_response(request, page_device, server_key)
-    if librenms_item.get("_source") == OOB_INVENTORY_SOURCE:
-        messages.error(request, OOB_INVENTORY_READ_ONLY_REASON)
-        return None, None, _modules_action_response(request, page_device, server_key)
-    if not module_inventory_binding_matches(
-        request.POST.get("inventory_binding"),
-        target_device.pk,
-        server_key,
-        action,
-        action_target,
-        ent_index,
-        module_inventory_row_digest(librenms_item),
-    ):
-        messages.error(
-            request,
-            "Inventory action is stale or does not match this row. Refresh Modules and try again.",
-        )
-        return None, None, _modules_action_response(request, page_device, server_key)
-    return librenms_item, cached_data, None
-
-
-def _current_device_serials(devices):
-    """Return the stored serial of each already-resolved device; the page lock must already be held."""
-    from dcim.models import Device
-
-    ids = {device.pk for device in devices}
-    serials = dict(Device.objects.filter(pk__in=ids).values_list("pk", "serial"))
-    if serials.keys() != ids:
-        raise ValidationError("A selected device is no longer available. Refresh Modules and try again.")
-    return serials
 
 
 def _inventory_index_map(inventory):
@@ -940,74 +961,14 @@ def _record_bind_outcome(bind_result, result, skipped):
     return _module_bind_result_changed(bind_result)
 
 
-def _selected_row_is_ignored(item, index_map, ignore_rules, target_device, ancestor_action):
-    """
-    Return whether an ignore rule hides a selected row from install.
-
-    The row's own action uses the target device's rules: skip or transparent hides it. Each
-    ancestor's action uses that ancestor's own attributed policy: skip hides the row.
-
-    Args:
-        item (dict): The selected inventory row.
-        index_map (dict): Inventory items keyed by physical index.
-        ignore_rules (list): The target device's ignore rules.
-        target_device (Device): The device the row installs onto.
-        ancestor_action (Callable[[dict], str | None]): The ignore action of one ancestor.
-
-    Returns:
-        bool: True if the row must not install.
-
-    """
-    if ignore_rules:
-        own_action = _check_ignore_rules(
-            item,
-            index_map.get(item.get("entPhysicalContainedIn")),
-            ignore_rules,
-            index_map,
-            DeviceIdentity.of(target_device),
-        )
-        if own_action in {"skip", "transparent"}:
-            return True
-    return _has_skipped_ancestor(item, index_map, ancestor_action)
-
-
-def _locked_ancestor_action(page_device, inventory, index_map, get_enabled_ignore_rules):
-    """
-    Return the ancestor ignore action of a selected install, built from device data read under the page lock.
-
-    Attribution and device identities come from the current device serials, the same state the
-    selected rows' own checks read after the lock.
-
-    Args:
-        page_device (Device): The page device; the page lock must already be held.
-        inventory (list[dict]): The cached inventory rows.
-        index_map (dict): Inventory items keyed by physical index.
-        get_enabled_ignore_rules (Callable): Loads the enabled ignore rules for a manufacturer.
-
-    Returns:
-        Callable[[dict], str | None]: The ignore action of one ancestor under its own attributed policy.
-
-    """
-    from dcim.models import Device
-
-    current_page = Device.objects.select_related("device_type__manufacturer").filter(pk=page_device.pk).first()
-    if current_page is None:
-        raise ValidationError("A selected device is no longer available. Refresh Modules and try again.")
-    vc_members = (
-        list(current_page.virtual_chassis.members.select_related("device_type__manufacturer"))
-        if current_page.virtual_chassis_id
-        else []
-    )
-    default_context, ignore_contexts = BaseModuleTableView._build_inventory_ignore_contexts(
-        current_page, inventory, vc_members, get_enabled_ignore_rules
-    )
-
-    def ancestor_action(ancestor):
-        return _own_ignore_action(
-            ancestor, index_map, ignore_contexts, default_context["ignore_rules"], default_context["device_identity"]
-        )
-
-    return ancestor_action
+def _inventory_depth(index_map, index):
+    """Return how many ancestors the row *index* has in *index_map*; a containment loop ends the walk."""
+    seen = {index}
+    parent = index_map.get(index, {}).get("entPhysicalContainedIn")
+    while parent in index_map and parent not in seen:
+        seen.add(parent)
+        parent = index_map[parent].get("entPhysicalContainedIn")
+    return len(seen) - 1
 
 
 def _never_installable_reason(item):
@@ -1031,8 +992,17 @@ def _never_installable_reason(item):
     return None
 
 
-class _ModuleInstallRefused(Exception):
-    """Leave the install transaction before rendering a reported refusal."""
+class _ModuleActionRefused(Exception):
+    """Leave a module write transaction before any write, with the text the page shows."""
+
+    def __init__(self, message, level=messages.ERROR):
+        self.message = message
+        self.level = level
+        super().__init__(message)
+
+    def report(self, request):
+        """Queue the refusal text on *request*."""
+        messages.add_message(request, self.level, self.message)
 
 
 class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -1056,13 +1026,6 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             return error
 
         page_device = self.restrict_object_or_404(Device, pk=pk)
-        target_device, invalid_selected_device = _resolve_target_device_with_validation(
-            page_device,
-            request.POST.get("selected_device_id"),
-            self.restricted_queryset(Device),
-        )
-        if invalid_selected_device:
-            _warn_invalid_selected_device(request)
         changeable_components = _restricted_module_component_querysets(self)
         changeable_interfaces = changeable_components[Interface]
         deletable_interfaces = self.restricted_queryset(Interface, "delete")
@@ -1070,6 +1033,12 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         if server_key is None:
             messages.error(request, NO_LIBRENMS_SERVER_MESSAGE)
             return _modules_action_response(request, page_device)
+        target_device = _resolve_destination(
+            page_device, request.POST.get("selected_device_id"), self.restricted_queryset(Device)
+        )
+        if target_device is None:
+            messages.error(request, GrantRefusal.DESTINATION.message)
+            return _modules_action_response(request, page_device, server_key)
 
         try:
             module_bay_id = int(request.POST.get("module_bay_id"))
@@ -1078,57 +1047,35 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             messages.error(request, "Missing or invalid module bay/module type ID.")
             return _modules_action_response(request, page_device, server_key)
 
-        # Resolve all inventory metadata from the signed cached row. Carrier installs do not have
-        # an inventory row of their own, so they intentionally omit ent_index.
-        from netbox_librenms_plugin.models import InventoryRuleFilterError
-        from netbox_librenms_plugin.utils import get_enabled_ignore_rules
-
-        bind_item = None
-        serial = ""
-        if request.POST.get("ent_index"):
-            bind_item, inventory, refusal = _resolve_posted_inventory_row(
-                request,
-                page_device,
-                target_device,
-                server_key,
-                self.get_cache_key,
-                action="install_module",
-                action_target={"module_bay_id": module_bay_id, "module_type_id": module_type_id},
-            )
-            if refusal:
-                return refusal
-            if reason := _never_installable_reason(bind_item):
-                messages.error(request, f"Nothing was installed: {reason}.")
-                return _modules_action_response(request, page_device, server_key)
-            manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
-            try:
-                ignore_rules = get_enabled_ignore_rules(manufacturer)
-            except InventoryRuleFilterError as exc:
-                logger.error("Single install on %s refused: %s", page_device, exc)
-                messages.error(request, INVALID_INVENTORY_RULE_MESSAGE)
-                return _modules_action_response(request, page_device, server_key)
-            index_map = _inventory_index_map(inventory)
-            serial = normalize_inventory_serial(bind_item.get("entPhysicalSerialNum"), manufacturer=manufacturer)
-            if is_librenms_placeholder(serial):
-                serial = ""
-
         self.restrict_object_or_404(
             ModuleBay, pk=module_bay_id, device=target_device
         )  # verify bay belongs to selected device
         module_type = self.restrict_object_or_404(ModuleType, pk=module_type_id)
+        # Carrier installs have no inventory row of their own, so they omit ent_index and need no grant.
+        indexed = bool(request.POST.get("ent_index"))
 
         try:
             with transaction.atomic():
                 _lock_page_device_serials(page_device)
-                if bind_item is not None:
-                    # The selected install's check, on the same inputs: rules read before the lock, serials after it.
-                    target_device.serial = _current_device_serials([target_device])[target_device.pk]
-                    ancestor_action = _locked_ancestor_action(
-                        page_device, inventory, index_map, get_enabled_ignore_rules
+                bind_item = None
+                serial = ""
+                if indexed:
+                    granted = _authorize_module_grant(
+                        self, page_device, server_key, ACTION_INSTALL_MODULE, request.POST.get("inventory_binding")
                     )
-                    if _selected_row_is_ignored(bind_item, index_map, ignore_rules, target_device, ancestor_action):
-                        messages.error(request, IGNORED_INVENTORY_ROW_MESSAGE)
-                        raise _ModuleInstallRefused
+                    granted.grant.require(
+                        device_id=target_device.pk,
+                        ent_index=request.POST.get("ent_index"),
+                        action_target={"module_bay_id": module_bay_id, "module_type_id": module_type_id},
+                    )
+                    bind_item = granted.row(granted.grant.ent_index)
+                    serial = normalize_inventory_serial(
+                        bind_item.get("entPhysicalSerialNum"),
+                        manufacturer=target_device.device_type.manufacturer,
+                        preloaded_rules=granted.policy.serial_rule_sets,
+                    )
+                    if is_librenms_placeholder(serial):
+                        serial = ""
                 # Re-fetch bay under lock to prevent TOCTOU race with concurrent installs.
                 locked_bay = (
                     self.restricted_queryset(ModuleBay)
@@ -1137,19 +1084,17 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     .first()
                 )
                 if not locked_bay:
-                    messages.error(request, "Module bay no longer exists.")
-                    raise _ModuleInstallRefused
+                    raise _ModuleActionRefused("Module bay no longer exists.")
                 if hasattr(locked_bay, "installed_module") and locked_bay.installed_module:
-                    messages.warning(request, f"Module bay '{locked_bay.name}' already has a module installed.")
-                    raise _ModuleInstallRefused
+                    raise _ModuleActionRefused(
+                        f"Module bay '{locked_bay.name}' already has a module installed.", messages.WARNING
+                    )
                 if _module_already_on_device(target_device, serial):
                     # The bay is deliberately not named: the conflicting module may be outside
                     # this operator's scope, and its existence is what blocks the install.
-                    messages.error(
-                        request,
-                        f"Serial '{serial}' is already installed on this device. Nothing was installed.",
+                    raise _ModuleActionRefused(
+                        f"Serial '{serial}' is already installed on this device. Nothing was installed."
                     )
-                    raise _ModuleInstallRefused
                 module = Module(
                     device=target_device,
                     module_bay=locked_bay,
@@ -1210,12 +1155,10 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     f"{bind_result.get('reason', 'unknown reason')}",
                 )
             _schedule_module_cache_mutation(request, page_device, server_key)
-        except _ModuleInstallRefused:
-            pass
-        except InventoryRuleFilterError as exc:
-            # The page and member rules are read under the page lock, so an edit after the first read lands here.
-            logger.error("Single install on %s refused: %s", page_device, exc)
-            messages.error(request, INVALID_INVENTORY_RULE_MESSAGE)
+        except GrantRefused as exc:
+            messages.error(request, exc.refusal.message)
+        except _ModuleActionRefused as exc:
+            exc.report(request)
         except _ModuleComponentAdoptionUnavailable as exc:
             messages.error(request, f"A matching {exc.component_label} is not available for module adoption.")
         except (AbortRequest, ValidationError, IntegrityError) as e:
@@ -1282,75 +1225,38 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         _lock_page_device_serials(page_device)
         # The advisory lock does not refresh model instances loaded before its wait.
         page_device = self.restrict_object_or_404(Device, pk=page_device.pk)
-        target_device, invalid_selected_device = _resolve_target_device_with_validation(
-            page_device, request.POST.get("selected_device_id"), self.restricted_queryset(Device)
-        )
-        if invalid_selected_device:
-            messages.error(request, "Inventory destination changed. Refresh Modules and try again.")
-            return
-
-        # Read and authenticate the snapshot through the current inventory owner.
-        sync_device = _get_sync_device_for_inventory(target_device, server_key)
-        cached_data = _get_cached_inventory_for_device(sync_device, server_key, self.get_cache_key)
-        if cached_data is None:
-            messages.error(request, "No cached inventory data. Please refresh modules first.")
-            return
-        if not module_inventory_binding_matches(
-            request.POST.get("inventory_binding"),
-            target_device.pk,
-            server_key,
-            "install_branch",
-            {"parent_index": parent_index},
-            parent_index,
-            module_inventory_snapshot_digest(cached_data),
-        ):
-            messages.error(
-                request,
-                "Inventory action is stale or does not match this snapshot. Refresh Modules and try again.",
-            )
-            return
-
-        # Load ignore rules so the branch respects the same filters shown in the table
-        from netbox_librenms_plugin.models import InventoryRuleFilterError
-        from netbox_librenms_plugin.utils import get_enabled_ignore_rules
-
-        index_map = _inventory_index_map(cached_data)
-        vc_members = (
-            list(page_device.virtual_chassis.members.select_related("device_type__manufacturer"))
-            if page_device.virtual_chassis_id
-            else []
-        )
         try:
-            default_context, ignore_contexts = BaseModuleTableView._build_inventory_ignore_contexts(
-                page_device, cached_data, vc_members, get_enabled_ignore_rules
+            granted = _authorize_module_grant(
+                self, page_device, server_key, ACTION_INSTALL_BRANCH, request.POST.get("inventory_binding")
             )
-        except InventoryRuleFilterError as exc:
-            logger.error("Branch install on %s refused: %s", page_device, exc)
-            messages.error(request, INVALID_INVENTORY_RULE_MESSAGE)
+            grant = granted.grant.require(
+                device_id=request.POST.get("selected_device_id", ""),
+                ent_index=parent_index,
+                action_target={"parent_index": parent_index},
+            )
+            # The table signed the branch it rendered; the writer runs exactly that list, in that order.
+            entries = [(granted.row(index), target_id) for index, target_id in grant.rows]
+        except GrantRefused as exc:
+            messages.error(request, exc.refusal.message)
             return
-        root = index_map.get(parent_index)
-        if root is not None and ignore_contexts[_inventory_item_key(root)]["selected_device"].pk != target_device.pk:
-            messages.error(request, "Inventory destination changed. Refresh Modules and try again.")
+        except _ModuleActionRefused as exc:
+            exc.report(request)
             return
-        branch_items = self._collect_branch(
-            parent_index,
-            cached_data,
-            default_context["ignore_rules"],
-            default_context["device_identity"],
-            index_map,
-            ignore_contexts=ignore_contexts,
-        )
-        destination_ids = {ignore_contexts[_inventory_item_key(item)]["selected_device"].pk for item in branch_items}
-        permitted_ids = set(
-            self.restricted_queryset(Device).filter(pk__in=destination_ids).values_list("pk", flat=True)
-        )
-        if destination_ids != permitted_ids:
+        if not entries:
+            messages.warning(request, "No installable items found in this branch.")
+            return
+        targets = {
+            device.pk: device
+            for device in self.restricted_queryset(Device)
+            .filter(pk__in={target_id for _item, target_id in entries})
+            .select_related("device_type__manufacturer")
+        }
+        if len(targets) != len({target_id for _item, target_id in entries}):
             messages.error(request, "An inventory destination is unavailable. Refresh Modules and try again.")
             return
 
-        if not branch_items:
-            messages.warning(request, "No installable items found in this branch.")
-            return
+        # The parent-module walk keeps a row's whole attributed subtree, hidden holders too.
+        member_index_maps = self._ancestry_maps(granted, set(targets))
 
         # Load module types (with mappings)
         module_types = get_module_types_indexed()
@@ -1362,27 +1268,14 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         from netbox_librenms_plugin.utils import load_bay_mappings
 
         exact_mappings, regex_mappings = load_bay_mappings()
-        member_index_maps = {
-            device_id: {
-                idx: item
-                for idx, item in index_map.items()
-                if ignore_contexts[_inventory_item_key(item)]["selected_device"].pk == device_id
-            }
-            for device_id in destination_ids
-        }
-        manufacturer_contexts = self._build_manufacturer_contexts(
-            branch_items, ignore_contexts, exact_mappings, regex_mappings
-        )
+        manufacturer_contexts = self._build_manufacturer_contexts(targets.values(), exact_mappings, regex_mappings)
 
         # Preload module_bay normalization rules once so _match_bay_for_item considers the
-        # same normalized candidate names as the table/UI matcher. The serial scope is
-        # preloaded the same way because every item normalizes its inventory serial.
+        # same normalized candidate names as the table/UI matcher.
         from netbox_librenms_plugin.utils import preload_normalization_rules
 
         norm_rules_bay = preload_normalization_rules("module_bay")
         type_bay_types = load_module_type_bay_types()
-        for context in manufacturer_contexts.values():
-            context["serial_rules"] = preload_normalization_rules("serial", context["manufacturer"])
 
         # Install top-down: each install may create new child bays
         installed = []
@@ -1393,8 +1286,8 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         try:
             with transaction.atomic():
                 holder_of_by_device = {}
-                for item in branch_items:
-                    target_device = ignore_contexts[_inventory_item_key(item)]["selected_device"]
+                for item, target_id in entries:
+                    target_device = targets[target_id]
                     if target_device.pk not in holder_of_by_device:
                         holder_of_by_device[target_device.pk] = _module_holder_map(target_device)
                     holder_of = holder_of_by_device[target_device.pk]
@@ -1403,13 +1296,14 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     result = self._install_single(
                         target_device,
                         item,
-                        member_index_maps[target_device.pk],
                         module_types,
+                        naming_map=granted.index_map,
+                        ancestry_map=member_index_maps[target_device.pk],
                         exact_mappings=policy["exact_mappings"],
                         regex_mappings=policy["regex_mappings"],
                         manufacturer_id=mfr_id,
                         norm_rules_bay=norm_rules_bay,
-                        norm_rules_serial=policy["serial_rules"],
+                        norm_rules_serial=granted.policy.serial_rule_sets,
                         type_bay_types=type_bay_types,
                         module_bays=module_bays,
                         allowed_module_type_ids=allowed_module_type_ids,
@@ -1445,11 +1339,38 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             _schedule_module_cache_mutation(request, page_device, server_key)
 
     @staticmethod
-    def _build_manufacturer_contexts(branch_items, ignore_contexts, exact_mappings, regex_mappings):
+    def _ancestry_maps(granted, target_ids):
+        """
+        Return, per target, the inventory rows its parent-module walk may use: the rows the signed render attributes to it.
+
+        A pinned render attributes every row to its one member; the page render attributes rows as the table did.
+        """
+        policy = granted.policy
+        if granted.grant.render_mode == RENDER_PINNED:
+            return InstallBranchView._attributed_rows(granted, policy.member(granted.grant.device_id), [], target_ids)
+        return InstallBranchView._attributed_rows(granted, policy.page_device, policy.vc_members, target_ids)
+
+    @staticmethod
+    def _attributed_rows(granted, owner, vc_members, target_ids):
+        """Return, per target, the inventory rows that the render of *owner* over *vc_members* attributes to it."""
+        _default, contexts = BaseModuleTableView._build_inventory_ignore_contexts(
+            owner, granted.inventory, vc_members, granted.policy
+        )
+        return {
+            device_id: {
+                idx: item
+                for idx, item in granted.index_map.items()
+                if contexts[_inventory_item_key(item)]["selected_device"].pk == device_id
+            }
+            for device_id in target_ids
+        }
+
+    @staticmethod
+    def _build_manufacturer_contexts(target_devices, exact_mappings, regex_mappings):
         """Share one bay-mapping policy for each destination manufacturer."""
         manufacturer_contexts = {}
-        for item in branch_items:
-            manufacturer = ignore_contexts[_inventory_item_key(item)]["manufacturer"]
+        for device in target_devices:
+            manufacturer = device.device_type.manufacturer
             if manufacturer.pk not in manufacturer_contexts:
                 manufacturer_contexts[manufacturer.pk] = {
                     "exact_mappings": BaseModuleTableView._filter_mappings_by_manufacturer(
@@ -1462,160 +1383,14 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 }
         return manufacturer_contexts
 
-    def _collect_branch(
-        self,
-        parent_index,
-        inventory_data,
-        ignore_rules=None,
-        device_identity=NO_DEVICE_IDENTITY,
-        index_map=None,
-        *,
-        ignore_contexts=None,
-    ):
-        """
-        Collect all items in a branch depth-first, parent first.
-
-        Returns items in install order (parent before children).
-        Optionally filters items matching 'skip' ignore rules; 'transparent' items
-        are excluded from installation but their children are still collected.
-
-        Args:
-            parent_index (int): The inventory index at the branch root.
-            inventory_data (list[dict]): The LibreNMS inventory items.
-            ignore_rules (list[dict] | None): The optional inventory ignore rules.
-            device_identity (DeviceIdentity): The device identity used to evaluate ignore rules.
-            index_map (dict | None): The inventory items keyed by index.
-            ignore_contexts (dict | None): The owner and ignore policy for each inventory item.
-
-        Returns:
-            list[dict]: The collected items in parent-first install order.
-
-        """
-        items = []
-        parent = next((i for i in inventory_data if i.get("entPhysicalIndex") == parent_index), None)
-        if parent and _has_skipped_ancestor(
-            parent,
-            index_map or {},
-            lambda ancestor: _own_ignore_action(ancestor, index_map, ignore_contexts, ignore_rules, device_identity),
-        ):
-            return []
-        if parent:
-            item_rules, item_identity = BaseModuleTableView._ignore_policy_for_item(
-                parent, ignore_contexts, ignore_rules, device_identity
-            )
-            if item_rules:
-                ancestor = index_map.get(parent.get("entPhysicalContainedIn")) if index_map else None
-                action = _check_ignore_rules(parent, ancestor, item_rules, index_map, item_identity)
-                if action == "skip":
-                    return []
-                if action == "transparent":
-                    self._collect_children(
-                        parent_index,
-                        inventory_data,
-                        items,
-                        visited={parent_index},
-                        ignore_rules=ignore_rules,
-                        device_identity=device_identity,
-                        index_map=index_map,
-                        ignore_contexts=ignore_contexts,
-                    )
-                    return items
-            if not _is_holder(parent):
-                items.append(parent)
-            self._collect_children(
-                parent_index,
-                inventory_data,
-                items,
-                visited={parent_index},
-                ignore_rules=ignore_rules,
-                device_identity=device_identity,
-                index_map=index_map,
-                ignore_contexts=ignore_contexts,
-            )
-        return items
-
-    def _collect_children(
-        self,
-        parent_idx,
-        inventory_data,
-        items,
-        visited=None,
-        ignore_rules=None,
-        device_identity=NO_DEVICE_IDENTITY,
-        index_map=None,
-        *,
-        ignore_contexts=None,
-    ):
-        """
-        Recursively collect children that are hardware, not holders, depth-first.
-
-        When ignore_rules are provided, items matching a 'skip' rule (and their
-        subtree) are excluded.  Items matching 'transparent' are not installed but
-        their children are still collected at the same depth.
-
-        Args:
-            parent_idx (int): The inventory index whose children are collected.
-            inventory_data (list[dict]): The LibreNMS inventory items.
-            items (list[dict]): The output list that receives installable children.
-            visited (set[int] | None): The inventory indexes already visited.
-            ignore_rules (list[dict] | None): The optional inventory ignore rules.
-            device_identity (DeviceIdentity): The device identity used to evaluate ignore rules.
-            index_map (dict | None): The inventory items keyed by index.
-            ignore_contexts (dict | None): The owner and ignore policy for each inventory item.
-
-        """
-        if visited is None:
-            visited = set()
-        children = [i for i in inventory_data if i.get("entPhysicalContainedIn") == parent_idx]
-        for child in children:
-            child_idx = child.get("entPhysicalIndex")
-            if child_idx is None:
-                continue
-            if child_idx in visited:
-                continue
-            visited.add(child_idx)
-            item_rules, item_identity = BaseModuleTableView._ignore_policy_for_item(
-                child, ignore_contexts, ignore_rules, device_identity
-            )
-            if item_rules:
-                parent_item = index_map.get(child.get("entPhysicalContainedIn")) if index_map else None
-                action = _check_ignore_rules(child, parent_item, item_rules, index_map, item_identity)
-                if action == "skip":
-                    continue
-                if action == "transparent":
-                    # Don't install this item but still collect its children
-                    self._collect_children(
-                        child_idx,
-                        inventory_data,
-                        items,
-                        visited,
-                        ignore_rules,
-                        device_identity,
-                        index_map,
-                        ignore_contexts=ignore_contexts,
-                    )
-                    continue
-            if not _is_holder(child):
-                items.append(child)
-            # Always recurse to find deeper items below holders
-            self._collect_children(
-                child_idx,
-                inventory_data,
-                items,
-                visited,
-                ignore_rules,
-                device_identity,
-                index_map,
-                ignore_contexts=ignore_contexts,
-            )
-
     @staticmethod
     def _install_single(
         device,
         item,
-        index_map,
         module_types,
         *,
+        naming_map,
+        ancestry_map,
         module_bays,
         allowed_module_type_ids,
         changeable_components,
@@ -1639,8 +1414,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         Args:
             device (Device): The NetBox device that receives the module.
             item (dict): The LibreNMS inventory item to install.
-            index_map (dict): The inventory items keyed by index.
             module_types (dict): The available module types indexed for matching.
+            naming_map (dict): The rendered inventory items keyed by index, for the bay names.
+            ancestry_map (dict): The items keyed by index that the parent-module walk may use.
             module_bays (QuerySet): The module bays available to the caller.
             allowed_module_type_ids (set[int]): The module type IDs available to the caller.
             changeable_components (dict): The component querysets available for adoption.
@@ -1663,7 +1439,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         from netbox_librenms_plugin.utils import module_type_lookup_candidates, resolve_module_type
 
-        model_name = (item.get("entPhysicalModelName") or "").strip()
+        model_name = normalize_serial(item.get("entPhysicalModelName"))
         # The serial-scope rules strip vendor markers such as Juniper's "S/N ", and the
         # coercion handles the all-digit serials LibreNMS sends as JSON numbers.
         serial = normalize_inventory_serial(
@@ -1706,12 +1482,13 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         matched_bay = InstallBranchView._resolve_bay_for_item(
             device,
             item,
-            index_map,
             bays,
             exact_mappings,
             regex_mappings,
             manufacturer_id,
             norm_rules_bay,
+            naming_map=naming_map,
+            ancestry_map=ancestry_map,
             holder_of=holder_of,
             accepted_bay_types=module_type_bay_type_ids(matched_type, type_bay_types),
         )
@@ -1790,13 +1567,14 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
     def _resolve_bay_for_item(
         device,
         item,
-        index_map,
         bays,
         exact_mappings,
         regex_mappings,
         manufacturer_id,
         norm_rules_bay,
         *,
+        naming_map,
+        ancestry_map,
         holder_of=None,
         accepted_bay_types=frozenset(),
     ):
@@ -1816,12 +1594,13 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         Args:
             device (Device): The device being installed onto.
             item (dict): The LibreNMS inventory item to place.
-            index_map (dict): The inventory items keyed by index.
             bays: The device's module bays, with ``installed_module`` selected.
             exact_mappings (list): The exact module bay mappings.
             regex_mappings (list): The regular expression module bay mappings.
             manufacturer_id (int | None): The device manufacturer ID.
             norm_rules_bay (dict | None): The module bay normalization rules.
+            naming_map (dict): The rendered inventory items keyed by index, for the bay names.
+            ancestry_map (dict): The items keyed by index that the parent-module walk may use.
             holder_of (dict | None): Preloaded module ancestry for a bulk install.
             accepted_bay_types (frozenset): The module bay types the module type fits.
 
@@ -1833,18 +1612,21 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         def match_against(candidate_bays):
             return BaseModuleTableView._match_bay_for_item(
                 item,
-                index_map,
+                naming_map,
                 candidate_bays,
                 exact_mappings=exact_mappings,
                 regex_mappings=regex_mappings,
                 manufacturer_id=manufacturer_id,
                 norm_rules_bay=norm_rules_bay,
+                foreign_indices=foreign_indices,
                 accepted_bay_types=accepted_bay_types,
             )
 
-        # Trace the item's LibreNMS parent hierarchy to an installed module, if any.
+        foreign_indices = naming_map.keys() - ancestry_map.keys()
+
+        # The bay names come from the whole render, as in the table; the module walk stops at a member boundary.
         parent_module_id = InstallBranchView._find_parent_module_id(
-            item, index_map, bays, exact_mappings, regex_mappings, manufacturer_id
+            item, ancestry_map, bays, exact_mappings, regex_mappings, manufacturer_id
         )
         matched = match_against(InstallBranchView._candidate_bays_for_item(bays, parent_module_id))
         if not matched and parent_module_id:
@@ -2136,7 +1918,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
     items with no bay or no type are silently skipped (same behaviour as branch).
     """
 
-    def post(self, request, pk):  # noqa: C901
+    def post(self, request, pk):
         from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
 
         self.required_object_permissions = {
@@ -2175,50 +1957,6 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             messages.error(request, "Invalid selection.")
             return _modules_action_response(request, page_device, server_key)
 
-        sync_device = _get_sync_device_for_inventory(page_device, server_key)
-        cached_data = _get_cached_inventory_for_device(sync_device, server_key, self.get_cache_key)
-        if cached_data is None:
-            return _modules_cache_missing_response(request, page_device, server_key)
-        if not module_inventory_binding_matches(
-            request.POST.get("inventory_binding"),
-            page_device.pk,
-            server_key,
-            "install_selected",
-            {},
-            None,
-            module_inventory_snapshot_digest(cached_data),
-        ):
-            messages.error(
-                request,
-                "Inventory action is stale or does not match this snapshot. Refresh Modules and try again.",
-            )
-            return _modules_action_response(request, page_device, server_key)
-
-        index_map = _inventory_index_map(cached_data)
-        items = [index_map[idx] for idx in selected_list if idx in index_map]
-
-        if not items:
-            messages.warning(request, "None of the selected indices matched cached inventory.")
-            return _modules_action_response(request, page_device, server_key)
-
-        # Ignore rules are evaluated per-row inside the install loop against the *resolved* target
-        # device, since VC rows may switch to a different member via device_selection_<ent_index>.
-        # The rules are manufacturer-scoped and VC members can carry different device types, so
-        # resolve them per target and cache by manufacturer rather than loading the page device's
-        # set once for every row.
-        from netbox_librenms_plugin.models import InventoryRuleFilterError
-        from netbox_librenms_plugin.utils import get_enabled_ignore_rules
-
-        ignore_rules_by_manufacturer = {}
-
-        def _ignore_rules_for(device):
-            """Return the enabled ignore rules that apply to *device*, loading each vendor once."""
-            manufacturer = getattr(getattr(device, "device_type", None), "manufacturer", None)
-            key = getattr(manufacturer, "pk", None)
-            if key not in ignore_rules_by_manufacturer:
-                ignore_rules_by_manufacturer[key] = get_enabled_ignore_rules(manufacturer)
-            return ignore_rules_by_manufacturer[key]
-
         # Preload all ModuleBayMappings once to avoid N+1 per-item queries.
         # Manufacturer-scoping happens per-iteration since target_device may
         # differ across rows (VC members can have different device types).
@@ -2229,41 +1967,11 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         all_exact, all_regex = load_bay_mappings()
 
         # Preload module_bay normalization rules once so _match_bay_for_item considers the
-        # same normalized candidate names as the table/UI matcher. The serial scope is
-        # preloaded the same way because every item normalizes its inventory serial.
+        # same normalized candidate names as the table/UI matcher.
         from netbox_librenms_plugin.utils import preload_normalization_rules
 
         norm_rules_bay = preload_normalization_rules("module_bay")
-        norm_rules_serial = preload_normalization_rules("serial", page_device.device_type.manufacturer)
         type_bay_types = load_module_type_bay_types()
-        if page_device.virtual_chassis_id is not None:
-            members = (
-                self.restricted_queryset(Device)
-                .filter(virtual_chassis_id=page_device.virtual_chassis_id)
-                .select_related("device_type__manufacturer")
-            )
-            for member in members:
-                manufacturer = member.device_type.manufacturer
-                if ("serial", manufacturer.pk) not in norm_rules_serial:
-                    norm_rules_serial.update(preload_normalization_rules("serial", manufacturer))
-
-        resolved_items = []
-        invalid_selection_seen = False
-        devices = self.restricted_queryset(Device)
-        try:
-            for item in items:
-                ent_index = item.get("entPhysicalIndex")
-                target_device, invalid_selected_device = _resolve_target_device_with_validation(
-                    page_device,
-                    request.POST.get(f"device_selection_{ent_index}"),
-                    devices,
-                )
-                invalid_selection_seen |= invalid_selected_device
-                resolved_items.append((item, target_device, _ignore_rules_for(target_device)))
-        except InventoryRuleFilterError as exc:
-            logger.error("Selected install on %s refused: %s", page_device, exc)
-            messages.error(request, INVALID_INVENTORY_RULE_MESSAGE)
-            return _modules_action_response(request, page_device, server_key)
 
         holder_of_by_device = {}
         installed, skipped, failed = [], [], []
@@ -2271,14 +1979,23 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         try:
             with transaction.atomic():
                 _lock_page_device_serials(page_device)
-                current_serials = _current_device_serials(device for _, device, _ in resolved_items)
-                ancestor_action = _locked_ancestor_action(page_device, cached_data, index_map, get_enabled_ignore_rules)
-                for item, target_device, ignore_rules in resolved_items:
-                    target_device.serial = current_serials[target_device.pk]
-                    if _selected_row_is_ignored(item, index_map, ignore_rules, target_device, ancestor_action):
-                        skipped.append(f"{item.get('entPhysicalName', '?')}: matched ignore rule")
-                        continue
-                    mfr_id = getattr(getattr(target_device, "device_type", None), "manufacturer_id", None)
+                granted = _authorize_module_grant(
+                    self, page_device, server_key, ACTION_INSTALL_SELECTED, request.POST.get("inventory_binding")
+                )
+                granted.grant.require(device_id=page_device.pk)
+                plan = self._granted_selection(request, granted, selected_list, page_device, server_key)
+                # A row walks its parent modules in the render that authorized it: the manifest or a pinned override.
+                manifest_maps = InstallBranchView._ancestry_maps(
+                    granted, {target.pk for _item, target, pinned in plan if not pinned}
+                )
+                pinned_maps = {
+                    target_id: InstallBranchView._attributed_rows(
+                        granted, granted.policy.member(target_id), [], {target_id}
+                    )[target_id]
+                    for target_id in {target.pk for _item, target, pinned in plan if pinned}
+                }
+                for item, target_device, pinned in plan:
+                    mfr_id = target_device.device_type.manufacturer_id
                     if target_device.pk not in holder_of_by_device:
                         holder_of_by_device[target_device.pk] = _module_holder_map(target_device)
                     holder_of = holder_of_by_device[target_device.pk]
@@ -2287,13 +2004,14 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     result = InstallBranchView._install_single(
                         target_device,
                         item,
-                        index_map,
                         module_types,
+                        naming_map=granted.index_map,
+                        ancestry_map=(pinned_maps if pinned else manifest_maps)[target_device.pk],
                         exact_mappings=exact_mappings,
                         regex_mappings=regex_mappings,
                         manufacturer_id=mfr_id,
                         norm_rules_bay=norm_rules_bay,
-                        norm_rules_serial=norm_rules_serial,
+                        norm_rules_serial=granted.policy.serial_rule_sets,
                         type_bay_types=type_bay_types,
                         module_bays=module_bays,
                         allowed_module_type_ids=allowed_module_type_ids,
@@ -2315,10 +2033,11 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                             changeable_interfaces,
                         )
                         bound_any = _record_bind_outcome(bind_result, result, skipped) or bound_any
-        except InventoryRuleFilterError as exc:
-            # The rules are read again under the page lock, so an edit after the first read lands here.
-            logger.error("Selected install on %s refused: %s", page_device, exc)
-            messages.error(request, INVALID_INVENTORY_RULE_MESSAGE)
+        except GrantRefused as exc:
+            messages.error(request, exc.refusal.message)
+            return _modules_action_response(request, page_device, server_key)
+        except _ModuleActionRefused as exc:
+            exc.report(request)
             return _modules_action_response(request, page_device, server_key)
         except (AbortRequest, ValidationError, IntegrityError) as e:
             if classify_conflict(e):
@@ -2329,13 +2048,64 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
             messages.error(request, f"Install failed: {detail}")
             return _modules_action_response(request, page_device, server_key)
 
-        if invalid_selection_seen:
-            _warn_invalid_selected_device(request)
-
         _report_install_results(request, installed, skipped, failed)
         if installed or bound_any:
             _schedule_module_cache_mutation(request, page_device, server_key)
         return _modules_action_response(request, page_device, server_key)
+
+    def _granted_selection(self, request, granted, selected_list, page_device, server_key):
+        """
+        Return ``[(row, target device, pinned)]`` for the selected indices, or refuse the whole request.
+
+        A posted override, which a verify request signed for the row and its target, authorizes the
+        row on any target, the manifest target too: the row then shows the verified render. Without an
+        override, the row installs only onto the target the manifest signed and offered for it.
+        ``pinned`` is True when the override, not the manifest, authorized the row.
+        """
+        from dcim.models import Device
+
+        manifest = {index: (target_id, selectable) for index, target_id, selectable in granted.grant.rows}
+        plan, refused = [], []
+        for index in selected_list:
+            entry = manifest.get(index)
+            posted = request.POST.get(f"device_selection_{index}")
+            target_id = entry[0] if entry and posted in (None, "") else _coerce_positive_int(posted)
+            if entry is None or target_id is None:
+                refused.append(index)
+                continue
+            override_token = request.POST.get(f"selection_grant_{index}")
+            pinned = bool(override_token) or not (target_id == entry[0] and entry[1])
+            if pinned:
+                try:
+                    override = read_module_grant(
+                        override_token,
+                        action=ACTION_INSTALL_SELECTED_ROW,
+                        page_device_id=page_device.pk,
+                        server_key=server_key,
+                    )
+                    override.require(device_id=target_id, ent_index=index)
+                    if override.render_mode != RENDER_PINNED:
+                        raise GrantRefused(GrantRefusal.STALE)
+                    override.check_state(granted.inventory, granted.policy)
+                except GrantRefused:
+                    refused.append(index)
+                    continue
+            plan.append((index, target_id, pinned))
+        # A parent install creates the bays of its children, so a row runs after every selected ancestor.
+        plan.sort(key=lambda entry: _inventory_depth(granted.index_map, entry[0]))
+        if refused:
+            names = [str(granted.index_map.get(index, {}).get("entPhysicalName") or index) for index in refused]
+            raise _ModuleActionRefused(SELECTED_ROWS_REFUSED_MESSAGE.format(rows=", ".join(names)))
+        target_ids = {target_id for _index, target_id, _pinned in plan}
+        targets = {
+            device.pk: device
+            for device in self.restricted_queryset(Device)
+            .filter(pk__in=target_ids)
+            .select_related("device_type__manufacturer")
+        }
+        if len(targets) != len(target_ids):
+            raise GrantRefused(GrantRefusal.DESTINATION)
+        return [(granted.row(index), targets[target_id], pinned) for index, target_id, pinned in plan]
 
 
 class UpdateModuleSerialView(
@@ -2359,17 +2129,16 @@ class UpdateModuleSerialView(
             return error
 
         page_device = self.restrict_object_or_404(Device, pk=pk)
-        target_device, invalid_selected_device = _resolve_target_device_with_validation(
-            page_device,
-            request.POST.get("selected_device_id"),
-            self.restricted_queryset(Device),
-        )
-        if invalid_selected_device:
-            _warn_invalid_selected_device(request)
         server_key = self.resolve_posted_server_key_or_none(request.POST)
         if server_key is None:
             messages.error(request, NO_LIBRENMS_SERVER_MESSAGE)
             return _modules_action_response(request, page_device)
+        target_device = _resolve_destination(
+            page_device, request.POST.get("selected_device_id"), self.restricted_queryset(Device)
+        )
+        if target_device is None:
+            messages.error(request, GrantRefusal.DESTINATION.message)
+            return _modules_action_response(request, page_device, server_key)
 
         try:
             module_id = int(request.POST.get("module_id"))
@@ -2377,24 +2146,20 @@ class UpdateModuleSerialView(
             messages.error(request, "Missing or invalid module ID.")
             return _modules_action_response(request, page_device, server_key)
 
-        librenms_item, _inventory, refusal = _resolve_posted_inventory_row(
-            request,
-            page_device,
-            target_device,
-            server_key,
-            self.get_cache_key,
-            action="update_module_serial",
-            action_target={"module_id": module_id},
-        )
-        if refusal:
-            return refusal
-        manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
-        serial = normalize_inventory_serial(librenms_item.get("entPhysicalSerialNum"), manufacturer=manufacturer)
-        if is_librenms_placeholder(serial):
-            serial = ""
-
         try:
             with transaction.atomic():
+                granted = _authorize_module_grant(
+                    self, page_device, server_key, ACTION_UPDATE_SERIAL, request.POST.get("inventory_binding")
+                )
+                granted.grant.require(device_id=target_device.pk, ent_index=request.POST.get("ent_index", ""))
+                librenms_item = granted.row(granted.grant.ent_index)
+                serial = normalize_inventory_serial(
+                    librenms_item.get("entPhysicalSerialNum"),
+                    manufacturer=target_device.device_type.manufacturer,
+                    preloaded_rules=granted.policy.serial_rule_sets,
+                )
+                if is_librenms_placeholder(serial):
+                    serial = ""
                 module = (
                     self.restricted_queryset(Module, "change")
                     .select_for_update(of=("self",))
@@ -2403,8 +2168,8 @@ class UpdateModuleSerialView(
                     .first()
                 )
                 if not module:
-                    messages.error(request, "Module no longer exists.")
-                    return _modules_action_response(request, page_device, server_key)
+                    raise _ModuleActionRefused("Module no longer exists.")
+                granted.grant.require(action_target=installed_module_target(module.pk, module.module_bay_id))
                 changed = module.serial != serial
                 if changed:
                     module.snapshot()
@@ -2420,6 +2185,10 @@ class UpdateModuleSerialView(
                     _schedule_module_cache_mutation(request, page_device, server_key)
             else:
                 messages.info(request, "The module serial already matches LibreNMS. No change was needed.")
+        except GrantRefused as exc:
+            messages.error(request, exc.refusal.message)
+        except _ModuleActionRefused as exc:
+            exc.report(request)
         except (AbortRequest, ValidationError, IntegrityError) as e:
             if classify_conflict(e):
                 raise
@@ -2436,7 +2205,7 @@ class UpdateModuleInterfaceView(
 ):
     """Associate a matching NetBox interface with an already-installed module."""
 
-    def post(self, request, pk):  # noqa: C901
+    def post(self, request, pk):
         from dcim.models import Device, Interface, Module
 
         self.required_object_permissions = {"POST": [("view", Device), ("view", Module), ("change", Interface)]}
@@ -2455,102 +2224,43 @@ class UpdateModuleInterfaceView(
             messages.error(request, "Missing or invalid module ID.")
             return _modules_action_response(request, page_device, server_key)
 
-        target_device, invalid_selected_device = _resolve_target_device_with_validation(
-            page_device,
-            request.POST.get("selected_device_id"),
-            self.restricted_queryset(Device),
+        target_device = _resolve_destination(
+            page_device, request.POST.get("selected_device_id"), self.restricted_queryset(Device)
         )
-        if invalid_selected_device:
-            _warn_invalid_selected_device(request)
+        if target_device is None:
+            messages.error(request, GrantRefusal.DESTINATION.message)
+            return _modules_action_response(request, page_device, server_key)
         changeable_interfaces = self.restricted_queryset(Interface, "change")
-        bind_item, _inventory, refusal = _resolve_posted_inventory_row(
-            request,
-            page_device,
-            target_device,
-            server_key,
-            self.get_cache_key,
-            action="update_module_interface",
-            action_target={"module_id": module_id},
-        )
-        if refusal:
-            return refusal
-
         module = self.restrict_object_or_404(Module, "view", pk=module_id, device=target_device)
 
         bind_result = None
         adoption_failed = False
-        # One transaction: a lock conflict in the bind or the adoption rolls back both.
-        with transaction.atomic():
-            # The missing-server guard above already returned, so a resolved primary is always bound.
-            try:
-                bind_result = _bind_interface_librenms_id(
-                    target_device,
-                    bind_item,
-                    module.pk,
-                    server_key,
-                    changeable_interfaces,
+        try:
+            # One transaction: a lock conflict in the bind or the adoption rolls back both.
+            with transaction.atomic():
+                granted = _authorize_module_grant(
+                    self, page_device, server_key, ACTION_UPDATE_INTERFACE, request.POST.get("inventory_binding")
                 )
-            except Exception as exc:
-                if classify_conflict(exc):
-                    raise
-                logger.exception(
-                    "Unexpected error binding interface to module (device %s, module %s)",
-                    target_device.pk,
-                    module.pk,
+                granted.grant.require(device_id=target_device.pk, ent_index=request.POST.get("ent_index", ""))
+                # Lock the module row, so it stays in the bay that the row matched while the bind runs.
+                module_bay_id = (
+                    self.restricted_queryset(Module, "view")
+                    .select_for_update(of=("self",))
+                    .filter(pk=module.pk)
+                    .values_list("module_bay_id", flat=True)
+                    .first()
                 )
-                bind_result = {
-                    "status": "failed",
-                    "reason": "unexpected error while associating interface to installed module",
-                }
-            else:
-                # The port_id bind only associates the single LibreNMS-identified interface, but a
-                # module can also own template interfaces (e.g. breakout children like c2/1) that
-                # remain standalone and independently keep the row's "Update Interface" action on
-                # (see _count_adoptable_template_interfaces). Adopt those too when the bind found
-                # nothing to do (None) or succeeded (bound) — otherwise an already-bound interface
-                # makes the bind a no-op, the adoption is skipped, and the button never clears.
-                # A hard conflict/skip is left untouched so we don't mutate past an unresolved issue.
-                if bind_result is None or bind_result.get("status") == "bound":
-                    try:
-                        with transaction.atomic():
-                            adopt_result = _adopt_existing_template_interfaces(
-                                target_device,
-                                module,
-                                changeable_interfaces,
-                            )
-                    except Exception as exc:
-                        if classify_conflict(exc):
-                            raise
-                        logger.exception(
-                            "Unexpected error adopting standalone template interfaces (device %s, module %s)",
-                            target_device.pk,
-                            module.pk,
-                        )
-                        # The adoption's savepoint keeps the primary bind: that interface is bound
-                        # regardless, and reporting "failed" would make a retry look like a fresh
-                        # conflict. Only the bind-less path downgrades to a hard failure.
-                        if bind_result is None:
-                            bind_result = {
-                                "status": "failed",
-                                "reason": "unexpected error while associating interface to installed module",
-                            }
-                        else:
-                            adoption_failed = True
-                    else:
-                        if bind_result is None:
-                            bind_result = adopt_result
-                        elif adopt_result.get("status") == "bound":
-                            bind_result = {
-                                "status": "bound",
-                                "interface": bind_result.get("interface"),
-                                # Keep the primary bind's port_id so the merged result still
-                                # carries the bound interface's LibreNMS identity, not just the
-                                # adoption tally.
-                                "port_id": bind_result.get("port_id"),
-                                "changed": bind_result.get("changed", False),
-                                "adopted_count": (bind_result.get("adopted_count") or 0)
-                                + (adopt_result.get("adopted_count") or 0),
-                            }
+                granted.grant.require(action_target=installed_module_target(module.pk, module_bay_id))
+                bind_item = granted.row(granted.grant.ent_index)
+                bind_result, adoption_failed = self._bind_and_adopt(
+                    target_device, module, bind_item, server_key, changeable_interfaces
+                )
+        except GrantRefused as exc:
+            messages.error(request, exc.refusal.message)
+            return _modules_action_response(request, page_device, server_key)
+        except _ModuleActionRefused as exc:
+            exc.report(request)
+            return _modules_action_response(request, page_device, server_key)
         if adoption_failed:
             messages.warning(
                 request,
@@ -2572,6 +2282,83 @@ class UpdateModuleInterfaceView(
             )
 
         return _modules_action_response(request, page_device, server_key)
+
+    @staticmethod
+    def _bind_and_adopt(target_device, module, bind_item, server_key, changeable_interfaces):
+        """Bind the row's LibreNMS port and adopt the module's standalone template interfaces; return the outcome."""
+        bind_result = None
+        adoption_failed = False
+        # The missing-server guard above already returned, so a resolved primary is always bound.
+        try:
+            bind_result = _bind_interface_librenms_id(
+                target_device,
+                bind_item,
+                module.pk,
+                server_key,
+                changeable_interfaces,
+            )
+        except Exception as exc:
+            if classify_conflict(exc):
+                raise
+            logger.exception(
+                "Unexpected error binding interface to module (device %s, module %s)",
+                target_device.pk,
+                module.pk,
+            )
+            bind_result = {
+                "status": "failed",
+                "reason": "unexpected error while associating interface to installed module",
+            }
+        else:
+            # The port_id bind only associates the single LibreNMS-identified interface, but a
+            # module can also own template interfaces (e.g. breakout children like c2/1) that
+            # remain standalone and independently keep the row's "Update Interface" action on
+            # (see _count_adoptable_template_interfaces). Adopt those too when the bind found
+            # nothing to do (None) or succeeded (bound). Otherwise an already-bound interface
+            # makes the bind a no-op, the adoption is skipped, and the button never clears.
+            # A hard conflict/skip is left untouched so we don't mutate past an unresolved issue.
+            if bind_result is None or bind_result.get("status") == "bound":
+                try:
+                    with transaction.atomic():
+                        adopt_result = _adopt_existing_template_interfaces(
+                            target_device,
+                            module,
+                            changeable_interfaces,
+                        )
+                except Exception as exc:
+                    if classify_conflict(exc):
+                        raise
+                    logger.exception(
+                        "Unexpected error adopting standalone template interfaces (device %s, module %s)",
+                        target_device.pk,
+                        module.pk,
+                    )
+                    # The adoption's savepoint keeps the primary bind: that interface is bound
+                    # regardless, and reporting "failed" would make a retry look like a fresh
+                    # conflict. Only the bind-less path downgrades to a hard failure.
+                    if bind_result is None:
+                        bind_result = {
+                            "status": "failed",
+                            "reason": "unexpected error while associating interface to installed module",
+                        }
+                    else:
+                        adoption_failed = True
+                else:
+                    if bind_result is None:
+                        bind_result = adopt_result
+                    elif adopt_result.get("status") == "bound":
+                        bind_result = {
+                            "status": "bound",
+                            "interface": bind_result.get("interface"),
+                            # Keep the primary bind's port_id so the merged result still
+                            # carries the bound interface's LibreNMS identity, not just the
+                            # adoption tally.
+                            "port_id": bind_result.get("port_id"),
+                            "changed": bind_result.get("changed", False),
+                            "adopted_count": (bind_result.get("adopted_count") or 0)
+                            + (adopt_result.get("adopted_count") or 0),
+                        }
+        return bind_result, adoption_failed
 
 
 def _module_interface_type_targets(device, module):
@@ -2635,16 +2422,14 @@ class ModuleInterfaceTypePreviewView(LibreNMSPermissionMixin, NetBoxObjectPermis
             return error
 
         page_device = self.restrict_object_or_404(Device, pk=pk)
-        target_device, invalid_selected_device = _resolve_target_device_with_validation(
-            page_device,
-            request.GET.get("selected_device_id"),
-            self.restricted_queryset(Device),
-        )
-        if invalid_selected_device:
-            _warn_invalid_selected_device(request)
         server_key = self.resolve_posted_server_key_or_none(request.GET)
         if server_key is None:
             return HttpResponse(NO_LIBRENMS_SERVER_MESSAGE, status=400)
+        target_device = _resolve_destination(
+            page_device, request.GET.get("selected_device_id"), self.restricted_queryset(Device)
+        )
+        if target_device is None:
+            return HttpResponse(GrantRefusal.DESTINATION.message, status=400)
 
         try:
             module_id = int(request.GET.get("module_id"))
@@ -2695,9 +2480,7 @@ class ApplyModuleInterfaceTypesView(
     """Apply selected module interface-template types after checking preview state."""
 
     def _assert_updated_interface_change_scope(self, interface, outcome):
-        from dcim.models import Interface
-
-        if outcome == "updated" and not self.restricted_queryset(Interface, "change").filter(pk=interface.pk).exists():
+        if outcome == "updated" and not saved_in_scope(interface, self.request.user, "change"):
             raise _InterfaceChangeScopeViolation(interface.name)
 
     def post(self, request, pk):  # noqa: C901
@@ -2713,13 +2496,12 @@ class ApplyModuleInterfaceTypesView(
             messages.error(request, NO_LIBRENMS_SERVER_MESSAGE)
             return _modules_action_response(request, page_device)
 
-        target_device, invalid_selected_device = _resolve_target_device_with_validation(
-            page_device,
-            request.POST.get("selected_device_id"),
-            self.restricted_queryset(Device),
+        target_device = _resolve_destination(
+            page_device, request.POST.get("selected_device_id"), self.restricted_queryset(Device)
         )
-        if invalid_selected_device:
-            _warn_invalid_selected_device(request)
+        if target_device is None:
+            messages.error(request, GrantRefusal.DESTINATION.message)
+            return _modules_action_response(request, page_device, server_key)
 
         try:
             module_id = int(request.POST.get("module_id"))
@@ -2814,6 +2596,23 @@ class ApplyModuleInterfaceTypesView(
         return _modules_action_response(request, page_device, server_key)
 
 
+def _serial_digest(serial):
+    """Return a positive int that names the stripped stored serial, so the id-only action target can sign it."""
+    return int.from_bytes(hashlib.sha256((serial or "").strip().encode()).digest()[:7], "big") + 1
+
+
+def _replace_target(module, replacement_type):
+    """Return what a replace grant signs: the module, type, bay and serial the preview showed, and the type it resolved."""
+    target = {
+        **installed_module_target(module.pk, module.module_bay_id),
+        "module_type_id": module.module_type_id,
+        "module_serial_digest": _serial_digest(module.serial),
+    }
+    if replacement_type is not None:
+        target["replacement_module_type_id"] = replacement_type.pk
+    return target
+
+
 class ModuleMismatchPreviewView(
     LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View
 ):
@@ -2834,16 +2633,14 @@ class ModuleMismatchPreviewView(
             return error
 
         page_device = self.restrict_object_or_404(Device, pk=pk)
-        target_device, invalid_selected_device = _resolve_target_device_with_validation(
-            page_device,
-            request.GET.get("selected_device_id"),
-            self.restricted_queryset(Device),
-        )
-        if invalid_selected_device:
-            _warn_invalid_selected_device(request)
         server_key = self.resolve_posted_server_key_or_none(request.GET)
         if server_key is None:
             return HttpResponse(NO_LIBRENMS_SERVER_MESSAGE, status=400)
+        target_device = _resolve_destination(
+            page_device, request.GET.get("selected_device_id"), self.restricted_queryset(Device)
+        )
+        if target_device is None:
+            return HttpResponse(GrantRefusal.DESTINATION.message, status=400)
 
         try:
             module_id = int(request.GET.get("module_id"))
@@ -2858,30 +2655,31 @@ class ModuleMismatchPreviewView(
             device=target_device,
         )
 
-        sync_device = _get_sync_device_for_inventory(target_device, server_key)
-        cached_data = _get_cached_inventory_for_device(sync_device, server_key, self.get_cache_key)
-        if cached_data is None:
-            return HttpResponse("No cached inventory data. Please refresh modules first.", status=400)
-
-        librenms_item = next(
-            (item for item in cached_data if item.get("entPhysicalIndex") == ent_index_int),
-            None,
-        )
-        if not librenms_item:
-            return HttpResponse("Inventory item not found in cache.", status=400)
-        if librenms_item.get("_source") == OOB_INVENTORY_SOURCE:
-            return HttpResponse(OOB_INVENTORY_READ_ONLY_REASON, status=400)
-        inventory_digest = module_inventory_row_digest(librenms_item)
-        action_target = {"module_id": installed_module.pk}
+        # The preview signs the replace and serial actions, so it needs the table's own grant for this row.
+        action_target = installed_module_target(installed_module.pk, installed_module.module_bay_id)
+        try:
+            granted = _authorize_module_grant(
+                self, page_device, server_key, ACTION_MISMATCH_PREVIEW, request.GET.get("inventory_binding")
+            )
+            grant = granted.grant.require(
+                device_id=target_device.pk, ent_index=ent_index_int, action_target=action_target
+            )
+            librenms_item = granted.row(grant.ent_index)
+        except GrantRefused as exc:
+            return HttpResponse(exc.refusal.message, status=400)
+        except _ModuleActionRefused as exc:
+            return HttpResponse(exc.message, status=400)
 
         from netbox_librenms_plugin.utils import module_type_lookup_candidates, resolve_module_type
 
-        manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
+        manufacturer = target_device.device_type.manufacturer
         librenms_model = normalize_serial(librenms_item.get("entPhysicalModelName")) or "-"
         # The preview sits beside the stored module serial, which the install path writes through
         # this same normalization, so the raw inventory value would read as a mismatch.
         librenms_serial = normalize_inventory_serial(
-            librenms_item.get("entPhysicalSerialNum"), manufacturer=manufacturer
+            librenms_item.get("entPhysicalSerialNum"),
+            manufacturer=manufacturer,
+            preloaded_rules=granted.policy.serial_rule_sets,
         )
         if is_librenms_placeholder(librenms_serial):
             librenms_serial = ""
@@ -2946,23 +2744,26 @@ class ModuleMismatchPreviewView(
                 "ent_index": ent_index_int,
                 "server_key": server_key or "",
                 "selected_device_id": target_device.pk,
-                "serial_inventory_binding": module_inventory_binding_token(
-                    target_device.pk,
-                    server_key,
-                    "update_module_serial",
-                    action_target,
-                    ent_index_int,
-                    inventory_digest,
-                ),
-                "replace_inventory_binding": module_inventory_binding_token(
-                    target_device.pk,
-                    server_key,
-                    "replace_module",
-                    action_target,
-                    ent_index_int,
-                    inventory_digest,
+                "serial_inventory_binding": self._derived_grant(grant, ACTION_UPDATE_SERIAL),
+                "replace_inventory_binding": self._derived_grant(
+                    grant, ACTION_REPLACE_MODULE, action_target=_replace_target(installed_module, matched_type)
                 ),
             },
+        )
+
+    @staticmethod
+    def _derived_grant(grant, action, action_target=None):
+        """Sign a modal action with the page, target, snapshot, policy and render mode of the preview grant."""
+        return sign_module_grant(
+            page_device_id=grant.page_device_id,
+            device_id=grant.device_id,
+            server_key=grant.server_key,
+            action=action,
+            ent_index=grant.ent_index,
+            action_target=action_target or grant.action_target,
+            inventory_digest=grant.inventory_digest,
+            policy_fingerprint=grant.policy_fingerprint,
+            render_mode=grant.render_mode,
         )
 
 
@@ -2987,13 +2788,11 @@ class VCNormalizationReportView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
             return HttpResponse("Missing or invalid module_id.", status=400)
 
         page_device = self.restrict_object_or_404(Device, pk=pk)
-        target_device, invalid_selected_device = _resolve_target_device_with_validation(
-            page_device,
-            request.GET.get("selected_device_id"),
-            self.restricted_queryset(Device),
+        target_device = _resolve_destination(
+            page_device, request.GET.get("selected_device_id"), self.restricted_queryset(Device)
         )
-        if invalid_selected_device:
-            _warn_invalid_selected_device(request)
+        if target_device is None:
+            return HttpResponse(GrantRefusal.DESTINATION.message, status=400)
 
         module = self.restrict_object_or_404(
             Module,
@@ -3046,13 +2845,6 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             return error
 
         page_device = self.restrict_object_or_404(Device, pk=pk)
-        target_device, invalid_selected_device = _resolve_target_device_with_validation(
-            page_device,
-            request.POST.get("selected_device_id"),
-            self.restricted_queryset(Device),
-        )
-        if invalid_selected_device:
-            _warn_invalid_selected_device(request)
         changeable_components = _restricted_module_component_querysets(self)
         changeable_interfaces = changeable_components[Interface]
         deletable_interfaces = self.restricted_queryset(Interface, "delete")
@@ -3060,6 +2852,12 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         if server_key is None:
             messages.error(request, NO_LIBRENMS_SERVER_MESSAGE)
             return _modules_action_response(request, page_device)
+        target_device = _resolve_destination(
+            page_device, request.POST.get("selected_device_id"), self.restricted_queryset(Device)
+        )
+        if target_device is None:
+            messages.error(request, GrantRefusal.DESTINATION.message)
+            return _modules_action_response(request, page_device, server_key)
 
         try:
             module_id = int(request.POST.get("module_id"))
@@ -3076,43 +2874,9 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             pk__in=self.restricted_queryset(Module, "delete").values("pk"),
         )
 
-        librenms_item, _inventory, refusal = _resolve_posted_inventory_row(
-            request,
-            page_device,
-            target_device,
-            server_key,
-            self.get_cache_key,
-            action="replace_module",
-            action_target={"module_id": module_id},
-        )
-        if refusal:
-            return refusal
-
         from netbox_librenms_plugin.utils import module_type_lookup_candidates, resolve_module_type
 
-        manufacturer = getattr(getattr(target_device, "device_type", None), "manufacturer", None)
-        model_name = normalize_serial(librenms_item.get("entPhysicalModelName"))
-        # The replacement is stored and matched against serials the install path already
-        # normalized, so a raw vendor marker here would never match either.
-        serial = normalize_inventory_serial(librenms_item.get("entPhysicalSerialNum"), manufacturer=manufacturer)
-        if is_librenms_placeholder(serial):
-            serial = ""
-
-        module_types = get_module_types_indexed()
-        matched_type = resolve_module_type(
-            model_name,
-            module_types,
-            manufacturer=manufacturer,
-            fallback_names=module_type_lookup_candidates(librenms_item),
-        )
-
-        if not matched_type:
-            messages.error(request, f"No matching module type found for '{model_name}'.")
-            return _modules_action_response(request, page_device, server_key)
-        if not self.restricted_queryset(ModuleType).filter(pk=matched_type.pk).exists():
-            messages.error(request, f"No matching module type found for '{model_name}'.")
-            return _modules_action_response(request, page_device, server_key)
-
+        manufacturer = target_device.device_type.manufacturer
         try:
             conflict_removed_msg = None
             conflict_device = None
@@ -3120,6 +2884,30 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             adopted_components = 0
             vc_adjustments = {"renamed": 0, "adopted": 0, "removed": 0, "skipped": 0}
             with transaction.atomic():
+                granted = _authorize_module_grant(
+                    self, page_device, server_key, ACTION_REPLACE_MODULE, request.POST.get("inventory_binding")
+                )
+                granted.grant.require(device_id=target_device.pk, ent_index=request.POST.get("ent_index", ""))
+                librenms_item = granted.row(granted.grant.ent_index)
+                model_name = normalize_serial(librenms_item.get("entPhysicalModelName"))
+                # The replacement is stored and matched against serials the install path already
+                # normalized, so a raw vendor marker here would never match either.
+                serial = normalize_inventory_serial(
+                    librenms_item.get("entPhysicalSerialNum"),
+                    manufacturer=manufacturer,
+                    preloaded_rules=granted.policy.serial_rule_sets,
+                )
+                if is_librenms_placeholder(serial):
+                    serial = ""
+                matched_type = resolve_module_type(
+                    model_name,
+                    get_module_types_indexed(),
+                    manufacturer=manufacturer,
+                    fallback_names=module_type_lookup_candidates(librenms_item),
+                )
+                if not matched_type or not self.restricted_queryset(ModuleType).filter(pk=matched_type.pk).exists():
+                    raise _ModuleActionRefused(f"No matching module type found for '{model_name}'.")
+
                 # Re-fetch with row lock to prevent concurrent modifications
                 installed_module = (
                     self.restricted_queryset(Module, "change")
@@ -3133,8 +2921,8 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                     .first()
                 )
                 if not installed_module:
-                    messages.error(request, "Module no longer exists.")
-                    return _modules_action_response(request, page_device, server_key)
+                    raise _ModuleActionRefused("Module no longer exists.")
+                granted.grant.require(action_target=_replace_target(installed_module, matched_type))
 
                 # Read bay/type from locked row to avoid stale snapshot
                 target_bay = installed_module.module_bay
@@ -3250,6 +3038,10 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                     f"{bind_result.get('reason', 'unknown reason')}",
                 )
             _schedule_module_cache_mutation(request, page_device, server_key)
+        except GrantRefused as exc:
+            messages.error(request, exc.refusal.message)
+        except _ModuleActionRefused as exc:
+            exc.report(request)
         except _ModuleComponentAdoptionUnavailable as exc:
             messages.error(request, f"A matching {exc.component_label} is not available for module adoption.")
         except _SerialConflictAmbiguous as exc:
@@ -3324,14 +3116,13 @@ class MoveModuleView(
             return error
 
         page_device = self.restrict_object_or_404(Device, pk=pk)
-        target_device, invalid_selected_device = _resolve_target_device_with_validation(
-            page_device,
-            request.POST.get("selected_device_id"),
-            self.restricted_queryset(Device),
-        )
-        if invalid_selected_device:
-            _warn_invalid_selected_device(request)
         server_key = self.resolve_posted_server_key_or_none(request.POST)
+        target_device = _resolve_destination(
+            page_device, request.POST.get("selected_device_id"), self.restricted_queryset(Device)
+        )
+        if target_device is None:
+            messages.error(request, GrantRefusal.DESTINATION.message)
+            return _modules_action_response(request, page_device, server_key)
 
         # The rendered control is advisory; a scripted POST never reads it.
         if not netbox_relocates_module_subtree():
@@ -3385,7 +3176,7 @@ class MoveModuleView(
                 try:
                     conflict_module = update_existing_row(
                         self.restricted_queryset(Module, "change")
-                        .filter(pk=conflict_module_id)
+                        .filter(pk=conflict_module_id, device__in=self.restricted_queryset(Device))
                         .select_related("module_type", "module_bay", "device"),
                         move,
                     )
@@ -3557,12 +3348,16 @@ class AddBayTemplateView(
 
         librenms_pattern = "".join(pattern_parts)
         netbox_replacement = "".join(replacement_parts)
+        # The pattern is derived from two bay names, not stored, so a failure only means no suggestion.
+        # nosemgrep: regex-error-must-raise
         try:
             compiled = re.compile(librenms_pattern)
         except REGEX_COMPILE_ERRORS:
             return None
         if not compiled.fullmatch(librenms_name):
             return None
+        # The replacement is derived from two bay names, not stored, so a failure only means no suggestion.
+        # nosemgrep: regex-error-must-raise
         try:
             if compiled.sub(netbox_replacement, librenms_name) != netbox_name:
                 return None
@@ -3606,13 +3401,7 @@ class AddBayTemplateView(
             qs = qs.filter(models.Q(manufacturer=manufacturer) | models.Q(manufacturer__isnull=True))
         else:
             qs = qs.filter(manufacturer__isnull=True)
-        for mapping in qs.only("librenms_name"):
-            try:
-                if re.compile(mapping.librenms_name).fullmatch(librenms_name):
-                    return True
-            except REGEX_COMPILE_ERRORS:
-                continue
-        return False
+        return any(mapping._compiled_pattern.fullmatch(librenms_name) for mapping in qs)
 
     @staticmethod
     def _existing_bay_mapping(librenms_name, librenms_class, manufacturer):
@@ -3956,3 +3745,266 @@ class AddBayTemplateView(
             messages.error(request, f"Failed to add bay template: {detail}")
 
         return _modules_action_response(request, device, server_key)
+
+
+@dataclass(frozen=True)
+class _BuiltInPlan:
+    """What "Mark built-in" writes: maybe the model as the part number of one device type, and the rule."""
+
+    target: object
+    # The target's device type as the policy loaded it.
+    device_type: object
+    manufacturer_id: int
+    model: str
+    records_part_number: bool
+    rule: object
+    ent_index: int
+
+    def still_holds(self, device_type) -> bool:
+        """Return whether the locked *device_type* is still in the state the plan was made for."""
+        if device_type.manufacturer_id != self.manufacturer_id:
+            return False
+        if self.records_part_number:
+            return not (device_type.part_number or "").strip()
+        held = {(name or "").strip().casefold() for name in (device_type.model, device_type.part_number)}
+        return self.model.casefold() in held
+
+
+class _MarkBuiltInOutOfScope(Exception):
+    """Roll back a mark whose saved rows leave the caller's permission scope."""
+
+
+class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
+    """
+    Mark a chassis-level unit as built into its device type.
+
+    GET renders the confirm modal. POST records the unit's model as the part number of the target device type
+    when the device type does not hold it yet, and makes sure that an enabled, unfiltered
+    ``model_matches_device_type`` transparent rule covers the device type's manufacturer. The candidate test is
+    ``built_in_candidate``.
+    """
+
+    def _permissions(self, plan=None):
+        """Return the object permissions of the action: each write of the plan adds its own."""
+        from dcim.models import Device, DeviceType
+
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+        required = [("view", Device)]
+        if plan is not None:
+            if plan.records_part_number:
+                required.append(("change", DeviceType))
+            required.append(("change" if plan.rule else "add", InventoryIgnoreRule))
+        return required
+
+    def _plan(self, page_device, server_key, data, *, write):
+        """
+        Return the plan of a granted row, or raise GrantRefused or _ModuleActionRefused.
+
+        The grant binds the snapshot and the policy, which holds every rule and the model and part number of each
+        device type, so the candidate test below sees what the table saw. The bay is matched again.
+        """
+        from dcim.models import Device
+
+        target = _resolve_destination(page_device, data.get("selected_device_id"), self.restricted_queryset(Device))
+        if target is None:
+            raise GrantRefused(GrantRefusal.DESTINATION)
+        if write:
+            # One writer per manufacturer at a time, so two marks cannot both create the rule.
+            acquire_advisory_transaction_lock(
+                f"netbox-librenms-plugin:built-in-rule:{target.device_type.manufacturer_id}"
+            )
+        granted = _authorize_module_grant(
+            self, page_device, server_key, ACTION_MARK_BUILT_IN, data.get("inventory_binding")
+        )
+        grant = granted.grant.require(device_id=target.pk, ent_index=data.get("ent_index", ""))
+        member = granted.policy.member(target.pk)
+        device_type = member.device_type
+        grant.require(action_target={"device_type_id": device_type.pk})
+        item = granted.row(grant.ent_index)
+        ancestry = InstallBranchView._ancestry_maps(granted, {member.pk})[member.pk]
+        has_bay = self._matches_a_bay(member, item, granted.index_map, granted.index_map.keys() - ancestry.keys())
+        identity = DeviceIdentity.of(member, granted.policy.chassis_serial_key())
+        candidate = built_in_candidate(item, granted.index_map, identity, has_bay=has_bay)
+        if candidate is None:
+            raise GrantRefused(GrantRefusal.STALE)
+        if candidate.records_part_number and (device_type.part_number or "").strip():
+            raise _ModuleActionRefused(
+                f"Device type {device_type} already has a part number. Add an Inventory Rule instead."
+            )
+        return _BuiltInPlan(
+            target=target,
+            device_type=device_type,
+            manufacturer_id=device_type.manufacturer_id,
+            model=candidate.model,
+            records_part_number=candidate.records_part_number,
+            rule=reusable_built_in_rule(granted.policy.rules_for(device_type.manufacturer)),
+            ent_index=grant.ent_index,
+        )
+
+    @staticmethod
+    def _matches_a_bay(device, item, index_map, foreign_indices):
+        """
+        Return whether *item* matches a bay of *device* now, as the table matches a chassis-level row.
+
+        Bay mappings are not part of the grant, and a mapping edit keeps the cached snapshot, so the
+        bay that the table found is matched again here.
+        """
+        from dcim.models import ModuleBay
+
+        from netbox_librenms_plugin.utils import (
+            load_bay_mappings,
+            module_type_lookup_candidates,
+            preload_normalization_rules,
+            resolve_module_type,
+        )
+
+        manufacturer = device.device_type.manufacturer
+        matched_type = resolve_module_type(
+            _normalize_librenms_text(item.get("entPhysicalModelName")),
+            get_module_types_indexed(),
+            manufacturer=manufacturer,
+            norm_rules=preload_normalization_rules("module_type", manufacturer=manufacturer),
+            fallback_names=module_type_lookup_candidates(item),
+        )
+        exact_mappings, regex_mappings = load_bay_mappings()
+        bays = prefetch_module_bay_types(
+            ModuleBay.objects.filter(device=device).select_related("installed_module__module_type")
+        )
+        device_bays, module_scoped_bays = {}, {}
+        for bay in bays:
+            if bay.module_id:
+                module_scoped_bays.setdefault(bay.module_id, {})[bay.name] = bay
+            else:
+                device_bays[bay.name] = bay
+        # The install resolver drops a bay name that two modules define; the table keeps it, so a match hides the mark.
+        matched_bay = BaseModuleTableView._match_bay_for_item(
+            item,
+            index_map,
+            BaseModuleTableView._compute_all_bays(device_bays, module_scoped_bays),
+            exact_mappings=exact_mappings,
+            regex_mappings=regex_mappings,
+            manufacturer_id=manufacturer.pk,
+            norm_rules_bay=preload_normalization_rules("module_bay"),
+            foreign_indices=foreign_indices,
+            accepted_bay_types=module_type_bay_type_ids(matched_type, load_module_type_bay_types()),
+        )
+        return matched_bay is not None
+
+    def get(self, request, pk):
+        from dcim.models import Device
+
+        self.required_object_permissions = {"GET": self._permissions()}
+        if error := self.require_all_permissions("GET"):
+            return error
+        page_device = self.restrict_object_or_404(Device, pk=pk)
+        server_key = self.resolve_posted_server_key_or_none(request.GET)
+        if server_key is None:
+            return HttpResponse(NO_LIBRENMS_SERVER_MESSAGE, status=400)
+        try:
+            plan = self._plan(page_device, server_key, request.GET, write=False)
+        except GrantRefused as exc:
+            return HttpResponse(exc.refusal.message, status=400)
+        except _ModuleActionRefused as exc:
+            # The refusal names the device type, which a user can edit.
+            return HttpResponse(escape(exc.message), status=400)
+        self.required_object_permissions = {"GET": self._permissions(plan)}
+        if error := self.require_object_permissions("GET"):
+            return error
+        return render(
+            request,
+            "netbox_librenms_plugin/htmx/mark_built_in_modal.html",
+            {
+                "device_pk": page_device.pk,
+                "device_type": plan.device_type,
+                "model": plan.model,
+                "records_part_number": plan.records_part_number,
+                "rule": plan.rule,
+                "server_key": server_key,
+                "selected_device_id": plan.target.pk,
+                "ent_index": plan.ent_index,
+                "inventory_binding": request.GET.get("inventory_binding", ""),
+            },
+        )
+
+    def _write(self, plan):
+        """Lock the device type, write the plan inside the caller's transaction, and return the rule that covers it."""
+        from dcim.models import DeviceType
+
+        from netbox_librenms_plugin.models import BUILT_IN_UNITS_RULE, InventoryIgnoreRule
+
+        # The device type comes from the target device, which the request resolved through its scope.
+        locked = self.relock_scoped_row(DeviceType, pk=plan.device_type.pk)
+        if locked is None or not plan.still_holds(locked):
+            raise GrantRefused(GrantRefusal.STALE)
+        if plan.records_part_number:
+
+            def apply(row):
+                row.part_number = plan.model
+
+            update_existing_row(self.restricted_queryset(DeviceType, "change").filter(pk=locked.pk), apply)
+            # A constrained grant decides on the saved row; a denial rolls the whole mark back.
+            if not saved_in_scope(locked, self.request.user, "change"):
+                raise _MarkBuiltInOutOfScope
+        if plan.rule is not None:
+            # A rule edit after the policy read must not leave a mark that no rule covers.
+            rule = (
+                self.restricted_queryset(InventoryIgnoreRule, "change")
+                .select_for_update(of=("self",))
+                .filter(pk=plan.rule.pk)
+                .first()
+            )
+            if rule is None:
+                raise _MarkBuiltInOutOfScope
+            if not rule.hides_built_in_units or rule.manufacturer_id not in {None, plan.manufacturer_id}:
+                raise GrantRefused(GrantRefusal.STALE)
+            return rule
+        rule = InventoryIgnoreRule(**BUILT_IN_UNITS_RULE, manufacturer_id=plan.manufacturer_id)
+        try:
+            rule.full_clean()
+        except ValidationError as exc:
+            detail = exception_text_for(exc, InventoryIgnoreRule, self.request.user)
+            raise _ModuleActionRefused(f"Failed to mark the unit built-in: {detail}") from exc
+        rule.save()
+        if not saved_in_scope(rule, self.request.user, "add"):
+            raise _MarkBuiltInOutOfScope
+        return rule
+
+    def post(self, request, pk):
+        from dcim.models import Device, DeviceType
+
+        self.required_object_permissions = {"POST": self._permissions()}
+        if error := self.require_all_permissions("POST"):
+            return error
+        page_device = self.restrict_object_or_404(Device, pk=pk)
+        server_key = self.resolve_posted_server_key_or_none(request.POST)
+        if server_key is None:
+            messages.error(request, NO_LIBRENMS_SERVER_MESSAGE)
+            return _modules_action_response(request, page_device)
+
+        try:
+            with transaction.atomic():
+                plan = self._plan(page_device, server_key, request.POST, write=True)
+                self.required_object_permissions = {"POST": self._permissions(plan)}
+                if error := self.require_object_permissions("POST"):
+                    return error
+                rule = self._write(plan)
+        except GrantRefused as exc:
+            messages.error(request, exc.refusal.message)
+        except _ModuleActionRefused as exc:
+            exc.report(request)
+        except (_MarkBuiltInOutOfScope, DeviceType.DoesNotExist):
+            messages.error(request, "Nothing was changed: the result is outside your permission scope.")
+        except (ValidationError, IntegrityError) as exc:
+            if classify_conflict(exc):
+                raise
+            messages.error(
+                request, f"Failed to mark the unit built-in: {exception_text_for(exc, DeviceType, request.user)}"
+            )
+        else:
+            recorded = (
+                f"Recorded {plan.model} as the part number of the device type. " if plan.records_part_number else ""
+            )
+            messages.success(request, f"{recorded}The rule '{rule.name}' hides the built-in units of {plan.model}.")
+            _schedule_module_cache_mutation(request, page_device, server_key)
+        return _modules_action_response(request, page_device, server_key)

@@ -22,6 +22,7 @@ class TestVlanSyncContentTemplateMigratedMode:
         from django.test import RequestFactory
         from django_tables2 import RequestConfig
 
+        from netbox_librenms_plugin.sync_filters import parse_sync_filters
         from netbox_librenms_plugin.tables.vlans import LibreNMSVLANTable
         from netbox_librenms_plugin.tests.conftest import make_device
 
@@ -37,6 +38,7 @@ class TestVlanSyncContentTemplateMigratedMode:
         vlan_sync = {
             "object": device,
             "vlan_table": table,
+            "filters": parse_sync_filters(request.GET, table.filter_spec()),
             "server_key": server_key,
             "cache_expiry": None,
         }
@@ -54,8 +56,9 @@ class TestVlanSyncContentTemplateMigratedMode:
             migrated={"server_key": "prod", "device_id": 1, "at": "now"},
             server_key="prod",
         )
-        # The live POST form must be gone in migrated mode (a donor must not POST a sync).
-        assert "<form" not in html
+        # The live POST form must be gone in migrated mode (a donor must not POST a sync). The
+        # filter form is a GET form, so it cannot submit a sync.
+        assert '<form method="post"' not in html
         # ...but CSRF + server_key must remain so the JS verify-vlan-group fetch targets the
         # right server with a USABLE token — an empty value would still POST X-CSRFToken: ''
         # and 403, so pin a non-empty value, not mere input presence.
@@ -66,21 +69,23 @@ class TestVlanSyncContentTemplateMigratedMode:
 
     def test_normal_mode_emits_form_with_csrf_server_key_and_action(self):
         html = self._render(migrated=None)
-        assert "<form" in html
+        assert '<form method="post"' in html
         assert re.search(r'name="csrfmiddlewaretoken" value="[^"]+"', html)
         assert 'name="server_key"' in html
         assert 'value="create_vlans"' in html
         assert 'hx-target="#htmx-modal-content"' in html
         assert 'hx-swap="innerHTML"' in html
 
-    def test_normal_mode_renders_filters_for_the_vlan_columns(self):
+    def test_normal_mode_renders_a_server_filter_field_for_each_vlan_column(self):
         html = self._render(migrated=None)
 
         assert 'aria-controls="vlanFilterSection"' in html
         assert 'id="vlanFilterSection"' in html
-        for field in ("vlan-id", "vlan-name", "vlan-group", "vlan-type", "vlan-state"):
-            assert f'id="filter-{field}"' in html
+        # The filter is a GET form before the sync form, so Enter in a field never submits a sync.
+        assert html.index('<form method="get"') < html.index('<form method="post"')
+        for field in ("vlan_id", "name", "group", "type", "state"):
             assert re.search(
-                rf'<label[^>]*class="[^"]*visually-hidden[^"]*"[^>]*for="filter-{field}"[^>]*>',
+                rf'<input type="text" form="vlans_filter-form" name="vlans_filter_{field}" id="id_vlans_filter_{field}"',
                 html,
             )
+            assert f'<label class="form-label" for="id_vlans_filter_{field}">' in html

@@ -86,6 +86,10 @@ def _captured_table_view(view):
         rows_store["rows"] = table_data
 
         class CapturedTable:
+            # The capture keeps rows only, so it signs no grant.
+            selection_allowed = False
+            grants_enabled = False
+
             def __init__(self):
                 self.attrs = {}
 
@@ -144,19 +148,24 @@ class TestInventoryClassIncludeRule:
             DeviceIdentity,
             _check_ignore_rules,
         )
+        from netbox_librenms_plugin.utils import normalize_stack_serial
 
         index_map = {item["entPhysicalIndex"]: item for item in items}
         # _collect_top_items reads this cache for any item carrying an index, so a test that
         # passed {} would report that no rule ever matched.
         ignore_cache = {
             item["entPhysicalIndex"]: _check_ignore_rules(
-                item, index_map.get(item.get("entPhysicalContainedIn")), rules, index_map, DeviceIdentity()
+                item,
+                index_map.get(item.get("entPhysicalContainedIn")),
+                rules,
+                index_map,
+                DeviceIdentity(serial_key=normalize_stack_serial),
             )
             for item in items
         }
         transparent = BaseModuleTableView._find_transparent_indices(items, ignore_cache)
         return BaseModuleTableView._collect_top_items(
-            items, index_map, rules, DeviceIdentity(), transparent, ignore_cache
+            items, index_map, rules, DeviceIdentity(serial_key=normalize_stack_serial), transparent, ignore_cache
         )
 
     def _include_rule(self, pattern="other"):
@@ -181,22 +190,21 @@ class TestInventoryClassIncludeRule:
 
         assert [item["entPhysicalIndex"] for item in collected] == [38, 39]
 
-    def test_rule_admitted_row_uses_the_cached_inventory_digest(self, settings, librenms_server):
-        """Display annotations must not change the digest used to authorize a later action."""
+    def test_rule_admitted_row_leaves_the_cached_inventory_unchanged(self, settings, librenms_server):
+        """Display annotations must not change the snapshot whose digest authorizes a later action."""
+        from copy import deepcopy
+
         from netbox_librenms_plugin.tests.conftest import make_device
-        from netbox_librenms_plugin.utils import module_inventory_row_digest
-        from netbox_librenms_plugin.views.base.modules_view import _PREFER_DESCRIPTION
 
         inventory = self._inventory()
-        expected_digest = module_inventory_row_digest(inventory[1])
+        cached = deepcopy(inventory)
         view = _real_api_view(settings, librenms_server, librenms_id=304)
 
         rows = _run_build_context_real(view, inventory, make_device("included-class-digest"))
         row = next(row for row in rows if row["ent_physical_index"] == 38)
 
-        assert row["inventory_digest"] == expected_digest
         assert row["name"] == "Routing Engine 0"
-        assert _PREFER_DESCRIPTION not in inventory[1]
+        assert inventory == cached
 
     def test_a_rule_for_another_class_admits_nothing(self):
         assert self._collect(self._inventory(), [self._include_rule(pattern="sensor")]) == []
@@ -681,6 +689,9 @@ class TestMergeTransceiverDataPortIdentity:
         assert item["_librenms_port_id"] == 42
         assert item["_librenms_ifname"] == "Te1/0/1"
         assert item["entPhysicalName"] == "Te1/0/1"
+        port_requests = [request for request in librenms_server.requests if request["path"].endswith("/ports")]
+        assert len(port_requests) == 1
+        assert "with" not in port_requests[0]["query"]
 
     def test_existing_inventory_item_gets_port_identity_metadata(self, settings, librenms_server):
         view = _real_api_view(settings, librenms_server, librenms_id=101)
@@ -1056,6 +1067,9 @@ class TestMergeTransceiverDataPortIdentity:
         assert inventory[0]["_librenms_port_id"] == 56284
         assert inventory[0]["_librenms_ifname"] == "TenGigabitEthernet1/1/1"
         assert inventory[0]["_librenms_ifdescr"] == "Te1/1/1"
+        port_requests = [request for request in librenms_server.requests if request["path"].endswith("/ports")]
+        assert len(port_requests) == 1
+        assert "with" not in port_requests[0]["query"]
 
     def test_enrich_inventory_port_identity_skips_ambiguous_labels(self, settings, librenms_server):
         view = _real_api_view(settings, librenms_server, librenms_id=103)
@@ -1430,6 +1444,7 @@ class TestPostInventoryRefresh:
 
         assert response.status_code == 200
         assert len(port_requests) == 1
+        assert "with" not in port_requests[0]["query"]
         cached = cache.get(view.get_cache_key(device, "inventory", server_key=server_key))
         main_item = next(item for item in cached["inventory"] if item["entPhysicalIndex"] == 1)
         transceiver_item = next(item for item in cached["inventory"] if item["entPhysicalIndex"] == 2)
@@ -3574,9 +3589,14 @@ class TestCheckIgnoreRules:
 
     def _check(self, item, parent_item, rules, index_map=None, device_serial="", type_models=()):
         from netbox_librenms_plugin.views.base.modules_view import DeviceIdentity, _check_ignore_rules
+        from netbox_librenms_plugin.utils import normalize_stack_serial
 
         return _check_ignore_rules(
-            item, parent_item, rules, index_map, DeviceIdentity(device_serial, frozenset(type_models))
+            item,
+            parent_item,
+            rules,
+            index_map,
+            DeviceIdentity(device_serial, frozenset(type_models), serial_key=normalize_stack_serial),
         )
 
     def test_match_with_serial_match_skips(self):
@@ -4117,12 +4137,6 @@ class TestHolderEntitiesAreNotRows:
 
     def test_a_cage_the_transceivers_api_confirms_is_an_optic(self, librenms_server, server_key):
         """The API supplies the cage's model but no serial; its evidence must still make the cage a row."""
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.views.base.modules_view import DeviceIdentity
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-        from netbox_librenms_plugin.views.sync.modules import InstallBranchView
-
         shape = self._shape()
         recording = deepcopy(shape.recording)
         inventory, transceivers, _ports = self._responses(recording)
@@ -4140,15 +4154,8 @@ class TestHolderEntitiesAreNotRows:
         rows = {row["ent_physical_index"]: row for row in _refresh_module_rows(device, server_key)}
 
         assert rows[cage["entPhysicalIndex"]]["model"] == transceiver["model"]
-        cached = cache.get(DeviceModuleTableView().get_cache_key(device, "inventory", server_key=server_key))
-        branch = InstallBranchView()._collect_branch(
-            shape.line_card,
-            cached["inventory"],
-            [],
-            DeviceIdentity(),
-            {e["entPhysicalIndex"]: e for e in cached["inventory"]},
-        )
-        assert cage["entPhysicalIndex"] in {item["entPhysicalIndex"] for item in branch}
+        # The line card's branch list is what Install Branch runs.
+        assert cage["entPhysicalIndex"] in {index for index, _target in rows[shape.line_card]["branch_rows"]}
 
     def test_a_snapshot_cached_before_the_schema_version_is_refetched(self, librenms_server, server_key):
         """An older writer cached the API-confirmed cage without its marker; the tab must not serve it."""
@@ -4504,7 +4511,7 @@ class TestPositionalMatchClassAware:
         }
         inventory.append(item)
         index_map = {i["entPhysicalIndex"]: i for i in inventory}
-        return BaseModuleTableView._match_bay_by_position(item, index_map, bays)
+        return BaseModuleTableView._match_bay_by_position(item, index_map, bays, frozenset())
 
     @staticmethod
     def _bay(name, position=None):
@@ -4548,7 +4555,7 @@ class TestPositionalMatchClassAware:
         }
         inventory.append(item)
         index_map = {i["entPhysicalIndex"]: i for i in inventory}
-        return BaseModuleTableView._match_bay_by_position(item, index_map, bays)
+        return BaseModuleTableView._match_bay_by_position(item, index_map, bays, frozenset())
 
     def test_fan_does_not_match_slot_bay(self):
         """A fan (class=fan) must not land in a 'Slot 1' bay even when positional says slot 1."""
@@ -5450,27 +5457,10 @@ class TestStatusIconNotesHaveAnAccessibleName:
         ids=["repaired-parent", "name-conflict", "model-warning"],
     )
     def test_each_titled_icon_is_an_image_named_by_its_title(self, status, record):
-        from html.parser import HTMLParser
-
         from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+        from netbox_librenms_plugin.tests.view_test_helpers import assert_titled_icons_are_named
 
-        class Icons(HTMLParser):
-            def __init__(self):
-                super().__init__()
-                self.titled = []
-
-            def handle_starttag(self, tag, attrs):
-                attrs = dict(attrs)
-                if tag == "i" and "title" in attrs:
-                    self.titled.append(attrs)
-
-        icons = Icons()
-        icons.feed(str(LibreNMSModuleTable([]).render_status(status, record)))
-
-        assert icons.titled
-        for attrs in icons.titled:
-            assert attrs.get("role") == "img"
-            assert attrs.get("aria-label") == attrs["title"]
+        assert_titled_icons_are_named(LibreNMSModuleTable([]).render_status(status, record))
 
 
 class TestRenderStatusNoBayOnParent:
@@ -6238,6 +6228,7 @@ class TestScopePreservedAcrossIntegratedContainer:
         from netbox_librenms_plugin.models import ModuleBayMapping
         from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView, DeviceIdentity
+        from netbox_librenms_plugin.utils import normalize_stack_serial
 
         view = object.__new__(BaseModuleTableView)
         view._device_manufacturer = None
@@ -6282,6 +6273,7 @@ class TestScopePreservedAcrossIntegratedContainer:
             "interfaces_by_module": {},
             "port_holders": {},
             "server_key": "test-server",
+            "withheld": False,
         }
 
         xiom_item = {
@@ -6327,7 +6319,7 @@ class TestScopePreservedAcrossIntegratedContainer:
             index_map=index_map,
             children_by_parent={100: [mda_item], 200: [port_item]},
             ignore_rules=[],
-            device_identity=DeviceIdentity(),
+            device_identity=DeviceIdentity(serial_key=normalize_stack_serial),
             module_types=view._get_module_types(),
             manufacturer=selected_device.device_type.manufacturer,
             selected_device=selected_device,
@@ -6758,6 +6750,9 @@ class TestRenderActionsPortIdentityFields:
         table.device = make_device("render-module-install-action")
         table.csrf_token = "csrf123"
         table.server_key = "default"
+        table.inventory_snapshot_digest = "render-actions-snapshot-digest"
+        table.policy_fingerprint = "render-actions-policy-fingerprint"
+        table.render_mode = "attributed"
         table.has_write_permission = True
         table.can_add_module = True
         table.can_change_module = False
@@ -6775,7 +6770,6 @@ class TestRenderActionsPortIdentityFields:
             "module_bay_id": 10,
             "module_type_id": 5,
             "serial": "SN-1",
-            "inventory_digest": "render-actions-row-digest",
         }
 
         html = str(table.render_actions("", record))
@@ -7395,9 +7389,9 @@ def test_vc_carrier_rules_follow_the_attributed_members_manufacturer():
 
 
 @pytest.mark.django_db
-def test_rule_admission_does_not_change_the_cached_inventory_digest():
-    """Presentation markers must not change the digest used to bind a cached inventory row."""
-    from netbox_librenms_plugin.utils import module_inventory_row_digest
+def test_rule_admission_does_not_change_the_cached_inventory():
+    """Presentation markers must not change the snapshot whose digest binds every module action."""
+    from copy import deepcopy
 
     from netbox_librenms_plugin.tests.conftest import make_device
 
@@ -7411,11 +7405,12 @@ def test_rule_admission_does_not_change_the_cached_inventory_digest():
             "entPhysicalContainedIn": 0,
         }
     ]
-    cached_digest = module_inventory_row_digest(inventory[0])
+    cached = deepcopy(inventory)
 
     rows = _run_build_context_real(_make_view(), inventory, device)
 
-    assert rows[0]["inventory_digest"] == cached_digest
+    assert rows[0]["ent_physical_index"] == 102
+    assert inventory == cached
 
 
 @pytest.mark.django_db

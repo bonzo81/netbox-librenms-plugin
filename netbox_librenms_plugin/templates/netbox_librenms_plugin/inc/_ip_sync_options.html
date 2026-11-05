@@ -8,16 +8,16 @@
     </button>
     <div class="dropdown-menu p-3 ip-sync-options-menu">
         <div class="form-check form-switch mb-2">
-            <input type="hidden" name="set-primary-ip-toggle" value="off">
-            <input class="form-check-input ip-sync-option" type="checkbox" id="set-primary-ip-toggle-cb"
+            <input {% if sync_form_id %}form="{{ sync_form_id }}" {% endif %}type="hidden" name="set-primary-ip-toggle" value="off">
+            <input {% if sync_form_id %}form="{{ sync_form_id }}" {% endif %}class="form-check-input ip-sync-option" type="checkbox" id="set-primary-ip-toggle-cb"
                    name="set-primary-ip-toggle" value="on" {% if ip_sync.set_primary_ip %}checked{% endif %}
                    data-default-checked="false"
                    title="When the synced IP equals the device's LibreNMS management IP and is assigned to an interface, set it as the Primary IP.">
             <label class="form-check-label small" for="set-primary-ip-toggle-cb">Set Primary IP</label>
         </div>
         <div class="form-check form-switch mb-2">
-            <input type="hidden" name="create-missing-interfaces-toggle" value="off">
-            <input class="form-check-input ip-sync-option" type="checkbox" id="create-missing-interfaces-toggle-cb"
+            <input {% if sync_form_id %}form="{{ sync_form_id }}" {% endif %}type="hidden" name="create-missing-interfaces-toggle" value="off">
+            <input {% if sync_form_id %}form="{{ sync_form_id }}" {% endif %}class="form-check-input ip-sync-option" type="checkbox" id="create-missing-interfaces-toggle-cb"
                    name="create-missing-interfaces-toggle" value="on" {% if ip_sync.create_missing_interfaces %}checked{% endif %}
                    data-default-checked="false"
                    title="Create a missing NetBox interface from the cached LibreNMS port before assigning the selected IP address.">

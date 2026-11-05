@@ -32,7 +32,7 @@ unchecked until that review.
 | Path | Purpose |
 | --- | --- |
 | `.opengrep/librenms-rules.yaml` | The ruleset. **Single source of truth.** |
-| `.opengrep/tests/*.py`, `.opengrep/tests/*.html` | Annotated rule-test fixtures. |
+| `.opengrep/tests/*.py`, `.opengrep/tests/*.html`, `.opengrep/tests/*.js` | Annotated rule-test fixtures. |
 | `scripts/opengrep-scan.sh` | Scan the source tree. Pre-push hook and manual use. Non-zero on any finding. |
 | `scripts/opengrep-test.sh` | Run the rule-tests against the ruleset. |
 | `netbox_librenms_plugin/tests/test_import_disclosure.py` | Check scan options and explicit targets with the real executable. |
@@ -44,7 +44,7 @@ unchecked until that review.
 | --- | --- | --- |
 | `import-disclosure` | error | A `warnings`/`issues` message that names a NetBox object no `restrict()` call filtered. |
 | `import-disclosure-sanitizer-shadow` | error | A local definition that impersonates a permission API trusted by `import-disclosure`. |
-| `caught-error-text` | error | A read of a caught error that can be a ValidationError, a database error or an `AbortRequest`, other than through `exception_text_for`, the module logger or a `raise`. |
+| `caught-error-text` | error | A read of a caught error that can be a ValidationError, a database error or an `AbortRequest`, other than through `exception_text_for` or `write_failure_message`, the module logger or a `raise`. |
 | `caught-error-text-shadow` | error | A binding of a name that `caught-error-text` trusts, a logging change, a risky error class under another name, or `except*`. |
 | `no-requests-outside-http-client` | error | Selected imported requests HTTP calls outside the package HTTP client and tests. |
 | `ipaddress-address-needs-netaddr` | error | An ipam `IPAddress` gets an address that is not a `netaddr.IPNetwork(...)` call, or a `**` expansion. |
@@ -63,9 +63,24 @@ unchecked until that review.
 | `no-stored-mapping-access-orm` | error | A `custom_field_data__librenms_id` lookup, projection or ordering, also across a relation such as `device__`; a `has_key`, `has_keys`, `has_any_keys` or `contains` lookup on the container whose value names the key; a projection of the whole container; or a `custom_fields.librenms_id` path. |
 | `no-stored-mapping-access-private` | error | An import or attribute access of a private name of `server_mappings`, or a patch target string that names one. |
 | `no-stored-mapping-access-template` | error | A template that reads `cf.librenms_id` or `custom_field_data.librenms_id`, or looks the key up with a filter. |
+| `no-scroll-wrapper-on-sync-table` | error | A `table-responsive` wrapper directly around `inc/table.html`. It clips a member dropdown that opens inside the table. A wrapper with another class, or one written with `{% if %}` in its class, is outside this check. |
+| `titled-icon-needs-accessible-name` | error | An `<i>` tag with a `title` and without `aria-hidden="true"` or both `role="img"` and a non-empty `aria-label`, in package Python, template or script source. |
 | `conflict-raised-without-record` | error | A raise of a `TransactionConflict` or `ConcurrentRowChange` class that does not go through `recorded_conflict(...)`. |
 | `no-lock-on-exists` | error | A `select_for_update()` chain that ends in `exists()` or `count()`. |
 | `no-monkeypatch-on-django-proxy` | error | A test calls a monkeypatch `setattr` or `delattr` on the Django cache, settings or connection proxy, or on a `cache` attribute of a module, also as a dotted-string target. |
+| `assert-is-not-parametrized-flag` | error | A test asserts `value is not flag`, where `flag` is a `pytest.mark.parametrize` argument with `True` or `False` values. That identity check also passes for `None`. |
+| `vc-member-name-through-helper` | error | A `_generate_vc_member_name()` call outside `_member_name()`. Such a name skips the serial rules, so it can differ from the name that import creates. Tests are excluded, and an import alias of the function is not followed. |
+| `device-serial-compare-through-serials-match` | error | A `==` or `!=` comparison with a `.serial` attribute in `views/` or `import_utils/`, outside tests. `Device.serial` holds the raw LibreNMS serial, so a comparison calls `serials_match()`, which applies the serial rules to both sides. `views/sync/modules.py` is excluded because Module serials are normalized at write, so a Device comparison added there is not checked. A serial copied into a local first is not followed. |
+| `posted-module-target-needs-resolver` | error | A read of the posted `selected_device_id` from `request.GET` or `request.POST` outside `_resolve_destination(...)` or a module grant's `require(device_id=...)`. |
+| `regex-error-must-raise` | error | A handler that catches `re.error` or `REGEX_COMPILE_ERRORS` and does not raise. A stored rule regex compiles through `models.compile_rule_regex`, which raises `RuleConfigurationError`. |
+| `rule-error-message-needs-projection` | error | A `str()` conversion of the rule error bound by the module-context walrus check, or the exception parameter in `RuleConfigurationErrorMiddleware.process_exception`. These paths use `public_message`. Other aliases and handlers are outside this check. |
+| `sync-tab-url-through-sync-query` | error | A hand-built `?tab=`, `&tab=` or `&amp;tab=` query string, or a `?{% ... %}tab=` one, in package Python or a template, outside `sync_query.py`. |
+| `post-write-scope-through-helper` | error | An inline `restrict(user, "add"/"change")` or `restricted_queryset(model, "add"/"change")` existence check of a row that the same block saved or created before. Call `transactions.saved_in_scope()`. |
+| `sync-script-reads-page-server-key` | error | A package script calls `document.querySelector`, `querySelectorAll` or `getElementsByName` for `server_key`. A lookup inside one form is allowed. Vendored and minified files are excluded. |
+
+The `sync-tab-attributes-through-parser` rule rejects a sync container regex that closes the tag
+immediately after `data-active-tab`. It checks direct `re.search` calls in tests. Other attribute
+orders and regex API aliases are outside this narrow check.
 
 ## Scope
 
@@ -85,6 +100,11 @@ import of the private storage adapter carries a suppression. Tests seed and insp
 through its helpers. The template rule applies to `.html` files.
 `conflict-raised-without-record` excludes tests and `transactions.py`, where the runner raises its
 own conflict after the last attempt.
+`post-write-scope-through-helper` excludes tests and migrations.
+`titled-icon-needs-accessible-name` applies to `.py`, `.html` and `.js` files and excludes tests.
+`sync-tab-url-through-sync-query` applies to `.py` and `.html` files. It excludes tests,
+`sync_query.py`, which builds the sync page URLs, and `views/sync/modules.py`: the Modules tab
+redirect keeps its own query and is outside the filter work.
 The remaining rules apply to Python files in the scan target.
 
 Opengrep 1.30.0 skips test directories during directory scans. The scan script expands the default
@@ -99,7 +119,8 @@ must fail with an unexpected finding on that line. Use separate scans at represe
 verify path inclusion and exclusion; rule-tests alone do not test that scope.
 `test_each_rule_applies_to_its_declared_paths` in `tests/test_import_disclosure.py` does this.
 
-A fixture is a `.py` file with `#` markers or a `.html` file with `<!-- ruleid: ... -->` markers.
+A fixture is a `.py` file with `#` markers, a `.html` file with `<!-- ruleid: ... -->` markers, or a
+`.js` file with `// ruleid: ...` markers.
 `opengrep test` does not accept a `{# ... #}` marker. The script fails on a fixture with another
 extension, and on a fixture with no `ruleid:` marker: opengrep would check nothing in it and pass.
 
@@ -147,6 +168,13 @@ Symbolic propagation covers simple local constructor bindings. Other method call
 those bindings. The rule does not track dynamically supplied scorers or prove exact-only selection.
 Runtime tests must cover the exact-only invariant.
 
+The icon rule reads the source text from `<i` to the next `>`, also across concatenated string
+literals. A `>` inside the tag, such as in `{% if a > b %}` or a script expression, ends that text
+early. The rule then can miss a title or report an icon that has its name. The rule does not check
+that the `aria-label` text equals the title: the Python renderers get both from `utils.note_icon`,
+and tests check the rendered markup. A title on an element other than `<i>`, such as a badge around
+an icon, a `data-bs-title` tooltip, and an icon built with `createElement` are outside this check.
+
 The disclosure rule accepts only manager calls through `.objects` and the exact fixed-wording
 linkage rendering. It does not trust a helper name. Its companion rule rejects local definitions,
 assignments, and callable parameters that can obscure these taint flows.
@@ -158,7 +186,7 @@ also counts. A chained error (`__cause__`, `__context__`, a group's `exceptions`
 returns the current exception (`sys.exc_info()`, `traceback.format_exc()`, `locals()` and others)
 are sources in any function. Each argument or receiver of a call, and each store, return, yield,
 loop or assert message, is a finding. The exceptions are the log methods of the module `logger`, a `raise`,
-and the trusted calls: `exception_text_for`, `classify_conflict`, `database_error_sqlstate`,
+and the trusted calls: `exception_text_for`, `write_failure_message`, `classify_conflict`, `database_error_sqlstate`,
 `isinstance`, `hasattr`, `type`, `validation_error_detail`, and a `TypeRefusal` that the reviewed
 factory `_first_refusal` builds. A trusted call hides the arguments that it gets. A call of a
 helper is a finding at the call, and intrafile analysis also reports the reads inside a helper of
@@ -232,8 +260,35 @@ local or module string constant. A key built at run time is outside the check. T
 It does not see a conflict that is raised from a variable. When you add a `TransactionConflict`
 subclass, add its name to the rule and a fixture line.
 
+`sync-tab-url-through-sync-query` reads the source text, so it also reports a comment that
+writes such a query. It does not see a query that code builds from parts, such as `"?" + "tab="`,
+a key in a variable, or a URL that a script builds. The navigation contract tests
+(`tests/test_sync_filter_navigation_contract.py`) render each sync tab and check every link, form
+and `hx-*` URL; they cover those cases, and a missing page key in a URL that `sync_query` builds.
+
 `no-lock-on-exists` checks one method chain. It does not see a locked queryset in a variable that a
 later statement ends with `exists()` or `count()`.
+
+`assert-is-not-parametrized-flag` reads a `pytest.mark.parametrize` decorator on the test function. It does
+not see a parameter that a class decorator or `pytestmark` sets. The decorator must name the parameter,
+as a string, a comma-separated string, or a tuple or list of strings. Its values must contain a `True`
+or `False` literal. With several argument names, the rule does not check which argument has that literal.
+
+`posted-module-target-needs-resolver` excludes tests. It reads the key by its literal name. It does
+not see the key in a variable, or a read through a name other than `GET` or `POST`.
+
+`regex-error-must-raise` reads the class list of the handler. It does not see a regex error caught
+by `except Exception`, or a module alias other than `_re`. A handler that raises only inside a
+nested branch is reported, because its other branch swallows the error. A pattern that is not
+stored rule data, such as a form value or a derived pattern, carries a suppression with its reason.
+
+`post-write-scope-through-helper` reads the write and the check as one statement sequence. It
+reports the check when `obj.save(...)` or `obj = ....create(...)` comes before it, also in a `try`
+statement before the check. It does not see a write in another function, such as a helper that
+saves the row, or a write through `update_existing_row`: those read-backs call `saved_in_scope`
+by review. A check in the `view` scope, or of another row than the saved one, is not reported.
+A check through a restricted queryset that a variable or a parameter holds is not reported either,
+because the rule cannot tell that queryset from an unrestricted one.
 
 ## `--taint-intrafile` is required
 
@@ -290,3 +345,17 @@ its own, and build the message on the next line, where the rule still checks it.
 3. Add the rule to `.opengrep/librenms-rules.yaml`. Run the rule-tests again and confirm they pass.
 4. Flip one `ruleid:` marker to `ok:`. Confirm the rule-test reports that line, then restore it.
 5. Run `./scripts/opengrep-scan.sh`. Report any findings before changing production code.
+
+`netbox-only-controls-use-replaceable-handlers` rejects `addEventListener` in
+`initializeNetBoxOnlyInterfaces`. These controls use event properties so repeated
+initialization replaces the handler and its row references. Other initializers and
+listener registration through aliases are outside this check.
+
+`metadata-ports-skip-vlan-associations` requires `with_vlans=False` for `get_ports`
+calls in the module and cable base views. These callers read port metadata.
+Interface views still request VLAN associations for VLAN comparison. Calls through
+aliases and consumers in other modules are outside this check.
+
+`mapping-create-recovers-validation-races` rejects an IntegrityError-only recovery
+in `_map_os_platform`. The creator must also recover uniqueness errors from
+`full_clean()`. Other creators and exception aliases are outside this check.

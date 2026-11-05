@@ -12,6 +12,7 @@ cache, and loopback LibreNMS HTTP boundary. Each form must contain the hidden
 
 from contextlib import ExitStack
 from copy import deepcopy
+from html.parser import HTMLParser
 from types import SimpleNamespace
 
 import pytest
@@ -440,26 +441,23 @@ class TestUpdateDeviceLocationRebindsServer:
 class TestInterfaceSyncRefreshButtonDeduped:
     """Verify that one Refresh Interfaces button uses the object-specific URL and shared pagination and server values."""
 
-    def _render(self, obj):
+    def _render(self, obj, query=None):
         from django.template.loader import render_to_string
 
         # A real request (with a user) so {% csrf_token %} and the context processors the
         # template relies on resolve instead of rendering empty with a warning.
-        request = RequestFactory().get("/")
+        request = RequestFactory().get("/", query or {})
         request.user = make_superuser("interface-refresh-renderer")
         return render_to_string(
-            "netbox_librenms_plugin/_interface_sync.html",
+            "netbox_librenms_plugin/inc/_interface_sync_refresh.html",
             {
                 "object": obj,
+                "server_key": "default",
                 "has_librenms_id": True,
                 "librenms_server_info": {"server_key": "default"},
             },
             request=request,
         )
-
-    def _refresh_button_tag(self, html, path):
-        hx_post = html.index(f'hx-post="{path}"')
-        return html[html.rfind("<button", 0, hx_post) : html.index(">", hx_post) + 1]
 
     def test_device_refresh_button_single_with_device_url(self):
         from django.urls import reverse
@@ -469,13 +467,23 @@ class TestInterfaceSyncRefreshButtonDeduped:
         device_path = reverse("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": device.pk})
         vm_path = reverse("plugins:netbox_librenms_plugin:vm_interface_sync", kwargs={"pk": device.pk})
 
-        # Exactly one refresh action button (hx-post), pointing at the device URL, with the
-        # shared hx-vals — and never the VM branch's URL.
+        # The refresh form owns one button and the active server key.
         assert html.count("hx-post=") == 1
         assert f'hx-post="{device_path}"' in html
-        button = self._refresh_button_tag(html, device_path)
-        assert "hx-vals=" in button and "interfaces_per_page" in button and "server_key" in button
+        form = _enclosing_form(html, f'hx-post="{device_path}"')
+        assert 'name="server_key" value="default"' in form
         assert vm_path not in html
+
+    def test_the_refresh_url_carries_the_page_query(self):
+        from django.urls import reverse
+
+        device = make_device("refresh-btn-query")
+        query = {"interfaces_per_page": "7", "interfaces_page": "3", "interfaces_q": "eth"}
+        html = self._render(device, query)
+        device_path = reverse("plugins:netbox_librenms_plugin:device_interface_sync", kwargs={"pk": device.pk})
+
+        # A refresh keeps the filters, the page size and the page.
+        assert f'hx-post="{device_path}?interfaces_per_page=7&amp;interfaces_page=3&amp;interfaces_q=eth"' in html
 
     def test_vm_refresh_button_single_with_vm_url(self):
         from django.urls import reverse
@@ -489,6 +497,90 @@ class TestInterfaceSyncRefreshButtonDeduped:
 
         assert html.count("hx-post=") == 1
         assert f'hx-post="{vm_path}"' in html
-        button = self._refresh_button_tag(html, vm_path)
-        assert "hx-vals=" in button and "interfaces_per_page" in button and "server_key" in button
+        form = _enclosing_form(html, f'hx-post="{vm_path}"')
+        assert 'name="server_key" value="default"' in form
         assert device_path not in html
+
+
+class _PostedForms(HTMLParser):
+    """Read native form fields and HTMX buttons from the rendered response."""
+
+    def __init__(self, html):
+        super().__init__()
+        self.forms = []
+        self.current = None
+        self.feed(html)
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "form":
+            self.current = {"attrs": attrs, "fields": {}, "buttons": []}
+            self.forms.append(self.current)
+        elif self.current is not None:
+            if tag == "input" and attrs.get("name"):
+                self.current["fields"][attrs["name"]] = attrs.get("value", "")
+            elif tag == "button":
+                self.current["buttons"].append(attrs)
+
+    def handle_endtag(self, tag):
+        if tag == "form":
+            self.current = None
+
+
+@pytest.mark.parametrize("configuration_error", ["removed", "invalid"])
+@pytest.mark.parametrize(
+    "model,tab",
+    [("device", tab) for tab in ["interface", "cable", "ipaddress", "vlan", "module"]]
+    + [("vm", "interface"), ("vm", "ipaddress")],
+)
+def test_refresh_configuration_error_cannot_retry_another_server(
+    client, settings, servers, model, tab, configuration_error
+):
+    """A swapped error must never turn a secondary-server refresh into a default-server fetch."""
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_vm
+
+    factory = make_device if model == "device" else make_vm
+    from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+
+    obj = factory("refresh-retry-scope")
+    seed_stored_mapping(obj, {"default": {"id": 42}, "secondary": {"id": 42}}, save=True)
+    client.force_login(make_superuser("refresh-retry-user"))
+    _register_device_info(servers.default)
+    _register_device_info(servers.secondary)
+    page_url = reverse(f"plugins:netbox_librenms_plugin:{model}_librenms_sync", args=[obj.pk])
+    refresh_url = reverse(f"plugins:netbox_librenms_plugin:{model}_{tab}_sync", args=[obj.pk])
+    response = client.get(page_url, {"server_key": "secondary"})
+    assert response.status_code == 200
+    form = next(
+        form
+        for form in _PostedForms(response.content.decode()).forms
+        if any(button.get("hx-post", "").split("?", 1)[0] == refresh_url for button in form["buttons"])
+    )
+    assert form["fields"]["server_key"] == "secondary"
+    if configuration_error == "removed":
+        del settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["secondary"]
+    else:
+        settings.PLUGINS_CONFIG["netbox_librenms_plugin"]["servers"]["secondary"]["librenms_url"] = ""
+    servers.default.requests.clear()
+    servers.secondary.requests.clear()
+    response = client.post(refresh_url + "?server_key=secondary", form["fields"], HTTP_HX_REQUEST="true")
+    assert response.status_code == 200
+    assert not servers.default.requests
+    assert not servers.secondary.requests
+    forms = _PostedForms(response.content.decode()).forms
+    refresh = next(form for form in forms if "sync-tab-refresh-toolbar" in form["attrs"].get("class", ""))
+    button = refresh["buttons"][0]
+    if "disabled" not in button:
+        response = client.post(button["hx-post"], refresh["fields"], HTTP_HX_REQUEST="true")
+        assert response.status_code == 200
+    assert not servers.default.requests, "The retry addressed the installation default server"
+    assert not servers.secondary.requests
+    assert "disabled" in button
+    assert "hx-post" not in button
+    assert all(
+        "server_key" in form["fields"] or all("disabled" in button for button in form["buttons"])
+        for form in forms
+        if form["attrs"].get("method") == "post"
+    )

@@ -19,16 +19,27 @@ from ..import_validation_helpers import (
 from ..ip_addressing import parse_host_address
 from ..librenms_api import LibreNMSAPI, librenms_id_owned_message
 from ..librenms_ids import coerce_librenms_id
+from ..models import RuleConfigurationError
+from ..platform_versions import (
+    HIDDEN_PLATFORM,
+    PlatformFacts,
+    PlatformReason,
+    PlatformState,
+    assess_platform,
+    import_platform,
+    platform_label,
+    platform_version_tracking_enabled,
+    reason_text,
+)
 from ..utils import (
     cached_row_matches,
     exception_text_for,
-    find_devices_by_serial,
     find_matching_location,
-    find_matching_platform,
     find_matching_site,
     is_vc_position,
     match_librenms_hardware_to_device_type,
     normalize_serial,
+    normalize_stack_serial,
     parse_location_for_import,
     resolve_location_mapping,
 )
@@ -37,8 +48,10 @@ from .naming import _name_candidates, _resolve_device_name
 from .virtual_chassis import (
     _member_name,
     chassis_serial_key,
+    devices_with_serial,
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
+    serials_match,
     update_vc_member_suggested_names,
     vc_serial_key,
 )
@@ -271,6 +284,8 @@ def _try_chassis_device_type_match(api, device_id, preloaded_device_type_rules: 
                         chassis_match["match_type"] = "chassis"
                         chassis_match["chassis_model"] = value
                         return chassis_match
+    except RuleConfigurationError:
+        raise
     except Exception:
         logger.debug(f"Chassis inventory fallback failed for device {device_id}", exc_info=True)
 
@@ -667,9 +682,9 @@ def validate_device_for_import(  # noqa: C901
                     'host_device': Device or None
                 },
                 'platform': {
-                    'found': bool,
-                    'platform': Platform or None,
-                    'match_type': str  # 'exact' or None
+                    'platform': Platform or None,  # assigned without a create: the target or the OS platform
+                    'assessment': PlatformAssessment or None,
+                    'reason_text': str,  # the words of the assessment reason
                 },
                 'rack': {  # Only for devices
                     'found': bool,
@@ -755,7 +770,7 @@ def validate_device_for_import(  # noqa: C901
             "found": False,
             "host_device": None,
         },
-        "platform": {"found": False, "platform": None, "match_type": None},
+        "platform": {"platform": None, "assessment": None, "reason_text": ""},
         "rack": {
             "found": False,
             "rack": None,
@@ -931,14 +946,12 @@ def validate_device_for_import(  # noqa: C901
                 # OOB controller's, so comparing it against the host record's serial would surface
                 # bogus replacement/conflict warnings on a row that is already correctly linked.
                 incoming_serial = normalize_serial(libre_device.get("serial"))
-                # Normalize the stored side too: a legacy padded serial equals the incoming one.
-                stored_serial = normalize_serial(existing_device.serial)
-                if result["existing_match_type"] != "librenms_oob" and incoming_serial and incoming_serial != "-":
-                    if stored_serial and stored_serial == incoming_serial:
+                if result["existing_match_type"] != "librenms_oob" and normalize_stack_serial(incoming_serial):
+                    if serials_match(existing_device.serial, incoming_serial, chassis_serial_key(existing_device)):
                         result["serial_confirmed"] = True
-                    elif stored_serial and stored_serial != incoming_serial:
-                        serial_conflict = (
-                            Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
+                    elif normalize_serial(existing_device.serial):
+                        serial_conflict = next(
+                            iter(devices_with_serial(incoming_serial, exclude_pk=existing_device.pk, limit=1)), None
                         )
                         if serial_conflict:
                             result["serial_action"] = "conflict"
@@ -1022,13 +1035,13 @@ def validate_device_for_import(  # noqa: C901
                 # is already linked to LibreNMS isn't mislabelled as "not linked".
                 result["existing_librenms_link"] = _describe_existing_librenms_link(existing_device, server_key)
 
-                # Check for serial conflict on hostname-matched device. Both sides are
-                # normalized so a legacy padded stored serial isn't read as drift.
+                # Check for serial conflict on hostname-matched device.
                 incoming_serial = normalize_serial(libre_device.get("serial"))
-                stored_serial = normalize_serial(existing_device.serial)
-                if incoming_serial and incoming_serial != "-" and stored_serial != incoming_serial:
-                    serial_conflict = (
-                        Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
+                if normalize_stack_serial(incoming_serial) and not serials_match(
+                    existing_device.serial, incoming_serial, chassis_serial_key(existing_device)
+                ):
+                    serial_conflict = next(
+                        iter(devices_with_serial(incoming_serial, exclude_pk=existing_device.pk, limit=1)), None
                     )
                     if serial_conflict:
                         result["serial_action"] = "conflict"
@@ -1056,12 +1069,12 @@ def validate_device_for_import(  # noqa: C901
                 # canonicalizes legacy Device rows, and every plugin write path stores this same
                 # normalized form, so matching and persistence share one representation.
                 serial = normalize_serial(libre_device.get("serial"))
-                if serial and serial != "-" and not import_as_vm:
+                if normalize_stack_serial(serial) and not import_as_vm:
                     # Serial is not unique in NetBox, so .first() would bind an arbitrary row
                     # and the downstream serial/OOB/merge flow would derive its guidance from a
                     # random device. Require a unique match before binding, mirroring the
                     # merge-peer [:2] guard (issue #101).
-                    serial_matches = find_devices_by_serial(serial)
+                    serial_matches = devices_with_serial(serial)
                     if len(serial_matches) > 1:
                         # Device.serial is not unique in NetBox, so several rows already share it.
                         # Binding to an arbitrary one is wrong, and importing anyway would mint YET
@@ -1135,7 +1148,7 @@ def validate_device_for_import(  # noqa: C901
                 # re-issuing the identical UNIQUE query — keeps the single-query invariant while the
                 # fail-closed guard stays in place. Only defined when existing_match_type == "serial".
                 serial_matches
-                if _dup_eligible and _match_type == "serial" and _serial_now and _serial_now != "-"
+                if _dup_eligible and _match_type == "serial" and normalize_stack_serial(_serial_now)
                 else []
             )
             if _dup_eligible:
@@ -1143,7 +1156,7 @@ def validate_device_for_import(  # noqa: C901
                 if _match_type == "hostname" and hostname:
                     _dup_current = len(_hostname_peers) > 1
                 elif _match_type == "serial":
-                    _dup_current = bool(_serial_now) and _serial_now != "-" and len(_serial_peers) > 1
+                    _dup_current = bool(normalize_stack_serial(_serial_now)) and len(_serial_peers) > 1
                 if _dup_current:
                     # Arbitrary .first() match among duplicates: block link/promote/import and
                     # surface a blocking issue. The match is left for display only.
@@ -1188,8 +1201,7 @@ def validate_device_for_import(  # noqa: C901
             try:
                 _serial_for_pair = normalize_serial(libre_device.get("serial"))
                 if (
-                    _serial_for_pair
-                    and _serial_for_pair != "-"
+                    normalize_stack_serial(_serial_for_pair)
                     and not import_as_vm
                     and result.get("existing_device") is not None
                     and result.get("existing_match_type") in ("hostname", "serial")
@@ -1227,9 +1239,7 @@ def validate_device_for_import(  # noqa: C901
                     # surface the wrong merge target. Fetch up to 2; only pair on exactly one,
                     # otherwise skip the suggestion and warn.
                     if _hostname_match and not _serial_match:
-                        _serial_peers = list(
-                            Device.objects.filter(serial=_serial_for_pair).exclude(pk=_hostname_match.pk)[:2]
-                        )
+                        _serial_peers = devices_with_serial(_serial_for_pair, exclude_pk=_hostname_match.pk)
                         if len(_serial_peers) == 1:
                             _serial_match = _serial_peers[0]
                         elif len(_serial_peers) > 1:
@@ -1573,23 +1583,20 @@ def validate_device_for_import(  # noqa: C901
             result["cluster"]["found"] = True  # Not required for devices
 
         # 5. Match Platform (optional - same for both devices and VMs)
-        os = libre_device.get("os", "")
-        platform_match = find_matching_platform(os)
-        result["platform"] = platform_match
-
-        if not platform_match["found"] and os:
-            if platform_match.get("match_type") == "ambiguous":
-                ambiguity_source = platform_match.get("ambiguity_source", "mapping")
-                if ambiguity_source == "platform":
-                    result["warnings"].append(
-                        f"Multiple Platforms match OS: '{os}' — resolve the duplicate Platform names in NetBox"
-                    )
-                else:
-                    result["warnings"].append(
-                        f"Multiple platform mappings found for OS: '{os}' — resolve the conflict in Platform Mappings"
-                    )
-            else:
-                result["warnings"].append(f"No matching platform found for OS: '{os}'")
+        platform_assessment = assess_platform(
+            None,
+            PlatformFacts.from_librenms(libre_device.get("os"), libre_device.get("version")),
+            tracking=platform_version_tracking_enabled(),
+        )
+        result["platform"] = {
+            "platform": platform_assessment.target or platform_assessment.os_platform,
+            "assessment": platform_assessment,
+            # The validation is cached and shown to any import user, so its text names no platform.
+            "reason_text": reason_text(platform_assessment.reason, platform_assessment, None),
+        }
+        if platform_assessment.state is PlatformState.BLOCKED or platform_assessment.os_platform is None:
+            if platform_assessment.reason is not PlatformReason.NO_OS:
+                result["warnings"].append(result["platform"]["reason_text"])
 
         # 6. Additional validations
         if not hostname:
@@ -1694,6 +1701,31 @@ def _validate_and_insert(row, _mapping_fields=frozenset()):
     return row
 
 
+def import_platform_warnings(label, plan, text_viewer):
+    """
+    Return the warning for an imported object that did not get its version platform.
+
+    Args:
+        label (str): Names the imported object, e.g. ``device 12``.
+        plan (ImportPlatform): The platform the import assigned.
+        text_viewer: The user who reads the text, or None for saved text.
+
+    Returns:
+        list[str]: One warning, or none when the object got the platform the rule calls for.
+
+    """
+    if plan.reason is None:
+        return []
+    from dcim.models import Platform
+
+    detail = reason_text(plan.reason, plan.assessment, text_viewer)
+    if plan.error is not None:
+        detail = f"{detail} {exception_text_for(plan.error, Platform, text_viewer)}"
+    platform = platform_label(plan.platform, text_viewer)
+    assigned = "an OS platform you cannot view" if platform == HIDDEN_PLATFORM else f"OS platform {platform}"
+    return [f"Imported {label} with {assigned}: {detail}"]
+
+
 def import_single_device(  # noqa: C901
     device_id: int,
     server_key: str = None,
@@ -1715,7 +1747,6 @@ def import_single_device(  # noqa: C901
             - site_id: NetBox Site ID
             - device_type_id: NetBox DeviceType ID
             - device_role_id: NetBox DeviceRole ID
-            - platform_id: NetBox Platform ID (optional)
             - rack_id: NetBox Rack ID (optional)
         sync_options: Sync options (optional):
             - sync_interfaces: bool (default True)
@@ -1739,6 +1770,7 @@ def import_single_device(  # noqa: C901
                     'cables': int,
                     'ip_addresses': int
                 },
+                'warnings': List[str],  # only on success: the version platform the device did not get
             }
 
     """
@@ -1826,7 +1858,6 @@ def import_single_device(  # noqa: C901
         site = validation["site"].get("site")
         device_type = validation["device_type"].get("device_type")
         device_role = validation["device_role"].get("role")
-        platform = validation["platform"].get("platform")
         rack = None
         rack_explicitly_selected = False
 
@@ -1837,12 +1868,6 @@ def import_single_device(  # noqa: C901
         if manual_mappings:
             site = Site.objects.filter(id=manual_mappings.get("site_id")).first() or site
             device_role = DeviceRole.objects.filter(id=manual_mappings.get("device_role_id")).first() or device_role
-
-            platform_id = manual_mappings.get("platform_id")
-            if platform_id:
-                from dcim.models import Platform
-
-                platform = Platform.objects.filter(id=platform_id).first() or platform
 
             rack_id = manual_mappings.get("rack_id")
             if rack_id:
@@ -1927,13 +1952,18 @@ def import_single_device(  # noqa: C901
                 "comments": f"Imported from LibreNMS by netbox-librenms-plugin on {import_time}",
             }
 
-            # Add optional fields
-            if platform:
-                device_data["platform"] = platform
+            # A version platform created here rolls back with a failed import.
+            platform_plan = import_platform(
+                PlatformFacts.from_librenms(libre_device.get("os"), libre_device.get("version")),
+                tracking=platform_version_tracking_enabled(),
+                actor=user,
+            )
+            if platform_plan.platform is not None:
+                device_data["platform"] = platform_plan.platform
 
-            # Persist the canonical serial used by the exact indexed match lookups.
+            # Persist the trimmed raw serial; the exact indexed match lookups read this form.
             serial = normalize_serial(libre_device.get("serial"))
-            if serial and serial != "-":
+            if normalize_stack_serial(serial):
                 device_data["serial"] = serial
 
             location_name = libre_device.get("location", "")
@@ -1997,6 +2027,7 @@ def import_single_device(  # noqa: C901
             "message": f"Successfully imported device: {device.name}",
             "error": None,
             "synced": synced,
+            "warnings": import_platform_warnings(f"device {device_id}", platform_plan, text_viewer),
         }
 
     except Exception as e:

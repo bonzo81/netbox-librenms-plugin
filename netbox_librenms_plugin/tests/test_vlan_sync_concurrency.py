@@ -94,6 +94,7 @@ def _sync_global_vlan(device, user, vid, lookup_wrapper):
                 "action": "create_vlans",
                 "select": [str(vid)],
                 f"vlan_group_{vid}": "",
+                f"expected_vlan_name_{vid}": "Concurrent global VLAN",
                 "server_key": "default",
             },
             user=user,
@@ -151,6 +152,7 @@ def _drive_grouped_sync(device, user, group, vid, librenms_name, *, intent=None)
         "action": "create_vlans",
         "select": [str(vid)],
         f"vlan_group_{vid}": str(group.pk),
+        f"expected_vlan_name_{vid}": librenms_name,
         "server_key": "default",
     }
     if intent is not None:

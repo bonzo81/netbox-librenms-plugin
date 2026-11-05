@@ -2,6 +2,7 @@
 
 import json
 import re
+from urllib.parse import urlencode
 
 import pytest
 from dcim.models import Interface
@@ -49,28 +50,25 @@ def _seed(owner, ports):
     cache.set(SyncInterfacesView().get_cache_key(owner, "ports", SERVER_KEY), payload, timeout=300)
 
 
-def _url(name, owner, object_type):
+def _url(name, owner, object_type, **query):
+    # The tab posts to a URL that carries the page query, as the rendered form action does.
     return (
         reverse(f"plugins:netbox_librenms_plugin:{name}", kwargs={"object_type": object_type, "object_id": owner.pk})
-        + "?interface_name_field=ifName"
+        + "?"
+        + urlencode({"interface_name_field": "ifName", **query})
     )
 
 
-def _post(client, owner, data, *, name="sync_selected_interfaces", object_type="device", htmx=True):
+def _post(client, owner, data, *, name="sync_selected_interfaces", object_type="device", htmx=True, **query):
     headers = {"HTTP_HX_REQUEST": "true"} if htmx else {}
-    return client.post(_url(name, owner, object_type), {"server_key": SERVER_KEY, **data}, **headers)
+    return client.post(_url(name, owner, object_type, **query), {"server_key": SERVER_KEY, **data}, **headers)
 
 
-def _sync_data(*port_ids, page=None, per_page=None):
-    data = {
+def _sync_data(*port_ids):
+    return {
         "select": [str(port_id) for port_id in port_ids],
         "exclude_columns": ["vlans", "mac_address", "description", "mtu", "speed", "type"],
     }
-    if page is not None:
-        data["interfaces_page"] = str(page)
-    if per_page is not None:
-        data["interfaces_per_page"] = str(per_page)
-    return data
 
 
 def _row_names(html):
@@ -96,16 +94,22 @@ class TestHtmxSync:
         client.force_login(make_superuser("htmx-sync-page-user"))
         synced_port = FIRST_PORT + 12
 
-        response = _post(client, device, _sync_data(synced_port, page=2, per_page=10))
+        page_query = {"interfaces_page": "2", "interfaces_per_page": "10"}
+        response = _post(client, device, _sync_data(synced_port), **page_query)
 
         assert response.status_code == 200
         assert "Location" not in response
         html = response.content.decode()
         assert "Showing 11-20 of 30" in html
         assert _row_names(html) == [f"eth{index:02d}" for index in range(10, 20)]
-        assert (_hidden_value(html, "interfaces_page"), _hidden_value(html, "interfaces_per_page")) == ("2", "10")
-        # The swapped form posts over htmx again, so the next sync also stays on this page.
-        assert f'hx-post="{_url("sync_selected_interfaces", device, "device")}"' in html
+        # The page state lives in the URL only, never in a hidden input the sync form would post.
+        sync_form_start = html.index('<form method="post"')
+        sync_form = html[sync_form_start : html.index("</form>", sync_form_start)]
+        assert _hidden_value(sync_form, "interfaces_page") is None
+        assert _hidden_value(sync_form, "interfaces_per_page") is None
+        # The swapped form posts over htmx to the same page query, so the next sync also stays on this page.
+        action = _url("sync_selected_interfaces", device, "device", **page_query).replace("&", "&amp;")
+        assert f'hx-post="{action}"' in html
         assert "Selected interfaces synced successfully." in html
         interface = Interface.objects.get(device=device, name="eth12")
         assert read_mapping(interface).own_id(SERVER_KEY) == synced_port
@@ -127,7 +131,7 @@ class TestHtmxSync:
         _seed(device, _ports())
         client.force_login(make_superuser("htmx-sync-empty-user"))
 
-        response = _post(client, device, _sync_data(page=3, per_page=10))
+        response = _post(client, device, _sync_data(), interfaces_page="3", interfaces_per_page="10")
 
         assert response.status_code == 200
         html = response.content.decode()
@@ -153,7 +157,7 @@ class TestHtmxSync:
         _seed(vm, _ports())
         client.force_login(make_superuser("htmx-sync-vm-user"))
 
-        response = _post(client, vm, _sync_data(FIRST_PORT + 1, page=1, per_page=10), object_type="virtualmachine")
+        response = _post(client, vm, _sync_data(FIRST_PORT + 1), object_type="virtualmachine", interfaces_per_page="10")
 
         assert response.status_code == 200
         html = response.content.decode()
@@ -187,13 +191,10 @@ def test_an_htmx_rebind_swaps_the_tab_in_place(client, settings, django_capture_
         response = _post(
             client,
             device,
-            {
-                "rebind_one": str(port_id),
-                f"rebind_expected_port_{port_id}": "8679",
-                "interfaces_page": "2",
-                "interfaces_per_page": "10",
-            },
+            {"rebind_one": str(port_id), f"rebind_expected_port_{port_id}": "8679"},
             name="rebind_interface_port",
+            interfaces_page="2",
+            interfaces_per_page="10",
         )
 
     assert response.status_code == 200

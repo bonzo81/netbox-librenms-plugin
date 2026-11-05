@@ -15,6 +15,8 @@ luck — names often don't match. The picker lets the user choose the remote end
 All tests run against real Device / ConsoleServerPort / ConsolePort / Interface / Cable rows.
 """
 
+import re
+
 import pytest
 from django.core.cache.backends.locmem import LocMemCache
 
@@ -3191,7 +3193,14 @@ class TestNormalCableLinkObjectScope:
         assert record.get("netbox_local_interface_id") is None
         assert reverse("dcim:interface", args=[hidden_local.pk]) not in table_html
         assert hidden.name not in table_html
-        assert f'value="{hidden.pk}"' not in table_html
+        # Another row field can hold the same number as the hidden pk, so only the member controls are read.
+        member_controls = re.findall(
+            r'<select[^>]*"device_selection_[^"]*"[^>]*>.*?</select>|<input[^>]*name="device_selection_[^"]*"[^>]*>',
+            table_html,
+            re.S,
+        )
+        assert member_controls
+        assert all(f'value="{hidden.pk}"' not in control for control in member_controls)
 
     def test_verify_does_not_repaint_a_remote_interface_on_a_hidden_vc_member(self):
         import json

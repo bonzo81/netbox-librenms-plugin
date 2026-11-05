@@ -31,14 +31,12 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
     make_request,
     make_user_with_perms,
     message_texts,
-    module_row_binding,
+    render_module_tab,
+    rendered_modal_form,
+    rendered_module_form,
 )
 from netbox_librenms_plugin.tests.view_test_helpers import post as view_post
-from netbox_librenms_plugin.utils import (
-    module_inventory_binding_token,
-    module_inventory_snapshot_digest,
-    netbox_relocates_module_subtree,
-)
+from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
 
 HIDDEN = "(only a superuser sees the message)"
 
@@ -89,12 +87,13 @@ def _assert_shown(texts, hidden, superuser, restricted_text):
 
 
 def _drive(view_class, device, data, user, live_librenms, inventory=None):
-    """POST into a bound view with a real request, and return the message texts."""
-    request = make_request("post", {"server_key": "default", **data}, user=user, path="/modules/")
+    """POST into a bound view with a real request, and return the message texts; a callable *data* reads the page."""
     view = view_class()
     view._librenms_api = live_librenms.api
     key = None if inventory is None else seed_inventory(view, device, inventory, librenms_id=device.pk)
     try:
+        fields = data(device, user) if callable(data) else data
+        request = make_request("post", {"server_key": "default", **fields}, user=user, path="/modules/")
         view_post(view, request, pk=device.pk)
     finally:
         if key is not None:
@@ -155,13 +154,13 @@ class TestAModuleActionShowsNetBoxsMessageOnlyToASuperuser:
 
         tag = f"vetext-{view_name.lower()}-{int(superuser)}"
         device, hidden = _linked(make_device_with_module_bays(tag, ["Slot 1"])), make_device(f"{tag}-hidden")
-        rows = [_row(10, make_module_type(f"CARD-{tag}").model, "Slot 1")]
+        rows = _bulk_rows(view_name, [_row(10, make_module_type(f"CARD-{tag}").model, "Slot 1")], tag)
         settings.CUSTOM_VALIDATORS = {"dcim.module": [_Refuses(f"Conflicts with {hidden.name}.")]}
 
         texts = _drive(
             getattr(modules, view_name),
             device,
-            _bulk_data(device, view_name, rows),
+            _bulk_data(view_name),
             _viewer(tag, superuser, device),
             live_librenms,
             rows,
@@ -180,7 +179,9 @@ class TestAModuleActionShowsNetBoxsMessageOnlyToASuperuser:
         device, hidden = _linked(make_device_with_module_bays(tag, ["Slot 1"])), make_device(f"{tag}-hidden")
         interface = make_interface(device, "Te1/1/1")
         model = make_module_type(f"CARD-{tag}").model
-        rows = [_row(10, model, "Slot 1", _librenms_port_id=7301, _librenms_ifname=interface.name)]
+        rows = _bulk_rows(
+            view_name, [_row(10, model, "Slot 1", _librenms_port_id=7301, _librenms_ifname=interface.name)], tag
+        )
         refuse = _refuse_the_bind_of(interface, hidden)
 
         pre_save.connect(refuse, sender=Interface, weak=False)
@@ -188,7 +189,7 @@ class TestAModuleActionShowsNetBoxsMessageOnlyToASuperuser:
             texts = _drive(
                 getattr(modules, view_name),
                 device,
-                _bulk_data(device, view_name, rows),
+                _bulk_data(view_name),
                 _viewer(tag, superuser, device),
                 live_librenms,
                 rows,
@@ -206,12 +207,13 @@ class TestAModuleActionShowsNetBoxsMessageOnlyToASuperuser:
         module = install_module(device, "Slot 1", f"CARD-{tag}", serial="OLD")
         rows = [_row(11, module.module_type.model, "Slot 1", entPhysicalSerialNum="NEW")]
         settings.CUSTOM_VALIDATORS = {"dcim.module": [_Refuses(f"Conflicts with {hidden.name}.", "serial")]}
-        binding = module_row_binding(device, "update_module_serial", rows[0], action_target={"module_id": module.pk})
 
         texts = _drive(
             UpdateModuleSerialView,
             device,
-            {"module_id": str(module.pk), "ent_index": "11", "inventory_binding": binding},
+            lambda device, user: rendered_module_form(render_module_tab(device, user=user), "update-module-serial", 11)[
+                1
+            ],
             _viewer(tag, superuser, device),
             live_librenms,
             rows,
@@ -224,15 +226,14 @@ class TestAModuleActionShowsNetBoxsMessageOnlyToASuperuser:
 
         tag = f"vetext-replace-{int(superuser)}"
         device, hidden = _linked(make_device_with_module_bays(tag, ["Slot 1"])), make_device(f"{tag}-hidden")
-        installed = install_module(device, "Slot 1", f"OLD-{tag}", serial="OLD")
-        rows = [{"entPhysicalIndex": 100, "entPhysicalModelName": make_module_type(f"NEW-{tag}").model}]
+        install_module(device, "Slot 1", f"OLD-{tag}", serial="OLD")
+        rows = [_row(100, make_module_type(f"NEW-{tag}").model, "Slot 1")]
         settings.CUSTOM_VALIDATORS = {"dcim.module": [_Refuses(f"Conflicts with {hidden.name}.", hidden.name)]}
-        binding = module_row_binding(device, "replace_module", rows[0], action_target={"module_id": installed.pk})
 
         texts = _drive(
             ReplaceModuleView,
             device,
-            {"module_id": str(installed.pk), "ent_index": "100", "inventory_binding": binding},
+            lambda device, user: rendered_modal_form(device, 100, "replace-module", user=user)[1],
             _viewer(tag, superuser, device),
             live_librenms,
             rows,
@@ -299,13 +300,20 @@ class TestAModuleActionShowsNetBoxsMessageOnlyToASuperuser:
         _assert_shown(message_texts(response.wsgi_request), hidden, superuser, "the netbox_bay_name field")
 
 
-def _bulk_data(device, view_name, rows):
-    """Return the POST of a branch install (parent index 10) or a selected install (row 10)."""
-    digest = module_inventory_snapshot_digest(rows)
-    if view_name == "InstallBranchView":
-        binding = module_inventory_binding_token(
-            device.pk, "default", "install_branch", {"parent_index": 10}, 10, digest
-        )
-        return {"parent_index": "10", "inventory_binding": binding}
-    binding = module_inventory_binding_token(device.pk, "default", "install_selected", {}, None, digest)
-    return {"select": ["10"], "inventory_binding": binding}
+def _bulk_rows(view_name, rows, tag):
+    """Add an optic below row 10 for a branch install, so the table renders that row's branch button."""
+    if view_name != "InstallBranchView":
+        return rows
+    return [*rows, _row(11, make_module_type(f"OPTIC-{tag}").model, "Optic", entPhysicalContainedIn=10)]
+
+
+def _bulk_data(view_name):
+    """Return a reader of the rendered branch form of row 10, or of the rendered selected form with row 10 checked."""
+
+    def read(device, user):
+        content = render_module_tab(device, user=user)
+        if view_name == "InstallBranchView":
+            return rendered_module_form(content, "install-branch", 10)[1]
+        return {**rendered_module_form(content, "install-selected")[1], "select": ["10"]}
+
+    return read
