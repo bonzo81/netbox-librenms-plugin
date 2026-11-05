@@ -11,13 +11,14 @@ module type carries no interface templates so adoption resolves to a real no-op)
 """
 
 import pytest
+from dcim.models import Interface
 from django.contrib.auth import get_user_model
 from django.contrib.messages.storage.fallback import FallbackStorage
 from django.test import RequestFactory
 from django_htmx.middleware import HtmxDetails
 
 from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
-from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
 
 SERVER_KEY = "default"
 
@@ -133,6 +134,12 @@ class TestUpdateModuleInterfaceBindMessage:
 
         joined = " || ".join(msg for _, msg in messages)
         assert not any("Updated interface" in msg for _, msg in messages), joined
+        # Only the bound summary is a success: a refusal, a missing identity or a failed bind warns or errors.
+        assert [level for level, _ in messages] == ["success"], joined
+        # The view wrote nothing: the row and its binding are as the concurrent writer left them.
+        stored = Interface.objects.get(pk=iface.pk)
+        assert stored.last_updated == iface.last_updated
+        assert stored_mapping_for_test(stored) == stored_mapping_for_test(iface)
 
     def test_real_rebind_still_announces_updated_interface(self):
         # Positive control: the interface has NO port binding yet, so posting a port_id actually
