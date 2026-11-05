@@ -20,6 +20,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Case, IntegerField, Q, Value, When
 from django.http import QueryDict
 from django.utils.translation import gettext_lazy as _
+from ipam.models import VRF
 from netbox.forms import (
     NetBoxModelFilterSetForm,
     NetBoxModelForm,
@@ -40,6 +41,7 @@ from .models import (
     DeviceTypeMapping,
     InterfaceTypeMapping,
     InventoryIgnoreRule,
+    IPAddressMapping,
     LibreNMSSettings,
     LocationMapping,
     ModuleBayMapping,
@@ -230,6 +232,14 @@ class ImportSettingsForm(NetBoxModelForm):
         help_text="Store each user's ifName or ifDescr choice separately for each device platform",
     )
 
+    platform_version_tracking = forms.BooleanField(
+        label="Track OS versions as platforms",
+        required=False,
+        widget=forms.CheckboxInput(attrs={"class": "form-check-input"}),
+        help_text="Give each device and virtual machine the version platform of its LibreNMS OS version: "
+        "a child of the OS platform, created when it is missing",
+    )
+
     class Meta:
         model = LibreNMSSettings
         fields = [
@@ -239,6 +249,7 @@ class ImportSettingsForm(NetBoxModelForm):
             "location_parse_pattern",
             "location_parse_is_regex",
             "remember_interface_name_per_platform",
+            "platform_version_tracking",
         ]
 
     def clean_vc_member_name_pattern(self):
@@ -316,6 +327,8 @@ class ImportSettingsForm(NetBoxModelForm):
         valid_tokens = {"region", "site", "location", "rack", "tenant"}
 
         if is_regex:
+            # The form validates the typed pattern and shows the error on the field.
+            # nosemgrep: regex-error-must-raise
             try:
                 compiled = re.compile(pattern)
             except REGEX_COMPILE_ERRORS as exc:
@@ -609,6 +622,79 @@ class InterfaceTypeMappingFilterForm(NetBoxModelFilterSetForm):
     )
 
     model = InterfaceTypeMapping
+
+
+class IPAddressMappingForm(NetBoxModelForm):
+    """Create and edit IP mappings: keep the LibreNMS addresses in a prefix out of IP sync."""
+
+    vrf = DynamicModelChoiceField(
+        queryset=VRF.objects.all(),
+        required=False,
+        label="VRF",
+        help_text="Leave blank to apply the mapping in every VRF and in the global table.",
+    )
+
+    class Meta:
+        model = IPAddressMapping
+        fields = ["prefix", "vrf", "action", "description"]
+
+
+class IPAddressMappingImportForm(NetBoxModelImportForm):
+    """Import IP mappings from CSV, JSON, or YAML."""
+
+    vrf = CSVModelChoiceField(
+        queryset=VRF.objects.all(),
+        to_field_name="name",
+        required=False,
+        help_text=_("VRF name. Leave blank to apply the mapping in every VRF and in the global table."),
+    )
+    action = CSVChoiceField(
+        label=_("Action"),
+        choices=IPAddressMapping.ACTION_CHOICES,
+        required=False,
+        help_text=_("ignore (the default)"),
+    )
+
+    class Meta:
+        model = IPAddressMapping
+        fields = ["prefix", "vrf", "action", "description"]
+
+    def clean_action(self):
+        """Read a blank action as the mapping's current one (ignore for a new mapping)."""
+        return self.cleaned_data["action"] or self.instance.action
+
+
+class IPAddressMappingFilterForm(NetBoxModelFilterSetForm):
+    """Filter IP mappings by prefix, VRF, action and description."""
+
+    prefix = forms.CharField(
+        required=False,
+        label="Prefix",
+        help_text="Filter by prefix text (partial match)",
+    )
+    vrf_id = DynamicModelChoiceField(
+        queryset=VRF.objects.all(),
+        required=False,
+        label="VRF",
+    )
+    vrf__isnull = forms.NullBooleanField(
+        required=False,
+        widget=forms.Select(choices=[("", "---------"), ("true", "Yes"), ("false", "No")]),
+        label="All VRFs",
+        help_text="Yes lists only mappings that apply in every VRF",
+    )
+    action = forms.ChoiceField(
+        required=False,
+        label="Action",
+        choices=[("", "---------"), *IPAddressMapping.ACTION_CHOICES],
+    )
+    description = forms.CharField(
+        required=False,
+        label="Description",
+        help_text="Filter by description (partial match)",
+    )
+
+    model = IPAddressMapping
 
 
 class DeviceTypeMappingForm(NetBoxModelForm):

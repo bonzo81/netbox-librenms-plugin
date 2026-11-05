@@ -16,6 +16,13 @@ from netbox_librenms_plugin.import_utils.virtual_chassis import (
     extract_vc_members,
     members_by_serial_key,
 )
+from netbox_librenms_plugin.platform_versions import (
+    PlatformFacts,
+    assess_platform,
+    platform_version_tracking_enabled,
+    reason_text,
+    target_label,
+)
 from netbox_librenms_plugin.server_mappings import mapped_device_servers, read_mapping
 from netbox_librenms_plugin.server_selection import (
     ServerSelectionState,
@@ -30,7 +37,6 @@ from netbox_librenms_plugin.sync_cache import (
     sync_cache_browser_contract,
 )
 from netbox_librenms_plugin.utils import (
-    find_matching_platform,
     get_interface_name_field,
     get_user_pref,
     match_librenms_hardware_to_device_type,
@@ -250,6 +256,8 @@ class BaseLibreNMSSyncView(
         for sync_tab in applicable_tabs:
             query = request.GET.copy()
             query["tab"] = sync_tab.value
+            # The tab link adds the selected name field itself, so a copy here would grow per click.
+            query.pop("interface_name_field", None)
             sync_tab_urls[sync_tab.value] = f"{request.path}?{query.urlencode()}"
 
         # Add our specific context
@@ -318,7 +326,7 @@ class BaseLibreNMSSyncView(
         interface_name_field = get_interface_name_field(request, obj)
 
         # Get platform info for display and sync
-        platform_info = self._get_platform_info(librenms_info, obj)
+        platform_info = self._get_platform_info(librenms_info, obj, request.user)
 
         # Get manufacturers for platform creation modal
         from dcim.models import Manufacturer
@@ -822,48 +830,34 @@ class BaseLibreNMSSyncView(
 
         return result
 
-    def _get_platform_info(self, librenms_info, obj):
+    def _get_platform_info(self, librenms_info, obj, actor):
         """
-        Get platform information from LibreNMS.
-
-        Platform matching is based on OS name only (not version).
-        Version is displayed separately as informational data.
+        Return the platform row of the sync page: the LibreNMS facts and their platform assessment.
 
         Args:
-            librenms_info: Dictionary with LibreNMS device info
-            obj: NetBox device object
+            librenms_info: Dictionary with LibreNMS device info.
+            obj: The NetBox Device or VirtualMachine.
+            actor: The user who reads the page; the assessment checks whether they may add platforms.
 
         Returns:
-            dict: {
-                'netbox_platform': Platform object or None,
-                'librenms_os': str (OS name),
-                'librenms_version': str (OS version),
-                'platform_exists': bool (whether OS platform exists in NetBox),
-                'platform_name': str (OS name for platform matching),
-                'matching_platform': Platform object or None
-            }
+            dict: ``librenms_os`` and ``librenms_version`` (raw, ``-`` when absent), ``assessment``
+                (PlatformAssessment), and ``reason_text`` and ``target_label`` (words that name only
+                platforms the actor may view).
 
         """
-        librenms_os = librenms_info["librenms_device_details"].get("librenms_device_os", "-")
-        librenms_version = librenms_info["librenms_device_details"].get("librenms_device_version", "-")
-
-        # Platform name is just the OS (not OS + version)
-        platform_name = librenms_os if librenms_os != "-" else None
-
-        # Try case-insensitive exact name match first, then fall back to PlatformMapping
-        platform_exists = False
-        matching_platform = None
-        if platform_name:
-            result = find_matching_platform(platform_name)
-            if result["found"] and result["match_type"] != "ambiguous":
-                matching_platform = result["platform"]
-                platform_exists = True
-
+        details = librenms_info["librenms_device_details"]
+        librenms_os = details.get("librenms_device_os", "-")
+        librenms_version = details.get("librenms_device_version", "-")
+        assessment = assess_platform(
+            obj,
+            PlatformFacts.from_librenms(librenms_os, librenms_version),
+            tracking=platform_version_tracking_enabled(),
+            actor=actor,
+        )
         return {
-            "netbox_platform": obj.platform,
             "librenms_os": librenms_os,
             "librenms_version": librenms_version,
-            "platform_exists": platform_exists,
-            "platform_name": platform_name,
-            "matching_platform": matching_platform,
+            "assessment": assessment,
+            "reason_text": reason_text(assessment.reason, assessment, actor),
+            "target_label": target_label(assessment, actor),
         }

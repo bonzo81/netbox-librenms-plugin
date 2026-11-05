@@ -1,5 +1,4 @@
 import functools
-import logging
 import re
 
 import yaml
@@ -12,6 +11,8 @@ from django.db import models
 from django.db.models import Q
 from django.db.models.functions import Lower
 from django.urls import reverse
+from ipam.fields import IPNetworkField
+from ipam.models import VRF
 from netbox.models import NetBoxModel
 from utilities.fields import ColorField
 
@@ -22,8 +23,6 @@ from netbox_librenms_plugin.utils import (
     validate_regex_field,
 )
 
-logger = logging.getLogger(__name__)
-
 # Characters removed by Python's no-argument str.strip(). PostgreSQL BTRIM removes only ASCII
 # spaces when its second argument is absent, so pass this set explicitly wherever the database
 # must enforce the same normalization as PortStackLagPattern.clean().
@@ -31,6 +30,74 @@ _PYTHON_STRIP_WHITESPACE = (
     "\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0"
     "\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
 )
+
+
+HIDDEN_RULE_ERROR_MESSAGE = "A stored rule does not work, and you may not view it. Ask an administrator to fix it."
+
+
+class _HiddenRuleConfigurationError:
+    """A broken stored rule as a viewer without view permission on the rule sees it: without the rule details."""
+
+    visible = False
+    public_message = HIDDEN_RULE_ERROR_MESSAGE
+
+
+class RuleConfigurationError(Exception):
+    """A stored rule holds a regex or a replacement that does not work, so no decision from its rule set is safe."""
+
+    visible = True
+
+    def __init__(self, rule, field):
+        self.rule_model = type(rule)
+        self.rule_pk = rule.pk
+        self.rule_name = getattr(rule, "name", "") or str(rule)
+        self.rule_kind = str(rule._meta.verbose_name)
+        self.rule_url = rule.get_absolute_url()
+        self.field = field
+        self.value = getattr(rule, field)
+        super().__init__(self.public_message)
+
+    def shown_to(self, user):
+        """Return this error as *user* may see it: the rule details need view permission on the rule."""
+        if self.rule_model.objects.restrict(user, "view").filter(pk=self.rule_pk).exists():
+            return self
+        return _HiddenRuleConfigurationError()
+
+    @property
+    def public_message(self):
+        """Return stored rule details without exception diagnostics."""
+        return (
+            f'{self.rule_kind[:1].upper()}{self.rule_kind[1:]} "{self.rule_name}" (ID {self.rule_pk}) stores an '
+            f"invalid {self.field}: {self.value}. Fix the rule, then try again."
+        )
+
+
+def compile_rule_regex(rule, field):
+    """
+    Return the compiled regex that *rule* stores in *field*.
+
+    Raises:
+        RuleConfigurationError: When the stored regex does not compile.
+
+    """
+    try:
+        return re.compile(getattr(rule, field))
+    except REGEX_COMPILE_ERRORS as exc:
+        raise RuleConfigurationError(rule, field) from exc
+
+
+def check_rule_replacement(rule, compiled, field):
+    """
+    Raise when the replacement that *rule* stores in *field* is not a valid template for *compiled*.
+
+    Raises:
+        RuleConfigurationError: When the stored replacement refers to a group that *compiled* lacks.
+
+    """
+    try:
+        _validate_replacement_template(compiled, getattr(rule, field))
+    except (*REGEX_COMPILE_ERRORS, IndexError) as exc:
+        raise RuleConfigurationError(rule, field) from exc
 
 
 def _trim_python_whitespace(expression):
@@ -129,6 +196,12 @@ class LibreNMSSettings(models.Model):
     remember_interface_name_per_platform = models.BooleanField(
         default=False,
         help_text="Remember each user's ifName or ifDescr choice separately for each device platform",
+    )
+
+    platform_version_tracking = models.BooleanField(
+        default=False,
+        help_text="Give each device and virtual machine the version platform of its LibreNMS OS version: "
+        "a child of the OS platform, created when it is missing",
     )
 
     # Cable-sync provenance settings. DB/UI-managed (Settings page) rather than PLUGINS_CONFIG,
@@ -339,6 +412,102 @@ class InterfaceTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
         return yaml.dump(data, sort_keys=False)
 
 
+_IP_MAPPING_EXISTS = "An IP mapping for this prefix and VRF already exists."
+
+
+class IPAddressMapping(FullCleanOnSaveMixin, NetBoxModel):
+    """
+    One IP mapping: an action for the LibreNMS addresses in a prefix, optionally in one VRF.
+
+    ``ip_rules.IPRuleMatcher`` is the one reader that applies these mappings.
+    """
+
+    ACTION_IGNORE = "ignore"
+    ACTION_CHOICES = [
+        (ACTION_IGNORE, "Ignore"),
+    ]
+    # What a mapping without a VRF applies to, wherever the UI shows it.
+    ANY_VRF_LABEL = "All VRFs and Global"
+
+    prefix = IPNetworkField(
+        help_text="IPv4 or IPv6 prefix, for example fe80::/10. A host address is stored as its network.",
+    )
+    vrf = models.ForeignKey(
+        VRF,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="librenms_ip_address_mappings",
+        help_text="Apply only to addresses synced into this VRF. Leave blank for every VRF and the global table.",
+    )
+    action = models.CharField(
+        max_length=10,
+        choices=ACTION_CHOICES,
+        default=ACTION_IGNORE,
+        help_text="Ignore keeps matching addresses out of IP sync.",
+    )
+    description = models.TextField(
+        blank=True,
+        help_text="Optional description or notes about this IP mapping",
+    )
+
+    def clean_fields(self, exclude=None):
+        """Store the network address of the prefix, so ``fe80::1/10`` is saved as ``fe80::/10``."""
+        # NetBox's prefix validator refuses host bits and runs here, before clean(). 0.0.0.0/0 is falsy.
+        if self.prefix not in (None, "") and "prefix" not in (exclude or ()):
+            try:
+                self.prefix = self._meta.get_field("prefix").to_python(self.prefix).cidr
+            except ValidationError as exc:
+                raise ValidationError({"prefix": "Enter a prefix in CIDR notation, for example fe80::/10."}) from exc
+        super().clean_fields(exclude=exclude)
+
+    def validate_constraints(self, exclude=None):
+        """Report a duplicate mapping on the prefix field, so the forms and the API show it there."""
+        try:
+            super().validate_constraints(exclude=exclude)
+        except ValidationError as exc:
+            # The two unique constraints are this model's only constraints.
+            raise ValidationError({"prefix": _IP_MAPPING_EXISTS}) from exc
+
+    def get_absolute_url(self):
+        """Return the URL for this mapping's detail page."""
+        return reverse("plugins:netbox_librenms_plugin:ipaddressmapping_detail", args=[self.pk])
+
+    class Meta:
+        """Meta options for IPAddressMapping."""
+
+        # NULL is never equal in SQL, so the global rows get their own partition.
+        constraints = [
+            models.UniqueConstraint(
+                fields=["prefix", "vrf"],
+                condition=Q(vrf__isnull=False),
+                name="unique_ip_address_mapping_vrf",
+                violation_error_message=_IP_MAPPING_EXISTS,
+            ),
+            models.UniqueConstraint(
+                fields=["prefix"],
+                condition=Q(vrf__isnull=True),
+                name="unique_ip_address_mapping_global",
+                violation_error_message=_IP_MAPPING_EXISTS,
+            ),
+        ]
+        ordering = ["prefix", "pk"]
+        verbose_name = "IP mapping"
+        verbose_name_plural = "IP mappings"
+
+    def __str__(self):
+        return f"{self.prefix} (VRF {self.vrf})" if self.vrf_id else str(self.prefix)
+
+    def to_yaml(self):
+        data = {
+            "prefix": str(self.prefix),
+            "vrf": self.vrf.name if self.vrf_id else "",
+            "action": self.action,
+            "description": self.description,
+        }
+        return yaml.dump(data, sort_keys=False)
+
+
 class DeviceTypeMapping(FullCleanOnSaveMixin, NetBoxModel):
     """Map LibreNMS hardware strings to NetBox DeviceType objects."""
 
@@ -511,13 +680,21 @@ class ModuleBayMapping(FullCleanOnSaveMixin, NetBoxModel):
 
     @functools.cached_property
     def _compiled_pattern(self):
-        """Compiled regex for is_regex=True mappings; None for exact mappings or invalid patterns."""
+        """
+        Return the compiled regex of an is_regex=True mapping, checked against its bay name template.
+
+        Returns:
+            re.Pattern | None: The compiled pattern, or None for an exact mapping.
+
+        Raises:
+            RuleConfigurationError: When the stored pattern or bay name template does not work.
+
+        """
         if not self.is_regex or not self.librenms_name:
             return None
-        try:
-            return re.compile(self.librenms_name)
-        except REGEX_COMPILE_ERRORS:
-            return None
+        compiled = compile_rule_regex(self, "librenms_name")
+        check_rule_replacement(self, compiled, "netbox_bay_name")
+        return compiled
 
     def clean(self):
         """Validate that regex patterns compile when is_regex is True."""
@@ -652,6 +829,7 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
     def clean(self):
         """Validate that match_pattern compiles as a regex and replacement is a valid template."""
         super().clean()
+        self.__dict__.pop("compiled_match_pattern", None)
         errors = {}
         if not self.match_pattern:
             errors["match_pattern"] = "This field is required."
@@ -665,6 +843,23 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
             _validate_replacement_template(compiled, self.replacement)
         except (re.error, IndexError) as e:
             raise ValidationError({"replacement": f"Invalid replacement template: {e}"}) from e
+
+    @functools.cached_property
+    def compiled_match_pattern(self):
+        """
+        Return the compiled match_pattern, checked against the replacement template.
+
+        Raises:
+            RuleConfigurationError: When the stored pattern or replacement does not work.
+
+        """
+        compiled = compile_rule_regex(self, "match_pattern")
+        check_rule_replacement(self, compiled, "replacement")
+        return compiled
+
+    def apply(self, value: str) -> str:
+        """Return *value* with this rule's substitution applied; raise RuleConfigurationError for a broken rule."""
+        return self.compiled_match_pattern.sub(self.replacement, value)
 
     def get_absolute_url(self):
         """Return the URL for this rule's detail page."""
@@ -688,16 +883,6 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
             "description": self.description,
         }
         return yaml.dump(data, sort_keys=False)
-
-
-class InventoryRuleFilterError(Exception):
-    """An inventory rule stores a filter regex that does not compile."""
-
-    def __init__(self, rule, field):
-        self.rule_pk = rule.pk
-        self.rule_name = rule.name
-        self.field = field
-        super().__init__(f"InventoryIgnoreRule pk={rule.pk} stores an invalid {field} regex")
 
 
 def _raw_text(value):
@@ -913,13 +1098,16 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
 
     @functools.cached_property
     def _compiled_pattern(self):
-        """Compiled regex for MATCH_REGEX rules; None for other match types or invalid patterns."""
+        """
+        Return the compiled regex of a MATCH_REGEX rule, or None for other match types.
+
+        Raises:
+            RuleConfigurationError: When the stored pattern does not compile.
+
+        """
         if self.match_type != self.MATCH_REGEX or not self.pattern:
             return None
-        try:
-            return re.compile(self.pattern)
-        except REGEX_COMPILE_ERRORS:
-            return None
+        return compile_rule_regex(self, "pattern")
 
     def matches_class(self, phys_class: str) -> bool:
         """Return True when this rule's class is *phys_class* (class_is rules only)."""
@@ -933,18 +1121,14 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
         Return ``(inventory field, compiled regex)`` for each non-blank filter of this rule.
 
         Raises:
-            InventoryRuleFilterError: When a stored filter does not compile.
+            RuleConfigurationError: When a stored filter does not compile.
 
         """
-        compiled = []
-        for field, source in self.FILTER_SOURCES.items():
-            if not getattr(self, field):
-                continue
-            try:
-                compiled.append((source, re.compile(getattr(self, field))))
-            except REGEX_COMPILE_ERRORS as exc:
-                raise InventoryRuleFilterError(self, field) from exc
-        return tuple(compiled)
+        return tuple(
+            (source, compile_rule_regex(self, field))
+            for field, source in self.FILTER_SOURCES.items()
+            if getattr(self, field)
+        )
 
     def matches_item_class(self, item: dict) -> bool:
         """Return True when this class_is rule's class is the class of *item*."""
@@ -967,15 +1151,7 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
         if not self.pattern or not self.pattern.strip():
             return False
         if self.match_type == self.MATCH_REGEX:
-            compiled = self._compiled_pattern
-            if compiled is None:
-                logger.error(
-                    "Invalid regex in InventoryIgnoreRule pk=%s pattern=%r — skipping",
-                    self.pk,
-                    self.pattern,
-                )
-                return False
-            return bool(compiled.search(name))
+            return bool(self._compiled_pattern.search(name))
         name_up = name.upper()
         pat = self.pattern.upper()
         if self.match_type == self.MATCH_ENDS_WITH:
@@ -1304,30 +1480,24 @@ class CarrierAutoInstallRule(FullCleanOnSaveMixin, NetBoxModel):
 
     @functools.cached_property
     def _compiled_device_type_pattern(self):
+        """Return the compiled device_type_pattern, or None when it is blank; raise RuleConfigurationError when it is invalid."""
         if not self.device_type_pattern:
             return None
-        try:
-            return re.compile(self.device_type_pattern)
-        except REGEX_COMPILE_ERRORS:
-            return None
+        return compile_rule_regex(self, "device_type_pattern")
 
     @functools.cached_property
     def _compiled_child_name_pattern(self):
+        """Return the compiled librenms_child_name_pattern, or None when it is blank; raise RuleConfigurationError when it is invalid."""
         if not self.librenms_child_name_pattern:
             return None
-        try:
-            return re.compile(self.librenms_child_name_pattern)
-        except REGEX_COMPILE_ERRORS:
-            return None
+        return compile_rule_regex(self, "librenms_child_name_pattern")
 
     @functools.cached_property
     def _compiled_bay_name_pattern(self):
+        """Return the compiled netbox_bay_name_pattern, or None when it is blank; raise RuleConfigurationError when it is invalid."""
         if not self.netbox_bay_name_pattern:
             return None
-        try:
-            return re.compile(self.netbox_bay_name_pattern)
-        except REGEX_COMPILE_ERRORS:
-            return None
+        return compile_rule_regex(self, "netbox_bay_name_pattern")
 
     def clean(self):
         super().clean()
@@ -1473,31 +1643,22 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
 
     @functools.cached_property
     def _compiled_pattern(self):
-        """Compiled lag_name_pattern regex, or None when it doesn't compile (skipped, not fatal)."""
-        try:
-            return re.compile(self.lag_name_pattern)
-        except REGEX_COMPILE_ERRORS:
-            return None
+        """Return the compiled lag_name_pattern; raise RuleConfigurationError when it is invalid."""
+        return compile_rule_regex(self, "lag_name_pattern")
 
     @functools.cached_property
     def _compiled_sap_pattern(self):
-        """Compiled sap_name_pattern regex, or None when it is blank or doesn't compile."""
+        """Return the compiled sap_name_pattern, or None when it is blank; raise RuleConfigurationError when invalid."""
         if not self.sap_name_pattern:
             return None
-        try:
-            return re.compile(self.sap_name_pattern)
-        except REGEX_COMPILE_ERRORS:
-            return None
+        return compile_rule_regex(self, "sap_name_pattern")
 
     @functools.cached_property
     def _compiled_bridge_pattern(self):
-        """Return the compiled bridge regex, or None when it is blank or invalid."""
+        """Return the compiled bridge_name_pattern, or None when it is blank; raise RuleConfigurationError when invalid."""
         if not self.bridge_name_pattern:
             return None
-        try:
-            return re.compile(self.bridge_name_pattern)
-        except REGEX_COMPILE_ERRORS:
-            return None
+        return compile_rule_regex(self, "bridge_name_pattern")
 
     @classmethod
     def _patterns_for_os_queryset(cls, device_os):
@@ -1535,8 +1696,7 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
         disagree on which patterns apply. ``device_os=None`` loads every stored pattern (legacy
         unscoped behaviour); a present-but-blank/non-string OS returns none (an unknown OS must
         not re-globalize every vendor's regex); otherwise the patterns whose ``librenms_os``
-        matches after the same trim/lower normalization as the database constraint. Patterns
-        that fail to compile are skipped and logged.
+        matches after the same trim/lower normalization as the database constraint.
 
         Args:
             device_os (str | None): The LibreNMS OS name, or None to load every stored pattern.
@@ -1544,29 +1704,21 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
         Returns:
             list[re.Pattern]: The compiled patterns that apply to the specified OS.
 
+        Raises:
+            RuleConfigurationError: When an applicable stored pattern does not compile.
+
         """
         queryset = cls._patterns_for_os_queryset(device_os)
         if queryset is None:
             return []
-        compiled = []
-        for pattern in queryset:
-            regex = pattern._compiled_pattern
-            if regex is None:
-                logger.warning(
-                    "Skipping invalid LAG name pattern for OS %r: %r",
-                    pattern.librenms_os,
-                    pattern.lag_name_pattern,
-                )
-                continue
-            compiled.append(regex)
-        return compiled
+        return [pattern._compiled_pattern for pattern in queryset]
 
     @classmethod
     def compiled_sap_patterns_for_os(cls, device_os):
         """
         Return the compiled sap_name_pattern regexes scoped to *device_os*.
 
-        Same compile-with-skip as :meth:`compiled_patterns_for_os`, over the other pattern this
+        Same compile as :meth:`compiled_patterns_for_os`, over the other pattern this
         model stores. Rows with a blank sap_name_pattern contribute nothing, so an OS with no SAP
         notation simply has no rule. The scoping differs on one point: an OS this model cannot
         resolve falls back to every stored rule rather than none (see the body).
@@ -1577,6 +1729,9 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
 
         Returns:
             list: The compiled regexes that apply to this OS.
+
+        Raises:
+            RuleConfigurationError: When an applicable stored pattern does not compile.
 
         """
         queryset = cls._patterns_for_os_queryset(device_os)
@@ -1593,39 +1748,15 @@ class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
             # under-skipping writes a service access point into NetBox as a LAG member. This also
             # keeps the unconditional colon skip this replaced, for a device whose OS is unknown.
             queryset = cls.objects.all()
-        compiled = []
-        for pattern in queryset:
-            regex = pattern._compiled_sap_pattern
-            if regex is None:
-                if pattern.sap_name_pattern:
-                    logger.warning(
-                        "Skipping invalid SAP name pattern for OS %r: %r",
-                        pattern.librenms_os,
-                        pattern.sap_name_pattern,
-                    )
-                continue
-            compiled.append(regex)
-        return compiled
+        return [pattern._compiled_sap_pattern for pattern in queryset if pattern.sap_name_pattern]
 
     @classmethod
     def compiled_bridge_patterns_for_os(cls, device_os):
-        """Return the compiled bridge-name regexes scoped to the LibreNMS OS."""
+        """Return the compiled bridge-name regexes scoped to the LibreNMS OS; raise RuleConfigurationError when invalid."""
         queryset = cls._patterns_for_os_queryset(device_os)
         if queryset is None:
             return []
-        compiled = []
-        for pattern in queryset:
-            regex = pattern._compiled_bridge_pattern
-            if regex is None:
-                if pattern.bridge_name_pattern:
-                    logger.warning(
-                        "Skipping invalid bridge name pattern for OS %r: %r",
-                        pattern.librenms_os,
-                        pattern.bridge_name_pattern,
-                    )
-                continue
-            compiled.append(regex)
-        return compiled
+        return [pattern._compiled_bridge_pattern for pattern in queryset if pattern.bridge_name_pattern]
 
     def clean(self):
         """Normalize the OS name and validate each stored regex."""

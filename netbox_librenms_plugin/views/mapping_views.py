@@ -9,6 +9,7 @@ from netbox_librenms_plugin.filters import (
     DeviceTypeMappingFilterSet,
     InterfaceTypeMappingFilterSet,
     InventoryIgnoreRuleFilterSet,
+    IPAddressMappingFilterSet,
     LocationMappingFilterSet,
     ModuleBayMappingFilterSet,
     ModuleTypeMappingFilterSet,
@@ -30,6 +31,9 @@ from netbox_librenms_plugin.forms import (
     InventoryIgnoreRuleFilterForm,
     InventoryIgnoreRuleForm,
     InventoryIgnoreRuleImportForm,
+    IPAddressMappingFilterForm,
+    IPAddressMappingForm,
+    IPAddressMappingImportForm,
     LocationMappingFilterForm,
     LocationMappingForm,
     LocationMappingImportForm,
@@ -57,6 +61,7 @@ from netbox_librenms_plugin.models import (
     DeviceTypeMapping,
     InterfaceTypeMapping,
     InventoryIgnoreRule,
+    IPAddressMapping,
     LocationMapping,
     ModuleBayMapping,
     ModuleTypeMapping,
@@ -70,6 +75,7 @@ from netbox_librenms_plugin.tables.mappings import (
     DeviceTypeMappingTable,
     InterfaceTypeMappingTable,
     InventoryIgnoreRuleTable,
+    IPAddressMappingTable,
     LocationMappingTable,
     ModuleBayMappingTable,
     ModuleTypeMappingTable,
@@ -165,6 +171,66 @@ class InterfaceTypeMappingChangeLogView(LibreNMSGenericPermissionMixin, generic.
     """Provides a view for displaying the change log of a specific `InterfaceTypeMapping` object."""
 
     queryset = InterfaceTypeMapping.objects.all()
+
+
+# --- IPAddressMapping views ---
+
+
+class IPAddressMappingListView(LibreNMSGenericPermissionMixin, generic.ObjectListView):
+    """Provides a view for listing all IPAddressMapping objects."""
+
+    queryset = IPAddressMapping.objects.select_related("vrf")
+    table = IPAddressMappingTable
+    filterset = IPAddressMappingFilterSet
+    filterset_form = IPAddressMappingFilterForm
+    template_name = "netbox_librenms_plugin/ipaddressmapping_list.html"
+
+
+class IPAddressMappingCreateView(LibreNMSGenericWritePermissionMixin, generic.ObjectEditView):
+    """Provides a view for creating a new IPAddressMapping object."""
+
+    queryset = IPAddressMapping.objects.all()
+    form = IPAddressMappingForm
+
+
+@register_model_view(IPAddressMapping, "bulk_import", path="import", detail=False)
+class IPAddressMappingBulkImportView(LibreNMSGenericWritePermissionMixin, generic.BulkImportView):
+    """Provides a view for bulk importing IPAddressMapping objects."""
+
+    queryset = IPAddressMapping.objects.all()
+    model_form = IPAddressMappingImportForm
+
+
+class IPAddressMappingView(LibreNMSGenericPermissionMixin, generic.ObjectView):
+    """Provides a view for displaying details of a specific IPAddressMapping object."""
+
+    queryset = IPAddressMapping.objects.select_related("vrf")
+
+
+class IPAddressMappingEditView(LibreNMSGenericWritePermissionMixin, generic.ObjectEditView):
+    """Provides a view for editing a specific IPAddressMapping object."""
+
+    queryset = IPAddressMapping.objects.all()
+    form = IPAddressMappingForm
+
+
+class IPAddressMappingDeleteView(LibreNMSGenericWritePermissionMixin, generic.ObjectDeleteView):
+    """Provides a view for deleting a specific IPAddressMapping object."""
+
+    queryset = IPAddressMapping.objects.all()
+
+
+class IPAddressMappingBulkDeleteView(LibreNMSGenericWritePermissionMixin, generic.BulkDeleteView):
+    """Provides a view for deleting multiple IPAddressMapping objects."""
+
+    queryset = IPAddressMapping.objects.all()
+    table = IPAddressMappingTable
+
+
+class IPAddressMappingChangeLogView(LibreNMSGenericPermissionMixin, generic.ObjectChangeLogView):
+    """Provides a view for displaying the change log of a specific IPAddressMapping object."""
+
+    queryset = IPAddressMapping.objects.all()
 
 
 # --- DeviceTypeMapping views ---
@@ -504,6 +570,10 @@ class BulkExportYAMLView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, V
 
 class InterfaceTypeMappingBulkExportYAMLView(BulkExportYAMLView):
     queryset = InterfaceTypeMapping.objects.select_related("platform")
+
+
+class IPAddressMappingBulkExportYAMLView(BulkExportYAMLView):
+    queryset = IPAddressMapping.objects.select_related("vrf")
 
 
 class DeviceTypeMappingBulkExportYAMLView(BulkExportYAMLView):

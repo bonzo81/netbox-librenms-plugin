@@ -24,7 +24,7 @@ from requests.exceptions import RequestException
 from utilities.exceptions import AbortRequest
 
 from netbox_librenms_plugin.transactions import classify_conflict, database_error_sqlstate
-from netbox_librenms_plugin.utils import exception_text_for, validation_error_detail
+from netbox_librenms_plugin.utils import exception_text_for, validation_error_detail, write_failure_message
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +133,40 @@ def read_saved_alias():
     except ValidationError as exc:
         # ruleid: caught-error-text
         saved = exc
+
+
+def show_the_write_failure_message(request, model):
+    try:
+        save()
+    except ValidationError as exc:
+        # ok: caught-error-text
+        failure = write_failure_message(exc, "save the serial", "serial", model, request.user)
+        # ok: caught-error-text
+        messages.error(request, failure)
+
+
+def pass_the_error_as_the_action(request, model, other):
+    try:
+        save()
+    except ValidationError as exc:
+        # ruleid: caught-error-text
+        messages.error(request, write_failure_message(other, exc.messages[0], "serial", model, request.user))
+
+
+def pass_the_error_as_a_keyword_action(request, model, other):
+    try:
+        save()
+    except ValidationError as exc:
+        # ruleid: caught-error-text
+        failure = write_failure_message(other, action=str(exc), written_field="serial", model=model, user=None)
+
+
+def put_the_error_text_into_the_action(request, model):
+    try:
+        save()
+    except ValidationError as exc:
+        # ruleid: caught-error-text
+        failure = write_failure_message(exc, f"save {exc.messages[0]}", "serial", model, request.user)
 
 
 def log_validation_error_detail():
@@ -1568,6 +1602,14 @@ def replace_a_log_method():
 # ruleid: caught-error-text-shadow
 def logger_parameter(logger):
     return logger
+
+
+def local_failure_message():
+    # ruleid: caught-error-text-shadow
+    def write_failure_message(exc, action, written_field, model, user):
+        return str(exc)
+
+    return write_failure_message
 
 
 def rebind_with_setattr(module):

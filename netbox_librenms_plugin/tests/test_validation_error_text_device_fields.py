@@ -66,6 +66,13 @@ def _viewer(tag, superuser, *devices):
     )
 
 
+def _reporting_device(name, server, device_id, os=""):
+    """A linked device whose LibreNMS device reports *os*: Create & Sync reads its facts there."""
+    device = make_device(name, librenms_cf={SERVER_KEY: device_id})
+    server.device_info_response(device_id=device_id, hostname=name, os=os)
+    return device
+
+
 def _assert_shown(response, hidden, superuser, restricted_text):
     texts = " | ".join(message_texts(response.wsgi_request))
     if superuser:
@@ -135,7 +142,7 @@ class TestADeviceFieldSyncShowsNetBoxsMessageOnlyToASuperuser:
         from dcim.models import Platform
 
         tag = f"vetext-newplatform-{int(superuser)}"
-        device, hidden = make_device(tag), make_device(f"{tag}-hidden")
+        device, hidden = _reporting_device(tag, librenms_server, 7111), make_device(f"{tag}-hidden")
         settings.CUSTOM_VALIDATORS = {"dcim.platform": [_Refuses(f"Conflicts with {hidden.name}.")]}
         viewer = _viewer(tag, superuser, device)
         client.force_login(viewer if superuser else grant(viewer, "add", Platform))
@@ -148,7 +155,7 @@ class TestADeviceFieldSyncShowsNetBoxsMessageOnlyToASuperuser:
         from dcim.models import Platform
 
         tag = f"vetext-assignplatform-{int(superuser)}"
-        device, hidden = make_device(tag), make_device(f"{tag}-hidden")
+        device, hidden = _reporting_device(tag, librenms_server, 7112), make_device(f"{tag}-hidden")
         platform = Platform.objects.create(name=f"Platform {tag}", slug=f"platform-{tag}")
         settings.CUSTOM_VALIDATORS = {"dcim.device": [_Refuses(f"Conflicts with {hidden.name}.", "platform")]}
         viewer = _viewer(tag, superuser, device)
@@ -164,7 +171,7 @@ class TestADeviceFieldSyncShowsNetBoxsMessageOnlyToASuperuser:
         from netbox_librenms_plugin.models import PlatformMapping
 
         tag = f"vetext-mapping-{int(superuser)}"
-        device, hidden = make_device(tag), make_device(f"{tag}-hidden")
+        device, hidden = _reporting_device(tag, librenms_server, 7113, f"os-{tag}"), make_device(f"{tag}-hidden")
         platform = Platform.objects.create(name=f"Platform {tag}", slug=f"platform-{tag}")
         settings.CUSTOM_VALIDATORS = {
             "netbox_librenms_plugin.platformmapping": [_Refuses(f"Conflicts with {hidden.name}.", "netbox_platform")]
@@ -265,7 +272,7 @@ class TestADeviceFieldSyncHidesADatabaseError:
             device = make_device(tag, serial="LEGACY-DB", librenms_cf="7109")
             librenms_server.device_info_response(device_id=7109, hostname=device.name, serial="LEGACY-DB")
         else:
-            device = make_device(tag)
+            device = _reporting_device(tag, librenms_server, 7114, f"os-{tag}")
             data = {**data, "platform_name": f"Platform {tag}", "librenms_os": f"os-{tag}"}
             if case != "platform_create":
                 Platform.objects.create(name=f"Platform {tag}", slug=f"platform-{tag}")
