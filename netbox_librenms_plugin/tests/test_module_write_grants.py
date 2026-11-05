@@ -768,8 +768,12 @@ def test_the_member_select_names_only_the_members_the_user_may_view(client, vc_g
     assert options(CARD) == [(str(page.pk), " selected")]
 
 
-def test_a_row_on_a_hidden_member_shows_no_bay_module_or_action_of_that_member(client, vc_grants):
-    """Optic 1 belongs to the hidden member by its serial: the table withholds that member's bays and module."""
+@pytest.mark.parametrize("module_serial", ["other", "row"])
+def test_a_row_on_a_hidden_member_shows_no_bay_module_or_action_of_that_member(client, vc_grants, module_serial):
+    """Optic 1 belongs to the hidden member by its serial: the table withholds that member's bays and module.
+
+    With the row's serial, the member's module is also a serial conflict of the row, which must not name it either.
+    """
     from dcim.models import Device, Module, ModuleBay, ModuleType
 
     from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
@@ -777,25 +781,79 @@ def test_a_row_on_a_hidden_member_shows_no_bay_module_or_action_of_that_member(c
     page, member = vc_grants(optic_1_on_member=True)
     member_bay = ModuleBay.objects.get(device=member, name="Cage 1")
     member_module = Module.objects.create(
-        device=member, module_bay=member_bay, module_type=ModuleType.objects.get(model="GR-OPTIC"), serial="OLD"
+        device=member,
+        module_bay=member_bay,
+        module_type=ModuleType.objects.get(model="GR-OPTIC"),
+        serial=member.serial if module_serial == "row" else "OLD",
     )
     user = make_user_with_perms("module-grants-hidden-bays", [("view", Device)], constraints={"pk": page.pk})
     for action, model in (("view", ModuleBay), ("view", ModuleType), ("view", Module), ("add", Module)):
         user = grant(user, action, model)
-    user = grant(user, "change", Module)
+    for action in ("change", "delete"):
+        user = grant(user, action, Module)
     client.force_login(user)
 
     content = render(client, page)
     parsed = module_tab_forms(content)
 
+    assert member.name not in content
     assert member_bay.get_absolute_url() not in content
     assert member_module.get_absolute_url() not in content
     assert not [form for form in parsed.forms if str(OPTIC_1) in form["fields"].values()]
+    assert not [form for form in parsed.forms if form["fields"].get("conflict_module_id") == str(member_module.pk)]
     assert not any(f"ent_index={OPTIC_1}" in link.get("hx-get", "") for link in parsed.links)
     (checkbox,) = re.findall(rf'<input type="checkbox" name="select" value="{OPTIC_1}"[^>]*>', content)
     assert " disabled" in checkbox
     # The page member keeps its rows: Card Slot still offers its install.
     assert rendered_module_form(content, "install-module", CARD)
+
+
+def test_a_serial_conflict_on_a_device_the_user_cannot_view_names_nothing_and_offers_no_move(client, vc_grants):
+    """The card serial sits on a module of a device outside the user's view: the row neither names nor moves it."""
+    from dcim.models import Device, Module, ModuleBay, ModuleType
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+    page, _member = vc_grants()
+    other = make_device_with_module_bays("module-grants-hidden-other", ["Card Slot"])
+    other_module = Module.objects.create(
+        device=other,
+        module_bay=ModuleBay.objects.get(device=other, name="Card Slot"),
+        module_type=ModuleType.objects.get(model="GR-CARD"),
+        serial="SN-CARD",
+    )
+    user = make_user_with_perms("module-grants-hidden-other", [("view", Device)], constraints={"pk": page.pk})
+    for action, model in (("view", ModuleBay), ("view", ModuleType), ("view", Module)):
+        user = grant(user, action, model)
+    for action in ("add", "change", "delete"):
+        user = grant(user, action, Module)
+    client.force_login(user)
+
+    content = render(client, page)
+
+    assert other.name not in content
+    assert other_module.get_absolute_url() not in content
+    assert not [
+        form
+        for form in module_tab_forms(content).forms
+        if form["fields"].get("conflict_module_id") == str(other_module.pk)
+    ]
+
+    # A scripted Move of that module is refused too, and the module stays where it is.
+    response = post(
+        client,
+        reverse("plugins:netbox_librenms_plugin:move_module", args=[page.pk]),
+        {
+            "server_key": SERVER_KEY,
+            "selected_device_id": str(page.pk),
+            "conflict_module_id": str(other_module.pk),
+            "target_bay_id": str(ModuleBay.objects.get(device=page, name="Card Slot").pk),
+        },
+    )
+    assert other.name not in " ".join(messages_of(response))
+    assert Module.objects.filter(pk=other_module.pk, device=other).exists()
 
 
 def test_a_grant_does_not_outlive_the_permission_it_was_rendered_for(client, c8300):

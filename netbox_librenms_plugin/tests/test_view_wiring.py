@@ -1789,6 +1789,7 @@ class TestModuleMoveRequiresNetBoxRelocation:
         record = {
             "can_move_from": True,
             "serial_conflict_module": conflict_module,
+            "serial_conflict_visible": True,
             "module_bay_id": conflict_module.module_bay_id,
             "ent_physical_index": 100,
         }

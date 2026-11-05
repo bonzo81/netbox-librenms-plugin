@@ -3208,7 +3208,7 @@ class MoveModuleView(
                 try:
                     conflict_module = update_existing_row(
                         self.restricted_queryset(Module, "change")
-                        .filter(pk=conflict_module_id)
+                        .filter(pk=conflict_module_id, device__in=self.restricted_queryset(Device))
                         .select_related("module_type", "module_bay", "device"),
                         move,
                     )

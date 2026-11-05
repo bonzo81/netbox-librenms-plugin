@@ -4424,7 +4424,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             obj (Device | None): Device whose VC membership bounds valid conflicts.
 
         """
-        from dcim.models import Module
+        from dcim.models import Device, Module
 
         serial_rows = self._identity_candidate_rows(table_data, index_map)
         if not serial_rows:
@@ -4439,8 +4439,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # disclosing a module the operator cannot see.
         visible_conflict_pks = set()
         if getattr(self, "request", None) is not None:
+            # A module is named only when the user may view it and its device.
             visible_conflict_pks = set(
-                self.restricted_queryset(Module).filter(serial__in=serial_rows.keys()).values_list("pk", flat=True)
+                self.restricted_queryset(Module)
+                .filter(serial__in=serial_rows.keys(), device__in=self.restricted_queryset(Device))
+                .values_list("pk", flat=True)
             )
         scope_device_ids = self._identity_scope_device_ids(obj)
 

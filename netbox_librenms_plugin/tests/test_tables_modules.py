@@ -659,7 +659,12 @@ class TestActionRendering:
             pytest.skip("Move is offered only where NetBox relocates the module subtree")
         source = make_device_with_module_bays("table-move-source", ["Slot 1"])
         conflict = install_module(source, "Slot 1", "TABLE-MOVE-TYPE", serial="MOVE-SERIAL")
-        record = {"can_move_from": True, "serial_conflict_module": conflict, "module_bay_id": 7}
+        record = {
+            "can_move_from": True,
+            "serial_conflict_module": conflict,
+            "serial_conflict_visible": True,
+            "module_bay_id": 7,
+        }
 
         rendered = str(_table(make_device("table-move-target")).render_actions(None, record))
 

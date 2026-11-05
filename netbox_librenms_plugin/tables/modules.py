@@ -985,6 +985,7 @@ class LibreNMSModuleTable(tables.Table):
             and self.can_delete_module
             and record.get("can_move_from")
             and record.get("serial_conflict_module")
+            and record.get("serial_conflict_visible")
             and record.get("module_bay_id")
         ):
             move_url = reverse("plugins:netbox_librenms_plugin:move_module", kwargs={"pk": self.device.pk})
