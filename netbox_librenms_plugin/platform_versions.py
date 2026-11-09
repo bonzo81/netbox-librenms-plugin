@@ -248,6 +248,19 @@ def _may_add_platform(actor):
     return actor is None or actor.has_perm(_ADD_PLATFORM)
 
 
+def add_platform_grant_is_constrained(actor):
+    """
+    Return True when every add-platform grant of *actor* has constraints, so only the saved platform decides it.
+
+    A create that the constraints refuse rolls back, and the import then assigns the OS platform.
+    """
+    from netbox.authentication import ObjectPermissionBackend
+
+    if actor is None or not actor.has_perm(_ADD_PLATFORM) or (actor.is_active and actor.is_superuser):
+        return False
+    return all(ObjectPermissionBackend().get_all_permissions(actor).get(_ADD_PLATFORM, ()))
+
+
 def assess_platform(subject, facts, *, tracking, actor=None):
     """
     Assess which platform *facts* call for on *subject*, without a change.

@@ -285,7 +285,7 @@ class TestAVirtualChassisMemberReadsTheChassisFacts:
 
 
 class TestImportDetailsPlatformCell:
-    def _render(self, *, can_add_platform):
+    def _render(self, *, can_add_platform, platform_add_constrained=False):
         from django.contrib.auth.models import AnonymousUser
         from django.template.loader import render_to_string
 
@@ -329,6 +329,7 @@ class TestImportDetailsPlatformCell:
                 "use_sysname": True,
                 "strip_domain": False,
                 "can_add_platform": can_add_platform,
+                "platform_add_constrained": platform_add_constrained,
                 "platform_display": _platform_display(
                     {"platform": os_platform, "assessment": assessment}, make_superuser("details-cell-su")
                 ),
@@ -341,6 +342,13 @@ class TestImportDetailsPlatformCell:
 
         assert 'data-version-platform="create"' in html
         assert f"junos {VERSION}" in html
+
+    def test_a_constrained_add_grant_makes_the_creation_conditional(self):
+        """Only the saved row can decide a constrained grant, so the import may assign the OS platform instead."""
+        html = self._render(can_add_platform=True, platform_add_constrained=True)
+
+        assert 'data-version-platform="create-if-permitted"' in html
+        assert 'data-version-platform="create"' not in html
 
     def test_the_missing_version_platform_is_shown_for_an_actor_who_may_not_add_it(self):
         html = self._render(can_add_platform=False)

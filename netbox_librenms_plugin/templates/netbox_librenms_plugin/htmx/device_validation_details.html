@@ -414,7 +414,11 @@
                   {% elif validation.platform.platform %}
                     {# New import: the platform is assigned on import #}
                     {% with assessment=validation.platform.assessment %}
-                    {% if assessment.operation == "create_version_platform" and can_add_platform %}
+                    {% if assessment.operation == "create_version_platform" and can_add_platform and platform_add_constrained %}
+                      {{ platform_display.target }}
+                      <span class="badge bg-info text-dark ms-1" data-version-platform="create-if-permitted"
+                            title="Your permission to add platforms has constraints. The import creates the version platform only when they allow it; otherwise it assigns the OS platform.">Created on import if permitted</span>
+                    {% elif assessment.operation == "create_version_platform" and can_add_platform %}
                       {{ platform_display.target }}
                       <span class="badge bg-info text-dark ms-1" data-version-platform="create">Created on import</span>
                     {% elif assessment.operation == "create_version_platform" %}

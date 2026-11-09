@@ -82,6 +82,7 @@ from netbox_librenms_plugin.platform_versions import (
     NewOSPlatform,
     PlatformFacts,
     PlatformState,
+    add_platform_grant_is_constrained,
     apply_platform,
     assess_platform,
     create_os_platform,
@@ -1992,6 +1993,7 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
             "import_row_hx_include": import_row_hx_include(device_id),
             # Without it the import assigns the OS platform and reports the missing version platform.
             "can_add_platform": request.user.has_perm("dcim.add_platform"),
+            "platform_add_constrained": add_platform_grant_is_constrained(request.user),
             "platform_display": _platform_display(validation.get("platform") or {}, request.user),
         }
 

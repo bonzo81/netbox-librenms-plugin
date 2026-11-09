@@ -851,6 +851,26 @@ class TestMapOSPlatformRace:
 
 
 @pytest.mark.django_db
+class TestAddPlatformGrantScope:
+    def test_only_a_grant_whose_every_entry_has_constraints_is_constrained(self):
+        from dcim.models import Platform
+
+        from netbox_librenms_plugin.platform_versions import add_platform_grant_is_constrained
+
+        def actor(username, *constraint_sets):
+            user = make_user_with_perms(username, [])
+            for constraints in constraint_sets:
+                user = grant(user, "add", Platform, constraints=constraints)
+            return user
+
+        assert add_platform_grant_is_constrained(actor("add-scope-constrained", {"name": "x"})) is True
+        assert add_platform_grant_is_constrained(actor("add-scope-open", None)) is False
+        assert add_platform_grant_is_constrained(actor("add-scope-both", {"name": "x"}, None)) is False
+        assert add_platform_grant_is_constrained(actor("add-scope-none")) is False
+        assert add_platform_grant_is_constrained(make_superuser("add-scope-su")) is False
+
+
+@pytest.mark.django_db
 class TestCreateOSPlatform:
     def test_the_named_platform_is_created_without_its_version_platform(self):
         from dcim.models import Manufacturer, Platform
