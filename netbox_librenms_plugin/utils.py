@@ -4,12 +4,13 @@ import logging
 import re
 import threading
 from dataclasses import dataclass
-from typing import Optional
+from typing import NamedTuple, Optional
 
+import django_tables2 as tables
 import psycopg
 from dcim.models import Device, Interface
-from django.core import signing
 from django.core.exceptions import FieldDoesNotExist, ObjectDoesNotExist, ValidationError
+from django.core.paginator import EmptyPage, PageNotAnInteger
 from django.db import DatabaseError, IntegrityError, transaction
 from django.db.models import Count, Max
 from django.http import HttpRequest
@@ -19,6 +20,7 @@ from django.utils.safestring import mark_safe
 from netbox.config import get_config
 from netbox.plugins import get_plugin_config
 from utilities.exceptions import AbortRequest
+from utilities.paginator import EnhancedPaginator
 from utilities.paginator import get_paginate_count as netbox_get_paginate_count
 
 from netbox_librenms_plugin.constants import (
@@ -48,91 +50,6 @@ from netbox_librenms_plugin.server_mappings import (
 from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE, classify_conflict, nearest_database_error
 
 logger = logging.getLogger(__name__)
-
-_MODULE_INVENTORY_BINDING_SALT = "netbox_librenms_plugin.module_inventory_binding"
-
-
-def module_inventory_row_digest(inventory_item) -> str:
-    """Return a canonical digest for one cached LibreNMS inventory row."""
-    if not isinstance(inventory_item, dict):
-        raise TypeError("inventory_item must be a dictionary")
-    serialized = json.dumps(inventory_item, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(serialized.encode()).hexdigest()
-
-
-def module_inventory_snapshot_digest(inventory) -> str:
-    """Return a canonical digest for a complete cached LibreNMS inventory snapshot."""
-    if not isinstance(inventory, list) or any(not isinstance(item, dict) for item in inventory):
-        raise TypeError("inventory must be a list of dictionaries")
-    return module_inventory_row_digest({"inventory": inventory})
-
-
-def _module_inventory_binding_payload(
-    device_id,
-    server_key,
-    action,
-    action_target,
-    ent_index,
-    inventory_digest,
-):
-    """Return the canonical fields that bind one rendered action to inventory state."""
-    return {
-        "device_id": coerce_positive_int(device_id),
-        "server_key": server_key,
-        "action": action,
-        "action_target": {key: coerce_positive_int(value) for key, value in sorted(action_target.items())},
-        "ent_index": coerce_positive_int(ent_index),
-        "inventory_digest": inventory_digest,
-    }
-
-
-def module_inventory_binding_token(
-    device_id,
-    server_key,
-    action,
-    action_target,
-    ent_index,
-    inventory_digest,
-) -> str:
-    """Sign one rendered module action and its exact inventory state."""
-    return signing.dumps(
-        _module_inventory_binding_payload(
-            device_id,
-            server_key,
-            action,
-            action_target,
-            ent_index,
-            inventory_digest,
-        ),
-        salt=_MODULE_INVENTORY_BINDING_SALT,
-    )
-
-
-def module_inventory_binding_matches(
-    token,
-    device_id,
-    server_key,
-    action,
-    action_target,
-    ent_index,
-    inventory_digest,
-) -> bool:
-    """Return whether a signed action still matches its target and inventory state."""
-    if not isinstance(token, str) or not token:
-        return False
-    try:
-        payload = signing.loads(token, salt=_MODULE_INVENTORY_BINDING_SALT)
-    except signing.BadSignature:
-        return False
-    return payload == _module_inventory_binding_payload(
-        device_id,
-        server_key,
-        action,
-        action_target,
-        ent_index,
-        inventory_digest,
-    )
-
 
 _CABLE_ROW_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 
@@ -803,7 +720,15 @@ def cable_has_librenms_tag(cable, provenance_tag=_PROVENANCE_TAG_UNSET) -> bool:
 
 
 def cable_is_point_to_point(cable) -> bool:
-    """Return whether *cable* has exactly one termination on each end."""
+    """Return whether *cable* has one termination on each end, and a profile (if any) of one connector per end."""
+    # A breakout or trunk profile has more connectors and takes more far ends later, so plain sync never takes it.
+    if getattr(cable, "profile", ""):
+        # NetBox's profile_class property is None for a stored value that is no known profile.
+        if (profile_class := cable.profile_class) is None:
+            return False
+        profile = profile_class()
+        if len(profile.a_connectors) != 1 or len(profile.b_connectors) != 1:
+            return False
     prefetched = getattr(cable, "_prefetched_objects_cache", {}).get("terminations")
     if prefetched is not None:
         end_counts = {"A": 0, "B": 0}
@@ -887,6 +812,12 @@ def cable_far_terminations(cable, near_termination) -> list:
             the A side, else ``a_terminations``).
 
     """
+    from netbox_librenms_plugin.breakout_cables import breakout_far_end, is_channel
+
+    # A channel is no termination: its far end is the one at its connector of the parent's cable.
+    if is_channel(near_termination):
+        far_end = breakout_far_end(near_termination, near_termination.parent, cable)
+        return [] if far_end is None else [far_end]
     # Serial table enrichment prefetches the generic CableTermination rows and their concrete
     # objects for the whole page. Use that cache when present. The a_terminations/b_terminations
     # properties otherwise issue one concrete-object query per cable.
@@ -1353,10 +1284,29 @@ def get_module_template_interface_specs(device: Device, module) -> list[tuple[st
     return predicted_specs
 
 
-def get_module_template_interface_names(device: Device, module) -> list[str]:
-    """Return unique instantiated interface-template names, rewritten for VC members when needed."""
-    template_names = [name for name, _template_type in _instantiate_module_template_interface_specs(device, module)]
+class ModuleInterfaceNames(NamedTuple):
+    """The interface names of a module that this plugin may move into the module."""
 
+    names: list[str]
+    # True when the prediction expands the templates into a family: the naming plugin owns its other rows.
+    family: bool
+
+    def may_move(self, name: str) -> bool:
+        """Return whether this plugin may set the module on the interface row named *name*."""
+        return not self.family or name in self.names
+
+
+def get_module_adoptable_interface_names(device: Device, module) -> ModuleInterfaceNames:
+    """Return the predicted template names, or only the raw ones when the prediction expands them into a family."""
+    template_names = [name for name, _template_type in _instantiate_module_template_interface_specs(device, module)]
+    predicted_names = _predict_template_interface_names(device, module, template_names)
+    if len(predicted_names) > len(template_names):
+        return ModuleInterfaceNames(template_names, True)
+    return ModuleInterfaceNames(predicted_names, False)
+
+
+def _predict_template_interface_names(device: Device, module, template_names: list[str]) -> list[str]:
+    """Return the names the prediction receivers give for the instantiated template names."""
     from netbox_librenms_plugin.signals import predict_module_interface_names
 
     # Adoption accepts a receiver's whole-list answer, while typed specs require one result per template.
@@ -1395,7 +1345,7 @@ def predict_module_interface_rename(device: Device, module, names) -> list[str]:
     """
     Return the INR-predicted post-rename names for an explicit list of *names*.
 
-    Same receiver semantics as :func:`get_module_template_interface_names`
+    Same receiver semantics as :func:`get_module_adoptable_interface_names`
     (``send_robust`` isolates a failing receiver and the last non-None list return
     wins), but the input is a caller-supplied list of names rather than template
     instantiations. Used to recognise when a standalone interface is the renamed
@@ -1594,9 +1544,16 @@ def build_vc_normalization_report(diagnostic: dict) -> str:
     return "\n".join(lines)
 
 
+SYNC_TAB_PAGE_SIZE_PREFERENCE = "plugins.netbox_librenms_plugin.per_page"
+
+
 def get_table_paginate_count(request: HttpRequest, table_prefix: str) -> int:
     """
-    Extend NetBox pagination for multiple tables with table-specific prefixes.
+    Return the page size of one sync tab table, and remember a requested size for that tab.
+
+    The order is: a valid ``<prefix>per_page`` request value, the size saved for the tab, then
+    NetBox's own page size. A request value is saved when it differs from the size the tab
+    shows without it. Every size is clamped to MAX_PAGE_SIZE.
 
     Args:
         request: HTTP request object
@@ -1606,24 +1563,46 @@ def get_table_paginate_count(request: HttpRequest, table_prefix: str) -> int:
         int: Number of items to display per page
 
     """
-    config = get_config()
     # An HTMX refresh sends the new page size in POST while the URL can retain an old value.
     param_key = f"{table_prefix}per_page"
     param_value = request.POST.get(param_key) if param_key in request.POST else request.GET.get(param_key)
-    if param_value:
-        try:
-            per_page = int(param_value)
-            # Guard against 0/negative input, which would break the paginator.
-            if per_page < 1:
-                return netbox_get_paginate_count(request)
-            max_page_size = config.MAX_PAGE_SIZE
-            # MAX_PAGE_SIZE 0/None disables the NetBox ceiling; don't clamp to it (min() with 0
-            # would zero the page size, and with None it TypeErrors).
-            return min(per_page, max_page_size) if max_page_size else per_page
-        except ValueError:
-            pass
+    preference = f"{SYNC_TAB_PAGE_SIZE_PREFERENCE}.{table_prefix.rstrip('_')}"
+    max_page_size = get_config().MAX_PAGE_SIZE
 
-    return netbox_get_paginate_count(request)
+    def clamp(per_page):
+        # MAX_PAGE_SIZE 0/None disables the NetBox ceiling; don't clamp to it (min() with 0
+        # would zero the page size, and with None it TypeErrors).
+        return min(per_page, max_page_size) if max_page_size else per_page
+
+    saved = coerce_positive_int(get_user_pref(request, preference))
+    current = clamp(saved) if saved is not None else netbox_get_paginate_count(request)
+    requested = coerce_positive_int(param_value)
+    if requested is None:
+        return current
+    per_page = clamp(requested)
+    # Page links and the sync form carry the rendered size, so only a different size is a choice.
+    if per_page != current:
+        save_user_pref(request, preference, per_page)
+    return per_page
+
+
+def paginate_sync_table(table, request, page=None):
+    """
+    Order and paginate a sync tab table, with the page size from get_table_paginate_count().
+
+    RequestConfig would take a raw ``<prefix>per_page`` from GET past the size checks, so it only orders the table.
+    """
+    tables.RequestConfig(request, paginate=False).configure(table)
+    if page is None:
+        page = request.GET.get(table.prefixed_page_field, 1)
+    try:
+        table.paginate(
+            paginator_class=EnhancedPaginator, per_page=get_table_paginate_count(request, table.prefix), page=page
+        )
+    except PageNotAnInteger:
+        table.page = table.paginator.page(1)
+    except EmptyPage:
+        table.page = table.paginator.page(table.paginator.num_pages)
 
 
 def get_user_pref(request, path, default=None):
@@ -3274,13 +3253,14 @@ def oob_badge_html(record, leading_space=False):
 
 def rule_block_html(rule_block):
     """
-    Return the pill that says why the interface rules refuse a row's write.
+    Return the pill that says why the interface rules or an IP mapping refuse a row's write.
 
     Shared by the IP and cable tables and the cable-verify formatter. It uses the badge language
     of the interfaces table's rule pill.
 
     Args:
-        rule_block (dict): The row data from ``interface_rules.row_rule_block``.
+        rule_block (dict): The row data from ``interface_rules.row_rule_block`` or
+            ``ip_rules.row_ip_rule_block``.
 
     Returns:
         SafeString: The pill markup.
@@ -4534,35 +4514,6 @@ def slashless_route_aliases(patterns):
             continue
         aliases.append(path(route[:-1], entry.callback, kwargs=entry.default_args))
     return aliases
-
-
-def get_enabled_ignore_rules(manufacturer=None) -> list:
-    """
-    Return the enabled InventoryIgnoreRule instances that apply to *manufacturer*.
-
-    Scoping follows :func:`apply_normalization_rules`: a manufacturer takes its own rules plus
-    the unscoped ones, and no manufacturer takes only the unscoped ones. A rule that admits a
-    vendor's own inventory class is vendor-specific in practice, so leaving every such rule
-    global made one vendor's quirk change what every other vendor's sync admits.
-
-    Raises:
-        InventoryRuleFilterError: When an enabled rule of any action stores a filter regex that does not compile.
-
-    """
-    from django.db.models import Q
-
-    from netbox_librenms_plugin.models import InventoryIgnoreRule
-
-    rules = InventoryIgnoreRule.objects.filter(enabled=True)
-    if manufacturer is not None and getattr(manufacturer, "pk", None) is not None:
-        rules = rules.filter(Q(manufacturer__isnull=True) | Q(manufacturer=manufacturer))
-    else:
-        rules = rules.filter(manufacturer__isnull=True)
-    rules = list(rules.order_by("pk"))
-    for rule in rules:
-        # Compile now: a broken filter must stop the caller, not silently admit or hide nothing.
-        _ = rule.compiled_filters
-    return rules
 
 
 def load_bay_mappings() -> tuple:

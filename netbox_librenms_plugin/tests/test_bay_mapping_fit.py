@@ -125,25 +125,17 @@ def test_the_installer_skips_the_bay_that_the_table_refuses(librenms_server, ser
     from dcim.models import Module
 
     from netbox_librenms_plugin.tests.conftest import make_superuser
-    from netbox_librenms_plugin.tests.test_inventory_tree import _cached_inventory
-    from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
-    from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_snapshot_digest
+    from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post, rendered_module_form
     from netbox_librenms_plugin.views.sync.modules import InstallSelectedView
 
     device = _setup(
         "installer", _mx_recording(), server_key, librenms_server, re_bay_types=("mx-re",), cb_bay_types=("mx-scb",)
     )
-    _refresh(device, server_key)
-    digest = module_inventory_snapshot_digest(list(_cached_inventory(device, server_key).values()))
+    response, _module_sync = _refresh(device, server_key)
+    _action, fields = rendered_module_form(response.content.decode(), "install-selected")
     request = make_request(
         "post",
-        {
-            "select": [str(RE_ROWS[0])],
-            "server_key": server_key,
-            "inventory_binding": module_inventory_binding_token(
-                device.pk, server_key, "install_selected", {}, None, digest
-            ),
-        },
+        {**fields, "select": [str(RE_ROWS[0])]},
         user=make_superuser(),
         path="/modules/",
     )

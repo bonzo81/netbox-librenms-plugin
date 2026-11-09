@@ -42,7 +42,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_vm,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import apply_mapping_change, seed_mapping, seed_stored_mapping
-from netbox_librenms_plugin.utils import module_inventory_binding_token, module_inventory_row_digest
+from netbox_librenms_plugin.tests.view_test_helpers import render_module_tab, rendered_module_form
 from netbox_librenms_plugin.server_mappings import mark_migrated
 from netbox_librenms_plugin.views.sync.ip_addresses import SyncIPAddressesView
 
@@ -1280,6 +1280,24 @@ def test_module_install_invalidates_other_tabs_after_creating_a_module(
     assert cache.get(_cache_key("ip_addresses", device, "primary")) is None
 
 
+def _module_row(index, bay, module_type, serial):
+    """Return an inventory row that the bay matcher places in *bay* as *module_type*."""
+    return {
+        "entPhysicalIndex": index,
+        "entPhysicalClass": "module",
+        "entPhysicalName": bay.name,
+        "entPhysicalModelName": module_type.model,
+        "entPhysicalSerialNum": serial,
+    }
+
+
+def _rendered_serial_update(device, ent_index, user):
+    """Return the Update Serial form that the cached "primary" Modules tab renders for row *ent_index*."""
+    return rendered_module_form(
+        render_module_tab(device, user=user, server_key="primary"), "update-module-serial", ent_index
+    )
+
+
 @pytest.mark.django_db
 def test_unchanged_module_serial_preserves_other_snapshots(client, settings, django_capture_on_commit_callbacks):
     """Submitting the existing serial must not publish a cache mutation."""
@@ -1292,37 +1310,20 @@ def test_unchanged_module_serial_preserves_other_snapshots(client, settings, dja
         manufacturer=device.device_type.manufacturer,
         model="Cache Existing Module",
     )
-    module = Module.objects.create(
-        device=device,
-        module_bay=bay,
-        module_type=module_type,
-        serial="UNCHANGED-SERIAL",
-    )
+    module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, serial="OLD")
     inventory_payload = module_inventory_cache_payload(
-        [{"entPhysicalIndex": 8102, "entPhysicalSerialNum": module.serial}], 641, None
+        [_module_row(8102, bay, module_type, "UNCHANGED-SERIAL")], 641, None
     )
     _seed_snapshot("inventory", device, "primary", inventory_payload)
     _seed_snapshot("ports", device, "primary")
-    client.force_login(make_superuser("cache-module-unchanged-user"))
-    url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": device.pk})
+    user = make_superuser("cache-module-unchanged-user")
+    client.force_login(user)
+    url, fields = _rendered_serial_update(device, 8102, user)
+    # Another writer stores the reported serial after the page renders.
+    Module.objects.filter(pk=module.pk).update(serial="UNCHANGED-SERIAL")
 
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(
-            url,
-            {
-                "server_key": "primary",
-                "module_id": str(module.pk),
-                "ent_index": "8102",
-                "inventory_binding": module_inventory_binding_token(
-                    device.pk,
-                    "primary",
-                    "update_module_serial",
-                    {"module_id": module.pk},
-                    8102,
-                    module_inventory_row_digest(inventory_payload["inventory"][0]),
-                ),
-            },
-        )
+        response = client.post(url, fields)
 
     assert response.status_code == 302
     assert [str(message) for message in get_messages(response.wsgi_request)] == [
@@ -1348,9 +1349,7 @@ def test_module_mutation_without_posted_server_uses_active_namespace(
         model="Cache Scoped Module",
     )
     module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, serial="OLD")
-    inventory_payload = module_inventory_cache_payload(
-        [{"entPhysicalIndex": 8103, "entPhysicalSerialNum": "NEW"}], 642, None
-    )
+    inventory_payload = module_inventory_cache_payload([_module_row(8103, bay, module_type, "NEW")], 642, None)
     _seed_snapshot(
         "inventory",
         device,
@@ -1358,25 +1357,13 @@ def test_module_mutation_without_posted_server_uses_active_namespace(
         inventory_payload,
     )
     _seed_snapshot("ports", device, "primary")
-    client.force_login(make_superuser("cache-module-missing-server-user"))
-    url = reverse("plugins:netbox_librenms_plugin:update_module_serial", kwargs={"pk": device.pk})
+    user = make_superuser("cache-module-missing-server-user")
+    client.force_login(user)
+    url, fields = _rendered_serial_update(device, 8103, user)
+    del fields["server_key"]
 
     with django_capture_on_commit_callbacks(execute=True):
-        response = client.post(
-            url,
-            {
-                "module_id": str(module.pk),
-                "ent_index": "8103",
-                "inventory_binding": module_inventory_binding_token(
-                    device.pk,
-                    "primary",
-                    "update_module_serial",
-                    {"module_id": module.pk},
-                    8103,
-                    module_inventory_row_digest(inventory_payload["inventory"][0]),
-                ),
-            },
-        )
+        response = client.post(url, fields)
 
     assert response.status_code == 302
     module.refresh_from_db()

@@ -386,6 +386,49 @@ class TestCreate:
         assert VRF.objects.filter(name=RD_VRF[0], rd=RD_VRF[1]).exists()
 
 
+def _host_prefix(row_id):
+    return f"{row_id.partition('/')[0]}/32"
+
+
+class TestAnIgnoredAddressCreatesNoVRF:
+    """The VRF does not exist yet, so only an IP mapping without a VRF can ignore the row."""
+
+    def test_the_row_offers_no_create_and_a_direct_post_creates_no_vrf(self, client, seeded):
+        from ipam.models import VRF
+
+        from netbox_librenms_plugin.models import IPAddressMapping
+
+        owner = seeded("vrf-ignored")
+        IPAddressMapping.objects.create(prefix=_host_prefix(RD_ROWS[0]))
+        ui = _superuser_client(client)
+
+        rows = _rows(ui, owner)
+        response = _create(ui, owner, RD_ROWS[0])
+
+        assert not _offers_create(rows[RD_ROWS[0]])
+        assert all(_offers_create(rows[row_id]) for row_id in RD_ROWS[1:])
+        assert not VRF.objects.exists()
+        assert _messages(response, "danger") == [
+            f"IP row {RD_ROWS[0]} is not synced, so the NetBox VRF is not created: "
+            f"IP mapping {_host_prefix(RD_ROWS[0])} ignores this address."
+        ]
+
+    def test_a_mapping_in_another_vrf_does_not_block_the_create(self, client, seeded):
+        from ipam.models import VRF
+
+        from netbox_librenms_plugin.models import IPAddressMapping
+
+        owner = seeded("vrf-ignored-elsewhere")
+        IPAddressMapping.objects.create(
+            prefix=_host_prefix(RD_ROWS[0]), vrf=VRF.objects.create(name="ip-mapping-other")
+        )
+
+        response = _create(_superuser_client(client), owner, RD_ROWS[0])
+
+        assert VRF.objects.filter(name=RD_VRF[0]).exists()
+        assert _messages(response, "danger") == []
+
+
 class TestRefusals:
     """Every refusal leaves NetBox without the new VRF and says why."""
 

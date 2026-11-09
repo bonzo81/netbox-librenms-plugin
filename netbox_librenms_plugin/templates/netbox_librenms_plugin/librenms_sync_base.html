@@ -496,7 +496,7 @@
         <div class="card">
             <h5 class="card-header">Device Information Sync</h5>
             <div class="card-body p-0">
-                <table class="table table-sm table-hover mb-0">
+                <table class="table table-sm table-hover mb-0 device-info-sync-table">
                     <thead>
                         <tr>
                             <th style="width: 20%; padding-left: 1rem;">Field</th>
@@ -830,26 +830,26 @@ that may well be correct.
 <div class="d-flex justify-content-between align-items-center">
     <ul class="nav nav-tabs mt-3" id="librenmsSync" role="tablist">
         <li class="nav-item" role="presentation">
-            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='interfaces' tab_label='Interfaces' tab_url=sync_tab_urls.interfaces tab_status=sync_cache_status.interfaces only %}
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='interfaces' tab_label='Interfaces' tab_url=sync_tab_urls.interfaces tab_status=sync_cache_status.interfaces interface_name_field=interface_name_field only %}
         </li>
         {% if cable_sync %}
         <li class="nav-item" role="presentation">
-            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='cables' tab_label='Cables' tab_url=sync_tab_urls.cables tab_status=sync_cache_status.cables only %}
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='cables' tab_label='Cables' tab_url=sync_tab_urls.cables tab_status=sync_cache_status.cables interface_name_field=interface_name_field only %}
         </li>
         {% endif %}
         <li class="nav-item" role="presentation">
-            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='ipaddresses' tab_label='IP Addresses' tab_url=sync_tab_urls.ipaddresses tab_status=sync_cache_status.ipaddresses only %}
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='ipaddresses' tab_label='IP Addresses' tab_url=sync_tab_urls.ipaddresses tab_status=sync_cache_status.ipaddresses interface_name_field=interface_name_field only %}
         </li>
         {% with model_name=object|meta:"model_name" %}
         {% if model_name == "device" %}
         <li class="nav-item" role="presentation">
-            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='vlans' tab_label='VLANs' tab_url=sync_tab_urls.vlans tab_status=sync_cache_status.vlans only %}
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='vlans' tab_label='VLANs' tab_url=sync_tab_urls.vlans tab_status=sync_cache_status.vlans interface_name_field=interface_name_field only %}
         </li>
         {% endif %}
         {% endwith %}
         {% if module_sync and object|meta:"model_name" == "device" %}
         <li class="nav-item" role="presentation">
-            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='modules' tab_label='Modules' tab_url=sync_tab_urls.modules tab_status=sync_cache_status.modules only %}
+            {% include 'netbox_librenms_plugin/inc/_sync_tab_link.html' with current_tab=active_sync_tab tab_id='modules' tab_label='Modules' tab_url=sync_tab_urls.modules tab_status=sync_cache_status.modules interface_name_field=interface_name_field only %}
         </li>
         {% endif %}
     </ul>
@@ -904,6 +904,12 @@ that may well be correct.
             hx-trigger="librenms:load-fragment" hx-target="#module-sync-content"
             hx-sync="#module-sync-content:abort" hx-swap="innerHTML"></span>
         {% endif %}
+        {# A verified row is written with innerHTML, so its modal buttons send their hx-get through this loader. #}
+        <span class="d-none" data-modal-loader hx-get="" hx-trigger="librenms:open-modal"
+            hx-target="#htmx-modal-content" hx-sync="#htmx-modal-content:replace" hx-swap="innerHTML"></span>
+        {# Its hx-post forms post their fields through this loader, with the target, swap and sync of the row forms. #}
+        <span class="d-none" data-row-form-loader hx-post="" hx-trigger="librenms:submit-row-form"
+            hx-target="#module-sync-content" hx-sync="#module-sync-content:drop" hx-swap="innerHTML"></span>
         {% include 'netbox_librenms_plugin/_module_sync.html' %}
     </div>
     {% endif %}

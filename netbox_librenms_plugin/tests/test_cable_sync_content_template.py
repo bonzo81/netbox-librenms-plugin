@@ -161,3 +161,29 @@ class TestCableSyncContentTemplateMigratedMode:
         assert 'data-cable-picker-url="/plugins/librenms_plugin/picker/1/"' in html
         assert 'hx-get="/plugins/librenms_plugin/picker/1/"' not in html
         assert 'aria-label="Pick remote end"' in html
+
+    def test_the_cable_table_has_no_scroll_wrapper(self):
+        """A scroll wrapper clips the member dropdown, which opens inside the table."""
+        from html.parser import HTMLParser
+
+        class _TableAncestors(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.stack, self.ancestors = [], None
+
+            def handle_starttag(self, tag, attrs):
+                classes = (dict(attrs).get("class") or "").split()
+                if tag == "table" and self.ancestors is None:
+                    self.ancestors = [c for _, cls in self.stack for c in cls]
+                self.stack.append((tag, classes))
+
+            def handle_endtag(self, tag):
+                while self.stack and self.stack.pop()[0] != tag:
+                    pass
+
+        parser = _TableAncestors()
+        parser.feed(self._render(migrated=None))
+
+        assert parser.ancestors is not None
+        assert "card" in parser.ancestors
+        assert "table-responsive" not in parser.ancestors

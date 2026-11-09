@@ -18,6 +18,7 @@ from django.urls import reverse
 # switcher include) in the same commit that adds the model.
 MAPPING_LIST_ROUTES = [
     "interfacetypemapping_list",
+    "ipaddressmapping_list",
     "devicetypemapping_list",
     "moduletypemapping_list",
     "modulebaymapping_list",
