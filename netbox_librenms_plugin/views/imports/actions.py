@@ -2758,8 +2758,15 @@ class CreatePlatformFromImportView(
         if validated_device is None:
             return _htmx_error_response("Device not found in LibreNMS.")
         target_model, target_pk = self._assignment_target(request, validation)
-        # The facts come from the validated LibreNMS device, never from the posted form.
-        facts = PlatformFacts.from_librenms(validated_device.get("os"), validated_device.get("version"))
+        # The facts come from LibreNMS now, as Create & Sync reads them: the import row is a cache.
+        found, live_device = self.librenms_api.get_device_info(device_id, use_cache=False)
+        if not found:
+            return _htmx_error_response(
+                "Device not found in LibreNMS."
+                if live_device is None
+                else "Failed to retrieve device info from LibreNMS."
+            )
+        facts = PlatformFacts.from_librenms(live_device.get("os"), live_device.get("version"))
 
         if error := self._require_create_permissions(request, target_model):
             return error

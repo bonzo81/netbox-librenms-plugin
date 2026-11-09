@@ -828,6 +828,64 @@ class TestImportCreatePlatformModal:
         assert device.platform is None
         assert Platform.objects.count() == count
 
+    @staticmethod
+    def _cache_import_row(device, device_id):
+        """Seed the import row cache with the device as LibreNMS reported it when the page loaded."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+
+        cached_row = {
+            "device_id": device_id,
+            "hostname": device.name,
+            "sysName": device.name,
+            "hardware": device.device_type.model,
+            "os": "junos",
+            "version": VERSION,
+            "serial": "SN123",
+            "ip": "",
+        }
+        cache.set(get_import_device_cache_key(device_id, SERVER_KEY), cached_row, timeout=300)
+
+    def test_a_version_changed_behind_the_cached_import_row_creates_nothing(self, client, librenms_server):
+        """The import row comes from a cache; the create reads LibreNMS live, as Create & Sync does."""
+        from dcim.models import Platform
+
+        _tracking(True)
+        device = _import_linked("import-stale-cached", librenms_server, 7407, version="22.1R1")
+        self._cache_import_row(device, 7407)
+        client.force_login(make_superuser("import-stale-cached-su"))
+        count = Platform.objects.count()
+
+        response = _import_post(
+            client,
+            device,
+            7407,
+            {"platform_name": "Juniper Junos", "librenms_os": "junos", "librenms_version": VERSION},
+        )
+
+        device.refresh_from_db()
+        assert "now reports version '22.1R1'" in _import_error(response)
+        assert device.platform is None
+        assert Platform.objects.count() == count
+
+    def test_a_device_gone_from_librenms_behind_the_cached_import_row_creates_nothing(self, client, librenms_server):
+        from dcim.models import Platform
+
+        _tracking(False)
+        device = _import_linked("import-gone-cached", librenms_server, 7408)
+        self._cache_import_row(device, 7408)
+        librenms_server.register("/api/v0/devices/7408", {"status": "error"}, status=404)
+        client.force_login(make_superuser("import-gone-cached-su"))
+        count = Platform.objects.count()
+
+        response = _import_post(client, device, 7408, {"platform_name": "Juniper Junos", "librenms_os": "junos"})
+
+        device.refresh_from_db()
+        assert "Device not found in LibreNMS." in _import_error(response)
+        assert device.platform is None
+        assert Platform.objects.count() == count
+
 
 class TestImportPlatformSyncAction:
     def test_the_row_response_confirms_the_created_and_assigned_platform(self, client, librenms_server):
