@@ -547,6 +547,8 @@ class TestDeviceValidation:
         )
 
         assert result[result_key][result_key] is None
+        if result_key in ("site", "device_type"):
+            assert result[result_key]["found"] is False
 
     def test_unknown_prerequisites_report_real_validation_results(self):
         from netbox_librenms_plugin.import_utils import validate_device_for_import

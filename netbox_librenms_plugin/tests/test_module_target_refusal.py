@@ -51,6 +51,7 @@ def _world(tag):
     )
     return {
         "page": page,
+        "sibling": sibling,
         "hidden": hidden,
         "outsider": outsider,
         "module": module,
@@ -89,14 +90,18 @@ def _url(name, page):
 
 class TestInterfaceTypePreview:
     @staticmethod
-    def _get(client, settings, world, tag, selected_device_id):
+    def _get(client, settings, world, tag, selected_device_id, module=None):
         from dcim.models import Interface, Module
 
         configure_default_librenms_server(settings)
         client.force_login(_user(world, tag, [("view", Module), ("view", Interface)]))
         return client.get(
             _url("module_interface_type_preview", world["page"]),
-            {"server_key": "default", "module_id": str(world["module"].pk), "selected_device_id": selected_device_id},
+            {
+                "server_key": "default",
+                "module_id": str((module or world["module"]).pk),
+                "selected_device_id": selected_device_id,
+            },
         )
 
     def test_the_page_device_target_shows_the_preview(self, client, settings):
@@ -106,6 +111,21 @@ class TestInterfaceTypePreview:
 
         assert response.status_code == 200
         assert f'name="interface_id" value="{world["interface"].pk}"' in response.content.decode()
+
+    def test_a_visible_sibling_target_shows_the_preview_of_its_module(self, client, settings):
+        from dcim.models import Interface, InterfaceTemplate
+
+        world = _world("tgt-preview-sibling")
+        sibling = world["sibling"]
+        make_module_bay(sibling, "Slot 1")
+        module = install_module(sibling, "Slot 1", "TGT-PREVIEW-SIBLING-MEMBER-CARD")
+        InterfaceTemplate.objects.create(module_type=module.module_type, name=_TEMPLATE_NAME, type="10gbase-x-sfpp")
+        interface = Interface.objects.create(device=sibling, module=module, name=_TEMPLATE_NAME, type="1000base-t")
+
+        response = self._get(client, settings, world, "tgt-preview-sibling", str(sibling.pk), module=module)
+
+        assert response.status_code == 200
+        assert f'name="interface_id" value="{interface.pk}"' in response.content.decode()
 
     @pytest.mark.parametrize("kind", INVALID_TARGETS)
     def test_an_invalid_target_is_refused(self, client, settings, kind):
@@ -191,7 +211,7 @@ class TestVCNormalizationReport:
 
 class TestMoveModule:
     @staticmethod
-    def _post(client, settings, world, tag, selected_device_id):
+    def _post(client, settings, world, tag, selected_device_id, target_bay=None):
         from dcim.models import Module, ModuleBay
 
         configure_default_librenms_server(settings)
@@ -204,7 +224,7 @@ class TestMoveModule:
                     "server_key": "default",
                     "selected_device_id": selected_device_id,
                     "conflict_module_id": str(world["moving"].pk),
-                    "target_bay_id": str(world["empty_bay"].pk),
+                    "target_bay_id": str((target_bay or world["empty_bay"]).pk),
                 },
             )
 
@@ -216,6 +236,16 @@ class TestMoveModule:
         world["moving"].refresh_from_db()
         assert response.status_code == 302
         assert world["moving"].module_bay_id == world["empty_bay"].pk
+
+    def test_a_visible_sibling_target_moves_the_module_into_its_bay(self, client, settings):
+        world = _world("tgt-move-sibling")
+        sibling_bay = make_module_bay(world["sibling"], "Sibling Slot")
+
+        response = self._post(client, settings, world, "tgt-move-sibling", str(world["sibling"].pk), sibling_bay)
+
+        world["moving"].refresh_from_db()
+        assert response.status_code == 302
+        assert (world["moving"].device_id, world["moving"].module_bay_id) == (world["sibling"].pk, sibling_bay.pk)
 
     @pytest.mark.parametrize("kind", INVALID_TARGETS)
     def test_an_invalid_target_is_refused(self, client, settings, kind):
