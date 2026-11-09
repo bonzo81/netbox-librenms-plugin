@@ -3755,7 +3755,8 @@ def exception_text_for(exc: Exception, model, user) -> str:
     that the error keys name, or the model. Identity conflicts and database errors use generic
     text because their details can identify objects outside the viewer's scope. A database error
     is a ``DatabaseError``, a psycopg ``Error``, or an ``AbortRequest`` that NetBox raised from one.
-    A lock conflict (``classify_conflict``) gets the "try again" text for every viewer.
+    A lock conflict (``classify_conflict``) gets the "try again" text for every viewer. A broken
+    stored rule names the rule only to a viewer of the rule.
 
     Args:
         exc (Exception): The caught error.
@@ -3776,6 +3777,10 @@ def exception_text_for(exc: Exception, model, user) -> str:
     ):
         logger.warning("The database rejected %s: %s", model.__name__, exc)
         return DATABASE_ERROR_MESSAGE
+    from netbox_librenms_plugin.models import RuleConfigurationError
+
+    if isinstance(exc, RuleConfigurationError):
+        return exc.shown_to(user).public_message
     if not isinstance(exc, ValidationError):
         return str(exc)
     if is_active_superuser(user):

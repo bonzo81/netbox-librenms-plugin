@@ -261,6 +261,41 @@ def test_the_chassis_fallback_of_the_device_type_match_does_not_swallow_a_broken
     assert (excinfo.value.rule_pk, excinfo.value.field) == (rule.pk, "match_pattern")
 
 
+def test_a_cached_import_validation_names_no_broken_rule():
+    """The validation result is cached and shown to any import user, so it keeps the rule details out."""
+    from netbox_librenms_plugin.import_utils import validate_device_for_import
+    from netbox_librenms_plugin.models import HIDDEN_RULE_ERROR_MESSAGE
+
+    rule = _break_device_type_normalization()
+
+    result = validate_device_for_import(
+        {"device_id": 4715, "hostname": "rule-error-import", "hardware": "WS-C9300"}, include_vc_detection=False
+    )
+
+    issues = " ".join(result["issues"])
+    assert HIDDEN_RULE_ERROR_MESSAGE in issues
+    assert f"ID {rule.pk}" not in issues
+    assert "match_pattern" not in issues
+
+
+@pytest.mark.parametrize("may_view_rule", [False, True], ids=["hidden", "viewable"])
+def test_the_text_of_a_caught_broken_rule_names_the_rule_only_to_its_viewer(may_view_rule):
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.models import HIDDEN_RULE_ERROR_MESSAGE, NormalizationRule, RuleConfigurationError
+    from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+    from netbox_librenms_plugin.utils import exception_text_for
+
+    rule = _break_device_type_normalization()
+    perms = [("view", NormalizationRule)] if may_view_rule else []
+    viewer = make_user_with_perms(f"rule-error-text-{may_view_rule}", perms)
+
+    text = exception_text_for(RuleConfigurationError(rule, "match_pattern"), Device, viewer)
+
+    assert (f"(ID {rule.pk}) stores an invalid match_pattern" in text) is may_view_rule
+    assert (text == HIDDEN_RULE_ERROR_MESSAGE) is (not may_view_rule)
+
+
 @pytest.fixture
 def server_key(settings, librenms_server):
     return _two_server_keys(settings, librenms_server, "rule-error-modules")[0]
