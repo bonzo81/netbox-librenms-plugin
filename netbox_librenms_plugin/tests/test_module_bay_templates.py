@@ -112,6 +112,17 @@ class TestExistingMappingLookup:
 
         assert (excinfo.value.rule_pk, excinfo.value.field) == (broken.pk, "librenms_name")
 
+    def test_a_blank_regex_row_covers_nothing(self):
+        from netbox_librenms_plugin.models import ModuleBayMapping
+        from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
+
+        # Stored without clean(): a blank regex has no pattern, as the bay lookup already holds.
+        ModuleBayMapping.objects.bulk_create(
+            [ModuleBayMapping(librenms_name="", librenms_class="", netbox_bay_name="PS", is_regex=True)]
+        )
+
+        assert AddBayTemplateView._existing_regex_mapping_covers("PSU 1", "", None) is False
+
     def test_regex_row_covering_the_name_is_found(self):
         from netbox_librenms_plugin.views.sync.modules import AddBayTemplateView
 

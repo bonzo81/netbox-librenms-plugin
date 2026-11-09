@@ -3398,7 +3398,11 @@ class AddBayTemplateView(
             qs = qs.filter(models.Q(manufacturer=manufacturer) | models.Q(manufacturer__isnull=True))
         else:
             qs = qs.filter(manufacturer__isnull=True)
-        return any(mapping._compiled_pattern.fullmatch(librenms_name) for mapping in qs)
+        # A blank regex row has no pattern, as the bay lookup holds.
+        return any(
+            mapping._compiled_pattern is not None and mapping._compiled_pattern.fullmatch(librenms_name)
+            for mapping in qs
+        )
 
     @staticmethod
     def _existing_bay_mapping(librenms_name, librenms_class, manufacturer):
