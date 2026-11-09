@@ -20,6 +20,7 @@ from netbox_librenms_plugin.platform_versions import (
     PlatformFacts,
     apply_platform,
     map_os_platform,
+    named_platform,
     platform_reports,
     platform_version_tracking_enabled,
 )
@@ -495,7 +496,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         # A platform with this name is reused as it is: it needs "view", not "add".
         existing_platform = None
         if platform_name:
-            existing_platform = Platform.objects.filter(name__iexact=platform_name).first()
+            existing_platform = named_platform(platform_name, request.POST.get("manufacturer") or "")
 
         required = [("change", self.subject_model)]
         if existing_platform is None:

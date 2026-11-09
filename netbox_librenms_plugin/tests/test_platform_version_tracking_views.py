@@ -246,6 +246,28 @@ class TestCreateAndAssignPlatformView:
         assert device.platform.parent == os_platform
         assert PlatformMapping.objects.get(librenms_os="junos").netbox_platform == os_platform
 
+    def test_a_same_named_platform_of_another_manufacturer_needs_no_view_permission(self, client, librenms_server):
+        """Only the platform that the create would reuse needs "view": the name under the selected manufacturer."""
+        from dcim.models import Device, Manufacturer, Platform
+
+        _tracking(False)
+        device = _linked("create-other-vendor-name", librenms_server, 7322)
+        vendor = device.device_type.manufacturer
+        other = Manufacturer.objects.create(name="Other Vendor Page", slug="other-vendor-page")
+        Platform.objects.create(name="Juniper Junos", slug="juniper-junos", manufacturer=other)
+        perms = [("view", Device), ("change", Device), ("add", Platform), ("view", Manufacturer)]
+        client.force_login(make_user_with_perms("create-other-vendor-name", perms))
+
+        _post(
+            client,
+            "create_and_assign_platform",
+            device,
+            {"platform_name": "Juniper Junos", "librenms_os": "junos", "manufacturer": str(vendor.pk)},
+        )
+
+        device.refresh_from_db()
+        assert (device.platform.name, device.platform.manufacturer) == ("Juniper Junos", vendor)
+
 
 class TestAVirtualChassisMemberReadsTheChassisFacts:
     """The sync page of an unmapped member shows the chassis facts, so its platform writes read them too."""
@@ -876,6 +898,28 @@ class TestImportCreatePlatformModal:
         assert "now reports version '22.1R1'" in _import_error(response)
         assert device.platform is None
         assert Platform.objects.count() == count
+
+    def test_a_same_named_platform_of_another_manufacturer_needs_no_view_permission(self, client, librenms_server):
+        from dcim.models import Manufacturer, Platform
+
+        _tracking(False)
+        device = _import_linked("import-other-vendor-name", librenms_server, 7409)
+        vendor = device.device_type.manufacturer
+        other = Manufacturer.objects.create(name="Other Vendor Import", slug="other-vendor-import")
+        Platform.objects.create(name="Juniper Junos", slug="juniper-junos", manufacturer=other)
+        client.force_login(
+            _import_actor("import-other-vendor-name", ("add", Platform, None), ("view", Manufacturer, None))
+        )
+
+        _import_post(
+            client,
+            device,
+            7409,
+            {"platform_name": "Juniper Junos", "librenms_os": "junos", "manufacturer": str(vendor.pk)},
+        )
+
+        device.refresh_from_db()
+        assert (device.platform.name, device.platform.manufacturer) == ("Juniper Junos", vendor)
 
     def test_a_device_gone_from_librenms_behind_the_cached_import_row_creates_nothing(self, client, librenms_server):
         from dcim.models import Platform

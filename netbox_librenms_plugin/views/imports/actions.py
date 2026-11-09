@@ -87,6 +87,7 @@ from netbox_librenms_plugin.platform_versions import (
     assess_platform,
     create_os_platform,
     map_os_platform,
+    named_platform,
     platform_label,
     platform_reports,
     platform_version_tracking_enabled,
@@ -2833,7 +2834,9 @@ class CreatePlatformFromImportView(
 
         platform_name = (request.POST.get("platform_name") or "").strip()
         # A platform with this name is reused as it is: it needs "view", not "add".
-        exists = bool(platform_name) and Platform.objects.filter(name__iexact=platform_name).exists()
+        exists = (
+            bool(platform_name) and named_platform(platform_name, request.POST.get("manufacturer") or "") is not None
+        )
         perms = [("view", Platform) if exists else ("add", Platform)]
         if target_model is not None:
             perms.append(("change", target_model))

@@ -152,7 +152,7 @@ Creating a version platform needs the NetBox `add` permission on Platform. On th
 
 The sync page of a device and of a virtual machine both show the platform row. **Create & Sync** reads the current OS and version from LibreNMS, never from the page. Nothing changes, and the page asks you to refresh, when the OS differs from the OS on the page, when a platform or Platform Mapping now matches the OS, or (with tracking on) when the version differs from the version on the page. A Platform Mapping that cannot be added after the platform is assigned is reported as a warning; the assignment stays.
 
-The **Create Platform** modal on the import page follows the same rules. A platform with the name and the manufacturer you enter is used as it is, when you may view it. When the assignment to the matched device or virtual machine is refused, the new platform is not kept either. The Platform Mapping uses the OS that LibreNMS reports for the device. Without a matched object, the modal creates only the OS platform; the import creates the version platform.
+The **Create Platform** modal on the import page follows the same rules. A platform with the name you enter is used as it is, when you may view it. A manufacturer that you select limits this to the platform of that manufacturer. When the assignment to the matched device or virtual machine is refused, the new platform is not kept either. The Platform Mapping uses the OS that LibreNMS reports for the device. Without a matched object, the modal creates only the OS platform; the import creates the version platform.
 
 Messages and reasons name only platforms that you may view. Another platform is shown as "a platform you cannot view".
 
