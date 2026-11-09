@@ -346,6 +346,30 @@ class TestApplication:
         assert device.platform.name == "Juniper Junos 21.2R3-S4.8"
         assert device.platform.parent.name == "Juniper Junos"
 
+    def test_a_named_platform_of_another_manufacturer_is_not_reused(self):
+        """NetBox keeps a platform name unique per manufacturer, and a device takes only its own vendor's platform."""
+        from dcim.models import Device, Manufacturer
+
+        device = make_device("apply-named-other-vendor")
+        vendor = device.device_type.manufacturer
+        other = _platform(
+            "Juniper Junos", manufacturer=Manufacturer.objects.create(name="Other Vendor", slug="other-vendor")
+        )
+
+        outcome = apply_platform(
+            Device,
+            device.pk,
+            _facts(),
+            tracking=False,
+            actor=make_superuser("named-other-vendor-su"),
+            new_os_platform=NewOSPlatform("Juniper Junos", "junos", manufacturer=vendor),
+        )
+
+        device.refresh_from_db()
+        assert outcome.status is OutcomeStatus.APPLIED
+        assert (device.platform.name, device.platform.manufacturer) == ("Juniper Junos", vendor)
+        assert device.platform != other
+
     def test_a_blocked_version_platform_rolls_back_the_named_os_platform(self):
         from dcim.models import Device, Platform
 

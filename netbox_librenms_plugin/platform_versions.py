@@ -377,12 +377,14 @@ def _named_os_platform(new_os_platform, actor, named):
     """
     Return the OS platform that the actor names, created when no platform has that name; *named* assesses it.
 
-    A platform with that name, found now or as the winner of a concurrent create, is reused only when
-    the actor may view it.
+    A platform with that name and manufacturer, found now or as the winner of a concurrent create, is
+    reused only when the actor may view it. NetBox keeps a platform name unique per manufacturer.
     """
 
     def reusable():
-        found = Platform.objects.filter(name__iexact=new_os_platform.name).first()
+        found = Platform.objects.filter(
+            name__iexact=new_os_platform.name, manufacturer=new_os_platform.manufacturer
+        ).first()
         if found is not None and not platform_visible(found, actor):
             raise _Stop(PlatformOutcome(OutcomeStatus.BLOCKED, PlatformReason.NAMED_PLATFORM_UNAVAILABLE, named))
         return found
