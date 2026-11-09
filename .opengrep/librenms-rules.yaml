@@ -792,9 +792,11 @@ rules:
               metavariable: $ERROR
               regex: ^\w+(\.__(cause|context)__)*$
         exact: true
-      # Only the first argument goes through exception_text_for. The other arguments go into the text.
+      # Only the error argument goes through exception_text_for. The other arguments go into the text.
       - patterns:
-          - pattern: write_failure_message($ERROR, ...)
+          - pattern-either:
+              - pattern: write_failure_message($ERROR, ...)
+              - pattern: write_failure_message(..., exc=$ERROR, ...)
           - metavariable-regex:
               metavariable: $ERROR
               regex: ^\w+(\.__(cause|context)__)*$
@@ -1674,6 +1676,29 @@ rules:
                 ...
               except IntegrityError as $ERROR:
                 ...
+          # A tuple that holds IntegrityError but not ValidationError misses the validation-time race too.
+          - patterns:
+              - pattern-either:
+                  - pattern: |
+                      try:
+                        ...
+                      except (..., IntegrityError, ...):
+                        ...
+                  - pattern: |
+                      try:
+                        ...
+                      except (..., IntegrityError, ...) as $ERROR:
+                        ...
+              - pattern-not: |
+                  try:
+                    ...
+                  except (..., ValidationError, ...):
+                    ...
+              - pattern-not: |
+                  try:
+                    ...
+                  except (..., ValidationError, ...) as $ERROR:
+                    ...
 
   - id: batch-validation-needs-candidate-keys
     languages: [python]

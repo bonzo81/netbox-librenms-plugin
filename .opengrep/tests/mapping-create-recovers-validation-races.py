@@ -17,6 +17,24 @@ def _map_os_platform():
 
 
 def _map_os_platform():
+    # ruleid: mapping-create-recovers-validation-races
+    try:
+        mapping.full_clean()
+        mapping.save()
+    except (IntegrityError, OperationalError):
+        recover_winner()
+
+
+def _map_os_platform():
+    # ruleid: mapping-create-recovers-validation-races
+    try:
+        mapping.full_clean()
+        mapping.save()
+    except (OperationalError, IntegrityError) as exc:
+        recover_winner()
+
+
+def _map_os_platform():
     # ok: mapping-create-recovers-validation-races
     try:
         mapping.full_clean()
