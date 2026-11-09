@@ -406,13 +406,22 @@ class BaseInterfaceTableView(
         # only consider host ports. An OOB-only row matching the ifType/name heuristic would
         # otherwise trigger a host port_stack fetch (and the "may be incomplete" warning) even
         # when the main device has no such relationships.
+        from netbox_librenms_plugin.models import RuleConfigurationError
+
         host_ports_final = [p for p in librenms_data.get("ports", []) if p.get("_source") != OOB_INVENTORY_SOURCE]
-        self._enrich_port_stack_relationships(
-            request,
-            librenms_data,
-            host_ports_final,
-            interface_name_field,
-        )
+        try:
+            self._enrich_port_stack_relationships(
+                request,
+                librenms_data,
+                host_ports_final,
+                interface_name_field,
+            )
+        except RuleConfigurationError:
+            # The snapshot is already deleted; the middleware answers with the rule.
+            SyncCacheConsistency(obj).mark_refresh_failure(
+                SyncTab.INTERFACES, _server_key, actor_id=request_actor_id(request)
+            )
+            raise
 
         # Fill the VLAN holes here, on the rows that get cached, so the table and the sync
         # writer read one derivation instead of each computing its own.

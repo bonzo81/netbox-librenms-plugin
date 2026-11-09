@@ -197,6 +197,7 @@ class TestInterfaceRefreshFailureThroughTheUrl:
         assert "netbox_librenms_plugin/_interface_sync_content.html" in [t.name for t in response.templates]
         assert response.context["interface_sync"]["table"] is None
         assert response.context["interface_sync"]["server_key"] == SERVER_KEY
+        assert "Device not found in LibreNMS." in response.content.decode()
         assert _tab_state(owner)["state"] == "refresh_failed"
 
 
@@ -223,6 +224,23 @@ class TestInterfaceRefreshOobMerge:
         paths = [r["path"] for r in librenms_server.requests]
         assert paths == ["/api/v0/devices/21/ports", "/api/v0/devices/21", "/api/v0/devices/21/port_stack"]
         assert not any("not-an-id" in path for path in paths)
+
+    def test_a_broken_port_stack_rule_records_the_failed_refresh(self, librenms_server, settings):
+        """The refresh deleted the snapshot first, so the tab state must say the refresh failed, not missing."""
+        from netbox_librenms_plugin.models import PortStackLagPattern, RuleConfigurationError
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+        device = _map_device(make_device("iface-broken-port-stack-rule"), 23)
+        librenms_server.ports_response(device_id=23, ports=[{"port_id": 1, "ifName": "eth0"}])
+        librenms_server.device_info_response(device_id=23, hostname=device.name, os="rule-error-os")
+        PortStackLagPattern.objects.bulk_create(
+            [PortStackLagPattern(librenms_os="rule-error-os", lag_name_pattern="(")]
+        )
+
+        with pytest.raises(RuleConfigurationError):
+            _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
+
+        assert _tab_state(device)["state"] == "refresh_failed"
 
     def test_oob_ports_merge_and_only_real_shared_macs_are_flagged(self, librenms_server, settings):
         """OOB rows merge in tagged _source=oob, and only a real MAC on both sides is a conflict."""
