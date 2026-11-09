@@ -2762,8 +2762,11 @@ class CreatePlatformFromImportView(
             return _htmx_error_response("Device not found in LibreNMS.")
         target_model, target_pk = self._assignment_target(request, validation)
         # The facts come from LibreNMS now, as Create & Sync reads them: the import row is a cache.
+        cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
         found, live_device = self.librenms_api.get_device_info(device_id, use_cache=False)
         if not found:
+            if live_device is None:
+                cache.delete(cache_key)
             return _htmx_error_response(
                 "Device not found in LibreNMS."
                 if live_device is None
@@ -2797,6 +2800,8 @@ class CreatePlatformFromImportView(
             )
         reports = platform_reports(outcome, target_model, request.user, named=True)
         if refusal := next((report.text for report in reports if report.level == messages.ERROR), None):
+            # A refusal can come from facts that changed since the row was cached, so the next open reads them again.
+            cache.delete(cache_key)
             return _htmx_error_response(refusal)
         logger.info(
             "CreatePlatformFromImportView: platform '%s' for LibreNMS device_id=%s: %s",
@@ -2811,7 +2816,6 @@ class CreatePlatformFromImportView(
                 request, *map_os_platform(facts.librenms_os, outcome.assessment.os_platform, request.user)
             )
 
-        cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
         cache.delete(cache_key)
         return self._updated_row_response(request, device_id)
 

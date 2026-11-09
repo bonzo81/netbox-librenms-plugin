@@ -880,6 +880,9 @@ class TestImportCreatePlatformModal:
     def test_a_version_changed_behind_the_cached_import_row_creates_nothing(self, client, librenms_server):
         """The import row comes from a cache; the create reads LibreNMS live, as Create & Sync does."""
         from dcim.models import Platform
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
 
         _tracking(True)
         device = _import_linked("import-stale-cached", librenms_server, 7407, version="22.1R1")
@@ -898,6 +901,8 @@ class TestImportCreatePlatformModal:
         assert "now reports version '22.1R1'" in _import_error(response)
         assert device.platform is None
         assert Platform.objects.count() == count
+        # The refusal asks for a refresh, so the modal must not read the stale row again.
+        assert cache.get(get_import_device_cache_key(7407, SERVER_KEY)) is None
 
     def test_a_same_named_platform_of_another_manufacturer_needs_no_view_permission(self, client, librenms_server):
         from dcim.models import Manufacturer, Platform
