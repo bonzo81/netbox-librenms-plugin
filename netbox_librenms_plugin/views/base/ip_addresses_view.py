@@ -1426,9 +1426,15 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
                     vrf_id = int(vrf_id)
                 except (TypeError, ValueError):
                     return JsonResponse({"status": "error", "message": "Invalid VRF ID"}, status=400)
-                # The dropdown lists only viewable VRFs, so a VRF the user cannot view decides nothing.
+                # A hidden VRF answers as a deleted one, so the refusal discloses nothing.
                 if not self.restricted_queryset(VRF).filter(pk=vrf_id).exists():
-                    vrf_id = None
+                    return JsonResponse(
+                        {
+                            "status": "error",
+                            "message": "Selected VRF is no longer available or you do not have permission to view it.",
+                        },
+                        status=400,
+                    )
 
             # Get the object (Device or VirtualMachine)
             try:

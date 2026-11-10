@@ -192,7 +192,9 @@ class TestVerifyPostRejectsMalformedVrfId:
 
     def test_numeric_string_vrf_id_is_accepted(self):
         # A digit string coerces to int and flows through the real filter without 400/500.
-        assert self._post("999999").status_code == 200
+        from ipam.models import VRF
+
+        assert self._post(str(VRF.objects.create(name="vrfsk-vrf").pk)).status_code == 200
 
 
 class TestFindInCacheFailsClosed:
