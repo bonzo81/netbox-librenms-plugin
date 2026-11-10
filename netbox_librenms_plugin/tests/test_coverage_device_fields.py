@@ -590,14 +590,14 @@ class TestCreateAndAssignPlatformView:
     def test_a_platform_netbox_refuses_rolls_back_creation(self, logged_in_client, librenms_server):
         from dcim.models import Platform
 
-        device = _reporting_device("platform-invalid-name", librenms_server, 6584, "")
+        device = _reporting_device("platform-invalid-name", librenms_server, 6584, "invalid-name-os")
         name = "x" * (Platform._meta.get_field("name").max_length + 1)
 
         response = _post(
             logged_in_client,
             "create_and_assign_platform",
             device,
-            {"platform_name": name},
+            {"platform_name": name, "librenms_os": "invalid-name-os"},
         )
 
         assert not Platform.objects.filter(name=name).exists()
@@ -610,7 +610,7 @@ class TestCreateAndAssignPlatformView:
     ):
         from dcim.models import Manufacturer, Platform
 
-        device = _reporting_device("platform-incompatible-manufacturer", librenms_server, 6585, "")
+        device = _reporting_device("platform-incompatible-manufacturer", librenms_server, 6585, "incompatible-os")
         incompatible = Manufacturer.objects.create(
             name="Incompatible platform manufacturer",
             slug="incompatible-platform-manufacturer",
@@ -623,6 +623,7 @@ class TestCreateAndAssignPlatformView:
             {
                 "platform_name": "Incompatible Platform",
                 "manufacturer": str(incompatible.pk),
+                "librenms_os": "incompatible-os",
             },
         )
 

@@ -1223,6 +1223,34 @@ def test_an_os_that_differs_from_the_form_creates_and_maps_nothing(client, libre
     assert not PlatformMapping.objects.exists()
 
 
+@pytest.mark.parametrize("endpoint", ["sync", "import"])
+@pytest.mark.parametrize("librenms_os", ["", "-"], ids=["empty-os", "dash-os"])
+def test_a_device_without_a_librenms_os_gets_no_named_platform(client, librenms_server, endpoint, librenms_os):
+    """LibreNMS reports no OS, and the form posted none: no OS rule could find the platform later."""
+    from dcim.models import Platform
+
+    from netbox_librenms_plugin.models import PlatformMapping
+
+    _tracking(False)
+    name = f"no-os-{endpoint}-{librenms_os or 'empty'}"
+    device = _import_linked(name, librenms_server, 7412, os=librenms_os)
+    client.force_login(make_superuser(name))
+    data = {"platform_name": "Juniper Junos", "librenms_os": "", "create_mapping": "1"}
+    count = Platform.objects.count()
+
+    if endpoint == "sync":
+        response = _post(client, "create_and_assign_platform", device, data)
+        errors = " ".join(message_texts(response.wsgi_request, "error"))
+    else:
+        errors = _import_error(_import_post(client, device, 7412, data))
+
+    device.refresh_from_db()
+    assert "LibreNMS reports no OS." in errors
+    assert device.platform is None
+    assert Platform.objects.count() == count
+    assert not PlatformMapping.objects.exists()
+
+
 @pytest.mark.parametrize("posted_os", ["junos", None], ids=["posted-os", "no-posted-os"])
 def test_a_device_gone_from_librenms_creates_no_platform(client, librenms_server, posted_os):
     """The import row names a LibreNMS device that LibreNMS no longer has."""

@@ -211,10 +211,11 @@ class TestSyncPostPermissionGates:
         configure_librenms_servers(settings, servers)
         server_key = next(iter(servers))
         device = make_device("platform-permission-device", librenms_cf={server_key: 7501})
-        librenms_server.device_info_response(device_id=7501, hostname=device.name, os="")
+        librenms_server.device_info_response(device_id=7501, hostname=device.name, os="permission-os")
         perms = [("change", Device)] + ([("add", Platform)] if allow_create else [])
         user = make_user_with_perms("platform-creator", perms)
-        request = make_request(data={"platform_name": "Permission platform", "server_key": server_key}, user=user)
+        data = {"platform_name": "Permission platform", "librenms_os": "permission-os", "server_key": server_key}
+        request = make_request(data=data, user=user)
         view = CreateAndAssignPlatformView()
         count = Platform.objects.count()
 

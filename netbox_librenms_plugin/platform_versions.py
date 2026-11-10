@@ -486,11 +486,12 @@ def _create_version_platform(assessment, actor):
 
 def _named_request(new_os_platform, facts, tracking):
     """
-    Return the assessment of the OS platform that the actor names, and the stale outcome of changed facts.
+    Return the assessment of the OS platform that the actor names, and the outcome that refuses it.
 
     Returns:
         tuple[PlatformAssessment, PlatformOutcome | None]: The assessment, and the outcome when
-        LibreNMS now reports another OS than the actor saw, or with tracking on another version.
+        LibreNMS reports no OS, now reports another OS than the actor saw, or with tracking on
+        another version.
 
     """
     named = PlatformAssessment(
@@ -501,6 +502,9 @@ def _named_request(new_os_platform, facts, tracking):
         target_name=new_os_platform.name,
         operation=PlatformOperation.CREATE_OS_PLATFORM,
     )
+    # No OS rule could find a platform named for a device without an OS.
+    if not facts.librenms_os:
+        return named, PlatformOutcome(OutcomeStatus.BLOCKED, PlatformReason.NO_OS, named)
     # The OS platform lookup ignores case, so the OS comparison does too.
     if _fact(new_os_platform.reported_os).casefold() != facts.librenms_os.casefold():
         return named, PlatformOutcome(OutcomeStatus.STALE, PlatformReason.OS_CHANGED, named)
