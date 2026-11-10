@@ -18,7 +18,11 @@ from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.constants import LIBRENMS_GLOBAL_ROUTING_INSTANCE, is_supported_interface_name_field
 from netbox_librenms_plugin.interface_rules import interface_rules_for_request, row_rule_block
-from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_librenms_ip_entry
+from netbox_librenms_plugin.ip_addressing import (
+    UNAVAILABLE_VRF_MESSAGE,
+    parse_address_with_prefix,
+    parse_librenms_ip_entry,
+)
 from netbox_librenms_plugin.ip_rules import ip_rules_for_request, row_ip_rule_block
 from netbox_librenms_plugin.librenms_ids import (
     coerce_librenms_id,
@@ -1431,7 +1435,7 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
                     return JsonResponse(
                         {
                             "status": "error",
-                            "message": "Selected VRF is no longer available or you do not have permission to view it.",
+                            "message": UNAVAILABLE_VRF_MESSAGE,
                         },
                         status=400,
                     )

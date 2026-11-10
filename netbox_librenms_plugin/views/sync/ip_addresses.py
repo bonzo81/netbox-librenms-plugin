@@ -20,7 +20,7 @@ from virtualization.models import VirtualMachine, VMInterface
 from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE, is_supported_interface_name_field
 from netbox_librenms_plugin.interface_rules import PortSyncBlocked, interface_rules_for_request
 from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
-from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix
+from netbox_librenms_plugin.ip_addressing import UNAVAILABLE_VRF_MESSAGE, parse_address_with_prefix
 from netbox_librenms_plugin.ip_rules import ip_rules_for_request
 from netbox_librenms_plugin.librenms_api import LibreNMSIDConflictError
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
@@ -176,7 +176,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         try:
             return self.restricted_queryset(VRF).get(pk=vrf_id)
         except (VRF.DoesNotExist, TypeError, ValueError):
-            raise ValueError("Selected VRF is no longer available or you do not have permission to view it.") from None
+            raise ValueError(UNAVAILABLE_VRF_MESSAGE) from None
 
     def get_cached_ip_snapshot(self, obj, *, require_create_metadata=False):
         """Return the cached LibreNMS IP snapshot when it satisfies the requested contract."""
@@ -792,7 +792,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         try:
             return self.restricted_queryset(VRF).get(pk=vrf_id)
         except (VRF.DoesNotExist, TypeError, ValueError):
-            raise ValueError("Selected VRF is no longer available or you do not have permission to view it.") from None
+            raise ValueError(UNAVAILABLE_VRF_MESSAGE) from None
 
     @staticmethod
     def _host_rows(vrf, parsed):
