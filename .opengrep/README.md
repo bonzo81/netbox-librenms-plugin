@@ -70,7 +70,7 @@ unchecked until that review.
 | `assert-is-not-parametrized-flag` | error | A test asserts `value is not flag`, where `flag` is a `pytest.mark.parametrize` argument with `True` or `False` values. That identity check also passes for `None`. |
 | `vc-member-name-through-helper` | error | A `_generate_vc_member_name()` call outside `_member_name()`. Such a name skips the serial rules, so it can differ from the name that import creates. Tests are excluded, and an import alias of the function is not followed. |
 | `posted-module-target-needs-resolver` | error | A read of the posted `selected_device_id` from `request.GET` or `request.POST` outside `_resolve_destination(...)` or a module grant's `require(device_id=...)`. |
-| `regex-error-must-raise` | error | A handler that catches `re.error`, `re.PatternError` or `REGEX_COMPILE_ERRORS` and does not raise. A stored rule regex compiles through `models.compile_rule_regex`, which raises `RuleConfigurationError`. |
+| `regex-error-must-raise` | error | A handler that catches `re.error`, `re.PatternError` or `REGEX_COMPILE_ERRORS` and does not end with a top-level `raise`. A stored rule regex compiles through `models.compile_rule_regex`, which raises `RuleConfigurationError`. |
 | `rule-error-message-needs-projection` | error | A `str()` conversion of the rule error bound by the module-context walrus check, or the exception parameter in `RuleConfigurationErrorMiddleware.process_exception`. These paths use `public_message`. Other aliases and handlers are outside this check. |
 
 ## Scope
@@ -251,7 +251,8 @@ not see the key in a variable, or a read through a name other than `GET` or `POS
 
 `regex-error-must-raise` reads the class list of the handler. It does not see a regex error caught
 by `except Exception`, or a module alias other than `_re`. A handler that raises only inside a
-nested branch is reported, because its other branch swallows the error. A pattern that is not
+nested branch is reported, because its other branch swallows the error. A handler that ends with a
+top-level raise but returns early on one branch is not reported. A pattern that is not
 stored rule data, such as a form value or a derived pattern, carries a suppression with its reason.
 
 ## `--taint-intrafile` is required

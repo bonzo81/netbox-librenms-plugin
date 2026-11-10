@@ -156,6 +156,35 @@ def catches_a_lookalike_module_error(pattern):
         return None
 
 
+def raises_only_on_one_branch(pattern, strict):
+    # ruleid: regex-error-must-raise
+    try:
+        return re.compile(pattern)
+    except re.error as exc:
+        if strict:
+            raise ValueError(pattern) from exc
+        return None
+
+
+def falls_through_after_a_conditional_raise(pattern, strict):
+    # ruleid: regex-error-must-raise
+    try:
+        return re.compile(pattern)
+    except REGEX_COMPILE_ERRORS:
+        if strict:
+            raise
+
+
+def raises_after_a_condition(rule, field, verbose):
+    # ok: regex-error-must-raise
+    try:
+        return re.compile(getattr(rule, field))
+    except REGEX_COMPILE_ERRORS as exc:
+        if verbose:
+            logger.debug("Rejected pattern: %s", exc)
+        raise RuleConfigurationError(rule, field) from exc
+
+
 def raises_the_typed_error(rule, field):
     # ok: regex-error-must-raise
     try:

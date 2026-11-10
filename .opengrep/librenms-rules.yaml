@@ -1641,21 +1641,22 @@ rules:
           metavariable: $CLASS
           # The module re, its alias _re, or the shared tuple, also unpacked into a tuple. Python 3.13 names re.error re.PatternError.
           regex: ^([\s\S]*[(,]\s*)?\*?(_?re\.(error|PatternError)|REGEX_COMPILE_ERRORS)\s*([,)][\s\S]*)?$
-      # A handler that raises, also after other statements, fails closed.
+      # A handler whose last top-level statement raises fails closed. A raise inside an if or a with does not count.
       - metavariable-pattern:
           metavariable: $...HANDLER
           patterns:
             # The whole handler. A pattern-not removes it only when its match covers the same text.
             - pattern-regex: (?s)\A.*\z
+            # $...BODY, unlike "...", does not reach into a nested block.
             - pattern-not: |
-                ...
+                $...BODY
                 raise ...
             - pattern-not: |
-                ...
+                $...BODY
                 raise $NEW from $CAUSE
             # A bare raise re-raises the error. The "raise ..." form above does not match it.
             - pattern-not: |
-                ...
+                $...BODY
                 raise
 
   - id: mapping-create-recovers-validation-races
