@@ -943,6 +943,24 @@ class TestImportCreatePlatformModal:
         assert device.platform is None
         assert Platform.objects.count() == count
 
+    def test_a_user_without_platform_permission_is_refused_before_the_live_device_read(self, client, librenms_server):
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+
+        _tracking(False)
+        device = _import_linked("import-no-platform-perm", librenms_server, 7410)
+        self._cache_import_row(device, 7410)
+        librenms_server.register("/api/v0/devices/7410", {"status": "error"}, status=404)
+        client.force_login(_import_actor("import-no-platform-perm"))
+
+        response = _import_post(client, device, 7410, {"platform_name": "Juniper Junos", "librenms_os": "junos"})
+
+        device.refresh_from_db()
+        assert device.platform is None
+        assert "Device not found in LibreNMS." not in response.content.decode()
+        assert cache.get(get_import_device_cache_key(7410, SERVER_KEY)) is not None
+
 
 class TestImportPlatformSyncAction:
     def test_the_row_response_confirms_the_created_and_assigned_platform(self, client, librenms_server):

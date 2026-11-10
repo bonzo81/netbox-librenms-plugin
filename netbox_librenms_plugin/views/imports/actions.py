@@ -2761,7 +2761,16 @@ class CreatePlatformFromImportView(
         if validated_device is None:
             return _htmx_error_response("Device not found in LibreNMS.")
         target_model, target_pk = self._assignment_target(request, validation)
-        # The facts come from LibreNMS now, as Create & Sync reads them: the import row is a cache.
+        if error := self._require_create_permissions(request, target_model):
+            return error
+        platform_name = (request.POST.get("platform_name") or "").strip()
+        if not platform_name:
+            return _htmx_error_response("Platform name is required.")
+        manufacturer, error = self._posted_manufacturer(request)
+        if error:
+            return error
+
+        # LibreNMS facts are read live after the local checks, as in Create & Sync: the import row is a cache.
         cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
         found, live_device = self.librenms_api.get_device_info(device_id, use_cache=False)
         if not found:
@@ -2773,15 +2782,6 @@ class CreatePlatformFromImportView(
                 else "Failed to retrieve device info from LibreNMS."
             )
         facts = PlatformFacts.from_librenms(live_device.get("os"), live_device.get("version"))
-
-        if error := self._require_create_permissions(request, target_model):
-            return error
-        platform_name = (request.POST.get("platform_name") or "").strip()
-        if not platform_name:
-            return _htmx_error_response("Platform name is required.")
-        manufacturer, error = self._posted_manufacturer(request)
-        if error:
-            return error
 
         tracking = platform_version_tracking_enabled()
         named = NewOSPlatform(
