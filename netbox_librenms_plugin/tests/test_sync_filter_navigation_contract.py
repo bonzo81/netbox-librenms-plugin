@@ -99,7 +99,8 @@ class _Hops(HTMLParser):
                 self.urls.append({"tag": tag, "attrs": attributes, "url": attributes[name]})
 
     def handle_endtag(self, tag):
-        if not self.depth:
+        # A self-closing void tag (`<input ... />`) also calls this, but it never added depth.
+        if not self.depth or tag in VOID_TAGS:
             return
         if tag == "form":
             self._get_form = None
@@ -147,7 +148,7 @@ def _classify(hop, page_path, routes):
     if path == routes["fragment"]:
         # The loader states only its tab; the browser adds the page query (the browser test checks it).
         return "fragment"
-    if "/sync-interface-" in path or path.startswith("/dcim/interfaces/"):
+    if "/sync-interface-" in path or path.startswith(("/dcim/interfaces/", "/virtualization/interfaces/")):
         # A relationship sync answers JSON and repaints one button; an object link leaves the page.
         return "follow-up"
     if on_page and "sync-filter-clear" in hop["attrs"].get("class", "").split():
@@ -278,6 +279,13 @@ def test_a_filters_reset_drops_exactly_the_keys_the_filter_parser_owns():
         "interfaces_filter_name",
         "interfaces_filter_unknown",
     }
+
+
+@pytest.mark.parametrize("void", ['<input name="pk" value="1" />', '<input name="pk" value="1">', "<br/>"])
+def test_the_hop_parser_keeps_its_depth_across_void_elements(void):
+    html = f'<div id="pane">{void}<a href="?tab=interfaces">x</a></div>'
+
+    assert [hop["url"] for hop in _hops(html, "pane").urls] == ["?tab=interfaces"]
 
 
 def test_the_module_paginator_keeps_the_interface_filters():
