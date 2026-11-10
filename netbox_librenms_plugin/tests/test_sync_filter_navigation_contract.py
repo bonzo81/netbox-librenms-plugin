@@ -288,6 +288,7 @@ def test_the_hop_parser_keeps_its_depth_across_void_elements(void):
     assert [hop["url"] for hop in _hops(html, "pane").urls] == ["?tab=interfaces"]
 
 
+@pytest.mark.django_db
 def test_the_module_paginator_keeps_the_interface_filters():
     """The Modules tab shares the paginator, so its links carry the other tabs' state too."""
     rows = [{"ent_physical_index": index, "name": f"module {index}", "depth": 0} for index in range(60)]
