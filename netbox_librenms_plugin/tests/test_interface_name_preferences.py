@@ -294,8 +294,10 @@ def test_a_platform_choice_applies_on_its_descendants_until_one_saves_its_own(cl
     junos = Platform.objects.create(name="Vendor J", slug="vendor-j")
     version = Platform.objects.create(name="Vendor J 21.2R3", slug="vendor-j-21-2r3", parent=junos)
     other_version = Platform.objects.create(name="Vendor J 22.4R1", slug="vendor-j-22-4r1", parent=junos)
+    # A grandchild without a choice tells the nearest ancestor apart from the root.
+    patch = Platform.objects.create(name="Vendor J 21.2R3-S1", slug="vendor-j-21-2r3-s1", parent=version)
     devices = {}
-    for platform in (junos, version, other_version):
+    for platform in (junos, version, other_version, patch):
         devices[platform.pk] = make_device(f"tree-preference-{platform.slug}")
         devices[platform.pk].platform = platform
         devices[platform.pk].save(update_fields=["platform"])
@@ -305,7 +307,8 @@ def test_a_platform_choice_applies_on_its_descendants_until_one_saves_its_own(cl
     assert _post_preference(client, "ifDescr").status_code == 200
     assert _post_preference(client, "ifName", junos.pk).status_code == 200
     request = _request_for(user)
-    assert [get_interface_name_field(request, devices[p.pk]) for p in (junos, version, other_version)] == [
+    assert [get_interface_name_field(request, devices[p.pk]) for p in (junos, version, other_version, patch)] == [
+        "ifName",
         "ifName",
         "ifName",
         "ifName",
@@ -313,10 +316,11 @@ def test_a_platform_choice_applies_on_its_descendants_until_one_saves_its_own(cl
 
     assert _post_preference(client, "ifDescr", version.pk).status_code == 200
     request = _request_for(user)
-    assert [get_interface_name_field(request, devices[p.pk]) for p in (junos, version, other_version)] == [
+    assert [get_interface_name_field(request, devices[p.pk]) for p in (junos, version, other_version, patch)] == [
         "ifName",
         "ifDescr",
         "ifName",
+        "ifDescr",
     ]
     assert request.user.config.get(PLATFORM_PREFERENCES) == {str(junos.pk): "ifName", str(version.pk): "ifDescr"}
 
