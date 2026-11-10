@@ -113,6 +113,28 @@ def _map_os_platform():
         release()
 
 
+def _map_os_platform():
+    # ruleid: mapping-create-recovers-validation-races
+    try:
+        mapping.full_clean()
+        mapping.save()
+    except _AddDenied:
+        return denied
+    except IntegrityError:
+        recover_winner()
+
+
+def _map_os_platform():
+    # ok: mapping-create-recovers-validation-races
+    try:
+        mapping.full_clean()
+        mapping.save()
+    except _AddDenied:
+        return denied
+    except (ValidationError, IntegrityError) as exc:
+        recover_winner()
+
+
 def other_operation():
     # ok: mapping-create-recovers-validation-races
     try:
