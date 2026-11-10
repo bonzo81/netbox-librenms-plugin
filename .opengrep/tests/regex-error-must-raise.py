@@ -2,6 +2,8 @@ import logging
 import re
 import re as _re
 
+import re2
+
 from django.core.exceptions import ValidationError
 
 from netbox_librenms_plugin.models import RuleConfigurationError
@@ -42,6 +44,30 @@ def logs_through_an_alias(pattern):
         return _re.compile(pattern)
     except _re.error as exc:
         logger.warning("Skipping invalid pattern %r: %s", pattern, exc)
+        return None
+
+
+def skips_the_python_313_name(pattern):
+    # ruleid: regex-error-must-raise
+    try:
+        return re.compile(pattern)
+    except re.PatternError:
+        return None
+
+
+def raises_from_the_python_313_name(rule, field):
+    # ok: regex-error-must-raise
+    try:
+        return re.compile(getattr(rule, field))
+    except re.PatternError as exc:
+        raise RuleConfigurationError(rule, field) from exc
+
+
+def skips_a_recording_pattern_in_re2(pattern):
+    # ok: regex-error-must-raise
+    try:
+        return re2.compile(pattern)
+    except re2.error:
         return None
 
 

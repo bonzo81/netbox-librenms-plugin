@@ -1598,8 +1598,8 @@ rules:
                 ...
       - metavariable-regex:
           metavariable: $CLASS
-          # The module re, its alias _re, or the shared tuple, also unpacked into a tuple.
-          regex: ^\*?(_?re\.error|REGEX_COMPILE_ERRORS)$
+          # The module re, its alias _re, or the shared tuple, also unpacked into a tuple. Python 3.13 names re.error re.PatternError.
+          regex: ^\*?(_?re\.(error|PatternError)|REGEX_COMPILE_ERRORS)$
       # A handler that raises, also after other statements, fails closed.
       - pattern-not: |
           try:
