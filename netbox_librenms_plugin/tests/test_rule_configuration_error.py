@@ -296,6 +296,83 @@ def test_the_text_of_a_caught_broken_rule_names_the_rule_only_to_its_viewer(may_
     assert (text == HIDDEN_RULE_ERROR_MESSAGE) is (not may_view_rule)
 
 
+@pytest.mark.parametrize("may_view_settings", [False, True], ids=["hidden", "viewable"])
+def test_the_text_of_a_broken_location_parse_pattern_names_the_settings_only_to_its_viewer(may_view_settings):
+    """LibreNMSSettings is a plain Django model: its manager has no restrict()."""
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.models import HIDDEN_RULE_ERROR_MESSAGE, RuleConfigurationError
+    from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+    from netbox_librenms_plugin.utils import exception_text_for
+
+    settings, field, evaluate = _location_parse_pattern()
+    viewer = make_user_with_perms(f"location-rule-text-{may_view_settings}", [], plugin_write=may_view_settings)
+    with pytest.raises(RuleConfigurationError) as excinfo:
+        evaluate()
+
+    text = exception_text_for(excinfo.value, Device, viewer)
+
+    assert (f"(ID {settings.pk}) stores an invalid {field}" in text) is may_view_settings
+    assert (text == HIDDEN_RULE_ERROR_MESSAGE) is (not may_view_settings)
+
+
+def test_the_import_validation_reports_a_broken_location_parse_pattern(client, server):
+    """The validation keeps the settings details out, as for any broken rule, and does not fail the request."""
+    from netbox_librenms_plugin.models import HIDDEN_RULE_ERROR_MESSAGE
+
+    _location_parse_pattern()
+    device_id = 4716
+    libre_device = {
+        "device_id": device_id,
+        "hostname": "location-rule-host",
+        "sysName": "location-rule-host",
+        "location": "Site A",
+        "os": "ios",
+        "serial": "",
+        "hardware": "",
+        "version": "",
+        "ip": "",
+    }
+    server.register(f"/api/v0/devices/{device_id}", {"status": "ok", "devices": [libre_device]}, method="GET")
+    client.force_login(make_superuser("location-rule-validator"))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_validation_details", args=[device_id]),
+        {"server_key": server.server_key},
+        headers={"HX-Request": "true"},
+    )
+
+    assert response.status_code == 200
+    issues = " ".join(response.context["validation"]["issues"])
+    assert HIDDEN_RULE_ERROR_MESSAGE in issues
+    assert "location_parse_pattern" not in issues
+
+
+def test_a_broken_location_parse_pattern_that_escapes_a_view_shows_the_banner(client, server, monkeypatch):
+    """No view lets this error escape today, so the test raises it from a plugin view."""
+    from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
+    from netbox_librenms_plugin.utils import parse_location_for_import
+    from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
+
+    settings, field, _evaluate = _location_parse_pattern()
+    monkeypatch.setattr(
+        DeviceValidationDetailsView,
+        "_render_for_bound_server",
+        lambda self, request, device_id: parse_location_for_import("Site A"),
+    )
+    client.force_login(make_user_with_perms("location-rule-banner", []))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_validation_details", args=[4717]),
+        {"server_key": server.server_key},
+    )
+
+    assert response.status_code == 409
+    content = response.content.decode()
+    assert f'<a href="{settings.get_absolute_url()}">' in content
+    assert f"(ID {settings.pk}) stores an invalid <code>{field}</code>" in content
+
+
 @pytest.fixture
 def server_key(settings, librenms_server):
     return _two_server_keys(settings, librenms_server, "rule-error-modules")[0]

@@ -15,6 +15,7 @@ from ipam.fields import IPNetworkField
 from ipam.models import VRF
 from netbox.models import NetBoxModel
 from utilities.fields import ColorField
+from utilities.querysets import RestrictedQuerySet
 
 from netbox_librenms_plugin.utils import (
     REGEX_COMPILE_ERRORS,
@@ -59,7 +60,8 @@ class RuleConfigurationError(Exception):
 
     def shown_to(self, user):
         """Return this error as *user* may see it: the rule details need view permission on the rule."""
-        if self.rule_model.objects.restrict(user, "view").filter(pk=self.rule_pk).exists():
+        # LibreNMSSettings is a plain Django model, so its manager has no restrict().
+        if RestrictedQuerySet(model=self.rule_model).restrict(user, "view").filter(pk=self.rule_pk).exists():
             return self
         return _HiddenRuleConfigurationError()
 
