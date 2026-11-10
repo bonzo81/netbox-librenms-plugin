@@ -71,6 +71,91 @@ def skips_a_recording_pattern_in_re2(pattern):
         return None
 
 
+def skips_before_an_else(pattern):
+    # ruleid: regex-error-must-raise
+    try:
+        compiled = re.compile(pattern)
+    except re.error:
+        return None
+    else:
+        return compiled
+
+
+def skips_before_a_finally(pattern):
+    # ruleid: regex-error-must-raise
+    try:
+        return re.compile(pattern)
+    except (re.error, IndexError) as exc:
+        logger.warning("Skipping invalid pattern %r: %s", pattern, exc)
+        return None
+    finally:
+        logger.debug("Compiled pattern")
+
+
+def skips_before_an_else_and_a_finally(pattern):
+    # ruleid: regex-error-must-raise
+    try:
+        compiled = re.compile(pattern)
+    except REGEX_COMPILE_ERRORS as exc:
+        logger.warning("Skipping invalid pattern %r: %s", pattern, exc)
+        return None
+    else:
+        return compiled
+    finally:
+        logger.debug("Compiled pattern")
+
+
+def raises_before_an_else(rule, field):
+    # ok: regex-error-must-raise
+    try:
+        compiled = re.compile(getattr(rule, field))
+    except REGEX_COMPILE_ERRORS as exc:
+        raise RuleConfigurationError(rule, field) from exc
+    else:
+        return compiled
+
+
+def re_raises_before_a_finally(pattern):
+    # ok: regex-error-must-raise
+    try:
+        return re.compile(pattern)
+    except re.error:
+        logger.debug("Rejected pattern")
+        raise
+    finally:
+        logger.debug("Compiled pattern")
+
+
+def raises_before_an_else_and_a_finally(value):
+    # ok: regex-error-must-raise
+    try:
+        compiled = re.compile(value)
+    except (re.error, IndexError):
+        raise ValidationError({"pattern": "Invalid regex."})
+    else:
+        return compiled
+    finally:
+        logger.debug("Compiled pattern")
+
+
+def skips_a_later_tuple_element(pattern):
+    # ruleid: regex-error-must-raise
+    try:
+        return re.compile(pattern)
+    except (IndexError, re.error) as exc:
+        logger.warning("Skipping invalid pattern %r: %s", pattern, exc)
+        return None
+
+
+def catches_a_lookalike_module_error(pattern):
+    # ok: regex-error-must-raise
+    try:
+        return re2.compile(pattern)
+    except (IndexError, re2.error) as exc:
+        logger.warning("Skipping invalid pattern %r: %s", pattern, exc)
+        return None
+
+
 def raises_the_typed_error(rule, field):
     # ok: regex-error-must-raise
     try:
