@@ -1542,8 +1542,9 @@ rules:
     languages: [python]
     severity: ERROR
     message: >-
-      Return RuleConfigurationError.public_message. Converting the exception to text mixes
-      response data with exception diagnostics and triggers the CodeQL exposure check.
+      Return RuleConfigurationError.public_message. Converting the exception to text (str, repr,
+      an f-string, format) or reading its args mixes response data with exception diagnostics and
+      triggers the CodeQL exposure check.
     metadata:
       category: security
     paths:
@@ -1555,7 +1556,12 @@ rules:
           - pattern-inside: |
               if ($ERROR := $CONTEXT.get("inventory_rule_error")) is not None:
                 ...
-          - pattern: str($ERROR)
+          - pattern-either:
+              - pattern: str($ERROR)
+              - pattern: repr($ERROR)
+              - pattern: f"...{$ERROR}..."
+              - pattern: $FORMAT.format(..., $ERROR, ...)
+              - pattern: $ERROR.args
       - patterns:
           - pattern-inside: |
               class RuleConfigurationErrorMiddleware:
@@ -1563,7 +1569,12 @@ rules:
           - pattern-inside: |
               def process_exception($SELF, $REQUEST, $ERROR):
                 ...
-          - pattern: str($ERROR)
+          - pattern-either:
+              - pattern: str($ERROR)
+              - pattern: repr($ERROR)
+              - pattern: f"...{$ERROR}..."
+              - pattern: $FORMAT.format(..., $ERROR, ...)
+              - pattern: $ERROR.args
   - id: regex-error-must-raise
     languages: [python]
     severity: ERROR
