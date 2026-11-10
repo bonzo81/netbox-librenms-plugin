@@ -581,6 +581,21 @@ def test_an_exclude_option_accepts_an_existing_path():
     assert package / "librenms_api.py" in scanned, "the option-only scan lost the default package"
 
 
+def test_the_rule_timeout_comes_from_the_environment():
+    """OPENGREP_TIMEOUT replaces the 60 s limit, so a loaded host can scan without a rule timeout."""
+    script = REPOSITORY_ROOT / "scripts" / "opengrep-scan.sh"
+    target = REPOSITORY_ROOT / "netbox_librenms_plugin" / "__init__.py"
+    run = [str(script), "--json", "--", str(target)]
+    result = subprocess.run(run, capture_output=True, text=True, env={**os.environ, "OPENGREP_TIMEOUT": "not-a-number"})
+    if result.returncode == OPENGREP_NOT_INSTALLED:
+        pytest.skip("opengrep is not installed; see .opengrep/README.md")
+
+    assert result.returncode not in (0, OPENGREP_NOT_INSTALLED), result.stdout
+    assert "--timeout" in result.stderr
+    # The control: a valid value scans as the default does.
+    assert subprocess.run(run, capture_output=True, env={**os.environ, "OPENGREP_TIMEOUT": "300"}).returncode == 0
+
+
 def test_each_rule_applies_to_its_declared_paths(tmp_path):
     """The path scoping is the rules' real boundary, so pin it against a staged tree, not fixtures."""
     http_call = "import requests\nrequests.get(url)\n"

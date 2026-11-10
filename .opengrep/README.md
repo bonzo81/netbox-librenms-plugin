@@ -288,9 +288,10 @@ per-function analysis. Without the flag those sites are missed.
 The scan script passes `--strict` and `--timeout 60`. By default, a rule that runs longer than 5 s
 on a file, or a file that opengrep cannot parse, is a warning, and the scan passes without the
 findings of that file. With `--strict`, each such warning fails the scan, and the 60 s limit stops a
-stalled analysis. The scan still skips a file that the `.semgrepignore` rules or the size limit
-exclude. `caught-error-text` needs about 5 s on `views/sync/modules.py`. CodeRabbit's own opengrep
-run can time out on that file, so the pre-push hook is the gate.
+stalled analysis. On a loaded host, set `OPENGREP_TIMEOUT` to a larger limit in seconds. The scan
+still skips a file that the `.semgrepignore` rules or the size limit exclude. `caught-error-text`
+needs about 5 s on `views/sync/modules.py`. CodeRabbit's own opengrep run can time out on that file,
+so the pre-push hook is the gate.
 
 ## Running locally
 
