@@ -114,7 +114,6 @@ from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.transactions import (
     classify_conflict,
     lock_and_snapshot,
-    run_transaction,
     update_existing_row,
 )
 from netbox_librenms_plugin.utils import (
@@ -2791,7 +2790,7 @@ class CreatePlatformFromImportView(
             reported_version=request.POST.get("librenms_version") or "",
         )
         if target_model is None:
-            outcome = run_transaction(lambda: create_os_platform(named, facts, tracking=tracking, actor=request.user))
+            outcome = create_os_platform(named, facts, tracking=tracking, actor=request.user)
         else:
             outcome = apply_platform(
                 target_model, target_pk, facts, tracking=tracking, actor=request.user, new_os_platform=named

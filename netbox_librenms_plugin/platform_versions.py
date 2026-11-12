@@ -20,12 +20,18 @@ from django.db.models import Q
 from django.utils.text import slugify
 
 from netbox_librenms_plugin.models import LibreNMSSettings, PlatformMapping
-from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, update_existing_row
+from netbox_librenms_plugin.transactions import (
+    TransactionConflict,
+    classify_conflict,
+    run_transaction,
+    update_existing_row,
+)
 from netbox_librenms_plugin.utils import exception_text_for, write_failure_message
 
 _ADD_PLATFORM = "dcim.add_platform"
 _ADD_MAPPING = "netbox_librenms_plugin.add_platformmapping"
 _SLUG_MAX_LENGTH = 100
+_MAPPING_DENIED = "you lack permission to add mappings."
 HIDDEN_PLATFORM = "a platform you cannot view"
 
 
@@ -733,25 +739,32 @@ def create_os_platform(new_os_platform, facts, *, tracking, actor):
 
     Returns:
         PlatformOutcome: APPLIED with the new platform in ``created``, or UNCHANGED for a reused
-        platform; the assessment holds the OS platform. A lock conflict is raised, not returned.
+        platform; the assessment holds the OS platform. A lock conflict on both attempts is raised.
+
+    Raises:
+        TransactionConflict: Both attempts met a lock conflict.
+        RuntimeError: The call is inside an atomic block.
 
     """
     named, stale = _named_request(new_os_platform, facts, tracking)
     if stale is not None:
         return stale
-    created = []
+    # A refused create leaves the runner as an exception, so NetBox drops the event of the rolled-back row.
     try:
-        with transaction.atomic():
-            os_platform = _resolve_named_os_platform(new_os_platform, facts, actor, named, created)
+        return run_transaction(lambda: _create_os_platform_once(new_os_platform, facts, actor, named))
     except _Stop as stop:
         return stop.outcome
     except (ValidationError, IntegrityError) as exc:
-        if classify_conflict(exc):
-            raise
         refused = {"error_model": Platform}
-        # The adapter gives the error to exception_text_for with its own viewer.
+        # A lock conflict leaves the runner as TransactionConflict; the adapter describes this error.
         # nosemgrep: caught-error-text  # noqa: ERA001
         return PlatformOutcome(OutcomeStatus.FAILED, PlatformReason.PLATFORM_INVALID, named, error=exc, **refused)
+
+
+def _create_os_platform_once(new_os_platform, facts, actor, named):
+    """Run one attempt of ``create_os_platform``."""
+    created = []
+    os_platform = _resolve_named_os_platform(new_os_platform, facts, actor, named, created)
     status = OutcomeStatus.APPLIED if created else OutcomeStatus.UNCHANGED
     return PlatformOutcome(
         status, assessment=replace(named, os_platform=os_platform), platform=os_platform, created=tuple(created)
@@ -912,8 +925,10 @@ def map_os_platform(librenms_os, platform, actor):
     """
     Add the Platform Mapping from *librenms_os* to the OS *platform* when no mapping exists, and report it.
 
-    The call runs in one transaction. The caller's platform work has committed before it, so a
-    failed query or a refused insert, a lock conflict too, is a warning and never an exception.
+    The call runs in one outermost transaction (``run_transaction``). The caller's platform work
+    has committed before it, so a failed query or a refused insert, a lock conflict too, is a
+    warning and never an exception. A refused insert rolls the transaction back, so NetBox sends
+    no event for it.
 
     Args:
         librenms_os (str): The LibreNMS OS; the mapping stores it in lowercase.
@@ -926,9 +941,10 @@ def map_os_platform(librenms_os, platform, actor):
     """
     librenms_os = librenms_os.lower()
     try:
-        with transaction.atomic():
-            return _map_os_platform(librenms_os, platform, actor)
-    except (ValidationError, DatabaseError) as exc:
+        return run_transaction(lambda: _map_os_platform(librenms_os, platform, actor))
+    except _AddDenied:
+        return _mapping_not_created(librenms_os, _MAPPING_DENIED)
+    except (ValidationError, DatabaseError, TransactionConflict) as exc:
         return _mapping_not_created(librenms_os, exception_text_for(exc, PlatformMapping, actor))
 
 
@@ -936,9 +952,8 @@ def _map_os_platform(librenms_os, platform, actor):
     existing = _os_mappings(librenms_os)
     if existing:
         return _existing_mapping_report(librenms_os, existing, platform, actor)
-    denied = _mapping_not_created(librenms_os, "you lack permission to add mappings.")
     if not actor.has_perm(_ADD_MAPPING):
-        return denied
+        return _mapping_not_created(librenms_os, _MAPPING_DENIED)
     # Read the label before the insert, so a failed query cannot follow a committed mapping.
     added = Report(
         message_levels.SUCCESS, f"Platform mapping '{librenms_os}' to {platform_label(platform, actor)} added"
@@ -948,11 +963,9 @@ def _map_os_platform(librenms_os, platform, actor):
             mapping = PlatformMapping(librenms_os=librenms_os, netbox_platform=platform)
             mapping.full_clean()
             mapping.save()
-            # A constrained grant decides on the saved row; a denial rolls this savepoint back.
+            # A constrained grant decides on the saved row; a denial leaves the runner and rolls it back.
             if not PlatformMapping.objects.restrict(actor, "add").filter(pk=mapping.pk).exists():
                 raise _AddDenied
-    except _AddDenied:
-        return denied
     except (ValidationError, IntegrityError) as exc:
         if classify_conflict(exc):
             raise

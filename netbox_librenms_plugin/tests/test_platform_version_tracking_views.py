@@ -1,5 +1,6 @@
 """Platform version tracking through the real sync page, its writer views, and the import paths."""
 
+from contextlib import contextmanager
 from copy import deepcopy
 
 import pytest
@@ -738,19 +739,25 @@ class TestCreateAndSyncReadsOnlyThePostedServer:
         assert "Selected LibreNMS server is no longer configured." in message_texts(response.wsgi_request, "error")
 
 
-def _after_the_assignment(prefix, table):
-    """Match the first statement that starts with *prefix* and names *table*, after the subject's platform UPDATE."""
-    state = {"assigned": False, "matched": False}
+@contextmanager
+def _failing_after_the_assignment(prefix, table, sqlstate):
+    """Fail each statement that starts with *prefix* and names *table*, after the subject's platform UPDATE."""
+    from django.db import connection
 
-    def matches(sql, _params):
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import wrapped_database_error
+
+    state, failed = {"assigned": False}, []
+
+    def fail(execute, sql, params, many, context):
         if sql.startswith('UPDATE "dcim_device"'):
             state["assigned"] = True
-        elif state["assigned"] and not state["matched"] and sql.startswith(prefix) and table in sql:
-            state["matched"] = True
-            return True
-        return False
+        elif state["assigned"] and sql.startswith(prefix) and table in sql:
+            failed.append(sql)
+            raise wrapped_database_error(sqlstate)
+        return execute(sql, params, many, context)
 
-    return matches
+    with connection.execute_wrapper(fail):
+        yield failed
 
 
 class TestTheMappingFollowUpKeepsTheCommittedAssignment:
@@ -758,8 +765,8 @@ class TestTheMappingFollowUpKeepsTheCommittedAssignment:
     def test_a_lock_conflict_on_a_mapping_query_is_reported_after_the_assignment(
         self, client, librenms_server, statement
     ):
+        """The mapping runs once more after a conflict; a conflict on both attempts is a warning."""
         from netbox_librenms_plugin.models import PlatformMapping
-        from netbox_librenms_plugin.tests.lock_conflict_helpers import failing_statement
         from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
 
         _tracking(False)
@@ -767,9 +774,8 @@ class TestTheMappingFollowUpKeepsTheCommittedAssignment:
         client.force_login(make_superuser(f"mapping-follow-up-{statement.lower()}-su"))
         table = "netbox_librenms_plugin_platformmapping"
         prefix = "SELECT" if statement == "SELECT" else f'INSERT INTO "{table}"'
-        matches = _after_the_assignment(prefix, table)
 
-        with failing_statement(matches, "55P03") as failed:
+        with _failing_after_the_assignment(prefix, table, "55P03") as failed:
             response = _post(
                 client,
                 "create_and_assign_platform",
@@ -777,7 +783,7 @@ class TestTheMappingFollowUpKeepsTheCommittedAssignment:
                 {"platform_name": "Juniper Junos", "librenms_os": "junos", "create_mapping": "on"},
             )
 
-        assert failed
+        assert len(failed) == 2
         device.refresh_from_db()
         assert response.status_code == 302
         assert device.platform.name == "Juniper Junos"
@@ -799,10 +805,11 @@ class TestTheMappingFollowUpKeepsTheCommittedAssignment:
         insert_failed, select_failed = [], []
 
         def fail(execute, sql, params, many, context):
-            if table in sql and sql.startswith(f'INSERT INTO "{table}"') and not insert_failed:
+            # Each attempt's insert meets a duplicate, and the recovery select after it meets a conflict.
+            if table in sql and sql.startswith(f'INSERT INTO "{table}"'):
                 insert_failed.append(sql)
                 raise wrapped_database_error("23505")
-            if table in sql and sql.startswith("SELECT") and insert_failed and not select_failed:
+            if table in sql and sql.startswith("SELECT") and len(select_failed) < len(insert_failed):
                 select_failed.append(sql)
                 raise wrapped_database_error("55P03")
             return execute(sql, params, many, context)
@@ -816,7 +823,7 @@ class TestTheMappingFollowUpKeepsTheCommittedAssignment:
             )
 
         device.refresh_from_db()
-        assert insert_failed and select_failed
+        assert (len(insert_failed), len(select_failed)) == (2, 2)
         assert device.platform.name == "Juniper Junos"
         assert message_texts(response.wsgi_request, "warning") == [
             f"Platform mapping for 'junos' not created: {TRY_AGAIN_MESSAGE}"
@@ -1359,3 +1366,78 @@ class TestAChassisChangeDuringTheLibreNMSReadChangesNothing:
         assert message_texts(response.wsgi_request) == [
             "The virtual chassis changed after LibreNMS was read. Refresh the page and try again."
         ]
+
+
+@transactional_db_with_all_apps()
+class TestARefusedPlatformCreateLeavesNoEvent:
+    """A create that the actor's grant or NetBox refuses rolls back, and NetBox sends no event for it."""
+
+    def _unmatched(self, server, device_id):
+        server.device_info_response(device_id=device_id, hostname=f"sw-unmatched-{device_id}", os="junos", ip="")
+        server.vc_inventory_callable(device_id, [], {})
+
+    def _post_unmatched(self, client, device_id, data):
+        url = reverse("plugins:netbox_librenms_plugin:create_platform_from_import", kwargs={"device_id": device_id})
+        return client.post(url, {"server_key": SERVER_KEY, **data}, HTTP_HX_REQUEST="true")
+
+    def test_an_import_create_outside_the_add_grant_leaves_no_platform_and_no_event(
+        self, client, librenms_server, flushed_events
+    ):
+        from dcim.models import Platform
+
+        _tracking(False)
+        self._unmatched(librenms_server, 7480)
+        actor = make_user_with_perms("import-unmatched-denied", [("view", Platform)])
+        client.force_login(grant(actor, "add", Platform, constraints={"name": "some other platform"}))
+
+        response = self._post_unmatched(client, 7480, {"platform_name": "Juniper Junos", "librenms_os": "junos"})
+
+        assert "You do not have permission to add platforms" in _import_error(response)
+        assert not Platform.objects.filter(name="Juniper Junos").exists()
+        assert flushed_events == []
+
+    def test_an_import_create_that_netbox_refuses_leaves_no_platform_and_no_event(
+        self, client, settings, librenms_server, flushed_events
+    ):
+        from dcim.models import Platform
+        from extras.validators import CustomValidator
+
+        class Refuses(CustomValidator):
+            def validate(self, instance, request):
+                self.fail("Platforms are frozen.")
+
+        _tracking(False)
+        self._unmatched(librenms_server, 7481)
+        settings.CUSTOM_VALIDATORS = {"dcim.platform": [Refuses()]}
+        client.force_login(make_superuser("import-unmatched-invalid-su"))
+
+        response = self._post_unmatched(client, 7481, {"platform_name": "Juniper Junos", "librenms_os": "junos"})
+
+        assert "could not be created" in _import_error(response)
+        assert not Platform.objects.filter(name="Juniper Junos").exists()
+        assert flushed_events == []
+
+    def test_a_mapping_outside_the_add_grant_leaves_no_mapping_and_no_event(
+        self, client, librenms_server, flushed_events
+    ):
+        from dcim.models import Device, Platform
+
+        from netbox_librenms_plugin.models import PlatformMapping
+
+        _tracking(False)
+        device = _linked("mapping-denied", librenms_server, 7482)
+        actor = make_user_with_perms("mapping-denied", [("change", Device), ("add", Platform), ("view", Platform)])
+        client.force_login(grant(actor, "add", PlatformMapping, constraints={"librenms_os": "other"}))
+
+        response = _post(
+            client,
+            "create_and_assign_platform",
+            device,
+            {"platform_name": "Juniper Junos", "librenms_os": "junos", "create_mapping": "on"},
+        )
+
+        assert not PlatformMapping.objects.exists()
+        assert "Platform mapping for 'junos' not created: you lack permission to add mappings." in message_texts(
+            response.wsgi_request, "warning"
+        )
+        assert not [event for event in flushed_events if event[0] == "platformmapping"]
