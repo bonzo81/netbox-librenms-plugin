@@ -3,8 +3,8 @@ Platform version tracking: assess and apply the platform of one synchronization 
 
 An assessment compares the LibreNMS OS and version facts with NetBox and changes nothing. An
 application checks the actor's permissions and the assessment again under the subject's row lock,
-creates the platforms it needs, and writes the subject. A chassis application writes the same
-platform to every member of the subject's virtual chassis. Neither needs an HTTP request, so the sync
+creates the platforms it needs, and writes the subject in one transaction. A chassis application
+writes the same platform to every member of the subject's virtual chassis. Neither needs an HTTP request, so the sync
 page, import, and a background job are adapters over this module.
 """
 
@@ -20,7 +20,7 @@ from django.db.models import Q
 from django.utils.text import slugify
 
 from netbox_librenms_plugin.models import LibreNMSSettings, PlatformMapping
-from netbox_librenms_plugin.transactions import classify_conflict, update_existing_row
+from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, update_existing_row
 from netbox_librenms_plugin.utils import exception_text_for, write_failure_message
 
 _ADD_PLATFORM = "dcim.add_platform"
@@ -94,6 +94,14 @@ class PlatformFacts:
     def from_librenms(cls, librenms_os, version):
         """Return the facts for the raw LibreNMS ``os`` and ``version`` values."""
         return cls(_fact(librenms_os), _fact(version))
+
+
+@dataclass(frozen=True)
+class FactsSource:
+    """The object whose LibreNMS facts were read (``source_pk``), and the virtual chassis of the subject at that read."""
+
+    source_pk: int
+    chassis_id: int | None
 
 
 @dataclass(frozen=True)
@@ -529,23 +537,21 @@ def members_to_change(assessment, members):
     ]
 
 
-def _lock_chassis(model, pk, actor):
+def _lock_chassis(model, pk, actor, source):
     """
-    Lock the members of the virtual chassis of the subject *pk* in pk order, and return their pks.
+    Lock the members of the virtual chassis of *source* in pk order, and return their pks.
 
-    A subject outside a virtual chassis is alone.
+    The binding holds while the subject *pk* and the device whose facts were read are both
+    members. The locks keep it until the transaction ends.
 
     Raises:
-        _Stop: The subject left the chassis, or the actor may not change every member.
+        _Stop: The binding changed, or the actor may not change every member.
 
     """
-    chassis_id = model.objects.filter(pk=pk).values_list("virtual_chassis_id", flat=True).first()
-    if chassis_id is None:
-        return None
     # Pk order, so two chassis applications take the member locks in the same order.
-    members = model.objects.filter(virtual_chassis_id=chassis_id).order_by("pk").select_for_update()
+    members = model.objects.filter(virtual_chassis_id=source.chassis_id).order_by("pk").select_for_update()
     pks = tuple(members.values_list("pk", flat=True))
-    if pk not in pks:
+    if pk not in pks or source.source_pk not in pks:
         raise _Stop(PlatformOutcome(OutcomeStatus.STALE, PlatformReason.CHASSIS_CHANGED))
     if model.objects.restrict(actor, "change").filter(pk__in=pks).count() != len(pks):
         raise _Stop(PlatformOutcome(OutcomeStatus.BLOCKED, PlatformReason.CHASSIS_MEMBER_DENIED))
@@ -583,9 +589,13 @@ def _decide(row, seen, facts, *, tracking, actor, new_os_platform):
     return platform
 
 
-def apply_platform(model, pk, facts, *, tracking, actor, new_os_platform=None, chassis=False):
+def apply_platform(model, pk, facts, *, tracking, actor, new_os_platform=None, source=None):
     """
     Assess the subject again under its row lock, create the platforms it needs, and write it.
+
+    The application is one outermost transaction (``run_transaction``). An outcome other than
+    APPLIED or UNCHANGED rolls the whole transaction back, so NetBox sends no event for a row
+    or a platform that does not stay.
 
     Args:
         model: Device or VirtualMachine.
@@ -597,20 +607,61 @@ def apply_platform(model, pk, facts, *, tracking, actor, new_os_platform=None, c
         new_os_platform (NewOSPlatform | None): The OS platform the actor names when none matches
             the LibreNMS OS. A platform with that name is used as it is. When a platform or a
             Platform Mapping now matches the OS, or the OS or the version changed, the outcome is stale.
-        chassis (bool): For a Device in a virtual chassis, apply the platform to every member in
-            one transaction. The first member in pk order decides the platform, and each other
-            member gets it unless it has it. The actor needs ``change`` on every member, or no
-            member changes.
+        source (FactsSource | None): Where *facts* came from. With a virtual chassis, the platform
+            goes to every member in pk order: the first member decides it, and each other member
+            gets it unless it has it. The actor needs ``change`` on every member, or no member
+            changes. When the chassis of the subject or of the source device changed after the
+            read, the outcome is stale. None applies to the subject alone, without that check.
 
     Returns:
-        PlatformOutcome: The outcome. A lock conflict is raised, not returned.
+        PlatformOutcome: The outcome. A lock conflict on both attempts is raised, not returned.
+
+    Raises:
+        TransactionConflict: Both attempts met a lock conflict.
+        RuntimeError: The call is inside an atomic block.
 
     """
-    seen = {"created": [], "writing": model, "changed": [], "members": ()}
+    named = None
     if new_os_platform is not None:
-        seen["named"], stale = _named_request(new_os_platform, facts, tracking)
+        named, stale = _named_request(new_os_platform, facts, tracking)
         if stale is not None:
             return stale
+    application = {
+        "model": model,
+        "pk": pk,
+        "facts": facts,
+        "tracking": tracking,
+        "actor": actor,
+        "new_os_platform": new_os_platform,
+        "named": named,
+        "source": source,
+    }
+    seen = {}
+    try:
+        return run_transaction(lambda: _apply_once(seen, **application))
+    except _Stop as stop:
+        return stop.outcome
+    except model.DoesNotExist:
+        return PlatformOutcome(OutcomeStatus.BLOCKED, PlatformReason.SUBJECT_UNAVAILABLE)
+    except (ValidationError, IntegrityError) as exc:
+        # A lock conflict leaves the runner as TransactionConflict; the adapter describes this error.
+        # nosemgrep: caught-error-text  # noqa: ERA001
+        return _failed_outcome(exc, seen, model)
+
+
+def _apply_once(seen, model, pk, facts, *, tracking, actor, new_os_platform, named, source):
+    """
+    Run one attempt of ``apply_platform``, and record its state in *seen* for a refused write.
+
+    Each exception leaves the runner, so the attempt rolls back, and NetBox's events of the attempt go with it.
+
+    Raises:
+        _Stop: An outcome other than APPLIED or UNCHANGED.
+        Model.DoesNotExist | ValidationError | IntegrityError: The subject is gone, or a write was refused.
+
+    """
+    seen.clear()
+    seen.update({"created": [], "writing": model, "changed": [], "members": (), "named": named})
 
     def write(row):
         assessment, target = seen["assessment"], seen["target"]
@@ -625,26 +676,17 @@ def apply_platform(model, pk, facts, *, tracking, actor, new_os_platform=None, c
 
     def apply(row):
         if row.pk == pk:
+            if source is not None and getattr(row, "virtual_chassis_id", None) != source.chassis_id:
+                raise _Stop(PlatformOutcome(OutcomeStatus.STALE, PlatformReason.CHASSIS_CHANGED))
             seen["previous"] = row.platform
         if "target" not in seen:
             seen["target"] = _decide(row, seen, facts, tracking=tracking, actor=actor, new_os_platform=new_os_platform)
         return write(row)
 
-    try:
-        with transaction.atomic():
-            seen["members"] = (_lock_chassis(model, pk, actor) if chassis else None) or ()
-            for member_pk in seen["members"] or (pk,):
-                update_existing_row(model.objects.restrict(actor, "change").filter(pk=member_pk), apply)
-    except model.DoesNotExist:
-        return PlatformOutcome(OutcomeStatus.BLOCKED, PlatformReason.SUBJECT_UNAVAILABLE)
-    except _Stop as stop:
-        return stop.outcome
-    except (ValidationError, IntegrityError) as exc:
-        if classify_conflict(exc):
-            raise
-        # The adapter gives the error to exception_text_for with its own viewer.
-        # nosemgrep: caught-error-text  # noqa: ERA001
-        return _failed_outcome(exc, seen, model)
+    if source is not None and source.chassis_id is not None:
+        seen["members"] = _lock_chassis(model, pk, actor, source)
+    for member_pk in seen["members"] or (pk,):
+        update_existing_row(model.objects.restrict(actor, "change").filter(pk=member_pk), apply)
     return _written_outcome(seen)
 
 
@@ -860,7 +902,7 @@ def reason_text(reason, assessment, viewer):
             "You do not have permission to change every member of the virtual chassis, so no platform was changed."
         ),
         PlatformReason.CHASSIS_CHANGED: lambda: (
-            "The device is no longer a member of the virtual chassis. Refresh the page and try again."
+            "The virtual chassis changed after LibreNMS was read. Refresh the page and try again."
         ),
     }
     return texts[reason]()

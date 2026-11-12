@@ -15,6 +15,7 @@ from virtualization.models import VirtualMachine
 from netbox_librenms_plugin.import_utils import _determine_device_name
 from netbox_librenms_plugin.import_utils.virtual_chassis import _member_name, chassis_serial_key
 from netbox_librenms_plugin.platform_versions import (
+    FactsSource,
     NewOSPlatform,
     OutcomeStatus,
     PlatformFacts,
@@ -175,19 +176,20 @@ def _live_platform_facts(view, subject, server_key):
     A virtual chassis member reads the facts of the chassis sync device for *server_key*, as the sync page does.
 
     Returns:
-        tuple: ``(PlatformFacts, None)``, or ``(None, text)`` when the lookup failed.
+        tuple: ``(PlatformFacts, FactsSource, None)``, or ``(None, None, text)`` when the lookup failed.
 
     """
     lookup_subject = get_librenms_sync_device(subject, server_key=server_key) or subject
+    source = FactsSource(lookup_subject.pk, getattr(subject, "virtual_chassis_id", None))
     view.librenms_id, lookup_error = view.resolve_librenms_id(lookup_subject)
     if lookup_error is not None:
-        return None, view.scoped_lookup_message(lookup_error)
+        return None, None, view.scoped_lookup_message(lookup_error)
     if not view.librenms_id:
-        return None, "Device not found in LibreNMS"
+        return None, None, "Device not found in LibreNMS"
     success, device_info = view.get_live_device_info(view.librenms_id)
     if not success or not device_info:
-        return None, "Failed to retrieve device info from LibreNMS"
-    return PlatformFacts.from_librenms(device_info.get("os"), device_info.get("version")), None
+        return None, None, "Failed to retrieve device info from LibreNMS"
+    return PlatformFacts.from_librenms(device_info.get("os"), device_info.get("version")), source, None
 
 
 def _add_reports(request, reports):
@@ -430,7 +432,6 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
     """Give the device, or each member of its virtual chassis, the platform that the LibreNMS OS and version call for."""
 
     subject_model = Device
-    chassis = True
     sync_url_name = "plugins:netbox_librenms_plugin:device_librenms_sync"
     required_object_permissions = {
         "POST": [("change", Device)],
@@ -449,7 +450,7 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
             messages.error(request, "Selected LibreNMS server is no longer configured.")
             return self._redirect(request, pk, server_key)
 
-        facts, lookup_failure = _live_platform_facts(self, subject, server_key)
+        facts, source, lookup_failure = _live_platform_facts(self, subject, server_key)
         if lookup_failure:
             messages.error(request, lookup_failure)
             return self._redirect(request, pk, server_key)
@@ -457,11 +458,13 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
             messages.warning(request, "No OS information available in LibreNMS")
             return self._redirect(request, pk, server_key)
 
-        tracking = platform_version_tracking_enabled()
-        outcome = run_transaction(
-            lambda: apply_platform(
-                self.subject_model, pk, facts, tracking=tracking, actor=request.user, chassis=self.chassis
-            )
+        outcome = apply_platform(
+            self.subject_model,
+            pk,
+            facts,
+            tracking=platform_version_tracking_enabled(),
+            actor=request.user,
+            source=source,
         )
         _add_reports(request, platform_reports(outcome, self.subject_model, request.user))
         return self._redirect(request, pk, server_key)
@@ -474,7 +477,6 @@ class UpdateVMPlatformView(UpdateDevicePlatformView):
     """Give the virtual machine the platform that its LibreNMS OS (and version, when tracked) calls for."""
 
     subject_model = VirtualMachine
-    chassis = False
     sync_url_name = "plugins:netbox_librenms_plugin:vm_librenms_sync"
     required_object_permissions = {
         "POST": [("change", VirtualMachine)],
@@ -485,7 +487,6 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
     """Create the OS platform the user names, and assign it (or its version platform) to the device or its chassis."""
 
     subject_model = Device
-    chassis = True
     sync_url_name = "plugins:netbox_librenms_plugin:device_librenms_sync"
     required_object_permissions = {
         "POST": [
@@ -542,7 +543,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
                 return self._sync_redirect(request, pk, self._active_key())
 
         # The OS and version come from LibreNMS, never from the posted form.
-        facts, lookup_failure = self._bound_live_facts(subject, server_key)
+        facts, source, lookup_failure = self._bound_live_facts(subject, server_key)
         if lookup_failure:
             messages.error(request, lookup_failure)
             return self._sync_redirect(request, pk, self._active_key())
@@ -554,17 +555,14 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             manufacturer=manufacturer,
             reported_version=request.POST.get("librenms_version") or "",
         )
-        tracking = platform_version_tracking_enabled()
-        outcome = run_transaction(
-            lambda: apply_platform(
-                self.subject_model,
-                pk,
-                facts,
-                tracking=tracking,
-                actor=request.user,
-                new_os_platform=named,
-                chassis=self.chassis,
-            )
+        outcome = apply_platform(
+            self.subject_model,
+            pk,
+            facts,
+            tracking=platform_version_tracking_enabled(),
+            actor=request.user,
+            new_os_platform=named,
+            source=source,
         )
         _add_reports(request, platform_reports(outcome, self.subject_model, request.user, named=True))
         if outcome.status not in (OutcomeStatus.APPLIED, OutcomeStatus.UNCHANGED):
@@ -581,7 +579,7 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
     def _bound_live_facts(self, subject, server_key):
         """Return the subject's live facts from the posted server, or why they cannot be read; never another server."""
         if server_key is None:
-            return None, "Selected LibreNMS server is no longer configured."
+            return None, None, "Selected LibreNMS server is no longer configured."
         return _live_platform_facts(self, subject, server_key)
 
     def _sync_redirect(self, request, pk, fallback_server_key=None):
@@ -602,7 +600,6 @@ class CreateAndAssignVMPlatformView(CreateAndAssignPlatformView):
     """Create the OS platform the user names (and its version platform when tracked) and assign it to the VM."""
 
     subject_model = VirtualMachine
-    chassis = False
     sync_url_name = "plugins:netbox_librenms_plugin:vm_librenms_sync"
     required_object_permissions = {
         "POST": [

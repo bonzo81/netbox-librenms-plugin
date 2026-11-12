@@ -2793,10 +2793,8 @@ class CreatePlatformFromImportView(
         if target_model is None:
             outcome = run_transaction(lambda: create_os_platform(named, facts, tracking=tracking, actor=request.user))
         else:
-            outcome = run_transaction(
-                lambda: apply_platform(
-                    target_model, target_pk, facts, tracking=tracking, actor=request.user, new_os_platform=named
-                )
+            outcome = apply_platform(
+                target_model, target_pk, facts, tracking=tracking, actor=request.user, new_os_platform=named
             )
         reports = platform_reports(outcome, target_model, request.user, named=True)
         if refusal := next((report.text for report in reports if report.level == messages.ERROR), None):

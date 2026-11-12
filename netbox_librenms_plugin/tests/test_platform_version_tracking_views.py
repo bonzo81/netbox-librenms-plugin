@@ -405,23 +405,6 @@ class TestTheSyncSetsThePlatformOnEveryChassisMember:
         ]
         assert not any(members[index].name in text for text in texts for index in (0, 2))
 
-    def test_a_refused_member_write_rolls_back_every_member(self, client, librenms_server):
-        from dcim.models import Device
-
-        _tracking(False)
-        _platform("junos")
-        members = _chassis("vc-refused", librenms_server, 7460, None, None)
-        # NetBox refuses a chassis member without a position; the update skips that check.
-        Device.objects.filter(pk=members[1].pk).update(vc_position=None)
-        client.force_login(make_superuser("vc-refused-su"))
-
-        response = _post(client, "update_device_platform", members[0])
-
-        assert _platforms(members) == [None, None]
-        errors = message_texts(response.wsgi_request, "error")
-        assert len(errors) == 1
-        assert errors[0].startswith(f"Cannot assign platform 'junos' to device '{members[1].name}'")
-
     def test_create_and_sync_sets_the_named_platform_on_every_member(self, client, librenms_server):
         _tracking(False)
         members = _chassis("vc-all-create", librenms_server, 7456, None, None)
@@ -1294,3 +1277,85 @@ class TestANamedPlatformRaceWinnerNeedsViewScope:
         assert response.status_code == 302
         assert device.platform is None
         assert Platform.objects.filter(name="Juniper Junos").count() == 1
+
+
+@transactional_db_with_all_apps()
+class TestARefusedMemberWriteLeavesNoChassisChange:
+    """A refused member write rolls back the whole chassis, and NetBox sends no event for it; the commit decides."""
+
+    def test_a_refused_member_write_rolls_back_every_member_and_its_event(
+        self, client, librenms_server, flushed_events
+    ):
+        from dcim.models import Device
+
+        _tracking(False)
+        _platform("junos")
+        members = _chassis("vc-refused", librenms_server, 7460, None, None)
+        # NetBox refuses a chassis member without a position; the update skips that check.
+        Device.objects.filter(pk=members[1].pk).update(vc_position=None)
+        client.force_login(make_superuser("vc-refused-su"))
+
+        response = _post(client, "update_device_platform", members[0])
+
+        assert _platforms(members) == [None, None]
+        errors = message_texts(response.wsgi_request, "error")
+        assert len(errors) == 1
+        assert errors[0].startswith(f"Cannot assign platform 'junos' to device '{members[1].name}'")
+        assert flushed_events == []
+
+    def test_a_refused_member_write_rolls_back_the_new_version_platform_and_its_event(
+        self, client, librenms_server, flushed_events
+    ):
+        from dcim.models import Device, Platform
+
+        _tracking(True)
+        os_platform = _platform("junos")
+        members = _chassis("vc-refused-version", librenms_server, 7462, os_platform, os_platform)
+        Device.objects.filter(pk=members[1].pk).update(vc_position=None)
+        client.force_login(make_superuser("vc-refused-version-su"))
+
+        response = _post(client, "update_device_platform", members[0])
+
+        assert _platforms(members) == [os_platform, os_platform]
+        assert not Platform.objects.filter(parent=os_platform).exists()
+        assert len(message_texts(response.wsgi_request, "error")) == 1
+        assert flushed_events == []
+
+
+@transactional_db_with_all_apps()
+class TestAChassisChangeDuringTheLibreNMSReadChangesNothing:
+    """The facts belong to the chassis that the lookup read; a membership change before the write refuses it."""
+
+    @pytest.mark.parametrize("endpoint", ["update_device_platform", "create_and_assign_platform"])
+    @pytest.mark.parametrize("moved", ["subject", "source"])
+    def test_a_member_that_moves_while_librenms_answers_stops_the_sync(self, client, librenms_server, endpoint, moved):
+        from dcim.models import Device, Platform
+        from django.db import connections
+
+        _tracking(False)
+        if endpoint == "update_device_platform":
+            _platform("junos")
+        tag = f"vc-race-{endpoint[:6]}-{moved}"
+        source, subject = _chassis(f"{tag}-a", librenms_server, 7470, None, None)
+        other = [make_device(f"{tag}-b{position}") for position in (1, 2)]
+        target = make_virtual_chassis(f"vc-{tag}-b", *other)
+        mover = subject if moved == "subject" else source
+        facts = librenms_server.routes["/api/v0/devices/7470"]
+
+        def move_then_answer(**request):
+            try:
+                Device.objects.filter(pk=mover.pk).update(virtual_chassis=target, vc_position=9)
+            finally:
+                connections.close_all()
+            return facts
+
+        librenms_server.register("/api/v0/devices/7470", move_then_answer)
+        client.force_login(make_superuser(f"{tag}-su"))
+
+        response = _post(client, endpoint, subject, {"platform_name": "Juniper Junos", "librenms_os": "junos"})
+
+        assert _platforms([source, subject, *other]) == [None] * 4
+        assert not Platform.objects.filter(name="Juniper Junos").exists()
+        assert message_texts(response.wsgi_request) == [
+            "The virtual chassis changed after LibreNMS was read. Refresh the page and try again."
+        ]
