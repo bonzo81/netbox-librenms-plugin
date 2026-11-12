@@ -18,8 +18,8 @@
      data-cable-origin-device-id="{{ cable_sync.object.pk }}">
     {% comment %}
     No POST form in migrated mode, but the cable table still renders interactive controls whose
-    verify-cable fetch (handleCableChange) reads document.querySelector('[name=csrfmiddlewaretoken]').value.
-    Emit a standalone token so those JS-driven requests don't hit a null CSRF token (TypeError/403). A bare
+    verify-cable fetch (handleCableChange) reads the token with getCsrfToken() and does nothing without one.
+    Emit a standalone token so those JS-driven requests still run. A bare
     hidden input never auto-submits, so it doesn't reintroduce the live-form problem migrated mode avoids.
     Mirrors _interface_sync_content.html.
     {% endcomment %}
