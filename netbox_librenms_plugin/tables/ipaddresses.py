@@ -6,7 +6,7 @@ from django.utils.html import format_html, mark_safe
 from netbox.tables.columns import ToggleColumn
 
 from netbox_librenms_plugin.constants import MATCHING, MISMATCHED, NOT_IN_NETBOX
-from netbox_librenms_plugin.sync_filters import FilterColumn, FilterSpec
+from netbox_librenms_plugin.sync_filters import EMPTY_CELL_VALUES, FilterColumn, FilterSpec, cell_text
 from netbox_librenms_plugin.sync_query import SyncQuery
 from netbox_librenms_plugin.utils import paginate_sync_table, rule_block_html, rule_block_label
 
@@ -15,9 +15,6 @@ _FILTER_SYNC_STATE = {"matched": MATCHING, "update": MISMATCHED, "sync": NOT_IN_
 
 # The visible label of the button that creates the LibreNMS VRF of a row.
 CREATE_VRF_LABEL = "VRF"
-
-# The values a plain column shows as the table default ("—") instead of calling its render method.
-_EMPTY_VALUES = (None, "")
 
 
 class _StatusCell(NamedTuple):
@@ -175,27 +172,23 @@ class IPAddressTable(tables.Table):
     def filter_sync_state(self, record):
         """Return the row's sync-state filter value, or None for a row no sync-state filter shows."""
         value = record.get("status")
-        return None if value in _EMPTY_VALUES else self._status_cell(value, record).sync_state
-
-    def _cell_text(self, value):
-        """Return the text a plain cell shows for *value*: the table default for an empty value."""
-        return self.default if value in _EMPTY_VALUES else str(value)
+        return None if value in EMPTY_CELL_VALUES else self._status_cell(value, record).sync_state
 
     def text_address(self, record):
         """Return the visible text of the address cell."""
-        return self._cell_text(record.get("ip_address"))
+        return cell_text(record.get("ip_address"), self.default)
 
     def text_prefix(self, record):
         """Return the visible text of the prefix length cell."""
-        return self._cell_text(record.get("prefix_length"))
+        return cell_text(record.get("prefix_length"), self.default)
 
     def text_device(self, record):
         """Return the visible text of the device cell."""
-        return self._cell_text(record.get("device"))
+        return cell_text(record.get("device"), self.default)
 
     def text_interface(self, record):
         """Return the visible text of the interface cell."""
-        return self._cell_text(record.get("interface_name"))
+        return cell_text(record.get("interface_name"), self.default)
 
     def text_vrf(self, record):
         """Return the visible text of the VRF cell: the option its select shows, and the create button label."""
@@ -226,7 +219,7 @@ class IPAddressTable(tables.Table):
     def text_status(self, record):
         """Return the visible text of the status cell: the action, the rule pill or the row state."""
         value = record.get("status")
-        return self.default if value in _EMPTY_VALUES else self._status_cell(value, record).label
+        return self.default if value in EMPTY_CELL_VALUES else self._status_cell(value, record).label
 
     @staticmethod
     def _status_cell(value, record):
