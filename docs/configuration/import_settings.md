@@ -156,4 +156,6 @@ The **Create Platform** modal on the import page follows the same rules. A platf
 
 Messages and reasons name only platforms that you may view. Another platform is shown as "a platform you cannot view".
 
-Members of a virtual chassis keep the platform of the chassis master.
+Import gives each member of a virtual chassis the platform of the chassis master.
+
+On the sync page of a virtual chassis member, **Sync to NetBox** and **Create & Sync** give every member of the chassis the platform that the chassis LibreNMS device calls for, in one change. A member that already has the platform is not changed. The row shows the button while any member that you may view needs the platform, and it shows how many members change. You need the NetBox `change` permission on every member. Without it, no member changes.

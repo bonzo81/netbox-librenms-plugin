@@ -306,6 +306,168 @@ class TestAVirtualChassisMemberReadsTheChassisFacts:
         assert message_texts(response.wsgi_request, "error") == []
 
 
+def _chassis(tag, server, device_id, *platforms):
+    """Return the members of a new virtual chassis; only the first is linked, and member *n* has ``platforms[n]``."""
+    members = [_linked(f"{tag}-m1", server, device_id)]
+    members += [make_device(f"{tag}-m{position}") for position in range(2, len(platforms) + 1)]
+    make_virtual_chassis(f"vc-{tag}", *members)
+    for member, platform in zip(members, platforms, strict=True):
+        member.platform = platform
+        member.save()
+    return members
+
+
+def _platforms(members):
+    for member in members:
+        member.refresh_from_db()
+    return [member.platform for member in members]
+
+
+class TestTheSyncSetsThePlatformOnEveryChassisMember:
+    """The platform sync on a member's sync page gives every member of the chassis the platform of the chassis facts."""
+
+    def test_tracking_gives_every_member_the_version_platform(self, client, librenms_server):
+        from dcim.models import Platform
+
+        _tracking(True)
+        os_platform = _platform("junos")
+        members = _chassis("vc-all-tracked", librenms_server, 7451, os_platform, os_platform, None)
+        client.force_login(make_superuser("vc-all-tracked-su"))
+
+        response = _post(client, "update_device_platform", members[1])
+
+        version_platform = Platform.objects.get(parent=os_platform)
+        assert _platforms(members) == [version_platform] * 3
+        assert message_texts(response.wsgi_request, "success") == [
+            f"Created platform 'junos {VERSION}'",
+            f"Platform 'junos {VERSION}' set on 3 of 3 virtual chassis members",
+        ]
+
+    def test_without_tracking_every_member_gets_the_os_platform(self, client, librenms_server):
+        _tracking(False)
+        os_platform = _platform("junos")
+        members = _chassis("vc-all-os", librenms_server, 7452, None, _platform("eos"), None)
+        client.force_login(make_superuser("vc-all-os-su"))
+
+        response = _post(client, "update_device_platform", members[2])
+
+        assert _platforms(members) == [os_platform] * 3
+        assert message_texts(response.wsgi_request, "success") == [
+            "Platform 'junos' set on 3 of 3 virtual chassis members"
+        ]
+
+    def test_a_member_on_the_platform_is_not_written(self, client, librenms_server):
+        _tracking(True)
+        os_platform = _platform("junos")
+        version_platform = _platform(f"junos {VERSION}", parent=os_platform)
+        members = _chassis("vc-one-current", librenms_server, 7453, os_platform, version_platform, None)
+        stamp = members[1].last_updated
+        client.force_login(make_superuser("vc-one-current-su"))
+
+        response = _post(client, "update_device_platform", members[1])
+
+        assert _platforms(members) == [version_platform] * 3
+        assert members[1].last_updated == stamp
+        assert message_texts(response.wsgi_request, "success") == [
+            f"Platform 'junos {VERSION}' set on 2 of 3 virtual chassis members"
+        ]
+
+    def test_a_chassis_on_the_platform_reports_no_change(self, client, librenms_server):
+        _tracking(False)
+        os_platform = _platform("junos")
+        members = _chassis("vc-all-current", librenms_server, 7454, os_platform, os_platform)
+        client.force_login(make_superuser("vc-all-current-su"))
+
+        response = _post(client, "update_device_platform", members[0])
+
+        assert message_texts(response.wsgi_request, "info") == [
+            "All 2 virtual chassis members already match platform 'junos'"
+        ]
+
+    def test_an_actor_who_cannot_change_every_member_changes_no_member(self, client, librenms_server):
+        """No partial chassis: the refusal changes nothing, and it names no member that the actor cannot view."""
+        from dcim.models import Device
+
+        _tracking(False)
+        _platform("junos")
+        members = _chassis("vc-scoped", librenms_server, 7455, None, None, None)
+        actor = make_user_with_perms(
+            "vc-scoped-actor", [("view", Device), ("change", Device)], constraints={"pk": members[1].pk}
+        )
+        client.force_login(actor)
+
+        response = _post(client, "update_device_platform", members[1])
+
+        assert _platforms(members) == [None] * 3
+        texts = message_texts(response.wsgi_request)
+        assert texts == [
+            "You do not have permission to change every member of the virtual chassis, so no platform was changed."
+        ]
+        assert not any(members[index].name in text for text in texts for index in (0, 2))
+
+    def test_a_refused_member_write_rolls_back_every_member(self, client, librenms_server):
+        from dcim.models import Device
+
+        _tracking(False)
+        _platform("junos")
+        members = _chassis("vc-refused", librenms_server, 7460, None, None)
+        # NetBox refuses a chassis member without a position; the update skips that check.
+        Device.objects.filter(pk=members[1].pk).update(vc_position=None)
+        client.force_login(make_superuser("vc-refused-su"))
+
+        response = _post(client, "update_device_platform", members[0])
+
+        assert _platforms(members) == [None, None]
+        errors = message_texts(response.wsgi_request, "error")
+        assert len(errors) == 1
+        assert errors[0].startswith(f"Cannot assign platform 'junos' to device '{members[1].name}'")
+
+    def test_create_and_sync_sets_the_named_platform_on_every_member(self, client, librenms_server):
+        _tracking(False)
+        members = _chassis("vc-all-create", librenms_server, 7456, None, None)
+        client.force_login(make_superuser("vc-all-create-su"))
+
+        _post(
+            client, "create_and_assign_platform", members[1], {"platform_name": "Juniper Junos", "librenms_os": "junos"}
+        )
+
+        assert [platform.name for platform in _platforms(members)] == ["Juniper Junos"] * 2
+
+    def test_a_device_outside_a_chassis_changes_only_itself(self, client, librenms_server):
+        _tracking(False)
+        os_platform = _platform("junos")
+        device = _linked("vc-none", librenms_server, 7457)
+        other = make_device("vc-none-other")
+        client.force_login(make_superuser("vc-none-su"))
+
+        response = _post(client, "update_device_platform", device)
+
+        assert _platforms([device, other]) == [os_platform, None]
+        assert message_texts(response.wsgi_request, "success") == ["Device platform set to 'junos'"]
+
+    def test_the_sync_member_page_offers_the_sync_when_another_member_differs(self, librenms_server):
+        """Only the sync member's page shows the comparison; another member's page links to it."""
+        _tracking(False)
+        os_platform = _platform("junos")
+        members = _chassis("vc-page", librenms_server, 7458, os_platform, os_platform, None)
+
+        html = _render_sync_page(members[0])
+
+        assert UPDATE_PLATFORM_ACTION in html
+        assert 'data-chassis-pending="1"' in html
+        assert "Set platform to &#x27;junos&#x27; on 1 of 3 virtual chassis members" in html
+
+    def test_the_sync_member_page_shows_the_chassis_in_sync_when_every_member_matches(self, librenms_server):
+        _tracking(False)
+        os_platform = _platform("junos")
+        members = _chassis("vc-page-synced", librenms_server, 7459, os_platform, os_platform)
+
+        html = _render_sync_page(members[0])
+
+        assert UPDATE_PLATFORM_ACTION not in html
+        assert 'title="Synced with LibreNMS"' in html
+
+
 class TestImportDetailsPlatformCell:
     def _render(self, *, can_add_platform, platform_add_constrained=False):
         from django.contrib.auth.models import AnonymousUser

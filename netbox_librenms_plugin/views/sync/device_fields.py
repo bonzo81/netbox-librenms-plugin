@@ -427,9 +427,10 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
 
 
 class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
-    """Give the device the platform that its LibreNMS OS (and version, when tracked) calls for."""
+    """Give the device, or each member of its virtual chassis, the platform that the LibreNMS OS and version call for."""
 
     subject_model = Device
+    chassis = True
     sync_url_name = "plugins:netbox_librenms_plugin:device_librenms_sync"
     required_object_permissions = {
         "POST": [("change", Device)],
@@ -456,8 +457,11 @@ class UpdateDevicePlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMi
             messages.warning(request, "No OS information available in LibreNMS")
             return self._redirect(request, pk, server_key)
 
-        outcome = apply_platform(
-            self.subject_model, pk, facts, tracking=platform_version_tracking_enabled(), actor=request.user
+        tracking = platform_version_tracking_enabled()
+        outcome = run_transaction(
+            lambda: apply_platform(
+                self.subject_model, pk, facts, tracking=tracking, actor=request.user, chassis=self.chassis
+            )
         )
         _add_reports(request, platform_reports(outcome, self.subject_model, request.user))
         return self._redirect(request, pk, server_key)
@@ -470,6 +474,7 @@ class UpdateVMPlatformView(UpdateDevicePlatformView):
     """Give the virtual machine the platform that its LibreNMS OS (and version, when tracked) calls for."""
 
     subject_model = VirtualMachine
+    chassis = False
     sync_url_name = "plugins:netbox_librenms_plugin:vm_librenms_sync"
     required_object_permissions = {
         "POST": [("change", VirtualMachine)],
@@ -477,9 +482,10 @@ class UpdateVMPlatformView(UpdateDevicePlatformView):
 
 
 class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, View):
-    """Create the OS platform the user names (and its version platform when tracked) and assign it to the device."""
+    """Create the OS platform the user names, and assign it (or its version platform) to the device or its chassis."""
 
     subject_model = Device
+    chassis = True
     sync_url_name = "plugins:netbox_librenms_plugin:device_librenms_sync"
     required_object_permissions = {
         "POST": [
@@ -548,13 +554,17 @@ class CreateAndAssignPlatformView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             manufacturer=manufacturer,
             reported_version=request.POST.get("librenms_version") or "",
         )
-        outcome = apply_platform(
-            self.subject_model,
-            pk,
-            facts,
-            tracking=platform_version_tracking_enabled(),
-            actor=request.user,
-            new_os_platform=named,
+        tracking = platform_version_tracking_enabled()
+        outcome = run_transaction(
+            lambda: apply_platform(
+                self.subject_model,
+                pk,
+                facts,
+                tracking=tracking,
+                actor=request.user,
+                new_os_platform=named,
+                chassis=self.chassis,
+            )
         )
         _add_reports(request, platform_reports(outcome, self.subject_model, request.user, named=True))
         if outcome.status not in (OutcomeStatus.APPLIED, OutcomeStatus.UNCHANGED):
@@ -592,6 +602,7 @@ class CreateAndAssignVMPlatformView(CreateAndAssignPlatformView):
     """Create the OS platform the user names (and its version platform when tracked) and assign it to the VM."""
 
     subject_model = VirtualMachine
+    chassis = False
     sync_url_name = "plugins:netbox_librenms_plugin:vm_librenms_sync"
     required_object_permissions = {
         "POST": [

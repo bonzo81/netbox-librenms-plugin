@@ -3,7 +3,8 @@ Platform version tracking: assess and apply the platform of one synchronization 
 
 An assessment compares the LibreNMS OS and version facts with NetBox and changes nothing. An
 application checks the actor's permissions and the assessment again under the subject's row lock,
-creates the platforms it needs, and writes the subject. Neither needs an HTTP request, so the sync
+creates the platforms it needs, and writes the subject. A chassis application writes the same
+platform to every member of the subject's virtual chassis. Neither needs an HTTP request, so the sync
 page, import, and a background job are adapters over this module.
 """
 
@@ -55,6 +56,8 @@ class PlatformReason(StrEnum):
     OS_PLATFORM_RESOLVED = "os_platform_resolved"
     NAMED_PLATFORM_UNAVAILABLE = "named_platform_unavailable"
     OS_CHANGED = "os_changed"
+    CHASSIS_MEMBER_DENIED = "chassis_member_denied"
+    CHASSIS_CHANGED = "chassis_changed"
 
 
 class PlatformOperation(StrEnum):
@@ -140,7 +143,9 @@ class PlatformOutcome:
     The result of one application.
 
     ``platform`` is the platform written (or attempted, for a failure). ``error`` and
-    ``error_model`` hold the refused write of a failure, so an adapter can describe it.
+    ``error_model`` hold the refused write of a failure, so an adapter can describe it. A
+    virtual chassis application holds the pks of its ``members``, the pks of the members it
+    ``changed``, and the ``member`` whose write failed.
     """
 
     status: OutcomeStatus
@@ -151,6 +156,9 @@ class PlatformOutcome:
     created: tuple = ()
     error: Exception | None = None
     error_model: type | None = None
+    members: tuple = ()
+    changed: tuple = ()
+    member: object = None
 
 
 @dataclass(frozen=True)
@@ -295,13 +303,27 @@ def assess_platform(subject, facts, *, tracking, actor=None):
     )
 
 
+def _holds(platform_pk, target, os_platform, tracks_version):
+    """
+    Return whether a subject on the platform *platform_pk* has the *target* platform.
+
+    Without a tracked version, the target is the OS platform, and each platform under it is current too.
+    """
+    if platform_pk is None:
+        return False
+    if platform_pk == target.pk:
+        return True
+    return not tracks_version and os_platform.get_descendants(include_self=True).filter(pk=platform_pk).exists()
+
+
 def _assess_under(subject, os_platform, facts, *, tracking, actor):
     """Assess *subject* against the known *os_platform*."""
     current_pk = subject.platform_id if subject is not None else None
     shared = {"facts": facts, "tracking": tracking, "os_platform": os_platform}
+    tracks_version = tracking and bool(facts.version)
 
     def on_or_off(target):
-        if current_pk == target.pk:
+        if _holds(current_pk, target, os_platform, tracks_version):
             return PlatformAssessment(
                 PlatformState.CURRENT, PlatformReason.ON_TARGET, target=target, target_name=target.name, **shared
             )
@@ -314,15 +336,7 @@ def _assess_under(subject, os_platform, facts, *, tracking, actor):
             **shared,
         )
 
-    if not (tracking and facts.version):
-        if current_pk is not None and os_platform.get_descendants(include_self=True).filter(pk=current_pk).exists():
-            return PlatformAssessment(
-                PlatformState.CURRENT,
-                PlatformReason.ON_TARGET,
-                target=os_platform,
-                target_name=os_platform.name,
-                **shared,
-            )
+    if not tracks_version:
         return on_or_off(os_platform)
 
     matches = tuple(_version_platforms(os_platform, facts.version))
@@ -498,7 +512,78 @@ def _resolve_named_os_platform(new_os_platform, facts, actor, named, created):
     return os_platform
 
 
-def apply_platform(model, pk, facts, *, tracking, actor, new_os_platform=None):
+def members_to_change(assessment, members):
+    """
+    Return the *members* whose platform an application of *assessment* changes.
+
+    A blocked assessment, or one without an OS, changes no member. A target that does not exist
+    yet changes each member.
+    """
+    if assessment.state is PlatformState.BLOCKED or assessment.reason is PlatformReason.NO_OS:
+        return []
+    if assessment.target is None:
+        return list(members)
+    os_platform, tracks_version = assessment.os_platform, assessment.tracks_version
+    return [
+        member for member in members if not _holds(member.platform_id, assessment.target, os_platform, tracks_version)
+    ]
+
+
+def _lock_chassis(model, pk, actor):
+    """
+    Lock the members of the virtual chassis of the subject *pk* in pk order, and return their pks.
+
+    A subject outside a virtual chassis is alone.
+
+    Raises:
+        _Stop: The subject left the chassis, or the actor may not change every member.
+
+    """
+    chassis_id = model.objects.filter(pk=pk).values_list("virtual_chassis_id", flat=True).first()
+    if chassis_id is None:
+        return None
+    # Pk order, so two chassis applications take the member locks in the same order.
+    members = model.objects.filter(virtual_chassis_id=chassis_id).order_by("pk").select_for_update()
+    pks = tuple(members.values_list("pk", flat=True))
+    if pk not in pks:
+        raise _Stop(PlatformOutcome(OutcomeStatus.STALE, PlatformReason.CHASSIS_CHANGED))
+    if model.objects.restrict(actor, "change").filter(pk__in=pks).count() != len(pks):
+        raise _Stop(PlatformOutcome(OutcomeStatus.BLOCKED, PlatformReason.CHASSIS_MEMBER_DENIED))
+    return pks
+
+
+def _decide(row, seen, facts, *, tracking, actor, new_os_platform):
+    """
+    Assess the locked *row*, create the platforms that the assessment needs, and return the target platform.
+
+    *seen* records the assessment and the new platforms, so a refused create can be reported.
+
+    Raises:
+        _Stop: The assessment is blocked, or it needs an OS platform that the actor did not name.
+
+    """
+    named = seen.get("named")
+    seen["writing"] = Platform
+    seen["assessment"] = named
+    if new_os_platform is None:
+        assessment = assess_platform(row, facts, tracking=tracking, actor=actor)
+    else:
+        os_platform = _resolve_named_os_platform(new_os_platform, facts, actor, named, seen["created"])
+        assessment = _assess_under(row, os_platform, facts, tracking=tracking, actor=actor)
+    seen["assessment"] = assessment
+    if assessment.state is PlatformState.CURRENT:
+        return assessment.target
+    if assessment.state is PlatformState.BLOCKED or assessment.operation is PlatformOperation.CREATE_OS_PLATFORM:
+        raise _Stop(PlatformOutcome(OutcomeStatus.BLOCKED, assessment.reason, assessment, previous=row.platform))
+    if assessment.operation is not PlatformOperation.CREATE_VERSION_PLATFORM:
+        return assessment.target
+    platform, created = _create_version_platform(assessment, actor)
+    if created:
+        seen["created"].append(platform)
+    return platform
+
+
+def apply_platform(model, pk, facts, *, tracking, actor, new_os_platform=None, chassis=False):
     """
     Assess the subject again under its row lock, create the platforms it needs, and write it.
 
@@ -512,44 +597,44 @@ def apply_platform(model, pk, facts, *, tracking, actor, new_os_platform=None):
         new_os_platform (NewOSPlatform | None): The OS platform the actor names when none matches
             the LibreNMS OS. A platform with that name is used as it is. When a platform or a
             Platform Mapping now matches the OS, or the OS or the version changed, the outcome is stale.
+        chassis (bool): For a Device in a virtual chassis, apply the platform to every member in
+            one transaction. The first member in pk order decides the platform, and each other
+            member gets it unless it has it. The actor needs ``change`` on every member, or no
+            member changes.
 
     Returns:
         PlatformOutcome: The outcome. A lock conflict is raised, not returned.
 
     """
-    seen = {"created": [], "writing": model}
-    named = None
+    seen = {"created": [], "writing": model, "changed": [], "members": ()}
     if new_os_platform is not None:
-        named, stale = _named_request(new_os_platform, facts, tracking)
+        seen["named"], stale = _named_request(new_os_platform, facts, tracking)
         if stale is not None:
             return stale
 
-    def apply(row):
-        seen["previous"] = row.platform
-        seen["writing"] = Platform
-        seen["assessment"] = named
-        if new_os_platform is None:
-            assessment = assess_platform(row, facts, tracking=tracking, actor=actor)
-        else:
-            os_platform = _resolve_named_os_platform(new_os_platform, facts, actor, named, seen["created"])
-            assessment = _assess_under(row, os_platform, facts, tracking=tracking, actor=actor)
-        seen["assessment"] = assessment
-        if assessment.state is PlatformState.CURRENT:
+    def write(row):
+        assessment, target = seen["assessment"], seen["target"]
+        if target is None or _holds(row.platform_id, target, assessment.os_platform, assessment.tracks_version):
             return False
-        if assessment.state is PlatformState.BLOCKED or assessment.operation is PlatformOperation.CREATE_OS_PLATFORM:
-            raise _Stop(PlatformOutcome(OutcomeStatus.BLOCKED, assessment.reason, assessment, previous=row.platform))
-        platform = assessment.target
-        if assessment.operation is PlatformOperation.CREATE_VERSION_PLATFORM:
-            platform, created = _create_version_platform(assessment, actor)
-            if created:
-                seen["created"].append(platform)
-        seen["platform"] = platform
+        seen["platform"] = target
         seen["writing"] = model
-        row.platform = platform
+        seen["member"] = row
+        seen["changed"].append(row.pk)
+        row.platform = target
         return None
 
+    def apply(row):
+        if row.pk == pk:
+            seen["previous"] = row.platform
+        if "target" not in seen:
+            seen["target"] = _decide(row, seen, facts, tracking=tracking, actor=actor, new_os_platform=new_os_platform)
+        return write(row)
+
     try:
-        update_existing_row(model.objects.restrict(actor, "change").filter(pk=pk), apply)
+        with transaction.atomic():
+            seen["members"] = (_lock_chassis(model, pk, actor) if chassis else None) or ()
+            for member_pk in seen["members"] or (pk,):
+                update_existing_row(model.objects.restrict(actor, "change").filter(pk=member_pk), apply)
     except model.DoesNotExist:
         return PlatformOutcome(OutcomeStatus.BLOCKED, PlatformReason.SUBJECT_UNAVAILABLE)
     except _Stop as stop:
@@ -557,29 +642,36 @@ def apply_platform(model, pk, facts, *, tracking, actor, new_os_platform=None):
     except (ValidationError, IntegrityError) as exc:
         if classify_conflict(exc):
             raise
-        refused = seen["writing"]
-        reason = PlatformReason.PLATFORM_INVALID if refused is Platform else None
-        failed = {"previous": seen.get("previous"), "platform": seen.get("platform"), "error_model": refused}
         # The adapter gives the error to exception_text_for with its own viewer.
         # nosemgrep: caught-error-text  # noqa: ERA001
-        return PlatformOutcome(OutcomeStatus.FAILED, reason, seen.get("assessment"), error=exc, **failed)
-    assessment = seen["assessment"]
-    if assessment.state is PlatformState.CURRENT:
-        return PlatformOutcome(
-            OutcomeStatus.UNCHANGED,
-            assessment.reason,
-            assessment,
-            previous=seen["previous"],
-            platform=seen["previous"],
-            created=tuple(seen["created"]),
-        )
+        return _failed_outcome(exc, seen, model)
+    return _written_outcome(seen)
+
+
+def _failed_outcome(exc, seen, model):
+    """Return the outcome of the refused write that *seen* records; a chassis failure names its member."""
+    refused = seen["writing"]
+    reason = PlatformReason.PLATFORM_INVALID if refused is Platform else None
+    failed = {"previous": seen.get("previous"), "platform": seen.get("platform"), "error_model": refused}
+    if seen["members"] and refused is model:
+        failed["member"] = seen["member"]
+    # nosemgrep: caught-error-text  # noqa: ERA001
+    return PlatformOutcome(OutcomeStatus.FAILED, reason, seen.get("assessment"), error=exc, **failed)
+
+
+def _written_outcome(seen):
+    """Return the outcome of the application that *seen* records; an unchanged chassis reports its target."""
+    assessment, changed = seen["assessment"], tuple(seen["changed"])
+    kept = seen["target"] if seen["members"] else seen["previous"]
     return PlatformOutcome(
-        OutcomeStatus.APPLIED,
+        OutcomeStatus.APPLIED if changed else OutcomeStatus.UNCHANGED,
         assessment.reason,
         assessment,
         previous=seen["previous"],
-        platform=seen["platform"],
+        platform=seen["platform"] if changed else kept,
         created=tuple(seen["created"]),
+        members=seen["members"],
+        changed=changed,
     )
 
 
@@ -764,6 +856,12 @@ def reason_text(reason, assessment, viewer):
             f"A platform now matches LibreNMS OS '{os_name}'. Refresh the page and try again."
         ),
         PlatformReason.NAMED_PLATFORM_UNAVAILABLE: lambda: f"Platform '{assessment.target_name}' is not available.",
+        PlatformReason.CHASSIS_MEMBER_DENIED: lambda: (
+            "You do not have permission to change every member of the virtual chassis, so no platform was changed."
+        ),
+        PlatformReason.CHASSIS_CHANGED: lambda: (
+            "The device is no longer a member of the virtual chassis. Refresh the page and try again."
+        ),
     }
     return texts[reason]()
 
@@ -860,7 +958,9 @@ def platform_reports(outcome, model, viewer, *, named=False):
             detail = exception_text_for(outcome.error, Platform, viewer)
             target = target_label(outcome.assessment, viewer)
             return (Report(message_levels.ERROR, f"Platform {target} could not be created: {detail}"),)
-        action = f"assign platform {attempted_label(outcome.platform, viewer)} to the {model._meta.verbose_name}"
+        action = (
+            f"assign platform {attempted_label(outcome.platform, viewer)} to {_subject_label(outcome, model, viewer)}"
+        )
         return (Report(message_levels.ERROR, write_failure_message(outcome.error, action, "platform", model, viewer)),)
     if outcome.reason is PlatformReason.SUBJECT_UNAVAILABLE:
         return (Report(message_levels.ERROR, f"{model._meta.verbose_name.capitalize()} no longer exists."),)
@@ -873,13 +973,36 @@ def platform_reports(outcome, model, viewer, *, named=False):
         Report(message_levels.SUCCESS, f"Created platform {platform_label(platform, viewer)}")
         for platform in outcome.created
     ]
-    if model is not None:
+    if outcome.members:
+        reports.append(_chassis_report(outcome, viewer))
+    elif model is not None:
         reports.append(_assignment_report(outcome, model, viewer))
     os_platform = outcome.assessment.os_platform
     if named and os_platform not in outcome.created:
         label = platform_label(os_platform, viewer)
         reports.append(Report(message_levels.SUCCESS, f"Platform {label} already existed and was used as it is"))
     return tuple(reports)
+
+
+def _subject_label(outcome, model, viewer):
+    """Return the words for the subject of a failed write; a chassis member is named only when *viewer* may view it."""
+    if outcome.member is None:
+        return f"the {model._meta.verbose_name}"
+    # A local import: the import_utils package imports this module.
+    from netbox_librenms_plugin.import_utils.disclosure import visible_object_label
+
+    visible = visible_object_label(outcome.member, viewer)
+    return f"{visible[0]} '{visible[1]}'" if visible else "a member of the virtual chassis"
+
+
+def _chassis_report(outcome, viewer):
+    platform = platform_label(outcome.platform, viewer)
+    total = len(outcome.members)
+    if outcome.status is OutcomeStatus.UNCHANGED:
+        return Report(message_levels.INFO, f"All {total} virtual chassis members already match platform {platform}")
+    return Report(
+        message_levels.SUCCESS, f"Platform {platform} set on {len(outcome.changed)} of {total} virtual chassis members"
+    )
 
 
 def _assignment_report(outcome, model, viewer):

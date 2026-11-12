@@ -19,6 +19,7 @@ from netbox_librenms_plugin.import_utils.virtual_chassis import (
 from netbox_librenms_plugin.platform_versions import (
     PlatformFacts,
     assess_platform,
+    members_to_change,
     platform_version_tracking_enabled,
     reason_text,
     target_label,
@@ -842,7 +843,9 @@ class BaseLibreNMSSyncView(
         Returns:
             dict: ``librenms_os`` and ``librenms_version`` (raw, ``-`` when absent), ``assessment``
                 (PlatformAssessment), and ``reason_text`` and ``target_label`` (words that name only
-                platforms the actor may view).
+                platforms the actor may view). A virtual chassis member also gets ``chassis_members``
+                and ``chassis_pending``: the counts of the members the actor may view, and of those
+                that the platform sync changes.
 
         """
         details = librenms_info["librenms_device_details"]
@@ -854,10 +857,16 @@ class BaseLibreNMSSyncView(
             tracking=platform_version_tracking_enabled(),
             actor=actor,
         )
-        return {
+        info = {
             "librenms_os": librenms_os,
             "librenms_version": librenms_version,
             "assessment": assessment,
             "reason_text": reason_text(assessment.reason, assessment, actor),
             "target_label": target_label(assessment, actor),
         }
+        chassis_id = getattr(obj, "virtual_chassis_id", None)
+        if chassis_id is not None:
+            members = list(type(obj).objects.restrict(actor, "view").filter(virtual_chassis_id=chassis_id))
+            info["chassis_members"] = len(members)
+            info["chassis_pending"] = len(members_to_change(assessment, members))
+        return info
