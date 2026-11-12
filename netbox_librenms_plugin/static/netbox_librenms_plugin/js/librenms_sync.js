@@ -4255,12 +4255,13 @@ function initializeSyncFilters() {
         form.dataset.liveSearchBound = 'true';
         const cancel = () => clearTimeout(liveSearchTimers.get(form));
         const submit = () => { cancel(); form.requestSubmit(); };
+        const schedule = () => { cancel(); liveSearchTimers.set(form, setTimeout(submit, 400)); };
         Array.from(form.elements).forEach((field) => {
             if (field.type === 'search') {
-                field.addEventListener('input', () => {
-                    cancel();
-                    liveSearchTimers.set(form, setTimeout(submit, 400));
-                });
+                // An IME composition is no search text until it ends.
+                field.addEventListener('compositionstart', cancel);
+                field.addEventListener('compositionend', schedule);
+                field.addEventListener('input', (event) => { if (!event.isComposing) schedule(); });
             } else if (field.name.endsWith('_sync_state')) {
                 field.addEventListener('change', submit);
             }
