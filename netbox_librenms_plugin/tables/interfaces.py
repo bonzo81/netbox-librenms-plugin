@@ -34,7 +34,7 @@ from netbox_librenms_plugin.interface_rules import RuleDecisionKind, decision_re
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.constants import MATCHING, MISMATCHED, NOT_IN_NETBOX
-from netbox_librenms_plugin.sync_filters import FilterColumn, FilterSpec
+from netbox_librenms_plugin.sync_filters import EMPTY_CELL_VALUES, FilterColumn, FilterSpec, cell_text
 from netbox_librenms_plugin.sync_query import SyncQuery
 from netbox_librenms_plugin.utils import (
     SYNC_TABLE_HEADER_ATTRS,
@@ -100,9 +100,6 @@ _OWNER_UNRESOLVED_HINT = (
 
 # The sync-state filter value of each row state; every other row state is unclassified.
 _FILTER_SYNC_STATE = {ROW_IN_SYNC: MATCHING, ROW_DIFFERS: MISMATCHED, ROW_ABSENT: NOT_IN_NETBOX}
-
-# The values a plain column shows as the table default ("—") instead of calling its render method.
-_EMPTY_VALUES = (None, "")
 
 # Each textual column whose text the filters read, in display order; the actions column has no header.
 _FILTER_COLUMNS = (
@@ -297,27 +294,23 @@ class LibreNMSInterfaceTable(tables.Table):
         """Return the row's sync-state filter value, or None for a row no sync-state filter shows."""
         return _FILTER_SYNC_STATE.get(self.row_sync_state(record).state)
 
-    def _cell_text(self, value):
-        """Return the text a plain cell shows for *value*: the table default for an empty value."""
-        return self.default if value in _EMPTY_VALUES else str(value)
-
     def text_name(self, record):
         """Return the visible text of the name cell."""
-        return self._cell_text(record.get(self.interface_name_field))
+        return cell_text(record.get(self.interface_name_field), self.default)
 
     def text_speed(self, record):
         """Return the visible text of the speed cell."""
         value = record.get("ifSpeed")
-        return self.default if value in _EMPTY_VALUES else humanize_speed(convert_speed_to_kbps(value))
+        return self.default if value in EMPTY_CELL_VALUES else humanize_speed(convert_speed_to_kbps(value))
 
     def text_mac_address(self, record):
         """Return the visible text of the MAC address cell."""
         value = record.get("ifPhysAddress")
-        return self.default if value in _EMPTY_VALUES else format_mac_address(value)
+        return self.default if value in EMPTY_CELL_VALUES else format_mac_address(value)
 
     def text_mtu(self, record):
         """Return the visible text of the MTU cell."""
-        return self._cell_text(record.get("ifMtu"))
+        return cell_text(record.get("ifMtu"), self.default)
 
     def text_enabled(self, record):
         """Return the visible text of the enabled cell: the state a sync writes."""
@@ -325,16 +318,16 @@ class LibreNMSInterfaceTable(tables.Table):
 
     def text_description(self, record):
         """Return the visible text of the description cell."""
-        return self._cell_text(record.get("ifAlias"))
+        return cell_text(record.get("ifAlias"), self.default)
 
     def text_librenms_id(self, record):
         """Return the visible text of the LibreNMS ID cell."""
-        return self._cell_text(record.get("port_id"))
+        return cell_text(record.get("port_id"), self.default)
 
     def text_type(self, record):
         """Return the visible text of the type cell, which names the NetBox type a sync keeps."""
         value = record.get("ifType")
-        if value in _EMPTY_VALUES:
+        if value in EMPTY_CELL_VALUES:
             return self.default
         return str(self._type_cell(value, record)[1])
 

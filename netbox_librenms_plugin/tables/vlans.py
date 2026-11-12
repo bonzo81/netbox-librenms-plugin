@@ -4,7 +4,7 @@ from django.utils.safestring import mark_safe
 from netbox.tables.columns import ToggleColumn
 
 from netbox_librenms_plugin.constants import LIBRENMS_VLAN_STATE_ACTIVE
-from netbox_librenms_plugin.sync_filters import FilterColumn, FilterSpec
+from netbox_librenms_plugin.sync_filters import EMPTY_CELL_VALUES, FilterColumn, FilterSpec, cell_text
 from netbox_librenms_plugin.utils import (
     get_vlan_sync_css_class,
     note_icon,
@@ -13,9 +13,6 @@ from netbox_librenms_plugin.utils import (
     vlan_sync_action_label,
     vlan_sync_comparison,
 )
-
-# The values a plain column shows as the table default ("—") instead of calling its render method.
-_EMPTY_VALUES = (None, "")
 
 # The label of the group option that selects no group.
 _NO_GROUP_LABEL = "-- No Group (Global) --"
@@ -133,10 +130,6 @@ class LibreNMSVLANTable(tables.Table):
             return None
         return vlan_sync_comparison(record.get("exists_in_netbox", False), record.get("name_matches", True))
 
-    def _cell_text(self, value):
-        """Return the text a plain cell shows for *value*: the table default for an empty value."""
-        return self.default if value in _EMPTY_VALUES else str(value)
-
     @staticmethod
     def _invalid_vid_parts(record):
         """Return the source VID text and the error badge text of a row with an invalid or duplicate VID."""
@@ -155,7 +148,7 @@ class LibreNMSVLANTable(tables.Table):
 
     def text_name(self, record):
         """Return the visible text of the name cell."""
-        return self._cell_text(record.get("name"))
+        return cell_text(record.get("name"), self.default)
 
     def text_group(self, record):
         """Return the visible text of the group cell: the option its select shows."""
@@ -166,12 +159,12 @@ class LibreNMSVLANTable(tables.Table):
 
     def text_type(self, record):
         """Return the visible text of the type cell."""
-        return self._cell_text(record.get("type"))
+        return cell_text(record.get("type"), self.default)
 
     def text_state(self, record):
         """Return the visible text of the state cell."""
         value = record.get("state")
-        if value in _EMPTY_VALUES:
+        if value in EMPTY_CELL_VALUES:
             return self.default
         return "Active" if self._is_active(value) else "Inactive"
 
