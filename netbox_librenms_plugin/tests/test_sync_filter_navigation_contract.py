@@ -187,7 +187,7 @@ def _classify(hop, page_path, routes):
         return "page link"
     if path == routes["netbox_only"]:
         # The NetBox-only dialog loads its rows for the same page query.
-        _assert_keeps(query, KEEP_ALL, url)
+        _assert_keeps(query, (*KEEP_ALL, "server_key"), url)
         return "netbox-only loader"
     if path in (routes["refresh"], routes["sync"], routes["rebind"]):
         # A refresh, sync or Rebind comes back to the same filters and page, clamped to the last page.
