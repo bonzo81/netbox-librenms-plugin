@@ -829,6 +829,25 @@ def test_typing_in_the_search_filters_the_tab_without_a_submit(page):
     expect(search).to_have_value("eth")
 
 
+def test_a_live_search_waits_for_the_ime_composition_to_end(page):
+    held = _serve_filter_tab(page)
+    ime = page.context.new_cdp_session(page)
+    page.focus("#id_interfaces_q")
+    ime.send("Input.insertText", {"text": "e"})
+    ime.send("Input.imeSetComposition", {"text": "ni", "selectionStart": 2, "selectionEnd": 2})
+    # A pause to choose a candidate does not search, not even for the text typed before the composition.
+    page.wait_for_timeout(800)
+    assert held == []
+
+    ime.send("Input.insertText", {"text": "nihao"})
+    route = _next_request(page, held, 1)
+    assert parse_qs(urlsplit(route.request.url).query)["interfaces_q"] == ["enihao"]
+    _answer(route)
+    expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "enihao")
+    page.wait_for_timeout(800)
+    assert len(held) == 1
+
+
 def test_a_sync_state_choice_filters_the_tab_at_once(page):
     held = _serve_filter_tab(page)
     page.select_option("#id_interfaces_sync_state", "mismatched")
