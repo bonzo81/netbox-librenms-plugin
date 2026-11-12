@@ -241,6 +241,17 @@ def sync_cache_browser_contract(tabs):
     }
 
 
+def withhold_unavailable_snapshots(context, sync_cache_status, tabs):
+    """Clear the table and expiry of each of *tabs* whose snapshot *sync_cache_status* reports unavailable."""
+    for tab in tabs:
+        if sync_cache_status[tab.value]["snapshot_available"]:
+            continue
+        spec = TAB_SPECS[tab]
+        tab_context = context.get(spec.context_name)
+        if isinstance(tab_context, dict):
+            context[spec.context_name] = {**tab_context, spec.table_context_key: None, "cache_expiry": None}
+
+
 @dataclass
 class CacheMutationTransition:
     """Report the cache work that ran after a committed NetBox mutation."""

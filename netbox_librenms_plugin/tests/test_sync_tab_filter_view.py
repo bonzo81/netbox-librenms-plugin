@@ -96,6 +96,22 @@ def test_a_tab_with_no_snapshot_answers_with_its_empty_state(client, settings):
     assert 'class="btn btn-link sync-filter-clear"' not in html
 
 
+def test_a_tab_whose_snapshot_the_status_withholds_answers_with_its_empty_state(client, settings):
+    """A failed refresh keeps the old rows in the cache when their cleanup fails; the filter must not show them."""
+    from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
+
+    client = _superuser_client(client, settings, "tab-filter-withheld")
+    device = _mixed_device("tab-filter-withheld")
+    SyncCacheConsistency(device).mark_refresh_failure(SyncTab.INTERFACES, SERVER_KEY)
+
+    response = _filter(client, device)
+
+    assert response.status_code == 200
+    html = response.content.decode()
+    assert not _rows(html)
+    assert 'data-filter-snapshot="false"' in html
+
+
 def test_the_modules_tab_has_no_filter(client, settings):
     client = _superuser_client(client, settings, "tab-filter-modules")
     device = _mixed_device("tab-filter-modules")

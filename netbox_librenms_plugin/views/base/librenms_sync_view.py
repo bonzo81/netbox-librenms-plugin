@@ -41,6 +41,7 @@ from netbox_librenms_plugin.sync_cache import (
     SyncCacheConsistency,
     SyncTab,
     sync_cache_browser_contract,
+    withhold_unavailable_snapshots,
 )
 from netbox_librenms_plugin.sync_query import SyncQuery
 from netbox_librenms_plugin.utils import (
@@ -446,17 +447,7 @@ class BaseLibreNMSSyncView(
 
         if sync_cache_status is not None:
             object_type = obj._meta.model_name
-            for sync_tab in applicable_tabs:
-                if sync_cache_status[sync_tab.value]["snapshot_available"]:
-                    continue
-                spec = TAB_SPECS[sync_tab]
-                tab_context = context.get(spec.context_name)
-                if isinstance(tab_context, dict):
-                    context[spec.context_name] = {
-                        **tab_context,
-                        spec.table_context_key: None,
-                        "cache_expiry": None,
-                    }
+            withhold_unavailable_snapshots(context, sync_cache_status, applicable_tabs)
             context.update(
                 {
                     "sync_cache_status": sync_cache_status,
