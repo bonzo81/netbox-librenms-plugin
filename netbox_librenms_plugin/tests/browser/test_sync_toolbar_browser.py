@@ -54,15 +54,11 @@ def render_tab(
     tags = Library()
     tags.simple_tag(lambda name, *args, **kwargs: f"/endpoint/{name.rsplit(':', 1)[-1]}/", name="url")
     tags.filter("meta", lambda obj, attr: model)
+    # The tab query value, which is also the filter prefix of the tab table (for example "interfaces_").
+    tab_query = {"ipaddress": "ipaddresses"}.get(tab, tab + "s")
     query = Library()
     query.simple_tag(lambda path="", **kwargs: path or "/sync/", name="sync_tab_url")
-    query.simple_tag(
-        lambda **kwargs: [
-            ("server_key", "secondary"),
-            ("tab", {"interface": "interfaces", "ipaddress": "ipaddresses"}.get(tab, tab + "s")),
-        ],
-        name="sync_tab_query_items",
-    )
+    query.simple_tag(lambda **kwargs: [("server_key", "secondary"), ("tab", tab_query)], name="sync_tab_query_items")
     query.simple_tag(lambda server_key: timeout, name="sync_cache_timeout")
     fixtures = {
         "inc/table.html": '<table id="test-rows"><tbody><tr><td>Ethernet1</td></tr></tbody></table>',
@@ -78,8 +74,8 @@ def render_tab(
 
     def field(name, choices=()):
         return SimpleNamespace(
-            auto_id=f"id_{tab}_{name}",
-            html_name=f"{tab}_{name}",
+            auto_id=f"id_{tab_query}_{name}",
+            html_name=f"{tab_query}_{name}",
             label=name,
             value="",
             errors=[],
@@ -296,7 +292,7 @@ def test_filter_controls_submit_the_get_form(page, field, value):
         else:
             page.locator(".sync-filter-controls select").select_option(value)
     query = parse_qs(navigation.value.url.split("?", 1)[1])
-    assert query[f"interface_{field}"] == [value]
+    assert query[f"interfaces_{field}"] == [value]
     assert query["server_key"] == ["secondary"]
     assert query["tab"] == ["interfaces"]
 
