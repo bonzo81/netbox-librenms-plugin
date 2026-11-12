@@ -14,6 +14,7 @@ from netbox_librenms_plugin.sync_cache import (
     SyncCacheConsistency,
     SyncTab,
     request_actor_id,
+    withhold_unavailable_snapshots,
 )
 from netbox_librenms_plugin.sync_query import SyncQuery
 from netbox_librenms_plugin.utils import get_interface_name_field
@@ -185,11 +186,13 @@ class SyncTabFilterView(SyncCacheFragmentView):
         )
         if error:
             return error
+        coordinator = SyncCacheConsistency(obj)
+        sync_cache_status = coordinator.status_for_request(request, server_key, active_tab=SyncTab(tab))
+        withhold_unavailable_snapshots(payload, sync_cache_status, (SyncTab(tab),))
         response = tab_view.render_sync_partial(request, obj, server_key, payload)
         # The sync page is the object's LibreNMS Sync tab, which NetBox serves under the object's own path.
         page_path = reverse(f"{obj._meta.app_label}:{obj._meta.model_name}_librenms_sync", args=[obj.pk])
         page_query = SyncQuery.from_request(request)
-        coordinator = SyncCacheConsistency(obj)
         out_of_band = render_to_string(
             "netbox_librenms_plugin/inc/_sync_filter_out_of_band.html",
             {
@@ -199,7 +202,7 @@ class SyncTabFilterView(SyncCacheFragmentView):
                     sync_tab.value: page_query.tab_url(page_path, sync_tab.value)
                     for sync_tab in coordinator.applicable_tabs()
                 },
-                "sync_cache_status": coordinator.status_for_request(request, server_key, active_tab=SyncTab(tab)),
+                "sync_cache_status": sync_cache_status,
                 "interface_name_field": get_interface_name_field(request, obj),
             },
             request=request,
