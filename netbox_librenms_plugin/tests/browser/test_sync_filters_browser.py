@@ -608,9 +608,9 @@ def _tab_page(tab):
           <a class="nav-link" id="cables-tab" data-tab="cables" href="{PAGE_URL}?tab=cables" hx-get="{PAGE_URL}?tab=cables"
             hx-target="#librenms-sync-tabs" hx-select="#librenms-sync-tabs" hx-swap="outerHTML"
             hx-sync="#librenms-sync-tabs:replace">Cables</a>
-          <form method="get" id="interfaces_filter-form" class="sync-filter-form">
+          <form method="get" id="{tab}_filter-form" class="sync-filter-form">
             <input type="hidden" name="tab" value="{tab}"></form>
-          <input type="search" form="interfaces_filter-form" name="interfaces_q" id="search">
+          <input type="search" form="{tab}_filter-form" name="{tab}_q" id="search">
         </div></body></html>"""
 
 
@@ -645,4 +645,4 @@ def test_a_tab_click_cancels_the_pending_live_search_of_the_old_tab(page):
     # The form of the new tab keeps its live search.
     with page.expect_navigation() as navigation:
         page.fill("#search", "po")
-    assert parse_qs(urlsplit(navigation.value.url).query) == {"tab": ["cables"], "interfaces_q": ["po"]}
+    assert parse_qs(urlsplit(navigation.value.url).query) == {"tab": ["cables"], "cables_q": ["po"]}
