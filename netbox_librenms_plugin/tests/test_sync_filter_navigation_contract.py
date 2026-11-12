@@ -154,21 +154,23 @@ def _classify(hop, page_path, routes):
     if on_page and "sync-filter-clear" in hop["attrs"].get("class", "").split():
         # Clear filters: this tab's filters and page go, every other state stays.
         assert not any(key in query for key in (*INTERFACE_FILTERS, "interfaces_page")), url
-        _assert_keeps(query, ("cables_q", "interfaces_per_page", "interfaces_sort", "interfaces_show_ignored"), url)
+        _assert_keeps(
+            query, ("cables_q", "interfaces_per_page", "interfaces_sort", "interfaces_show_ignored", "server_key"), url
+        )
         return "clear"
     if on_page and attrs.get("id") == "interfaces-show-ignored-toggle":
         # Show ignored: the filters stay, the page goes, the toggle flips.
         assert "interfaces_page" not in query and "interfaces_show_ignored" not in query, url
-        _assert_keeps(query, (*PAGE_FILTERS, "interfaces_per_page", "interfaces_sort"), url)
+        _assert_keeps(query, (*PAGE_FILTERS, "interfaces_per_page", "interfaces_sort", "server_key"), url)
         return "toggle"
     if on_page:
         # Paging, page size and sort: each states its own key, and everything else stays.
         assert query["tab"] == ["interfaces"], url
-        _assert_keeps(query, (*PAGE_FILTERS, "interfaces_show_ignored"), url)
+        _assert_keeps(query, (*PAGE_FILTERS, "interfaces_show_ignored", "server_key"), url)
         return "page link"
     if path in (routes["refresh"], routes["sync"], routes["rebind"]):
         # A refresh, sync or Rebind comes back to the same filters and page, clamped to the last page.
-        _assert_keeps(query, KEEP_ALL, url)
+        _assert_keeps(query, (*KEEP_ALL, "server_key"), url)
         return {routes["refresh"]: "refresh", routes["sync"]: "sync", routes["rebind"]: "rebind"}[path]
     pytest.fail(f"An unclassified hop in the interfaces pane: <{hop['tag']}> {url}")
 
@@ -182,6 +184,15 @@ def _check_filter_form(hops):
     # A filter change keeps every other state and starts at page 1.
     assert "interfaces_page" not in submitted
     _assert_keeps(submitted, KEEP_ALL_BUT_PAGE, form)
+
+
+def _make_another_server_the_default(settings, librenms_server):
+    """Configure a second server and make it the default, so a hop that drops the page's server_key changes server."""
+    from netbox_librenms_plugin.models import LibreNMSSettings
+
+    server = {"librenms_url": librenms_server.url, "api_token": "test-token"}
+    configure_librenms_servers(settings, {SERVER_KEY: server, "secondary": server})
+    LibreNMSSettings.objects.update_or_create(defaults={"selected_server": "secondary"})
 
 
 def _render_page(client, owner):
@@ -220,6 +231,7 @@ def test_every_interface_tab_hop_keeps_the_page_query_or_applies_its_reset(clien
     owner, object_type = _contract_owner(kind)
     _seed(owner, _contract_ports())
     serve_sync_page(client, settings, librenms_server, owner)
+    _make_another_server_the_default(settings, librenms_server)
 
     page_path, html = _render_page(client, owner)
     hops = _hops(html, "interfaces")
@@ -383,12 +395,12 @@ def _classify_tab_hop(hop, page_path, tab, owner, page_query):
     if on_page and "sync-filter-clear" in hop["attrs"].get("class", "").split():
         # Clear filters: this tab's filters and page go, every other state stays.
         assert not any(key in query for key in (*own_filters, f"{prefix}page")), url
-        _assert_keeps(query, (*OTHER_TAB_FILTER, f"{prefix}per_page", f"{prefix}sort"), url, page_query)
+        _assert_keeps(query, (*OTHER_TAB_FILTER, f"{prefix}per_page", f"{prefix}sort", "server_key"), url, page_query)
         return "clear"
     if on_page:
         # Paging, page size and sort: each states its own key, and every filter stays.
         assert query["tab"] == [tab], url
-        _assert_keeps(query, (*OTHER_TAB_FILTER, *own_filters), url, page_query)
+        _assert_keeps(query, (*OTHER_TAB_FILTER, *own_filters, "server_key"), url, page_query)
         return "page link"
     if path in posts:
         # A refresh, sync or VRF create comes back to the same filters and page, clamped to the last page.
@@ -493,6 +505,7 @@ def test_every_ip_vlan_and_cable_tab_hop_keeps_the_page_query_or_applies_its_res
         owner = _cable_owner(kind, client, settings, librenms_server)
     else:
         owner = _vlan_owner(client, settings, librenms_server)
+    _make_another_server_the_default(settings, librenms_server)
     page_query = {"tab": tab, "server_key": SERVER_KEY, **OTHER_TAB_FILTER, **TAB_PAGE_QUERIES[tab]}
     name = "vm_librenms_sync" if owner._meta.model_name == "virtualmachine" else "device_librenms_sync"
     page_path = reverse(f"plugins:netbox_librenms_plugin:{name}", args=[owner.pk])
