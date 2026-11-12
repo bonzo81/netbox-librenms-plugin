@@ -8,7 +8,7 @@ from netbox.tables.columns import ToggleColumn
 
 from netbox_librenms_plugin.constants import SERIAL_INVENTORY_SOURCE
 from netbox_librenms_plugin.constants import UNCLASSIFIED
-from netbox_librenms_plugin.sync_filters import FilterColumn, FilterSpec
+from netbox_librenms_plugin.sync_filters import EMPTY_CELL_VALUES, FilterColumn, FilterSpec
 from netbox_librenms_plugin.utils import (
     oob_badge_html,
     paginate_sync_table,
@@ -20,9 +20,6 @@ from netbox_librenms_plugin.utils import (
 
 # Static trusted markup for the "Serial" console-port badge. The leading space is intentional.
 SERIAL_BADGE_HTML = ' <span class="badge bg-teal text-dark ms-1" title="Serial console port">Serial</span>'
-
-# The values a plain column shows as the table default ("—") instead of calling its render method.
-_EMPTY_VALUES = (None, "")
 
 # The label of the row action that syncs one cable.
 SYNC_CABLE_LABEL = "Sync Cable"
@@ -162,7 +159,7 @@ class LibreNMSCableTable(tables.Table):
     def _rendered_text(self, record, accessor, render):
         """Return the visible text of a plain cell: the table default for an empty value, else its render."""
         value = record.get(accessor)
-        return self.default if value in _EMPTY_VALUES else _visible_text(render(value, record))
+        return self.default if value in EMPTY_CELL_VALUES else _visible_text(render(value, record))
 
     def text_local_port(self, record):
         """Return the visible text of the local port cell: the port name and its badges."""

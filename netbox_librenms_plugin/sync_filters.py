@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Callable
 from urllib.parse import urlencode
 
+import django_tables2 as tables
 from django import forms
 
 from netbox_librenms_plugin.constants import MATCHING, MISMATCHED, NOT_IN_NETBOX
@@ -27,6 +28,15 @@ SYNC_STATE_CHOICES = (
 )
 # The empty text of a filtered table that has no row.
 NO_MATCH_TEXT = "No rows match these filters"
+
+# The values that a plain django-tables2 column shows as the table default instead of calling its render method.
+EMPTY_CELL_VALUES = tables.Column.empty_values
+
+
+def cell_text(value, default):
+    """Return the text that a plain cell shows for *value*: *default* for an empty value."""
+    return default if value in EMPTY_CELL_VALUES else str(value)
+
 
 QUERY_FIELD = "q"
 SYNC_STATE_FIELD = "sync_state"
