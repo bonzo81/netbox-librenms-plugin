@@ -4301,6 +4301,10 @@ function applyFilterDisclosureState(section, button, expanded) {
 
 const pendingFilterApplies = new WeakSet();
 const initializedFilterTargets = new WeakSet();
+// An IME composition is no search text until it ends, and its compositionend trigger searches then.
+const composingSearches = new WeakSet();
+document.addEventListener('compositionstart', event => composingSearches.add(event.target));
+document.addEventListener('compositionend', event => composingSearches.delete(event.target));
 
 // Keep an explicit Apply when queue-last replaces its submit with a later change.
 document.addEventListener('submit', function (event) {
@@ -4348,9 +4352,13 @@ document.addEventListener('htmx:configRequest', function (event) {
             initializedFilterTargets.add(target);
         }
         const results = target.querySelector('[data-filter-search]');
+        const search = [...form.elements].find(control => control.matches('.sync-filter-search'));
+        if (composingSearches.has(search)) {
+            event.preventDefault();
+            return;
+        }
         // A cancelled automatic choice must not apply column edits made after that choice.
         if (event.detail.triggeringEvent?.type === 'change' && !pendingFilterApplies.has(form)) {
-            const search = [...form.elements].find(control => control.matches('.sync-filter-search'));
             const state = [...form.elements].find(control => control.tagName === 'SELECT');
             if (search?.value === results.dataset.filterSearch && state?.value === results.dataset.filterState) {
                 event.preventDefault();
