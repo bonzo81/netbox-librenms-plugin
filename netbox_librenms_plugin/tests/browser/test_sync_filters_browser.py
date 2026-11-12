@@ -646,3 +646,21 @@ def test_a_tab_click_cancels_the_pending_live_search_of_the_old_tab(page):
     with page.expect_navigation() as navigation:
         page.fill("#search", "po")
     assert parse_qs(urlsplit(navigation.value.url).query) == {"tab": ["cables"], "cables_q": ["po"]}
+
+
+def test_a_live_search_waits_for_the_ime_composition_to_end(page):
+    navigations = []
+    _serve(page, _tab_page("interfaces"))
+    page.evaluate("initializeSyncFilters()")
+    page.on("request", lambda request: request.is_navigation_request() and navigations.append(request.url))
+    ime = page.context.new_cdp_session(page)
+
+    page.focus("#search")
+    ime.send("Input.imeSetComposition", {"text": "ni", "selectionStart": 2, "selectionEnd": 2})
+    page.wait_for_timeout(700)
+    # A pause to choose a candidate does not search for the uncommitted text.
+    assert navigations == []
+
+    with page.expect_navigation() as navigation:
+        ime.send("Input.insertText", {"text": "nihao"})
+    assert parse_qs(urlsplit(navigation.value.url).query) == {"tab": ["interfaces"], "interfaces_q": ["nihao"]}
