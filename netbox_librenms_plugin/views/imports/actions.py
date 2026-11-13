@@ -1337,6 +1337,8 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     "is_vm": is_vm,
                     "object_type": "virtualmachine" if is_vm else "device",
                     "placement_method": placement_method,
+                    # A row whose stack cannot be numbered is shown with its refusal and not submitted.
+                    "executable": not (validation.get("virtual_chassis") or {}).get("numbering_error"),
                 }
             )
 
@@ -1376,7 +1378,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
 
         context = {
             "devices": devices,
-            "device_count": len(devices),
+            "device_count": sum(1 for entry in devices if entry["executable"]),
             "errors": errors,
             # Surface partial cache-expiry: when SOME rows survive (devices non-empty) the
             # all-expired / partial-expired warnings above are skipped, so without this the modal
