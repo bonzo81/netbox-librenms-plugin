@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from netbox_librenms_plugin.serial_identity import plain_context
+from netbox_librenms_plugin.serial_identity import SerialRules, plain_context
 from netbox_librenms_plugin.tests.conftest import junos_vc_inventory, make_junos_vc_members
 
 # ---------------------------------------------------------------------------
@@ -1954,6 +1954,7 @@ class TestPostInventoryRefresh:
             "inventory": [],
             "librenms_id": 777,
             "oob_librenms_id": None,
+            "serial_rules": SerialRules.load().digest,
         }
 
     def test_post_treats_non_int_main_index_as_fetch_failure(self, librenms_server, server_keys):

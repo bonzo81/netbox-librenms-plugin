@@ -180,3 +180,44 @@ class TestPartialModuleRefreshRendersEmpty:
             assert all("no module rows were loaded" not in text for text in message_texts(request)), message_texts(
                 request
             )
+
+
+@pytest.mark.django_db
+class TestSerialRuleEditStalesTheSnapshot:
+    """S5: a snapshot merges transceivers by serial, so a serial rule edit makes it stale."""
+
+    @pytest.fixture(autouse=True)
+    def _configure_server(self, settings):
+        configure_default_librenms_server(settings)
+
+    def test_a_cached_read_rejects_a_snapshot_merged_under_other_serial_rules(self, librenms_server):
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.sync_cache import cached_module_inventory, sync_snapshot_key
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
+        NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
+        device = make_device("rule-edit-snapshot", librenms_cf={SERVER_KEY: 42})
+        make_module_bay(device, "Bay 1")
+        # Under the rule the transceiver's "S/N PARTIAL-1" is the module's "PARTIAL-1", so the merge drops it.
+        transceivers = [{"entity_physical_index": 20, "serial": "S/N PARTIAL-1", "model": "SFP-RULE", "type": "sfp"}]
+        snapshot_key = sync_snapshot_key(device, "inventory", SERVER_KEY)
+        try:
+            _response, context, _request = _refresh(device, librenms_server, transceivers=(True, transceivers))
+            assert context.get("table") is not None
+            cached = cached_module_inventory(cache.get(snapshot_key))
+            assert [item["entPhysicalIndex"] for item in cached] == [1]
+
+            NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
+            request = make_request("get", {"tab": "modules", "server_key": SERVER_KEY})
+            view = DeviceModuleTableView()
+            view.setup(request, pk=device.pk)
+            view.cache_only = True
+            context = view.get_context_data(request, device, server_key=SERVER_KEY)
+
+            assert context["table"] is None
+        finally:
+            cache.delete(snapshot_key)

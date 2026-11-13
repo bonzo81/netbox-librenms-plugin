@@ -34,24 +34,28 @@ _MAX_ACKNOWLEDGED_REVISIONS = 200
 MODULE_INVENTORY_CACHE_VERSION = 4
 
 
-def module_inventory_cache_payload(inventory, librenms_id, oob_librenms_id) -> dict:
+def module_inventory_cache_payload(inventory, librenms_id, oob_librenms_id, *, serial_rules=None) -> dict:
     """
-    Return the cached module inventory payload, stamped with the current schema version.
+    Return the cached module inventory payload, stamped with the current schema version and serial rules.
 
     Args:
         inventory (list[dict]): The merged inventory rows.
         librenms_id (int): The LibreNMS device ID the rows came from.
         oob_librenms_id (int | None): The linked OOB controller ID, or None.
+        serial_rules (SerialRules | None): The rules the transceiver merge used; None reads them.
 
     Returns:
         dict: The payload to cache.
 
     """
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
     return {
         "version": MODULE_INVENTORY_CACHE_VERSION,
         "inventory": inventory,
         "librenms_id": librenms_id,
         "oob_librenms_id": oob_librenms_id,
+        "serial_rules": (serial_rules or SerialRules.load()).digest,
     }
 
 
@@ -774,10 +778,16 @@ class SyncCacheConsistency:
         """Return whether the tab's snapshot exists in a form its reader accepts."""
         key = self.snapshot_key(tab, server_key)
         if tab == SyncTab.MODULES:
+            from netbox_librenms_plugin.serial_identity import SerialRules
+
             payload = cache.get(key)
             owner = self._primary_owner(tab, server_key)
-            return cached_module_inventory(payload) is not None and module_inventory_snapshot_matches(
-                payload, owner, server_key, module_snapshot_host_id(owner, server_key)
+            return (
+                cached_module_inventory(payload) is not None
+                and module_inventory_snapshot_matches(
+                    payload, owner, server_key, module_snapshot_host_id(owner, server_key)
+                )
+                and payload.get("serial_rules") == SerialRules.load().digest
             )
         return cache.has_key(key)
 
