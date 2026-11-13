@@ -732,7 +732,7 @@ def _normalize_module_interface_names_for_vc_member(
                 conflict.save(update_fields=["module", "last_updated"])
                 result["adopted"] += 1
                 try:
-                    with transaction.atomic():
+                    with row_savepoint():
                         interface.delete()
                     result["removed"] += 1
                 except Exception as exc:
@@ -746,7 +746,7 @@ def _normalize_module_interface_names_for_vc_member(
         interface.snapshot()
         interface.name = desired_name
         try:
-            with transaction.atomic():
+            with row_savepoint():
                 interface.full_clean()
                 interface.save(update_fields=["name", "_name", "last_updated"])
             result["renamed"] += 1
@@ -853,7 +853,7 @@ def _module_may_own_interface(device, module_pk, name):
 
 
 # Its own savepoint: callers catch a non-conflict error and keep their transaction.
-@transaction.atomic
+@row_savepoint()
 def _bind_interface_librenms_id(device, item, module_pk, server_key, interfaces):
     """
     Bind LibreNMS ``port_id`` to the best matching NetBox interface.
