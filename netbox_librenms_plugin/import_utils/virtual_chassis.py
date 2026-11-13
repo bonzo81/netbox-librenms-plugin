@@ -772,7 +772,6 @@ def create_virtual_chassis_with_members(
     """
     # Members store the raw serial; names and the duplicate check use the serial context of the master.
     serial_rules = serial_rules or SerialRules.load()
-    context = serial_rules.for_device_type(getattr(master_device, "device_type", None))
     # Caller-supplied members can lack positions; the stack rule then numbers them in row order.
     positions = _member_positions([member.get("position") for member in members_info])
     master_pos = next(
@@ -795,6 +794,14 @@ def create_virtual_chassis_with_members(
                 model=Device,
                 rules=serial_rules,
             )
+            # The master row decides the member context: a type change of the master is waited for, then read.
+            master_type = (
+                Device.objects.select_for_update(no_key=True, of=("self",))
+                .select_related("device_type")
+                .get(pk=master_device.pk)
+                .device_type
+            )
+            context = serial_rules.for_device_type(master_type)
             master_device.snapshot()
             # Load naming pattern once to avoid a DB query per member
             vc_pattern = _load_vc_member_name_pattern()
