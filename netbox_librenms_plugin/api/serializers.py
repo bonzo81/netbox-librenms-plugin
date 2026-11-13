@@ -16,6 +16,7 @@ from netbox_librenms_plugin.models import (
     PlatformMapping,
     PortStackLagPattern,
     SerialSensorTypePattern,
+    VCMemberNumberingRule,
 )
 
 
@@ -208,6 +209,18 @@ class CarrierAutoInstallRuleSerializer(NetBoxModelSerializer):
             "description",
         ]
         brief_fields = ("id", "url", "display", "device_type_pattern", "description")
+
+
+@extend_schema_serializer(component_name="LibreNMSVCMemberNumberingRule")
+class VCMemberNumberingRuleSerializer(NetBoxModelSerializer):
+    """Serialize VCMemberNumberingRule model for REST API."""
+
+    class Meta:
+        """Meta options for VCMemberNumberingRuleSerializer."""
+
+        model = VCMemberNumberingRule
+        fields = ["id", "url", "display", "manufacturer", "device_type_pattern", "numbering_mode", "description"]
+        brief_fields = ("id", "url", "display", "device_type_pattern", "numbering_mode")
 
 
 @extend_schema_serializer(component_name="LibreNMSPortStackLagPattern")

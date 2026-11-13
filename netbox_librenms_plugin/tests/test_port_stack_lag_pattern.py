@@ -543,6 +543,7 @@ def test_mapping_bulk_import_routes_resolve_without_the_model_view_registry():
         "carrierautoinstallrule_bulk_import": mapping_views.CarrierAutoInstallRuleBulkImportView,
         "portstacklagpattern_bulk_import": mapping_views.PortStackLagPatternBulkImportView,
         "serialsensortypepattern_bulk_import": mapping_views.SerialSensorTypePatternBulkImportView,
+        "vcmembernumberingrule_bulk_import": mapping_views.VCMemberNumberingRuleBulkImportView,
     }
 
     for route, view_class in expected.items():

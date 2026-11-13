@@ -155,7 +155,9 @@ def test_a_missing_member_position_numbers_the_whole_stack_in_row_order(live_lib
         2: fpc_serials[121],
     }
     index_map = {row["entPhysicalIndex"]: row for row in inventory}
-    owners = attribute_inventory(inventory, list(members.values()), SerialRules.load().for_device(chassis.master))
+    owners = attribute_inventory(
+        inventory, list(members.values()), SerialRules.load().for_device(chassis.master), "reported"
+    )
     psu = index_map[4]
     assert psu["entPhysicalDescr"].startswith("FPC 1 ")
     assert owners[inventory.index(psu)][0] == members[2]
