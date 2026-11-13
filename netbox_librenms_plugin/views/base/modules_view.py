@@ -281,6 +281,10 @@ def _admitting_rules(item: dict, rules: list) -> list:
     return [rule for rule in rules if rule.matches_inventory_item(item)]
 
 
+class _StaleInventorySnapshot(Exception):
+    """A cached inventory snapshot was merged under serial rules that changed since."""
+
+
 @dataclass(frozen=True)
 class DeviceIdentity:
     """The target device facts that the pattern-less ignore rules compare an inventory item with."""
@@ -932,13 +936,22 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # are counted in main_max_idx.  Vendors like Nokia expose SFPs in the
         # transceiver API with indices that are absent from ENTITY-MIB; without
         # this reordering those high indices could fall inside the OOB namespace.
+        from dcim.models import Device
+
         from netbox_librenms_plugin.models import RuleConfigurationError
 
         try:
+            # One policy read: the merge uses its serial rules, the snapshot records them, and the table uses it.
+            policy = load_inventory_policy(obj.pk)
+            serial_rules = policy.serial_identity_rules
             inventory_data, txr_error = self._merge_transceiver_data(
-                inventory_data, ports_data=ports_data, manufacturer=sync_device.device_type.manufacturer
+                inventory_data,
+                ports_data=ports_data,
+                manufacturer=sync_device.device_type.manufacturer,
+                serial_rules=serial_rules,
             )
-        except RuleConfigurationError as exc:
+        except (Device.DoesNotExist, RuleConfigurationError) as exc:
+            # The page device changed while the policy was read, or a rule does not work: no table and no snapshot.
             cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
             SyncCacheConsistency(obj).mark_refresh_failure(
                 SyncTab.MODULES,
@@ -946,20 +959,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 actor_id=request_actor_id(request),
             )
             logger.error("Module table for %s not built: %s", obj, exc)
-            return self.render_sync_partial(
-                request,
-                obj,
-                server_key,
-                {
-                    "module_sync": {
-                        "object": obj,
-                        "table": None,
-                        "cache_expiry": None,
-                        "server_key": server_key,
-                        "inventory_rule_error": exc.shown_to(request.user),
-                    }
-                },
-            )
+            module_sync = {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}
+            if isinstance(exc, RuleConfigurationError):
+                module_sync["inventory_rule_error"] = exc.shown_to(request.user)
+            return self.render_sync_partial(request, obj, server_key, {"module_sync": module_sync})
         for item in inventory_data:
             item.setdefault("_source", MAIN_INVENTORY_SOURCE)
         # Enrich port rows with stable LibreNMS port_id using ports data so
@@ -1031,7 +1034,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         else:
             cache.set(
                 self.get_cache_key(sync_device, "inventory", server_key=server_key),
-                module_inventory_cache_payload(inventory_data, self.librenms_id, oob_id),
+                module_inventory_cache_payload(inventory_data, self.librenms_id, oob_id, serial_rules=serial_rules),
                 timeout=self.librenms_api.cache_timeout,
             )
 
@@ -1039,7 +1042,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         context = (
             {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}
             if refresh_incomplete
-            else self._build_context(request, obj, inventory_data, server_key=server_key, sync_device=sync_device)
+            else self._build_context(
+                request, obj, inventory_data, server_key=server_key, sync_device=sync_device, policy=policy
+            )
         )
         refresh_incomplete = refresh_incomplete or context.get("table") is None
         if ports_error:
@@ -1093,7 +1098,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
     def _read_render_inventory(self, request, obj, server_key=None):
         """
-        Return ``(server key, sync device, cached inventory, None)``, or an empty context as the last item.
+        Return ``(server key, sync device, cached payload, None)``, or an empty context as the last item.
 
         The read is scoped to the active server from the request (GET query), the server post() rebinds
         to and caches under. A cached snapshot for another LibreNMS device or OOB link is discarded.
@@ -1141,16 +1146,23 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         if not module_inventory_snapshot_matches(cached_payload, sync_device, scoped_server, current_librenms_id):
             cache.delete(cache_key)
             return None, None, None, empty
-        return scoped_server, sync_device, cached_inventory, None
+        return scoped_server, sync_device, cached_payload, None
 
     def get_context_data(self, request, obj, server_key=None):
         """Get context from cache (used on initial page load and by the module actions' in-place re-render)."""
-        scoped_server, sync_device, inventory, empty = self._read_render_inventory(request, obj, server_key)
+        scoped_server, sync_device, payload, empty = self._read_render_inventory(request, obj, server_key)
         if empty is not None:
             return empty
         # Pass the resolved server explicitly (like post() does) so _active_server_key keys on it
         # rather than falling back to self.librenms_api.server_key.
-        return self._build_context(request, obj, inventory, server_key=scoped_server, sync_device=sync_device)
+        return self._build_context(
+            request,
+            obj,
+            payload["inventory"],
+            server_key=scoped_server,
+            sync_device=sync_device,
+            snapshot_serial_rules=payload.get("serial_rules", ""),
+        )
 
     def get_verify_context_data(self, request, page_device, member, server_key=None):
         """
@@ -1162,7 +1174,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         from netbox_librenms_plugin.models import RuleConfigurationError
 
-        scoped_server, sync_device, inventory, empty = self._read_render_inventory(request, page_device, server_key)
+        scoped_server, sync_device, payload, empty = self._read_render_inventory(request, page_device, server_key)
         if empty is not None:
             return empty
         try:
@@ -1187,11 +1199,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         return self._build_context(
             request,
             page_device,
-            inventory,
+            payload["inventory"],
             server_key=scoped_server,
             sync_device=sync_device,
             policy=policy,
             pin_to=member,
+            snapshot_serial_rules=payload.get("serial_rules", ""),
         )
 
     def _build_context(
@@ -1204,6 +1217,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         *,
         policy=None,
         pin_to=None,
+        snapshot_serial_rules=None,
     ):
         """
         Build context with matched inventory items and table.
@@ -1216,6 +1230,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             sync_device (Device | None): The device that owns the cached snapshot.
             policy (InventoryPolicy | None): The policy inputs of *obj*, loaded here when None.
             pin_to (Device | None): A member that every row is attributed to, as the verify view renders it.
+            snapshot_serial_rules (str | None): The serial rules digest of a cached snapshot; None for fresh rows.
 
         Returns:
             dict: The module sync context.
@@ -1232,7 +1247,18 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         from netbox_librenms_plugin.models import RuleConfigurationError
 
         try:
-            return self._build_table_context(request, obj, inventory_data, sync_device, policy=policy, pin_to=pin_to)
+            return self._build_table_context(
+                request,
+                obj,
+                inventory_data,
+                sync_device,
+                policy=policy,
+                pin_to=pin_to,
+                snapshot_serial_rules=snapshot_serial_rules,
+            )
+        except _StaleInventorySnapshot:
+            cache.delete(self.get_cache_key(sync_device, "inventory", server_key=self._active_server_key))
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": self._active_server_key}
         except Device.DoesNotExist:
             return {
                 "table": None,
@@ -1251,10 +1277,15 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 "inventory_rule_error": exc.shown_to(request.user),
             }
 
-    def _build_table_context(self, request, obj, inventory_data, sync_device, *, policy, pin_to):
+    def _build_table_context(
+        self, request, obj, inventory_data, sync_device, *, policy, pin_to, snapshot_serial_rules=None
+    ):
         """Build the module table context of ``_build_context``; raise RuleConfigurationError for a broken rule."""
         if policy is None:
             policy = load_inventory_policy(obj.pk)
+        # The refresh merged transceivers by serial under its rules; other rules make the snapshot stale.
+        if snapshot_serial_rules is not None and snapshot_serial_rules != policy.serial_identity_rules.digest:
+            raise _StaleInventorySnapshot()
         # The collector reads devices from the policy load, so the fingerprint covers what it read.
         self._inventory_policy = policy
         owner = policy.page_device if pin_to is None else policy.member(pin_to.pk)
@@ -2198,7 +2229,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     child_item
                 )
 
-    def _merge_transceiver_data(self, inventory_data, ports_data=None, *, manufacturer=None):  # noqa: C901
+    def _merge_transceiver_data(  # noqa: C901
+        self, inventory_data, ports_data=None, *, manufacturer=None, serial_rules: SerialRules | None = None
+    ):
         """
         Merge transceiver API data with entity inventory.
 
@@ -2242,7 +2275,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         inv_by_index = {
             idx: item for item in inventory_data if (idx := _coerce_idx(item.get("entPhysicalIndex"))) is not None
         }
-        serial_context = SerialRules.load().context(getattr(manufacturer, "pk", None))
+        serial_context = (serial_rules or SerialRules.load()).context(getattr(manufacturer, "pk", None))
         inv_serials = group_serials(
             inventory_data, serial_context, serial=lambda item: item.get("entPhysicalSerialNum")
         )
