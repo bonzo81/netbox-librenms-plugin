@@ -32,6 +32,7 @@ from .cache import (
     get_cache_metadata_key,
     get_import_device_cache_key,
     get_validated_device_cache_key,
+    import_configuration_generation,
 )
 from .collisions import detect_bulk_collisions, scope_bulk_collisions
 from .device_operations import (
@@ -1468,6 +1469,8 @@ def process_device_filters(  # noqa: C901
     # Validate each device
     validated_devices = []
     total = len(libre_devices)
+    # Read before the configuration, so a row validated after an edit is stored under the old generation.
+    generation = import_configuration_generation()
     serial_rules = SerialRules.load()
     numbering_rules = load_numbering_rules()
     # Always pass api so validate_device_for_import can run hardware/chassis lookups.
@@ -1500,6 +1503,7 @@ def process_device_filters(  # noqa: C901
             use_sysname=use_sysname,
             strip_domain=strip_domain,
             serial_rules=serial_rules,
+            generation=generation,
         )
 
         # Check if we already have cached validation for this device

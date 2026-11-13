@@ -257,6 +257,7 @@ def get_validated_device_cache_key(
     use_sysname: bool = True,
     strip_domain: bool = False,
     serial_rules=None,
+    generation: int | None = None,
 ) -> str:
     """
     Generate a consistent cache key for validated device data.
@@ -272,9 +273,9 @@ def get_validated_device_cache_key(
         use_sysname: Whether sysName is preferred over hostname for device naming
         strip_domain: Whether domain suffix is stripped from device names
         serial_rules: The SerialRules the validation used; None reads them. A rule edit changes the key.
-            The key also holds :func:`import_configuration_generation`, so a caller computes it before it
-            validates: a configuration edit that commits during the validation leaves the result under
-            the old key.
+        generation: The :func:`import_configuration_generation` that the caller read before it read the
+            configuration it validates with; None reads it now. An edit that commits later then leaves the
+            result under the old generation, which no reader asks for.
 
     Returns:
         str: Cache key for the validated device
@@ -293,7 +294,7 @@ def get_validated_device_cache_key(
     rules_part = (serial_rules or SerialRules.load()).digest[:16]
     return (
         f"validated_device_{server_key}_{filter_hash}_{device_id}_{vc_part}_sysname={use_sysname}_strip={strip_domain}"
-        f"_rules={rules_part}_config={import_configuration_generation()}"
+        f"_rules={rules_part}_config={import_configuration_generation() if generation is None else generation}"
     )
 
 
