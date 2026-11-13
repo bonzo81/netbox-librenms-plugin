@@ -118,14 +118,14 @@ Migration 0025 cannot be reversed. To go back to an earlier release, restore a d
 
 ## Normalization Rules
 
-Normalization Rules apply regular-expression substitutions before a value is matched or stored. Rules run in priority order, from the lowest number to the highest, and each rule receives the output of the previous rule.
+Normalization Rules apply regular expressions before a value is matched or stored. Rules run in priority order, from the lowest number to the highest, and each rule receives the output of the previous rule. A `serial` rule extracts part of a value instead of substituting it; see [Serials](#serials).
 
 The available scopes are:
 
 - `module_type` normalizes `entPhysicalModelName` before Module Type Mapping lookup.
 - `device_type` normalizes the LibreNMS hardware string before Device Type Mapping, part-number, or model lookup.
 - `module_bay` normalizes `entPhysicalName` before Module Bay Mapping lookup.
-- `serial` normalizes serial numbers before comparison. See [Serials](#serials).
+- `serial` extracts the part of a serial number that identifies the hardware, for each comparison. See [Serials](#serials).
 - `vlan_name` changes the VLAN name that the VLANs tab compares with NetBox and saves.
 
 Rules can optionally be limited to a manufacturer. Regular-expression matching is case-sensitive unless the pattern enables case-insensitive matching, for example with `(?i)`.
@@ -145,11 +145,27 @@ For this rule, `3HE16474AARA01` becomes `3HE16474AA`.
 
 ### Serials
 
-A `serial` rule applies only when the plugin compares two serials. The plugin stores each device serial as LibreNMS reports it, with the spaces at the start and end removed, and does not store a placeholder such as `-`, `N/A` or `unknown`. Each comparison applies the current rules to both serials: the serial that NetBox stores and the serial that LibreNMS reports. This includes the serial row of the LibreNMS Sync page, the import checks, virtual chassis members and the **Serial matches device** inventory rule. A rule change thus applies to both sides at once. A serial that is a placeholder before or after the rules matches nothing.
+A `serial` rule decides which part of a serial identifies the hardware. When its match pattern matches the whole serial, the serial becomes one capture group of the match; otherwise the serial does not change. The replacement must be exactly one reference to a group that the pattern defines: `\1` to `\99`, `\g<1>` or `\g<name>`. The plugin refuses any other replacement for a serial rule, such as `X\1`. The rules of the manufacturer run first, then the global rules, each in priority order. The result is the serial key.
 
-The plugin seeds a global rule that removes Juniper's `S/N ` mark. With this rule, a stored `BCFB9793` matches a LibreNMS serial `S/N BCFB9793`, and a device that the plugin imports or syncs shows `S/N BCFB9793`.
+A serial key never identifies hardware when:
 
-Virtual chassis members that an earlier plugin version created store the serial after the rules. A rule that changes its own output again, such as `^X(.+)$` to `\1`, can make such a member stop matching. See [Virtual Chassis Support](../device_sync/virtual_chassis.md#member-serials).
+- the serial is a placeholder, such as `-`, `N/A` or `unknown`, before or after the rules
+- a rule extracts a group that is empty or that does not take part in the match
+- the key has no three ASCII letters or digits in a row, for example `0`, `AB-1` or `A++`
+
+The plugin stores each Device and Module serial as LibreNMS reports it, with the spaces at the start and end removed, and does not store a placeholder. Each comparison applies the current rules to both serials: the serial that NetBox stores and the serial that LibreNMS reports. A virtual chassis member uses the rules of the manufacturer of its chassis master, and a module uses the rules of the manufacturer of its device. So a rule change applies on the next request. A module action that the Modules tab rendered before the change is refused; refresh the tab and try again.
+
+To find a device or a module by serial, the plugin keys the LibreNMS serial with the global rules and with the rules of each manufacturer that has serial rules. It then reads every row whose stored serial contains one of these keys, through a trigram index, and keys each stored serial with its own rules. When two or more rows match, the plugin binds none of them, also when you cannot see one of them. An import, a serial update or a virtual chassis member creation then stops and names the conflict.
+
+The plugin seeds a global rule that removes Juniper's `S/N ` mark: `^S/N\s+(.+)$` with the replacement `\1`. With this rule, a stored `BCFB9793` matches a LibreNMS serial `S/N BCFB9793`, and the reverse.
+
+An earlier plugin version stored the serial after the rules for Modules, and for virtual chassis members for a while. Such a row keeps its match under the seeded rule. When the plugin writes the serial of such a row, it stores the LibreNMS text. The LibreNMS Sync page and the Modules tab show **stored form differs** for such a row and offer the update of the serial. Three cases can make such a row stop matching until you update its serial: a doubled mark, such as `S/N S/N ABC` stored as `S/N ABC`; a rule that matches its own output again, such as `^0(.+)$`; and a deleted rule that produced the stored serial. To list the rows whose stored serial the current rules change, run:
+
+```bash
+python manage.py librenms_serial_report
+```
+
+The plugin does not coordinate a serial rule change with serial writes that run at the same time. A rule change that commits during an import or a serial update can let two rows store serials that the new rules key to one value. Every later lookup then reports the two rows as a conflict and binds neither.
 
 ### VLAN names
 
