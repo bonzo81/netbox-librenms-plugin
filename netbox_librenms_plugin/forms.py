@@ -232,6 +232,14 @@ class ImportSettingsForm(NetBoxModelForm):
         help_text="Store each user's ifName or ifDescr choice separately for each device platform",
     )
 
+    platform_version_tracking = forms.BooleanField(
+        label="Track OS versions as platforms",
+        required=False,
+        widget=forms.CheckboxInput(attrs={"class": "form-check-input"}),
+        help_text="Give each device and virtual machine the version platform of its LibreNMS OS version: "
+        "a child of the OS platform, created when it is missing",
+    )
+
     class Meta:
         model = LibreNMSSettings
         fields = [
@@ -241,6 +249,7 @@ class ImportSettingsForm(NetBoxModelForm):
             "location_parse_pattern",
             "location_parse_is_regex",
             "remember_interface_name_per_platform",
+            "platform_version_tracking",
         ]
 
     def clean_vc_member_name_pattern(self):
@@ -318,6 +327,8 @@ class ImportSettingsForm(NetBoxModelForm):
         valid_tokens = {"region", "site", "location", "rack", "tenant"}
 
         if is_regex:
+            # The form validates the typed pattern and shows the error on the field.
+            # nosemgrep: regex-error-must-raise
             try:
                 compiled = re.compile(pattern)
             except REGEX_COMPILE_ERRORS as exc:

@@ -554,3 +554,28 @@ def test_a_failed_row_post_keeps_the_buttons_locked_while_a_member_verify_runs(p
     # A refused verify puts the row back on member 2, whose form may post again.
     held_verify[0].fulfill(**REFUSED)
     expect(page.locator("#install-30")).to_be_enabled()
+
+
+@pytest.mark.parametrize("content_type", ["text/html", "text/plain"])
+@pytest.mark.parametrize("reverify", [False, True], ids=["member-change", "saved-selection"])
+def test_a_non_json_member_refusal_keeps_the_response_body_out_of_the_toast(page, content_type, reverify):
+    """An upstream error page must not become the user's refusal message."""
+    refusal = {"status": 502, "content_type": content_type, "body": "private diagnostic content"}
+    if reverify:
+        _answers(page, _success(30, "2", "override-30"), refusal)
+    else:
+        _answers(page, refusal)
+    _load(page, [_row(30), _row(31)], url=f"{PAGE_URL}?page=1")
+
+    with page.expect_response(VERIFY_ROUTE):
+        _change_member(page, 30, "2")
+    if reverify:
+        page.check("#cb-30")
+        _load(page, [_row(40)], url=f"{PAGE_URL}?page=2")
+        with page.expect_response(VERIFY_ROUTE):
+            _load(page, [_row(30), _row(31)], url=f"{PAGE_URL}?page=1")
+
+    expect(_toasts(page)).to_contain_text("502")
+    expect(_toasts(page)).not_to_contain_text("private diagnostic content")
+    expect(page.locator("#install-30")).to_be_enabled()
+    assert page.locator("#device_selection_30").input_value() == "1"

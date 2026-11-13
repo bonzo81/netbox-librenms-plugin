@@ -94,7 +94,8 @@ logger = logging.getLogger(__name__)
 # Every module action below scopes its cache reads and its LibreNMS id writes by server key.
 MODULE_MOVE_REQUIRES_NETBOX_MESSAGE = "Moving a module needs NetBox 4.7 or later. Earlier releases move only the module itself and leave its interfaces, its module bays and any modules installed in them on the original device."
 NO_LIBRENMS_SERVER_MESSAGE = (
-    "No LibreNMS server is configured. Add a server to the plugin configuration before syncing modules."
+    "The selected LibreNMS server is not configured. Reload the page, or add the server to the plugin "
+    "configuration before syncing modules."
 )
 
 # OOB-controller rows are merged into the cached snapshot for display only, and every entry point
@@ -314,9 +315,9 @@ def _report_install_results(request, installed, skipped, failed):
 
 def _resolve_destination(page_device, selected_device_id, devices):
     """
-    Return the posted write target: the page device, or a member of its Virtual Chassis in *devices*.
+    Return the posted target: the page device, or a member of its Virtual Chassis in *devices*.
 
-    A module writer refuses an invalid target instead of falling back to the page device.
+    Every module view refuses an invalid target instead of falling back to the page device.
 
     Args:
         page_device (Device): The device whose Modules page posted the action.
@@ -382,7 +383,7 @@ def _authorize_module_grant(view, page_device, server_key, action, token):
     """
     from dcim.models import Device
 
-    from netbox_librenms_plugin.models import InventoryRuleFilterError
+    from netbox_librenms_plugin.models import RuleConfigurationError
 
     sync_device = _get_sync_device_for_inventory(page_device, server_key)
     inventory = _get_cached_inventory_for_device(sync_device, server_key, view.get_cache_key)
@@ -392,42 +393,12 @@ def _authorize_module_grant(view, page_device, server_key, action, token):
         policy = load_inventory_policy(page_device.pk)
     except Device.DoesNotExist as exc:
         raise GrantRefused(GrantRefusal.DESTINATION) from exc
-    except InventoryRuleFilterError as exc:
+    except RuleConfigurationError as exc:
         logger.error("Module action %s on %s refused: %s", action, page_device, exc)
         raise GrantRefused(GrantRefusal.RULE_ERROR) from exc
     grant = read_module_grant(token, action=action, page_device_id=page_device.pk, server_key=server_key)
     grant.check_state(inventory, policy)
     return _GrantedInventory(grant, inventory, _inventory_index_map(inventory), policy)
-
-
-def _resolve_target_device_with_validation(page_device, selected_device_id, devices):
-    """Resolve a target device and indicate whether selection input was invalid."""
-    if not selected_device_id:
-        return page_device, False
-
-    try:
-        selected_device_id = int(selected_device_id)
-    except (TypeError, ValueError):
-        return page_device, True
-
-    if selected_device_id == getattr(page_device, "pk", None):
-        return page_device, False
-
-    if not getattr(page_device, "virtual_chassis", None):
-        return page_device, True
-
-    member = devices.filter(pk=selected_device_id, virtual_chassis=page_device.virtual_chassis).first()
-    if member is None:
-        return page_device, True
-    return member, False
-
-
-def _warn_invalid_selected_device(request):
-    """Warn the user that selected device input was invalid and fallback was applied."""
-    messages.warning(
-        request,
-        "Invalid selected device context detected; falling back to the page device for this operation.",
-    )
 
 
 class _SerialConflictAmbiguous(Exception):
@@ -2446,16 +2417,14 @@ class ModuleInterfaceTypePreviewView(LibreNMSPermissionMixin, NetBoxObjectPermis
             return error
 
         page_device = self.restrict_object_or_404(Device, pk=pk)
-        target_device, invalid_selected_device = _resolve_target_device_with_validation(
-            page_device,
-            request.GET.get("selected_device_id"),
-            self.restricted_queryset(Device),
-        )
-        if invalid_selected_device:
-            _warn_invalid_selected_device(request)
         server_key = self.resolve_posted_server_key_or_none(request.GET)
         if server_key is None:
             return HttpResponse(NO_LIBRENMS_SERVER_MESSAGE, status=400)
+        target_device = _resolve_destination(
+            page_device, request.GET.get("selected_device_id"), self.restricted_queryset(Device)
+        )
+        if target_device is None:
+            return HttpResponse(GrantRefusal.DESTINATION.message, status=400)
 
         try:
             module_id = int(request.GET.get("module_id"))
@@ -2524,13 +2493,12 @@ class ApplyModuleInterfaceTypesView(
             messages.error(request, NO_LIBRENMS_SERVER_MESSAGE)
             return _modules_action_response(request, page_device)
 
-        target_device, invalid_selected_device = _resolve_target_device_with_validation(
-            page_device,
-            request.POST.get("selected_device_id"),
-            self.restricted_queryset(Device),
+        target_device = _resolve_destination(
+            page_device, request.POST.get("selected_device_id"), self.restricted_queryset(Device)
         )
-        if invalid_selected_device:
-            _warn_invalid_selected_device(request)
+        if target_device is None:
+            messages.error(request, GrantRefusal.DESTINATION.message)
+            return _modules_action_response(request, page_device, server_key)
 
         try:
             module_id = int(request.POST.get("module_id"))
@@ -2817,13 +2785,11 @@ class VCNormalizationReportView(LibreNMSPermissionMixin, NetBoxObjectPermissionM
             return HttpResponse("Missing or invalid module_id.", status=400)
 
         page_device = self.restrict_object_or_404(Device, pk=pk)
-        target_device, invalid_selected_device = _resolve_target_device_with_validation(
-            page_device,
-            request.GET.get("selected_device_id"),
-            self.restricted_queryset(Device),
+        target_device = _resolve_destination(
+            page_device, request.GET.get("selected_device_id"), self.restricted_queryset(Device)
         )
-        if invalid_selected_device:
-            _warn_invalid_selected_device(request)
+        if target_device is None:
+            return HttpResponse(GrantRefusal.DESTINATION.message, status=400)
 
         module = self.restrict_object_or_404(
             Module,
@@ -3147,14 +3113,13 @@ class MoveModuleView(
             return error
 
         page_device = self.restrict_object_or_404(Device, pk=pk)
-        target_device, invalid_selected_device = _resolve_target_device_with_validation(
-            page_device,
-            request.POST.get("selected_device_id"),
-            self.restricted_queryset(Device),
-        )
-        if invalid_selected_device:
-            _warn_invalid_selected_device(request)
         server_key = self.resolve_posted_server_key_or_none(request.POST)
+        target_device = _resolve_destination(
+            page_device, request.POST.get("selected_device_id"), self.restricted_queryset(Device)
+        )
+        if target_device is None:
+            messages.error(request, GrantRefusal.DESTINATION.message)
+            return _modules_action_response(request, page_device, server_key)
 
         # The rendered control is advisory; a scripted POST never reads it.
         if not netbox_relocates_module_subtree():
@@ -3380,12 +3345,16 @@ class AddBayTemplateView(
 
         librenms_pattern = "".join(pattern_parts)
         netbox_replacement = "".join(replacement_parts)
+        # The pattern is derived from two bay names, not stored, so a failure only means no suggestion.
+        # nosemgrep: regex-error-must-raise
         try:
             compiled = re.compile(librenms_pattern)
         except REGEX_COMPILE_ERRORS:
             return None
         if not compiled.fullmatch(librenms_name):
             return None
+        # The replacement is derived from two bay names, not stored, so a failure only means no suggestion.
+        # nosemgrep: regex-error-must-raise
         try:
             if compiled.sub(netbox_replacement, librenms_name) != netbox_name:
                 return None
@@ -3429,13 +3398,11 @@ class AddBayTemplateView(
             qs = qs.filter(models.Q(manufacturer=manufacturer) | models.Q(manufacturer__isnull=True))
         else:
             qs = qs.filter(manufacturer__isnull=True)
-        for mapping in qs.only("librenms_name"):
-            try:
-                if re.compile(mapping.librenms_name).fullmatch(librenms_name):
-                    return True
-            except REGEX_COMPILE_ERRORS:
-                continue
-        return False
+        # A blank regex row has no pattern, as the bay lookup holds.
+        return any(
+            mapping._compiled_pattern is not None and mapping._compiled_pattern.fullmatch(librenms_name)
+            for mapping in qs
+        )
 
     @staticmethod
     def _existing_bay_mapping(librenms_name, librenms_class, manufacturer):

@@ -660,11 +660,11 @@ class TestPlatformAndPatternHelpers:
             }
         }
 
-        result = _device_view()._get_platform_info(details, device)
+        result = _device_view()._get_platform_info(details, device, None)
 
-        assert result["platform_exists"] is True
-        assert result["matching_platform"] == platform
-        assert result["platform_name"] == "SyncOS"
+        assert result["assessment"].target == platform
+        assert result["assessment"].operation == "assign"
+        assert result["librenms_os"] == "SyncOS"
         assert result["librenms_version"] == "9.1"
 
     def test_missing_platform_name_has_no_match(self, librenms_server):
@@ -676,11 +676,10 @@ class TestPlatformAndPatternHelpers:
             }
         }
 
-        result = _device_view()._get_platform_info(details, device)
+        result = _device_view()._get_platform_info(details, device, None)
 
-        assert result["platform_exists"] is False
-        assert result["matching_platform"] is None
-        assert result["platform_name"] is None
+        assert result["assessment"].reason == "no_os"
+        assert result["assessment"].operation is None
 
     def test_vc_pattern_strips_configured_suffixes(self, librenms_server):
         from netbox_librenms_plugin.models import LibreNMSSettings

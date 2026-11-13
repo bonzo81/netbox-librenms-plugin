@@ -11,6 +11,9 @@
 {#   use_htmx                - (optional) When True adds hx-post/hx-swap attributes #}
 {#   htmx_include            - (optional) CSS selector string for hx-include #}
 {#   server_key              - (optional) LibreNMS server key, forwarded as hidden field #}
+{#   tracked_version         - (optional) True when platform version tracking also creates a version platform #}
+{#   librenms_version        - (optional) LibreNMS OS version, shown with tracked_version #}
+{#   subject_noun            - (optional) What device_pk names, e.g. "virtual machine"; defaults to "device" #}
 <div class="modal-header">
     <h5 class="modal-title" id="createPlatformModalLabel">
         {% if libre_device %}<i class="mdi mdi-cog-outline"></i> Manage platform — <code>{{ librenms_os }}</code>{% else %}<i class="mdi mdi-alert"></i> Create New Platform{% endif %}
@@ -29,6 +32,9 @@
 <form{% if use_htmx %} hx-post="{{ form_action }}" hx-swap="none"{% if htmx_include %} hx-include="{{ htmx_include }}"{% endif %}{% else %} method="post" action="{{ form_action }}"{% endif %}>
     {% csrf_token %}
     <input type="hidden" name="librenms_os" value="{{ librenms_os }}">
+    {% if tracked_version %}
+    <input type="hidden" name="librenms_version" value="{{ librenms_version }}">
+    {% endif %}
     {% if server_key %}
     <input type="hidden" name="server_key" value="{{ server_key }}">
     {% endif %}
@@ -45,7 +51,8 @@
         <p>This will:</p>
         <ol>
             <li>Create a Platform with the name below (defaults to the LibreNMS OS name), or reuse the existing one if a platform with that name already exists — its details are left unchanged</li>
-            {% if device_pk %}<li>Assign it to this device</li>{% endif %}
+            {% if tracked_version %}<li>Create the version platform for <strong>{{ librenms_version }}</strong> under it, named after it and the version</li>{% endif %}
+            {% if device_pk %}<li>Assign {% if tracked_version %}the version platform{% else %}it{% endif %} to this {{ subject_noun|default:"device" }}</li>{% endif %}
             <li>Optionally add a platform mapping so future syncs match correctly</li>
         </ol>
         <div class="mb-3">

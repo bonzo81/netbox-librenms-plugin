@@ -67,6 +67,49 @@ def test_relationship_diagnostics_modal_opens_without_bootstrap(page):
     assert page.locator(".modal-backdrop").count() == 0
 
 
+def test_the_platform_row_opens_the_create_platform_modal_without_bootstrap(page):
+    """The device and VM sync pages share the platform row; its Create & Sync button opens the real modal form."""
+    from types import SimpleNamespace
+
+    from django.template import Context, Engine
+
+    engine = Engine(dirs=[str(TEMPLATE_DIR.parent)])
+    assessment = SimpleNamespace(
+        reason="os_platform_missing", state="proposed", operation="create_os_platform", tracks_version=False
+    )
+    row = engine.get_template("netbox_librenms_plugin/inc/_platform_sync_row.html").render(
+        Context(
+            {"object": SimpleNamespace(platform=None), "platform_info": {"assessment": assessment}, "csrf_token": "t"},
+            use_l10n=False,
+        )
+    )
+    form = engine.get_template("netbox_librenms_plugin/htmx/create_platform_modal.html").render(
+        Context(
+            {"librenms_os": "junos", "platform_name": "junos", "form_action": "/c/", "device_pk": 1, "csrf_token": "t"},
+            use_l10n=False,
+        )
+    )
+    page.set_content(
+        "<style>.modal { display: none; } .modal.show { display: block; }</style>"
+        f"<table><tbody>{row}</tbody></table>"
+        '<div class="modal fade" id="create-platform-modal" tabindex="-1" aria-hidden="true">'
+        f'<div class="modal-dialog"><div class="modal-content">{form}</div></div></div>'
+    )
+    _add_page_scripts(page)
+
+    assert page.evaluate("typeof bootstrap") == "undefined"
+    modal = page.locator("#create-platform-modal")
+    assert not modal.is_visible()
+    page.get_by_role("button", name="Create & Sync").click()
+    assert modal.is_visible()
+    assert modal.get_attribute("aria-modal") == "true"
+    assert modal.locator("input[name=librenms_os]").get_attribute("value") == "junos"
+
+    modal.get_by_role("button", name="Cancel").click()
+    assert not modal.is_visible()
+    assert page.locator(".modal-backdrop").count() == 0
+
+
 # ===========================================================================
 # Interface selection: the requirement cascade and cross-page state
 # ===========================================================================
@@ -497,6 +540,28 @@ class TestAMovedMemberIsNotRestored:
 
         assert ("select", "10") in pairs
         assert ("device_selection_10", "2") in pairs
+
+
+def test_a_refused_member_check_shows_the_server_reason_and_keeps_the_member(page):
+    """The middleware answers a broken rule with a 409 JSON error, and the operator must see its text."""
+    reason = 'Interface type mapping "Gi" (ID 7) stores an invalid name_pattern: (. Fix the rule, then try again.'
+    _load_verify_page(page, OTHER_PAGE_ROWS)
+    page.evaluate("document.body.insertAdjacentHTML('afterbegin', '<div id=\"django-messages\"></div>')")
+    page.route(
+        "**/plugins/librenms_plugin/verify-interface/",
+        lambda route: route.fulfill(status=409, content_type="application/json", body=json.dumps({"error": reason})),
+    )
+
+    page.evaluate(
+        """() => {
+            const select = document.querySelector('tr[data-port-id="40"] .vc-member-select');
+            select.value = '2';
+            handleInterfaceChange(select, '2');
+        }"""
+    )
+
+    expect(page.locator("#django-messages .toast-body")).to_have_text(f"{reason} The row keeps its previous member.")
+    expect(page.locator('tr[data-port-id="40"] .vc-member-select')).to_have_value("1")
 
 
 CABLE_VERIFY_URL = "https://plugin.example.com/verify-cable/"
@@ -5158,9 +5223,9 @@ PHONE_TABLES = {
         * 3
         + "</tbody></table>",
     },
-    "device-info-sync-table": {
+    "librenms-info-sync-table": {
         "toolbar": "",
-        "table": '<table class="table table-sm table-hover mb-0 device-info-sync-table" id="device-info-sync-table">'
+        "table": '<table class="table table-sm table-hover mb-0 librenms-info-sync-table" id="librenms-info-sync-table">'
         '<thead><tr><th style="width: 20%; padding-left: 1rem;">Field</th><th style="width: 40%;">NetBox Value</th>'
         '<th style="width: 40%;">LibreNMS Value</th></tr></thead><tbody>'
         '<tr><td style="padding-left: 1rem;">Name <i class="mdi mdi-information-outline text-muted ms-1"></i></td>'

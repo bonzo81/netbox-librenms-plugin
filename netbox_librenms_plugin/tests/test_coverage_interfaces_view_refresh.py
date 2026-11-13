@@ -128,35 +128,34 @@ class TestInterfaceRefreshStaleServerKey:
 
 @pytest.mark.django_db
 class TestInterfaceRefreshFailClosedExits:
-    def test_unmapped_device_redirects_and_records_a_failed_refresh(self, librenms_server, settings):
-        """No LibreNMS mapping: error, refresh_failed state, and a server_key-preserving redirect."""
+    def test_unmapped_device_renders_the_tab_and_records_a_failed_refresh(self, librenms_server, settings):
+        """No LibreNMS mapping: error, refresh_failed state, and the tab on the POSTed server."""
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         device = make_device("iface-unmapped")
 
         response, _view, request = _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
 
-        assert response.status_code == 302
-        assert response["Location"] == (
-            f"/plugins/librenms_plugin/devices/{device.pk}/interface-sync/?server_key={SERVER_KEY}"
-        )
+        assert response.status_code == 200
+        assert "Location" not in response
         assert message_texts(request, "error") == ["Device not found in LibreNMS."]
         assert _tab_state(device)["state"] == "refresh_failed"
 
     def test_ports_fetch_failure_surfaces_the_librenms_error(self, librenms_server, settings):
-        """A 404 on the ports endpoint redirects with the client's error text."""
+        """A 404 on the ports endpoint renders the tab with the client's error text."""
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         device = _map_device(make_device("iface-ports-404"), 11)
 
         response, _view, request = _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
 
-        assert response.status_code == 302
+        assert response.status_code == 200
+        assert "Location" not in response
         assert message_texts(request, "error") == ["Device not found in LibreNMS"]
         assert _tab_state(device)["state"] == "refresh_failed"
 
     def test_malformed_ports_payload_fails_closed(self, librenms_server, settings):
-        """A 200 whose "ports" is not a list of dicts must redirect, not 500 on enrichment."""
+        """A 200 whose "ports" is not a list of dicts must render the tab, not 500 on enrichment."""
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
 
         device = _map_device(make_device("iface-ports-malformed"), 12)
@@ -164,9 +163,42 @@ class TestInterfaceRefreshFailClosedExits:
 
         response, view, request = _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
 
-        assert response.status_code == 302
+        assert response.status_code == 200
+        assert "Location" not in response
         assert message_texts(request, "error") == ["Unexpected response from LibreNMS (malformed ports payload)."]
         assert _cached_ports(view, device) is None
+
+
+@pytest.mark.django_db
+class TestInterfaceRefreshFailureThroughTheUrl:
+    @pytest.mark.parametrize(
+        ("url_name", "make_owner"),
+        [("device_interface_sync", make_device), ("vm_interface_sync", make_vm)],
+    )
+    def test_failed_refresh_answers_the_htmx_post_with_the_tab(
+        self, client, librenms_server, settings, url_name, make_owner
+    ):
+        """The refresh URL accepts only POST, so a failed refresh must answer with the tab, not a redirect to it."""
+        from django.urls import reverse
+
+        owner = make_owner(f"iface-refresh-fail-{url_name}")
+        _bind_server(settings, librenms_server)
+        client.force_login(make_superuser())
+
+        response = client.post(
+            reverse(f"plugins:netbox_librenms_plugin:{url_name}", kwargs={"pk": owner.pk}),
+            {"server_key": SERVER_KEY},
+            HTTP_HX_REQUEST="true",
+            follow=True,
+        )
+
+        assert response.redirect_chain == []
+        assert response.status_code == 200
+        assert "netbox_librenms_plugin/_interface_sync_content.html" in [t.name for t in response.templates]
+        assert response.context["interface_sync"]["table"] is None
+        assert response.context["interface_sync"]["server_key"] == SERVER_KEY
+        assert "Device not found in LibreNMS." in response.content.decode()
+        assert _tab_state(owner)["state"] == "refresh_failed"
 
 
 @pytest.mark.django_db
@@ -192,6 +224,23 @@ class TestInterfaceRefreshOobMerge:
         paths = [r["path"] for r in librenms_server.requests]
         assert paths == ["/api/v0/devices/21/ports", "/api/v0/devices/21", "/api/v0/devices/21/port_stack"]
         assert not any("not-an-id" in path for path in paths)
+
+    def test_a_broken_port_stack_rule_records_the_failed_refresh(self, librenms_server, settings):
+        """The refresh deleted the snapshot first, so the tab state must say the refresh failed, not missing."""
+        from netbox_librenms_plugin.models import PortStackLagPattern, RuleConfigurationError
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView
+
+        device = _map_device(make_device("iface-broken-port-stack-rule"), 23)
+        librenms_server.ports_response(device_id=23, ports=[{"port_id": 1, "ifName": "eth0"}])
+        librenms_server.device_info_response(device_id=23, hostname=device.name, os="rule-error-os")
+        PortStackLagPattern.objects.bulk_create(
+            [PortStackLagPattern(librenms_os="rule-error-os", lag_name_pattern="(")]
+        )
+
+        with pytest.raises(RuleConfigurationError):
+            _refresh(DeviceInterfaceTableView, device, librenms_server, settings)
+
+        assert _tab_state(device)["state"] == "refresh_failed"
 
     def test_oob_ports_merge_and_only_real_shared_macs_are_flagged(self, librenms_server, settings):
         """OOB rows merge in tagged _source=oob, and only a real MAC on both sides is a conflict."""

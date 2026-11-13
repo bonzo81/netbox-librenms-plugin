@@ -451,6 +451,27 @@ def test_a_rule_that_does_not_work_renders_no_table_and_no_grant(ui, c8300, brea
     assert "inventory_binding" not in content
 
 
+def test_a_broken_optic_serial_rule_discards_the_old_snapshot_and_names_the_rule(ui, c8300):
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, SyncTabState
+
+    device, _entities = c8300
+    render(ui, device)
+    assert cache.get(cache_key(device)) is not None
+    rule, field = _break_serial_replacement()
+
+    content = render(ui, device)
+
+    assert 'id="module-inventory-rule-error"' in content
+    assert rule.get_absolute_url() in content and f"<code>{field}</code>" in content
+    assert "inventory_binding" not in content
+    assert "Inventory data refreshed successfully." not in content
+    assert cache.get(cache_key(device)) is None
+    state = cache.get(SyncCacheConsistency(device).state_key(SyncTab.MODULES, SERVER_KEY))
+    assert state["state"] == SyncTabState.REFRESH_FAILED.value
+
+
 @pytest.mark.parametrize("breakage", list(BREAKAGES))
 @pytest.mark.parametrize("writer", list(WRITERS))
 def test_a_rule_broken_after_render_refuses_every_writer(ui, c8300, writer, breakage):
@@ -671,6 +692,72 @@ def test_verify_issues_no_grant_for_a_row_the_member_table_hides(ui, vc_grants):
 
     assert response.status_code == 404
     assert "inventory_binding" not in response.content.decode()
+
+
+def test_verify_builds_one_table_per_request(ui, vc_grants, monkeypatch):
+    """The page table signed the verify grant, so verify builds only the table pinned to the member."""
+    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+    page, member = vc_grants()
+    content = render(ui, page)
+    build = BaseModuleTableView._build_context
+    pinned_to = []
+
+    def counted_build(self, *args, pin_to=None, **kwargs):
+        pinned_to.append(getattr(pin_to, "pk", None))
+        return build(self, *args, pin_to=pin_to, **kwargs)
+
+    monkeypatch.setattr(BaseModuleTableView, "_build_context", counted_build)
+
+    response = verify(ui, content, page, member, CARRIER)
+
+    assert response.status_code == 200, response.content
+    assert pinned_to == [member.pk]
+
+
+def test_a_second_verify_keeps_the_rows_the_page_table_hides_out_of_the_branch(ui, vc_grants):
+    """The verified row signs the page rows again, so a second member change still leaves Optic 2 out."""
+    page, member = vc_grants()
+    _rule("Page vendor hides optic 2", "Optic 2", page.device_type.manufacturer)
+    first = verify(ui, render(ui, page), page, member, CARRIER).json()["formatted_row"]
+
+    response = verify(ui, first["device_selection"], page, member, CARRIER)
+
+    assert response.status_code == 200, response.content
+    action, fields = rendered_module_form(response.json()["formatted_row"]["actions"], "install-branch", CARRIER)
+    post(ui, action, fields)
+    assert _installed(member) == {("Carrier Slot", "GR-CARRIER"), ("Cage 1", "GR-OPTIC")}
+
+
+def test_verify_refuses_a_grant_of_another_snapshot(ui, vc_grants):
+    from netbox_librenms_plugin.module_grants import GrantRefusal
+
+    page, member = vc_grants()
+    content = render(ui, page)
+    edit_cached_row(page, OPTIC_2, entPhysicalSerialNum="SN-O2-REPLACED")
+
+    response = verify(ui, content, page, member, CARRIER)
+
+    assert response.status_code == 409
+    assert response.json()["message"] == GrantRefusal.SNAPSHOT.message
+
+
+def test_a_verify_grant_checks_its_state_like_every_other_grant(ui, vc_grants):
+    """A verify row carries an index and no target, so the state check must not read a target from it."""
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+    from netbox_librenms_plugin.module_grants import ACTION_VERIFY_MODULE, read_module_grant
+
+    page, _member = vc_grants()
+    content = render(ui, page)
+    (select,) = [attrs for attrs in module_tab_forms(content).selects if attrs.get("data-module") == str(CARRIER)]
+    grant = read_module_grant(
+        select["data-verify-binding"], action=ACTION_VERIFY_MODULE, page_device_id=page.pk, server_key=SERVER_KEY
+    )
+    assert grant.rows
+
+    assert grant.check_state(cache.get(cache_key(page))["inventory"], load_inventory_policy(page.pk)) is grant
 
 
 def test_a_selected_install_onto_another_member_needs_the_verified_override(ui, vc_grants):

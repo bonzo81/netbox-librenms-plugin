@@ -1048,6 +1048,8 @@ class LibreNMSAPI:
 
             compiled_patterns = []
             for pattern_str in lag_patterns.values():
+                # A caller-supplied recording pattern, not a stored rule; the stored rules come in compiled.
+                # nosemgrep: regex-error-must-raise
                 try:
                     compiled_patterns.append(_re.compile(pattern_str))
                 except (*REGEX_COMPILE_ERRORS, TypeError) as exc:
@@ -1077,6 +1079,8 @@ class LibreNMSAPI:
 
                 compiled_bridge_patterns = []
                 for pattern_str in bridge_patterns.values():
+                    # A caller-supplied recording pattern, not a stored rule; the stored rules come in compiled.
+                    # nosemgrep: regex-error-must-raise
                     try:
                         compiled_bridge_patterns.append(_re.compile(pattern_str))
                     except (*REGEX_COMPILE_ERRORS, TypeError) as exc:
