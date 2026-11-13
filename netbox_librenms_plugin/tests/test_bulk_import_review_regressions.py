@@ -661,9 +661,17 @@ def test_collision_precheck_skips_import_prerequisite_queries():
         "netbox_librenms_plugin_platformmapping",
         "virtualization_cluster",
     }
+    # The serial rules are identity input, not a prerequisite: the batch reads them once.
+    serial_rule_reads = [
+        query["sql"]
+        for query in captured.captured_queries
+        if "netbox_librenms_plugin_normalizationrule" in query["sql"].lower() and "'serial'" in query["sql"]
+    ]
+    assert len(serial_rule_reads) <= 1
     unexpected = [
         query["sql"]
         for query in captured.captured_queries
         if any(table in query["sql"].lower() for table in import_prerequisite_tables)
+        and query["sql"] not in serial_rule_reads
     ]
     assert unexpected == []

@@ -130,6 +130,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
 
         # Load cached devices from job using shared cache keys
         from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         job_data = job.data or {}
         device_ids = job_data.get("device_ids", [])
@@ -163,8 +164,9 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
             logger.warning(f"Job {job_id} missing device_ids")
             return []
 
-        # Fetch devices from cache using shared keys
+        # Fetch devices from cache using shared keys; a serial rule edit since the job makes them a miss.
         validated_devices = []
+        serial_rules = SerialRules.load()
         for device_id in device_ids:
             cache_key = get_validated_device_cache_key(
                 server_key=server_key,
@@ -173,6 +175,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
                 vc_enabled=vc_enabled,
                 use_sysname=use_sysname,
                 strip_domain=strip_domain,
+                serial_rules=serial_rules,
             )
             device = cache.get(cache_key)
             if device:

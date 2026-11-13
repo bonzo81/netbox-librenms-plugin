@@ -207,6 +207,7 @@ def get_validated_device_cache_key(
     vc_enabled: bool,
     use_sysname: bool = True,
     strip_domain: bool = False,
+    serial_rules=None,
 ) -> str:
     """
     Generate a consistent cache key for validated device data.
@@ -221,6 +222,7 @@ def get_validated_device_cache_key(
         vc_enabled: Whether virtual chassis detection was enabled
         use_sysname: Whether sysName is preferred over hostname for device naming
         strip_domain: Whether domain suffix is stripped from device names
+        serial_rules: The SerialRules the validation used; None reads them. A rule edit changes the key.
 
     Returns:
         str: Cache key for the validated device
@@ -228,14 +230,18 @@ def get_validated_device_cache_key(
     Example:
         >>> key = get_validated_device_cache_key('default', {'location': 'NYC'}, 123, True)
         >>> key
-        'validated_device_default_154d56ec9289d49c_123_vc_sysname=True_strip=False'
+        'validated_device_default_154d56ec9289d49c_123_vc_sysname=True_strip=False_rules=4f53cda18c2baa0c'
     """
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
     # Sort filters for a deterministic, cross-process stable hash; None values are excluded
     # (consistent with get_cache_metadata_key).
     filter_hash = _build_filter_hash(filters)
     vc_part = "vc" if vc_enabled else "novc"
+    rules_part = (serial_rules or SerialRules.load()).digest[:16]
     return (
         f"validated_device_{server_key}_{filter_hash}_{device_id}_{vc_part}_sysname={use_sysname}_strip={strip_domain}"
+        f"_rules={rules_part}"
     )
 
 

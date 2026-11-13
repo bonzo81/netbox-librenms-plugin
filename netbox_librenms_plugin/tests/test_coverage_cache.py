@@ -117,16 +117,29 @@ class TestCacheKeyContracts:
         assert with_zero != without_optional
         assert with_false != without_optional
 
-    def test_validated_device_key_tracks_device_and_virtual_chassis_mode(self):
+    def test_validated_device_key_tracks_device_virtual_chassis_mode_and_serial_rules(self):
         from netbox_librenms_plugin.import_utils.cache import get_validated_device_cache_key
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
-        baseline = get_validated_device_cache_key("default", {"type": "network"}, 42, False)
-        same = get_validated_device_cache_key("default", {"type": "network"}, 42, False)
+        no_rules = SerialRules(())
+        seeded = SerialRules(
+            [NormalizationRule(pk=1, scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1", priority=100)]
+        )
+        baseline = get_validated_device_cache_key("default", {"type": "network"}, 42, False, serial_rules=no_rules)
+        same = get_validated_device_cache_key("default", {"type": "network"}, 42, False, serial_rules=no_rules)
 
         assert baseline == same
-        assert baseline != get_validated_device_cache_key("default", {"type": "network"}, 43, False)
-        assert baseline != get_validated_device_cache_key("default", {"type": "network"}, 42, True)
-        assert baseline.endswith("_42_novc_sysname=True_strip=False")
+        assert baseline != get_validated_device_cache_key(
+            "default", {"type": "network"}, 43, False, serial_rules=no_rules
+        )
+        assert baseline != get_validated_device_cache_key(
+            "default", {"type": "network"}, 42, True, serial_rules=no_rules
+        )
+        assert baseline != get_validated_device_cache_key(
+            "default", {"type": "network"}, 42, False, serial_rules=seeded
+        )
+        assert "_42_novc_sysname=True_strip=False_rules=" in baseline
 
     def test_import_device_key_includes_the_server_and_device(self):
         from netbox_librenms_plugin.import_utils.cache import (

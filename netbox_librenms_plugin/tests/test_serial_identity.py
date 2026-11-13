@@ -660,6 +660,77 @@ _REPLACED_HELPERS = frozenset(
 )
 
 
+@pytest.fixture
+def caching_librenms(settings, monkeypatch, request):
+    """A real loopback LibreNMS whose search results the plugin caches, under a server key of this test only."""
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    from netbox_librenms_plugin.tests.conftest import configure_librenms_servers
+    from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
+
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+    monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+    server_key = re.sub(r"[^a-z0-9]+", "-", f"serial-cache-{request.node.name}".lower())
+    with librenms_mock_server() as server:
+        configure_librenms_servers(
+            settings, {server_key: {"librenms_url": server.url, "api_token": "cache-token", "cache_timeout": 300}}
+        )
+        yield server, LibreNMSAPI(server_key=server_key)
+
+
+def _cached_search(caching_librenms, serial):
+    """Search LibreNMS for one device through the import search, which caches its validation."""
+    from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
+
+    server, api = caching_librenms
+    row = {"device_id": 7810, "hostname": "cache-incoming", "sysName": "cache-incoming", "serial": serial}
+    server.register("/api/v0/devices", {"status": "ok", "devices": [{**row, "disabled": 0, "hardware": "", "os": ""}]})
+    server.vc_inventory_callable(7810, [], {})
+    (found,) = process_device_filters(
+        api, {"hostname": "cache-incoming"}, vc_detection_enabled=False, clear_cache=False, show_disabled=True
+    )
+    return found["_validation"]
+
+
+class TestCachedSearchResults:
+    """S5: a cached search result shows the serial match that the current rules and rows give."""
+
+    def test_a_rule_deletion_drops_a_cached_serial_match(self, caching_librenms):
+        _rules_only((SEEDED, r"\1", None))
+        holder = make_device("cache-rule-holder", serial="S/N CACHE-SN1")
+        assert _cached_search(caching_librenms, "CACHE-SN1")["existing_device"] == holder
+
+        _rules_only()
+
+        assert _cached_search(caching_librenms, "CACHE-SN1")["existing_device"] is None
+
+    def test_a_rule_deletion_recomputes_the_serial_drift_of_a_cached_hostname_match(self, caching_librenms):
+        _rules_only((SEEDED, r"\1", None))
+        make_device("cache-incoming", serial="S/N CACHE-SN3")
+        assert _cached_search(caching_librenms, "CACHE-SN3")["serial_action"] is None
+
+        _rules_only()
+
+        assert _cached_search(caching_librenms, "CACHE-SN3")["serial_action"] == "update_serial"
+
+    @pytest.mark.parametrize("change", ["equivalent-duplicate", "holder-serial-changed"])
+    def test_a_row_change_drops_a_cached_serial_match(self, caching_librenms, change):
+        from dcim.models import Device
+
+        _rules_only((SEEDED, r"\1", None))
+        holder = make_device(f"cache-row-holder-{change}", serial="S/N CACHE-SN2")
+        assert _cached_search(caching_librenms, "CACHE-SN2")["existing_device"] == holder
+
+        if change == "equivalent-duplicate":
+            make_device(f"cache-row-twin-{change}", serial="CACHE-SN2")
+        else:
+            Device.objects.filter(pk=holder.pk).update(serial="REPLACED-SN9")
+        validation = _cached_search(caching_librenms, "CACHE-SN2")
+
+        assert validation["existing_device"] is None
+        if change == "equivalent-duplicate":
+            assert validation["can_import"] is False
+
+
 def _serial_bypasses(source):
     """Return ``(line, form)`` for each replaced-helper reference and each lookup on the serial column."""
     import ast

@@ -18,7 +18,7 @@ from ..import_validation_helpers import (
 )
 from ..librenms_api import LibreNMSAPI
 from ..librenms_ids import coerce_librenms_id
-from ..serial_identity import ResolutionKind, SerialRules, fingerprint, resolve_device
+from ..serial_identity import ResolutionKind, SerialRules, fingerprint, is_sole_holder, resolve_device
 from ..transactions import classify_conflict
 from ..utils import (
     cached_row_matches,
@@ -910,7 +910,19 @@ def _refresh_existing_device(  # noqa: C901
                     # independent of match_type) on a row that is actually host/OOB-linked. Drop
                     # them; a row already cached as a link type keeps its link-derived fields.
                     _clear_existing_match_derived_fields(validation)
-                if prior_match in ("librenms_id", "librenms_oob") and validation.get("existing_match_type") is None:
+                if (
+                    libre_device
+                    and validation.get("existing_match_type") == "serial"
+                    and not is_sole_holder(
+                        refreshed, libre_device.get("serial"), rules=serial_rules or SerialRules.load()
+                    )
+                ):
+                    # The cached serial match no longer holds under the current rows: drop it like a vanished link.
+                    validation["existing_match_type"] = None
+                if (
+                    prior_match in ("librenms_id", "librenms_oob", "serial")
+                    and validation.get("existing_match_type") is None
+                ):
                     # The librenms-id/OOB link that made this the cached match is gone
                     # (removed/repointed in NetBox since caching). Treat it like a vanished
                     # match — clear it and recompute readiness, then fall through to the fresh
@@ -1463,6 +1475,7 @@ def process_device_filters(  # noqa: C901
             vc_enabled=vc_detection_enabled,
             use_sysname=use_sysname,
             strip_domain=strip_domain,
+            serial_rules=serial_rules,
         )
 
         # Check if we already have cached validation for this device

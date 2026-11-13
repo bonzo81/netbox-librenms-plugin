@@ -9,7 +9,7 @@ from copy import deepcopy
 
 import pytest
 
-from netbox_librenms_plugin.serial_identity import plain_context
+from netbox_librenms_plugin.serial_identity import SerialRules, plain_context
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
@@ -81,6 +81,7 @@ class TestCacheKeyGeneration:
             filters={"location": "NYC"},
             device_id=123,
             vc_enabled=True,
+            serial_rules=SerialRules(()),
         )
 
         assert "validated_device" in key
@@ -102,7 +103,9 @@ class TestCacheKeyGeneration:
         """Different naming preferences produce different cache keys."""
         from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
 
-        base_args = dict(server_key="default", filters={}, device_id=123, vc_enabled=False)
+        base_args = dict(
+            server_key="default", filters={}, device_id=123, vc_enabled=False, serial_rules=SerialRules(())
+        )
         key_default = get_validated_device_cache_key(**base_args)
         key_no_sysname = get_validated_device_cache_key(**base_args, use_sysname=False)
         key_strip = get_validated_device_cache_key(**base_args, strip_domain=True)
@@ -387,7 +390,9 @@ class TestDeviceRetrieval:
         """Generate cache key without VC enabled."""
         from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
 
-        key = get_validated_device_cache_key(server_key="default", filters={}, device_id=100, vc_enabled=False)
+        key = get_validated_device_cache_key(
+            server_key="default", filters={}, device_id=100, vc_enabled=False, serial_rules=SerialRules(())
+        )
 
         assert "novc" in key
 
@@ -395,8 +400,13 @@ class TestDeviceRetrieval:
         """Generate cache key with VC enabled."""
         from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
 
-        key_vc = get_validated_device_cache_key(server_key="default", filters={}, device_id=100, vc_enabled=True)
-        key_novc = get_validated_device_cache_key(server_key="default", filters={}, device_id=100, vc_enabled=False)
+        no_rules = SerialRules(())
+        key_vc = get_validated_device_cache_key(
+            server_key="default", filters={}, device_id=100, vc_enabled=True, serial_rules=no_rules
+        )
+        key_novc = get_validated_device_cache_key(
+            server_key="default", filters={}, device_id=100, vc_enabled=False, serial_rules=no_rules
+        )
 
         # Keys should be different based on VC setting
         assert key_vc != key_novc
