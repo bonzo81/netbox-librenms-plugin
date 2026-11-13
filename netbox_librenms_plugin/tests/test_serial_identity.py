@@ -406,7 +406,22 @@ class TestAmbiguity:
         second = make_device("ambiguous-exclude-b", serial=" EXCL-SN1 ")
 
         assert resolve_device("EXCL-SN1", exclude_pks=[first.pk]).object == second
-        assert resolve_device("EXCL-SN1").excluding([second.pk]).object == first
+
+    def test_a_read_that_stops_at_two_refuses_an_exclusion_it_cannot_count(self):
+        from netbox_librenms_plugin.serial_identity import resolve_modules
+        from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
+
+        holders = [
+            install_module(
+                make_device_with_module_bays(f"spare-{tag}", ["Slot 1"]), "Slot 1", "SPARE-CARD", serial="SPARE-SN1"
+            )
+            for tag in "abc"
+        ]
+
+        with pytest.raises(RuntimeError):
+            resolve_modules(["SPARE-SN1"])["SPARE-SN1"].excluding([holders[0].pk])
+        found = resolve_modules(["SPARE-SN1"], spare=1)["SPARE-SN1"].excluding([holders[0].pk])
+        assert found.kind is ResolutionKind.AMBIGUOUS
 
     def test_import_validation_blocks_a_duplicate_that_the_user_cannot_see(self):
         from dcim.models import Device

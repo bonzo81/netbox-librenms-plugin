@@ -3443,6 +3443,21 @@ class TestDetectSerialConflicts:
         assert not row.get("can_move_from")
         assert row.get("serial_conflict_ambiguous") is True
 
+    def test_three_holders_stay_ambiguous_after_the_installed_one_is_left_out(self):
+        """The bay's own module is the first of three holders: two others remain, so nothing is named."""
+        view = self._view()
+        installed = self._make_module("triple-a", "TRIPLE-SN1")
+        self._make_module("triple-b", "TRIPLE-SN1")
+        self._make_module("triple-c", "TRIPLE-SN1")
+
+        row = {"can_replace": True, "serial": "TRIPLE-SN1", "installed_module_id": installed.pk}
+
+        view._detect_serial_conflicts([row])
+
+        assert row.get("serial_conflict_module") is None
+        assert not row.get("can_move_from")
+        assert row.get("serial_conflict_ambiguous") is True
+
     def test_can_install_no_serial_not_flagged(self, django_assert_num_queries):
         """A can_install row with no serial is not checked for conflicts."""
         view = self._view()
