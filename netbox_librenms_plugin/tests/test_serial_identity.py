@@ -758,6 +758,45 @@ class TestCachedSearchResults:
             assert validation["can_import"] is False
 
 
+class TestCompletedSearchJobResults:
+    """S5: a completed background search shows the serial match that the current rows give."""
+
+    @pytest.mark.parametrize("change", ["equivalent-duplicate", "holder-serial-changed"])
+    def test_a_row_change_drops_the_serial_match_of_a_completed_job(self, caching_librenms, change):
+        from uuid import uuid4
+
+        from core.models import Job
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
+
+        _rules_only((SEEDED, r"\1", None))
+        holder = make_device(f"job-holder-{change}", serial="S/N JOB-SN1")
+        assert _cached_search(caching_librenms, "JOB-SN1")["existing_device"] == holder
+        user = make_superuser(f"job-serial-user-{change}")
+        job = Job.objects.create(
+            name="Completed import search",
+            user=user,
+            job_id=uuid4(),
+            status="completed",
+            data={
+                "device_ids": [7810],
+                "filters": {"hostname": "cache-incoming"},
+                "server_key": caching_librenms[1].server_key,
+                "vc_detection_enabled": False,
+            },
+        )
+        if change == "equivalent-duplicate":
+            make_device(f"job-twin-{change}", serial="JOB-SN1")
+        else:
+            Device.objects.filter(pk=holder.pk).update(serial="REPLACED-SN9")
+
+        (row,) = LibreNMSImportView()._load_job_results(job.pk, user)
+
+        assert row["_validation"]["existing_device"] is None
+
+
 def _serial_bypasses(source):
     """Return ``(line, form)`` for each replaced-helper reference and each lookup on the serial column."""
     import ast

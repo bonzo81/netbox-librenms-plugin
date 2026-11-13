@@ -130,6 +130,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
 
         # Load cached devices from job using shared cache keys
         from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
         from netbox_librenms_plugin.serial_identity import SerialRules
 
         job_data = job.data or {}
@@ -178,7 +179,11 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
                 serial_rules=serial_rules,
             )
             device = cache.get(cache_key)
-            if device:
+            if isinstance(device, dict) and isinstance(device.get("_validation"), dict):
+                # The rows may have changed since the job: refresh the match as a cached search does.
+                _refresh_existing_device(
+                    device["_validation"], libre_device=device, server_key=server_key, serial_rules=serial_rules
+                )
                 validated_devices.append(device)
             else:
                 logger.warning(f"Device {device_id} from job {job_id} not in cache (may have expired)")
