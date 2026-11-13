@@ -571,7 +571,9 @@ class TestMarkBuiltIn:
         librenms_server.register(
             "/api/v0/devices/101/ports", {"status": "ok", "ports": [{"port_id": 99, "ifName": "1/1/c2"}]}, method="GET"
         )
-        merged, error = view._merge_transceiver_data(inventory)
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        merged, error = view._merge_transceiver_data(inventory, serial_context=SerialRules.load().context(None))
         assert error is None
 
         seed_snapshot(device, merged)
