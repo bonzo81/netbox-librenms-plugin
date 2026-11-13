@@ -514,7 +514,7 @@ def assignment_lock(serials: Iterable, *, model, rules: SerialRules) -> None:
     """
     Take the transaction advisory locks of every identity that the write set *serials* can have.
 
-    Call it once per transaction, with every serial the transaction writes, before any row lock.
+    Call it once per transaction and model, with every serial the transaction writes, before any row lock.
     The keys come from every candidate context, so two writers of rule-equivalent serials share a
     lock. The locks are taken in one sorted order.
 
@@ -593,45 +593,96 @@ def module_assignment(module, incoming, *, rules: SerialRules) -> Assignment:
 
 # The refusal of a DeviceType change; it names no device, because the lookup is unrestricted.
 RETYPE_HELD = (
-    "Another device holds a serial whose identity this device type decides. Resolve the duplicate serial first."
+    "This device type would give one serial identity to two rows, or the serials changed while the type was "
+    "checked. Resolve the duplicate serial, or try again."
 )
 
 
-def retype_holders(device) -> list:
+@dataclass(frozen=True)
+class RetypeScope:
     """
-    Return ``[(pk, stored serial)]`` of the Devices whose serial context a new DeviceType of *device* changes.
+    The serials whose identity a new DeviceType of one device decides, as ``(pk, serial)`` pairs.
 
-    A standalone device and the master of a Virtual Chassis decide their own context; a master
-    also decides the context of every member. Another member keeps the master's context.
+    ``devices``: the device's own serial; for a chassis master, every member serial; for another
+    member, none, because it keeps the master's context. ``modules``: the serials of the device's
+    Modules, which use the manufacturer of the device's own type.
+    """
+
+    devices: tuple
+    modules: tuple
+
+
+def retype_scope(device) -> RetypeScope:
+    """Read the serials whose identity a new DeviceType of *device* decides, from the database."""
+    from dcim.models import Device, Module
+
+    row = Device.objects.filter(pk=device.pk).values("virtual_chassis_id", "virtual_chassis__master_id").first()
+    chassis_id = row["virtual_chassis_id"] if row else None
+    master_id = row["virtual_chassis__master_id"] if row else None
+    if chassis_id is None or master_id is None:
+        devices = Device.objects.filter(pk=device.pk)
+    elif master_id == device.pk:
+        devices = Device.objects.filter(virtual_chassis_id=chassis_id)
+    else:
+        devices = Device.objects.none()
+    return RetypeScope(
+        tuple(devices.order_by("pk").values_list("pk", "serial")),
+        tuple(Module.objects.filter(device_id=device.pk).order_by("pk").values_list("pk", "serial")),
+    )
+
+
+def retype_lock(scope: RetypeScope, *, rules: SerialRules, serials=()) -> None:
+    """
+    Take the identity locks of a DeviceType change before any row lock: the Device locks, then the Module locks.
+
+    *serials* are the other Device serials that the same transaction writes; the Device locks are
+    taken in one call with them.
+    """
+    from dcim.models import Device, Module
+
+    assignment_lock([*serials, *(serial for _pk, serial in scope.devices)], model=Device, rules=rules)
+    assignment_lock([serial for _pk, serial in scope.modules], model=Module, rules=rules)
+
+
+def _new_shared_key(rows, old: SerialContext, new: SerialContext) -> bool:
+    """Return whether *new* keys two of *rows* to one identity that *old* did not give them both."""
+    groups: dict = {}
+    for _pk, serial in rows:
+        if key := new._key(serial):
+            groups.setdefault(key, []).append(old._key(serial))
+    return any(len(before) > 1 and (not before[0] or len(set(before)) > 1) for before in groups.values())
+
+
+def retype_conflict(device, device_type, *, rules: SerialRules, scope: RetypeScope) -> bool:
+    """
+    Return whether the DeviceType *device_type* must not be saved on *device*.
+
+    Call it after ``retype_lock`` and the device row lock, before the save. It refuses when the
+    serials of *scope* changed since they were read, when an Unavailable chassis link hides the
+    current identities, and when the new type gives one identity to two rows that did not share
+    it: two serials in *scope*, or a Device serial and another Device. The serial of *device*
+    comes from the object, so a serial that the same write sets counts.
     """
     from dcim.models import Device
 
-    chassis = device.virtual_chassis if device.virtual_chassis_id else None
-    if chassis is None or chassis.master_id is None:
-        return [(device.pk, device.serial)]
-    if chassis.master_id != device.pk:
-        return []
-    return list(Device.objects.filter(virtual_chassis_id=chassis.pk).order_by("pk").values_list("pk", "serial"))
-
-
-def retype_conflict(device, device_type, *, rules: SerialRules, affected) -> bool:
-    """
-    Return whether the DeviceType *device_type* lets another Device hold a serial that *device* decides.
-
-    *affected* is ``retype_holders(device)``, read before the caller took ``assignment_lock`` for
-    its serials and the row lock. The serial of *device* comes from the object, so a serial that
-    the same write sets counts. Each serial is looked up as stored and as its key under the new
-    context; an Unavailable outcome refuses too.
-    """
-    context = rules.for_device_type(device_type)
+    if retype_scope(device) != scope:
+        return True
+    stored = Device.objects.select_related("device_type", "virtual_chassis__master__device_type").get(pk=device.pk)
+    old, new = rules.for_device(stored), rules.for_device_type(device_type)
+    if old.unavailable:
+        return True
+    rows = [(pk, device.serial if pk == device.pk else serial) for pk, serial in scope.devices]
+    module_old = rules.for_module_target(stored)
+    if _new_shared_key(rows, old, new) or _new_shared_key(scope.modules, module_old, new):
+        return True
     values = set()
-    for pk, serial in affected:
-        serial = device.serial if pk == device.pk else serial
-        if key := context._key(serial):
-            values.update({_text(serial), key})
+    for _pk, serial in rows:
+        if new_key := new._key(serial):
+            old_key = old._key(serial)
+            values |= {_text(serial), new_key} - ({_text(serial), old_key} if old_key else set())
     if not values:
         return False
-    found = resolve_devices(values, rules=rules, exclude_pks=[pk for pk, _serial in affected])
+    found = resolve_devices(values, rules=rules, exclude_pks=[pk for pk, _serial in rows])
     return any(resolution.kind in REFUSING for resolution in found.values())
 
 

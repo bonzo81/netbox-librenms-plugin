@@ -208,3 +208,52 @@ def test_a_legacy_module_serial_heals_to_the_librenms_text(client):
 
     assert response.status_code == 302
     assert Module.objects.get(pk=installed.pk).serial == "S/N HEAL-SN1"
+
+
+@transactional_db_with_all_apps()
+def test_an_import_type_change_reads_the_device_serial_again_under_its_locks(librenms_server):
+    """Another session stores "XABC" after the type change read "DEF456"; under the new rule it is the holder's "ABC"."""
+    from dcim.models import Device, DeviceType, Manufacturer
+
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
+    from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms
+    from netbox_librenms_plugin.tests.view_test_helpers import post as post_view
+    from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+    target = make_device("retype-race-target", serial="DEF456", librenms_cf={SERVER_KEY: 9811})
+    make_device("retype-race-holder", serial="ABC")
+    new_maker = Manufacturer.objects.create(name="Retype race maker", slug="retype-race-maker")
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=new_maker
+    )
+    new_type = DeviceType.objects.create(
+        manufacturer=new_maker, model="Retype race model", slug="retype-race-model", part_number="RETYPE-RACE-HW"
+    )
+    librenms_server.device_info_response(
+        device_id=9811, hostname=target.name, serial="DEF456", hardware=new_type.part_number
+    )
+    librenms_server.vc_inventory_callable(9811, [], {})
+    view = DeviceConflictActionView()
+    view._librenms_api = LibreNMSAPI(server_key=SERVER_KEY)
+    request = make_request(
+        "post",
+        {"server_key": SERVER_KEY, "action": "update_type", "existing_device_id": str(target.pk), "force": "on"},
+        user=make_user_with_perms("retype-race-user", [("change", Device)]),
+        HTTP_HX_REQUEST="true",
+    )
+    changed = []
+
+    def change_before_the_first_lock(execute, sql, params, many, context):
+        if "pg_advisory_xact_lock" in sql and not changed:
+            changed.append(True)
+            with second_connection() as other:
+                commit_row_change(other, Device, target.pk, {"serial": "XABC"})
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(change_before_the_first_lock):
+        post_view(view, request, device_id=9811)
+
+    assert changed
+    assert Device.objects.get(pk=target.pk).device_type_id != new_type.pk

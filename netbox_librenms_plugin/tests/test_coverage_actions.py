@@ -2838,6 +2838,29 @@ def _serial_match_lost(device, change):
     return lose
 
 
+def _retype_shape(target, shape, new_maker):
+    """Give *target* two serials that only the rule of *new_maker* keys to one value: on chassis members or on modules."""
+    from dcim.models import VirtualChassis
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import install_module, make_module_bay, make_virtual_chassis
+
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=new_maker
+    )
+    if shape == "chassis-members":
+        target.serial = "XABC"
+        target.save()
+        member = make_device(f"{target.name}-member", serial="ABC")
+        chassis = make_virtual_chassis(f"{target.name}-chassis", target, member)
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=target)
+    else:
+        for number, serial in ((1, "XABC"), (2, "ABC")):
+            make_module_bay(target, f"Slot {number}", position=str(number))
+            install_module(target, f"Slot {number}", f"{target.name}-card-{number}".upper(), serial=serial)
+    target.refresh_from_db()
+
+
 @pytest.mark.django_db
 class TestDeviceConflictActionMigrateLibreNMSId:
     """DeviceConflictActionView migrate_librenms_id action through real integration seams."""
@@ -3768,6 +3791,27 @@ class TestDeviceConflictActionBranches:
 
         assert response.headers.get("HX-Reswap") == "none"
         assert holder.name.encode() not in response.content
+        assert Device.objects.get(pk=target.pk).device_type_id == old_type_id
+
+    @pytest.mark.parametrize("shape", ["chassis-members", "device-modules"])
+    def test_a_forced_type_change_refuses_two_serials_that_the_new_rules_key_to_one(self, shape):
+        from dcim.models import Device, DeviceType, Manufacturer
+
+        view = self._make_view()
+        tag = f"branches-retype-{shape}"
+        target = make_device(tag, librenms_cf={self.server_key: 42})
+        new_maker = Manufacturer.objects.create(name=f"Retype {shape}", slug=f"{tag}-maker")
+        _retype_shape(target, shape, new_maker)
+        new_type = DeviceType.objects.create(
+            manufacturer=new_maker, model=f"Retype {shape}", slug=f"{tag}-type", part_number=f"{tag}-hw".upper()
+        )
+        old_type_id = target.device_type_id
+        self._register_device(42, target.name, hardware=new_type.part_number)
+        request = self._request("update_type", target, f"{tag}-user", force="on")
+
+        response = post_view(view, request, device_id=42)
+
+        assert response.headers.get("HX-Reswap") == "none"
         assert Device.objects.get(pk=target.pk).device_type_id == old_type_id
 
     @pytest.mark.parametrize("action", ["update", "update_serial"])

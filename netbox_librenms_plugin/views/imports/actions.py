@@ -77,7 +77,8 @@ from netbox_librenms_plugin.serial_identity import (
     is_identity,
     is_sole_holder,
     retype_conflict,
-    retype_holders,
+    retype_lock,
+    retype_scope,
 )
 from netbox_librenms_plugin.import_validation_helpers import (
     apply_cluster_to_validation,
@@ -578,24 +579,27 @@ def _oob_ip_is_reassignable(candidate, interface) -> bool:
 _SERIAL_MATCH_LOST = "The serial no longer identifies this device alone. Refresh the validation and retry."
 
 
-def _retype_refusal(device, device_type, serial_rules, retyped) -> HttpResponse | None:
-    """Return an error response when *device_type* lets another Device hold a serial that *device* decides."""
-    if retyped and retype_conflict(device, device_type, rules=serial_rules, affected=retyped):
+def _retype_refusal(device, device_type, serial_rules, scope) -> HttpResponse | None:
+    """Return an error response when *device_type* must not be saved on the locked *device*; see ``retype_conflict``."""
+    if scope is not None and retype_conflict(device, device_type, rules=serial_rules, scope=scope):
         return _htmx_error_response(RETYPE_HELD)
     return None
 
 
 def _save_retyped_device(device, device_type, request) -> HttpResponse | None:
-    """Save *device_type* on *device* under the serial identity locks of the serials it decides; see ``_save_device``."""
+    """Save *device_type* on *device* under the identity locks of the serials it decides; see ``_save_device``."""
     from dcim.models import Device
 
     with atomic_with_events():
         serial_rules = SerialRules.load()
-        retyped = retype_holders(device)
-        assignment_lock([serial for _pk, serial in retyped], model=Device, rules=serial_rules)
-        device.device_type = device_type
-        if err := _retype_refusal(device, device_type, serial_rules, retyped):
+        scope = retype_scope(device)
+        retype_lock(scope, rules=serial_rules)
+        locked = Device.objects.select_for_update(of=("self",)).filter(pk=device.pk).first()
+        if locked is None:
+            return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
+        if err := _retype_refusal(locked, device_type, serial_rules, scope):
             return err
+        device.device_type = device_type
         return _save_device(device, update_fields=["device_type"], request=request)
 
 
@@ -2287,12 +2291,12 @@ class DeviceConflictActionView(
                 serial_matched = existing_model is Device and validation.get("existing_match_type") == "serial"
                 serial_rules = SerialRules.load()
                 # A forced DeviceType change decides the identity of the stored serials too.
-                retyped = retype_holders(existing_device) if librenms_device_type and existing_model is Device else []
-                lock_serials = [serial for _pk, serial in retyped]
-                if writes_serial or serial_matched:
-                    lock_serials.append(libre_device.get("serial"))
-                if lock_serials:
-                    # The serial identity locks come before the claim and the row lock.
+                retyped = retype_scope(existing_device) if librenms_device_type and existing_model is Device else None
+                lock_serials = [libre_device.get("serial")] if writes_serial or serial_matched else []
+                # The serial identity locks come before the claim and the row lock.
+                if retyped is not None:
+                    retype_lock(retyped, rules=serial_rules, serials=lock_serials)
+                elif lock_serials:
                     assignment_lock(lock_serials, model=Device, rules=serial_rules)
                 existing_device, lock_error = _lock_librenms_id_assignment_target(
                     self,
@@ -3694,10 +3698,11 @@ class PromoteToHostView(
             # The promotion rests on a serial match: the serial identity lock comes before the claim and the row lock.
             # A type override decides the identity of the stored serials too.
             serial_rules = SerialRules.load()
-            retyped = retype_holders(existing_device) if override_device_type else []
-            assignment_lock(
-                [libre_device.get("serial"), *(serial for _pk, serial in retyped)], model=Device, rules=serial_rules
-            )
+            retyped = retype_scope(existing_device) if override_device_type else None
+            if retyped is not None:
+                retype_lock(retyped, rules=serial_rules, serials=[libre_device.get("serial")])
+            else:
+                assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
             existing_device, lock_error = _lock_librenms_id_assignment_target(
                 self,
                 Device,
