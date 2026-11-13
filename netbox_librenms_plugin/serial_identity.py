@@ -393,7 +393,8 @@ def _resolve(queryset, values, *, rules, row_context, lock):
         queryset = queryset.select_for_update(of=("self",))
     matches = {value: [] for value in open_values}
     unavailable = {}
-    for row in queryset.iterator(chunk_size=200):
+    # One client-side read: a server-side cursor plans for its first rows and can leave the trigram index.
+    for row in queryset:
         context = row_context(row)
         stored = _text(row.serial)
         for value in open_values:
