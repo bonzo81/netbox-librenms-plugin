@@ -585,6 +585,50 @@ def module_assignment(module, incoming, *, rules: SerialRules) -> Assignment:
     return Assignment(value)
 
 
+# The refusal of a DeviceType change; it names no device, because the lookup is unrestricted.
+RETYPE_HELD = (
+    "Another device holds a serial whose identity this device type decides. Resolve the duplicate serial first."
+)
+
+
+def retype_holders(device) -> list:
+    """
+    Return ``[(pk, stored serial)]`` of the Devices whose serial context a new DeviceType of *device* changes.
+
+    A standalone device and the master of a Virtual Chassis decide their own context; a master
+    also decides the context of every member. Another member keeps the master's context.
+    """
+    from dcim.models import Device
+
+    chassis = device.virtual_chassis if device.virtual_chassis_id else None
+    if chassis is None or chassis.master_id is None:
+        return [(device.pk, device.serial)]
+    if chassis.master_id != device.pk:
+        return []
+    return list(Device.objects.filter(virtual_chassis_id=chassis.pk).order_by("pk").values_list("pk", "serial"))
+
+
+def retype_conflict(device, device_type, *, rules: SerialRules, affected) -> bool:
+    """
+    Return whether the DeviceType *device_type* lets another Device hold a serial that *device* decides.
+
+    *affected* is ``retype_holders(device)``, read before the caller took ``assignment_lock`` for
+    its serials and the row lock. The serial of *device* comes from the object, so a serial that
+    the same write sets counts. Each serial is looked up as stored and as its key under the new
+    context; an Unavailable outcome refuses too.
+    """
+    context = rules.for_device_type(device_type)
+    values = set()
+    for pk, serial in affected:
+        serial = device.serial if pk == device.pk else serial
+        if key := context._key(serial):
+            values.update({_text(serial), key})
+    if not values:
+        return False
+    found = resolve_devices(values, rules=rules, exclude_pks=[pk for pk, _serial in affected])
+    return any(resolution.kind in REFUSING for resolution in found.values())
+
+
 def report_rows(rules: SerialRules | None = None):
     """
     Yield ``(row, stored text, key or "", reason)`` for each Device and Module whose stored text changes under the rules.

@@ -38,11 +38,14 @@ from netbox_librenms_plugin.server_mappings import (
     set_preference,
 )
 from netbox_librenms_plugin.serial_identity import (
+    RETYPE_HELD,
     SerialRules,
     assignment_lock,
     device_assignment,
     display,
     is_sole_holder,
+    retype_conflict,
+    retype_holders,
 )
 from netbox_librenms_plugin.server_selection import build_server_mappings, get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import SyncTab
@@ -154,9 +157,11 @@ class _WriteRefused(Exception):
         self.level = level
 
 
-def _write_device_field(view, request, pk, server_key, field, value, action):
+def _write_device_field(view, request, pk, server_key, field, value, action, *, check=None):
     """
     Write *value* to *field* of the locked device, and report a failure to *request*.
+
+    *check*, when given, reads the changed locked row and raises ``_WriteRefused`` to stop the write.
 
     Returns:
         tuple: ``(old_value, None)`` after the write, or ``(None, redirect)`` when the write failed.
@@ -167,11 +172,16 @@ def _write_device_field(view, request, pk, server_key, field, value, action):
     def apply(row):
         old_values.append(getattr(row, field))
         setattr(row, field, value)
+        if check is not None:
+            check(row)
 
     try:
         update_existing_row(view.restricted_queryset(Device, "change").filter(pk=pk), apply)
     except Device.DoesNotExist:
         messages.error(request, "Device no longer exists.")
+        return None, _device_sync_redirect(request, pk, server_key)
+    except _WriteRefused as exc:
+        messages.add_message(request, exc.level, str(exc))
         return None, _device_sync_redirect(request, pk, server_key)
     except (ValidationError, IntegrityError) as e:
         if classify_conflict(e):
@@ -465,9 +475,26 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             return _device_sync_redirect(request, pk, server_key)
 
         device_type = match_result["device_type"]
-        old_device_type, failed = _write_device_field(
-            self, request, pk, server_key, "device_type", device_type, f"update device type to '{device_type}'"
-        )
+        # The type decides the identity of the stored serials: their identity locks come before the row lock.
+        serial_rules = SerialRules.load()
+        retyped = retype_holders(device)
+
+        def no_new_holder(row):
+            if retype_conflict(row, device_type, rules=serial_rules, affected=retyped):
+                raise _WriteRefused(RETYPE_HELD)
+
+        with atomic_with_events():
+            assignment_lock([serial for _pk, serial in retyped], model=Device, rules=serial_rules)
+            old_device_type, failed = _write_device_field(
+                self,
+                request,
+                pk,
+                server_key,
+                "device_type",
+                device_type,
+                f"update device type to '{device_type}'",
+                check=no_new_holder,
+            )
         if failed is not None:
             return failed
 
