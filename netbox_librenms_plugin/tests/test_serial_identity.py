@@ -626,3 +626,72 @@ class TestEquivalentFormsAcrossDecisions:
         )
 
         assert Device.objects.get(pk=target.pk).serial == "S/N HEAL-SN1"
+
+
+_REPLACED_HELPERS = frozenset(
+    {
+        "normalize_serial",
+        "normalize_stack_serial",
+        "normalize_inventory_serial",
+        "vc_serial_key",
+        "serials_match",
+        "chassis_serial_key",
+        "devices_with_serial",
+        "find_devices_by_serial",
+        "candidate_vc_serial_keys",
+        "members_by_serial_key",
+        "serial_rule_sets",
+    }
+)
+
+
+def _serial_bypasses(source):
+    """Return ``(line, form)`` for each replaced-helper reference and each lookup on the serial column."""
+    import ast
+
+    found = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom):
+            found += [(node.lineno, alias.name) for alias in node.names if alias.name in _REPLACED_HELPERS]
+        elif isinstance(node, (ast.Name, ast.Attribute)):
+            name = node.id if isinstance(node, ast.Name) else node.attr
+            if name in _REPLACED_HELPERS:
+                found.append((node.lineno, name))
+        if isinstance(node, ast.Call):
+            callee = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+            if callee in {"filter", "exclude", "get", "Q"}:
+                found += [
+                    (node.lineno, keyword.arg)
+                    for keyword in node.keywords
+                    if keyword.arg and (keyword.arg == "serial" or keyword.arg.startswith("serial__"))
+                ]
+    return found
+
+
+def test_the_guard_scan_finds_each_bypass_form():
+    """The control: without it, a scan that finds nothing would pass the package check by accident."""
+    source = (
+        "from netbox_librenms_plugin.utils import normalize_serial\n"
+        "virtual_chassis.vc_serial_key()\n"
+        "Device.objects.filter(serial=value)\n"
+        "Module.objects.exclude(device=device, serial__in=values)\n"
+        "Q(serial__iexact=value)\n"
+        "Module(device=device, serial=value)\n"
+    )
+
+    assert sorted(line for line, _form in _serial_bypasses(source)) == [1, 2, 3, 4, 5]
+
+
+def test_no_module_outside_the_owner_uses_a_replaced_helper_or_the_serial_column():
+    from pathlib import Path
+
+    package = Path(__file__).resolve().parents[1]
+    offenders = {
+        str(path.relative_to(package)): found
+        for path in package.rglob("*.py")
+        if not {"tests", "migrations"} & set(path.relative_to(package).parts)
+        and path.name != "serial_identity.py"
+        and (found := _serial_bypasses(path.read_text()))
+    }
+
+    assert offenders == {}
