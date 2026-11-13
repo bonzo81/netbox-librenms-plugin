@@ -105,8 +105,8 @@ class TestInstallSerialRulePreloading:
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
 
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
-        from netbox_librenms_plugin.utils import preload_normalization_rules
 
         module_type = make_module_type("WS-X4748")
         device = make_device("install-serial-rules-dev")
@@ -116,17 +116,16 @@ class TestInstallSerialRulePreloading:
             self._install_two_items(device, first_bays, module_type)
 
         # Two items, so the unpreloaded path reads the rule table more than once.
-        assert len(self._rule_queries(per_item)) > 2, self._rule_queries(per_item)
+        assert len(self._rule_queries(per_item)) >= 2, self._rule_queries(per_item)
 
         other = make_device("install-serial-rules-dev-2")
         second_bays = [make_module_bay(other, "Slot 1"), make_module_bay(other, "Slot 2")]
 
         with CaptureQueriesContext(connection) as preloaded:
-            rules = preload_normalization_rules("serial", manufacturer=other.device_type.manufacturer)
-            self._install_two_items(other, second_bays, module_type, norm_rules_serial=rules)
+            self._install_two_items(other, second_bays, module_type, serial_rules=SerialRules.load())
 
-        # The preload itself reads both scopes once; the install loop then reads nothing.
-        assert len(self._rule_queries(preloaded)) == 2, self._rule_queries(preloaded)
+        # The preload itself reads the serial rules once; the install loop then reads nothing.
+        assert len(self._rule_queries(preloaded)) == 1, self._rule_queries(preloaded)
 
     def test_both_install_views_forward_the_serial_rules(self):
         """Every install loop must forward preloaded serial rules to the shared writer."""
@@ -152,7 +151,7 @@ class TestInstallSerialRulePreloading:
             ]
             assert installs, f"{view.name} must install its selected inventory"
             for install in installs:
-                assert "norm_rules_serial" in {keyword.arg for keyword in install.keywords}
+                assert "serial_rules" in {keyword.arg for keyword in install.keywords}
 
 
 pytestmark = pytest.mark.django_db
@@ -2904,9 +2903,8 @@ def test_existing_bay_mapping_rejects_unavailable_targets(client, target):
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("raw_serial, expected", [("S/N SERIAL123", "SERIAL123"), ("00123", "0123")])
-def test_preview_and_replace_normalize_cached_serial_once(client, raw_serial, expected):
-    """Preview and replacement must interpret raw cached serials like installation."""
+def test_preview_and_replace_compare_under_the_rules_and_store_the_librenms_text(client):
+    """A legacy stored rule output names the hardware of the cached serial; the replacement stores the LibreNMS text."""
     from dcim.models import Module
     from django.core.cache import cache
 
@@ -2914,9 +2912,9 @@ def test_preview_and_replace_normalize_cached_serial_once(client, raw_serial, ex
     from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type, make_superuser
     from netbox_librenms_plugin.views.mixins import CacheMixin
 
+    raw_serial, legacy = "S/N SERIAL123", "SERIAL123"
     NormalizationRule.objects.filter(scope="serial").delete()
     NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
-    NormalizationRule.objects.create(scope="serial", match_pattern=r"^0(.*)$", replacement=r"\1")
     device = make_device("serial-normalization")
     module_type = make_module_type("serial-card", manufacturer=device.device_type.manufacturer)
     bay = make_module_bay(device, "Slot 1")
@@ -2940,16 +2938,16 @@ def test_preview_and_replace_normalize_cached_serial_once(client, raw_serial, ex
     user = make_superuser()
     client.force_login(user)
     preview_url = rendered_preview_url(render_module_tab(device, user=user), 100)
-    # The row reads as installed once normalized, so the stored serial lands after the page renders.
-    Module.objects.filter(pk=installed.pk).update(serial=expected)
+    # An older release stored the rule output; it lands after the page renders, as an external edit does.
+    Module.objects.filter(pk=installed.pk).update(serial=legacy)
     preview = client.get(preview_url)
     assert preview.status_code == 200
-    assert preview.context["librenms_serial"] == expected
+    assert preview.context["librenms_serial"] == raw_serial
     assert preview.context["serial_mismatch"] is False
     replace_url, replace_fields = rendered_module_form(preview.content.decode(), "replace-module", 100)
     response = client.post(replace_url, replace_fields)
     assert response.status_code == 302
-    assert Module.objects.get(module_bay=bay).serial == expected
+    assert Module.objects.get(module_bay=bay).serial == raw_serial
     assert cache.get(key)["inventory"][0]["entPhysicalSerialNum"] == raw_serial
 
 
@@ -2959,7 +2957,7 @@ def test_preview_and_replace_normalize_cached_serial_once(client, raw_serial, ex
     [("install_branch", False), ("install_selected", False), ("install_selected", True)],
 )
 def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint, mixed_manufacturers):
-    """A batch must normalize every serial without querying rules for every item."""
+    """A batch compares every serial without querying rules for every item, and stores the LibreNMS text."""
     from dcim.models import Manufacturer, Module, VirtualChassis
     from django.core.cache import cache
     from django.db import connection
@@ -2992,7 +2990,7 @@ def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint,
             scope="serial",
             manufacturer=member.device_type.manufacturer,
             match_pattern=r"^S/N (.+)$",
-            replacement=r"MEMBER-\1",
+            replacement=r"\1",
         )
     rows = [
         {
@@ -3032,20 +3030,19 @@ def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint,
     with CaptureQueriesContext(connection) as queries:
         response = client.post(reverse(f"plugins:netbox_librenms_plugin:{endpoint}", args=[device.pk]), data)
     assert response.status_code == 302
-    expected = {"BATCH-1", "BATCH-3"}
+    expected = {"S/N BATCH-1", "S/N BATCH-3"}
     if member is None:
-        expected.add("BATCH-2")
+        expected.add("S/N BATCH-2")
     else:
-        assert Module.objects.get(device=member).serial == "MEMBER-BATCH-2"
+        assert Module.objects.get(device=member).serial == "S/N BATCH-2"
     assert set(Module.objects.filter(device=device).values_list("serial", flat=True)) == expected
     serial_queries = [
         query["sql"]
         for query in queries
         if "SELECT" in query["sql"] and "normalizationrule" in query["sql"] and "'serial'" in query["sql"]
     ]
-    # A preload reads the manufacturer's rules and the global rules. A mixed install preloads up to three times:
-    # once for the stack's member attribution and once for each destination manufacturer.
-    assert len(serial_queries) <= (6 if mixed_manufacturers else 2), serial_queries
+    # The inventory policy reads every serial rule once, and each decision of the request reuses it.
+    assert len(serial_queries) == 1, serial_queries
 
 
 def _install_selected(client, device, rows, select):

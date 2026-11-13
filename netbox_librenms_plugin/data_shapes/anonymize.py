@@ -17,7 +17,6 @@ Use find_pii to check the result for residual identifying data.
 import hashlib
 import ipaddress
 import re
-from collections.abc import Callable
 from typing import NamedTuple
 
 from netbox_librenms_plugin.constants import (
@@ -40,6 +39,7 @@ from netbox_librenms_plugin.data_shapes.ports import (
     name_matches_lag_pattern,
 )
 from netbox_librenms_plugin.data_shapes.recordings_store import recording_meta
+from netbox_librenms_plugin.serial_identity import SerialContext, anonymize_input
 
 # Preserve structural fields. Model SKUs use shared tokens.
 PRESERVE_KEYS = frozenset(
@@ -795,10 +795,10 @@ def _anon_value(key, value, rules, container=None):  # noqa: C901
         serial = str(value).strip()
         if not serial or is_librenms_placeholder(serial):
             return value
-        if rules.serial_key is not None:
-            serial = rules.serial_key(value)
+        if rules.serial_context is not None:
+            serial = anonymize_input(value, rules.serial_context)
             if not serial:
-                # The key removed the identity of a real serial: never publish the raw value.
+                # The rules removed the identity of a real serial: never publish the raw value.
                 return ""
         return f"SN-{_hash(serial, salt)}"
     if key in MODEL_KEYS:
@@ -865,7 +865,7 @@ class _Rules(NamedTuple):
     """The per-recording anonymization context threaded through the walk."""
 
     salt: str = ""
-    serial_key: Callable | None = None
+    serial_context: SerialContext | None = None
     database_ids: _DatabaseIDs | None = None
     model_tokens: dict | None = None
     # Compiled LAG name patterns captured WITH the recording (see _anon_interface_name).
@@ -931,7 +931,7 @@ def _walk(obj, rules, container=None):
     return obj
 
 
-def anonymize_recording(recording, *, salt="", serial_key=None):
+def anonymize_recording(recording, *, salt="", serial_context=None):
     """
     Return a copy of *recording* with every response body anonymized field-by-field.
 
@@ -946,7 +946,7 @@ def anonymize_recording(recording, *, salt="", serial_key=None):
     Args:
         recording (dict): A recording as produced by :func:`.capture.capture_device_recording`.
         salt (str): Optional salt mixed into the deterministic pseudonym hashes.
-        serial_key: The production serial key for a live capture. Offline recordings use their stored serials.
+        serial_context: The production serial context for a live capture. Offline recordings use their stored serials.
 
     Returns:
         dict: A new recording with anonymized ``responses`` and a neutral name/description.
@@ -959,7 +959,7 @@ def anonymize_recording(recording, *, salt="", serial_key=None):
     # are compiled once here and threaded through the walk.
     rules = _Rules(
         salt=salt,
-        serial_key=serial_key,
+        serial_context=serial_context,
         database_ids=database_ids,
         model_tokens={},
         lag_patterns=tuple(compile_lag_patterns(recording)),

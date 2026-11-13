@@ -38,6 +38,11 @@ _SERIAL_CONFLICT_HIDDEN = (
     "Serial conflict: incoming serial '{serial}' is already assigned to a NetBox device outside "
     "your view scope. Ask an administrator to resolve the duplicate serial."
 )
+_SERIAL_CONFLICT_AMBIGUOUS = (
+    "Serial conflict: incoming serial '{serial}' is already assigned to more than one NetBox device. "
+    "Resolve the duplicate serial first."
+)
+_SERIAL_CONFLICT_UNAVAILABLE = "Serial conflict: incoming serial '{serial}' cannot be matched. {reason}"
 _SERIAL_CONFLICT_VISIBLE = (
     "Serial conflict: incoming serial '{serial}' is already assigned to device '{name}' "
     "(ID: {pk}) in NetBox. Investigate which device should own this serial before {phase}."
@@ -127,6 +132,31 @@ def visible_object_label(obj, user) -> tuple[str, str] | None:
     if not ViewerScope(user).can_see(model_name, obj.pk):
         return None
     return ("VM" if model_name == "virtualmachine" else "device", obj.name)
+
+
+def serial_conflict_text(conflict, serial: str, user) -> str:
+    """
+    Return the text that tells *user* why serial *serial* is not written.
+
+    Args:
+        conflict (Resolution): The Unique, Ambiguous or Unavailable outcome of an unrestricted lookup.
+        serial (str): The serial as the page shows it.
+        user (User): The viewer; only an object they may see is named.
+
+    Returns:
+        str: The refusal text.
+
+    """
+    from netbox_librenms_plugin.serial_identity import ResolutionKind
+
+    if conflict.kind is ResolutionKind.UNAVAILABLE:
+        return f"Serial '{serial}' cannot be matched. {conflict.reason}"
+    if conflict.kind is ResolutionKind.AMBIGUOUS:
+        return f"Serial conflict: '{serial}' is already assigned to more than one device."
+    holder = conflict.object
+    if visible_object_label(holder, user) is None:
+        return f"Serial conflict: '{serial}' is already assigned to a device outside your view scope."
+    return f"Serial conflict: '{serial}' is already assigned to device '{holder.name}' (ID: {holder.pk})"
 
 
 def scope_validation_disclosures(validations, user) -> None:
@@ -255,7 +285,11 @@ def _render_serial_conflict(validation: dict, scope: ViewerScope) -> None:
         return
     serial = conflict.get("serial") or ""
     pk = conflict.get("pk")
-    if not scope.can_see("device", pk):
+    if conflict.get("unavailable"):
+        message = _SERIAL_CONFLICT_UNAVAILABLE.format(serial=serial, reason=conflict["unavailable"])
+    elif conflict.get("ambiguous"):
+        message = _SERIAL_CONFLICT_AMBIGUOUS.format(serial=serial)
+    elif not scope.can_see("device", pk):
         message = _SERIAL_CONFLICT_HIDDEN.format(serial=serial)
     else:
         message = _SERIAL_CONFLICT_VISIBLE.format(

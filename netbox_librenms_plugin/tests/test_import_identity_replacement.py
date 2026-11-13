@@ -438,14 +438,12 @@ def test_a_blocked_serial_leaves_the_confirmed_replacement_unwritten(client, sec
 
 
 @pytest.mark.django_db
-def test_a_database_failure_leaves_the_confirmed_replacement_unwritten(client, secondary_server):
-    """A statement PostgreSQL rejects persists neither the mapping nor the serial."""
+def test_an_overlong_serial_leaves_the_confirmed_replacement_unwritten(client, secondary_server):
+    """The writer refuses a serial longer than the field, so neither the mapping nor the serial is written."""
     from dcim.models import Device
 
     device = make_device("replace-dberror-device", serial="SN-ORIGINAL", librenms_cf={"secondary": 54101})
     client.force_login(make_superuser("identity-replacement-dberror"))
-    # update writes custom_field_data, name, and serial in one statement, and save(update_fields=...)
-    # skips full_clean(), so an overlong LibreNMS serial reaches PostgreSQL and the statement fails.
     overlong_serial = "S" * (Device._meta.get_field("serial").max_length + 1)
     server = _serve_secondary(secondary_server, 54201, device.name, serial=overlong_serial)
 
@@ -453,7 +451,7 @@ def test_a_database_failure_leaves_the_confirmed_replacement_unwritten(client, s
     response = _post_confirmation(client, 54201, token, server=server)
 
     assert response.status_code == 200
-    assert b"too long" in response.content
+    assert b"Validation error" in response.content
     device.refresh_from_db()
     assert stored_mapping_for_test(device) == {"secondary": 54101}
     assert device.serial == "SN-ORIGINAL"

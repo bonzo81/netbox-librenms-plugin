@@ -498,7 +498,8 @@ class TestUpdateModuleSerialView:
         assert message_texts(request, "warning") == []
 
     @pytest.mark.parametrize("placeholder", ["N/A", "BUILTIN", "null"])
-    def test_a_placeholder_serial_updates_as_blank(self, live_librenms, placeholder):
+    def test_a_placeholder_serial_keeps_the_stored_serial(self, live_librenms, placeholder):
+        """An update never clears a stored serial because LibreNMS reports none."""
         """A grant signed for a placeholder row, e.g. by an older page, must store a blank serial."""
         from netbox_librenms_plugin.inventory_policy import load_inventory_policy
         from netbox_librenms_plugin.module_grants import (
@@ -536,7 +537,7 @@ class TestUpdateModuleSerialView:
 
         assert response.status_code == 302
         module.refresh_from_db()
-        assert module.serial == ""
+        assert module.serial == "OLD"
 
     def test_an_invalid_module_id_is_reported(self, live_librenms):
         from netbox_librenms_plugin.views.sync.modules import UpdateModuleSerialView

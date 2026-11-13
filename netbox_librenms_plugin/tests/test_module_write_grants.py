@@ -539,7 +539,7 @@ VC_LIBRENMS_ID = 4242
 CARRIER, OPTIC_1, OPTIC_2, CARD = 10, 21, 23, 30
 
 
-def _vc_rows(page_serial, member_serial, *, optic_1_serial="SN-O1"):
+def _vc_rows(page_serial, member_serial, *, optic_1_serial="SN-O1X1"):
     def module(index, parent, name, model, serial):
         return {
             "entPhysicalIndex": index,
@@ -579,7 +579,7 @@ def _vc_rows(page_serial, member_serial, *, optic_1_serial="SN-O1"):
         container(20, CARRIER, "Cage 1"),
         module(OPTIC_1, 20, "Optic 1", "GR-OPTIC", optic_1_serial),
         container(22, CARRIER, "Cage 2"),
-        module(OPTIC_2, 22, "Optic 2", "GR-OPTIC", "SN-O2"),
+        module(OPTIC_2, 22, "Optic 2", "GR-OPTIC", "SN-O2X2"),
         module(CARD, 1, "Card Slot", "GR-CARD", "SN-CARD"),
     ]
 
@@ -600,13 +600,13 @@ def vc_grants(settings, recording_server):
     def build(*, optic_1_on_member=False):
         member_vendor = Manufacturer.objects.create(name="Grants Member Vendor", slug="grants-member-vendor")
         bays = ["Carrier Slot", "Cage 1", "Cage 2", "Card Slot"]
-        page = make_device_with_module_bays("vc-grants-page", bays, serial="VC-A")
-        member = make_device_with_module_bays("vc-grants-member", bays, manufacturer=member_vendor, serial="VC-B")
+        page = make_device_with_module_bays("vc-grants-page", bays, serial="VCA-0001")
+        member = make_device_with_module_bays("vc-grants-member", bays, manufacturer=member_vendor, serial="VCB-0001")
         make_virtual_chassis("vc-grants", page, member)
         make_module_type_with_bays("GR-CARRIER", bay_names=["Cage 1", "Cage 2"])
         make_module_type_with_bays("GR-OPTIC")
         make_module_type_with_bays("GR-CARD")
-        rows = _vc_rows(page.serial, member.serial, optic_1_serial=member.serial if optic_1_on_member else "SN-O1")
+        rows = _vc_rows(page.serial, member.serial, optic_1_serial=member.serial if optic_1_on_member else "SN-O1X1")
         recording = {
             "device_id": VC_LIBRENMS_ID,
             "responses": {

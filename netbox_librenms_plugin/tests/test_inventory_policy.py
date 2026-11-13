@@ -113,7 +113,7 @@ def _serial_rule(field, value):
     def change(page, member, virtual_chassis):
         from netbox_librenms_plugin.models import NormalizationRule
 
-        rule = NormalizationRule.objects.create(scope="serial", match_pattern="^S/N ", replacement="SN-")
+        rule = NormalizationRule.objects.create(scope="serial", match_pattern="^S/N (.+)$", replacement=r"\1")
         before = fingerprint(page)
         _update(NormalizationRule, rule.pk, **{field: value})
         return before
@@ -140,8 +140,8 @@ CHANGES = {
     "member-type-model": _member_type_edit(model="Policy Model 2"),
     "member-type-part-number": _member_type_edit(part_number="PN-2"),
     "member-manufacturer": _member_manufacturer,
-    "serial-rule-pattern": _serial_rule("match_pattern", "^SN "),
-    "serial-rule-replacement": _serial_rule("replacement", "X"),
+    "serial-rule-pattern": _serial_rule("match_pattern", "^SN (.+)$"),
+    "serial-rule-replacement": _serial_rule("replacement", r"\g<1>"),
     "serial-rule-priority": _serial_rule("priority", 5),
 }
 

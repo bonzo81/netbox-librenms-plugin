@@ -398,6 +398,9 @@
                                 <span class="text-success ms-1" title="Serial matches NetBox">
                                     <i class="mdi mdi-check-circle"></i>
                                 </span>
+                                {% if serial_stored_form_differs %}
+                                <span class="badge text-bg-info ms-1" title="NetBox stores '{{ object.serial }}', which names the same hardware. Sync to store the LibreNMS text.">stored form differs</span>
+                                {% endif %}
                                 {% endif %}
                             </td>
                         </tr>
@@ -616,7 +619,7 @@
                                             </button>
                                         {% else %}
                                             {% if librenms_device_serial != "-" %}
-                                                {% if not serial_matches %}
+                                                {% if not serial_matches or serial_stored_form_differs %}
                                                 <form method="post"
                                                       action="{% url 'plugins:netbox_librenms_plugin:update_device_serial' pk=object.pk %}"
                                                       style="display: inline;">

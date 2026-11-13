@@ -629,13 +629,10 @@ class TestBulkImportConfirmView:
     def test_confirm_template_says_a_stack_without_a_master_imports_standalone(self, master_identified):
         from django.template.loader import render_to_string
 
-        from netbox_librenms_plugin.import_utils.virtual_chassis import (
-            _clone_virtual_chassis_data,
-            vc_master_view,
-            vc_serial_key,
-        )
+        from netbox_librenms_plugin.import_utils.virtual_chassis import _clone_virtual_chassis_data, vc_master_view
+        from netbox_librenms_plugin.serial_identity import plain_context
 
-        members = [{"position": 1, "serial": "SN-1"}, {"position": 2, "serial": "SN-2"}]
+        members = [{"position": 1, "serial": "SN-1001"}, {"position": 2, "serial": "SN-1002"}]
         html = render_to_string(
             "netbox_librenms_plugin/htmx/bulk_import_confirm.html",
             {
@@ -646,8 +643,8 @@ class TestBulkImportConfirmView:
                         "validation": {
                             "virtual_chassis": vc_master_view(
                                 _clone_virtual_chassis_data({"is_stack": True, "member_count": 2, "members": members}),
-                                "SN-1" if master_identified else "ROOT",
-                                vc_serial_key(),
+                                "SN-1001" if master_identified else "ROOT",
+                                plain_context(),
                             )
                         },
                     }
@@ -3793,7 +3790,8 @@ class TestDeviceConflictActionBranches:
 
         response = post_view(view, request, device_id=42)
 
-        self._assert_htmx_error(response, "Could not save: a field value is invalid")
+        # The writer refuses a serial longer than the field rather than cut it.
+        self._assert_htmx_error(response, "Validation error")
         assert Device.objects.get(pk=target.pk).serial == "BRANCHES-SYNC-SERIAL-KEEP"
 
     def test_sync_serial_reports_when_librenms_has_no_valid_serial(self):
@@ -7906,22 +7904,22 @@ class TestSerialActionsNormalizeAndLock:
     def test_update_serial_persists_trimmed_serial(self):
         """A padded LibreNMS serial is stored trimmed so the next exact lookup still matches."""
         target = make_device("ser-act-upd")
-        self._post_action("update_serial", target, " SN-42 ")
+        self._post_action("update_serial", target, " SN-4200 ")
         target.refresh_from_db()
-        assert target.serial == "SN-42"
+        assert target.serial == "SN-4200"
 
     def test_sync_serial_persists_trimmed_serial(self):
         """sync_serial stores the trimmed serial, consistent with validate/import normalization."""
         target = make_device("ser-act-sync")
-        self._post_action("sync_serial", target, " SN-43 ")
+        self._post_action("sync_serial", target, " SN-4300 ")
         target.refresh_from_db()
-        assert target.serial == "SN-43"
+        assert target.serial == "SN-4300"
 
     def test_update_serial_detects_conflict_against_trimmed_stored_serial(self):
         """A padded incoming serial must still hit the conflict guard when another device stored the trimmed value."""
-        make_device("ser-act-owner", serial="SN-7")
+        make_device("ser-act-owner", serial="SN-7000")
         target = make_device("ser-act-loser")
-        resp = self._post_action("update_serial", target, " SN-7 ")
+        resp = self._post_action("update_serial", target, " SN-7000 ")
         assert b"Serial conflict" in resp.content
         target.refresh_from_db()
         assert target.serial == ""  # nothing persisted
@@ -7933,7 +7931,7 @@ class TestSerialActionsNormalizeAndLock:
 
         target = make_device("ser-act-lock")
         with CaptureQueriesContext(connection) as ctx:
-            self._post_action("sync_serial", target, "SN-77")
+            self._post_action("sync_serial", target, "SN-7700")
         sqls = [q["sql"] for q in ctx.captured_queries]
         assert any("pg_advisory_xact_lock" in s for s in sqls), "advisory lock on the serial value not taken"
         # The own-row lock (WHERE "id" = ...) is expected; a conflict-row lock filters on serial.
@@ -7942,21 +7940,23 @@ class TestSerialActionsNormalizeAndLock:
 
     def test_serial_advisory_lock_uses_a_stable_application_key(self):
         """Equal serials use one stable application key while distinct serials use different keys."""
+        from dcim.models import Device
         from django.db import connection, transaction
         from django.test.utils import CaptureQueriesContext
 
-        from netbox_librenms_plugin.views.imports.actions import _acquire_serial_assignment_lock
+        from netbox_librenms_plugin.serial_identity import SerialRules, assignment_lock
 
+        rules = SerialRules(())
         with transaction.atomic(), CaptureQueriesContext(connection) as ctx:
-            _acquire_serial_assignment_lock("SN-STABLE")
-            _acquire_serial_assignment_lock("SN-STABLE")
-            _acquire_serial_assignment_lock("SN-DIFFERENT")
+            assignment_lock(["SN-STABLE"], model=Device, rules=rules)
+            assignment_lock([" SN-STABLE "], model=Device, rules=rules)
+            assignment_lock(["SN-DIFFERENT"], model=Device, rules=rules)
 
         lock_sqls = [q["sql"] for q in ctx.captured_queries if "pg_advisory_xact_lock" in q["sql"]]
         assert len(lock_sqls) == 3
         assert lock_sqls[0] == lock_sqls[1]
         assert lock_sqls[0] != lock_sqls[2]
-        assert "3935087803272606537" in lock_sqls[0]
+        assert "-1635233324441925838" in lock_sqls[0]
         assert all("hashtext" not in sql.lower() for sql in lock_sqls)
 
     def test_update_action_serializes_on_the_serial_advisory_lock(self):
@@ -7966,7 +7966,7 @@ class TestSerialActionsNormalizeAndLock:
 
         target = make_device("ser-act-upd-lock")
         with CaptureQueriesContext(connection) as ctx:
-            self._post_action("update", target, "SN-88")
+            self._post_action("update", target, "SN-8800")
         sqls = [q["sql"] for q in ctx.captured_queries]
         assert any("pg_advisory_xact_lock" in s for s in sqls)
         assert self._serial_row_locks(sqls) == []
@@ -7978,7 +7978,7 @@ class TestSerialActionsNormalizeAndLock:
 
         target = make_device("ser-act-upd-serial-lock")
         with CaptureQueriesContext(connection) as ctx:
-            self._post_action("update_serial", target, "SN-89")
+            self._post_action("update_serial", target, "SN-8900")
         sqls = [q["sql"] for q in ctx.captured_queries]
         assert any("pg_advisory_xact_lock" in sql for sql in sqls)
         assert self._serial_row_locks(sqls) == []

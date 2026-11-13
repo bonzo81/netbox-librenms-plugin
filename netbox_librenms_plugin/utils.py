@@ -3036,83 +3036,19 @@ def check_vlan_group_matches(
     return True
 
 
-def normalize_serial(value) -> str:
+def librenms_text(value) -> str:
     """
-    Return the trimmed str form of a LibreNMS serial; only None means missing.
+    Return a LibreNMS text value (a model, class or name) as trimmed text; only None means missing.
 
-    LibreNMS returns all-digit serials as JSON numbers, so the value must be
-    coerced before stripping — and ``str(value or "")`` would silently drop the
-    real-but-falsey serial ``0``. Call sites skip a placeholder with
-    ``normalize_stack_serial``.
-
-    ``Device.serial`` stores this form. A vendor marker such as Juniper's leading "S/N "
-    stays: ``serials_match`` applies the ``serial`` NormalizationRule chain to both sides.
+    LibreNMS returns an all-digit value as a JSON number, so the value is coerced before it is
+    trimmed, and ``str(value or "")`` would drop the real value ``0``. A hardware serial goes
+    through ``serial_identity`` instead.
 
     Args:
-        value: The raw serial as returned by LibreNMS (str, number, or None).
+        value: The raw value as returned by LibreNMS (str, number, or None).
 
     """
     return "" if value is None else str(value).strip()
-
-
-def normalize_stack_serial(value) -> str:
-    """Return a serial usable as stack identity evidence, preserving numeric zero."""
-    serial = normalize_serial(value)
-    return "" if is_librenms_placeholder(serial) else serial
-
-
-def find_devices_by_serial(serial: str, limit: int | None = 2) -> list:
-    """
-    Return up to *limit* Devices whose stored serial matches an already-normalized *serial*.
-
-    The exact lookup uses the serial index that migration 0012 creates. That migration also
-    canonicalizes existing rows, but a row written afterwards by another tool can hold padding
-    again, so a miss re-checks the trimmed column.
-
-    Args:
-        serial: The incoming serial, already passed through ``normalize_serial``.
-        limit: How many rows to read, enough to tell a unique match from a duplicate; None reads all.
-
-    """
-    from dcim.models import Device
-    from django.db.models import CharField, F, Func, Value
-
-    matches = list(Device.objects.filter(serial=serial)[:limit])
-    if limit is not None and len(matches) >= limit:
-        return matches
-    # An exact hit does not mean a unique one: a row written with padding normalizes to the same
-    # serial, and the caller uses len(matches) > 1 to refuse a duplicate. Returning early on the
-    # first exact match would hide that twin and let the import bind an arbitrary row.
-    # Django's Trim() strips spaces only; normalize_serial() uses str.strip(), so name the same set.
-    trimmed = Func(F("serial"), Value(" \t\n\r\v\f"), function="BTRIM", output_field=CharField())
-    remaining = None if limit is None else limit - len(matches)
-    matches.extend(
-        Device.objects.annotate(trimmed_serial=trimmed)
-        .filter(trimmed_serial=serial)
-        .exclude(pk__in=[device.pk for device in matches])[:remaining]
-    )
-    return matches
-
-
-def normalize_inventory_serial(value, manufacturer=None, preloaded_rules=None) -> str:
-    """
-    Trim a LibreNMS serial, then apply the serial-scope NormalizationRule chain.
-
-    Vendors decorate the ENTITY-MIB serial: Juniper reports "S/N BCFB9793". Keeping that
-    transformation in a rule shows the operator why a stored serial differs from the raw
-    inventory, and lets them add the next vendor without a release. Callers keep their own
-    placeholder guards, as ``normalize_serial`` does.
-    """
-    from netbox_librenms_plugin.models import NormalizationRule
-
-    serial = normalize_serial(value)
-    if not serial:
-        return serial
-    # Strip again: a rule that drops a prefix without its trailing space leaves the stored
-    # serial padded, which reads as a mismatch against the same serial normalized elsewhere.
-    return apply_normalization_rules(
-        serial, NormalizationRule.SCOPE_SERIAL, manufacturer=manufacturer, preloaded_rules=preloaded_rules
-    ).strip()
 
 
 def normalize_vlan_vid(value) -> int | None:
@@ -4431,7 +4367,7 @@ def module_type_lookup_candidates(item):
     """
     candidates = []
     for key in ("entPhysicalModelName", "entPhysicalDescr"):
-        value = normalize_serial(item.get(key))
+        value = librenms_text(item.get(key))
         if not is_librenms_placeholder(value) and value not in candidates:
             candidates.append(value)
     return candidates

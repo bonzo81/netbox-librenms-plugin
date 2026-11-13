@@ -985,7 +985,7 @@ class NormalizationRuleImportForm(NetBoxModelImportForm):
 
     scope = CSVChoiceField(
         choices=NormalizationRule.SCOPE_CHOICES,
-        help_text="Scope: module_type, device_type, or module_bay",
+        help_text="Scope: " + ", ".join(value for value, _label in NormalizationRule.SCOPE_CHOICES),
     )
     manufacturer = CSVModelChoiceField(
         queryset=Manufacturer.objects.all(),

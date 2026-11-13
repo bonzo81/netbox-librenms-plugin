@@ -643,8 +643,8 @@ def _assert_virtual_chassis(api, device_id, expected):
     from netbox_librenms_plugin.import_utils.virtual_chassis import (
         detect_virtual_chassis_from_inventory,
         identify_vc_master,
-        vc_serial_key,
     )
+    from netbox_librenms_plugin.serial_identity import SerialRules
 
     result = detect_virtual_chassis_from_inventory(api, device_id)
 
@@ -661,7 +661,7 @@ def _assert_virtual_chassis(api, device_id, expected):
         assert [m["position"] for m in result["members"]] == expected["member_positions"]
     if "master_position" in expected:
         _found, device = api.get_device_info(device_id)
-        master = identify_vc_master(result["members"], device["serial"], vc_serial_key())
+        master = identify_vc_master(result["members"], device["serial"], SerialRules.load().context(None))
         assert master["position"] == expected["master_position"]
 
 
@@ -921,8 +921,9 @@ def test_the_junos_name_update_writes_the_member_name_that_stack_creation_gives(
         create_virtual_chassis_with_members,
         detect_virtual_chassis_from_inventory,
         identify_vc_master,
-        vc_serial_key,
     )
+
+    from netbox_librenms_plugin.serial_identity import SerialRules
     from netbox_librenms_plugin.models import LibreNMSSettings, NormalizationRule
     from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
@@ -948,7 +949,7 @@ def test_the_junos_name_update_writes_the_member_name_that_stack_creation_gives(
     )
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"vc_member_name_pattern": "-{serial}"})
     members = detect_virtual_chassis_from_inventory(live_librenms.api, _DEVICE_ID)["members"]
-    master_member = identify_vc_master(members, master.serial, vc_serial_key(manufacturer))
+    master_member = identify_vc_master(members, master.serial, SerialRules.load().context(manufacturer.pk))
     create_virtual_chassis_with_members(master, members, libre_device, "default", master_member=master_member)
     master.refresh_from_db()
     created_name = master.name

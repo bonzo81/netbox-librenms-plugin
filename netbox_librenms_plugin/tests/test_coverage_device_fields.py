@@ -266,14 +266,18 @@ class TestUpdateDeviceSerialView:
         assert device.serial == "KEPT-SERIAL"
         assert any("No serial number available" in text for text in _messages(response, "warning"))
 
-    def test_a_numeric_zero_serial_is_stored(self, logged_in_client, librenms_server):
-        device = _linked_device("serial-zero", 6514, serial="OLD-ZERO")
-        librenms_server.device_info_response(device_id=6514, hostname=device.name, serial=0)
+    @pytest.mark.parametrize(("reported", "stored"), [(100200, "100200"), (0, "OLD-ZERO")])
+    def test_a_numeric_serial_is_stored_as_text_when_it_has_an_identity(
+        self, logged_in_client, librenms_server, reported, stored
+    ):
+        """A one-digit serial identifies no hardware, so the update keeps the stored serial."""
+        device = _linked_device(f"serial-numeric-{reported}", 6514, serial="OLD-ZERO")
+        librenms_server.device_info_response(device_id=6514, hostname=device.name, serial=reported)
 
         _post(logged_in_client, "update_device_serial", device)
 
         device.refresh_from_db()
-        assert device.serial == "0"
+        assert device.serial == stored
 
     def test_first_serial_uses_the_set_message(self, logged_in_client, librenms_server):
         device = _linked_device("serial-first", 6513)

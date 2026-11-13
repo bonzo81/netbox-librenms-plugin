@@ -39,11 +39,13 @@ def _device_identity(device):
 
 def _validate_rules(inventory_rules, serial_rules):
     """Raise RuleConfigurationError for the first rule whose regex or replacement does not work."""
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
     for rule in inventory_rules:
         if rule.enabled:
             _ = rule._compiled_pattern, rule.compiled_filters
-    for rule in serial_rules:
-        _ = rule.compiled_match_pattern
+    # Every chain is built, so every serial rule is checked.
+    SerialRules(serial_rules).candidates()
 
 
 @dataclass(frozen=True)
@@ -90,25 +92,15 @@ class InventoryPolicy:
         ]
 
     @cached_property
-    def serial_rule_sets(self) -> dict:
-        """Return the serial rules in the preloaded form that ``apply_normalization_rules`` reads."""
+    def serial_identity_rules(self):
+        """Return the loaded serial rules as the :class:`SerialRules` that every serial decision of the page reads."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
-        def chain(manufacturer_id):
-            rules = [rule for rule in self.serial_rules if rule.manufacturer_id == manufacturer_id]
-            return sorted(rules, key=lambda rule: (rule.priority, rule.pk))
+        return SerialRules(self.serial_rules)
 
-        manufacturer_ids = {member.device_type.manufacturer_id for member in self.members}
-        manufacturer_ids |= {rule.manufacturer_id for rule in self.serial_rules if rule.manufacturer_id}
-        sets = {(_SERIAL_SCOPE, manufacturer_id): chain(manufacturer_id) for manufacturer_id in manufacturer_ids}
-        sets[(_SERIAL_SCOPE, None)] = chain(None)
-        return sets
-
-    def chassis_serial_key(self):
-        """Return the member serial key under the serial rules of the Virtual Chassis master, else the page device."""
-        from netbox_librenms_plugin.import_utils.virtual_chassis import vc_serial_key
-
-        chassis = self.member(self.master_id) or self.page_device
-        return vc_serial_key(chassis.device_type.manufacturer, preloaded_rules=self.serial_rule_sets)
+    def chassis_serial_context(self):
+        """Return the serial context of the page device and its Virtual Chassis members: the master's manufacturer."""
+        return self.serial_identity_rules.for_device(self.page_device)
 
 
 def load_inventory_policy(page_device_id) -> InventoryPolicy:

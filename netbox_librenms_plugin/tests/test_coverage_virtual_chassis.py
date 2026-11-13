@@ -55,7 +55,8 @@ class TestCreateVirtualChassisWithMembers:
 
     def test_two_rows_with_the_master_serial_name_no_master(self):
         """No single member is the master, so the import creates no chassis and no duplicate device."""
-        from netbox_librenms_plugin.import_utils.virtual_chassis import identify_vc_master, vc_serial_key
+        from netbox_librenms_plugin.import_utils.virtual_chassis import identify_vc_master
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         members = [
             {"serial": "MASTER", "position": 1, "name": "Master"},
@@ -63,7 +64,7 @@ class TestCreateVirtualChassisWithMembers:
             {"serial": "MEMBER", "position": 3, "name": "Member"},
         ]
 
-        assert identify_vc_master(members, "MASTER", vc_serial_key()) is None
+        assert identify_vc_master(members, "MASTER", SerialRules.load().context(None)) is None
 
     def test_server_key_is_part_of_domain(self):
         master, virtual_chassis = self._create("server-domain", [], server_key="production")

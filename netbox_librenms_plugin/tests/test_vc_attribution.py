@@ -7,7 +7,8 @@ Plain ENTITY-MIB rows and real NetBox member Devices; the modules-tab tests in
 
 import pytest
 
-from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory, chassis_serial_key
+from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory
+from netbox_librenms_plugin.serial_identity import SerialRules
 from netbox_librenms_plugin.tests.conftest import junos_vc_inventory, make_junos_vc_members
 
 pytestmark = pytest.mark.django_db
@@ -15,13 +16,13 @@ pytestmark = pytest.mark.django_db
 
 def _owners(page, members, inventory):
     """Return ``{entPhysicalIndex: owning Device}``; an unowned row stays on *page*, as the modules tab shows it."""
-    owners = attribute_inventory(inventory, members, chassis_serial_key(page))
+    owners = attribute_inventory(inventory, members, SerialRules.load().for_device(page))
     return {row["entPhysicalIndex"]: member or page for row, (member, _source) in zip(inventory, owners, strict=True)}
 
 
 def _attribution(page, members, row):
     """Return ``(owning Device, source)`` for one row on its own."""
-    member, source = attribute_inventory([row], members, chassis_serial_key(page))[0]
+    member, source = attribute_inventory([row], members, SerialRules.load().for_device(page))[0]
     return member or page, source
 
 
@@ -74,15 +75,14 @@ class TestSerialEvidence:
         assert target.pk == member2.pk
         assert source == "serial"
 
-    def test_zero_item_serial_is_not_dropped_as_falsey(self):
-        """A serial of JSON number 0 is real; dropping it silently attributes the item to the wrong VC member."""
+    def test_a_serial_without_three_letters_or_digits_is_no_serial_evidence(self):
+        """A serial of JSON number 0 has no hardware identity, so it never attributes a row to a member."""
         master, member2 = _vc_members(["0", "100003"])
         item = {"entPhysicalIndex": 2, "entPhysicalSerialNum": 0, "entPhysicalContainedIn": 0}
 
-        target, source = _attribution(member2, [master, member2], item)
+        _target, source = _attribution(member2, [master, member2], item)
 
-        assert target.pk == master.pk
-        assert source == "serial"
+        assert source != "serial"
 
     def test_a_decorated_serial_is_serial_evidence(self):
         """Juniper reports "S/N 100007"; the serial rules strip the mark, so it matches the stored "100007"."""
@@ -199,7 +199,7 @@ class TestUnrecognizedShape:
             },
         ]
 
-        owners = attribute_inventory(inventory, [page, member], chassis_serial_key(page))
+        owners = attribute_inventory(inventory, [page, member], SerialRules.load().for_device(page))
 
         assert owners[0] == (None, "default")
         assert owners[1][0] == member
@@ -234,7 +234,7 @@ class TestUnrecognizedShape:
         ]
 
         # The page is member 1, so a stack child takes its own position 1 and a chassis root's child stays on the page.
-        owners = attribute_inventory(inventory, [first, second], chassis_serial_key(second))
+        owners = attribute_inventory(inventory, [first, second], SerialRules.load().for_device(second))
 
         assert owners[0] == (None, "default")
         assert (owners[1][0] or second) == second
@@ -342,9 +342,9 @@ class TestRecognizedStack:
             device.save(update_fields=["serial"])
         fpc = {"entPhysicalDescr": "FPC: EX4400-24X @ 1/*/*", "entPhysicalName": "EX4400-24X-S"}
         inventory = [
-            _row(1, "chassis", 0, entPhysicalDescr="Juniper Virtual Chassis Switch", entPhysicalSerialNum="S-A"),
-            _row(120, "container", 1, position=1, entPhysicalSerialNum="S-A", **fpc),
-            _row(121, "container", 1, position=1, entPhysicalSerialNum="S-B", **fpc),
+            _row(1, "chassis", 0, entPhysicalDescr="Juniper Virtual Chassis Switch", entPhysicalSerialNum="SN-AAA"),
+            _row(120, "container", 1, position=1, entPhysicalSerialNum="SN-AAA", **fpc),
+            _row(121, "container", 1, position=1, entPhysicalSerialNum="SN-BBB", **fpc),
             _row(1210, "module", 121, position=2, entPhysicalModelName="PIC"),
             # "FPC 1" names a slot that two FPCs share, so it names no member.
             _row(4, "powerSupply", 1, position=2, entPhysicalDescr="FPC 1 Power Supply 0", entPhysicalModelName="PSU"),
