@@ -1032,10 +1032,10 @@ def test_concurrent_commits_each_move_the_generation_and_a_concurrent_start_read
 
     workers = 4
     cache.delete(IMPORT_CONFIGURATION_GENERATION_KEY)
-    start = Barrier(workers)
+    start = Barrier(workers, timeout=10)
 
     def first_read():
-        start.wait(timeout=10)
+        start.wait()
         try:
             return import_configuration_generation()
         finally:
@@ -1045,10 +1045,10 @@ def test_concurrent_commits_each_move_the_generation_and_a_concurrent_start_read
         firsts = [future.result(timeout=30) for future in [executor.submit(first_read) for _ in range(workers)]]
     assert len(set(firsts)) == 1
 
-    commit = Barrier(workers)
+    commit = Barrier(workers, timeout=10)
 
     def commit_an_edit(index):
-        commit.wait(timeout=10)
+        commit.wait()
         try:
             with transaction.atomic():
                 VCMemberNumberingRule.objects.create(

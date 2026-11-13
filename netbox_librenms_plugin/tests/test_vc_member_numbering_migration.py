@@ -31,8 +31,17 @@ def _rules():
     return VCMemberNumberingRule.objects.order_by("pk")
 
 
-def test_a_fresh_migrate_seeds_no_rule_without_a_cisco_manufacturer():
+def test_the_data_step_without_a_cisco_manufacturer_creates_no_rule_and_no_manufacturer():
+    """No unscoped substitute: it would number the stacks of every other manufacturer."""
+    from dcim.models import Manufacturer
+
+    other = _manufacturer("juniper")
+    assert not Manufacturer.objects.filter(slug__in=_MIGRATION.CISCO_SLUGS).exists()
+
+    _run_data_step()
+
     assert not _rules().exists()
+    assert list(Manufacturer.objects.values_list("pk", flat=True)) == [other.pk]
 
 
 @pytest.mark.parametrize("slugs", [("cisco",), ("cisco-systems",), ("cisco", "cisco-systems")])
