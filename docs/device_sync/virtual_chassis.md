@@ -23,7 +23,23 @@ The master is the one member whose serial matches the device serial. Both serial
 
 ## Member Positions
 
-On import, each member gets the position number that the device reports for it. Junos numbers its members from 0 (`ge-0/0/0` is on member 0), so a Junos Virtual Chassis gets positions 0, 1, and so on. Cisco StackWise numbers its members from 1. If any member reports no position, a negative position, or the same position as another member, the plugin numbers all members in inventory order, starting at 1, so that no two members share a position.
+On import, each member gets the position number that LibreNMS reports for it, under the [VC member numbering rule](../configuration/rules_and_patterns.md#vc-member-numbering-rules) of the device type that the device imports as. Junos numbers its members from 0 (`ge-0/0/0` is on member 0), so without a rule a Junos Virtual Chassis gets positions 0, 1, and so on. LibreNMS reports Cisco stack members from 0, but Cisco numbers its switches from 1 (`Gi1/0/1` is on switch 1). The migration adds a **Number from 1** rule for each manufacturer with the slug `cisco` or `cisco-systems`, so a Cisco stack gets positions 1, 2, and so on. If you add a Cisco manufacturer later, or it has another slug, add the rule yourself.
+
+If any member reports no position, a negative position, or the same position as another member, the plugin numbers all members in inventory order, starting at 1, so that no two members share a position. A numbering rule does not change these numbers. This order does not identify the hardware: without serials, a changed inventory order gives other members the same numbers.
+
+The import table, the Virtual Chassis details dialog and the import confirmation show the positions and names that the import writes. Without a matched device type, they show no numbers. When a position is outside the range of the NetBox field, or a numbering rule does not work, the row cannot be imported, and no device is created. A rule change does not renumber the members of an existing virtual chassis.
+
+## Member Serials
+
+Each member stores its serial as LibreNMS reports it, with the spaces at the start and end removed. A Juniper member shows `S/N BCFB9751`, for example. A placeholder such as `-`, `N/A` or `unknown` is not stored. A serial without three letters or digits in a row, such as `0`, is stored but identifies no member.
+
+The plugin does not store the output of the serial normalization rules. It applies the rules to both serials each time it compares them: the stored serial and the LibreNMS serial. The rules of the manufacturer of the virtual chassis master apply, and the global rules. So a rule change applies to both sides at once, and a member name with `{serial}` is the same on import, on the LibreNMS Sync page and after a name sync. A serial that is a placeholder before or after the rules matches nothing.
+
+The **VC Serials** dialog shows each member serial as LibreNMS reports it, and **Sync All** stores that text. **Sync All** refuses a serial that another device holds in any form under the rules. If the dialog comes from a page that an earlier plugin version rendered, **Sync All** writes nothing and asks you to reload the page.
+
+On import, the plugin does not create a member when a device with the same serial exists. It finds a device that stores the serial in another form too: a member that an earlier import stored as `S/N ABC` is found when LibreNMS reports `ABC`, and the reverse. When several devices hold the serial, the plugin skips the member and logs a warning.
+
+Members that an earlier plugin version created store the serial after the rules. They keep their match while the rules give the same value for a value that they already changed, which is true for the seeded Juniper `S/N` rule. If a rule changes its own output again, use **Sync All** in the **VC Serials** dialog to store the LibreNMS serials. `python manage.py librenms_serial_report` lists the rows whose stored serial the current rules change; see [Serials](../configuration/rules_and_patterns.md#serials).
 
 ## How It Works
 

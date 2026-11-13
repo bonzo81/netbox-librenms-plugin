@@ -224,9 +224,14 @@ class TestCompletedJobResults:
         from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
         from netbox_librenms_plugin.views.imports.list import LibreNMSImportView
 
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+
         user = _create_user(django_user_model, "completed-job")
         filters = {"hostname": "edge"}
         cached_device = _device(4201)
+        cached_device["_validation"] = validate_device_for_import(
+            dict(cached_device), api=None, server_key=SERVER_KEY, include_vc_detection=False
+        )
         job = Job.objects.create(
             name="Completed import search",
             user=user,
@@ -259,7 +264,7 @@ class TestCompletedJobResults:
         view = LibreNMSImportView()
         result = view._load_job_results(job.pk, user)
 
-        assert result == [cached_device]
+        assert [row["device_id"] for row in result] == [4201]
         assert view._active_server_key == SERVER_KEY
         assert view._cache_timestamp == "2026-08-30T12:00:00+00:00"
         assert view._cache_timeout == 600

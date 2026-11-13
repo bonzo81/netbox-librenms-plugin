@@ -32,6 +32,16 @@ function getCsrfToken() {
 }
 
 /**
+ * Return the LibreNMS server key of the sync page, or '' for the default server.
+ *
+ * The server panel renders a server_key input for every other server, so a page-wide input
+ * lookup can name the wrong server. The page names its own server on #librenms-sync-tabs.
+ */
+function syncServerKey() {
+    return document.getElementById('librenms-sync-tabs')?.dataset.serverKey || '';
+}
+
+/**
  * Show a Bootstrap modal, using native Bootstrap Modal when available,
  * falling back to manual DOM manipulation otherwise.
  * Matches the ModalManager pattern in librenms_import.js.
@@ -327,38 +337,47 @@ function getDeviceIdFromUrl() {
 // CACHE COUNTDOWN TIMERS
 // ============================================
 
-/**
- * Initialize a countdown timer for cache expiry display.
- * Updates every second to show remaining time in MM:SS format.
- *
- * @param {string} elementId - DOM element ID containing data-expiry attribute
- * @returns {number|undefined} Interval ID for cleanup, or undefined if element not found
- */
+// Show the remaining cache lifetime below Refresh.
 function initializeCountdown(elementId) {
     const countdownElement = document.getElementById(elementId);
     if (!countdownElement) return;
-
+    const expiry = new Date(countdownElement.dataset.expiry).getTime();
+    const timeout = Number(countdownElement.dataset.timeout);
+    // Count on the server clock that rendered the expiry; keep the first offset, because every htmx swap restarts the countdown.
+    if (countdownElement.dataset.clockOffset === undefined) {
+        const serverNow = new Date(countdownElement.dataset.serverNow).getTime();
+        countdownElement.dataset.clockOffset = String(Number.isFinite(serverNow) ? serverNow - Date.now() : 0);
+    }
+    const clockOffset = Number(countdownElement.dataset.clockOffset);
     let countdownInterval;
 
     function updateCountdown() {
-        const expiry = new Date(countdownElement.dataset.expiry).getTime();
-        const now = new Date().getTime();
-        const distance = expiry - now;
-
-        if (distance < 0) {
+        if (!countdownElement.isConnected) {
             clearInterval(countdownInterval);
-            countdownElement.innerHTML = "EXPIRED";
-            expireSyncTabFromElement(countdownElement);
             return;
         }
-
-        const minutes = Math.floor((distance % (1000 * 60 * 60)) / (1000 * 60));
-        const seconds = Math.floor((distance % (1000 * 60)) / 1000);
-        countdownElement.innerHTML = minutes + "m " + seconds + "s ";
+        const distance = expiry - (Date.now() + clockOffset);
+        const remaining = Math.max(0, Math.ceil(distance / 1000));
+        const text = remaining > 0
+            ? `Cached data expires in ${Math.floor(remaining / 60)}m ${remaining % 60}s. Refresh to fetch it again.`
+            : 'Cached data expired. Refresh to fetch it again.';
+        const fill = countdownElement.querySelector('.sync-cache-fill');
+        if (fill) fill.style.width = `${Math.max(0, Math.min(100, distance / (timeout * 1000) * 100))}%`;
+        countdownElement.classList.toggle('is-warning', remaining > 0 && remaining < 60);
+        countdownElement.classList.toggle('is-expired', remaining === 0);
+        countdownElement.setAttribute('aria-valuenow', String(Math.min(timeout, remaining)));
+        countdownElement.setAttribute('aria-valuetext', text);
+        countdownElement.title = text;
+        const description = countdownElement.querySelector('.sync-cache-remaining');
+        if (description) description.textContent = remaining < 60 ? `${remaining}s` : `${Math.ceil(remaining / 60)}m`;
+        if (remaining === 0) {
+            clearInterval(countdownInterval);
+            expireSyncTabFromElement(countdownElement);
+        }
     }
 
-    updateCountdown();
     countdownInterval = setInterval(updateCountdown, COUNTDOWN_UPDATE_INTERVAL_MS);
+    updateCountdown();
     return countdownInterval;
 }
 
@@ -558,7 +577,16 @@ function clearSyncTabContent(tab, message) {
     text.textContent = message;
     body.append(icon, text);
     card.appendChild(body);
-    content.replaceChildren(card);
+    const refresh = content.querySelector('.sync-tab-refresh-toolbar');
+    if (refresh) {
+        if (!refresh.querySelector('.sync-cache-bar.is-expired')) refresh.querySelector('.sync-cache-countdown')?.replaceChildren();
+        const toolbar = document.createElement('div');
+        toolbar.className = 'noprint sync-tab-primary-toolbar justify-content-end';
+        toolbar.appendChild(refresh);
+        content.replaceChildren(toolbar, card);
+    } else {
+        content.replaceChildren(card);
+    }
     content.dataset.cacheEmpty = 'true';
 }
 
@@ -659,6 +687,34 @@ function syncCacheTabForContent(element) {
     return Object.entries(controller.contract || {}).find(([, spec]) => spec.content_id === element.id)?.[0];
 }
 
+/**
+ * Return the page query as htmx values: each key once, and a repeated key as an array of its values.
+ *
+ * @returns {Object<string, (string|string[])>} The query values by key.
+ */
+function pageQueryValues() {
+    const values = Object.create(null);
+    new URLSearchParams(window.location.search).forEach((value, key) => {
+        values[key] = key in values ? [].concat(values[key], value) : value;
+    });
+    return values;
+}
+
+/**
+ * Add the page query to a URL, for the keys that the URL does not state itself.
+ *
+ * @param {string} url - A same-origin URL that can carry its own query.
+ * @returns {string} The absolute URL with the page query.
+ */
+function withPageQuery(url) {
+    const target = new URL(url, window.location.href);
+    const ownKeys = new Set(target.searchParams.keys());
+    new URLSearchParams(window.location.search).forEach((value, key) => {
+        if (!ownKeys.has(key)) target.searchParams.append(key, value);
+    });
+    return target.href;
+}
+
 // NetBox imports htmx as a module, so there is no htmx global and HTML written with innerHTML keeps
 // no hx- bindings. The pane's hidden [data-fragment-loader] lets htmx request and swap the fragment,
 // which binds the restored forms like every other swap.
@@ -678,7 +734,8 @@ function loadSyncCacheFragment(tab, statusGeneration = null, signal = null) {
     if (!pane || !content || !controller || !loader) return Promise.resolve();
     if (signal?.aborted) return Promise.reject(new Error('Cache fragment request aborted'));
     const requestGeneration = statusGeneration ?? controller.statusGeneration;
-    loader.setAttribute('hx-vals', JSON.stringify({ server_key: controller.root.dataset.serverKey }));
+    // The fragment renders for the page query, so it keeps the tab's filters, page and sort.
+    loader.setAttribute('hx-vals', JSON.stringify({ ...pageQueryValues(), server_key: controller.root.dataset.serverKey }));
     // The fragment carries return_url links built from HX-Current-URL (tables/modules.py), which htmx sends itself.
     // The generation header tells the body's htmx:afterSwap handler this swap answers a status check.
     const fragmentHeaders = {
@@ -1807,17 +1864,19 @@ const SELECTABLE_TABLE_IDS = [
 /**
  * Build the sessionStorage key for one table.
  *
- * Scoped to the object being synced (the path), the table, and the LibreNMS server, so two
- * devices, two tabs, or two servers never share a selection. The page number is deliberately
- * left out: carrying the selection across pages is the whole point.
+ * Scoped to the object being synced (the path), the table, the LibreNMS server, and the filter
+ * signature the server renders on a filtered table, so two devices, two tabs, two servers or two
+ * filters never share a selection. The page number, sort and page size are deliberately left out:
+ * carrying the selection across pages is the whole point.
  *
  * @param {HTMLElement} table - The table element.
  * @returns {string} The storage key.
  */
 function _selectionStorageKey(table) {
-    const serverKeyInput = document.querySelector('[name=server_key]');
-    const serverKey = serverKeyInput ? serverKeyInput.value : '';
-    return 'lnmsSelection:' + window.location.pathname + ':' + table.id + ':' + serverKey;
+    const serverKey = syncServerKey();
+    const key = 'lnmsSelection:' + window.location.pathname + ':' + table.id + ':' + serverKey;
+    const signature = table.dataset.filterSignature;
+    return signature ? key + ':' + signature : key;
 }
 
 /**
@@ -1927,20 +1986,30 @@ function _rowCompanionInputs(row) {
  * @returns {boolean}
  */
 function _isSelectionCompanionName(name) {
-    const cableSnapshotPrefixes = [
-        'expected_local_id_',
-        'expected_local_device_id_',
-        'expected_remote_id_',
-        'expected_remote_device_id_',
-    ];
     return (
         Boolean(name) &&
         (name.startsWith('device_selection_') ||
             name.startsWith('selection_grant_') ||
             name.startsWith('vlan_group_') ||
             name.startsWith('vrf_') ||
-            cableSnapshotPrefixes.some((prefix) => name.startsWith(prefix)))
+            _isShownStateName(name))
     );
+}
+
+/**
+ * Return whether a field tells the writer what the row showed, so the writer can refuse a changed row.
+ *
+ * @param {string} name - The submitted field name.
+ * @returns {boolean}
+ */
+function _isShownStateName(name) {
+    return [
+        'expected_local_id_',
+        'expected_local_device_id_',
+        'expected_remote_id_',
+        'expected_remote_device_id_',
+        'expected_vlan_name_',
+    ].some((prefix) => name.startsWith(prefix));
 }
 
 /**
@@ -2030,6 +2099,8 @@ function restoreTableSelection(table) {
             if (input.matches('select.vrf-select') && !chosen.includes(input.name)) return;
             // A grant names the render it was signed for: the row keeps its own, and a restored member gets one from its verify.
             if (input.name.startsWith('selection_grant_')) return;
+            // A rendered row posts the state it shows now; only an off-page row posts its stored state.
+            if (_isShownStateName(input.name)) return;
             const renderedValue = input.value;
             if (input.tomselect) {
                 input.tomselect.setValue(companionInputs[input.name], true);
@@ -2290,8 +2361,9 @@ function updateOffPageSelectionNotice(table) {
         table.parentNode.insertBefore(notice, table);
     }
 
-    notice.querySelector('span').textContent =
-        count === 1 ? '1 more row is selected on another page.' : count + ' more rows are selected on other pages.';
+    notice.querySelector('span').textContent = count === 1
+        ? '1 more selected row is not shown on this page (another page, or excluded by the filter).'
+        : count + ' more selected rows are not shown on this page (another page, or excluded by the filter).';
 }
 
 /**
@@ -2553,7 +2625,7 @@ document.addEventListener('htmx:confirm', function (e) {
 });
 
 /**
- * Show a brief inline notice when a row's parent or aggregate is on another page.
+ * Show a brief inline notice when a row's parent or aggregate is not on the visible page.
  *
  * The relationship is applied when that interface already exists in NetBox, but an interface
  * NetBox does not have yet is only created by syncing its own row, so the notice says where to
@@ -2595,7 +2667,8 @@ function _showRequiredRowCrossPageNotice(relatedName, kind) {
     notice.appendChild(strong);
     notice.appendChild(
         document.createTextNode(
-            ' is on another page. Select it there if it is not in NetBox yet; this page keeps your selection.'
+            ' is not shown on this page (another page, or excluded by the filter). If it is not in NetBox yet,'
+            + ' show it and select it too; this page keeps your selection.'
         )
     );
     const closeBtn = document.createElement('button');
@@ -2739,6 +2812,12 @@ function initializeVlanGroupSelects() {
     });
 }
 
+// The warning icons carry their text only in the title, so the same text is their accessible name.
+const VLAN_MISSING_ICON = ' <i class="mdi mdi-alert text-danger" role="img" title="VLAN not in NetBox" aria-label="VLAN not in NetBox"></i>';
+const VLAN_MISSING_IN_GROUP_ICON = ' <i class="mdi mdi-alert text-danger" role="img"'
+    + ' title="VLAN not in selected group—use VLAN Sync first to create it"'
+    + ' aria-label="VLAN not in selected group—use VLAN Sync first to create it"></i>';
+
 /**
  * Open the VLAN detail modal for a specific interface.
  * Populates the modal table with per-VLAN rows and group dropdowns.
@@ -2778,7 +2857,7 @@ function openVlanDetailModal(btn) {
         vidSpan.className = vlan.css;
         vidSpan.textContent = vlan.vid;
         if (vlan.missing) {
-            vidSpan.innerHTML += ' <i class="mdi mdi-alert text-danger" title="VLAN not in NetBox"></i>';
+            vidSpan.innerHTML += VLAN_MISSING_ICON;
         }
         tdVid.appendChild(vidSpan);
         tr.appendChild(tdVid);
@@ -2922,7 +3001,7 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
                         // Update warning icon
                         const existingIcon = vidSpan.querySelector('.mdi-alert');
                         if (isMissing && !existingIcon) {
-                            vidSpan.innerHTML = vid + ' <i class="mdi mdi-alert text-danger" title="VLAN not in selected group\u2014use VLAN Sync first to create it"></i>';
+                            vidSpan.innerHTML = vid + VLAN_MISSING_IN_GROUP_ICON;
                         } else if (!isMissing && existingIcon) {
                             vidSpan.textContent = String(vid);
                         }
@@ -3042,6 +3121,7 @@ function initializeVlanModalSave() {
 
                     if (changed) {
                         btn.dataset.vlans = JSON.stringify(btnVlans);
+                        markFilterStaleRow(btn.closest('tr'));
                         // Update the tooltip and re-render inline summary colors
                         const summarySpan = btn.previousElementSibling;
                         if (summarySpan && summarySpan.tagName === 'SPAN') {
@@ -3056,7 +3136,7 @@ function initializeVlanModalSave() {
                             const MAX_INLINE = 3;
                             const inlineParts = btnVlans.slice(0, MAX_INLINE).map(v => {
                                 const warning = v.missing
-                                    ? ' <i class="mdi mdi-alert text-danger" title="VLAN not in selected group\u2014use VLAN Sync first to create it"></i>'
+                                    ? VLAN_MISSING_IN_GROUP_ICON
                                     : '';
                                 return `<span class="${v.css}">${v.vid}(${v.type})${warning}</span>`;
                             });
@@ -3099,7 +3179,7 @@ function initializeVlanModalSave() {
                 body: JSON.stringify({
                     device_id: deviceId,
                     vid_group_map: vidGroupMap,
-                    server_key: document.querySelector('input[name="server_key"]')?.value || null
+                    server_key: syncServerKey() || null
                 })
             }).then(response => {
                 if (!response.ok) {
@@ -3240,6 +3320,7 @@ function verifyVlanSyncGroup(select, vid, vlanName, groupId) {
             if (statusCell && data.status_html) {
                 statusCell.innerHTML = data.status_html;
             }
+            markFilterStaleRow(row);
         })
         .catch(error => {
             if (error.name === 'AbortError' || controller.signal.aborted || !_isLiveRow(select.closest('tr'))) return;
@@ -3308,7 +3389,7 @@ function handleVRFChange(select, value) {
             ip_address: fullIpAddress,  // Use full IP address with prefix
             row_id: select.dataset.rowId,
             vrf_id: value,
-            server_key: document.querySelector('input[name="server_key"]')?.value || null
+            server_key: syncServerKey() || null
         })
     })
         .then(response => {
@@ -3327,6 +3408,7 @@ function handleVRFChange(select, value) {
                 if (statusCell) {
                     statusCell.innerHTML = data.formatted_row.status;
                 }
+                markFilterStaleRow(row);
                 // An IP mapping can ignore the address in the chosen VRF, so the selection follows the verdict.
                 const checkbox = row.querySelector('input[name="select"]');
                 if (checkbox) {
@@ -3439,7 +3521,8 @@ function handleInterfaceChange(select, value) {
         if (row) commitSelectionChange(row.closest('table'));
     };
 
-    fetch('/plugins/librenms_plugin/verify-interface/', {
+    // The page query rides along, so a repainted Rebind button posts back with the same filters and page.
+    fetch('/plugins/librenms_plugin/verify-interface/' + window.location.search, {
         method: 'POST',
         signal: controller.signal,
         headers: {
@@ -3455,7 +3538,7 @@ function handleInterfaceChange(select, value) {
             // display names collide (host vs OOB controller); interface_name is the fallback.
             port_id: row?.dataset.portId || null,
             interface_name_field: document.querySelector('input[name="interface_name_field"]:checked')?.value || null,
-            server_key: document.querySelector('input[name="server_key"]')?.value || null
+            server_key: syncServerKey() || null
         })
     })
         .then(response => {
@@ -3520,8 +3603,8 @@ function handleInterfaceChange(select, value) {
                     row.dataset[datasetKey] = formattedRow[responseKey] ?? '';
                 });
                 initializeVlanGroupSelects();
-                initializeFilters();
                 initializeCheckboxListeners();
+                markFilterStaleRow(row);
                 // This member is now server-confirmed: record it as the rollback target and
                 // re-enable the relationship controls (the row HTML now matches this member).
                 select._lastVerifiedMember = value;
@@ -3629,7 +3712,7 @@ function handleCableChange(select, value) {
             device_id: value,
             origin_device_id: verifyContext?.dataset.cableOriginDeviceId || null,
             row_id: select.dataset.interface,
-            server_key: document.querySelector('input[name="server_key"]')?.value || null
+            server_key: syncServerKey() || null
         })
     })
         .then(response => {
@@ -3683,6 +3766,7 @@ function handleCableChange(select, value) {
                     });
                 }
                 select._lastVerifiedMember = value;
+                markFilterStaleRow(row);
                 restoreControls();
                 commitSelectionChange(row.closest('table'));
             } else {
@@ -3925,7 +4009,7 @@ function handleModuleChange(select, value, options = {}) {
             verify_binding: select.dataset.verifyBinding || null,
             ent_physical_index: select.dataset.module,
             depth: rowDepth,
-            server_key: document.querySelector('input[name="server_key"]')?.value || null
+            server_key: syncServerKey() || null
         }),
         signal: controller.signal
     })
@@ -4065,57 +4149,55 @@ function updateBulkActionButton() {
 }
 
 // ============================================
-// TABLE FILTERING
+// FILTER STALE MARKS
 // ============================================
 
 /**
- * Initialize column-based filtering for a sync comparison table.
- * Creates filter inputs that hide rows not matching the filter text.
+ * Mark a repainted row of a filtered table as one that can now be outside its filter.
  *
- * @param {string} tableId - DOM element ID of the table
- * @param {string[]} filterKeys - Array of column identifiers to filter
- * @param {Object} dataCols - Configuration mapping column IDs to data attributes or selectors
+ * The server chose the rows at the last load. A client-side repaint can change the text or the
+ * state that the filter matched, and the cells alone cannot prove a match, so the row is marked
+ * and never hidden or moved. Apply reloads the table and clears every mark.
+ *
+ * @param {?HTMLTableRowElement} row - The repainted row.
+ * @returns {void}
  */
-function initializeTableFilters(tableId, filterKeys, dataCols) {
-    const table = document.getElementById(tableId);
-    if (!table) return;
-
-    filterKeys.forEach(filterKey => {
-        const filterElement = document.getElementById(`filter-${filterKey}`);
-        if (filterElement) {
-            filterElement.addEventListener('input', () => filterTable(tableId, filterKeys, dataCols));
-        }
-    });
+function markFilterStaleRow(row) {
+    const table = row?.closest('table');
+    if (!table || table.dataset.filterActive !== 'true') return;
+    row.dataset.filterStale = 'true';
+    // The badge goes in the cell that names the row: the interface or VLAN name, the IP address, or the local port.
+    const cell = row.querySelector('td[data-col="name"], td[data-col="address"], td[data-col="local_port"]');
+    if (cell && !cell.querySelector('.filter-stale-badge')) {
+        const badge = document.createElement('span');
+        badge.className = 'badge bg-warning-lt filter-stale-badge ms-1';
+        badge.textContent = 'Changed since filtering';
+        cell.appendChild(badge);
+    }
+    showFilterStaleNotice(table);
 }
 
-// Generic function to filter a table
-function filterTable(tableId, filterKeys, dataCols) {
-    const table = document.getElementById(tableId);
-    if (!table) return;
-
-    const filters = {};
-    filterKeys.forEach(key => {
-        filters[key] = document.getElementById(`filter-${key}`)?.value.toLowerCase() || '';
-    });
-
-    const rows = table.querySelectorAll(
-        ':scope > tbody > tr[data-interface], :scope > tbody > tr[data-vlan-id]'
-    );
-    rows.forEach(row => {
-        const matches = filterKeys.map(key => {
-            let cellText = '';
-            if (dataCols[key].selector) {
-                cellText = row.querySelector(dataCols[key].selector)?.textContent.toLowerCase() || '';
-            } else {
-                const cell = row.querySelector(`td[data-col="${dataCols[key].name}"]`);
-                cellText = (cell.querySelector('span')?.textContent || cell.textContent).toLowerCase();
-            }
-            return cellText.includes(filters[key]);
-        });
-
-        row.style.display = matches.every(Boolean) ? '' : 'none';
-    });
+/**
+ * Show, once per table, the polite notice that the filtered rows reflect the last load.
+ *
+ * @param {HTMLElement} table - The filtered table.
+ * @returns {void}
+ */
+function showFilterStaleNotice(table) {
+    const noticeId = table.id + '-filter-stale-notice';
+    if (document.getElementById(noticeId)) return;
+    const notice = document.createElement('div');
+    notice.id = noticeId;
+    notice.className = 'alert alert-warning py-1 px-2 small mb-1';
+    notice.setAttribute('role', 'status');
+    table.parentNode.insertBefore(notice, table);
+    // The live region is in the page before its text changes, so a screen reader announces it.
+    notice.textContent = 'Results reflect the last load. Apply to update.';
 }
+
+// ============================================
+// FILTER PANELS
+// ============================================
 
 const FILTER_DISCLOSURE_STORAGE_PREFIX = 'netbox-librenms:sync-filter';
 const filterDisclosureState = new Map();
@@ -4165,14 +4247,46 @@ function applyFilterDisclosureState(section, button, expanded) {
     }
 }
 
+const liveSearchTimers = new WeakMap();
+
+function initializeSyncFilters() {
+    document.querySelectorAll('.sync-filter-form').forEach((form) => {
+        if (form.dataset.liveSearchBound) return;
+        form.dataset.liveSearchBound = 'true';
+        const cancel = () => clearTimeout(liveSearchTimers.get(form));
+        const submit = () => { cancel(); form.requestSubmit(); };
+        const schedule = () => { cancel(); liveSearchTimers.set(form, setTimeout(submit, 400)); };
+        Array.from(form.elements).forEach((field) => {
+            if (field.type === 'search') {
+                // An IME composition is no search text until it ends.
+                field.addEventListener('compositionstart', cancel);
+                field.addEventListener('compositionend', schedule);
+                field.addEventListener('input', (event) => { if (!event.isComposing) schedule(); });
+            } else if (field.name.endsWith('_sync_state')) {
+                field.addEventListener('change', submit);
+            }
+        });
+        form.addEventListener('submit', cancel);
+    });
+}
+
+// A tab request cancels the pending live search, so the old form cannot load its own tab again.
+document.addEventListener('htmx:beforeRequest', (event) => {
+    if (event.detail.target?.id !== 'librenms-sync-tabs') return;
+    event.detail.target.querySelectorAll('.sync-filter-form').forEach((form) => clearTimeout(liveSearchTimers.get(form)));
+});
+
 function initializeFilterDisclosures() {
     document.querySelectorAll('.sync-filter-toggle[aria-controls]').forEach((button) => {
         const section = document.getElementById(button.getAttribute('aria-controls'));
         if (!section) return;
 
+        // A new filter panel with a value or an error opens whatever state the user saved, and the state follows it.
+        const isNew = !initializedFilterDisclosures.has(section);
+        if (isNew && section.dataset.filterOpen === 'true') writeFilterDisclosureState(section.id, true);
         const storedState = readFilterDisclosureState(section.id);
         applyFilterDisclosureState(section, button, storedState ?? section.classList.contains('show'));
-        if (initializedFilterDisclosures.has(section)) return;
+        if (!isNew) return;
 
         section.addEventListener('shown.bs.collapse', () => {
             applyFilterDisclosureState(section, button, true);
@@ -4184,84 +4298,6 @@ function initializeFilterDisclosures() {
         });
         initializedFilterDisclosures.add(section);
     });
-}
-
-// Initialize filters for different tables
-function initializeFilters() {
-    initializeFilterDisclosures();
-
-    // Interface table
-    initializeTableFilters(
-        'librenms-interface-table',
-        ['name', 'type', 'speed', 'mac', 'mtu', 'enabled', 'description'],
-        {
-            name: { name: 'name' },
-            type: { name: 'type' },
-            speed: { name: 'speed' },
-            mac: { name: 'mac_address' },
-            mtu: { name: 'mtu' },
-            enabled: { name: 'enabled' },
-            description: { name: 'description' }
-        }
-    );
-
-    // VM Interface table
-    initializeTableFilters(
-        'librenms-interface-table-vm',
-        ['name', 'mac', 'mtu', 'enabled', 'description'],
-        {
-            name: { name: 'name' },
-            mac: { name: 'mac_address' },
-            mtu: { name: 'mtu' },
-            enabled: { name: 'enabled' },
-            description: { name: 'description' }
-        }
-    );
-    // Non Virtual Chassis Cable table (without 'vc-member' filter)
-    initializeTableFilters(
-        'librenms-cable-table',
-        ['local-port', 'remote-port', 'remote-device'],
-        {
-            'local-port': { name: 'local_port' },
-            'remote-port': { name: 'remote_port' },
-            'remote-device': { name: 'remote_device' }
-        }
-    );
-    // VC Cable table (with 'vc-member' filter)
-    initializeTableFilters(
-        'librenms-cable-table-vc',
-        ['vc-member', 'local-port', 'remote-port', 'remote-device'],
-        {
-            'vc-member': { selector: '.ts-control .item' },
-            'local-port': { name: 'local_port' },
-            'remote-port': { name: 'remote_port' },
-            'remote-device': { name: 'remote_device' }
-        }
-    );
-    initializeTableFilters(
-        'librenms-ipaddress-table',
-        ['address', 'prefix', 'device', 'interface'],
-        {
-            address: { name: 'address' },
-            prefix: { name: 'prefix' },
-            device: { name: 'device' },
-            interface: { name: 'interface' }
-        }
-    );
-    initializeTableFilters(
-        'librenms-vlan-table',
-        ['vlan-id', 'vlan-name', 'vlan-group', 'vlan-type', 'vlan-state'],
-        {
-            'vlan-id': { name: 'vlan_id' },
-            'vlan-name': { name: 'name' },
-            'vlan-group': {
-                selector: 'td[data-col="vlan_group_selection"] .ts-control .item, '
-                    + 'td[data-col="vlan_group_selection"] option:checked'
-            },
-            'vlan-type': { name: 'type' },
-            'vlan-state': { name: 'state' }
-        }
-    );
 }
 
 // ============================================
@@ -4417,59 +4453,112 @@ function openBulkVCModal() {
     showModal(document.getElementById('bulkVCMemberModal'));
 }
 
-// Function to update the interface_name_field radio button
+// The longest wait for the preference save before the page loads with the other name field.
+const NAME_FIELD_SAVE_TIMEOUT_MS = 3000;
+
+// True from a name field choice until the page loads with it.
+let interfaceNameFieldSaving = false;
+
+/**
+ * Bind the interface name field radios: a change saves the preference, then loads the page again.
+ *
+ * Every row has another name under the other field, so the whole page renders again with a full
+ * GET. The URL keeps the filters and drops every page number. Unsubmitted edits on the page are
+ * lost, the same as when the user goes to another page of a table.
+ *
+ * @returns {void}
+ */
 function updateInterfaceNameField() {
+    // A tab swap during the save renders the radios again, enabled, and this initializer runs on them.
+    if (interfaceNameFieldSaving) setInterfaceNameFieldsDisabled(true);
     document.querySelectorAll('.interface-name-field').forEach(radio => {
+        // The initializer runs again after every htmx swap, so each radio binds once.
+        if (radio.dataset.nameFieldBound) return;
+        radio.dataset.nameFieldBound = 'true';
         radio.addEventListener('change', function () {
-            const url = new URL(window.location);
-            url.searchParams.set('interface_name_field', this.value);
-            window.history.pushState({}, '', url);
-            // A tab link opened without htmx reads the field from its href, so each href names the new value.
-            document.querySelectorAll('#librenms-sync-tabs a[data-tab]').forEach(link => {
-                const linkUrl = new URL(link.getAttribute('href'), window.location.href);
-                linkUrl.searchParams.set('interface_name_field', this.value);
-                link.setAttribute('href', linkUrl.pathname + linkUrl.search + linkUrl.hash);
-            });
-
-            // Set HTMX headers for subsequent requests
-            if (typeof htmx !== 'undefined') {
-                htmx.config.defaultHeaders['X-Interface-Name-Field'] = this.value;
-            }
-
-            // Persist to user preferences via API
-            const preferenceSelector = this.closest('[data-save-pref-url]');
-            const savePrefUrl = preferenceSelector?.dataset.savePrefUrl;
-            if (savePrefUrl) {
-                const csrfToken = getCsrfToken();
-                if (!csrfToken) {
-                    console.debug('Failed to save interface_name_field pref: missing CSRF token');
-                } else {
-                    const platformId = preferenceSelector.dataset.platformId || null;
-                    fetch(savePrefUrl, {
-                        method: 'POST',
-                        keepalive: true,
-                        headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrfToken},
-                        body: JSON.stringify({
-                            key: 'interface_name_field',
-                            value: this.value,
-                            platform_id: platformId
-                        })
-                    }).then(response => {
-                        if (!response.ok) {
-                            throw new Error(`HTTP ${response.status}`);
-                        }
-                    }).catch(error => console.debug('Failed to save interface_name_field pref:', error.message));
-                }
-            }
-
-            // Refresh current tab content
-            const activeTab = document.querySelector('.tab-pane.active');
-            if (activeTab && typeof htmx !== 'undefined') {
-                htmx.trigger(activeTab, 'htmx:refresh');
-            }
+            const target = interfaceNameFieldUrl(this.value);
+            // One choice loads the page, so an earlier save cannot navigate after a later choice.
+            interfaceNameFieldSaving = true;
+            setInterfaceNameFieldsDisabled(true);
+            saveInterfaceNameFieldPreference(this.closest('[data-save-pref-url]'), this.value)
+                .then(() => window.location.assign(target));
         });
     });
 }
+
+/**
+ * Enable or disable every interface name field radio.
+ *
+ * @param {boolean} disabled - Whether the radios refuse a change.
+ * @returns {void}
+ */
+function setInterfaceNameFieldsDisabled(disabled) {
+    document.querySelectorAll('.interface-name-field').forEach(radio => {
+        radio.disabled = disabled;
+    });
+}
+
+// A page that the back button restores from the back-forward cache still has the radios disabled.
+window.addEventListener('pageshow', event => {
+    if (!event.persisted) return;
+    interfaceNameFieldSaving = false;
+    // The restored rows are those of the rendered name field, not of the radio checked before the navigation.
+    document.querySelectorAll('.interface-name-field').forEach(radio => {
+        radio.checked = radio.defaultChecked;
+    });
+    setInterfaceNameFieldFromURL();
+    setInterfaceNameFieldsDisabled(false);
+});
+
+/**
+ * Return the page URL for another interface name field: the filters stay, and every page resets.
+ *
+ * @param {string} value - The selected name field.
+ * @returns {string} The URL to load.
+ */
+function interfaceNameFieldUrl(value) {
+    const url = new URL(window.location.href);
+    url.searchParams.set('interface_name_field', value);
+    Array.from(url.searchParams.keys()).forEach(key => {
+        if (/(^|_)page$/.test(key) && !/(^|_)per_page$/.test(key)) url.searchParams.delete(key);
+    });
+    return url.toString();
+}
+
+/**
+ * Save the interface name field preference, and wait at most NAME_FIELD_SAVE_TIMEOUT_MS for it.
+ *
+ * @param {?HTMLElement} preferenceSelector - The selector element that names the save URL and platform.
+ * @param {string} value - The selected name field.
+ * @returns {Promise<void>} Resolves when the save ends, fails or times out.
+ */
+function saveInterfaceNameFieldPreference(preferenceSelector, value) {
+    const savePrefUrl = preferenceSelector?.dataset.savePrefUrl;
+    if (!savePrefUrl) return Promise.resolve();
+    const csrfToken = getCsrfToken();
+    if (!csrfToken) {
+        console.debug('Failed to save interface_name_field pref: missing CSRF token');
+        return Promise.resolve();
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), NAME_FIELD_SAVE_TIMEOUT_MS);
+    return fetch(savePrefUrl, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrfToken},
+        body: JSON.stringify({
+            key: 'interface_name_field',
+            value: value,
+            platform_id: preferenceSelector.dataset.platformId || null
+        }),
+        signal: controller.signal
+    }).then(response => {
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+    }).catch(error => console.debug('Failed to save interface_name_field pref:', error.message))
+        .finally(() => clearTimeout(timer));
+}
+
 // Function to set the interface_name_field from the URL
 function setInterfaceNameFieldFromURL() {
     const urlParams = new URLSearchParams(window.location.search);
@@ -4547,7 +4636,7 @@ function deleteSelectedInterfaces(selectedCheckboxes) {
     }
 
     formData.append('csrfmiddlewaretoken', csrfToken);
-    const serverKey = document.querySelector('[name="server_key"]')?.value;
+    const serverKey = syncServerKey();
     if (serverKey) formData.append('server_key', serverKey);
 
     // Add interface IDs
@@ -4627,7 +4716,7 @@ function deleteSelectedInterfaces(selectedCheckboxes) {
 function initializeSyncFormSpinners() {
     // Handle regular form submit buttons with sync-spinner inside
     document.querySelectorAll('.spinner.spinner-border.d-none').forEach(function (spinner) {
-        const form = spinner.closest('form');
+        const form = spinner.closest('button')?.form;
         const button = spinner.closest('button');
         if (!form || !button || form.dataset.spinnerInitialized) return;
 
@@ -4923,7 +5012,8 @@ function initializeScripts() {
     initializeVRFSelects();
     initializeVlanGroupSelects();
     initializeVlanModalSave();
-    initializeFilters();
+    initializeFilterDisclosures();
+    initializeSyncFilters();
     initializeCountdowns();
     initializeCheckboxListeners();
     initializeBulkEditApply();
@@ -4951,7 +5041,8 @@ document.addEventListener('DOMContentLoaded', function () {
                 event.preventDefault();
                 return;
             }
-            event.detail.path = loaderUrl;
+            // The picker answers for the filtered page; a modal loader keeps the URL of its control.
+            event.detail.path = event.detail.elt.matches('[data-cable-picker-loader]') ? withPageQuery(loaderUrl) : loaderUrl;
             // A routed row form posts its own fields.
             const rowForm = event.detail.triggeringEvent.detail.form;
             if (rowForm) new FormData(rowForm).forEach((value, name) => event.detail.parameters.append(name, value));
@@ -5178,8 +5269,7 @@ document.addEventListener('click', function (e) {
         return;
     }
 
-    const serverKeyInput = document.querySelector('[name=server_key]');
-    const serverKey = serverKeyInput ? serverKeyInput.value : '';
+    const serverKey = syncServerKey();
 
     const body = new URLSearchParams({
         csrfmiddlewaretoken: csrf,

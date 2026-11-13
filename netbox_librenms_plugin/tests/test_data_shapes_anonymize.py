@@ -7,6 +7,7 @@ import re
 import pytest
 
 from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording, find_pii, pseudonymize_os
+from netbox_librenms_plugin.serial_identity import SerialRules, plain_context
 from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 from netbox_librenms_plugin.tests.recordings import load_recording
 
@@ -78,7 +79,7 @@ def test_logic_bearing_fields_preserved():
 
     members = _response(anon, f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalContainedIn=1")["inventory"]
     # Positions and indices (drive VC member ordering) are untouched.
-    assert [m["entPhysicalParentRelPos"] for m in members] == [1, 2, 3]
+    assert [m["entPhysicalParentRelPos"] for m in members] == [0, 1, 2]
     assert [m["entPhysicalIndex"] for m in members] == [100, 200, 300]
     assert all(m["entPhysicalClass"] == "chassis" for m in members)
 
@@ -1031,7 +1032,8 @@ def test_entity_descr_keeps_a_leading_front_panel_as_typed_and_hashes_the_rest()
 
 def test_a_junos_vc_marker_before_a_locator_keeps_its_member_attribution(db):
     """The locator is parsed first and the VC marker rule then reads the prefix, so "FPC 1 " survives."""
-    from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory, chassis_serial_key
+    from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory
+    from netbox_librenms_plugin.serial_identity import SerialRules
     from netbox_librenms_plugin.tests.conftest import junos_vc_inventory, make_junos_vc_members
 
     inventory = junos_vc_inventory()
@@ -1043,8 +1045,8 @@ def test_a_junos_vc_marker_before_a_locator_keeps_its_member_attribution(db):
         anonymized["entPhysicalSerialNum"] = raw["entPhysicalSerialNum"]
     master, member = make_junos_vc_members("vc-locator")
 
-    raw_owners = attribute_inventory(inventory, [master, member], chassis_serial_key(master))
-    anonymized_owners = attribute_inventory(rows, [master, member], chassis_serial_key(master))
+    raw_owners = attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master), "reported")
+    anonymized_owners = attribute_inventory(rows, [master, member], SerialRules.load().for_device(master), "reported")
 
     assert re.fullmatch(r"FPC 1 entity-[0-9a-f]{6} @ 1/0/0", rows[-1]["entPhysicalDescr"])
     assert anonymized_owners == raw_owners
@@ -1219,7 +1221,7 @@ def test_anonymized_recording_still_detects_vc(recording_server, db):
 
     assert result is not None
     assert result["member_count"] == 3
-    assert [m["position"] for m in result["members"]] == [1, 2, 3]
+    assert [m["position"] for m in result["members"]] == [0, 1, 2]
     # The master is still identified by the (now pseudonymized) device serial matching a member:
     # compare member serials against the anonymized DEVICE endpoint's serial — comparing against
     # members[0] is a tautology (members[0] always equals itself), which would stay green even if
@@ -1320,7 +1322,7 @@ def test_numeric_model_fields_share_the_string_token(field, value):
 
 
 @pytest.mark.parametrize("field", ["entPhysicalModelName", "entPhysicalSerialNum"])
-@pytest.mark.parametrize("value", [0, 123456, 123456.25])
+@pytest.mark.parametrize("value", [100, 123456, 123456.25])
 @pytest.mark.parametrize("numeric_parent", [True, False])
 def test_anonymization_preserves_mixed_numeric_inventory_identity(recording_server, field, value, numeric_parent):
     from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
@@ -1353,8 +1355,9 @@ def test_anonymization_preserves_mixed_numeric_inventory_identity(recording_serv
         assert ok
         replay_parent, replay_child = inventory
         index_map = {item["entPhysicalIndex"]: item for item in inventory}
-        assert BaseModuleTableView._find_integrating_ancestor(replay_child, index_map) is replay_parent
+        assert BaseModuleTableView._find_integrating_ancestor(replay_child, index_map, plain_context()) is replay_parent
         view = object.__new__(BaseModuleTableView)
+        view._serial_rules = SerialRules(())
         row = view._build_row(replay_child, index_map, {}, {})
         assert row["status"] == "Integrated"
         assert row["integrated_in_index"] == 100

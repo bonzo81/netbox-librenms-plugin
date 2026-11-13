@@ -15,6 +15,7 @@ from django_htmx.middleware import HtmxDetails
 from django.urls import reverse
 from ipam.models import IPAddress, VLAN
 
+from netbox_librenms_plugin.serial_identity import SerialRules
 from netbox_librenms_plugin.sync_cache import _ACKNOWLEDGED_REVISIONS_SESSION_KEY as SYNC_CACHE_ACKNOWLEDGED_SESSION_KEY
 from netbox_librenms_plugin.sync_cache import (
     CacheMutationTransition,
@@ -362,7 +363,11 @@ def test_module_cache_status_reads_the_inventory_snapshot_like_the_tab(client, s
     )
 
     stale = client.get(url, {"server_key": "primary"})
-    cache.set(key, module_inventory_cache_payload([], 6406, None), timeout=300)
+    cache.set(
+        key,
+        module_inventory_cache_payload([], 6406, None, serial_context=SerialRules.load().for_device(device)),
+        timeout=300,
+    )
     current = client.get(url, {"server_key": "primary"})
 
     assert stale.status_code == current.status_code == 200
@@ -393,10 +398,18 @@ def test_module_cache_status_rejects_a_snapshot_of_another_oob_link_like_the_tab
 
     get_cache_key = DeviceModuleTableView().get_cache_key
 
-    cache.set(key, module_inventory_cache_payload([], 6407, 6408), timeout=300)
+    cache.set(
+        key,
+        module_inventory_cache_payload([], 6407, 6408, serial_context=SerialRules.load().for_device(device)),
+        timeout=300,
+    )
     current = client.get(status_url, {"server_key": "primary"}).json()["tabs"]["modules"]
     current_rows = _get_cached_inventory_for_device(device, "primary", get_cache_key)
-    cache.set(key, module_inventory_cache_payload([], 6407, 6499), timeout=300)
+    cache.set(
+        key,
+        module_inventory_cache_payload([], 6407, 6499, serial_context=SerialRules.load().for_device(device)),
+        timeout=300,
+    )
     stale = client.get(status_url, {"server_key": "primary"}).json()["tabs"]["modules"]
     stale_rows = _get_cached_inventory_for_device(device, "primary", get_cache_key)
     fragment = client.get(fragment_url, {"server_key": "primary"})
@@ -431,7 +444,11 @@ def test_module_cache_status_agrees_with_the_tab_after_the_host_mapping_changes(
         rendered = fragment.status_code == 200 and fragment.context["module_sync"]["table"] is not None
         return status["snapshot_available"], rendered
 
-    cache.set(_cache_key("inventory", device, "primary"), module_inventory_cache_payload([], 6407, None), timeout=300)
+    cache.set(
+        _cache_key("inventory", device, "primary"),
+        module_inventory_cache_payload([], 6407, None, serial_context=SerialRules.load().for_device(device)),
+        timeout=300,
+    )
     before = status_and_fragment()
     if remap == "save":
         seed_mapping(device, "primary", own=6410)
@@ -453,7 +470,7 @@ def test_module_cache_fragment_does_not_discover_a_missing_host_id(client, setti
     )
     cache.set(
         _cache_key("inventory", device, "primary"),
-        module_inventory_cache_payload([], 9999, 6405),
+        module_inventory_cache_payload([], 9999, 6405, serial_context=SerialRules.load().for_device(device)),
         timeout=300,
     )
     client.force_login(make_superuser("cache-only-module-user"))
@@ -1172,7 +1189,13 @@ def test_vlan_sync_invalidates_other_tabs_after_creating_a_vlan(
     with django_capture_on_commit_callbacks(execute=True):
         response = client.post(
             url,
-            {"server_key": "primary", "action": "create_vlans", "select": "3062", "vlan_group_3062": ""},
+            {
+                "server_key": "primary",
+                "action": "create_vlans",
+                "select": "3062",
+                "vlan_group_3062": "",
+                "expected_vlan_name_3062": "Cache Test VLAN",
+            },
         )
 
     assert response.status_code == 302
@@ -1312,7 +1335,10 @@ def test_unchanged_module_serial_preserves_other_snapshots(client, settings, dja
     )
     module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, serial="OLD")
     inventory_payload = module_inventory_cache_payload(
-        [_module_row(8102, bay, module_type, "UNCHANGED-SERIAL")], 641, None
+        [_module_row(8102, bay, module_type, "UNCHANGED-SERIAL")],
+        641,
+        None,
+        serial_context=SerialRules.load().for_device(device),
     )
     _seed_snapshot("inventory", device, "primary", inventory_payload)
     _seed_snapshot("ports", device, "primary")
@@ -1349,7 +1375,9 @@ def test_module_mutation_without_posted_server_uses_active_namespace(
         model="Cache Scoped Module",
     )
     module = Module.objects.create(device=device, module_bay=bay, module_type=module_type, serial="OLD")
-    inventory_payload = module_inventory_cache_payload([_module_row(8103, bay, module_type, "NEW")], 642, None)
+    inventory_payload = module_inventory_cache_payload(
+        [_module_row(8103, bay, module_type, "NEW")], 642, None, serial_context=SerialRules.load().for_device(device)
+    )
     _seed_snapshot(
         "inventory",
         device,

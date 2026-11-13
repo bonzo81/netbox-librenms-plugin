@@ -1,57 +1,47 @@
 {% load helpers %}
+{% load librenms_sync_query %}
 {% if sync_partial_response %}{% include 'inc/messages.html' %}{% endif %}
-{% if request.htmx %}
-{% include "netbox_librenms_plugin/inc/_sync_cache_countdown.html" with cache_expiry=ip_sync.cache_expiry cache_container_id="ip-cache-countdown" cache_countdown_id="ip-countdown-timer" cache_oob=True %}
-{% endif %}
+<div class="noprint sync-tab-primary-toolbar">
+    <div class="sync-tab-actions d-flex align-items-center gap-2">
+        {% if ip_sync.table %}
+            {% if not migrated_to_marker %}
+            <button type="submit" form="ipaddress-sync-form" class="btn btn-primary">
+                <span class="spinner spinner-border d-none" id="sync-spinner"></span>
+                <span>Sync Selected IP Addresses</span>
+            </button>
+            {% include 'netbox_librenms_plugin/inc/_ip_sync_options.html' with sync_form_id='ipaddress-sync-form' %}
+            {% endif %}
+        {% endif %}
+    </div>
+    <div class="sync-tab-filter-refresh">
+        {% if ip_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_controls.html" with filters=ip_sync.filters prefix="ipaddresses_" tab="ipaddresses" section_id="ipFilterSection" label="Filter IP addresses" %}{% endif %}
+        {% firstof ip_sync.server_key server_key librenms_server_info.server_key as refresh_server_key %}
+        {% include "netbox_librenms_plugin/inc/_ipaddress_sync_refresh.html" with object=ip_sync.object server_key=refresh_server_key %}
+    </div>
+</div>
+{% if ip_sync.table %}{% include "netbox_librenms_plugin/inc/_sync_filter_form.html" with filters=ip_sync.filters prefix="ipaddresses_" tab="ipaddresses" section_id="ipFilterSection" label="Filter IP addresses" %}{% endif %}
 
 <!-- IP Address Sync Table -->
 {% if ip_sync.table %}
+
 {# Migrated donors must not sync: hiding only the button leaves the POST form live (Enter in a filter still submits), so drop the form in migrated mode. #}
 {% with model_name=ip_sync.object|meta:"model_name" %}
 {% if migrated_to_marker %}
 <div>
 {% else %}
-<form method="post"
-      action="{% url 'plugins:netbox_librenms_plugin:sync_device_ip_addresses' object_type=model_name pk=ip_sync.object.pk %}"
-      hx-post="{% url 'plugins:netbox_librenms_plugin:sync_device_ip_addresses' object_type=model_name pk=ip_sync.object.pk %}"
+{% url 'plugins:netbox_librenms_plugin:sync_device_ip_addresses' object_type=model_name pk=ip_sync.object.pk as ip_sync_url_path %}{% sync_tab_url ip_sync_url_path as ip_sync_url %}
+<form method="post" id="ipaddress-sync-form"
+      action="{{ ip_sync_url }}"
+      hx-post="{{ ip_sync_url }}"
       hx-target="#htmx-modal-content"
       hx-swap="innerHTML">
 {% endif %}
 {% endwith %}
     {% csrf_token %}
     {% if ip_sync.server_key %}<input type="hidden" name="server_key" value="{{ ip_sync.server_key }}">{% endif %}
-    <div class="noprint d-flex align-items-center mt-0 mb-3 sync-tab-primary-toolbar">
-        <div class="d-flex align-items-center gap-2">
-            {% if not migrated_to_marker %}
-            <button type="submit" class="btn btn-primary">
-                <span class="spinner spinner-border d-none" id="sync-spinner"></span>
-                <span>Sync Selected IP Addresses</span>
-            </button>
-            {% include 'netbox_librenms_plugin/inc/_ip_sync_options.html' %}
-            {% endif %}
-        </div>
-    </div>
 
     <div class="row mb-3">
         <div class="col col-md-12">
-            <div class="d-flex justify-content-end align-items-center mb-3">
-                <button class="btn btn-sm btn-secondary sync-filter-toggle" type="button" data-bs-toggle="collapse" data-bs-target="#ipFilterSection" aria-expanded="false" aria-controls="ipFilterSection">
-                    <i class="mdi mdi-filter-outline"></i> Filters
-                </button>
-            </div>
-            <div class="collapse mb-3" id="ipFilterSection">
-                <div class="mb-2">
-                    <small class="text-muted">
-                        <i class="mdi mdi-information"></i> Filters apply to currently displayed IP addresses.
-                    </small>
-                </div>
-                <div class="filter-container d-flex gap-2">
-                    <input type="text" id="filter-address" placeholder="Filter by Address" class="form-control">
-                    <input type="text" id="filter-prefix" placeholder="Filter by Prefix" class="form-control">
-                    <input type="text" id="filter-device" placeholder="Filter by Device" class="form-control">
-                    <input type="text" id="filter-interface" placeholder="Filter by Interface" class="form-control">
-                </div>
-            </div>
             <style>
                 /* VRF dropdown styles */
                 #librenms-ipaddress-table td[data-col="vrf"] {
@@ -70,9 +60,14 @@
                 }
             </style>
             <div class="card">
-                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=ip_sync.table %}
+                {% if ip_sync.filters.is_valid %}
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=ip_sync.table placement="top" filtered_from=ip_sync.filtered_from %}
                 {% include 'inc/table.html' with table=ip_sync.table %}
-                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=ip_sync.table %}
+                {% include 'netbox_librenms_plugin/inc/paginator.html' with table=ip_sync.table filtered_from=ip_sync.filtered_from %}
+                {% else %}
+                {# The error summary above the form says what to correct; no row is shown for an invalid filter. #}
+                <div class="card-body text-center text-muted py-4" data-filter-invalid="true">Correct the filters to show the IP addresses.</div>
+                {% endif %}
             </div>
         </div>
     </div>
@@ -82,6 +77,7 @@
 </form>
 {% endif %}
 {% else %}
+
 <div class="card">
     <div class="card-body text-center text-muted py-4">
         <i class="mdi mdi-sync-off mdi-48px"></i>

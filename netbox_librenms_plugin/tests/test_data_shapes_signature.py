@@ -14,14 +14,14 @@ from netbox_librenms_plugin.tests.recordings import iter_recordings, load_record
 
 
 def test_signature_cisco_stackwise():
-    """A Cisco StackWise recording fingerprints as a 3-member, 1-based, stack-rooted VC."""
+    """A Cisco StackWise recording fingerprints as a 3-member, stack-rooted VC that LibreNMS numbers from 0."""
     sig = compute_shape_signature(load_recording("cisco-stackwise-3member"))
     assert sig["os"] == pseudonymize_os("ios")  # OS is pseudonymized in the recording
     assert sig["virtual_chassis"] == {
         "present": True,
         "root_class": "stack",
         "member_count": 3,
-        "position_base": 1,
+        "position_base": 0,
         "member_shape": "chassis",
     }
     assert sig["lag"]["present"] is False

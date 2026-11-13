@@ -16,18 +16,20 @@ class TestIpAddressSyncContentTemplateMigratedMode:
         from django.test import RequestFactory
         from django_tables2 import RequestConfig
 
+        from netbox_librenms_plugin.sync_filters import parse_sync_filters
         from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
         from netbox_librenms_plugin.tests.conftest import make_device
 
         device = make_device("ip-tmpl-dev")
         request = RequestFactory().get("/")
         request.user = AnonymousUser()
-        table = IPAddressTable([])
+        table = IPAddressTable([], mgmt_row_vrfs={})
         RequestConfig(request).configure(table)
         ctx = {
             "ip_sync": {
                 "object": device,
                 "table": table,
+                "filters": parse_sync_filters(request.GET, table.filter_spec()),
                 "server_key": server_key,
                 "set_primary_ip": False,
                 "create_missing_interfaces": False,

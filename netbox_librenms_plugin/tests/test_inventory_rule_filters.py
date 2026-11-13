@@ -25,8 +25,11 @@ def _rule(**fields):
 
 def _check(item, rules, parent=None, index_map=None, *, serial="", models=()):
     from netbox_librenms_plugin.views.base.modules_view import DeviceIdentity, _check_ignore_rules
+    from netbox_librenms_plugin.serial_identity import plain_context
 
-    return _check_ignore_rules(item, parent, rules, index_map, DeviceIdentity(serial, frozenset(models)))
+    return _check_ignore_rules(
+        item, parent, rules, index_map, DeviceIdentity(serial, frozenset(models), serial_context=plain_context())
+    )
 
 
 _CHASSIS = {"entPhysicalIndex": 1, "entPhysicalClass": "chassis", "entPhysicalContainedIn": 0}
@@ -60,7 +63,7 @@ class TestMatcher:
 
     @pytest.mark.parametrize(
         ("item_serial", "parent_serial", "matched"),
-        [("", "", False), ("SN-1", "SN-1", True), ("SN-1", "SN-2", False), ("SN-1", "", False)],
+        [("", "", False), ("SN-100", "SN-100", True), ("SN-100", "SN-200", False), ("SN-100", "", False)],
     )
     def test_a_class_rule_honours_the_serial_guard(self, item_serial, parent_serial, matched):
         rule = _rule(match_type="class_is", pattern="module", action="skip", require_serial_match_parent=True)
@@ -566,11 +569,14 @@ class TestSingleInstall:
 
 def _vc_rows(page, member):
     """Each member's chassis, a member board with the front-panel description, and an optic in its cage."""
+    from netbox_librenms_plugin.tests.conftest import STACK_ROOT_INDEX, stack_root_row
+
     return [
-        {"entPhysicalIndex": 1, "entPhysicalContainedIn": 0, "entPhysicalClass": "chassis",
-         "entPhysicalName": "Chassis 1", "entPhysicalSerialNum": page.serial},
-        {"entPhysicalIndex": 5, "entPhysicalContainedIn": 0, "entPhysicalClass": "chassis",
-         "entPhysicalName": "Chassis 2", "entPhysicalSerialNum": member.serial},
+        stack_root_row(),
+        {"entPhysicalIndex": 1, "entPhysicalContainedIn": STACK_ROOT_INDEX, "entPhysicalClass": "chassis",
+         "entPhysicalName": "Chassis 1", "entPhysicalSerialNum": page.serial, "entPhysicalParentRelPos": 1},
+        {"entPhysicalIndex": 5, "entPhysicalContainedIn": STACK_ROOT_INDEX, "entPhysicalClass": "chassis",
+         "entPhysicalName": "Chassis 2", "entPhysicalSerialNum": member.serial, "entPhysicalParentRelPos": 2},
         {"entPhysicalIndex": 10, "entPhysicalContainedIn": 5, "entPhysicalClass": "module",
          "entPhysicalName": "Member board", "entPhysicalDescr": "Front Panel 4 ports Gigabitethernet Module",
          "entPhysicalModelName": "MEMBER-BOARD", "entPhysicalSerialNum": "SN-VC-BOARD"},

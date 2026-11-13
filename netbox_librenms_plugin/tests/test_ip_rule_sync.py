@@ -340,19 +340,39 @@ class TestAVrfChangeRedecidesTheRow:
         assert "Synced" in verdict["status"]
         assert verdict["selectable"] is False
 
-    def test_a_vrf_the_user_cannot_view_decides_nothing(self, client, device, blue):
+    @pytest.mark.parametrize("unavailable", ["deleted", "hidden"])
+    def test_an_unavailable_vrf_is_refused_and_not_verified_as_global(self, client, device, blue, unavailable):
         from dcim.models import Device
 
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
         IPAddressMapping.objects.create(prefix="fe80::/10", vrf=blue)
-        _seed(device, [_row(LINK_LOCAL)])
-        client.force_login(make_user_with_perms("ip-rule-no-vrf-view", [("view", Device)]))
+        IPAddress.objects.create(address=GLOBAL_V4, assigned_object=device.interfaces.get(name="eth0"))
+        _seed(device, [_row(GLOBAL_V4)])
+        vrf_pk = blue.pk
+        if unavailable == "deleted":
+            blue.delete()
+        else:
+            client.force_login(make_user_with_perms("ip-rule-no-vrf-view", [("view", Device)]))
 
-        verdict = _verify(client, device, LINK_LOCAL, blue)
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:verify_ipaddress"),
+            json.dumps(
+                {
+                    "device_id": device.pk,
+                    "object_type": "device",
+                    "ip_address": GLOBAL_V4,
+                    "row_id": GLOBAL_V4,
+                    "vrf_id": vrf_pk,
+                    "server_key": SERVER_KEY,
+                }
+            ),
+            content_type="application/json",
+        )
 
-        assert "Ignored" not in verdict["status"]
-        assert verdict["selectable"] is True
+        assert response.status_code == 400, response.json()
+        assert response.json()["status"] == "error"
+        assert "formatted_row" not in response.json()
 
     @pytest.mark.parametrize("mapping", ["none", "all-vrf", "blue"])
     @pytest.mark.parametrize("held", [False, True], ids=["not-held", "held-on-eth0"])
@@ -391,7 +411,7 @@ class TestAVrfChangeRedecidesTheRow:
             return response.status_code, response.json()
 
         hidden = verify(blue.pk)
-        assert hidden[0] == 200, hidden
+        assert hidden[0] == 400, hidden
         assert hidden == verify(gone_pk)
 
 

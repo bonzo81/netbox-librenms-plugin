@@ -5,6 +5,8 @@ from copy import deepcopy
 
 import pytest
 from django.core.cache import cache
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
 from netbox_librenms_plugin.middleware import TRY_AGAIN_MESSAGE
@@ -249,7 +251,7 @@ class TestUpdateDeviceSerialView:
         assert any("updated from 'OLD-SERIAL'" in text for text in _messages(response, "success"))
         assert_update_logged(device, "serial", "OLD-SERIAL", "NEW-SERIAL")
 
-    @pytest.mark.parametrize("serial", [None, "", "-"])
+    @pytest.mark.parametrize("serial", [None, "", "-", "  ", "unknown", " N/A "])
     def test_missing_live_serial_preserves_the_stored_value(self, logged_in_client, librenms_server, serial):
         device = _linked_device(f"serial-missing-{serial!s}", 6512, serial="KEPT-SERIAL")
         librenms_server.register(
@@ -265,6 +267,19 @@ class TestUpdateDeviceSerialView:
         device.refresh_from_db()
         assert device.serial == "KEPT-SERIAL"
         assert any("No serial number available" in text for text in _messages(response, "warning"))
+
+    @pytest.mark.parametrize(("reported", "stored"), [(100200, "100200"), (0, "OLD-ZERO")])
+    def test_a_numeric_serial_is_stored_as_text_when_it_has_an_identity(
+        self, logged_in_client, librenms_server, reported, stored
+    ):
+        """A one-digit serial identifies no hardware, so the update keeps the stored serial."""
+        device = _linked_device(f"serial-numeric-{reported}", 6514, serial="OLD-ZERO")
+        librenms_server.device_info_response(device_id=6514, hostname=device.name, serial=reported)
+
+        _post(logged_in_client, "update_device_serial", device)
+
+        device.refresh_from_db()
+        assert device.serial == stored
 
     def test_first_serial_uses_the_set_message(self, logged_in_client, librenms_server):
         device = _linked_device("serial-first", 6513)
@@ -581,14 +596,14 @@ class TestCreateAndAssignPlatformView:
     def test_a_platform_netbox_refuses_rolls_back_creation(self, logged_in_client, librenms_server):
         from dcim.models import Platform
 
-        device = _reporting_device("platform-invalid-name", librenms_server, 6584, "")
+        device = _reporting_device("platform-invalid-name", librenms_server, 6584, "invalid-name-os")
         name = "x" * (Platform._meta.get_field("name").max_length + 1)
 
         response = _post(
             logged_in_client,
             "create_and_assign_platform",
             device,
-            {"platform_name": name},
+            {"platform_name": name, "librenms_os": "invalid-name-os"},
         )
 
         assert not Platform.objects.filter(name=name).exists()
@@ -601,7 +616,7 @@ class TestCreateAndAssignPlatformView:
     ):
         from dcim.models import Manufacturer, Platform
 
-        device = _reporting_device("platform-incompatible-manufacturer", librenms_server, 6585, "")
+        device = _reporting_device("platform-incompatible-manufacturer", librenms_server, 6585, "incompatible-os")
         incompatible = Manufacturer.objects.create(
             name="Incompatible platform manufacturer",
             slug="incompatible-platform-manufacturer",
@@ -614,6 +629,7 @@ class TestCreateAndAssignPlatformView:
             {
                 "platform_name": "Incompatible Platform",
                 "manufacturer": str(incompatible.pk),
+                "librenms_os": "incompatible-os",
             },
         )
 
@@ -665,9 +681,9 @@ class TestAssignVCSerialView:
             "assign_vc_serial",
             first,
             {
-                "serial_1": " FIRST-VC-SERIAL ",
+                "librenms_serial_1": " FIRST-VC-SERIAL ",
                 "member_id_1": str(first.pk),
-                "serial_2": "SECOND-VC-SERIAL",
+                "librenms_serial_2": "SECOND-VC-SERIAL",
                 "member_id_2": str(second.pk),
             },
         )
@@ -697,9 +713,9 @@ class TestAssignVCSerialView:
                     "assign_vc_serial",
                     first,
                     {
-                        "serial_1": "FIRST-LOCKED-SERIAL",
+                        "librenms_serial_1": "FIRST-LOCKED-SERIAL",
                         "member_id_1": str(first.pk),
-                        "serial_2": "SECOND-LOCKED-SERIAL",
+                        "librenms_serial_2": "SECOND-LOCKED-SERIAL",
                         "member_id_2": str(second.pk),
                     },
                 )
@@ -709,6 +725,30 @@ class TestAssignVCSerialView:
         assert (first.serial, second.serial) == ("", "")
         assert response.status_code == 302
         assert messages_on(response.wsgi_request) == [("error", TRY_AGAIN_MESSAGE)]
+
+    def test_a_post_without_the_librenms_serial_writes_nothing(self, logged_in_client, librenms_server):
+        """A page rendered before the raw serial field posts only the keyed serial, so the view refuses it."""
+        first = make_device("vc-serial-stale-first")
+        second = make_device("vc-serial-stale-second")
+        make_virtual_chassis("vc-serial-stale", first, second)
+
+        response = _post(
+            logged_in_client,
+            "assign_vc_serial",
+            first,
+            {
+                "librenms_serial_1": "STALE-FIRST",
+                "member_id_1": str(first.pk),
+                "serial_2": "STALE-SECOND",
+                "member_id_2": str(second.pk),
+            },
+        )
+
+        first.refresh_from_db()
+        second.refresh_from_db()
+        assert (first.serial, second.serial) == ("", "")
+        assert _messages(response, "success") == []
+        assert len(_messages(response, "error")) == 1
 
     def test_wrong_chassis_and_missing_member_are_both_reported(self, logged_in_client, librenms_server):
         root = make_device("vc-serial-root")
@@ -722,11 +762,11 @@ class TestAssignVCSerialView:
             "assign_vc_serial",
             root,
             {
-                "serial_1": "OUTSIDER-SERIAL",
+                "librenms_serial_1": "OUTSIDER-SERIAL",
                 "member_id_1": str(outsider.pk),
-                "serial_2": "MISSING-SERIAL",
+                "librenms_serial_2": "MISSING-SERIAL",
                 "member_id_2": str(outsider.pk + 10000),
-                "serial_3": "GARBLED-SERIAL",
+                "librenms_serial_3": "GARBLED-SERIAL",
                 "member_id_3": "not-a-number",
             },
         )
@@ -749,7 +789,7 @@ class TestAssignVCSerialView:
             {
                 "server_key": SECONDARY_KEY,
                 "tab": "cables",
-                "serial_1": "CONTEXT-SERIAL",
+                "librenms_serial_1": "CONTEXT-SERIAL",
                 "member_id_1": str(second.pk),
             },
         )
@@ -795,7 +835,7 @@ class TestAssignVCSerialView:
             logged_in_client,
             "assign_vc_serial",
             device,
-            {"serial_1": "UNUSED-SERIAL", "member_id_1": ""},
+            {"librenms_serial_1": "UNUSED-SERIAL", "member_id_1": ""},
         )
 
         device.refresh_from_db()
@@ -1099,6 +1139,133 @@ class TestSetPreferredServerView:
         assert any("server key must be a non-empty string" in text for text in _messages(response, "error"))
 
 
+def _retype_shape(target, shape, new_maker):
+    """Give *target* two serials that only the rule of *new_maker* keys to one value: on chassis members or on modules."""
+    from dcim.models import VirtualChassis
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import install_module, make_module_bay, make_virtual_chassis
+
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=new_maker
+    )
+    if shape == "chassis-members":
+        target.serial = "XABC"
+        target.save()
+        member = make_device(f"{target.name}-member", serial="ABC")
+        chassis = make_virtual_chassis(f"{target.name}-chassis", target, member)
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=target)
+    else:
+        for number, serial in ((1, "XABC"), (2, "ABC")):
+            make_module_bay(target, f"Slot {number}", position=str(number))
+            install_module(target, f"Slot {number}", f"{target.name}-card-{number}".upper(), serial=serial)
+    target.refresh_from_db()
+
+
+@pytest.mark.django_db
+class TestUpdateDeviceTypeSerialIdentity:
+    def test_a_type_change_refuses_when_another_device_then_holds_the_stored_serial(
+        self, logged_in_client, librenms_server
+    ):
+        """Under the old manufacturer's rule "XABC" has no identity; under the new type it is the holder's serial."""
+        from dcim.models import Device, DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        device = make_device("retype-sync-target", serial="XABC", librenms_cf={SERVER_KEY: 6571})
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^X(AB)C$", replacement=r"\1", manufacturer=device.device_type.manufacturer
+        )
+        new_type = DeviceType.objects.create(
+            manufacturer=Manufacturer.objects.create(name="Retype sync maker", slug="retype-sync-maker"),
+            model="Retype sync model",
+            slug="retype-sync-model",
+            part_number="RETYPE-SYNC-HW",
+        )
+        holder = make_device("retype-sync-holder", serial="XABC")
+        Device.objects.filter(pk=holder.pk).update(device_type=new_type)
+        old_type_id = device.device_type_id
+        librenms_server.device_info_response(
+            device_id=6571, hostname=device.name, serial="XABC", hardware=new_type.part_number
+        )
+
+        response = _post(logged_in_client, "update_device_type", device, {})
+
+        assert Device.objects.get(pk=device.pk).device_type_id == old_type_id
+        assert _messages(response, "error")
+        assert not any(holder.name in text for text in _messages(response, "error"))
+
+    @pytest.mark.parametrize("shape", ["chassis-members", "device-modules"])
+    def test_a_type_change_refuses_two_serials_that_the_new_rules_key_to_one(
+        self, logged_in_client, librenms_server, shape
+    ):
+        from dcim.models import Device, DeviceType, Manufacturer
+
+        device = make_device(f"retype-sync-{shape}", librenms_cf={SERVER_KEY: 6572})
+        new_maker = Manufacturer.objects.create(name=f"Retype sync {shape}", slug=f"retype-sync-{shape}-maker")
+        _retype_shape(device, shape, new_maker)
+        new_type = DeviceType.objects.create(
+            manufacturer=new_maker,
+            model=f"Retype sync {shape}",
+            slug=f"retype-sync-{shape}-type",
+            part_number=f"RETYPE-SYNC-{shape}-HW".upper(),
+        )
+        old_type_id = device.device_type_id
+        librenms_server.device_info_response(device_id=6572, hostname=device.name, hardware=new_type.part_number)
+
+        response = _post(logged_in_client, "update_device_type", device, {})
+
+        assert Device.objects.get(pk=device.pk).device_type_id == old_type_id
+        assert _messages(response, "error")
+
+    def test_a_type_change_refuses_a_new_holder_behind_an_existing_duplicate(self, logged_in_client, librenms_server):
+        """A and B already share "XABC"; under the new rule A also takes C's "ABC"."""
+        from dcim.models import Device, DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        device = make_device("retype-masked-a", serial="XABC", librenms_cf={SERVER_KEY: 6574})
+        make_device("retype-masked-b", serial="XABC")
+        make_device("retype-masked-c", serial="ABC")
+        new_maker = Manufacturer.objects.create(name="Retype masked maker", slug="retype-masked-maker")
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=new_maker
+        )
+        new_type = DeviceType.objects.create(
+            manufacturer=new_maker, model="Retype masked", slug="retype-masked", part_number="RETYPE-MASKED-HW"
+        )
+        old_type_id = device.device_type_id
+        librenms_server.device_info_response(device_id=6574, hostname=device.name, hardware=new_type.part_number)
+
+        _post(logged_in_client, "update_device_type", device, {})
+
+        assert Device.objects.get(pk=device.pk).device_type_id == old_type_id
+
+    def test_a_type_change_without_a_new_shared_serial_is_saved(self, logged_in_client, librenms_server):
+        """Two module serials that the old and the new rules both keep apart do not block the change."""
+        from dcim.models import Device, DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.conftest import install_module, make_module_bay
+
+        device = make_device("retype-sync-clean", librenms_cf={SERVER_KEY: 6573})
+        for number, serial in ((1, "XDEF"), (2, "ABC")):
+            make_module_bay(device, f"Slot {number}", position=str(number))
+            install_module(device, f"Slot {number}", f"RETYPE-CLEAN-CARD-{number}", serial=serial)
+        new_maker = Manufacturer.objects.create(name="Retype sync clean", slug="retype-sync-clean-maker")
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=new_maker
+        )
+        new_type = DeviceType.objects.create(
+            manufacturer=new_maker, model="Retype sync clean", slug="retype-sync-clean", part_number="RETYPE-CLEAN-HW"
+        )
+        librenms_server.device_info_response(device_id=6573, hostname=device.name, hardware=new_type.part_number)
+
+        _post(logged_in_client, "update_device_type", device, {})
+
+        assert Device.objects.get(pk=device.pk).device_type_id == new_type.pk
+
+
 @pytest.mark.django_db
 class TestConvertLegacyLibreNMSIdView:
     def test_matching_device_serial_converts_the_legacy_id(self, logged_in_client, librenms_server):
@@ -1140,7 +1307,50 @@ class TestConvertLegacyLibreNMSIdView:
 
         device.refresh_from_db()
         assert stored_mapping_for_test(device) == 6562
-        assert any("Serial number mismatch" in text for text in _messages(response, "error"))
+        assert _messages(response, "error")
+
+    def test_a_decorated_librenms_serial_confirms_the_stored_serial(self, logged_in_client, librenms_server):
+        """The serial rules key both sides, so a stored "ABC" matches LibreNMS "S/N ABC"."""
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        device = make_device("legacy-decorated", serial="ABC-LEGACY", librenms_cf=6566)
+        librenms_server.device_info_response(device_id=6566, hostname=device.name, serial="S/N ABC-LEGACY")
+
+        with CaptureQueriesContext(connection) as queries:
+            _post(logged_in_client, "convert_legacy_librenms_id", device, {"object_type": "device"})
+
+        device.refresh_from_db()
+        assert stored_mapping_for_test(device) == {SERVER_KEY: 6566}
+        # The serial identity lock comes before the row lock.
+        statements = [query["sql"] for query in queries.captured_queries]
+        identity_lock = next(i for i, sql in enumerate(statements) if "pg_advisory_xact_lock" in sql)
+        assert identity_lock < next(i for i, sql in enumerate(statements) if "FOR UPDATE" in sql)
+
+    def test_a_hidden_device_with_the_serial_in_another_form_refuses_the_conversion(self, client, librenms_server):
+        """The serial confirms the target only when no other device holds it, also one the user cannot see."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        device = make_device("legacy-twin-target", serial="TWIN-LEGACY", librenms_cf=6567)
+        make_device("legacy-twin-hidden", serial="S/N TWIN-LEGACY")
+        librenms_server.device_info_response(device_id=6567, hostname=device.name, serial="TWIN-LEGACY")
+        client.force_login(
+            make_user_with_perms(
+                "legacy-twin-user", [("view", Device), ("change", Device)], constraints={"name": device.name}
+            )
+        )
+
+        _post(client, "convert_legacy_librenms_id", device, {"object_type": "device"})
+
+        device.refresh_from_db()
+        assert stored_mapping_for_test(device) == 6567
 
     def test_vm_conversion_skips_the_device_serial_gate(self, logged_in_client, librenms_server):
         vm = make_vm("legacy-convert-vm")

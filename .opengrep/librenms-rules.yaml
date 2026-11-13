@@ -36,7 +36,8 @@ rules:
       - pattern: $M.objects
       # helpers that resolve a NetBox object with no permission scope applied
       - pattern: resolve_device_by_host_ip(...)
-      - pattern: find_devices_by_serial(...)
+      - pattern: resolve_device(...)
+      - pattern: resolve_devices(...)
       - pattern: find_mapping(...)
       - pattern: get_librenms_sync_device(...)
       # a match an unrestricted search already bound into the validation dict
@@ -1365,6 +1366,26 @@ rules:
     patterns:
       - pattern-regex: class=["']table-responsive["'][^>]*>\s*\{%\s*include\s+["']inc/table\.html["']
       - pattern-not-inside: "{# ... #}"
+  - id: titled-icon-needs-accessible-name
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      This icon gives its text only in a title, and a screen reader does not reliably announce the
+      title of an element that cannot get focus. Add role="img" and an aria-label equal to the
+      title. If visible text next to the icon says the same thing, add aria-hidden="true".
+    metadata:
+      category: accessibility
+    paths:
+      include:
+        - "*.py"
+        - "*.html"
+        - "*.js"
+      exclude:
+        - "**/tests/**"
+    patterns:
+      # The attribute set ends at the first ">", also across concatenated Python literals.
+      - pattern-regex: >-
+          <i\b(?=[^>]*[\s'"]title\s*=)(?![^>]*[\s'"]aria-hidden\s*=\s*["']true["'])(?!(?=[^>]*[\s'"]role\s*=\s*["']img["'])[^>]*[\s'"]aria-label\s*=\s*["'](?=\s*[^\s"']))[^>]*>
 
   - id: conflict-raised-without-record
     languages: [python]
@@ -1480,7 +1501,7 @@ rules:
     message: >-
       This code builds a Virtual Chassis member name with _generate_vc_member_name(). That call
       does not apply the serial rules, so a `{serial}` name can differ from the name that import
-      creates. Call _member_name() with a vc_serial_key() serial key.
+      creates. Call _member_name() with a serial context from serial_identity.SerialRules.
     metadata:
       category: correctness
     paths:
@@ -1493,6 +1514,78 @@ rules:
       - pattern-not-inside: |
           def _member_name(...):
               ...
+
+  - id: serial-identity-through-owner
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This code compares, groups, looks up or keys a hardware serial outside serial_identity.py.
+      A stored serial is the raw LibreNMS text, and two texts name one part only under the serial
+      rules of the right context. Call compare(), group(), is_identity(), resolve_devices() or
+      resolve_modules() from netbox_librenms_plugin.serial_identity instead.
+    metadata:
+      category: correctness
+      references:
+        - "netbox_librenms_plugin/serial_identity.py"
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/migrations/**"
+        - "**/serial_identity.py"
+    pattern-either:
+      # A comparison of a serial value: an attribute, a local named for a serial, or an inventory serial field.
+      - patterns:
+          - pattern-either:
+              - pattern: $A == $B
+              - pattern: $A != $B
+              - pattern: $B == $A
+              - pattern: $B != $A
+          - metavariable-regex:
+              metavariable: $A
+              regex: '^(?!["'']).*?(["''](serial|entPhysicalSerialNum)["'']|(^|\W)\w*serial(\.(strip|lower|upper|casefold)\(\))*$)'
+      # A dict or set keyed by a serial value.
+      - patterns:
+          - pattern-either:
+              - pattern: $D.setdefault($K, ...)
+              - pattern: $D[$K] = $V
+              - pattern: $S.add($K)
+          - metavariable-regex:
+              metavariable: $K
+              regex: '^(?!["'']).*?(["''](serial|entPhysicalSerialNum)["'']|(^|\W)\w*serial(\.(strip|lower|upper|casefold)\(\))*$)'
+      # A fingerprint built from serial values.
+      - patterns:
+          - pattern-either:
+              - pattern: sorted($E for $X in $Y)
+              - pattern: sorted($E for $X in $Y if $C)
+          - metavariable-regex:
+              metavariable: $E
+              regex: '^(?!["'']).*?(["''](serial|entPhysicalSerialNum)["'']|(^|\W)\w*serial(\.(strip|lower|upper|casefold)\(\))*$)'
+      # A Device or Module lookup on the serial column.
+      - patterns:
+          - pattern-either:
+              - pattern: $Q.filter(..., $KW=$V, ...)
+              - pattern: $Q.exclude(..., $KW=$V, ...)
+              - pattern: $Q.get(..., $KW=$V, ...)
+              - pattern: Q(..., $KW=$V, ...)
+          - metavariable-regex:
+              metavariable: $KW
+              regex: ^(serial|trimmed_serial)(__\w+)?$
+      # The serial rules applied outside the owner.
+      - pattern: apply_normalization_rules(..., "serial", ...)
+      - pattern: apply_normalization_rules(..., scope="serial", ...)
+      - pattern: apply_normalization_rules(..., $N.SCOPE_SERIAL, ...)
+      - pattern: preload_normalization_rules("serial", ...)
+      - pattern: preload_normalization_rules($N.SCOPE_SERIAL, ...)
+      - pattern: $R.serial_group
+      # A helper that the owner replaced.
+      - patterns:
+          - pattern-either:
+              - pattern: from $M import $NAME
+              - pattern: from $M import $NAME as $ALIAS
+              - pattern: $M.$NAME(...)
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: ^(normalize_serial|normalize_stack_serial|normalize_inventory_serial|vc_serial_key|serials_match|chassis_serial_key|devices_with_serial|find_devices_by_serial|candidate_vc_serial_keys|members_by_serial_key)$
 
   - id: netbox-only-controls-use-replaceable-handlers
     languages: [javascript]
@@ -1769,22 +1862,132 @@ rules:
           metavariable: $TYPES
           regex: ^(?![\s\S]*\bValidationError\b)[\s\S]*\bIntegrityError\b
 
-  - id: batch-validation-needs-candidate-keys
+  - id: post-write-scope-through-helper
     languages: [python]
     severity: ERROR
     message: >-
-      This batch passes a memoized serial_key_for but no candidate_keys. On a VC cache miss, each
-      device then reads the serial rules again. Pass candidate_keys=functools.cache(candidate_vc_serial_keys)
-      from the same batch.
+      This code reads a row that it just saved through an add or change scope inline. Call
+      transactions.saved_in_scope(obj, user, action), so every post-write read-back uses one rule.
+    metadata:
+      category: correctness
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/migrations/**"
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $OBJ.save(...)
+              ...
+          - pattern-inside: |
+              $OBJ = $MANAGER.create(...)
+              ...
+          - pattern-inside: |
+              try:
+                  ...
+                  $OBJ.save(...)
+              except $ERROR:
+                  ...
+              ...
+          - pattern-inside: |
+              try:
+                  ...
+                  $OBJ.save(...)
+              except $ERROR as $NAME:
+                  ...
+              ...
+          - pattern-inside: |
+              try:
+                  ...
+                  $OBJ = $MANAGER.create(...)
+              except $ERROR:
+                  ...
+              ...
+          - pattern-inside: |
+              try:
+                  ...
+                  $OBJ = $MANAGER.create(...)
+              except $ERROR as $NAME:
+                  ...
+              ...
+      - pattern-either:
+          - pattern: $MODEL.objects.restrict($USER, $ACTION).filter(pk=$OBJ.pk).exists()
+          - pattern: $VIEW.restricted_queryset($MODEL, $ACTION).filter(pk=$OBJ.pk).exists()
+      - metavariable-regex:
+          metavariable: $ACTION
+          regex: ^["'](add|change)["']$
+  - id: sync-script-reads-page-server-key
+    languages: [javascript]
+    severity: ERROR
+    message: >-
+      This script looks up a server_key input in the whole document. The server panel renders a
+      server_key input for each other server, so the first match can name the wrong server. Call
+      syncServerKey(), which reads the server of the sync page from #librenms-sync-tabs.
+    metadata:
+      category: correctness
+    paths:
+      include:
+        - "*.js"
+      exclude:
+        - "**/vendor/**"
+        - "*.min.js"
+    pattern-either:
+      - pattern: document.querySelector("=~/server_key/")
+      - pattern: document.querySelectorAll("=~/server_key/")
+      - pattern: document.getElementsByName("server_key")
+  - id: sync-tab-url-through-sync-query
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      This code writes a sync tab query string by hand, so the link drops the filters, pages and
+      other state of the sync page. Build it with the sync_tab_url tag, SyncQuery or
+      page_query_url from sync_query.py. The Modules tab is outside this check: its module action
+      redirect keeps its own query.
+    metadata:
+      category: correctness
+    paths:
+      include:
+        - "*.py"
+        - "*.html"
+      exclude:
+        - "**/tests/**"
+        - "**/sync_query.py"
+        - "**/views/sync/modules.py"
+    patterns:
+      # A tab key right after "?", "&", "&amp;" or a template tag that follows "?".
+      - pattern-regex: (?:[?&]|&amp;|\?\{%[^%]*%\})tab=
+
+  - id: sync-tab-attributes-through-parser
+    languages: [python]
+    severity: ERROR
+    message: Read the sync container attributes through sync_tab_attributes so added attributes remain valid.
+    patterns:
+      - pattern: re.search($PATTERN, ...)
+      - metavariable-regex:
+          metavariable: $PATTERN
+          regex: '.*librenms-sync-tabs.*data-active-tab=.*">.*'
+    paths:
+      include:
+        - "**/tests/**"
+
+  - id: batch-validation-shares-serial-rules
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This loop validates devices without serial_rules, so each device reads the serial rules
+      again. Read them once with serial_identity.SerialRules.load() before the loop and pass
+      serial_rules= to every validate_device_for_import() call.
     metadata:
       category: performance
     paths:
       exclude: ["**/netbox_librenms_plugin/tests/**"]
     patterns:
-      - pattern: validate_device_for_import(..., serial_key_for=$KEYS, ...)
-      # An explicit None is the default: each device then reads the serial rules again.
       - pattern-either:
-          - patterns:
-              - pattern: validate_device_for_import(...)
-              - pattern-not: validate_device_for_import(..., candidate_keys=$CANDIDATES, ...)
-          - pattern: validate_device_for_import(..., candidate_keys=None, ...)
+          - pattern-inside: |
+              for $X in $Y:
+                ...
+          - pattern-inside: |
+              while $C:
+                ...
+      - pattern: validate_device_for_import(...)
+      - pattern-not: validate_device_for_import(..., serial_rules=$RULES, ...)

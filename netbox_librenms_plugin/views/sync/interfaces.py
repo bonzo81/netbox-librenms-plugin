@@ -1,7 +1,6 @@
 import logging
 from dataclasses import dataclass, field
 from functools import partial
-from urllib.parse import quote_plus
 
 from dcim.models import Device, Interface, VirtualChassis
 from django.contrib import messages
@@ -64,6 +63,7 @@ from netbox_librenms_plugin.sync_cache import (
     apply_transition_to_response,
     schedule_request_cache_mutation,
 )
+from netbox_librenms_plugin.sync_query import page_query_url
 from netbox_librenms_plugin.transactions import CommittedFollowUpError, classify_conflict, run_transaction
 from netbox_librenms_plugin.utils import (
     build_migrated_context,
@@ -500,10 +500,11 @@ class SyncInterfacesView(
         """
         Return the interfaces tab after a sync or rebind POST.
 
-        An htmx submit gets the ``#interface-sync-content`` fragment in place, so the page, the page
-        size and the scroll position survive. A plain submit gets a redirect to the tab. The tab is
-        rendered from ``self.object``: the page object as the sync locked and decided it, so the
-        render reads the platform the writer read.
+        The action URL carries the page query, so both answers keep the tab's filters, page and page
+        size. An htmx submit gets the ``#interface-sync-content`` fragment in place, so the scroll
+        position survives too. A plain submit gets a redirect to the tab. The tab is rendered from
+        ``self.object``: the page object as the sync locked and decided it, so the render reads the
+        platform the writer read.
 
         Args:
             request (HttpRequest): The sync or rebind request.
@@ -522,12 +523,8 @@ class SyncInterfacesView(
                 if object_type == "device"
                 else "plugins:netbox_librenms_plugin:vm_librenms_sync"
             )
-            # quote_plus the request-supplied values so they cannot inject extra query parameters.
-            return redirect(
-                reverse(url_name, kwargs={"pk": obj.pk})
-                + f"?tab=interfaces&interface_name_field={quote_plus(interface_name_field)}"
-                + (f"&server_key={quote_plus(server_key)}" if server_key else "")
-            )
+            changes = {"tab": "interfaces", "interface_name_field": interface_name_field, "server_key": server_key}
+            return redirect(page_query_url(request, reverse(url_name, kwargs={"pk": obj.pk}), changes))
 
         # Imported here: the object_sync views import this module's view stack.
         from netbox_librenms_plugin.views.object_sync.devices import DeviceInterfaceTableView

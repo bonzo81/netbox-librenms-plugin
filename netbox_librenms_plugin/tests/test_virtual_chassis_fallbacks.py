@@ -9,7 +9,12 @@ import logging
 
 import pytest
 
-from netbox_librenms_plugin.tests.conftest import configure_librenms_servers, make_device
+from netbox_librenms_plugin.tests.conftest import (
+    configure_librenms_servers,
+    create_prepared_stack,
+    make_device,
+    prepared_stack,
+)
 
 
 class _FailingCache:
@@ -104,6 +109,15 @@ def _inventory_paths(server, device_id):
     return [r for r in server.requests if r["path"] == prefix or r["path"] == f"{prefix}/all"]
 
 
+def _seeded_serial_rule():
+    """Create the global rule that migration 0017 seeds: strip Juniper's "S/N " mark."""
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    NormalizationRule.objects.get_or_create(
+        scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+    )
+
+
 def _name_pattern(pattern="-M{position}"):
     """Store the VC member naming pattern the production code reads back."""
     from netbox_librenms_plugin.models import LibreNMSSettings
@@ -162,8 +176,8 @@ class TestStackDetectionCarriesItsMembers:
         from netbox_librenms_plugin.import_utils.virtual_chassis import (
             detect_virtual_chassis_from_inventory,
             identify_vc_master,
-            vc_serial_key,
         )
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         _seed_stack(librenms_server, 902, serials=("", ""))
         api = _api(settings, librenms_server, "default")
@@ -173,7 +187,7 @@ class TestStackDetectionCarriesItsMembers:
         assert detected["is_stack"] is True
         assert [m["serial"] for m in detected["members"]] == ["", ""]
         assert len(detected["members"]) == 2
-        assert identify_vc_master(detected["members"], "", vc_serial_key()) is None
+        assert identify_vc_master(detected["members"], "", SerialRules.load().context(None)) is None
 
 
 @pytest.mark.django_db
@@ -242,6 +256,7 @@ class TestPrefetchVcData:
         from netbox_librenms_plugin.import_utils import virtual_chassis as vc_module
         from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
         from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         api = _api(settings, librenms_server, f"vc_batch_rules_{entry}")
         device_ids = [7401, 7402, 7403]
@@ -249,12 +264,14 @@ class TestPrefetchVcData:
             _seed_stack(librenms_server, device_id)
         rows = {device_id: {"device_id": device_id, "hostname": f"sw-{device_id}"} for device_id in device_ids}
         table = f'"{NormalizationRule._meta.db_table}"'
+        current_rules = SerialRules.load()
+        cache_keys = [vc_module._vc_cache_key(api, device_id, current_rules) for device_id in device_ids]
 
         def run_batch():
             if entry == "prefetch":
                 vc_module.prefetch_vc_data_for_devices(api, device_ids, force_refresh=True)
                 return
-            cache.delete_many([vc_module._vc_cache_key(api, device_id) for device_id in device_ids])
+            cache.delete_many(cache_keys)
             detect_collisions_for_device_ids(device_ids, api, libre_devices_cache=dict(rows))
 
         def rule_reads(call):
@@ -262,7 +279,7 @@ class TestPrefetchVcData:
                 call()
             return [query for query in queries.captured_queries if table in query["sql"]]
 
-        one_key_set = rule_reads(vc_module.candidate_vc_serial_keys)
+        one_key_set = rule_reads(lambda: SerialRules.load().candidates())
         for _batch in range(2):
             assert len(rule_reads(run_batch)) == len(one_key_set)
         assert all(vc_module.get_virtual_chassis_data(api, device_id)["is_stack"] for device_id in device_ids)
@@ -436,33 +453,11 @@ class TestDetectVirtualChassisFailures:
 
 
 @pytest.mark.django_db
-class TestUpdateVcMemberSuggestedNames:
-    def test_an_unparseable_stored_position_falls_back_to_the_member_order(self):
-        from netbox_librenms_plugin.import_utils.virtual_chassis import update_vc_member_suggested_names
-
-        _name_pattern()
-        vc_data = {
-            "is_stack": True,
-            "member_count": 2,
-            "members": [
-                {"serial": "SN-A", "position": "not-a-number"},
-                {"serial": "SN-B", "position": None},
-            ],
-        }
-
-        result = update_vc_member_suggested_names(vc_data, "sw1")
-
-        assert [member["position"] for member in result["members"]] == [1, 2]
-        assert [member["suggested_name"] for member in result["members"]] == ["sw1-M1", "sw1-M2"]
-
-
-@pytest.mark.django_db
 class TestCreateVirtualChassisWithMembers:
     def test_a_taken_master_name_keeps_the_original_name(self, caplog):
         from dcim.models import Device
 
         from netbox_librenms_plugin.import_utils import virtual_chassis as vc_module
-        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
 
         _name_pattern()
         master = make_device("vc-keep-name", serial="MASTER1")
@@ -470,7 +465,7 @@ class TestCreateVirtualChassisWithMembers:
 
         with caplog.at_level(logging.WARNING, logger=vc_module.__name__):
             members = [{"serial": "MASTER1", "position": 1}]
-            vc = create_virtual_chassis_with_members(master, members, {"device_id": 8001}, master_member=members[0])
+            vc = create_prepared_stack(master, members, {"device_id": 8001})
 
         master.refresh_from_db()
         assert master.name == "vc-keep-name"
@@ -479,21 +474,14 @@ class TestCreateVirtualChassisWithMembers:
         assert "name already exists" in caplog.text
         assert Device.objects.filter(name="vc-keep-name-M1").count() == 1
 
-    def test_a_member_serial_keeps_no_vendor_marker(self):
-        """
-        Juniper reports ENTITY-MIB serials as "S/N BCFB9751".
-
-        Stored verbatim the VC member carries a serial the hardware never matches, and every
-        later comparison against a serial normalized elsewhere fails.
-        """
+    def test_a_member_stores_the_raw_librenms_serial(self):
+        """Juniper reports "S/N BCFB9751"; the member stores it as reported, and readers apply the rules."""
         from netbox_librenms_plugin.models import NormalizationRule
 
         NormalizationRule.objects.get_or_create(
             scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
         )
         from dcim.models import Device
-
-        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
 
         _name_pattern()
         master = make_device("vc-marker", serial="BCFB9793")
@@ -502,10 +490,10 @@ class TestCreateVirtualChassisWithMembers:
             {"serial": "S/N BCFB9751", "position": 2, "name": "FPC1"},
         ]
 
-        create_virtual_chassis_with_members(master, members, {"device_id": 8101}, master_member=members[0])
+        create_prepared_stack(master, members, {"device_id": 8101})
 
         created = Device.objects.get(virtual_chassis__name="vc-marker", vc_position=2)
-        assert created.serial == "BCFB9751"
+        assert created.serial == "S/N BCFB9751"
 
     def test_the_master_is_found_from_a_decorated_serial(self, settings, librenms_server):
         """
@@ -517,12 +505,11 @@ class TestCreateVirtualChassisWithMembers:
         from dcim.models import Device
 
         from netbox_librenms_plugin.import_utils.virtual_chassis import (
-            create_virtual_chassis_with_members,
             detect_virtual_chassis_from_inventory,
             identify_vc_master,
-            vc_serial_key,
         )
         from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         _name_pattern()
         NormalizationRule.objects.get_or_create(
@@ -538,10 +525,8 @@ class TestCreateVirtualChassisWithMembers:
 
         detected = detect_virtual_chassis_from_inventory(api, 8103)
         master = make_device("vc-master-pos", serial="BCFB9793")
-        master_member = identify_vc_master(detected["members"], "BCFB9793", vc_serial_key())
-        vc = create_virtual_chassis_with_members(
-            master, detected["members"], {"device_id": 8103}, master_member=master_member
-        )
+        master_member = identify_vc_master(detected["members"], "BCFB9793", SerialRules.load().context(None))
+        vc = create_prepared_stack(master, detected["members"], {"device_id": 8103}, master_index=1)
 
         assert master_member is detected["members"][1]
         master.refresh_from_db()
@@ -557,8 +542,6 @@ class TestCreateVirtualChassisWithMembers:
         """
         from dcim.models import Device
 
-        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
-
         _name_pattern()
         master = make_device("vc-master-marker", serial="BCFB9793")
         members = [
@@ -566,7 +549,7 @@ class TestCreateVirtualChassisWithMembers:
             {"serial": "S/N BCFB9751", "position": 2, "name": "FPC1"},
         ]
 
-        vc = create_virtual_chassis_with_members(master, members, {"device_id": 8102}, master_member=members[0])
+        vc = create_prepared_stack(master, members, {"device_id": 8102})
 
         assert Device.objects.filter(virtual_chassis=vc, serial="BCFB9793").count() == 1
         assert Device.objects.filter(virtual_chassis=vc).count() == 2
@@ -584,8 +567,12 @@ class TestCreateVirtualChassisWithMembers:
             {"serial": "COPY2", "position": 2, "name": "Switch 2"},
         ]
 
-        with pytest.raises(ValueError, match="master_member must be one of the members_info entries"):
-            create_virtual_chassis_with_members(master, members, {"device_id": 8105}, master_member=dict(members[0]))
+        prepared, master_member = prepared_stack(master, members)
+
+        with pytest.raises(ValueError, match="master_member must be one of the prepared members"):
+            create_virtual_chassis_with_members(
+                master, prepared, {"device_id": 8105}, master_member=dict(master_member)
+            )
 
         master.refresh_from_db()
         assert master.name == "vc-master-copy"
@@ -597,7 +584,6 @@ class TestCreateVirtualChassisWithMembers:
         from dcim.models import Device
 
         from netbox_librenms_plugin.import_utils import virtual_chassis as vc_module
-        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
 
         _name_pattern()
         master = make_device("vc-dup-serial", serial="MASTER2")
@@ -608,9 +594,7 @@ class TestCreateVirtualChassisWithMembers:
         ]
 
         with caplog.at_level(logging.WARNING, logger=vc_module.__name__):
-            vc = create_virtual_chassis_with_members(
-                master, members_info, {"device_id": 8002}, master_member=members_info[0]
-            )
+            vc = create_prepared_stack(master, members_info, {"device_id": 8002})
 
         assert sorted(vc.members.values_list("name", flat=True)) == ["vc-dup-serial-M1"]
         assert Device.objects.filter(serial="TAKEN2").count() == 1
@@ -622,7 +606,6 @@ class TestCreateVirtualChassisWithMembers:
         from dcim.models import Device
 
         from netbox_librenms_plugin.import_utils import virtual_chassis as vc_module
-        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
 
         _name_pattern()
         master = make_device("vc-padded-serial", serial="MASTER-PADDED")
@@ -634,19 +617,84 @@ class TestCreateVirtualChassisWithMembers:
         ]
 
         with caplog.at_level(logging.WARNING, logger=vc_module.__name__):
-            vc = create_virtual_chassis_with_members(
-                master, members_info, {"device_id": 8004}, master_member=members_info[0]
-            )
+            vc = create_prepared_stack(master, members_info, {"device_id": 8004})
 
         assert sorted(vc.members.values_list("name", flat=True)) == ["vc-padded-serial-M1"]
         assert not Device.objects.filter(serial="PADDED-MEMBER").exists()
         assert "Device with serial 'PADDED-MEMBER' already exists" in caplog.text
 
+    def test_a_legacy_keyed_member_blocks_its_decorated_serial(self):
+        """A member stored as "ABC" by an earlier release still blocks an incoming "S/N ABC"."""
+        from dcim.models import Device
+
+        _seeded_serial_rule()
+        _name_pattern()
+        master = make_device("vc-legacy-keyed", serial="MASTER-LK")
+        make_device("vc-legacy-keyed-elsewhere", serial="ABC-LK")
+        members = [{"serial": "MASTER-LK", "position": 1}, {"serial": "S/N ABC-LK", "position": 2}]
+
+        vc = create_prepared_stack(master, members, {"device_id": 8006})
+
+        assert vc.members.count() == 1
+        assert not Device.objects.filter(serial="S/N ABC-LK").exists()
+
+    def test_a_member_stored_raw_by_an_earlier_import_blocks_the_same_serial(self):
+        from dcim.models import Device
+
+        _seeded_serial_rule()
+        _name_pattern()
+        master = make_device("vc-earlier-raw", serial="MASTER-ER")
+        make_device("vc-earlier-raw-elsewhere", serial="S/N ABC-ER")
+        members = [{"serial": "MASTER-ER", "position": 1}, {"serial": "S/N ABC-ER", "position": 2}]
+
+        vc = create_prepared_stack(master, members, {"device_id": 8007})
+
+        assert vc.members.count() == 1
+        assert Device.objects.filter(serial="S/N ABC-ER").count() == 1
+
+    def test_one_batch_creates_one_member_for_two_forms_of_one_serial(self):
+
+        _seeded_serial_rule()
+        _name_pattern()
+        master = make_device("vc-batch-forms", serial="MASTER-BF")
+        members = [
+            {"serial": "MASTER-BF", "position": 1},
+            {"serial": "S/N ABC-BF", "position": 2},
+            {"serial": "ABC-BF", "position": 3},
+        ]
+
+        vc = create_prepared_stack(master, members, {"device_id": 8008})
+
+        assert sorted(vc.members.exclude(pk=master.pk).values_list("serial", flat=True)) == ["S/N ABC-BF"]
+
+    @pytest.mark.parametrize("earlier", ["batch", "legacy"])
+    def test_a_rule_that_matches_its_own_output_keeps_two_serials_apart_and_the_report_lists_them(self, earlier):
+        """Under ^X(.+)$ a stored "X123" keys to "123" and "XX123" to "X123": two identities, a documented limit."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import report_rows
+
+        NormalizationRule.objects.create(scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1")
+        _name_pattern()
+        master = make_device(f"vc-rematch-{earlier}", serial="MASTER-UC")
+        members = [{"serial": "MASTER-UC", "position": 1}]
+        if earlier == "batch":
+            members.append({"serial": "X123", "position": 2})
+        else:
+            make_device(f"vc-rematch-{earlier}-elsewhere", serial="X123")
+        members.append({"serial": "XX123", "position": 3})
+
+        vc = create_prepared_stack(master, members, {"device_id": 8009})
+
+        assert Device.objects.filter(serial="XX123").exists()
+        assert vc.members.count() == (3 if earlier == "batch" else 2)
+        assert {"X123", "XX123"} <= {stored for _row, stored, _key, _reason in report_rows()}
+
     def test_a_member_name_already_in_netbox_is_skipped(self, caplog):
         from dcim.models import Device
 
         from netbox_librenms_plugin.import_utils import virtual_chassis as vc_module
-        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
 
         _name_pattern()
         master = make_device("vc-dup-name", serial="MASTER3")
@@ -657,9 +705,7 @@ class TestCreateVirtualChassisWithMembers:
         ]
 
         with caplog.at_level(logging.WARNING, logger=vc_module.__name__):
-            vc = create_virtual_chassis_with_members(
-                master, members_info, {"device_id": 8003}, master_member=members_info[0]
-            )
+            vc = create_prepared_stack(master, members_info, {"device_id": 8003})
 
         assert sorted(vc.members.values_list("name", flat=True)) == ["vc-dup-name-M1"]
         assert not Device.objects.filter(serial="FREE3").exists()
@@ -670,8 +716,6 @@ class TestCreateVirtualChassisWithMembers:
         from django.core.exceptions import ValidationError
         from django.db import DatabaseError
 
-        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
-
         _name_pattern()
         # 63 characters: the "-M1" suffix pushes the renamed master past Device.name's 64.
         original_name = "vc-overflow-" + "x" * 51
@@ -679,7 +723,7 @@ class TestCreateVirtualChassisWithMembers:
 
         with pytest.raises((DatabaseError, ValidationError)):
             members = [{"serial": "MASTER4", "position": 1}]
-            create_virtual_chassis_with_members(master, members, {"device_id": 8004}, master_member=members[0])
+            create_prepared_stack(master, members, {"device_id": 8004})
 
         assert master.name == original_name
         assert master.virtual_chassis is None
@@ -696,48 +740,44 @@ def test_placeholder_stack_detection_and_creation_preserve_distinct_members(sett
     from netbox_librenms_plugin.import_utils.virtual_chassis import (
         detect_virtual_chassis_from_inventory,
         identify_vc_master,
-        vc_serial_key,
     )
-    from netbox_librenms_plugin.utils import normalize_serial
+    from netbox_librenms_plugin.serial_identity import SerialRules, display
 
     api = _api(settings, librenms_server, "placeholder-stack")
     _seed_stack(librenms_server, 981, serials=(serial, serial, serial))
     detected = detect_virtual_chassis_from_inventory(api, 981)
     assert detected["member_count"] == 3
     # A placeholder names no master, so the import creates no chassis.
-    assert identify_vc_master(detected["members"], serial, vc_serial_key()) is None
-    assert normalize_serial(serial) == serial.strip()
+    assert identify_vc_master(detected["members"], serial, SerialRules.load().context(None)) is None
+    assert display(serial) == ""
 
 
 @pytest.mark.django_db
-def test_zero_stack_serial_remains_identity_evidence(settings, librenms_server):
+def test_a_serial_shorter_than_three_letters_or_digits_is_no_stack_identity(settings, librenms_server):
+    """A one-digit member serial names no master, so the stack imports as one device; the members keep their text."""
     from netbox_librenms_plugin.import_utils.bulk_import import stack_key
     from netbox_librenms_plugin.import_utils.virtual_chassis import (
-        create_virtual_chassis_with_members,
         detect_virtual_chassis_from_inventory,
         identify_vc_master,
-        vc_serial_key,
     )
-    from netbox_librenms_plugin.utils import normalize_serial
+    from netbox_librenms_plugin.serial_identity import SerialRules
 
     api = _api(settings, librenms_server, "zero-stack")
     _seed_stack(librenms_server, 982, serials=(0, "REAL-MEMBER"))
     detected = detect_virtual_chassis_from_inventory(api, 982)
-    master_member = identify_vc_master(detected["members"], "0", vc_serial_key())
-    assert master_member is detected["members"][0]
-    assert stack_key(detected, 982) == "librenms-stack-0,REAL-MEMBER"
-    master = make_device("zero-stack-master", serial="0")
-    vc = create_virtual_chassis_with_members(
-        master, detected["members"], {"device_id": 982}, master_member=master_member
-    )
+    context = SerialRules.load().context(None)
+    assert identify_vc_master(detected["members"], "0", context) is None
+    assert identify_vc_master(detected["members"], "REAL-MEMBER", context) is detected["members"][1]
+    # The stack key counts only the member that has an identity.
+    assert stack_key(detected, 982, context) == stack_key({"members": [{"serial": "REAL-MEMBER"}]}, 1, context)
+    master = make_device("zero-stack-master", serial="REAL-MEMBER")
+    vc = create_prepared_stack(master, detected["members"], {"device_id": 982}, master_index=1)
     assert sorted(vc.members.values_list("serial", flat=True)) == ["0", "REAL-MEMBER"]
-    assert normalize_serial(0) == "0"
 
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("use_manufacturer_rule", [False, True])
 def test_placeholder_members_do_not_match_an_unrelated_device(use_manufacturer_rule):
-    from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
     from netbox_librenms_plugin.models import NormalizationRule
 
     master = make_device("placeholder-members-master", serial="REAL-MASTER")
@@ -745,17 +785,38 @@ def test_placeholder_members_do_not_match_an_unrelated_device(use_manufacturer_r
     serial = "unknown"
     if use_manufacturer_rule:
         serial = "VENDOR-PLACEHOLDER"
+        # The group takes no part in the match, so the rule leaves no identity.
         NormalizationRule.objects.create(
             scope="serial",
             manufacturer=master.device_type.manufacturer,
-            match_pattern="^VENDOR-PLACEHOLDER$",
-            replacement="N/A",
+            match_pattern="^VENDOR-PLACEHOLDER(X)?$",
+            replacement=r"\1",
         )
     members = [
         {"serial": master.serial, "position": 1},
         {"serial": serial, "position": 2},
         {"serial": serial, "position": 3},
     ]
-    vc = create_virtual_chassis_with_members(master, members, {"device_id": 983}, master_member=members[0])
+    vc = create_prepared_stack(master, members, {"device_id": 983})
     assert sorted(vc.members.values_list("vc_position", flat=True)) == [1, 2, 3]
-    assert list(vc.members.exclude(pk=master.pk).values_list("serial", flat=True)) == ["", ""]
+    # A rule that blanks a real raw serial only stops comparisons; the member keeps the raw value.
+    stored = "VENDOR-PLACEHOLDER" if use_manufacturer_rule else ""
+    assert list(vc.members.exclude(pk=master.pk).values_list("serial", flat=True)) == [stored, stored]
+
+
+@pytest.mark.django_db
+def test_a_serial_lookup_stops_reading_devices_at_its_limit():
+    """Devices that share one serial past two add no queries, and every count is Ambiguous."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    from netbox_librenms_plugin.serial_identity import ResolutionKind, resolve_device
+
+    def queries_for(serial, count):
+        for n in range(count):
+            make_device(f"{serial.lower()}-{n}", serial=serial)
+        with CaptureQueriesContext(connection) as queries:
+            assert resolve_device(serial).kind is ResolutionKind.AMBIGUOUS
+        return len(queries)
+
+    assert queries_for("FEW-SN", 2) == queries_for("MANY-SN", 6)

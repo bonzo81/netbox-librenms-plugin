@@ -517,7 +517,7 @@ def test_two_members_with_the_master_serial_import_standalone_without_a_duplicat
 @pytest.mark.django_db
 @pytest.mark.parametrize("device_type_source", ["mapped", "manual"])
 def test_a_manufacturer_serial_rule_identifies_the_master(live_librenms, device_type_source):
-    """A rule scoped to the DeviceType's manufacturer strips the member serials, so the master matches."""
+    """A rule scoped to the DeviceType's manufacturer keys the member serials, so the master matches; members store raw."""
     from dcim.models import Device, DeviceType, VirtualChassis
 
     from netbox_librenms_plugin.models import DeviceTypeMapping, NormalizationRule
@@ -548,8 +548,8 @@ def test_a_manufacturer_serial_rule_identifies_the_master(live_librenms, device_
     assert result["virtual_chassis_created"] == 1
     chassis = VirtualChassis.objects.get(domain=f"librenms-default-{device_id}")
     assert sorted(Device.objects.filter(virtual_chassis=chassis).values_list("serial", flat=True)) == [
+        f"PREFIX:SN2-{device_id}",
         "SN1",
-        f"SN2-{device_id}",
     ]
 
 
@@ -594,7 +594,7 @@ def test_a_failed_module_bay_count_write_fails_the_chassis_create():
     from dcim.models import VirtualChassis
     from django.db import OperationalError
 
-    from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+    from netbox_librenms_plugin.tests.conftest import create_prepared_stack
     from netbox_librenms_plugin.transactions import classify_conflict
 
     master = make_device("bay-count-conflict-master", serial="MASTER-SERIAL")
@@ -607,9 +607,7 @@ def test_a_failed_module_bay_count_write_fails_the_chassis_create():
         ) as failed,
     ):
         members = [{"serial": "MASTER-SERIAL", "position": 1}, {"serial": "MEMBER-SERIAL", "position": 2}]
-        create_virtual_chassis_with_members(
-            master, members, {"device_id": 96321}, server_key="default", master_member=members[0]
-        )
+        create_prepared_stack(master, members, {"device_id": 96321}, server_key="default")
 
     assert failed, "precondition: the count write ran"
     assert classify_conflict(caught.value)
@@ -661,9 +659,17 @@ def test_collision_precheck_skips_import_prerequisite_queries():
         "netbox_librenms_plugin_platformmapping",
         "virtualization_cluster",
     }
+    # The serial rules are identity input, not a prerequisite: the batch reads them once.
+    serial_rule_reads = [
+        query["sql"]
+        for query in captured.captured_queries
+        if "netbox_librenms_plugin_normalizationrule" in query["sql"].lower() and "'serial'" in query["sql"]
+    ]
+    assert len(serial_rule_reads) <= 1
     unexpected = [
         query["sql"]
         for query in captured.captured_queries
         if any(table in query["sql"].lower() for table in import_prerequisite_tables)
+        and query["sql"] not in serial_rule_reads
     ]
     assert unexpected == []

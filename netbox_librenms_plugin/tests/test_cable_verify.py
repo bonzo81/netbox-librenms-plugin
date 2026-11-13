@@ -118,6 +118,7 @@ class TestStaleFieldStripping:
 
         local, lifaces = _cable_device("stale-local", [("eth0", 100)])
         remote, rifaces = _cable_device("switch-remote", [("eth1", 200)])
+        stale_device_id = remote.pk + 1
         cable = Cable(a_terminations=[lifaces["eth0"]], b_terminations=[rifaces["eth1"]])
         cable.save()
 
@@ -137,8 +138,8 @@ class TestStaleFieldStripping:
                     "remote_device": "switch-remote",
                     "remote_device_id": None,
                     # Stale derived fields from a previous enrichment (a different remote object then):
-                    "netbox_remote_device_id": 999,
-                    "remote_device_url": "/dcim/devices/999/",
+                    "netbox_remote_device_id": stale_device_id,
+                    "remote_device_url": f"/dcim/devices/{stale_device_id}/",
                     "netbox_remote_interface_id": 888,
                     "remote_port_url": "/dcim/interfaces/888/",
                     "cable_status": "No Cable",
@@ -148,9 +149,9 @@ class TestStaleFieldStripping:
         )
 
         row = content["formatted_row"]
-        # Remote side recomputed to the REAL device, not the stale 999.
+        # The remote side uses the current device.
         assert f"/dcim/devices/{remote.pk}/" in row["remote_device"]
-        assert "/dcim/devices/999/" not in row["remote_device"]
+        assert f"/dcim/devices/{stale_device_id}/" not in row["remote_device"]
         # The real cable is found, so the stale "No Cable" is replaced.
         assert "Cable Found" in row["cable_status"]
 

@@ -1,31 +1,36 @@
 """Virtual chassis detection, creation, and management."""
 
-import functools
 import logging
-import re
 from typing import List, NamedTuple
 
 from dcim.models import Device, VirtualChassis
 from django.core.cache import cache
-from django.db import transaction
+from django.core.exceptions import ValidationError
 from redis.exceptions import RedisError
 
 from ..constants import (
-    GENERIC_CONTAINER_MODELS,
     JUNOS_FPC_DESCR_PREFIX,
     JUNOS_FPC_MEMBER_DESCR_RE,
     JUNOS_VC_ROOT_DESCR_MARKER,
 )
 from ..librenms_api import LibreNMSAPI
-from ..utils import (
-    exception_text_for,
-    find_devices_by_serial,
-    is_vc_position,
-    normalize_inventory_serial,
-    normalize_serial,
-    normalize_stack_serial,
-    preload_normalization_rules,
+from ..serial_identity import (
+    REFUSING,
+    Comparison,
+    ResolutionKind,
+    SerialGroups,
+    SerialRules,
+    assignment_lock,
+    compare,
+    group,
+    is_identity,
+    naming_token,
+    locked_type_context,
+    resolve_devices_write,
+    stored_form,
 )
+from ..transactions import atomic_with_events
+from ..utils import exception_text_for, is_vc_position
 
 logger = logging.getLogger(__name__)
 
@@ -47,9 +52,6 @@ def _clone_virtual_chassis_data(data: dict | None) -> dict:
         return empty_virtual_chassis_data()
 
     members = [member.copy() for member in data.get("members", [])]
-    for member, position in zip(members, _member_positions([m.get("position") for m in members]), strict=True):
-        member["position"] = position
-
     member_count = data.get("member_count") or len(members)
 
     return {
@@ -69,35 +71,39 @@ def _failed_virtual_chassis_data(error: str) -> dict:
     return data
 
 
-_VC_CACHE_VERSION = "v5"
+# v6: each member carries its reported ``inventory_position``.
+_VC_CACHE_VERSION = "v6"
 
 
-def _vc_cache_key(api: LibreNMSAPI, device_id: int | str) -> str:
+def _vc_cache_key(api: LibreNMSAPI, device_id: int | str, serial_rules: SerialRules | None = None) -> str:
+    """Return the cache key of one detection; the serial rules decide the result, so a rule edit changes the key."""
     server_key = getattr(api, "server_key", "default")
-    return f"librenms_vc_detection_{_VC_CACHE_VERSION}_{server_key}_{device_id}"
+    digest = (serial_rules or SerialRules.load()).digest[:16]
+    return f"librenms_vc_detection_{_VC_CACHE_VERSION}_{server_key}_{device_id}_{digest}"
 
 
 def get_virtual_chassis_data(
-    api: LibreNMSAPI, device_id: int | str, *, force_refresh: bool = False, candidate_keys=None
+    api: LibreNMSAPI, device_id: int | str, *, force_refresh: bool = False, serial_rules=None
 ) -> dict:
     """
     Fetch (and cache) virtual chassis data for a LibreNMS device.
 
-    *candidate_keys* returns :func:`candidate_vc_serial_keys`; a batch passes one memoized callable.
+    *serial_rules* are the batch's :class:`SerialRules`; None reads them.
     """
     if not api or device_id is None:
         return empty_virtual_chassis_data()
     try:
-        return _cached_virtual_chassis_data(api, device_id, force_refresh, candidate_keys)
+        return _cached_virtual_chassis_data(api, device_id, force_refresh, serial_rules)
     except RedisError as e:
         # A Redis outage fails only this device, as one does inside detection.
         logger.exception("Virtual chassis cache unavailable for device %s: %s", device_id, e)
         return _failed_virtual_chassis_data(exception_text_for(e, VirtualChassis, None) or type(e).__name__)
 
 
-def _cached_virtual_chassis_data(api: LibreNMSAPI, device_id, force_refresh: bool, candidate_keys) -> dict:
+def _cached_virtual_chassis_data(api: LibreNMSAPI, device_id, force_refresh: bool, serial_rules) -> dict:
     """Return the cached detection data of *device_id*, and detect and cache it on a miss."""
-    cache_key = _vc_cache_key(api, device_id)
+    serial_rules = serial_rules or SerialRules.load()
+    cache_key = _vc_cache_key(api, device_id, serial_rules)
     _cache_timeout = getattr(api, "cache_timeout", None)
     cache_timeout = 300 if _cache_timeout is None else _cache_timeout
     if not force_refresh and cache_timeout != 0:
@@ -105,7 +111,7 @@ def _cached_virtual_chassis_data(api: LibreNMSAPI, device_id, force_refresh: boo
         if cached is not None:
             return _clone_virtual_chassis_data(cached)
 
-    detection_data = detect_virtual_chassis_from_inventory(api, device_id, candidate_keys=candidate_keys)
+    detection_data = detect_virtual_chassis_from_inventory(api, device_id, serial_rules=serial_rules)
     if detection_data is None:
         # Cache a confirmed non-stack result so subsequent renders skip repeated reads.
         empty = empty_virtual_chassis_data()
@@ -148,12 +154,12 @@ def prefetch_vc_data_for_devices(api: LibreNMSAPI, device_ids: List[int], *, for
 
     logger.debug(f"Pre-warming VC cache for {len(device_ids)} devices")
     # Batch-local: a rule change shows in the next batch.
-    candidate_keys = functools.cache(candidate_vc_serial_keys)
+    serial_rules = SerialRules.load()
 
     for idx, device_id in enumerate(device_ids):
         # This populates the cache if empty, or skips if already cached
         try:
-            get_virtual_chassis_data(api, device_id, force_refresh=force_refresh, candidate_keys=candidate_keys)
+            get_virtual_chassis_data(api, device_id, force_refresh=force_refresh, serial_rules=serial_rules)
         except (BrokenPipeError, ConnectionError, IOError, OSError) as e:
             logger.warning("Connection error during VC prefetch at device %s: %s", idx, e)
             # Stop processing if connection is broken
@@ -197,124 +203,217 @@ def _is_junos_fpc(row: dict) -> bool:
     )
 
 
-def _junos_fpc_serials_hold(root_serial, fpc_serials: list, serial_key) -> bool:
+def _junos_fpc_serials_hold(root_serial, fpc_serials: list, context) -> bool:
     """Return whether two or more FPCs each have their own real serial and the root serial matches exactly one."""
-    serials = [serial_key(serial) for serial in fpc_serials]
+    groups = group(fpc_serials, context)
     return (
-        len(serials) >= 2
-        and all(serials)
-        and len(set(serials)) == len(serials)
-        and serials.count(serial_key(root_serial)) == 1
+        len(fpc_serials) >= 2
+        and not groups.absent
+        and all(len(fpcs) == 1 for fpcs in groups)
+        and len(groups.find(root_serial)) == 1
     )
 
 
-def _junos_fpc_rows(root: dict, children: list, serial_keys) -> list:
-    """Return the FPC member rows of a Junos Virtual Chassis root, or [] when no serial key meets every condition."""
+def _junos_fpc_rows(root: dict, children: list, contexts) -> list:
+    """Return the FPC member rows of a Junos Virtual Chassis root, or [] when no serial context meets every condition."""
     if not _is_junos_vc_root(root):
         return []
     fpcs = [row for row in children if _is_junos_fpc(row)]
     fpc_serials = [row.get("entPhysicalSerialNum") for row in fpcs]
-    # A false stack creates bogus member devices on import, so one serial key must meet every condition.
-    if any(_junos_fpc_serials_hold(root.get("entPhysicalSerialNum"), fpc_serials, key) for key in serial_keys):
+    # A false stack creates bogus member devices on import, so one serial context must meet every condition.
+    if any(_junos_fpc_serials_hold(root.get("entPhysicalSerialNum"), fpc_serials, context) for context in contexts):
         return fpcs
     return []
 
 
-def vc_serial_key(manufacturer=None, *, preloaded_rules=None):
-    """
-    Return the function that turns a serial into the form that stack member matching compares.
-
-    This is the one member-serial equality: the serial rules of *manufacturer* and the global
-    rules (Juniper's "S/N " mark, for example), then stack normalization, which blanks
-    placeholders. The master decision, module attribution and the serials modal all compare
-    serials through it.
-
-    Args:
-        manufacturer: The Manufacturer whose serial rules apply, or None for global rules only.
-        preloaded_rules (dict | None): Serial rules already loaded, as ``preload_normalization_rules`` returns them.
-
-    """
-    if preloaded_rules is None:
-        preloaded_rules = preload_normalization_rules("serial", manufacturer=manufacturer)
-    rules = preloaded_rules
-
-    def key(value) -> str:
-        return normalize_stack_serial(
-            normalize_inventory_serial(value, manufacturer=manufacturer, preloaded_rules=rules)
-        )
-
-    return key
-
-
-def chassis_serial_key(device):
-    """Return :func:`vc_serial_key` for the manufacturer of *device*'s Virtual Chassis master, or of *device*."""
-    chassis = getattr(device, "virtual_chassis", None)
-    master = getattr(chassis, "master", None) or device
-    return vc_serial_key(getattr(getattr(master, "device_type", None), "manufacturer", None))
-
-
-def candidate_vc_serial_keys() -> tuple:
-    """
-    Return each :func:`vc_serial_key` that an import can compare members with, before its DeviceType is known.
-
-    These are the global key and the key of each manufacturer that has serial rules. Detection accepts a
-    shape that one of them explains, and :func:`identify_vc_master` then uses the key of the DeviceType.
-    """
-    from dcim.models import Manufacturer
-
-    from ..models import NormalizationRule
-
-    scoped_rules = NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL, manufacturer__isnull=False)
-    manufacturers = Manufacturer.objects.filter(pk__in=scoped_rules.values("manufacturer")).order_by("pk")
-    return (vc_serial_key(), *(vc_serial_key(manufacturer) for manufacturer in manufacturers))
-
-
-def members_by_serial_key(vc_members, serial_key) -> dict:
-    """Return ``{serial key: member}``; a key that two members share names neither, so it is left out."""
-    by_key = {}
-    for member in vc_members:
-        if key := serial_key(member.serial):
-            by_key.setdefault(key, []).append(member)
-    return {key: members[0] for key, members in by_key.items() if len(members) == 1}
-
-
-def identify_vc_master(members: list, device_serial, serial_key) -> dict | None:
+def identify_vc_master(members: list, device_serial, context) -> dict | None:
     """
     Return the stack member that is the imported device, or None when no single member is.
 
     This is the one master decision, for import and for the pages that preview it. The master is
     returned only when exactly one member matches: none or several mean that the stack is
     imported as a single device, because a guess splits it into more devices than switches.
-    Junos FPC members must also meet the FPC serial checks under *serial_key*, because detection
+    Junos FPC members must also meet the FPC serial checks under *context*, because detection
     accepts a shape that the serial rules of any manufacturer explain.
 
     Args:
         members: Detected members, as :func:`extract_vc_members` returns them.
         device_serial: The serial of the device that becomes the master.
-        serial_key: From :func:`vc_serial_key`, for the DeviceType the device imports as.
+        context: The serial context of the DeviceType the device imports as.
 
     """
     root_serials = [member["root_serial"] for member in members if "root_serial" in member]
     if root_serials and (
         len(root_serials) != len(members)
         or len(set(root_serials)) != 1
-        or not _junos_fpc_serials_hold(root_serials[0], [member.get("serial") for member in members], serial_key)
+        or not _junos_fpc_serials_hold(root_serials[0], [member.get("serial") for member in members], context)
     ):
         return None
-    target = serial_key(device_serial)
-    matches = [member for member in members if target and serial_key(member.get("serial")) == target]
+    matches = [member for member in members if compare(device_serial, member.get("serial"), context) is Comparison.SAME]
     return matches[0] if len(matches) == 1 else None
 
 
-def vc_master_view(vc_data: dict, device_serial, serial_key) -> dict:
-    """Return a display copy of detection data that marks the master the way import will identify it."""
-    members = vc_data.get("members", [])
-    master = identify_vc_master(members, device_serial, serial_key) if vc_data.get("is_stack") else None
+# Fixed texts: a numbering refusal reaches any import or module viewer, so it names no member, serial or rule.
+VC_NUMBERING_INVALID = "The virtual chassis member numbers that LibreNMS reports cannot be numbered in NetBox, so the stack is not imported."
+VC_NUMBERING_RULE_INVALID = (
+    "A virtual chassis member numbering rule does not work, so the stack is not imported. Fix the rule, then try again."
+)
+VC_NUMBERING_MISMATCH = (
+    "The virtual chassis member numbers in NetBox do not agree with the LibreNMS inventory under the current "
+    "member numbering rules. Restore a matching rule or correct the members, then refresh Modules."
+)
+VC_NUMBERING_UNRECOGNIZED = (
+    "The LibreNMS inventory of this virtual chassis does not describe its stack members, so no row can be given "
+    "to a member. Refresh Modules when LibreNMS reports the stack."
+)
+VC_NUMBERING_NO_MASTER = (
+    "This virtual chassis has no master among its members, so its member numbering rule is unknown. "
+    "Set the master, then refresh Modules."
+)
+
+
+class VCNumberingError(Exception):
+    """The member numbers of a stack cannot be decided; the message is one of the fixed ``VC_NUMBERING_*`` texts."""
+
+
+def numbering_refusal_text(exc) -> str:
+    """Return the fixed text of a numbering refusal; a broken rule shows its details only through ``shown_to``."""
+    return str(exc) if isinstance(exc, VCNumberingError) else VC_NUMBERING_RULE_INVALID
+
+
+def load_numbering_rules() -> tuple:
+    """Return every VCMemberNumberingRule in id order, read once for a request or a batch."""
+    from ..models import VCMemberNumberingRule
+
+    return tuple(VCMemberNumberingRule.objects.order_by("pk"))
+
+
+def select_numbering_rule(rules, device_type):
+    """
+    Return the rule that numbers the members of a stack of *device_type*, or None.
+
+    Every rule of the type's manufacturer and every unscoped rule compiles first, so a broken
+    pattern never loses to a broader rule. A lower tier wins, then the lowest id.
+
+    Raises:
+        RuleConfigurationError: A candidate rule stores a pattern that does not compile.
+
+    """
+    candidates = [rule for rule in rules if rule.manufacturer_id in (None, device_type.manufacturer_id)]
+    for rule in candidates:
+        _ = rule._compiled_device_type_pattern
+    matching = [rule for rule in candidates if rule.matches(device_type)]
+    return min(matching, key=lambda rule: (rule.tier, rule.pk), default=None)
+
+
+def numbering_mode_for(device_type, rules) -> str:
+    """Return the numbering mode of *device_type*: its rule's mode, or ``reported`` without a rule."""
+    from ..models import VCMemberNumberingRule
+
+    rule = select_numbering_rule(rules, device_type)
+    return VCMemberNumberingRule.MODE_REPORTED if rule is None else rule.numbering_mode
+
+
+def project_vc_members(members: list, mode: str) -> list[dict]:
+    """
+    Return copies of *members* whose ``position`` is the NetBox ``vc_position`` under *mode*.
+
+    This is the one numbering arithmetic. It reads only ``inventory_position``, so a second
+    projection gives the same result. ``one_based`` adds 1 when the stack is numbered from 0.
+
+    Raises:
+        VCNumberingError: The reported numbers are no unique positions, *mode* is no mode, or a
+            number is outside the range of ``Device.vc_position``.
+
+    """
+    from ..models import VCMemberNumberingRule
+
+    sources = [member.get("inventory_position") for member in members]
+    if not sources or not all(is_vc_position(source) for source in sources) or len(set(sources)) != len(sources):
+        raise VCNumberingError(VC_NUMBERING_INVALID)
+    if mode == VCMemberNumberingRule.MODE_ONE_BASED:
+        shift = 1 if min(sources) == 0 and max(sources) > 0 else 0
+    elif mode == VCMemberNumberingRule.MODE_REPORTED:
+        shift = 0
+    else:
+        raise VCNumberingError(VC_NUMBERING_RULE_INVALID)
+    projected = [{**member, "position": member["inventory_position"] + shift} for member in members]
+    field = Device._meta.get_field("vc_position")
+    for member in projected:
+        try:
+            field.run_validators(member["position"])
+        except ValidationError as exc:
+            raise VCNumberingError(VC_NUMBERING_INVALID) from exc
+    return projected
+
+
+def unnumbered_virtual_chassis(vc_data: dict, error: str | None = None) -> dict:
+    """Return *vc_data* without NetBox numbers, names or a master: no DeviceType, or the numbering *error*."""
+    members = [
+        {**member, "position": None, "suggested_name": None, "is_master": False} for member in vc_data["members"]
+    ]
     return {
         **vc_data,
-        "members": [{**member, "is_master": member is master} for member in members],
-        "master_identified": master is not None,
+        "members": members,
+        "master_identified": False,
+        "numbering_available": False,
+        "numbering_error": error,
+        "device_type_id": None,
     }
+
+
+def prepare_virtual_chassis(
+    vc_data: dict, *, device_type, master_name, device_serial, serial_rules, numbering_rules=None
+) -> dict:
+    """
+    Return the import view of detected stack data for *device_type*; the one preparation that previews and import read.
+
+    It selects the numbering rule, projects the reported numbers, names the members and marks the
+    master from the projected list. Without a DeviceType the numbers are unavailable.
+
+    Args:
+        vc_data: Detection data, or data that this function prepared before.
+        device_type: The DeviceType the device imports as, or None.
+        master_name: The name the device imports with.
+        device_serial: The LibreNMS serial of the device that becomes the master.
+        serial_rules: The batch's :class:`SerialRules`.
+        numbering_rules: The batch's numbering rules; None reads them.
+
+    Raises:
+        VCNumberingError: The members cannot be numbered.
+        RuleConfigurationError: A candidate numbering rule stores a pattern that does not compile.
+
+    """
+    if not vc_data or not vc_data.get("is_stack"):
+        return vc_data
+    if device_type is None:
+        return unnumbered_virtual_chassis(vc_data)
+    rules = load_numbering_rules() if numbering_rules is None else numbering_rules
+    members = project_vc_members(vc_data["members"], numbering_mode_for(device_type, rules))
+    context = serial_rules.for_device_type(device_type)
+    pattern = _load_vc_member_name_pattern() if master_name else None
+    for member in members:
+        member["suggested_name"] = (
+            _member_name(master_name, member["position"], member.get("serial"), pattern, context)
+            if master_name
+            else f"Member-{member['position']}"
+        )
+    master = identify_vc_master(members, device_serial, context)
+    for member in members:
+        member["is_master"] = member is master
+    return {
+        **vc_data,
+        "members": members,
+        "master_identified": master is not None,
+        "numbering_available": True,
+        "numbering_error": None,
+        "device_type_id": device_type.pk,
+    }
+
+
+def prepared_master(prepared: dict) -> dict | None:
+    """Return the member entry of *prepared* that import makes the master, or None."""
+    return next((member for member in prepared.get("members", ()) if member.get("is_master")), None)
 
 
 def _member_entries(rows: list, *, model_field: str) -> list[dict]:
@@ -323,6 +422,8 @@ def _member_entries(rows: list, *, model_field: str) -> list[dict]:
     members = [
         {
             "serial": row.get("entPhysicalSerialNum", ""),
+            # The reported number; only project_vc_members derives a NetBox position from it.
+            "inventory_position": position,
             "position": position,
             "model": row.get(model_field, ""),
             "name": row.get("entPhysicalName", ""),
@@ -349,7 +450,7 @@ class VcStack(NamedTuple):
     shape: str | None
 
 
-def extract_vc_members(rows: list, serial_keys) -> list[dict]:
+def extract_vc_members(rows: list, contexts) -> list[dict]:
     """
     Return the Virtual Chassis members that ENTITY-MIB inventory rows describe.
 
@@ -359,7 +460,7 @@ def extract_vc_members(rows: list, serial_keys) -> list[dict]:
     * Two or more ``chassis`` children of the stack (or chassis) root.
     * Junos: a ``chassis`` root whose description names the Virtual Chassis, with two or more
       ``container`` children whose description starts with "FPC". Each FPC needs its own real
-      serial, and the root serial must match exactly one FPC, all under one of *serial_keys*. The
+      serial, and the root serial must match exactly one FPC, all under one of *contexts*. The
       model is the FPC name, and the position is the FPC's parent-relative position (the member id).
 
     Which member is the master is not part of this shape: :func:`identify_vc_master` decides it.
@@ -367,16 +468,16 @@ def extract_vc_members(rows: list, serial_keys) -> list[dict]:
     Args:
         rows: Inventory rows. They must hold the root rows and at least their direct children;
             deeper rows are ignored.
-        serial_keys: The :func:`vc_serial_key` functions that may compare the Junos FPC serials.
+        contexts: The serial contexts that may compare the Junos FPC serials.
 
     Returns:
         list[dict]: The members in position order, or [] when the rows describe no stack.
 
     """
-    return extract_vc_stack(rows, serial_keys).members
+    return extract_vc_stack(rows, contexts).members
 
 
-def extract_vc_stack(rows: list, serial_keys) -> VcStack:
+def extract_vc_stack(rows: list, contexts) -> VcStack:
     """Return the stack that :func:`extract_vc_members` reads, with the member shape that matched."""
     rows = [row for row in rows if isinstance(row, dict)]
     roots = [row for row in rows if _as_int(row.get("entPhysicalContainedIn")) == 0]
@@ -390,9 +491,9 @@ def extract_vc_stack(rows: list, serial_keys) -> VcStack:
     if len(chassis) >= 2:
         members = _member_entries(chassis, model_field="entPhysicalModelName")
         return VcStack(root, chassis, members, VC_MEMBER_SHAPE_CHASSIS)
-    fpcs = _junos_fpc_rows(root, children, serial_keys)
+    fpcs = _junos_fpc_rows(root, children, contexts)
     if fpcs:
-        # The master decision checks the FPC serials again under the key of the imported DeviceType.
+        # The master decision checks the FPC serials again under the context of the imported DeviceType.
         members = [
             {**member, "root_serial": root.get("entPhysicalSerialNum")}
             for member in _member_entries(fpcs, model_field="entPhysicalName")
@@ -405,8 +506,9 @@ class _StackRows(NamedTuple):
     """The inventory rows that :func:`extract_vc_members` reads as a stack, keyed by raw index."""
 
     root_index: object
+    # {member row index: NetBox position under the stack's numbering mode}.
     positions: dict
-    # Junos only: {FPC slot: FPC row index} for slots that exactly one FPC reports.
+    # Junos only: {reported FPC slot: FPC row index} for slots that exactly one FPC reports.
     fpc_slots: dict
 
     def fpc_named_by(self, row: dict):
@@ -418,9 +520,9 @@ class _StackRows(NamedTuple):
         return self.fpc_slots.get(int(named.group("member"))) if named else None
 
 
-def _stack_rows(rows, serial_keys) -> _StackRows:
-    """Return the stack root, the member rows' positions and the Junos FPC slots of an inventory."""
-    stack = extract_vc_stack(rows, serial_keys)
+def _stack_rows(rows, contexts, numbering_mode) -> _StackRows:
+    """Return the stack root, the member rows' projected positions and the Junos FPC slots of an inventory."""
+    stack = extract_vc_stack(rows, contexts)
     if stack.root is None:
         return _StackRows(None, {}, {})
     fpc_slots = {}
@@ -433,26 +535,33 @@ def _stack_rows(rows, serial_keys) -> _StackRows:
         }
     return _StackRows(
         stack.root.get("entPhysicalIndex"),
-        {member["index"]: member["position"] for member in stack.members},
+        {member["index"]: member["position"] for member in project_vc_members(stack.members, numbering_mode)},
         fpc_slots,
     )
-
-
-# A leading member number of 1 or more, then "/", ":" or "-", as in "2/1/1".
-_NAME_HINT_RE = re.compile(r"^\D*([1-9]\d*)[/:\-].*")
 
 
 class _Attribution:
     """Attribute the rows of one inventory to Virtual Chassis members; see :func:`attribute_inventory`."""
 
-    def __init__(self, rows, vc_members, serial_key):
+    def __init__(self, rows, vc_members, context, numbering_mode):
         self.vc_members = vc_members
-        self.serial_key = serial_key
-        self.by_serial = members_by_serial_key(vc_members, serial_key)
+        # Without members every row stays on the page, and context and numbering_mode can be None.
+        self.by_serial = group(vc_members, context, serial=lambda member: member.serial) if vc_members else None
         self.by_index = {index: row for row in rows if (index := row.get("entPhysicalIndex")) is not None}
-        # Without members every row stays on the page, and serial_key can be None.
-        self.stack = _stack_rows(rows, (serial_key,)) if vc_members else _StackRows(None, {}, {})
+        self.stack = _stack_rows(rows, (context,), numbering_mode) if vc_members else _StackRows(None, {}, {})
         self.results = {}
+        if vc_members and rows:
+            self._check_numbering()
+
+    def _check_numbering(self):
+        """Refuse an inventory whose member rows do not name the stored members by the current numbering."""
+        if not self.stack.positions:
+            raise VCNumberingError(VC_NUMBERING_UNRECOGNIZED)
+        stored = {member.vc_position for member in self.vc_members}
+        for index, position in self.stack.positions.items():
+            owner = self.serial_owner(self.by_index[index])
+            if position not in stored or (owner is not None and owner.vc_position != position):
+                raise VCNumberingError(VC_NUMBERING_MISMATCH)
 
     def member_at(self, position):
         """Return the member at *position*, or None."""
@@ -462,22 +571,20 @@ class _Attribution:
         return next((member for member in self.vc_members if member.vc_position == position), None)
 
     def serial_owner(self, row):
-        """Return the member whose serial the row carries, or None."""
-        key = self.serial_key(row.get("entPhysicalSerialNum"))
-        return self.by_serial.get(key) if key else None
+        """Return the member whose serial the row carries, or None; a serial that two members share names neither."""
+        members = self.by_serial.find(row.get("entPhysicalSerialNum"))
+        return members[0] if len(members) == 1 else None
 
-    def resolve(self, row, resolving=frozenset()):
-        """Return ``(member | None, source)`` for one row, its parent resolved first."""
+    def resolve(self, row):
+        """Return ``(member | None, source)`` for one row."""
         if id(row) in self.results:
             return self.results[id(row)]
         if not self.vc_members:
             result = (None, "default")
         elif (member := self.serial_owner(row)) is not None:
             result = (member, "serial")
-        elif self.stack.positions:
-            result = self._in_stack(row)
         else:
-            result = self._without_stack(row, resolving | {id(row)})
+            result = self._in_stack(row)
         self.results[id(row)] = result
         return result
 
@@ -511,74 +618,36 @@ class _Attribution:
             current = self.by_index.get(current.get("entPhysicalContainedIn"))
         return None, "default"
 
-    def _inherited(self, row, resolving):
-        """Return ``(inherits, member)`` from the row's parent; a generic root owns nothing."""
-        parent = self.by_index.get(row.get("entPhysicalContainedIn"))
-        if parent is None or id(parent) in resolving:
-            return False, None
-        member, source = self.resolve(parent, resolving)
-        parent_class = normalize_serial(parent.get("entPhysicalClass"))
-        parent_model = normalize_serial(parent.get("entPhysicalModelName")).lower()
-        generic_root = source == "default" and (
-            parent_class == "stack" or (parent_class == "container" and parent_model in GENERIC_CONTAINER_MODELS)
-        )
-        return not generic_root, member
 
-    def _without_stack(self, row, resolving):
-        """Attribute a row of an unrecognized shape with the position and name heuristic."""
-        parent_index = row.get("entPhysicalContainedIn", 0)
-        visited = set()
-        while parent_index and parent_index in self.by_index and parent_index not in visited:
-            visited.add(parent_index)
-            parent = self.by_index[parent_index]
-            if (member := self.serial_owner(parent)) is not None:
-                return member, "ancestor-serial"
-            parent_index = parent.get("entPhysicalContainedIn", 0)
-        # A descendant's parentRelPos is its hardware slot, so it inherits its parent's member.
-        inherits, member = self._inherited(row, resolving)
-        if inherits:
-            return member, "parent-context"
-        # This shape has no member rows, so any row's position or name hint from 1 names a member.
-        if (member := self.member_at(_from_one(row.get("entPhysicalParentRelPos")))) is not None:
-            return member, "position"
-        for field in ("entPhysicalName", "entPhysicalDescr", "entPhysicalModelName"):
-            match = _NAME_HINT_RE.match(normalize_serial(row.get(field)))
-            if match and (member := self.member_at(match.group(1))) is not None:
-                return member, "name-hint"
-        return None, "default"
-
-
-def _from_one(value) -> int | None:
-    """Return *value* as a position of 1 or more, or None."""
-    position = _as_int(value)
-    return position if position is not None and position >= 1 else None
-
-
-def attribute_inventory(rows: list, vc_members: list, serial_key) -> list[tuple]:
+def attribute_inventory(rows: list, vc_members: list, context, numbering_mode) -> list[tuple]:
     """
     Return the Virtual Chassis member that owns each inventory row, in row order.
 
-    This is all of module sync's member attribution. A row's own serial decides first. In a stack
-    that :func:`extract_vc_members` recognizes, only a member row gives a member by its position,
-    its descendants inherit it unless a nearer serial names another member, and the stack root and
-    the other rows directly under it own no member. A Junos PSU or fan tray named "FPC <n> ..."
-    follows the FPC that reports slot n. For an inventory that is not a recognized stack, a row
-    inherits its parent's member, or a position or leading name number of 1 or more names one.
+    This is all of module sync's member attribution. A row's own serial decides first. Only a
+    member row of the stack that :func:`extract_vc_members` recognizes gives a member, by its
+    position under *numbering_mode*; its descendants inherit it unless a nearer serial names
+    another member, and the stack root and the other rows directly under it own no member. A
+    Junos PSU or fan tray named "FPC <n> ..." follows the FPC that reports slot n.
 
     Args:
         rows: The main inventory rows of one device; OOB controller rows are no part of it.
         vc_members: The NetBox Virtual Chassis member Devices.
-        serial_key: From :func:`vc_serial_key`, for the stack's manufacturer; unused without members.
+        context: The serial context of the stack's master; unused without members.
+        numbering_mode: The numbering mode of the master's DeviceType; unused without members.
 
     Returns:
         list[tuple]: ``(member Device | None, source)`` per row, where None means the page device.
 
+    Raises:
+        VCNumberingError: The members have rows, and the inventory describes no stack, or a member
+            row's projected position is no stored member or disagrees with the member its serial names.
+
     """
-    attribution = _Attribution(rows, vc_members, serial_key)
+    attribution = _Attribution(rows, vc_members, context, numbering_mode)
     return [attribution.resolve(row) for row in rows]
 
 
-def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int, *, candidate_keys=None) -> dict | None:
+def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int, *, serial_rules=None) -> dict | None:
     """
     Detect a stack or Virtual Chassis from ENTITY-MIB inventory.
 
@@ -588,12 +657,13 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int, *, c
     Args:
         api: LibreNMSAPI instance
         device_id: LibreNMS device ID
-        candidate_keys: Returns :func:`candidate_vc_serial_keys`; None calls it directly.
+        serial_rules: The batch's :class:`SerialRules`; None reads them.
 
     Returns:
         dict | None: ``{is_stack, member_count, members, detection_failed, detection_error}``.
-            Each member carries serial, position, model, name, index, description and
-            suggested_name. None when the inventory confirms that the device is not a stack.
+            Each member carries serial, inventory_position (the reported number), position
+            (the same number until :func:`prepare_virtual_chassis` projects it), model, name,
+            index, description and a provisional suggested_name. None when the inventory confirms that the device is not a stack.
             A failed inventory read returns an empty payload with detection_failed=True so callers
             can fail closed without caching the failure as a negative result.
 
@@ -625,8 +695,9 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int, *, c
             logger.warning(f"Could not read child inventory for device {device_id}")
             return _failed_virtual_chassis_data("LibreNMS child inventory request failed")
 
-        serial_keys = (candidate_keys or candidate_vc_serial_keys)()
-        members = extract_vc_members([*root_items, *(child_items or [])], serial_keys)
+        # The DeviceType is not known yet, so every candidate context may explain the stack.
+        contexts = (serial_rules or SerialRules.load()).candidates()
+        members = extract_vc_members([*root_items, *(child_items or [])], contexts)
         if not members:
             return None
 
@@ -634,9 +705,9 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int, *, c
         vc_name_pattern = _load_vc_member_name_pattern() if master_name else None
         for member in members:
             if master_name:
-                # The DeviceType is not known yet, so the global key (the first candidate) names the members.
+                # The DeviceType is not known yet, so the global context (the first candidate) names the members.
                 member["suggested_name"] = _member_name(
-                    master_name, member["position"], member["serial"], vc_name_pattern, serial_keys[0]
+                    master_name, member["position"], member["serial"], vc_name_pattern, contexts[0]
                 )
             else:
                 member["suggested_name"] = f"Member-{member['position']}"
@@ -714,39 +785,9 @@ def _generate_vc_member_name(master_name: str, position: int, serial: str = None
         return f"{master_name}-M{position}"
 
 
-def _member_name(master_name: str, position: int, serial, pattern: str, serial_key) -> str:
+def _member_name(master_name: str, position: int, serial, pattern: str, context) -> str:
     """Return the name of the stack member; the import preview and member creation both name members here."""
-    return _generate_vc_member_name(master_name, position, serial=serial_key(serial), pattern=pattern)
-
-
-def update_vc_member_suggested_names(vc_data: dict, master_name: str, serial_key=None) -> dict:
-    """
-    Regenerate suggested VC member names using the actual master device name.
-
-    This ensures preview shows accurate names after use_sysname and strip_domain
-    are applied to the master device name.
-
-    Args:
-        vc_data: Virtual chassis detection data dict
-        master_name: The actual name that will be used for master device in NetBox
-        serial_key: From :func:`vc_serial_key`, for the DeviceType the device imports as; None applies global rules.
-
-    Returns:
-        Updated vc_data dict with corrected suggested_name for each member
-
-    """
-    if not vc_data or not vc_data.get("is_stack"):
-        return vc_data
-
-    # Load naming pattern once to avoid a DB query per member
-    vc_pattern = _load_vc_member_name_pattern()
-    serial_key = serial_key or vc_serial_key()
-    members = vc_data.get("members", [])
-    for member, position in zip(members, _member_positions([m.get("position") for m in members]), strict=True):
-        member["position"] = position
-        member["suggested_name"] = _member_name(master_name, position, member.get("serial"), vc_pattern, serial_key)
-
-    return vc_data
+    return _generate_vc_member_name(master_name, position, serial=naming_token(serial, context), pattern=pattern)
 
 
 def _as_int(value) -> int | None:
@@ -785,51 +826,49 @@ VC_MASTER_UNKNOWN_WARNING = (
 
 def create_virtual_chassis_with_members(
     master_device: Device,
-    members_info: list,
+    prepared: dict,
     libre_device: dict,
     server_key: str | None = None,
     *,
     master_member: dict,
+    serial_rules: SerialRules | None = None,
 ) -> VirtualChassis:
     """
-    Create Virtual Chassis and member devices from detection info.
+    Create Virtual Chassis and member devices from a prepared stack.
 
     This function creates a NetBox VirtualChassis with the master device
     and all detected member devices, wrapped in a transaction for safety.
 
     Args:
         master_device: The imported device (becomes VC master)
-        members_info: List of member dicts from VC detection, the master included
+        prepared: The stack that :func:`prepare_virtual_chassis` prepared for the master's DeviceType;
+            its members, the master included, carry the NetBox positions that this function writes.
         libre_device: Original LibreNMS device data
         server_key: LibreNMS server key stored with the created members.
-        master_member: The entry of *members_info* that is *master_device*, as the caller decided
-            it with :func:`identify_vc_master`.
+        master_member: The member entry of *prepared* that is *master_device*.
+        serial_rules: The batch's :class:`SerialRules`; None reads them.
 
     Returns:
         VirtualChassis: The created virtual chassis instance
 
     Raises:
-        ValueError: If *master_member* is not one of the *members_info* entries
+        ValueError: If *prepared* was prepared for another DeviceType than the locked master row
+            holds, its positions are no unique NetBox positions, or *master_member* is not one of its
+            members or not the master under that DeviceType
         IntegrityError: If duplicate serials/names are detected
         Exception: For other creation errors
 
-    Example members_info:
-        [
-            {'serial': 'ABC123', 'position': 0, 'model': 'C9300-48U', 'name': 'Switch 1'},
-            {'serial': 'ABC124', 'position': 1, 'model': 'C9300-48U', 'name': 'Switch 2'}
-        ]
-
     """
-    # The ENTITY-MIB serial carries the vendor's decoration ("S/N BCFB9793" on Juniper) while the
-    # stored device serial does not, so member serials go through the same serial key.
-    member_serial = vc_serial_key(getattr(getattr(master_device, "device_type", None), "manufacturer", None))
-    # Caller-supplied members can lack positions; the stack rule then numbers them in row order.
-    positions = _member_positions([member.get("position") for member in members_info])
-    master_pos = next(
-        (pos for member, pos in zip(members_info, positions, strict=True) if member is master_member), None
-    )
+    # Members store the raw serial; names and the duplicate check use the serial context of the master.
+    serial_rules = serial_rules or SerialRules.load()
+    members_info = prepared["members"]
+    positions = [member.get("position") for member in members_info]
+    # Creation writes the prepared numbers and never numbers a stack itself.
+    if not all(is_vc_position(position) for position in positions) or len(set(positions)) != len(positions):
+        raise ValueError("The stack was not numbered for import; no chassis was created.")
+    master_pos = next((member["position"] for member in members_info if member is master_member), None)
     if master_pos is None:
-        raise ValueError("master_member must be one of the members_info entries")
+        raise ValueError("master_member must be one of the prepared members")
 
     # Save originals for in-memory rollback — transaction.atomic() rolls back DB but
     # not in-memory model fields.
@@ -838,13 +877,30 @@ def create_virtual_chassis_with_members(
     original_vc_position = master_device.vc_position
 
     try:
-        with transaction.atomic():
+        with atomic_with_events():
+            # The serial identity locks of every member come before any row lock.
+            assignment_lock(
+                [member.get("serial") for member in members_info if member is not master_member],
+                model=Device,
+                rules=serial_rules,
+            )
+            # The master row decides the member context: a type change of the master is waited for, then read.
+            # The master decision and the member type follow the type that the locked row holds now.
+            context = locked_type_context(master_device, rules=serial_rules)
+            locked_master = Device.objects.select_related("device_type").get(pk=master_device.pk)
+            if prepared.get("device_type_id") != locked_master.device_type_id:
+                raise ValueError("The stack was numbered for another device type; no chassis was created.")
+            if identify_vc_master(members_info, locked_master.serial, context) is not master_member:
+                raise ValueError(
+                    "The stack master does not match under the current device type; no chassis was created."
+                )
+            master_device.device_type = locked_master.device_type
             master_device.snapshot()
             # Load naming pattern once to avoid a DB query per member
             vc_pattern = _load_vc_member_name_pattern()
             # Rename the master device with its own position, from its member entry like every other member
             master_device_new_name = _member_name(
-                original_master_name, master_pos, master_member.get("serial"), vc_pattern, member_serial
+                original_master_name, master_pos, master_member.get("serial"), vc_pattern, context
             )
 
             # Check if renamed master conflicts with existing device
@@ -881,7 +937,8 @@ def create_virtual_chassis_with_members(
                 master_member,
                 vc,
                 vc_pattern,
-                member_serial,
+                context,
+                serial_rules,
             )
             expected_members = len(members_info) - 1
             if members_created < expected_members:
@@ -913,24 +970,33 @@ def create_virtual_chassis_with_members(
 
 
 def _create_member_devices(
-    master_device, base_name, members_info, positions, master_member, vc, vc_pattern, member_serial
+    master_device, base_name, members_info, positions, master_member, vc, vc_pattern, context, serial_rules
 ) -> int:
     """Create a device for each non-master member at its stack position; return how many were created."""
     member_rack = master_device.rack
     member_location = master_device.location or (member_rack.location if member_rack and member_rack.location else None)
+    members = [
+        (member, position)
+        for member, position in zip(members_info, positions, strict=True)
+        if member is not master_member
+    ]
+    # One lookup for the whole stack, after the caller took the serial identity locks.
+    taken = resolve_devices_write(
+        [member.get("serial") for member, _position in members if is_identity(member.get("serial"), context)],
+        context,
+        rules=serial_rules,
+    )
+    created_members = SerialGroups(context)
     created = 0
-    for member, position in zip(members_info, positions, strict=True):
-        if member is master_member:
+    for member, position in members:
+        raw_serial = member.get("serial")
+        if is_identity(raw_serial, context) and _member_serial_taken(raw_serial, taken[raw_serial], created_members):
             continue
-        serial = member_serial(member.get("serial"))
-        if serial and find_devices_by_serial(serial, limit=1):
-            logger.warning(f"Device with serial '{serial}' already exists, skipping VC member creation")
-            continue
-        member_name = _member_name(base_name, position, member.get("serial"), vc_pattern, member_serial)
+        member_name = _member_name(base_name, position, raw_serial, vc_pattern, context)
         if Device.objects.filter(name=member_name).exists():
             logger.warning(f"Device with name '{member_name}' already exists, skipping VC member creation")
             continue
-        Device.objects.create(
+        device = Device.objects.create(
             name=member_name,
             device_type=master_device.device_type,
             role=master_device.role,
@@ -938,10 +1004,33 @@ def _create_member_devices(
             location=member_location,
             rack=member_rack,
             platform=master_device.platform,
-            serial=serial,
+            serial=stored_form(raw_serial, Device),
             virtual_chassis=vc,
             vc_position=position,
             comments=f"VC member (LibreNMS: {member.get('name', 'Unknown')})\nAuto-created from stack inventory",
         )
+        created_members.add(raw_serial, device)
         created += 1
     return created
+
+
+def _member_serial_taken(serial, resolution, created_members) -> bool:
+    """
+    Return whether a stack member with *serial* exists already, and log why it is skipped.
+
+    Args:
+        serial: The LibreNMS member serial; it has a hardware identity.
+        resolution: The Devices that held *serial* before this stack's members were created.
+        created_members: The members that this stack created so far, grouped by serial.
+
+    """
+    if created_members.find(serial) or resolution.kind is ResolutionKind.UNIQUE:
+        logger.warning(f"Device with serial '{serial}' already exists, skipping VC member creation")
+        return True
+    if resolution.kind is ResolutionKind.AMBIGUOUS:
+        logger.warning(f"Skipped VC member with serial '{serial}': several devices already hold this serial")
+        return True
+    if resolution.kind in REFUSING:
+        logger.warning(f"Skipped VC member with serial '{serial}': {resolution.reason}")
+        return True
+    return False

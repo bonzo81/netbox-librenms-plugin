@@ -1,6 +1,8 @@
 """The IP tab's Create VRF action: one rule offers it, and the endpoint re-derives that rule."""
 
 import re
+from html import unescape
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from django.contrib.auth import get_user
@@ -125,7 +127,62 @@ class TestTheCreateAffordance:
         create_url = reverse(
             "plugins:netbox_librenms_plugin:create_ip_row_vrf", kwargs={"object_type": "device", "pk": owner.pk}
         )
-        assert f'formaction="{create_url}"' in rows[RD_ROWS[0]]
+        formaction = urlsplit(unescape(re.search(r'formaction="([^"]*)"', rows[RD_ROWS[0]]).group(1)))
+        assert formaction.path == create_url
+        assert parse_qs(formaction.query) == {"server_key": [SERVER_KEY]}
+
+    def test_a_quick_search_finds_the_row_by_its_create_button_label(self, client, seeded):
+        from netbox_librenms_plugin.tests.test_interface_sync_filters import CELL, _visible_text
+
+        owner = seeded("quick-search")
+        client = _superuser_client(client)
+        rows = _rows(client, owner)
+        assert _offers_create(rows[NO_RD_ROW])
+        vrf_cell = dict(CELL.findall(rows[NO_RD_ROW]))["vrf"]
+
+        response = client.get(
+            reverse(
+                "plugins:netbox_librenms_plugin:sync_cache_fragment",
+                kwargs={"object_type": "device", "pk": owner.pk, "tab": "ipaddresses"},
+            ),
+            {"server_key": SERVER_KEY, "ipaddresses_q": "VRF"},
+        )
+
+        # The cell shows the selected option and the button label, and the search reads both.
+        assert _visible_text(vrf_cell).endswith(" vrf")
+        found = dict(
+            re.findall(r"<tr[^>]*data-interface=\"([^\"]+)\"[^>]*>(.*?)</tr>", response.content.decode(), re.S)
+        )
+        assert {*RD_ROWS, NO_RD_ROW} <= set(found)
+        assert UNTAGGED_ROW not in found
+
+    def test_the_create_keeps_the_page_query_of_every_tab(self, client, seeded):
+        owner = seeded("vrf-page-query")
+        page_query = {
+            "tab": "ipaddresses",
+            "server_key": SERVER_KEY,
+            "interfaces_q": "eth  a&b+c é",
+            "ipaddresses_filter_address": RD_ROWS[0].split("/")[0],
+        }
+        client = _superuser_client(client)
+        fragment = client.get(
+            reverse(
+                "plugins:netbox_librenms_plugin:sync_cache_fragment",
+                kwargs={"object_type": "device", "pk": owner.pk, "tab": "ipaddresses"},
+            ),
+            page_query,
+        )
+        (formaction,) = re.findall(r'formaction="([^"]*)"', fragment.content.decode())
+        expected = {key: [value] for key, value in page_query.items()}
+        assert parse_qs(urlsplit(unescape(formaction)).query) == expected
+
+        response = client.post(unescape(formaction), {"server_key": SERVER_KEY, "create_vrf": RD_ROWS[0]})
+
+        assert response.status_code == 302
+        assert _messages(response, "success")
+        location = urlsplit(response.url)
+        assert location.path == reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[owner.pk])
+        assert parse_qs(location.query) == expected
 
     @pytest.mark.parametrize(
         "existing",

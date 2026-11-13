@@ -26,6 +26,7 @@ from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
 from netbox_librenms_plugin.server_mappings import read_mapping, read_mappings
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, request_actor_id
+from netbox_librenms_plugin.sync_filters import filter_sync_table, parse_table_filters
 from netbox_librenms_plugin.utils import (
     apply_lag_vlan_fill,
     build_migrated_context,
@@ -201,11 +202,13 @@ class BaseInterfaceTableView(
             )
         else:
             extra_related = ["parent", "bridge"] if related_field == "virtual_machine" else ["lag", "parent", "bridge"]
+            # The planned type check asks each device interface whether it has LAG members.
+            extra_prefetch = [] if related_field == "virtual_machine" else ["member_interfaces"]
             interfaces = (
                 (interface, read_mapping(interface))
                 for interface in queryset.select_related(
                     related_field, "untagged_vlan", *extra_related
-                ).prefetch_related("tagged_vlans", "tagged_vlans__group", "mac_addresses")
+                ).prefetch_related("tagged_vlans", "tagged_vlans__group", "mac_addresses", *extra_prefetch)
             )
         for interface, mapping in interfaces:
             by_name[interface.name] = interface
@@ -661,10 +664,14 @@ class BaseInterfaceTableView(
         netbox_only_interfaces = []
         ignored_count = 0
         blocked_port_ids = []
-        show_ignored = "1" in (request.GET.get("interfaces_show_ignored"), request.POST.get("interfaces_show_ignored"))
+        filtered_from = None
+        # Every hop of the tab carries the page query, so the toggle is read from it only.
+        show_ignored = request.GET.get("interfaces_show_ignored") == "1"
 
         if interface_name_field is None:
             interface_name_field = get_interface_name_field(request, obj)
+        # The filters show their errors also when no snapshot is cached.
+        filters = parse_table_filters(request.GET, lambda rows: self.get_table(rows, obj, interface_name_field))
 
         unresolved = False
         if server_key is None:
@@ -987,12 +994,28 @@ class BaseInterfaceTableView(
                 for port in ports_data
                 if port["rule_decision"] is None or decision_reason(port["rule_decision"]) is not None
             ]
-            table = self.get_table(table_rows, obj, interface_name_field, vlan_groups=vlan_groups)
-            table.allowed_vc_member_ids = actionable_owner_ids
             # Propagate donor "migrated mode" so the table suppresses per-row relationship sync
             # buttons (the bulk form is already hidden by the template; the row buttons POST
             # directly, so they must be stripped here too to keep a migrated donor read-only).
-            table.migrated_to_marker = bool(build_migrated_context(obj, server_key).get("migrated_to_marker"))
+            migrated = bool(build_migrated_context(obj, server_key).get("migrated_to_marker"))
+
+            def build_table(rows):
+                built = self.get_table(rows, obj, interface_name_field, vlan_groups=vlan_groups)
+                built.allowed_vc_member_ids = actionable_owner_ids
+                built.migrated_to_marker = migrated
+                return built
+
+            # The filter runs after every whole-snapshot step above, so the counts, the ignored
+            # split and the blocked IDs describe the whole device. A new name field or ignored
+            # toggle starts an empty browser selection too.
+            table, filters, filtered_from = filter_sync_table(
+                request,
+                obj,
+                table_rows,
+                build_table,
+                server_key=server_key,
+                interfaces_show_ignored=int(show_ignored),
+            )
             table.configure(request)
 
             netbox_only_interfaces = []
@@ -1058,6 +1081,9 @@ class BaseInterfaceTableView(
             "vlan_scope_incomplete": vlan_scope_incomplete,
             "show_ignored": show_ignored,
             "ignored_count": ignored_count,
+            "filters": filters,
+            # The row count before the filter, shown only while a filter narrows the table.
+            "filtered_from": filtered_from,
             "sync_options": interface_sync_options_menu(request),
             # The browser's related-row walk skips these, on this page and on every other.
             "blocked_port_ids_json": json.dumps([str(port_id) for port_id in blocked_port_ids if port_id is not None]),

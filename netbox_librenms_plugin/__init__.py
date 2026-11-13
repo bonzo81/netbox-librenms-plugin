@@ -69,6 +69,11 @@ class LibreNMSSyncConfig(PluginConfig):
 
         cache_signals.connect()
 
+        # A cached import validation misses after an edit of the rows that select its DeviceType or numbering rule.
+        from netbox_librenms_plugin.import_utils.cache import connect_import_configuration_signals
+
+        connect_import_configuration_signals()
+
         # The late write of an interface row locks the row and checks its version just before the UPDATE.
         from dcim.models import Interface
         from django.db.models.signals import m2m_changed, post_save, pre_save
