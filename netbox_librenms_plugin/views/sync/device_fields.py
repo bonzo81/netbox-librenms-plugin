@@ -45,7 +45,8 @@ from netbox_librenms_plugin.serial_identity import (
     display,
     is_sole_holder,
     retype_conflict,
-    retype_holders,
+    retype_lock,
+    retype_scope,
 )
 from netbox_librenms_plugin.server_selection import build_server_mappings, get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import SyncTab
@@ -477,14 +478,14 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         device_type = match_result["device_type"]
         # The type decides the identity of the stored serials: their identity locks come before the row lock.
         serial_rules = SerialRules.load()
-        retyped = retype_holders(device)
+        scope = retype_scope(device)
 
         def no_new_holder(row):
-            if retype_conflict(row, device_type, rules=serial_rules, affected=retyped):
+            if retype_conflict(row, device_type, rules=serial_rules, scope=scope):
                 raise _WriteRefused(RETYPE_HELD)
 
         with atomic_with_events():
-            assignment_lock([serial for _pk, serial in retyped], model=Device, rules=serial_rules)
+            retype_lock(scope, rules=serial_rules)
             old_device_type, failed = _write_device_field(
                 self,
                 request,

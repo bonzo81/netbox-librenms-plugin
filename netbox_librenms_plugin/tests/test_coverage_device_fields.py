@@ -1139,6 +1139,29 @@ class TestSetPreferredServerView:
         assert any("server key must be a non-empty string" in text for text in _messages(response, "error"))
 
 
+def _retype_shape(target, shape, new_maker):
+    """Give *target* two serials that only the rule of *new_maker* keys to one value: on chassis members or on modules."""
+    from dcim.models import VirtualChassis
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import install_module, make_module_bay, make_virtual_chassis
+
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=new_maker
+    )
+    if shape == "chassis-members":
+        target.serial = "XABC"
+        target.save()
+        member = make_device(f"{target.name}-member", serial="ABC")
+        chassis = make_virtual_chassis(f"{target.name}-chassis", target, member)
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=target)
+    else:
+        for number, serial in ((1, "XABC"), (2, "ABC")):
+            make_module_bay(target, f"Slot {number}", position=str(number))
+            install_module(target, f"Slot {number}", f"{target.name}-card-{number}".upper(), serial=serial)
+    target.refresh_from_db()
+
+
 @pytest.mark.django_db
 class TestUpdateDeviceTypeSerialIdentity:
     def test_a_type_change_refuses_when_another_device_then_holds_the_stored_serial(
@@ -1171,6 +1194,53 @@ class TestUpdateDeviceTypeSerialIdentity:
         assert Device.objects.get(pk=device.pk).device_type_id == old_type_id
         assert _messages(response, "error")
         assert not any(holder.name in text for text in _messages(response, "error"))
+
+    @pytest.mark.parametrize("shape", ["chassis-members", "device-modules"])
+    def test_a_type_change_refuses_two_serials_that_the_new_rules_key_to_one(
+        self, logged_in_client, librenms_server, shape
+    ):
+        from dcim.models import Device, DeviceType, Manufacturer
+
+        device = make_device(f"retype-sync-{shape}", librenms_cf={SERVER_KEY: 6572})
+        new_maker = Manufacturer.objects.create(name=f"Retype sync {shape}", slug=f"retype-sync-{shape}-maker")
+        _retype_shape(device, shape, new_maker)
+        new_type = DeviceType.objects.create(
+            manufacturer=new_maker,
+            model=f"Retype sync {shape}",
+            slug=f"retype-sync-{shape}-type",
+            part_number=f"RETYPE-SYNC-{shape}-HW".upper(),
+        )
+        old_type_id = device.device_type_id
+        librenms_server.device_info_response(device_id=6572, hostname=device.name, hardware=new_type.part_number)
+
+        response = _post(logged_in_client, "update_device_type", device, {})
+
+        assert Device.objects.get(pk=device.pk).device_type_id == old_type_id
+        assert _messages(response, "error")
+
+    def test_a_type_change_without_a_new_shared_serial_is_saved(self, logged_in_client, librenms_server):
+        """Two module serials that the old and the new rules both keep apart do not block the change."""
+        from dcim.models import Device, DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.conftest import install_module, make_module_bay
+
+        device = make_device("retype-sync-clean", librenms_cf={SERVER_KEY: 6573})
+        for number, serial in ((1, "XDEF"), (2, "ABC")):
+            make_module_bay(device, f"Slot {number}", position=str(number))
+            install_module(device, f"Slot {number}", f"RETYPE-CLEAN-CARD-{number}", serial=serial)
+        new_maker = Manufacturer.objects.create(name="Retype sync clean", slug="retype-sync-clean-maker")
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=new_maker
+        )
+        new_type = DeviceType.objects.create(
+            manufacturer=new_maker, model="Retype sync clean", slug="retype-sync-clean", part_number="RETYPE-CLEAN-HW"
+        )
+        librenms_server.device_info_response(device_id=6573, hostname=device.name, hardware=new_type.part_number)
+
+        _post(logged_in_client, "update_device_type", device, {})
+
+        assert Device.objects.get(pk=device.pk).device_type_id == new_type.pk
 
 
 @pytest.mark.django_db

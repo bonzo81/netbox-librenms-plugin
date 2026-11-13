@@ -514,7 +514,7 @@ class TestWriters:
         """A member keeps the master's context: a new master type decides the member serials too."""
         from dcim.models import VirtualChassis
 
-        from netbox_librenms_plugin.serial_identity import retype_conflict, retype_holders
+        from netbox_librenms_plugin.serial_identity import retype_conflict, retype_scope
         from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
 
         old_maker, new_maker = _manufacturer("retype-old"), _manufacturer("retype-new")
@@ -524,18 +524,17 @@ class TestWriters:
         chassis = make_virtual_chassis("retype-chassis", master, member)
         VirtualChassis.objects.filter(pk=chassis.pk).update(master=master)
         master.refresh_from_db()
-        member.refresh_from_db()
         _device_of(new_maker, "retype-holder", "XABC")
         same_rules_type = _device_of(old_maker, "retype-same-maker", "OTHER-SN1").device_type
         new_type = _device_of(new_maker, "retype-new-type", "OTHER-SN2").device_type
         rules = SerialRules.load()
 
-        affected = retype_holders(master)
+        scope = retype_scope(master)
 
-        assert sorted(serial for _pk, serial in affected) == ["MASTER-SN1", "XABC"]
-        assert retype_conflict(master, new_type, rules=rules, affected=affected) is True
-        assert retype_conflict(master, same_rules_type, rules=rules, affected=affected) is False
-        assert retype_holders(member) == []
+        assert sorted(serial for _pk, serial in scope.devices) == ["MASTER-SN1", "XABC"]
+        assert retype_conflict(master, new_type, rules=rules, scope=scope) is True
+        assert retype_conflict(master, same_rules_type, rules=rules, scope=scope) is False
+        assert retype_scope(member).devices == ()
 
     def test_an_import_refuses_a_serial_that_a_device_committed_after_the_validation(self, settings):
         from netbox_librenms_plugin.import_utils import validate_device_for_import
