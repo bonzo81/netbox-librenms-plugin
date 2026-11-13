@@ -26,7 +26,7 @@ from ..serial_identity import (
     group,
     is_identity,
     naming_token,
-    resolve_devices,
+    resolve_devices_write,
     stored_form,
 )
 from ..transactions import atomic_with_events
@@ -881,8 +881,9 @@ def _create_member_devices(
         if member is not master_member
     ]
     # One lookup for the whole stack, after the caller took the serial identity locks.
-    taken = resolve_devices(
+    taken = resolve_devices_write(
         [member.get("serial") for member, _position in members if is_identity(member.get("serial"), context)],
+        context,
         rules=serial_rules,
     )
     created_members = SerialGroups(context)
