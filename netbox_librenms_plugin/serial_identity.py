@@ -459,9 +459,9 @@ def resolve_device(serial, *, rules: SerialRules | None = None, exclude_pks=(), 
     return resolve_devices([serial], rules=rules, exclude_pks=exclude_pks, lock=lock)[serial]
 
 
-def is_sole_holder(device, incoming, *, rules: SerialRules) -> bool:
-    """Return whether *device* is the one Device that holds the hardware *incoming* names, from an unrestricted read."""
-    holder = resolve_device(incoming, rules=rules).object
+def is_sole_holder(device, incoming, *, rules: SerialRules, exclude_pks=()) -> bool:
+    """Return whether *device* is the one Device, apart from *exclude_pks*, that holds the hardware *incoming* names."""
+    holder = resolve_device(incoming, rules=rules, exclude_pks=exclude_pks).object
     return holder is not None and holder.pk == device.pk
 
 
