@@ -594,7 +594,7 @@ def test_a_failed_module_bay_count_write_fails_the_chassis_create():
     from dcim.models import VirtualChassis
     from django.db import OperationalError
 
-    from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+    from netbox_librenms_plugin.tests.conftest import create_prepared_stack
     from netbox_librenms_plugin.transactions import classify_conflict
 
     master = make_device("bay-count-conflict-master", serial="MASTER-SERIAL")
@@ -607,9 +607,7 @@ def test_a_failed_module_bay_count_write_fails_the_chassis_create():
         ) as failed,
     ):
         members = [{"serial": "MASTER-SERIAL", "position": 1}, {"serial": "MEMBER-SERIAL", "position": 2}]
-        create_virtual_chassis_with_members(
-            master, members, {"device_id": 96321}, server_key="default", master_member=members[0]
-        )
+        create_prepared_stack(master, members, {"device_id": 96321}, server_key="default")
 
     assert failed, "precondition: the count write ran"
     assert classify_conflict(caught.value)

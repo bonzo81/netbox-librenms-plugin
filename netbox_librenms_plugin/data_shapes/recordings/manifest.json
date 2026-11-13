@@ -95,7 +95,7 @@
         "present": true,
         "root_class": "stack",
         "member_count": 3,
-        "position_base": 1,
+        "position_base": 0,
         "member_shape": "chassis"
       },
       "lag": {

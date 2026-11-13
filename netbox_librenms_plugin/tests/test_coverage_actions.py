@@ -13,6 +13,7 @@ from django.urls import reverse as url_for
 
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.conftest import (
+    _shared_infra,
     bounded_executor,
     make_cluster,
     make_device,
@@ -630,10 +631,14 @@ class TestBulkImportConfirmView:
     def test_confirm_template_says_a_stack_without_a_master_imports_standalone(self, master_identified):
         from django.template.loader import render_to_string
 
-        from netbox_librenms_plugin.import_utils.virtual_chassis import _clone_virtual_chassis_data, vc_master_view
-        from netbox_librenms_plugin.serial_identity import plain_context
+        from netbox_librenms_plugin.import_utils.virtual_chassis import prepare_virtual_chassis
+        from netbox_librenms_plugin.serial_identity import SerialRules
+        from netbox_librenms_plugin.tests.conftest import _shared_infra
 
-        members = [{"position": 1, "serial": "SN-1001"}, {"position": 2, "serial": "SN-1002"}]
+        members = [
+            {"position": 1, "inventory_position": 1, "serial": "SN-1001"},
+            {"position": 2, "inventory_position": 2, "serial": "SN-1002"},
+        ]
         html = render_to_string(
             "netbox_librenms_plugin/htmx/bulk_import_confirm.html",
             {
@@ -642,10 +647,12 @@ class TestBulkImportConfirmView:
                         "device_id": 9903,
                         "device_name": "unknown-master-stack",
                         "validation": {
-                            "virtual_chassis": vc_master_view(
-                                _clone_virtual_chassis_data({"is_stack": True, "member_count": 2, "members": members}),
-                                "SN-1001" if master_identified else "ROOT",
-                                plain_context(),
+                            "virtual_chassis": prepare_virtual_chassis(
+                                {"is_stack": True, "member_count": 2, "members": members},
+                                device_type=_shared_infra()[2],
+                                master_name="unknown-master-stack",
+                                device_serial="SN-1001" if master_identified else "ROOT",
+                                serial_rules=SerialRules.load(),
                             )
                         },
                     }
@@ -788,7 +795,7 @@ class TestBulkImportConfirmViewIntegration:
         librenms_server.device_info_response(
             device_id=21,
             hostname="confirm-integration-stack.example.test",
-            hardware="Test stack hardware",
+            hardware=_shared_infra()[2].model,
             os="test-stack-os",
             serial="CONFIRM-INTEGRATION-STACK-SERIAL-1",
             ip="198.18.0.21",
@@ -853,7 +860,7 @@ class TestBulkImportConfirmViewIntegration:
         librenms_server.device_info_response(
             device_id=71,
             hostname=".confirm-integration-stack-fallback.example.test",
-            hardware="Test fallback stack hardware",
+            hardware=_shared_infra()[2].model,
             os="test-fallback-stack-os",
             serial="CONFIRM-INTEGRATION-STACK-FALLBACK-SERIAL-1",
             ip="198.18.0.71",
@@ -2181,7 +2188,9 @@ class TestDeviceVCDetailsView:
         server_key = "vc-details-stack"
         device_id = 42
         view = self._view(settings, librenms_server, server_key)
-        librenms_server.device_info_response(device_id=device_id, hostname="stack-master", serial="MEMBER-1")
+        librenms_server.device_info_response(
+            device_id=device_id, hostname="stack-master", serial="MEMBER-1", hardware=_shared_infra()[2].model
+        )
         librenms_server.vc_inventory_callable(
             device_id,
             [{"entPhysicalClass": "stack", "entPhysicalIndex": 100}],
@@ -2218,7 +2227,9 @@ class TestDeviceVCDetailsView:
         server_key = "vc-details-zero"
         device_id = 43
         view = self._view(settings, librenms_server, server_key)
-        librenms_server.device_info_response(device_id=device_id, hostname="zero-master", serial="ZERO-0")
+        librenms_server.device_info_response(
+            device_id=device_id, hostname="zero-master", serial="ZERO-0", hardware=_shared_infra()[2].model
+        )
         librenms_server.vc_inventory_callable(
             device_id,
             [{"entPhysicalClass": "stack", "entPhysicalIndex": 100, "entPhysicalContainedIn": 0}],
@@ -2249,7 +2260,9 @@ class TestDeviceVCDetailsView:
         server_key = "vc-details-no-master"
         device_id = 44
         view = self._view(settings, librenms_server, server_key)
-        librenms_server.device_info_response(device_id=device_id, hostname="no-master", serial="ROOT")
+        librenms_server.device_info_response(
+            device_id=device_id, hostname="no-master", serial="ROOT", hardware=_shared_infra()[2].model
+        )
         librenms_server.vc_inventory_callable(
             device_id,
             [{"entPhysicalClass": "stack", "entPhysicalIndex": 100}],

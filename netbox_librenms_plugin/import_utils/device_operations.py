@@ -59,10 +59,13 @@ from ..utils import (
 from .cache import get_import_device_cache_key
 from .naming import _name_candidates, _resolve_device_name
 from .virtual_chassis import (
+    VCNumberingError,
     _member_name,
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
-    update_vc_member_suggested_names,
+    numbering_refusal_text,
+    prepare_virtual_chassis,
+    unnumbered_virtual_chassis,
 )
 from netbox_librenms_plugin.server_mappings import (
     IDENTITY_BUSY_MESSAGE,
@@ -634,6 +637,7 @@ def validate_device_for_import(  # noqa: C901
     strip_domain: bool = False,
     preloaded_device_type_rules: dict | None = None,
     serial_rules: SerialRules | None = None,
+    numbering_rules: tuple | None = None,
 ) -> dict:
     """
     Validate if a LibreNMS device can be imported to NetBox.
@@ -659,6 +663,7 @@ def validate_device_for_import(  # noqa: C901
         strip_domain: If True, strip domain suffix from device name.
         preloaded_device_type_rules: Optional device-type normalization rules keyed for lookup.
         serial_rules: The batch's :class:`SerialRules`; None reads them once for this device.
+        numbering_rules: The batch's VC member numbering rules; None reads them for a stack.
 
     Returns:
         dict: Validation result with structure (the key set is pinned by
@@ -690,7 +695,7 @@ def validate_device_for_import(  # noqa: C901
                 'suggested_name': str or None,  # Name to suggest when name_sync_available
                 'device_type_mismatch': bool,  # Existing device's type differs from LibreNMS (devices only)
                 'naming_criteria': dict or None,  # How resolved_name was derived (use_sysname/strip_domain)
-                'virtual_chassis': dict,  # VC detection state, empty_virtual_chassis_data() shape
+                'virtual_chassis': dict,  # VC state, prepare_virtual_chassis() for the matched DeviceType
                 'issues': List[str],  # Blocking issues
                 'warnings': List[str],  # Non-blocking warnings
                 'site': {  # Device site or VM matched-site placement
@@ -1657,10 +1662,20 @@ def validate_device_for_import(  # noqa: C901
                                 f"Virtual chassis CONFIRMED for device {hostname}: "
                                 f"{vc_detection['member_count']} members"
                             )
-                            device_type = effective_import_device_type(result["device_type"].get("device_type"))
-                            result["virtual_chassis"] = update_vc_member_suggested_names(
-                                vc_detection, hostname, serial_rules.for_device_type(device_type)
-                            )
+                            try:
+                                result["virtual_chassis"] = prepare_virtual_chassis(
+                                    vc_detection,
+                                    device_type=effective_import_device_type(result["device_type"].get("device_type")),
+                                    master_name=hostname,
+                                    device_serial=incoming_serial,
+                                    serial_rules=serial_rules,
+                                    numbering_rules=numbering_rules,
+                                )
+                            except (VCNumberingError, RuleConfigurationError) as exc:
+                                # The import numbers the stack again for its final DeviceType.
+                                refusal = numbering_refusal_text(exc)
+                                result["virtual_chassis"] = unnumbered_virtual_chassis(vc_detection, refusal)
+                                result["issues"].append(refusal)
                 except Exception as e:
                     logger.exception("Exception during VC detection for device %s: %s", hostname, e)
                     # The validation result has no viewer: it is cached and shown to any import user.

@@ -1005,8 +1005,12 @@ class DeviceImportTable(tables.Table):
             kwargs={"device_id": device_id},
         )
         server_key = getattr(self, "server_key", None)
-        if server_key:
-            vc_url += f"?server_key={quote_plus(str(server_key))}"
+        params = {"server_key": server_key} if server_key else {}
+        # The dialog names the members with the naming of this row's validation.
+        naming = validation.get("naming_criteria") or {}
+        params.update({key: str(bool(naming[key])).lower() for key in ("use_sysname", "strip_domain") if key in naming})
+        if params:
+            vc_url += "?" + "&".join(f"{key}={quote_plus(str(value))}" for key, value in params.items())
 
         # Show error button if detection failed
         if vc_data.get("detection_failed") or vc_data.get("detection_error"):

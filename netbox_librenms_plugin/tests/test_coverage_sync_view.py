@@ -617,9 +617,8 @@ class TestVirtualChassisInventory:
         member.device_type = DeviceType.objects.create(manufacturer=other, model="Other member", slug="other-member")
         member.serial = "MEMBER-SERIAL"
         member.save()
-        if has_master:
-            vc.master = master
-            vc.save()
+        vc.master = master if has_master else None
+        vc.save()
         NormalizationRule.objects.create(
             scope="serial",
             manufacturer=master.device_type.manufacturer if has_master else other,

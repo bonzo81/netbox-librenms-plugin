@@ -27,6 +27,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_module_type,
     make_superuser,
     make_virtual_chassis,
+    stack_inventory,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import mapping_from_change_record, stored_mapping_for_test
 from netbox_librenms_plugin.tests.view_test_helpers import (
@@ -129,9 +130,10 @@ def _inventory_row(module_type, bay_name, **extra):
     }
 
 
-def _seed_inventory(device, row, librenms_id):
-    """Put *row* in the module tab snapshot of *device*, as a refresh of the tab does."""
-    payload = trusted_module_inventory_payload(device, [row], server_key=SERVER_KEY, librenms_id=librenms_id)
+def _seed_inventory(device, row, librenms_id, members=()):
+    """Put *row* in the module tab snapshot of *device*, as a refresh of the tab does; *members* adds their stack."""
+    rows = stack_inventory([row], members) if members else [row]
+    payload = trusted_module_inventory_payload(device, rows, server_key=SERVER_KEY, librenms_id=librenms_id)
     cache.set(DeviceModuleTableView().get_cache_key(device, "inventory", server_key=SERVER_KEY), payload, 300)
 
 
@@ -249,7 +251,7 @@ def test_installing_a_module_on_a_second_member_records_the_rename_and_the_adopt
     standalone = make_interface(member, "Te2/1/2")
     standalone_before = _stored_last_updated(standalone)
     row = _inventory_row(module_type, "Slot 1", entPhysicalSerialNum="SER-VC-1")
-    _seed_inventory(member, row, librenms_id=74)
+    _seed_inventory(member, row, librenms_id=74, members=[first, member])
     client.force_login(make_superuser("partial-save-vc-user"))
 
     _post_module_action(

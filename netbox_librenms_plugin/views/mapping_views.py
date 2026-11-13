@@ -17,6 +17,7 @@ from netbox_librenms_plugin.filters import (
     PlatformMappingFilterSet,
     PortStackLagPatternFilterSet,
     SerialSensorTypePatternFilterSet,
+    VCMemberNumberingRuleFilterSet,
 )
 from netbox_librenms_plugin.forms import (
     CarrierAutoInstallRuleFilterForm,
@@ -55,6 +56,9 @@ from netbox_librenms_plugin.forms import (
     SerialSensorTypePatternFilterForm,
     SerialSensorTypePatternForm,
     SerialSensorTypePatternImportForm,
+    VCMemberNumberingRuleFilterForm,
+    VCMemberNumberingRuleForm,
+    VCMemberNumberingRuleImportForm,
 )
 from netbox_librenms_plugin.models import (
     CarrierAutoInstallRule,
@@ -69,6 +73,7 @@ from netbox_librenms_plugin.models import (
     PlatformMapping,
     PortStackLagPattern,
     SerialSensorTypePattern,
+    VCMemberNumberingRule,
 )
 from netbox_librenms_plugin.tables.mappings import (
     CarrierAutoInstallRuleTable,
@@ -83,6 +88,7 @@ from netbox_librenms_plugin.tables.mappings import (
     PlatformMappingTable,
     PortStackLagPatternTable,
     SerialSensorTypePatternTable,
+    VCMemberNumberingRuleTable,
 )
 from netbox_librenms_plugin.views.mixins import (
     LibreNMSGenericPermissionMixin,
@@ -788,6 +794,70 @@ class CarrierAutoInstallRuleChangeLogView(LibreNMSGenericPermissionMixin, generi
 
 class CarrierAutoInstallRuleBulkExportYAMLView(BulkExportYAMLView):
     queryset = CarrierAutoInstallRule.objects.select_related("manufacturer", "carrier_module_type")
+
+
+# --- VCMemberNumberingRule views ---
+
+
+class VCMemberNumberingRuleListView(LibreNMSGenericPermissionMixin, generic.ObjectListView):
+    """Provides a view for listing all VCMemberNumberingRule objects."""
+
+    queryset = VCMemberNumberingRule.objects.select_related("manufacturer")
+    table = VCMemberNumberingRuleTable
+    filterset = VCMemberNumberingRuleFilterSet
+    filterset_form = VCMemberNumberingRuleFilterForm
+    template_name = "netbox_librenms_plugin/vcmembernumberingrule_list.html"
+
+
+class VCMemberNumberingRuleCreateView(LibreNMSGenericWritePermissionMixin, generic.ObjectEditView):
+    """Provides a view for creating a new VCMemberNumberingRule object."""
+
+    queryset = VCMemberNumberingRule.objects.all()
+    form = VCMemberNumberingRuleForm
+
+
+@register_model_view(VCMemberNumberingRule, "bulk_import", path="import", detail=False)
+class VCMemberNumberingRuleBulkImportView(LibreNMSGenericWritePermissionMixin, generic.BulkImportView):
+    """Provides a view for bulk importing VCMemberNumberingRule objects."""
+
+    queryset = VCMemberNumberingRule.objects.all()
+    model_form = VCMemberNumberingRuleImportForm
+
+
+class VCMemberNumberingRuleView(LibreNMSGenericPermissionMixin, generic.ObjectView):
+    """Provides a view for displaying details of a specific VCMemberNumberingRule object."""
+
+    queryset = VCMemberNumberingRule.objects.select_related("manufacturer")
+
+
+class VCMemberNumberingRuleEditView(LibreNMSGenericWritePermissionMixin, generic.ObjectEditView):
+    """Provides a view for editing a specific VCMemberNumberingRule object."""
+
+    queryset = VCMemberNumberingRule.objects.all()
+    form = VCMemberNumberingRuleForm
+
+
+class VCMemberNumberingRuleDeleteView(LibreNMSGenericWritePermissionMixin, generic.ObjectDeleteView):
+    """Provides a view for deleting a specific VCMemberNumberingRule object."""
+
+    queryset = VCMemberNumberingRule.objects.all()
+
+
+class VCMemberNumberingRuleBulkDeleteView(LibreNMSGenericWritePermissionMixin, generic.BulkDeleteView):
+    """Provides a view for deleting multiple VCMemberNumberingRule objects."""
+
+    queryset = VCMemberNumberingRule.objects.all()
+    table = VCMemberNumberingRuleTable
+
+
+class VCMemberNumberingRuleChangeLogView(LibreNMSGenericPermissionMixin, generic.ObjectChangeLogView):
+    """Provides a view for displaying the change log of a specific VCMemberNumberingRule object."""
+
+    queryset = VCMemberNumberingRule.objects.all()
+
+
+class VCMemberNumberingRuleBulkExportYAMLView(BulkExportYAMLView):
+    queryset = VCMemberNumberingRule.objects.select_related("manufacturer")
 
 
 # --- PortStackLagPattern views ---

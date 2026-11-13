@@ -27,6 +27,7 @@ from netbox_librenms_plugin.serial_identity import (
     stored_form_differs,
 )
 from netbox_librenms_plugin.tests.conftest import (
+    create_prepared_stack,
     install_module,
     make_device,
     make_device_with_module_bays,
@@ -496,14 +497,12 @@ class TestWriters:
     def test_a_member_of_a_new_chassis_is_skipped_when_a_device_holds_its_decorated_serial(self):
         from dcim.models import Device
 
-        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
-
         _rules_only((SEEDED, r"\1", None))
         existing = make_device("member-dedupe-existing", serial="S/N MEMBER-DEDUPE")
         master = make_device("member-dedupe-master", serial="MASTER-DEDUPE")
         members = [{"serial": "MASTER-DEDUPE", "position": 1}, {"serial": "MEMBER-DEDUPE", "position": 2}]
 
-        chassis = create_virtual_chassis_with_members(master, members, {"device_id": 7702}, master_member=members[0])
+        chassis = create_prepared_stack(master, members, {"device_id": 7702})
 
         assert list(chassis.members.values_list("pk", flat=True)) == [master.pk]
         assert list(Device.objects.filter(serial__contains="MEMBER-DEDUPE").values_list("pk", flat=True)) == [
@@ -539,15 +538,13 @@ class TestWriters:
     def test_a_member_is_skipped_when_another_device_holds_its_key_under_the_master_rules(self):
         from dcim.models import Device
 
-        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
-
         master_maker = _manufacturer("key-member")
         _rules_only((SEEDED, r"\1", None), (r"^X(.+)$", r"\1", master_maker))
         master = _device_of(master_maker, "key-member-master", "MASTER-KEY1")
         make_device("key-member-holder", serial="ABC")
         members = [{"serial": "MASTER-KEY1", "position": 1}, {"serial": "XABC", "position": 2}]
 
-        chassis = create_virtual_chassis_with_members(master, members, {"device_id": 7808}, master_member=members[0])
+        chassis = create_prepared_stack(master, members, {"device_id": 7808})
 
         assert list(chassis.members.values_list("pk", flat=True)) == [master.pk]
         assert not Device.objects.filter(serial="XABC").exists()
@@ -556,10 +553,10 @@ class TestWriters:
         """Under maker A the root "ABC" is FPC "XABC"; a type change to maker B, which has no rule, leaves no master."""
         from dcim.models import Device, VirtualChassis
 
-        from netbox_librenms_plugin.import_utils.virtual_chassis import (
-            create_virtual_chassis_with_members,
-            identify_vc_master,
-        )
+        from dcim.models import DeviceType
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+        from netbox_librenms_plugin.tests.conftest import prepared_stack
 
         maker_a, maker_b = _manufacturer("master-decision-a"), _manufacturer("master-decision-b")
         _rules_only((SEEDED, r"\1", None), (r"^X(.+)$", r"\1", maker_a))
@@ -568,14 +565,13 @@ class TestWriters:
             {"serial": "XABC", "position": 0, "root_serial": "ABC"},
             {"serial": "XDEF", "position": 1, "root_serial": "ABC"},
         ]
-        master_member = identify_vc_master(members, master.serial, SerialRules.load().for_device(master))
-        assert master_member is members[0]
-        Device.objects.filter(pk=master.pk).update(
-            device_type=_device_of(maker_b, "master-decision-b", "B-SN1").device_type
-        )
+        prepared, master_member = prepared_stack(master, members)
+        assert master_member["is_master"]
+        # The same DeviceType row moves to maker B, so the stack stays prepared for the master's type.
+        DeviceType.objects.filter(pk=master.device_type_id).update(manufacturer=maker_b)
 
-        with pytest.raises(ValueError):
-            create_virtual_chassis_with_members(master, members, {"device_id": 7809}, master_member=master_member)
+        with pytest.raises(ValueError, match="does not match under the current device type"):
+            create_virtual_chassis_with_members(master, prepared, {"device_id": 7809}, master_member=master_member)
 
         assert not VirtualChassis.objects.filter(members__pk=master.pk).exists()
         assert not Device.objects.filter(serial="XDEF").exists()

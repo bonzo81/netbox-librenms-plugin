@@ -71,7 +71,15 @@ Some chassis (e.g. Nokia 7750 SR-s) report child components (CPMs, MDAs) without
 
 For Virtual Chassis devices, the Modules tab automatically distributes inventory rows across the correct VC member based on the component's position in the ENTITY-MIB tree. Each row shows the member hostname to make it clear which physical switch a component belongs to.
 
-When the inventory is a stack that import detection recognizes, only a member row (for example a stack chassis or a Junos FPC) names a member by its position. Rows below a member row belong to that member, unless a serial names another member. The stack root and rows directly under it belong to the device whose page is open. For an inventory that is not a recognized stack, the plugin reads a position of 1 or more, or a leading number in the name, as the member number.
+Only a member row of a stack that import detection recognizes (for example a stack chassis or a Junos FPC) names a member by its position. The position is the number LibreNMS reports, under the [VC member numbering rule](../configuration/rules_and_patterns.md#vc-member-numbering-rules) of the master's device type, as import numbers it. Rows below a member row belong to that member, unless a serial names another member. The stack root and rows directly under it belong to the device whose page is open.
+
+The tab shows no rows and runs no module action when:
+
+- The inventory of a virtual chassis describes no stack members, for example when LibreNMS reports only one member chassis.
+- A member position does not belong to a member in NetBox, or a member row's serial names a member at another position. This happens after a numbering rule change, because a rule change does not renumber the members that an import created.
+- The virtual chassis has no master among its members.
+
+A device that is not in a virtual chassis keeps every row on its own page.
 
 On a Junos Virtual Chassis, all members hang under one root. A row such as "FPC 1 Power Supply 0" belongs to the same member as the FPC that reports slot 1, and a row below an FPC belongs to that FPC's member. An FPC's member comes from its serial first, then from its detected position. If no FPC or more than one FPC reports the slot, the row stays on the open page. Routing Engine numbers are not member numbers.
 

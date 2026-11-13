@@ -920,7 +920,8 @@ def test_the_junos_name_update_writes_the_member_name_that_stack_creation_gives(
     from netbox_librenms_plugin.import_utils.virtual_chassis import (
         create_virtual_chassis_with_members,
         detect_virtual_chassis_from_inventory,
-        identify_vc_master,
+        prepare_virtual_chassis,
+        prepared_master,
     )
 
     from netbox_librenms_plugin.serial_identity import SerialRules
@@ -948,9 +949,16 @@ def test_the_junos_name_update_writes_the_member_name_that_stack_creation_gives(
         replacement=r"\1",
     )
     LibreNMSSettings.objects.update_or_create(pk=1, defaults={"vc_member_name_pattern": "-{serial}"})
-    members = detect_virtual_chassis_from_inventory(live_librenms.api, _DEVICE_ID)["members"]
-    master_member = identify_vc_master(members, master.serial, SerialRules.load().context(manufacturer.pk))
-    create_virtual_chassis_with_members(master, members, libre_device, "default", master_member=master_member)
+    prepared = prepare_virtual_chassis(
+        detect_virtual_chassis_from_inventory(live_librenms.api, _DEVICE_ID),
+        device_type=master.device_type,
+        master_name=master.name,
+        device_serial=master.serial,
+        serial_rules=SerialRules.load(),
+    )
+    create_virtual_chassis_with_members(
+        master, prepared, libre_device, "default", master_member=prepared_master(prepared)
+    )
     master.refresh_from_db()
     created_name = master.name
     Device.objects.filter(pk=master.pk).update(name="stale-name")

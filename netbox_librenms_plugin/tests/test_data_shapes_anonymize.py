@@ -79,7 +79,7 @@ def test_logic_bearing_fields_preserved():
 
     members = _response(anon, f"GET /api/v0/inventory/{_STACK_RECORDING_ID}?entPhysicalContainedIn=1")["inventory"]
     # Positions and indices (drive VC member ordering) are untouched.
-    assert [m["entPhysicalParentRelPos"] for m in members] == [1, 2, 3]
+    assert [m["entPhysicalParentRelPos"] for m in members] == [0, 1, 2]
     assert [m["entPhysicalIndex"] for m in members] == [100, 200, 300]
     assert all(m["entPhysicalClass"] == "chassis" for m in members)
 
@@ -1045,8 +1045,8 @@ def test_a_junos_vc_marker_before_a_locator_keeps_its_member_attribution(db):
         anonymized["entPhysicalSerialNum"] = raw["entPhysicalSerialNum"]
     master, member = make_junos_vc_members("vc-locator")
 
-    raw_owners = attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master))
-    anonymized_owners = attribute_inventory(rows, [master, member], SerialRules.load().for_device(master))
+    raw_owners = attribute_inventory(inventory, [master, member], SerialRules.load().for_device(master), "reported")
+    anonymized_owners = attribute_inventory(rows, [master, member], SerialRules.load().for_device(master), "reported")
 
     assert re.fullmatch(r"FPC 1 entity-[0-9a-f]{6} @ 1/0/0", rows[-1]["entPhysicalDescr"])
     assert anonymized_owners == raw_owners
@@ -1221,7 +1221,7 @@ def test_anonymized_recording_still_detects_vc(recording_server, db):
 
     assert result is not None
     assert result["member_count"] == 3
-    assert [m["position"] for m in result["members"]] == [1, 2, 3]
+    assert [m["position"] for m in result["members"]] == [0, 1, 2]
     # The master is still identified by the (now pseudonymized) device serial matching a member:
     # compare member serials against the anonymized DEVICE endpoint's serial — comparing against
     # members[0] is a tautology (members[0] always equals itself), which would stay green even if

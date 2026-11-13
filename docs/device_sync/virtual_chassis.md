@@ -23,7 +23,11 @@ The master is the one member whose serial matches the device serial. Both serial
 
 ## Member Positions
 
-On import, each member gets the position number that the device reports for it. Junos numbers its members from 0 (`ge-0/0/0` is on member 0), so a Junos Virtual Chassis gets positions 0, 1, and so on. Cisco StackWise numbers its members from 1. If any member reports no position, a negative position, or the same position as another member, the plugin numbers all members in inventory order, starting at 1, so that no two members share a position.
+On import, each member gets the position number that LibreNMS reports for it, under the [VC member numbering rule](../configuration/rules_and_patterns.md#vc-member-numbering-rules) of the device type that the device imports as. Junos numbers its members from 0 (`ge-0/0/0` is on member 0), so without a rule a Junos Virtual Chassis gets positions 0, 1, and so on. LibreNMS reports Cisco stack members from 0, but Cisco numbers its switches from 1 (`Gi1/0/1` is on switch 1). The migration adds a **Number from 1** rule for each manufacturer with the slug `cisco` or `cisco-systems`, so a Cisco stack gets positions 1, 2, and so on. If you add a Cisco manufacturer later, or it has another slug, add the rule yourself.
+
+If any member reports no position, a negative position, or the same position as another member, the plugin numbers all members in inventory order, starting at 1, so that no two members share a position. A numbering rule does not change these numbers. This order does not identify the hardware: without serials, a changed inventory order gives other members the same numbers.
+
+The import table, the Virtual Chassis details dialog and the import confirmation show the positions and names that the import writes. Without a matched device type, they show no numbers. When a position is outside the range of the NetBox field, or a numbering rule does not work, the row cannot be imported, and no device is created. A rule change does not renumber the members of an existing virtual chassis.
 
 ## Member Serials
 

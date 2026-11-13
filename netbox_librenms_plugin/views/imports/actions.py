@@ -56,7 +56,6 @@ from netbox_librenms_plugin.import_utils import (
     scope_bulk_collisions,
     scope_validation_disclosure,
     scope_validation_disclosures,
-    update_vc_member_suggested_names,
     validate_device_for_import,
     visible_object_label,
 )
@@ -65,7 +64,14 @@ from netbox_librenms_plugin.import_utils.device_operations import (
     match_import_device_type,
 )
 from netbox_librenms_plugin.import_utils.disclosure import serial_conflict_text
-from netbox_librenms_plugin.import_utils.virtual_chassis import vc_master_view
+from netbox_librenms_plugin.import_utils.naming import _resolve_device_name
+from netbox_librenms_plugin.import_utils.virtual_chassis import (
+    VCNumberingError,
+    load_numbering_rules,
+    numbering_refusal_text,
+    prepare_virtual_chassis,
+    unnumbered_virtual_chassis,
+)
 from netbox_librenms_plugin.serial_identity import (
     Comparison,
     SerialRules,
@@ -1198,6 +1204,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         seen_ids = set()
         cache_expired_count = 0
         serial_rules = SerialRules.load()
+        numbering_rules = load_numbering_rules()
 
         for raw_device_id in device_ids:
             try:
@@ -1239,23 +1246,14 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 # detect VC membership so stack members are visible before import.
                 include_vc_detection=True,
                 serial_rules=serial_rules,
+                numbering_rules=numbering_rules,
             )
             # Mark validation with VC detection flag for proper URL generation in table
             # Bulk confirm should respect the initial filter's VC detection preference
             validation["_vc_detection_enabled"] = vc_detection_enabled
 
+            # The validation prepared the stack the way import does: numbers, names and master.
             device_name = validation.get("resolved_name") or f"device-{device_id}"
-
-            if validation.get("virtual_chassis", {}).get("is_stack"):
-                # Preview the names and the master the way import makes them: with the resolved DeviceType's rules.
-                device_type = effective_import_device_type((validation.get("device_type") or {}).get("device_type"))
-                master_context = serial_rules.for_device_type(device_type)
-                validation["virtual_chassis"] = update_vc_member_suggested_names(
-                    validation["virtual_chassis"], device_name, master_context
-                )
-                validation["virtual_chassis"] = vc_master_view(
-                    validation["virtual_chassis"], libre_device.get("serial"), master_context
-                )
 
             from dcim.models import DeviceRole, Rack
             from virtualization.models import Cluster
@@ -1904,15 +1902,27 @@ class DeviceVCDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 status=200,
             )
 
-        # Preview the master the way import will match it: with the matched DeviceType's rules.
+        from netbox_librenms_plugin.models import RuleConfigurationError
+
+        # Preview the stack the way import will prepare it: for the matched DeviceType, under the row's naming.
         match = match_import_device_type(libre_device, self.librenms_api)
         device_type = effective_import_device_type(match.get("device_type") if match and match["matched"] else None)
-        serial_rules = SerialRules.load()
-        vc_data = vc_master_view(
-            get_virtual_chassis_data(self.librenms_api, device_id, serial_rules=serial_rules),
-            libre_device.get("serial"),
-            serial_rules.for_device_type(device_type),
+        use_sysname, strip_domain = resolve_naming_preferences(request)
+        master_name, _source = _resolve_device_name(
+            libre_device, use_sysname=use_sysname, strip_domain=strip_domain, device_id=libre_device.get("device_id")
         )
+        serial_rules = SerialRules.load()
+        detected = get_virtual_chassis_data(self.librenms_api, device_id, serial_rules=serial_rules)
+        try:
+            vc_data = prepare_virtual_chassis(
+                detected,
+                device_type=device_type,
+                master_name=master_name,
+                device_serial=libre_device.get("serial"),
+                serial_rules=serial_rules,
+            )
+        except (VCNumberingError, RuleConfigurationError) as exc:
+            vc_data = unnumbered_virtual_chassis(detected, numbering_refusal_text(exc))
 
         context = {
             "libre_device": libre_device,

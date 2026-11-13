@@ -1698,6 +1698,117 @@ class CarrierAutoInstallRule(FullCleanOnSaveMixin, NetBoxModel):
         return yaml.dump(data, sort_keys=False)
 
 
+VC_NUMBERING_RULE_EXISTS = "A numbering rule with this manufacturer and device type pattern already exists."
+
+
+class VCMemberNumberingRule(FullCleanOnSaveMixin, NetBoxModel):
+    """
+    Decide the NetBox ``vc_position`` of the Virtual Chassis members that LibreNMS reports for a DeviceType.
+
+    The rule of the imported DeviceType applies: a rule with a manufacturer and a pattern first,
+    then a pattern only, then a manufacturer only, then an unscoped rule. The lowest id wins in a
+    tier. Without a rule, members keep the numbers that LibreNMS reports.
+    """
+
+    MODE_REPORTED = "reported"
+    MODE_ONE_BASED = "one_based"
+    MODE_CHOICES = (
+        (MODE_REPORTED, "Reported numbers"),
+        (MODE_ONE_BASED, "Number from 1"),
+    )
+
+    manufacturer = models.ForeignKey(
+        Manufacturer,
+        # SET_NULL would make a manufacturer rule apply to every manufacturer.
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="librenms_vc_numbering_rules",
+        help_text="Optional: the manufacturer of the imported device type. Leave blank to apply to every manufacturer.",
+    )
+    device_type_pattern = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Optional regex (Python re.fullmatch, case-sensitive) on the device type model. "
+        "Leave blank to apply to every device type.",
+    )
+    numbering_mode = models.CharField(
+        max_length=20,
+        choices=MODE_CHOICES,
+        default=MODE_REPORTED,
+        help_text="Reported numbers: keep the numbers that LibreNMS reports. Number from 1: add 1 to every member "
+        "number when the stack is numbered from 0.",
+    )
+    description = models.TextField(blank=True, help_text="Optional notes about this rule.")
+
+    @functools.cached_property
+    def _compiled_device_type_pattern(self):
+        """Return the compiled device_type_pattern, or None when it is blank; raise RuleConfigurationError when it is invalid."""
+        if not self.device_type_pattern:
+            return None
+        return compile_rule_regex(self, "device_type_pattern")
+
+    @property
+    def tier(self) -> int:
+        """Return the precedence tier of this rule; a lower tier wins."""
+        if self.device_type_pattern:
+            return 0 if self.manufacturer_id is not None else 1
+        return 2 if self.manufacturer_id is not None else 3
+
+    def matches(self, device_type) -> bool:
+        """Return whether this rule applies to *device_type*; raise RuleConfigurationError for an invalid pattern."""
+        if self.manufacturer_id is not None and self.manufacturer_id != device_type.manufacturer_id:
+            return False
+        pattern = self._compiled_device_type_pattern
+        return pattern is None or pattern.fullmatch(device_type.model) is not None
+
+    def clean(self):
+        super().clean()
+        self.__dict__.pop("_compiled_device_type_pattern", None)
+        self.device_type_pattern = (self.device_type_pattern or "").strip()
+        if self.device_type_pattern:
+            validate_regex_field(self.device_type_pattern, "device_type_pattern")
+
+    def get_absolute_url(self):
+        return reverse("plugins:netbox_librenms_plugin:vcmembernumberingrule_detail", args=[self.pk])
+
+    class Meta:
+        """Meta options for VCMemberNumberingRule."""
+
+        ordering = ["pk"]
+        verbose_name = "VC member numbering rule"
+        # A nullable manufacturer needs two conditional constraints; see ModuleBayMapping.Meta.constraints.
+        constraints = [
+            models.UniqueConstraint(
+                fields=["manufacturer", "device_type_pattern"],
+                condition=models.Q(manufacturer__isnull=False),
+                name="unique_vc_member_numbering_rule",
+                violation_error_message=VC_NUMBERING_RULE_EXISTS,
+            ),
+            models.UniqueConstraint(
+                fields=["device_type_pattern"],
+                condition=models.Q(manufacturer__isnull=True),
+                name="unique_vc_member_numbering_rule_global",
+                violation_error_message=VC_NUMBERING_RULE_EXISTS,
+            ),
+        ]
+
+    def __str__(self):
+        scope = self.manufacturer.name if self.manufacturer else "*"
+        if self.device_type_pattern:
+            scope = f"{scope}/{self.device_type_pattern}"
+        return f"{scope}: {self.get_numbering_mode_display()}"
+
+    def to_yaml(self):
+        data = {
+            "manufacturer": self.manufacturer.name if self.manufacturer else "",
+            "device_type_pattern": self.device_type_pattern,
+            "numbering_mode": self.numbering_mode,
+            "description": self.description,
+        }
+        return yaml.dump(data, sort_keys=False)
+
+
 class PortStackLagPattern(FullCleanOnSaveMixin, NetBoxModel):
     r"""
     Map a LibreNMS OS name to regexes that classify port-stack interfaces.

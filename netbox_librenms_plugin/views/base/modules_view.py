@@ -14,7 +14,7 @@ from netbox_librenms_plugin.constants import (
     OOB_INVENTORY_SOURCE,
     is_librenms_placeholder,
 )
-from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory
+from netbox_librenms_plugin.import_utils.virtual_chassis import VCNumberingError, attribute_inventory
 from netbox_librenms_plugin.inventory_policy import load_inventory_policy
 from netbox_librenms_plugin.inventory_tree import DANGLING_PARENT_KEY, REPORTED_PARENT_KEY, repair_dangling_parents
 from netbox_librenms_plugin.librenms_ids import (
@@ -831,8 +831,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
     def _attribute_to_members(obj, inventory_data, vc_members, policy):
         """Return ``{item key: (Device, source)}`` for the main inventory, with *obj* for an unowned row."""
         rows = [item for item in inventory_data if item.get("_source") != OOB_INVENTORY_SOURCE]
-        # Without members every row stays on the page, so the serial rules are not read.
-        owners = attribute_inventory(rows, vc_members, policy.chassis_serial_context() if vc_members else None)
+        # Without members every row stays on the page, so the serial and numbering rules are not read.
+        owners = attribute_inventory(
+            rows,
+            vc_members,
+            policy.chassis_serial_context() if vc_members else None,
+            policy.chassis_numbering_mode() if vc_members else None,
+        )
         return {
             _inventory_item_key(item): (member or obj, source)
             for item, (member, source) in zip(rows, owners, strict=True)
@@ -1272,6 +1277,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 "cache_expiry": None,
                 "server_key": self._active_server_key,
                 "inventory_rule_error": exc.shown_to(request.user),
+            }
+        except VCNumberingError as exc:
+            # A row whose member is unknown would land on the page device, so the tab shows no rows.
+            logger.warning("Module table for %s not built: %s", obj, exc)
+            return {
+                "table": None,
+                "object": obj,
+                "cache_expiry": None,
+                "server_key": self._active_server_key,
+                "vc_numbering_error": str(exc),
             }
 
     def _build_table_context(

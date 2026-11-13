@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from netbox_librenms_plugin.serial_identity import SerialRules, plain_context
-from netbox_librenms_plugin.tests.conftest import junos_vc_inventory, make_junos_vc_members
+from netbox_librenms_plugin.tests.conftest import junos_vc_inventory, make_junos_vc_members, stack_inventory
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -7303,6 +7303,7 @@ def test_vc_inventory_ignore_rules_follow_each_attributed_member(client, setting
             "_source": "oob",
         },
     ]
+    inventory = stack_inventory(inventory, [page, member], on_member={91: 2, 92: 2})
     payload = trusted_module_inventory_payload(page, inventory, librenms_id=9302)
     cache.set(DeviceModuleTableView().get_cache_key(page, "inventory", server_key="default"), payload, 300)
     cache.set("librenms_device_info_default_9302", (True, {"device_id": 9302, "hostname": page.name}), 300)
@@ -7366,6 +7367,7 @@ def test_vc_model_matches_device_type_follows_the_attributed_member(client, sett
             "entPhysicalContainedIn": 0,
         },
     ]
+    inventory = stack_inventory(inventory, [page, member], on_member={161: 2, 162: 2})
     payload = trusted_module_inventory_payload(page, inventory, librenms_id=9303)
     cache.set(DeviceModuleTableView().get_cache_key(page, "inventory", server_key="default"), payload, 300)
     cache.set("librenms_device_info_default_9303", (True, {"device_id": 9303, "hostname": page.name}), 300)
@@ -7440,7 +7442,7 @@ def test_vc_carrier_rules_follow_the_attributed_members_manufacturer():
         }
     ]
 
-    rows = _run_build_context_real(_make_view(), inventory, page)
+    rows = _run_build_context_real(_make_view(), stack_inventory(inventory, [page, member], on_member={101: 2}), page)
 
     assert rows[0]["selected_device_id"] == member.pk
     assert rows[0]["carrier_install_options"][0]["module_type_id"] == carrier_type.pk
@@ -7490,6 +7492,13 @@ def test_a_rule_admitted_row_keeps_its_attributed_member_context():
             "entPhysicalClass": "stack",
             "entPhysicalName": "Switch stack",
             "entPhysicalContainedIn": 0,
+        },
+        {
+            "entPhysicalIndex": 143,
+            "entPhysicalClass": "chassis",
+            "entPhysicalName": "Chassis 1",
+            "entPhysicalParentRelPos": 1,
+            "entPhysicalContainedIn": 140,
         },
         {
             "entPhysicalIndex": 141,
@@ -7558,7 +7567,7 @@ def test_vc_descendants_use_their_own_member_context():
         },
     ]
 
-    rows = _run_build_context_real(_make_view(), inventory, page)
+    rows = _run_build_context_real(_make_view(), stack_inventory(inventory, [page, member]), page)
 
     assert {row["name"] for row in rows} == {"Page parent", "Visible member child"}
     visible_child = next(row for row in rows if row["name"] == "Visible member child")
@@ -7597,6 +7606,8 @@ def test_vc_default_hardware_parent_keeps_child_on_page_device(client, settings,
             "entPhysicalContainedIn": 120,
         },
     ]
+    # The stack is a second root, so the hardware parent and its child sit outside every member row.
+    inventory = [*stack_inventory([], [page, _member]), *inventory]
     payload = trusted_module_inventory_payload(page, inventory, librenms_id=9302)
     cache.set(DeviceModuleTableView().get_cache_key(page, "inventory", server_key="default"), payload, 300)
     cache.set("librenms_device_info_default_9302", (True, {"device_id": 9302, "hostname": page.name}), 300)
@@ -7611,7 +7622,7 @@ def test_vc_default_hardware_parent_keeps_child_on_page_device(client, settings,
     rows = list(response.context["module_sync"]["table"].data)
     child = next(row for row in rows if row["ent_physical_index"] == 121)
     assert child["selected_device_id"] == page.pk
-    assert child["member_resolution_source"] == "parent-context"
+    assert child["member_resolution_source"] == "default"
 
 
 @pytest.mark.django_db
@@ -7684,8 +7695,8 @@ def test_a_standalone_device_with_a_junos_vc_inventory_keeps_every_row(client, s
 
 
 @pytest.mark.django_db
-def test_a_decorated_junos_fpc_serial_is_serial_evidence_on_the_page(client, settings, librenms_server):
-    """Juniper reports "S/N 12350"; after the serial rules it names its member even where the position disagrees."""
+def test_a_decorated_junos_fpc_serial_that_names_another_member_refuses_the_table(client, settings, librenms_server):
+    """Juniper reports "S/N 12350"; after the serial rules it names the member at the other position, so no row shows."""
     from django.core.cache import cache
     from django.urls import reverse
 
@@ -7722,9 +7733,8 @@ def test_a_decorated_junos_fpc_serial_is_serial_evidence_on_the_page(client, set
 
     assert any("/inventory/" in request["path"] for request in librenms_server.requests)
     assert response.status_code == 200
-    rows = {row["ent_physical_index"]: row for row in response.context["module_sync"]["table"].data}
-    assert rows[1210]["selected_device_id"] == master.pk
-    assert rows[1210]["member_resolution_source"] == "ancestor-serial"
+    assert response.context["module_sync"]["table"] is None
+    assert response.context["module_sync"]["vc_numbering_error"]
 
 
 @pytest.mark.django_db

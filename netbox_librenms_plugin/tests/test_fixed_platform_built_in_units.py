@@ -422,7 +422,7 @@ class TestMarkBuiltIn:
     def test_a_virtual_chassis_row_marks_the_device_type_of_its_member(self):
         from dcim.models import DeviceType, Manufacturer, VirtualChassis
 
-        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+        from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, stack_inventory
 
         page = ixr_device("ixr-vc-page", part_number="")
         vendor = Manufacturer.objects.create(name="IXR member vendor", slug="ixr-member-vendor")
@@ -439,7 +439,7 @@ class TestMarkBuiltIn:
             "entPhysicalName": "Member board",
             "entPhysicalModelName": "MEMBER-BOARD",
         }
-        seed_snapshot(page, [*ixr_inventory(), member_board])
+        seed_snapshot(page, stack_inventory([*ixr_inventory(), member_board], [page, member], on_member={90: 2}))
         assert tab_rows(page)[90]["selected_device_id"] == member.pk
 
         fields = modal_form(page, 90)

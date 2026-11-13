@@ -227,6 +227,13 @@ def _mutate_rule(device, entities, form, writer):
     return "Inventory rules or device identity changed. Refresh Modules and try again."
 
 
+def _mutate_numbering_rule(device, entities, form, writer):
+    from netbox_librenms_plugin.models import VCMemberNumberingRule
+
+    VCMemberNumberingRule.objects.create(device_type_pattern="NO-SUCH-MODEL", numbering_mode="one_based")
+    return "Inventory rules or device identity changed. Refresh Modules and try again."
+
+
 def _mutate_serial(device, entities, form, writer):
     from dcim.models import Device
 
@@ -248,6 +255,7 @@ def _mutate_old_token(device, entities, form, writer):
 
 MUTATIONS = {
     "rule-added": _mutate_rule,
+    "numbering-rule-added": _mutate_numbering_rule,
     "device-serial": _mutate_serial,
     "ancestor-row": _mutate_ancestor,
     "old-token": _mutate_old_token,
@@ -560,20 +568,25 @@ def _vc_rows(page_serial, member_serial, *, optic_1_serial="SN-O1X1"):
             "entPhysicalSerialNum": "",
         }
 
+    from netbox_librenms_plugin.tests.conftest import STACK_ROOT_INDEX, stack_root_row
+
     return [
+        stack_root_row(),
         {
             "entPhysicalIndex": 1,
-            "entPhysicalContainedIn": 0,
+            "entPhysicalContainedIn": STACK_ROOT_INDEX,
             "entPhysicalClass": "chassis",
             "entPhysicalName": "Chassis A",
             "entPhysicalSerialNum": page_serial,
+            "entPhysicalParentRelPos": 1,
         },
         {
             "entPhysicalIndex": 5,
-            "entPhysicalContainedIn": 0,
+            "entPhysicalContainedIn": STACK_ROOT_INDEX,
             "entPhysicalClass": "chassis",
             "entPhysicalName": "Chassis B",
             "entPhysicalSerialNum": member_serial,
+            "entPhysicalParentRelPos": 2,
         },
         module(CARRIER, 1, "Carrier Slot", "GR-CARRIER", "SN-CARRIER"),
         container(20, CARRIER, "Cage 1"),

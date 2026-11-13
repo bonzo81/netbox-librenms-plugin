@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from functools import cached_property
 
 # Change this when the fingerprint reads other inputs or the collector reads them differently.
-INVENTORY_POLICY_VERSION = 1
+INVENTORY_POLICY_VERSION = 2
 
 _SERIAL_SCOPE = "serial"
 
@@ -59,6 +59,7 @@ class InventoryPolicy:
         members (tuple): The Virtual Chassis members ordered by pk, or only the page device.
         inventory_rules (tuple): Every InventoryIgnoreRule, enabled or not, ordered by pk.
         serial_rules (tuple): Every serial-scope NormalizationRule, ordered by pk.
+        numbering_rules (tuple): Every VCMemberNumberingRule, ordered by pk.
         fingerprint (str): The SHA-256 of the canonical JSON of all the inputs above.
 
     """
@@ -68,6 +69,7 @@ class InventoryPolicy:
     members: tuple
     inventory_rules: tuple
     serial_rules: tuple
+    numbering_rules: tuple
     fingerprint: str
 
     def member(self, device_id):
@@ -102,6 +104,26 @@ class InventoryPolicy:
         """Return the serial context of the page device and its Virtual Chassis members: the master's manufacturer."""
         return self.serial_identity_rules.for_device(self.page_device)
 
+    def chassis_numbering_mode(self) -> str:
+        """
+        Return the member numbering mode of the page device's Virtual Chassis: the rule of its master's DeviceType.
+
+        Raises:
+            VCNumberingError: The chassis has no master among its loaded members.
+            RuleConfigurationError: A candidate numbering rule stores a pattern that does not compile.
+
+        """
+        from netbox_librenms_plugin.import_utils.virtual_chassis import (
+            VC_NUMBERING_NO_MASTER,
+            VCNumberingError,
+            numbering_mode_for,
+        )
+
+        master = self.member(self.master_id) if self.master_id is not None else None
+        if master is None:
+            raise VCNumberingError(VC_NUMBERING_NO_MASTER)
+        return numbering_mode_for(master.device_type, self.numbering_rules)
+
 
 def load_inventory_policy(page_device_id) -> InventoryPolicy:
     """
@@ -121,7 +143,7 @@ def load_inventory_policy(page_device_id) -> InventoryPolicy:
     """
     from dcim.models import Device
 
-    from netbox_librenms_plugin.models import InventoryIgnoreRule, NormalizationRule
+    from netbox_librenms_plugin.models import InventoryIgnoreRule, NormalizationRule, VCMemberNumberingRule
 
     page = Device.objects.select_related("virtual_chassis").get(pk=page_device_id)
     master_id = page.virtual_chassis.master_id if page.virtual_chassis_id else None
@@ -136,6 +158,7 @@ def load_inventory_policy(page_device_id) -> InventoryPolicy:
         raise Device.DoesNotExist(f"Device {page_device_id} changed while its inventory policy was read")
     inventory_rules = tuple(InventoryIgnoreRule.objects.order_by("pk"))
     serial_rules = tuple(NormalizationRule.objects.filter(scope=_SERIAL_SCOPE).order_by("pk"))
+    numbering_rules = tuple(VCMemberNumberingRule.objects.order_by("pk"))
     _validate_rules(inventory_rules, serial_rules)
     canonical = {
         "version": INVENTORY_POLICY_VERSION,
@@ -143,6 +166,7 @@ def load_inventory_policy(page_device_id) -> InventoryPolicy:
         "devices": [_device_identity(member) for member in members],
         "inventory_rules": [_concrete_values(rule) for rule in inventory_rules],
         "serial_rules": [_concrete_values(rule) for rule in serial_rules],
+        "numbering_rules": [_concrete_values(rule) for rule in numbering_rules],
     }
     serialized = json.dumps(canonical, sort_keys=True, separators=(",", ":"), default=str)
     return InventoryPolicy(
@@ -151,5 +175,6 @@ def load_inventory_policy(page_device_id) -> InventoryPolicy:
         members=members,
         inventory_rules=inventory_rules,
         serial_rules=serial_rules,
+        numbering_rules=numbering_rules,
         fingerprint=hashlib.sha256(serialized.encode()).hexdigest(),
     )

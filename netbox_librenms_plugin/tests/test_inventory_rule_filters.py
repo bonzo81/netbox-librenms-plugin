@@ -569,11 +569,14 @@ class TestSingleInstall:
 
 def _vc_rows(page, member):
     """Each member's chassis, a member board with the front-panel description, and an optic in its cage."""
+    from netbox_librenms_plugin.tests.conftest import STACK_ROOT_INDEX, stack_root_row
+
     return [
-        {"entPhysicalIndex": 1, "entPhysicalContainedIn": 0, "entPhysicalClass": "chassis",
-         "entPhysicalName": "Chassis 1", "entPhysicalSerialNum": page.serial},
-        {"entPhysicalIndex": 5, "entPhysicalContainedIn": 0, "entPhysicalClass": "chassis",
-         "entPhysicalName": "Chassis 2", "entPhysicalSerialNum": member.serial},
+        stack_root_row(),
+        {"entPhysicalIndex": 1, "entPhysicalContainedIn": STACK_ROOT_INDEX, "entPhysicalClass": "chassis",
+         "entPhysicalName": "Chassis 1", "entPhysicalSerialNum": page.serial, "entPhysicalParentRelPos": 1},
+        {"entPhysicalIndex": 5, "entPhysicalContainedIn": STACK_ROOT_INDEX, "entPhysicalClass": "chassis",
+         "entPhysicalName": "Chassis 2", "entPhysicalSerialNum": member.serial, "entPhysicalParentRelPos": 2},
         {"entPhysicalIndex": 10, "entPhysicalContainedIn": 5, "entPhysicalClass": "module",
          "entPhysicalName": "Member board", "entPhysicalDescr": "Front Panel 4 ports Gigabitethernet Module",
          "entPhysicalModelName": "MEMBER-BOARD", "entPhysicalSerialNum": "SN-VC-BOARD"},

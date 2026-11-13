@@ -19,6 +19,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_module_type,
     make_superuser,
     make_virtual_chassis,
+    stack_inventory,
     transactional_db_with_all_apps,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
@@ -1411,6 +1412,7 @@ class TestInstallAndUpdateViews:
             device.virtual_chassis = vc
             device.vc_position = position
             device.save()
+        VirtualChassis.objects.filter(pk=vc.pk).update(master=page)
         seed_stored_mapping(page, {"default": {"id": 77}}, save=True)
         module_type = ModuleType.objects.create(manufacturer=member_mfr, model="TargetRulesModule")
         # Scoped to the MEMBER's manufacturer, so only a target-resolved lookup finds it.
@@ -1426,7 +1428,7 @@ class TestInstallAndUpdateViews:
         view, request = _rendered_post(
             InstallSelectedView,
             page,
-            [item],
+            stack_inventory([item], [page, member]),
             77,
             live_librenms,
             "install-selected",
@@ -1460,6 +1462,7 @@ class TestInstallAndUpdateViews:
             device.virtual_chassis = vc
             device.vc_position = position
             device.save()
+        VirtualChassis.objects.filter(pk=vc.pk).update(master=page)
         seed_stored_mapping(page, {"default": {"id": 78}}, save=True)
         module_type = ModuleType.objects.create(manufacturer=member_mfr, model="AncestorRulesOptic")
         # Scoped to the member's vendor: the serial-less parent stays with the page member, its child goes to the member.
@@ -1471,10 +1474,13 @@ class TestInstallAndUpdateViews:
             require_serial_match_parent=False,
             manufacturer=member_mfr,
         )
-        rows = [
-            _inventory_item(100, "ANCESTOR-PAGE-CARD", "Card A"),
-            _inventory_item(101, module_type.model, "Optic B", parent=100, serial="SN-MEMBER"),
-        ]
+        rows = stack_inventory(
+            [
+                _inventory_item(100, "ANCESTOR-PAGE-CARD", "Card A"),
+                _inventory_item(101, module_type.model, "Optic B", parent=100, serial="SN-MEMBER"),
+            ],
+            [page, member],
+        )
         table_indexes = {row["ent_physical_index"] for row in _run_build_context_real(_make_view(), rows, page)}
         view, request = _rendered_post(
             InstallSelectedView,
@@ -3042,8 +3048,13 @@ def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint,
         for number in (1, 2, 3)
     )
     if member is not None:
-        # The position attributes the slot to the member, so the table renders it there.
-        rows[2]["entPhysicalParentRelPos"] = member.vc_position
+        # The stack's member rows give Slot 2 to the member, so the table renders it there.
+        rows.extend(
+            {"entPhysicalIndex": index, "entPhysicalContainedIn": 1, "entPhysicalClass": "chassis", **position}
+            for index, position in ((10, {"entPhysicalParentRelPos": 1}), (11, {"entPhysicalParentRelPos": 2}))
+        )
+        for row, chassis_index in zip(rows[1:4], (10, 11, 10), strict=True):
+            row["entPhysicalContainedIn"] = chassis_index
     cache.set(
         CacheMixin().get_cache_key(device, "inventory", "default"), trusted_module_inventory_payload(device, rows)
     )
@@ -3338,6 +3349,7 @@ def test_a_selected_install_uses_each_members_destination_and_ignore_policy(clie
             "entPhysicalSerialNum": member.serial,
         },
     ]
+    rows = stack_inventory(rows, [page, member])
     policy_inputs = load_inventory_policy(page.pk)
     _default, contexts = BaseModuleTableView()._build_inventory_ignore_contexts(
         policy_inputs.page_device, rows, policy_inputs.vc_members, policy_inputs
@@ -3530,7 +3542,7 @@ def test_branch_install_cuts_parent_bay_lookup_at_a_member_boundary(client, tran
             require_serial_match_parent=False,
         )
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
+    cache.set(key, trusted_module_inventory_payload(page, stack_inventory(rows, [page, member])))
     user = make_superuser("branch-boundary-user")
     client.force_login(user)
     try:
@@ -3594,7 +3606,7 @@ def _member_card_under_page_carrier(*, card_on_member):
         },
     ]
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
+    cache.set(key, trusted_module_inventory_payload(page, stack_inventory(rows, [page, member])))
     return page, member, unrelated, card_type, key
 
 
@@ -3700,7 +3712,7 @@ def test_table_counts_a_bay_position_only_under_a_module_of_the_target_member(an
         },
     ]
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
+    cache.set(key, trusted_module_inventory_payload(page, stack_inventory(rows, [page, member])))
     request = make_request("get", {"server_key": "default"}, user=make_superuser("position-boundary-user"), path="/m/")
     view = DeviceModuleTableView()
     view.setup(request, pk=page.pk)
@@ -3827,7 +3839,7 @@ def test_branch_install_runs_onto_the_signed_member_until_it_leaves_the_chassis(
         },
     ]
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
+    cache.set(key, trusted_module_inventory_payload(page, stack_inventory(rows, [page, member])))
     user = make_superuser("branch-moved-user")
     fields = _rendered_fields(page, "install-branch", 2, user=user)
     assert fields["selected_device_id"] == str(member.pk)
@@ -4067,7 +4079,9 @@ def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(
         )
         selected_index = 2
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
+    cache.set(
+        key, trusted_module_inventory_payload(page, stack_inventory(rows, [page, target]) if selected_member else rows)
+    )
     user = make_superuser("selected-fresh-page-user")
     fields = _rendered_fields(page, "install-selected", user=user)
     changed = []
@@ -4249,7 +4263,7 @@ def test_an_install_waits_for_the_serial_lock_of_another_member_page_of_its_chas
         },
     ]
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
+    cache.set(key, trusted_module_inventory_payload(page, stack_inventory(rows, [page, member])))
     action, fields = rendered_module_form(render_module_tab(page), "install-module", 2)
     user = make_superuser("chassis-lock-user")
     held, release, holder = Event(), Event(), {}

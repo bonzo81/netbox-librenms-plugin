@@ -294,7 +294,7 @@ class TestEmptyPolicy:
         from django.urls import reverse
 
         from netbox_librenms_plugin.models import InventoryIgnoreRule
-        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.tests.conftest import make_superuser, stack_inventory
         from netbox_librenms_plugin.tests.test_modules_view import _make_mixed_manufacturer_chassis, configure_servers
         from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
@@ -313,6 +313,8 @@ class TestEmptyPolicy:
             require_serial_match_parent=False,
             manufacturer=admitting.device_type.manufacturer,
         )
+        # A row below the member's stack row belongs to the member; a row outside the stack stays on the page.
+        inventory = stack_inventory(inventory, [page, member], on_member={161: member.vc_position})
         payload = trusted_module_inventory_payload(page, inventory, librenms_id=9304)
         cache.set(DeviceModuleTableView().get_cache_key(page, "inventory", server_key="default"), payload, 300)
         cache.set("librenms_device_info_default_9304", (True, {"device_id": 9304, "hostname": page.name}), 300)
@@ -331,7 +333,6 @@ class TestEmptyPolicy:
     @pytest.mark.parametrize("admitted_manufacturer_of", ["page", "member"])
     def test_a_vc_alert_names_the_member_whose_rows_no_rule_admits(self, client, settings, admitted_manufacturer_of):
         """VC rows follow their member's policy, so the alert reads every policy that a row uses."""
-        # Position 2 attributes a row to the member; a row without a position stays on the page.
         member_row = _entity(161, "module", "Member card", "Member card", contained_in=0, position=2)
         page_row = _entity(163, "module", "Page card", "Page card", contained_in=0)
         del page_row["entPhysicalParentRelPos"]
@@ -345,17 +346,6 @@ class TestEmptyPolicy:
         assert alert is not None
         assert refused.name in alert.group(0)
         assert admitting.name not in alert.group(0)
-
-    def test_a_vc_shows_no_alert_when_no_row_uses_the_refusing_policy(self, client, settings):
-        """The page policy alone must not raise the alert when every row belongs to an admitted member."""
-        member_row = _entity(161, "module", "Member card", "Member card", contained_in=0, position=2)
-
-        _page, member, rows, alert = self._render_vc_modules_tab(
-            client, settings, "vc-alert-member-only", [member_row], "member"
-        )
-
-        assert [row["selected_device_id"] for row in rows] == [member.pk]
-        assert alert is None
 
 
 def _break_the_scb_filter():

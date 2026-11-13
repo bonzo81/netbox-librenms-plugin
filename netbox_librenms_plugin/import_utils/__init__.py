@@ -59,6 +59,6 @@ from .virtual_chassis import (
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
     prefetch_vc_data_for_devices,
-    update_vc_member_suggested_names,
+    prepare_virtual_chassis,
 )
 from .vm_operations import bulk_import_vms, create_vm_from_librenms

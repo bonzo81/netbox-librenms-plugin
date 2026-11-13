@@ -219,6 +219,27 @@ The three regular-expression fields use full-match behavior, so their expression
 
 ![Carrier Auto-Install Rule List](../img/carrier_auto_install_rules/list.png)
 
+## VC Member Numbering Rules
+
+A VC Member Numbering Rule decides the NetBox position (`vc_position`) of each stack member that an import creates. Port names name the member by this number, so a Cisco port `Gi2/0/1` belongs to the member at position 2.
+
+A rule has:
+
+- An optional manufacturer, matched against the manufacturer of the device type that the device imports as. A manufacturer with a rule cannot be deleted.
+- An optional Python regular expression, full-matched against the device type model. The match is case-sensitive.
+- A numbering mode. **Number from 1** adds 1 to every member number when the stack is numbered from 0 (`0, 1, 2` gives `1, 2, 3`). A stack that is numbered from another number keeps its numbers. **Reported numbers** keeps the numbers that LibreNMS reports.
+
+Without a matching rule, the import keeps the numbers that LibreNMS reports. When several rules match, the rule with a manufacturer and a pattern wins, then a rule with a pattern only, then a rule with a manufacturer only, then a rule without either. When two rules of one group match, the rule with the lowest ID wins. The list shows the ID. Two rules cannot have the same manufacturer and pattern. A stored pattern that does not compile stops the import of every stack of that manufacturer, also when another rule would match.
+
+The migration adds a **Number from 1** rule for each manufacturer with the slug `cisco` or `cisco-systems`. A rule change does not renumber existing members. The Modules tab of a virtual chassis whose members do not agree with the current rule shows no rows; see [Module Sync](../device_sync/module_sync.md#virtual-chassis-support).
+
+```yaml
+- manufacturer: Cisco
+  device_type_pattern: ""
+  numbering_mode: one_based
+  description: "LibreNMS reports Cisco stack members from 0; Cisco numbers switches from 1."
+```
+
 ## Port Stack LAG Patterns
 
 Port Stack LAG Patterns help the plugin interpret LibreNMS port-stack relationships for a particular LibreNMS operating system identifier.

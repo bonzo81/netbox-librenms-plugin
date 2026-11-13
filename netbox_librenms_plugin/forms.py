@@ -50,6 +50,7 @@ from .models import (
     PlatformMapping,
     PortStackLagPattern,
     SerialSensorTypePattern,
+    VCMemberNumberingRule,
 )
 from .transactions import saved_in_scope
 from .utils import REGEX_COMPILE_ERRORS, _free_cable_tag_slug, normalize_cable_tag_slug
@@ -962,6 +963,56 @@ class CarrierAutoInstallRuleFilterForm(NetBoxModelFilterSetForm):
     description = forms.CharField(required=False, label="Description")
 
     model = CarrierAutoInstallRule
+
+
+class VCMemberNumberingRuleForm(NetBoxModelForm):
+    """Form for creating and editing VC member numbering rules."""
+
+    manufacturer = DynamicModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        required=False,
+        help_text="Optional: the manufacturer of the imported device type.",
+    )
+
+    class Meta:
+        """Meta options for VCMemberNumberingRuleForm."""
+
+        model = VCMemberNumberingRule
+        fields = ["manufacturer", "device_type_pattern", "numbering_mode", "description"]
+
+
+class VCMemberNumberingRuleImportForm(NetBoxModelImportForm):
+    """Form for bulk importing VC member numbering rules."""
+
+    manufacturer = CSVModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        to_field_name="name",
+        required=False,
+        help_text="Manufacturer name (optional; leave blank for every manufacturer).",
+    )
+    numbering_mode = CSVChoiceField(choices=VCMemberNumberingRule.MODE_CHOICES, help_text="reported or one_based")
+
+    class Meta:
+        """Meta options for VCMemberNumberingRuleImportForm."""
+
+        model = VCMemberNumberingRule
+        fields = ["manufacturer", "device_type_pattern", "numbering_mode", "description"]
+
+
+class VCMemberNumberingRuleFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering VC member numbering rules."""
+
+    manufacturer_id = DynamicModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        required=False,
+        label="Manufacturer",
+    )
+    device_type_pattern = forms.CharField(required=False, label="Device Type Pattern")
+    numbering_mode = forms.ChoiceField(
+        choices=(("", "---------"), *VCMemberNumberingRule.MODE_CHOICES), required=False, label="Numbering Mode"
+    )
+
+    model = VCMemberNumberingRule
 
 
 class NormalizationRuleForm(NetBoxModelForm):

@@ -139,6 +139,15 @@ from .mapping_views import (
     SerialSensorTypePatternEditView,
     SerialSensorTypePatternListView,
     SerialSensorTypePatternView,
+    VCMemberNumberingRuleBulkDeleteView,
+    VCMemberNumberingRuleBulkExportYAMLView,
+    VCMemberNumberingRuleBulkImportView,
+    VCMemberNumberingRuleChangeLogView,
+    VCMemberNumberingRuleCreateView,
+    VCMemberNumberingRuleDeleteView,
+    VCMemberNumberingRuleEditView,
+    VCMemberNumberingRuleListView,
+    VCMemberNumberingRuleView,
 )
 from .object_sync import (
     DeviceCableTableView,
