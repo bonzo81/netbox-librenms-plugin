@@ -590,16 +590,46 @@ def locked_context(device, *, rules: SerialRules) -> SerialContext:
     after it locks the master row, so a type change of the master that has not committed is
     waited for and then read.
     """
-    from dcim.models import Device, VirtualChassis
+    from dcim.models import VirtualChassis
 
     chassis_id = device.virtual_chassis_id
     master_id = VirtualChassis.objects.filter(pk=chassis_id).values_list("master_id", flat=True).first()
     if chassis_id is None or master_id is None or master_id == device.pk:
         return rules.for_device(device)
-    master = Device.objects.select_for_update(no_key=True, of=("self",)).select_related("device_type").get(pk=master_id)
-    if master.virtual_chassis_id != chassis_id:
+    master_chassis_id, manufacturer_id = _lock_type_row(master_id)
+    if master_chassis_id != chassis_id:
         return SerialContext(None, (), unavailable=UNAVAILABLE_MASTER_LINK)
-    return rules.for_device_type(master.device_type)
+    return rules.context(manufacturer_id)
+
+
+def _lock_type_row(device_pk) -> tuple:
+    """
+    Lock the Device row *device_pk* ``FOR NO KEY UPDATE``; return its chassis id and its type's manufacturer id.
+
+    The lock statement reads no other table: a join is checked again against the row that a type
+    change commits, and drops the row. The type is read after the lock, in its own statement.
+    """
+    from dcim.models import Device, DeviceType
+
+    chassis_id, type_id = (
+        Device.objects.select_for_update(no_key=True)
+        .filter(pk=device_pk)
+        .values_list("virtual_chassis_id", "device_type_id")
+        .get()
+    )
+    return chassis_id, DeviceType.objects.filter(pk=type_id).values_list("manufacturer_id", flat=True).get()
+
+
+def locked_type_context(device, *, rules: SerialRules | None) -> SerialContext:
+    """
+    Return the serial context of the DeviceType of *device*, under a lock on the device row.
+
+    It is the context of the device's Modules, and of the members of a chassis that the device
+    masters. A type change holds the row until it commits, so a write waits and then reads the new
+    type; call it before the lookup of the write. None reads the rules.
+    """
+    _chassis_id, manufacturer_id = _lock_type_row(device.pk)
+    return (rules or SerialRules.load()).context(manufacturer_id)
 
 
 def device_assignment(device, incoming, *, rules: SerialRules) -> Assignment:
@@ -635,7 +665,7 @@ def module_assignment(module, incoming, *, rules: SerialRules) -> Assignment:
     from dcim.models import Module
 
     device = module.device
-    if not is_identity(incoming, rules.for_module_target(device)):
+    if not is_identity(incoming, locked_type_context(device, rules=rules)):
         return Assignment(None, absent=True)
     value = stored_form(incoming, Module)
     if _text(module.serial) == value:

@@ -328,10 +328,104 @@ def test_a_member_serial_write_waits_for_a_chassis_master_type_change(librenms_s
         except FutureTimeout:
             pass
         release.set()
-        retype.result(timeout=30)
-        assign.result(timeout=30)
+        assert retype.result(timeout=30).status_code == 302
+        assert assign.result(timeout=30).status_code == 302
 
     retyped = Device.objects.get(pk=master.pk).device_type_id == new_type.pk
     member_serial = Device.objects.get(pk=member.pk).serial
     assert retyped, "the type change itself must commit"
     assert member_serial == "OLD123", member_serial
+
+
+@transactional_db_with_all_apps()
+def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_server, monkeypatch):
+    """
+    Under the new type "XABC" keys to "ABC". Two module serial updates run after the type change
+    passed its check and before it commits; they must not leave two modules with one identity.
+    """
+    from concurrent.futures import TimeoutError as FutureTimeout
+    from threading import Event
+
+    from dcim.models import Device, DeviceType, Manufacturer, Module
+    from django.core.cache import cache
+    from django.test import Client
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.views.mixins import CacheMixin
+    from netbox_librenms_plugin.views.sync import device_fields
+
+    device = make_device_with_module_bays("ctx-module-race", ["Slot 1", "Slot 2"])
+    first = install_module(device, "Slot 1", "CTX-MODULE-CARD-1", serial="OLD111")
+    second = install_module(device, "Slot 2", "CTX-MODULE-CARD-2", serial="OLD222")
+    new_maker = Manufacturer.objects.create(name="Context module maker", slug="ctx-module-maker")
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=new_maker
+    )
+    new_type = DeviceType.objects.create(
+        manufacturer=new_maker, model="Context module model", slug="ctx-module-model", part_number="CTX-MODULE-HW"
+    )
+    rows = [
+        {
+            "entPhysicalIndex": index,
+            "entPhysicalClass": "module",
+            "entPhysicalName": bay,
+            "entPhysicalModelName": module.module_type.model,
+            "entPhysicalSerialNum": serial,
+            "entPhysicalContainedIn": 0,
+        }
+        for index, bay, module, serial in ((7, "Slot 1", first, "ABC"), (8, "Slot 2", second, "XABC"))
+    ]
+    cache.set(
+        CacheMixin().get_cache_key(device, "inventory", SERVER_KEY),
+        trusted_module_inventory_payload(device, rows, librenms_id=9841),
+    )
+    librenms_server.device_info_response(device_id=9841, hostname=device.name, hardware=new_type.part_number)
+    user = make_superuser("ctx-module-race-user")
+    rendered = render_module_tab(device, user=user)
+    updates = [rendered_module_form(rendered, "update-module-serial", index) for index in (7, 8)]
+    checked, release = Event(), Event()
+    original = device_fields.retype_conflict
+
+    def check_then_wait(*args, **kwargs):
+        refused = original(*args, **kwargs)
+        checked.set()
+        release.wait(timeout=20)
+        return refused
+
+    monkeypatch.setattr(device_fields, "retype_conflict", check_then_wait)
+
+    def session(posts):
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET lock_timeout = '20s'")
+            client = Client()
+            client.force_login(user)
+            return [client.post(url, data).status_code for url, data in posts]
+        finally:
+            connection.close()
+
+    with bounded_executor(max_workers=2) as executor:
+        retype = executor.submit(
+            session,
+            [
+                (
+                    reverse("plugins:netbox_librenms_plugin:update_device_type", kwargs={"pk": device.pk}),
+                    {"server_key": SERVER_KEY},
+                )
+            ],
+        )
+        assert checked.wait(timeout=20)
+        modules = executor.submit(session, updates)
+        try:
+            modules.result(timeout=3)
+        except FutureTimeout:
+            pass
+        release.set()
+        assert retype.result(timeout=30) == [302]
+        assert modules.result(timeout=30) == [302, 302]
+
+    assert Device.objects.get(pk=device.pk).device_type_id == new_type.pk, "the type change itself must commit"
+    stored = (Module.objects.get(pk=first.pk).serial, Module.objects.get(pk=second.pk).serial)
+    assert stored != ("ABC", "XABC"), stored
