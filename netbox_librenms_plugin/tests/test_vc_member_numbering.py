@@ -129,6 +129,30 @@ class TestImport:
         assert get_virtual_chassis_member(chassis.master, "GigabitEthernet1/0/1") == members[1]
         assert get_virtual_chassis_member(members[1], "GigabitEthernet3/0/1") == members[3]
 
+    def test_an_interface_sync_writes_a_cisco_port_to_the_switch_its_name_names(self, client, live_librenms):
+        """A4 through the writer: Gi2/0/1 goes to the member at 2, and Gi1/0/1 to the member at 1, not to 0's."""
+        from dcim.models import Interface
+
+        from netbox_librenms_plugin.tests.interface_sync_post_helpers import post_interface_sync, seed_ports, sync_port
+
+        cisco_type = _cisco_type()
+        _rule(manufacturer=cisco_type.manufacturer)
+        recording = _cisco_recording()
+        row = _serve(live_librenms.server, recording, "cisco-ports", CISCO_MODEL)
+        _bulk_import([row])
+        chassis, _members = _chassis(row)
+        # LibreNMS reports switch 1 at 0 and switch 2 at 1.
+        switch_1, switch_2 = recording["expected"]["virtual_chassis"]["member_serials"][:2]
+        seed_ports(chassis.master, [sync_port(9101, "GigabitEthernet1/0/1"), sync_port(9102, "GigabitEthernet2/0/1")])
+        client.force_login(make_superuser("vc-numbering-ports"))
+
+        response = post_interface_sync(client, chassis.master, [9101, 9102], htmx=False)
+
+        assert response.status_code == 302
+        assert {
+            interface.name: interface.device.serial for interface in Interface.objects.filter(name__endswith="/0/1")
+        } == {"GigabitEthernet1/0/1": switch_1, "GigabitEthernet2/0/1": switch_2}
+
     def test_the_single_row_import_button_numbers_the_stack_from_one(self, client, live_librenms):
         """The row button posts one selected row to the bulk import view, which runs the shared importer."""
         cisco_type = _cisco_type()
@@ -314,6 +338,66 @@ class TestPreviews:
         assert sorted((m["position"], m["suggested_name"]) for m in confirm["members"]) == written
         assert [m["position"] for m in details["members"] if m["is_master"]] == [1]
 
+    def test_every_preview_names_members_with_the_naming_of_the_row(self, client, live_librenms):
+        """Hostname without its domain, not the sysName: the table, its details link, the confirmation and the import agree."""
+        import json
+        from html import unescape
+
+        from netbox_librenms_plugin.tables.device_status import DeviceImportTable
+
+        cisco_type = _cisco_type()
+        _rule(manufacturer=cisco_type.manufacturer)
+        row = _serve(live_librenms.server, _cisco_recording(), "naming", CISCO_MODEL)
+        row.update(hostname="naming-stack.example.com", sysName="sysname-stack.example.com")
+        live_librenms.server.register(
+            f"/api/v0/devices/{row['device_id']}", {"status": "ok", "devices": [row]}, method="GET"
+        )
+        naming = {"use_sysname": False, "strip_domain": True}
+        _site, _mfr, _dt, role = _shared_infra()
+        user = make_superuser("vc-numbering-naming")
+        client.force_login(user)
+
+        validation = _validation(live_librenms.api, row, **naming)
+        record = {**row, "_validation": validation}
+        table = json.loads(
+            unescape(
+                DeviceImportTable._build_vc_attributes(validation, record).split('data-vc-info="')[1].split('"')[0]
+            )
+        )
+        details_url = unescape(
+            DeviceImportTable([record], server_key="default", user=user)
+            .render_virtual_chassis(None, record)
+            .split('hx-get="')[1]
+            .split('"')[0]
+        )
+        details = client.get(details_url).context["vc_data"]
+        confirm = client.post(
+            reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
+            {
+                "select": [str(row["device_id"])],
+                "server_key": "default",
+                f"role_{row['device_id']}": str(role.pk),
+                "use_sysname": "false",
+                "strip_domain": "true",
+            },
+        ).context["devices"][0]["validation"]["virtual_chassis"]
+        from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+
+        bulk_import_devices_shared(
+            [row["device_id"]],
+            server_key="default",
+            sync_options=naming,
+            manual_mappings_per_device={row["device_id"]: {"site_id": _site.pk, "device_role_id": role.pk}},
+            libre_devices_cache={row["device_id"]: row},
+            user=user,
+        )
+
+        _chassis_row, members = _chassis(row)
+        written = sorted((position, member.name) for position, member in members.items())
+        assert written == [(position, f"naming-stack-M{position}") for position in (1, 2, 3)]
+        for preview in (table, details, confirm):
+            assert sorted((m["position"], m["suggested_name"]) for m in preview["members"]) == written
+
     def test_without_a_device_type_the_numbers_are_unavailable(self, live_librenms):
         row = _serve(live_librenms.server, _cisco_recording(), "cisco-no-type", "UNMATCHED-HARDWARE")
 
@@ -323,25 +407,78 @@ class TestPreviews:
         assert vc["numbering_available"] is False
         assert {member["position"] for member in vc["members"]} == {None}
 
-    def test_a_numbering_error_blocks_the_row_and_names_no_rule(self, live_librenms):
+    def test_a_numbering_error_blocks_the_row_and_names_no_rule(self, client, live_librenms):
+        """The validation is cached and shown to any import user, so its refusal names no rule, field or value."""
         from netbox_librenms_plugin.models import VCMemberNumberingRule
 
         cisco_type = _cisco_type()
-        VCMemberNumberingRule.objects.bulk_create(
-            [
-                VCMemberNumberingRule(
-                    manufacturer=cisco_type.manufacturer, device_type_pattern="(", description="SECRET-RULE"
-                )
-            ]
+        (broken,) = VCMemberNumberingRule.objects.bulk_create(
+            [VCMemberNumberingRule(manufacturer=cisco_type.manufacturer, device_type_pattern="(SECRET-MARKER")]
         )
         row = _serve(live_librenms.server, _cisco_recording(), "cisco-preview-error", CISCO_MODEL)
+        client.force_login(make_superuser("vc-numbering-preview-error"))
 
         validation = _validation(live_librenms.api, row)
+        details = client.get(
+            reverse("plugins:netbox_librenms_plugin:device_vc_details", args=[row["device_id"]]),
+            {"server_key": "default"},
+        )
 
         assert validation["can_import"] is False
         assert validation["virtual_chassis"]["numbering_error"] in validation["issues"]
-        assert "SECRET-RULE" not in validation["virtual_chassis"]["numbering_error"]
         assert {member["position"] for member in validation["virtual_chassis"]["members"]} == {None}
+        assert details.context["vc_data"]["numbering_error"]
+        for text in (validation["virtual_chassis"]["numbering_error"], details.content.decode()):
+            assert "SECRET-MARKER" not in text
+            assert broken.get_absolute_url() not in text
+            assert "device_type_pattern" not in text
+
+
+class TestConfirmation:
+    """The confirmation shows a numbering-blocked row and does not submit it."""
+
+    def _confirm(self, client, rows):
+        _site, _mfr, _dt, role = _shared_infra()
+        client.force_login(make_superuser("vc-numbering-confirm"))
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:bulk_import_confirm"),
+            {
+                "select": [str(row["device_id"]) for row in rows],
+                "server_key": "default",
+                **{f"role_{row['device_id']}": str(role.pk) for row in rows},
+            },
+        )
+        assert response.status_code == 200
+        return response.content.decode()
+
+    def _broken_cisco_rule(self):
+        from netbox_librenms_plugin.models import VCMemberNumberingRule
+
+        VCMemberNumberingRule.objects.bulk_create(
+            [VCMemberNumberingRule(manufacturer=_cisco_type().manufacturer, device_type_pattern="(")]
+        )
+
+    def test_a_blocked_row_is_shown_and_not_submitted(self, client, live_librenms):
+        self._broken_cisco_rule()
+        _site, _mfr, generic_type, _role = _shared_infra()
+        blocked = _serve(live_librenms.server, _cisco_recording(), "confirm-blocked", CISCO_MODEL)
+        ready = _serve(live_librenms.server, load_recording(JUNIPER), "confirm-ready", generic_type.model)
+
+        body = self._confirm(client, [blocked, ready])
+
+        assert f'name="select" value="{ready["device_id"]}"' in body
+        assert f'name="select" value="{blocked["device_id"]}"' not in body
+        assert blocked["hostname"] in body
+        assert "data-bulk-confirm-submit disabled" not in body
+
+    def test_a_confirmation_of_only_blocked_rows_cannot_be_submitted(self, client, live_librenms):
+        self._broken_cisco_rule()
+        blocked = _serve(live_librenms.server, _cisco_recording(), "confirm-only-blocked", CISCO_MODEL)
+
+        body = self._confirm(client, [blocked])
+
+        assert 'name="select"' not in body
+        assert "data-bulk-confirm-submit disabled" in body
 
 
 @pytest.fixture
@@ -755,6 +892,45 @@ class TestModuleAttribution:
         assert module_sync["table"] is None
         assert module_sync["vc_numbering_error"]
 
+    @pytest.mark.parametrize("viewer", ["rule-viewer", "restricted"])
+    def test_a_broken_numbering_rule_is_named_only_to_a_viewer_of_the_rule(self, live_librenms, viewer):
+        from dcim.models import Device, Module, ModuleBay, ModuleType
+        from django.test.signals import template_rendered
+
+        from netbox_librenms_plugin.models import VCMemberNumberingRule
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, make_user_with_perms, post
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        recording, _rule_row, members = self._imported(live_librenms, f"attr-broken-{viewer}")
+        manufacturer = members[1].device_type.manufacturer
+        (broken,) = VCMemberNumberingRule.objects.bulk_create(
+            [VCMemberNumberingRule(manufacturer=manufacturer, device_type_pattern="(SECRET-MARKER")]
+        )
+        self._serve_inventory(live_librenms, recording, _inventory_rows(recording))
+        perms = [("view", Device), ("view", Module), ("view", ModuleBay), ("view", ModuleType)]
+        if viewer == "rule-viewer":
+            perms.append(("view", VCMemberNumberingRule))
+        user = make_user_with_perms(f"vc-numbering-{viewer}", perms)
+        view = DeviceModuleTableView()
+        contexts = []
+
+        def capture(sender, template, context, **kwargs):
+            if template.name == view.partial_template_name:
+                contexts.append(context["module_sync"])
+
+        template_rendered.connect(capture)
+        try:
+            response = post(view, make_request("post", {"server_key": "default"}, user=user), pk=members[1].pk)
+        finally:
+            template_rendered.disconnect(capture)
+
+        (module_sync,) = contexts
+        content = response.content.decode()
+        assert module_sync["table"] is None
+        assert module_sync["inventory_rule_error"].visible is (viewer == "rule-viewer")
+        assert ("SECRET-MARKER" in content) is (viewer == "rule-viewer")
+        assert (broken.get_absolute_url() in content) is (viewer == "rule-viewer")
+
     def test_a_device_outside_a_virtual_chassis_keeps_every_row(self, live_librenms):
         """Without members there is no numbering to check: the rows stay on the page device."""
         from netbox_librenms_plugin.tests.conftest import make_device, map_device_to_librenms
@@ -778,3 +954,41 @@ def test_the_recording_signature_keeps_the_reported_numbers_under_a_rule():
     _rule(manufacturer=_cisco_type().manufacturer)
 
     assert compute_shape_signature(load_recording(CISCO))["virtual_chassis"]["position_base"] == 0
+
+
+def test_a_configuration_edit_between_two_rows_of_one_search_leaves_the_later_row_under_the_old_generation(
+    caching_librenms,
+):
+    """The batch read its rules once, so a row it validates after an edit is no result of the current configuration."""
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
+    from netbox_librenms_plugin.import_utils.cache import (
+        _bump_import_configuration_generation,
+        get_validated_device_cache_key,
+    )
+
+    server = caching_librenms.server
+    first = _serve(server, _cisco_recording(), "batch-edit", "UNMATCHED-HARDWARE")
+    second = {**first, "device_id": first["device_id"] + 1, "hostname": "batch-edit-second"}
+    server.register(f"/api/v0/devices/{second['device_id']}", {"status": "ok", "devices": [second]}, method="GET")
+    recorded = server.routes[f"GET /api/v0/inventory/{first['device_id']}"]
+
+    def first_row_inventory_while_a_commit_lands(**request):
+        # Unmatched hardware makes only the validation read the chassis model.
+        if "entPhysicalClass" in request["query"]:
+            _bump_import_configuration_generation()
+        return recorded(**request)
+
+    server.register(f"/api/v0/inventory/{first['device_id']}", first_row_inventory_while_a_commit_lands, method="GET")
+    server.register("/api/v0/devices", {"status": "ok", "devices": [first, second]}, method="GET")
+    filters = {"location": first["location"]}
+
+    process_device_filters(
+        caching_librenms.api, filters, vc_detection_enabled=False, clear_cache=False, show_disabled=True
+    )
+
+    key = get_validated_device_cache_key(
+        server_key="default", filters=filters, device_id=second["device_id"], vc_enabled=False
+    )
+    assert cache.get(key) is None
