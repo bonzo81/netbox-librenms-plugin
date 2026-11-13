@@ -20,7 +20,7 @@ from utilities.querysets import RestrictedQuerySet
 from netbox_librenms_plugin.utils import (
     REGEX_COMPILE_ERRORS,
     get_object_site_id,
-    normalize_serial,
+    librenms_text,
     validate_regex_field,
 )
 
@@ -100,6 +100,34 @@ def check_rule_replacement(rule, compiled, field):
         _validate_replacement_template(compiled, getattr(rule, field))
     except (*REGEX_COMPILE_ERRORS, IndexError) as exc:
         raise RuleConfigurationError(rule, field) from exc
+
+
+# A serial rule extracts one capture group, so its replacement names exactly one group.
+_SERIAL_GROUP_REFERENCE = re.compile(r"\\(?P<number>[1-9][0-9]?)|\\g<(?P<group>[0-9]+|[^\W\d]\w*)>")
+
+
+def serial_group_reference(compiled: re.Pattern, replacement: str):
+    r"""
+    Return the group that a serial rule's *replacement* names, or None when it names no defined group.
+
+    The replacement must be exactly ``\N`` (1-99), ``\g<N>`` or ``\g<name>``. The evaluator reads
+    ``match.group()`` of this reference and never expands a template, so ``\100`` cannot mean an octal escape.
+
+    Args:
+        compiled (re.Pattern): The rule's compiled match_pattern.
+        replacement (str): The rule's replacement.
+
+    Returns:
+        int | str | None: The group number or name, or None.
+
+    """
+    reference = _SERIAL_GROUP_REFERENCE.fullmatch(replacement or "")
+    if reference is None:
+        return None
+    number = reference["number"] or reference["group"]
+    if number.isdigit():
+        return int(number) if 1 <= int(number) <= compiled.groups else None
+    return number if number in compiled.groupindex else None
 
 
 def _trim_python_whitespace(expression):
@@ -787,20 +815,26 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
     SCOPE_DEVICE_TYPE = "device_type"
     SCOPE_MODULE_BAY = "module_bay"
     SCOPE_SERIAL = "serial"
+    SCOPE_VLAN_NAME = "vlan_name"
 
     SCOPE_CHOICES = [
         (SCOPE_MODULE_TYPE, "Module Type"),
         (SCOPE_DEVICE_TYPE, "Device Type"),
         (SCOPE_MODULE_BAY, "Module Bay"),
         (SCOPE_SERIAL, "Serial"),
+        (SCOPE_VLAN_NAME, "VLAN Name"),
     ]
+
+    # In a VLAN name rule, this text in match_pattern stands for the row's VLAN ID.
+    VID_PLACEHOLDER = "{vid}"
 
     scope = models.CharField(
         max_length=50,
         choices=SCOPE_CHOICES,
         db_index=True,
-        help_text="Which lookup this rule applies to. Serial rules rewrite the stored "
-        "serial rather than a matching key.",
+        help_text="Which lookup this rule applies to. A serial rule extracts the part of a serial that "
+        "identifies the hardware; the stored serial keeps the LibreNMS text. A VLAN name rule rewrites "
+        "the proposed VLAN name.",
     )
     manufacturer = models.ForeignKey(
         Manufacturer,
@@ -813,11 +847,13 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
     )
     match_pattern = models.CharField(
         max_length=500,
-        help_text="Regex pattern to match against input string (Python re syntax)",
+        help_text="Regex pattern to match against input string (Python re syntax). In a VLAN name rule, "
+        "{vid} stands for the VLAN ID of the row.",
     )
     replacement = models.CharField(
         max_length=500,
-        help_text="Replacement string (supports regex back-references \\1, \\2, …)",
+        help_text="Replacement string (supports regex back-references \\1, \\2, …). A serial rule "
+        "takes exactly one group reference, such as \\1 or \\g<name>, and keeps that group of a full match.",
     )
     priority = models.PositiveIntegerField(
         default=100,
@@ -832,6 +868,7 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
         """Validate that match_pattern compiles as a regex and replacement is a valid template."""
         super().clean()
         self.__dict__.pop("compiled_match_pattern", None)
+        self.__dict__.pop("serial_group", None)
         errors = {}
         if not self.match_pattern:
             errors["match_pattern"] = "This field is required."
@@ -839,7 +876,16 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
             errors["replacement"] = "This field is required."
         if errors:
             raise ValidationError(errors)
-        compiled = validate_regex_field(self.match_pattern, "match_pattern")
+        if self.VID_PLACEHOLDER in self.match_pattern and self.scope != self.SCOPE_VLAN_NAME:
+            raise ValidationError({"match_pattern": f"Only a VLAN name rule can use {self.VID_PLACEHOLDER}."})
+        compiled = validate_regex_field(self._pattern_for_vid(1), "match_pattern")
+        if self.scope == self.SCOPE_SERIAL and serial_group_reference(compiled, self.replacement) is None:
+            raise ValidationError(
+                {
+                    "replacement": "A serial rule keeps one capture group of a full match: use \\1, \\g<1> or "
+                    "\\g<name> for a group that the pattern defines, and nothing else."
+                }
+            )
         # Validate the replacement template by running a dummy substitution
         try:
             _validate_replacement_template(compiled, self.replacement)
@@ -859,9 +905,47 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
         check_rule_replacement(self, compiled, "replacement")
         return compiled
 
-    def apply(self, value: str) -> str:
-        """Return *value* with this rule's substitution applied; raise RuleConfigurationError for a broken rule."""
-        return self.compiled_match_pattern.sub(self.replacement, value)
+    @functools.cached_property
+    def serial_group(self):
+        """
+        Return the capture group that this serial rule keeps; serial_identity reads ``match.group()`` of it.
+
+        Raises:
+            RuleConfigurationError: When the stored replacement is not one group reference that the pattern defines.
+
+        """
+        reference = serial_group_reference(self.compiled_match_pattern, self.replacement)
+        if reference is None:
+            raise RuleConfigurationError(self, "replacement")
+        return reference
+
+    def _pattern_for_vid(self, vid):
+        """Return match_pattern with each VID placeholder replaced by *vid* as literal text."""
+        return self.match_pattern.replace(self.VID_PLACEHOLDER, re.escape(str(vid)))
+
+    def apply(self, value: str, *, vid=None) -> str:
+        """
+        Return *value* with this rule's substitution applied.
+
+        A rule that uses the VID placeholder leaves *value* unchanged when *vid* is None.
+
+        Raises:
+            RuleConfigurationError: When the stored pattern or replacement does not work.
+            TypeError: The rule is a serial rule; serial_identity evaluates those.
+
+        """
+        if self.scope == self.SCOPE_SERIAL:
+            raise TypeError("A serial rule extracts a group; serial_identity evaluates it.")
+        if self.VID_PLACEHOLDER not in self.match_pattern:
+            return self.compiled_match_pattern.sub(self.replacement, value)
+        if vid is None:
+            return value
+        try:
+            compiled = re.compile(self._pattern_for_vid(vid))
+        except REGEX_COMPILE_ERRORS as exc:
+            raise RuleConfigurationError(self, "match_pattern") from exc
+        check_rule_replacement(self, compiled, "replacement")
+        return compiled.sub(self.replacement, value)
 
     def get_absolute_url(self):
         """Return the URL for this rule's detail page."""
@@ -899,6 +983,20 @@ def _filter_help(source):
     )
 
 
+# The rule that "Mark built-in" creates. Migration 0026 keeps its own copy, because a migration must not import app code.
+BUILT_IN_UNITS_RULE = {
+    "name": "Fixed-platform built-in units",
+    "match_type": "model_matches_device_type",
+    "pattern": "",
+    "action": "transparent",
+    "require_serial_match_parent": False,
+    "enabled": True,
+    "description": "Fixed-form routers report built-in units as chassis-level modules whose model equals the device "
+    "type's model or part number. Marking them transparent hides their rows and promotes their children to "
+    "device-level bay matching.",
+}
+
+
 class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
     """
     Rule-based filter for ENTITY-MIB inventory items during module sync.
@@ -920,7 +1018,8 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
         sub-components.  Used for fixed-chassis devices whose RP or system board
         is the device itself: a board directly below the chassis that carries the
         device serial (``serial_matches_device``), or a built-in unit that reports
-        the chassis PID, also in a slot container (``model_matches_device_type``).
+        the chassis PID, also below a slot container or another built-in unit
+        (``model_matches_device_type``).
         Its children (transceivers, fans, PSUs) then match device-level bays.
 
     Optional regex filters on ``entPhysicalName``, ``entPhysicalDescr`` and
@@ -1098,6 +1197,16 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
         """Return True when ``require_serial_match_parent`` takes effect: a pattern-based skip or transparent rule."""
         return self.uses_pattern and self.action != self.ACTION_INCLUDE
 
+    @property
+    def hides_built_in_units(self) -> bool:
+        """Return True when this enabled rule hides every unit that reports its device type's model or part number."""
+        return (
+            self.enabled
+            and self.match_type == self.MATCH_MODEL_DEVICE_TYPE
+            and self.action == self.ACTION_TRANSPARENT
+            and not any(getattr(self, field) for field in self.FILTER_SOURCES)
+        )
+
     @functools.cached_property
     def _compiled_pattern(self):
         """
@@ -1135,7 +1244,7 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
     def matches_item_class(self, item: dict) -> bool:
         """Return True when this class_is rule's class is the class of *item*."""
         # LibreNMS sends JSON, so a numeric value arrives as an int; a missing one compares as "".
-        return self.matches_class(normalize_serial(item.get("entPhysicalClass")))
+        return self.matches_class(librenms_text(item.get("entPhysicalClass")))
 
     def matches_filters(self, item: dict) -> bool:
         """Return True when every non-blank filter of this rule matches *item*, whatever the action."""
@@ -1584,6 +1693,117 @@ class CarrierAutoInstallRule(FullCleanOnSaveMixin, NetBoxModel):
             "librenms_child_name_pattern": self.librenms_child_name_pattern,
             "netbox_bay_name_pattern": self.netbox_bay_name_pattern,
             "carrier_module_type": str(self.carrier_module_type),
+            "description": self.description,
+        }
+        return yaml.dump(data, sort_keys=False)
+
+
+VC_NUMBERING_RULE_EXISTS = "A numbering rule with this manufacturer and device type pattern already exists."
+
+
+class VCMemberNumberingRule(FullCleanOnSaveMixin, NetBoxModel):
+    """
+    Decide the NetBox ``vc_position`` of the Virtual Chassis members that LibreNMS reports for a DeviceType.
+
+    The rule of the imported DeviceType applies: a rule with a manufacturer and a pattern first,
+    then a pattern only, then a manufacturer only, then an unscoped rule. The lowest id wins in a
+    tier. Without a rule, members keep the numbers that LibreNMS reports.
+    """
+
+    MODE_REPORTED = "reported"
+    MODE_ONE_BASED = "one_based"
+    MODE_CHOICES = (
+        (MODE_REPORTED, "Reported numbers"),
+        (MODE_ONE_BASED, "Number from 1"),
+    )
+
+    manufacturer = models.ForeignKey(
+        Manufacturer,
+        # SET_NULL would make a manufacturer rule apply to every manufacturer.
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="librenms_vc_numbering_rules",
+        help_text="Optional: the manufacturer of the imported device type. Leave blank to apply to every manufacturer.",
+    )
+    device_type_pattern = models.CharField(
+        max_length=255,
+        blank=True,
+        help_text="Optional regex (Python re.fullmatch, case-sensitive) on the device type model. "
+        "Leave blank to apply to every device type.",
+    )
+    numbering_mode = models.CharField(
+        max_length=20,
+        choices=MODE_CHOICES,
+        default=MODE_REPORTED,
+        help_text="Reported numbers: keep the numbers that LibreNMS reports. Number from 1: add 1 to every member "
+        "number when the stack is numbered from 0.",
+    )
+    description = models.TextField(blank=True, help_text="Optional notes about this rule.")
+
+    @functools.cached_property
+    def _compiled_device_type_pattern(self):
+        """Return the compiled device_type_pattern, or None when it is blank; raise RuleConfigurationError when it is invalid."""
+        if not self.device_type_pattern:
+            return None
+        return compile_rule_regex(self, "device_type_pattern")
+
+    @property
+    def tier(self) -> int:
+        """Return the precedence tier of this rule; a lower tier wins."""
+        if self.device_type_pattern:
+            return 0 if self.manufacturer_id is not None else 1
+        return 2 if self.manufacturer_id is not None else 3
+
+    def matches(self, device_type) -> bool:
+        """Return whether this rule applies to *device_type*; raise RuleConfigurationError for an invalid pattern."""
+        if self.manufacturer_id is not None and self.manufacturer_id != device_type.manufacturer_id:
+            return False
+        pattern = self._compiled_device_type_pattern
+        return pattern is None or pattern.fullmatch(device_type.model) is not None
+
+    def clean(self):
+        super().clean()
+        self.__dict__.pop("_compiled_device_type_pattern", None)
+        self.device_type_pattern = (self.device_type_pattern or "").strip()
+        if self.device_type_pattern:
+            validate_regex_field(self.device_type_pattern, "device_type_pattern")
+
+    def get_absolute_url(self):
+        return reverse("plugins:netbox_librenms_plugin:vcmembernumberingrule_detail", args=[self.pk])
+
+    class Meta:
+        """Meta options for VCMemberNumberingRule."""
+
+        ordering = ["pk"]
+        verbose_name = "VC member numbering rule"
+        # A nullable manufacturer needs two conditional constraints; see ModuleBayMapping.Meta.constraints.
+        constraints = [
+            models.UniqueConstraint(
+                fields=["manufacturer", "device_type_pattern"],
+                condition=models.Q(manufacturer__isnull=False),
+                name="unique_vc_member_numbering_rule",
+                violation_error_message=VC_NUMBERING_RULE_EXISTS,
+            ),
+            models.UniqueConstraint(
+                fields=["device_type_pattern"],
+                condition=models.Q(manufacturer__isnull=True),
+                name="unique_vc_member_numbering_rule_global",
+                violation_error_message=VC_NUMBERING_RULE_EXISTS,
+            ),
+        ]
+
+    def __str__(self):
+        scope = self.manufacturer.name if self.manufacturer else "*"
+        if self.device_type_pattern:
+            scope = f"{scope}/{self.device_type_pattern}"
+        return f"{scope}: {self.get_numbering_mode_display()}"
+
+    def to_yaml(self):
+        data = {
+            "manufacturer": self.manufacturer.name if self.manufacturer else "",
+            "device_type_pattern": self.device_type_pattern,
+            "numbering_mode": self.numbering_mode,
             "description": self.description,
         }
         return yaml.dump(data, sort_keys=False)

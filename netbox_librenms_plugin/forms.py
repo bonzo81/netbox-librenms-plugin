@@ -50,7 +50,9 @@ from .models import (
     PlatformMapping,
     PortStackLagPattern,
     SerialSensorTypePattern,
+    VCMemberNumberingRule,
 )
+from .transactions import saved_in_scope
 from .utils import REGEX_COMPILE_ERRORS, _free_cable_tag_slug, normalize_cable_tag_slug
 
 logger = logging.getLogger(__name__)
@@ -461,7 +463,7 @@ class CableSyncSettingsForm(NetBoxModelForm):
                 # A concurrent insert can take either the unique name or the selected free slug.
                 # Do not adopt that row because this settings form did not create it.
                 raise CableSyncTagNameTaken({"cable_sync_tag": CABLE_SYNC_TAG_TAKEN}) from exc
-            if self.user is not None and not Tag.objects.restrict(self.user, "add").filter(pk=tag.pk).exists():
+            if self.user is not None and not saved_in_scope(tag, self.user, "add"):
                 raise PermissionDenied("You do not have permission to create the cable provenance tag.")
         elif tag.name != new_tag_name or tag.color != new_color:
             if self.user is not None and not Tag.objects.restrict(self.user, "change").filter(pk=tag.pk).exists():
@@ -476,7 +478,7 @@ class CableSyncSettingsForm(NetBoxModelForm):
                 # select_for_update cannot lock a name that has no row yet, so a concurrent
                 # create can take the target name between clean_cable_sync_tag and this save.
                 raise CableSyncTagNameTaken({"cable_sync_tag": CABLE_SYNC_TAG_TAKEN}) from exc
-            if self.user is not None and not Tag.objects.restrict(self.user, "change").filter(pk=tag.pk).exists():
+            if self.user is not None and not saved_in_scope(tag, self.user, "change"):
                 raise PermissionDenied("You do not have permission to change the cable provenance tag.")
 
         setting_fields = ("cable_sync_tag", "cable_sync_tag_color", "cable_sync_description")
@@ -963,6 +965,56 @@ class CarrierAutoInstallRuleFilterForm(NetBoxModelFilterSetForm):
     model = CarrierAutoInstallRule
 
 
+class VCMemberNumberingRuleForm(NetBoxModelForm):
+    """Form for creating and editing VC member numbering rules."""
+
+    manufacturer = DynamicModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        required=False,
+        help_text="Optional: the manufacturer of the imported device type.",
+    )
+
+    class Meta:
+        """Meta options for VCMemberNumberingRuleForm."""
+
+        model = VCMemberNumberingRule
+        fields = ["manufacturer", "device_type_pattern", "numbering_mode", "description"]
+
+
+class VCMemberNumberingRuleImportForm(NetBoxModelImportForm):
+    """Form for bulk importing VC member numbering rules."""
+
+    manufacturer = CSVModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        to_field_name="name",
+        required=False,
+        help_text="Manufacturer name (optional; leave blank for every manufacturer).",
+    )
+    numbering_mode = CSVChoiceField(choices=VCMemberNumberingRule.MODE_CHOICES, help_text="reported or one_based")
+
+    class Meta:
+        """Meta options for VCMemberNumberingRuleImportForm."""
+
+        model = VCMemberNumberingRule
+        fields = ["manufacturer", "device_type_pattern", "numbering_mode", "description"]
+
+
+class VCMemberNumberingRuleFilterForm(NetBoxModelFilterSetForm):
+    """Form for filtering VC member numbering rules."""
+
+    manufacturer_id = DynamicModelChoiceField(
+        queryset=Manufacturer.objects.all(),
+        required=False,
+        label="Manufacturer",
+    )
+    device_type_pattern = forms.CharField(required=False, label="Device Type Pattern")
+    numbering_mode = forms.ChoiceField(
+        choices=(("", "---------"), *VCMemberNumberingRule.MODE_CHOICES), required=False, label="Numbering Mode"
+    )
+
+    model = VCMemberNumberingRule
+
+
 class NormalizationRuleForm(NetBoxModelForm):
     """Form for creating and editing normalization rules."""
 
@@ -984,7 +1036,7 @@ class NormalizationRuleImportForm(NetBoxModelImportForm):
 
     scope = CSVChoiceField(
         choices=NormalizationRule.SCOPE_CHOICES,
-        help_text="Scope: module_type, device_type, or module_bay",
+        help_text="Scope: " + ", ".join(value for value, _label in NormalizationRule.SCOPE_CHOICES),
     )
     manufacturer = CSVModelChoiceField(
         queryset=Manufacturer.objects.all(),

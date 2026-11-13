@@ -34,14 +34,15 @@ _MAX_ACKNOWLEDGED_REVISIONS = 200
 MODULE_INVENTORY_CACHE_VERSION = 4
 
 
-def module_inventory_cache_payload(inventory, librenms_id, oob_librenms_id) -> dict:
+def module_inventory_cache_payload(inventory, librenms_id, oob_librenms_id, *, serial_context) -> dict:
     """
-    Return the cached module inventory payload, stamped with the current schema version.
+    Return the cached module inventory payload, stamped with the current schema version and serial context.
 
     Args:
         inventory (list[dict]): The merged inventory rows.
         librenms_id (int): The LibreNMS device ID the rows came from.
         oob_librenms_id (int | None): The linked OOB controller ID, or None.
+        serial_context (SerialContext): The chassis context that the transceiver merge grouped serials under.
 
     Returns:
         dict: The payload to cache.
@@ -52,6 +53,7 @@ def module_inventory_cache_payload(inventory, librenms_id, oob_librenms_id) -> d
         "inventory": inventory,
         "librenms_id": librenms_id,
         "oob_librenms_id": oob_librenms_id,
+        "serial_context": serial_context.fingerprint,
     }
 
 
@@ -237,6 +239,17 @@ def sync_cache_browser_contract(tabs):
         },
         "states": [state.value for state in SyncTabState],
     }
+
+
+def withhold_unavailable_snapshots(context, sync_cache_status, tabs):
+    """Clear the table and expiry of each of *tabs* whose snapshot *sync_cache_status* reports unavailable."""
+    for tab in tabs:
+        if sync_cache_status[tab.value]["snapshot_available"]:
+            continue
+        spec = TAB_SPECS[tab]
+        tab_context = context.get(spec.context_name)
+        if isinstance(tab_context, dict):
+            context[spec.context_name] = {**tab_context, spec.table_context_key: None, "cache_expiry": None}
 
 
 @dataclass
@@ -774,10 +787,16 @@ class SyncCacheConsistency:
         """Return whether the tab's snapshot exists in a form its reader accepts."""
         key = self.snapshot_key(tab, server_key)
         if tab == SyncTab.MODULES:
+            from netbox_librenms_plugin.serial_identity import SerialRules
+
             payload = cache.get(key)
             owner = self._primary_owner(tab, server_key)
-            return cached_module_inventory(payload) is not None and module_inventory_snapshot_matches(
-                payload, owner, server_key, module_snapshot_host_id(owner, server_key)
+            return (
+                cached_module_inventory(payload) is not None
+                and module_inventory_snapshot_matches(
+                    payload, owner, server_key, module_snapshot_host_id(owner, server_key)
+                )
+                and payload.get("serial_context") == SerialRules.load().for_device(owner).fingerprint
             )
         return cache.has_key(key)
 

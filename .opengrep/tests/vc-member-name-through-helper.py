@@ -1,10 +1,11 @@
 from netbox_librenms_plugin.import_utils import virtual_chassis
-from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name, vc_serial_key
+from netbox_librenms_plugin.import_utils.virtual_chassis import _generate_vc_member_name
+from netbox_librenms_plugin.serial_identity import SerialRules, naming_token
 
 
-def _member_name(master_name, position, serial, pattern, serial_key):
+def _member_name(master_name, position, serial, pattern, context):
     # ok: vc-member-name-through-helper
-    return _generate_vc_member_name(master_name, position, serial=serial_key(serial), pattern=pattern)
+    return _generate_vc_member_name(master_name, position, serial=naming_token(serial, context), pattern=pattern)
 
 
 def header_name(device, resolved_name):
@@ -19,4 +20,4 @@ def qualified_name(device, resolved_name):
 
 def keyed_name(device, resolved_name):
     # ok: vc-member-name-through-helper
-    return _member_name(resolved_name, device.vc_position, device.serial, None, vc_serial_key())
+    return _member_name(resolved_name, device.vc_position, device.serial, None, SerialRules.load().for_device(device))

@@ -179,7 +179,7 @@ class TestRealView:
         mine = make_device("seam-scoped-mine")
         theirs = make_device("seam-scoped-theirs")
         seed_mapping(mine, own=42)
-        live_librenms.server.device_info_response(device_id=42, hostname=mine.name, serial="SN-X")
+        live_librenms.server.device_info_response(device_id=42, hostname=mine.name, serial="SN-XYZ")
         user = make_user_with_perms("seam-scoped", [("change", Device)], constraints={"name": "seam-scoped-mine"})
         request = make_request("post", user=user)
         view = make_view(UpdateDeviceSerialView, request)
@@ -188,7 +188,7 @@ class TestRealView:
             post(view, request, pk=theirs.pk)
 
         post(view, request, pk=mine.pk)
-        assert Device.objects.get(pk=mine.pk).serial == "SN-X"
+        assert Device.objects.get(pk=mine.pk).serial == "SN-XYZ"
 
     def test_superuser_helper_returns_the_same_row_across_calls(self):
         """Two builders in one test must not race the unique-username constraint."""

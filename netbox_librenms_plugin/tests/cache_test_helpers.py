@@ -51,10 +51,13 @@ def seed_inventory(view, device, inventory, *, librenms_id, server_key="default"
     """
     from django.core.cache import cache
 
+    from netbox_librenms_plugin.serial_identity import SerialRules
     from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
 
     key = view.get_cache_key(device, "inventory", server_key=server_key)
-    payload = module_inventory_cache_payload(inventory, librenms_id, None)
+    payload = module_inventory_cache_payload(
+        inventory, librenms_id, None, serial_context=SerialRules.load().for_device(device)
+    )
     cache.set(key, payload, timeout=300)
     return key
 

@@ -1,6 +1,5 @@
 """HTMX endpoints and POST handlers for importing LibreNMS devices."""
 
-import functools
 import json
 import logging
 import re
@@ -57,7 +56,6 @@ from netbox_librenms_plugin.import_utils import (
     scope_bulk_collisions,
     scope_validation_disclosure,
     scope_validation_disclosures,
-    update_vc_member_suggested_names,
     validate_device_for_import,
     visible_object_label,
 )
@@ -65,7 +63,29 @@ from netbox_librenms_plugin.import_utils.device_operations import (
     effective_import_device_type,
     match_import_device_type,
 )
-from netbox_librenms_plugin.import_utils.virtual_chassis import candidate_vc_serial_keys, vc_master_view, vc_serial_key
+from netbox_librenms_plugin.import_utils.disclosure import serial_conflict_text
+from netbox_librenms_plugin.import_utils.naming import _resolve_device_name
+from netbox_librenms_plugin.import_utils.virtual_chassis import (
+    VCNumberingError,
+    load_numbering_rules,
+    numbering_refusal_text,
+    prepare_virtual_chassis,
+    unnumbered_virtual_chassis,
+)
+from netbox_librenms_plugin.serial_identity import (
+    Comparison,
+    SerialRules,
+    assignment_lock,
+    compare,
+    RETYPE_HELD,
+    device_assignment,
+    display,
+    is_identity,
+    is_sole_holder,
+    retype_conflict,
+    retype_lock,
+    retype_scope,
+)
 from netbox_librenms_plugin.import_validation_helpers import (
     apply_cluster_to_validation,
     apply_host_to_validation,
@@ -112,6 +132,7 @@ from netbox_librenms_plugin.server_mappings import (
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device, parse_configured_server_key
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.transactions import (
+    atomic_with_events,
     classify_conflict,
     lock_and_snapshot,
     update_existing_row,
@@ -121,9 +142,8 @@ from netbox_librenms_plugin.utils import (
     IMPORT_CONTEXT_COLUMNS_PREFERENCE,
     INTERFACE_SYNC_OPTIONS_PREFERENCE,
     SET_PRIMARY_IP_PREFERENCE,
-    acquire_advisory_transaction_lock,
     coerce_model_pk,
-    normalize_serial,
+    coerce_positive_int,
     resolve_naming_preferences,
     same_host,
     save_interface_name_preference,
@@ -561,69 +581,73 @@ def _oob_ip_is_reassignable(candidate, interface) -> bool:
     )
 
 
-def _acquire_serial_assignment_lock(serial: str) -> None:
+# A target that validation found by its serial must still hold the serial alone; the text names no device.
+_SERIAL_MATCH_LOST = "The serial no longer identifies this device alone. Refresh the validation and retry."
+
+
+def _retype_refusal(device, device_type, serial_rules, scope) -> HttpResponse | None:
+    """Return an error response when *device_type* must not be saved on the locked *device*; see ``retype_conflict``."""
+    if scope is not None and retype_conflict(device, device_type, rules=serial_rules, scope=scope):
+        return _htmx_error_response(RETYPE_HELD)
+    return None
+
+
+def _save_retyped_device(device, device_type, request) -> HttpResponse | None:
+    """Save *device_type* on *device* under the identity locks of the serials it decides; see ``_save_device``."""
+    from dcim.models import Device
+
+    with atomic_with_events():
+        serial_rules = SerialRules.load()
+        scope = retype_scope(device)
+        retype_lock(scope, rules=serial_rules)
+        locked = Device.objects.select_for_update(of=("self",)).filter(pk=device.pk).first()
+        if locked is None:
+            return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
+        if err := _retype_refusal(locked, device_type, serial_rules, scope):
+            return err
+        device.device_type = device_type
+        return _save_device(device, update_fields=["device_type"], request=request)
+
+
+def _apply_conflict_checked_serial(device, incoming_serial, user, serial_rules) -> tuple[HttpResponse | None, bool]:
     """
-    Serialize serial-assignment guards on the serial value (transaction-scoped advisory lock).
-
-    Concurrent writers of the SAME serial contend on one lock, and the second writer's
-    conflict check then sees the first one's committed row — closing the both-pass race a
-    conflict-row lock never covered (it locks nothing while the serial is unassigned).
-    It also replaces that second row lock: with own-row locks already held, two
-    swap-direction requests locking each other's conflict row deadlock (A→B / B→A).
-    Must be called inside ``transaction.atomic()``; the lock releases on commit/rollback.
-
-    Args:
-        serial: The trimmed serial being assigned.
-
-    Raises:
-        RuntimeError: When called in autocommit — the lock would release immediately.
-
-    """
-    acquire_advisory_transaction_lock(f"netbox-librenms-plugin:device-serial:{serial}")
-
-
-def _apply_conflict_checked_serial(device, incoming_serial: str, user) -> HttpResponse | None:
-    """
-    Assign *incoming_serial* to *device* under the serial advisory lock, or report the conflict.
+    Set *incoming_serial* on the locked *device* in memory, or report why the serial is not written.
 
     Shared by the conflict view's update / update_serial / sync_serial actions so the three can't
-    drift on the lock, the ownership guard, or the message. Must be called inside
-    ``transaction.atomic()`` — the advisory lock is transaction-scoped, so the read-then-write is
-    only serialized while the caller's transaction is open.
+    drift on the ownership guard or the message. The caller's transaction took the serial identity
+    locks (``assignment_lock``) before it locked *device*, so a concurrent writer of an equivalent
+    serial waits, and this lookup sees its committed row.
 
     NetBox deliberately has no DB-level uniqueness on ``Device.serial``: during moves and
     replacements two devices may temporarily share one. Conflicts therefore surface as an error
     for the user to resolve rather than a constraint violation.
 
     Args:
-        device: The Device to mutate. ``serial`` is set in memory only; the caller persists it.
-        incoming_serial: The already-trimmed serial from LibreNMS.
+        device: The locked Device to change. ``serial`` is set in memory only; the caller persists it.
+        incoming_serial: The serial that LibreNMS reports.
         user: The requesting user. The conflict lookup is unrestricted (a duplicate the user cannot
             see still blocks the write), so only their view scope decides whether it is named.
+        serial_rules: The serial rules that the caller's transaction read.
 
     Returns:
-        HttpResponse | None: An HTMX error toast when another device owns the serial, else None.
+        tuple: ``(error response, False)`` on a conflict, else ``(None, whether device.serial changed)``.
 
     """
-    from dcim.models import Device
-
-    _acquire_serial_assignment_lock(incoming_serial)
-    conflict_device = Device.objects.filter(serial=incoming_serial).exclude(pk=device.pk).first()
-    if conflict_device:
-        # No identity in the log either: the lookup is unrestricted, and the serial alone lets an
-        # operator find the owner without writing an unviewable object's name to a log file.
-        logger.warning(f"Serial assignment blocked: '{incoming_serial}' is already assigned to another device")
-        visible = visible_object_label(conflict_device, user)
-        if visible is None:
-            return _htmx_error_response(
-                f"Serial conflict: '{incoming_serial}' is already assigned to a device outside your view scope."
-            )
-        return _htmx_error_response(
-            f"Serial conflict: '{incoming_serial}' is already assigned to device "
-            f"'{conflict_device.name}' (ID: {conflict_device.pk})"
-        )
-    device.serial = incoming_serial
-    return None
+    serial = display(incoming_serial)
+    try:
+        assignment = device_assignment(device, incoming_serial, rules=serial_rules)
+    except ValidationError as exc:
+        # The LibreNMS serial does not fit the field; the writer refuses rather than cut it.
+        return _htmx_error_response(f"Validation error: {exception_text_for(exc, type(device), user)}"), False
+    conflict = assignment.conflict
+    if conflict is None:
+        if assignment.value is not None:
+            device.serial = assignment.value
+        return None, assignment.value is not None
+    # No identity in the log either: the lookup is unrestricted, and the serial alone lets an
+    # operator find the owner without writing an unviewable object's name to a log file.
+    logger.warning(f"Serial assignment blocked: '{serial}' is already assigned to another device")
+    return _htmx_error_response(serial_conflict_text(conflict, serial, user)), False
 
 
 def _platform_device_type_mismatch(device) -> HttpResponse | None:
@@ -1179,8 +1203,8 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         errors = []
         seen_ids = set()
         cache_expired_count = 0
-        serial_key_for = functools.cache(vc_serial_key)
-        candidate_keys = functools.cache(candidate_vc_serial_keys)
+        serial_rules = SerialRules.load()
+        numbering_rules = load_numbering_rules()
 
         for raw_device_id in device_ids:
             try:
@@ -1221,25 +1245,15 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 # Keep confirm modal aligned with import-time behavior: always
                 # detect VC membership so stack members are visible before import.
                 include_vc_detection=True,
-                serial_key_for=serial_key_for,
-                candidate_keys=candidate_keys,
+                serial_rules=serial_rules,
+                numbering_rules=numbering_rules,
             )
             # Mark validation with VC detection flag for proper URL generation in table
             # Bulk confirm should respect the initial filter's VC detection preference
             validation["_vc_detection_enabled"] = vc_detection_enabled
 
+            # The validation prepared the stack the way import does: numbers, names and master.
             device_name = validation.get("resolved_name") or f"device-{device_id}"
-
-            if validation.get("virtual_chassis", {}).get("is_stack"):
-                # Preview the names and the master the way import makes them: with the resolved DeviceType's rules.
-                device_type = effective_import_device_type((validation.get("device_type") or {}).get("device_type"))
-                serial_key = serial_key_for(getattr(device_type, "manufacturer", None))
-                validation["virtual_chassis"] = update_vc_member_suggested_names(
-                    validation["virtual_chassis"], device_name, serial_key
-                )
-                validation["virtual_chassis"] = vc_master_view(
-                    validation["virtual_chassis"], libre_device.get("serial"), serial_key
-                )
 
             from dcim.models import DeviceRole, Rack
             from virtualization.models import Cluster
@@ -1323,6 +1337,8 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                     "is_vm": is_vm,
                     "object_type": "virtualmachine" if is_vm else "device",
                     "placement_method": placement_method,
+                    # A row whose stack cannot be numbered is shown with its refusal and not submitted.
+                    "executable": not (validation.get("virtual_chassis") or {}).get("numbering_error"),
                 }
             )
 
@@ -1362,7 +1378,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
 
         context = {
             "devices": devices,
-            "device_count": len(devices),
+            "device_count": sum(1 for entry in devices if entry["executable"]),
             "errors": errors,
             # Surface partial cache-expiry: when SOME rows survive (devices non-empty) the
             # all-expired / partial-expired warnings above are skipped, so without this the modal
@@ -1762,6 +1778,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
             imported_vm_ids = {item["device_id"] for item in vm_result.get("success", [])}
 
             refreshed_devices = []
+            serial_rules = SerialRules.load()
 
             # Re-validate each imported device with fresh status.
             for device_id in imported_device_ids:
@@ -1787,6 +1804,7 @@ class BulkImportDevicesView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                         server_key=self.librenms_api.server_key,
                         use_sysname=sync_options.get("use_sysname", True),
                         strip_domain=sync_options.get("strip_domain", False),
+                        serial_rules=serial_rules,
                     )
                     validation["import_as_vm"] = is_vm
 
@@ -1886,14 +1904,27 @@ class DeviceVCDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 status=200,
             )
 
-        # Preview the master the way import will match it: with the matched DeviceType's rules.
+        from netbox_librenms_plugin.models import RuleConfigurationError
+
+        # Preview the stack the way import will prepare it: for the matched DeviceType, under the row's naming.
         match = match_import_device_type(libre_device, self.librenms_api)
         device_type = effective_import_device_type(match.get("device_type") if match and match["matched"] else None)
-        vc_data = vc_master_view(
-            get_virtual_chassis_data(self.librenms_api, device_id),
-            libre_device.get("serial"),
-            vc_serial_key(getattr(device_type, "manufacturer", None)),
+        use_sysname, strip_domain = resolve_naming_preferences(request)
+        master_name, _source = _resolve_device_name(
+            libre_device, use_sysname=use_sysname, strip_domain=strip_domain, device_id=libre_device.get("device_id")
         )
+        serial_rules = SerialRules.load()
+        detected = get_virtual_chassis_data(self.librenms_api, device_id, serial_rules=serial_rules)
+        try:
+            vc_data = prepare_virtual_chassis(
+                detected,
+                device_type=device_type,
+                master_name=master_name,
+                device_serial=libre_device.get("serial"),
+                serial_rules=serial_rules,
+            )
+        except (VCNumberingError, RuleConfigurationError) as exc:
+            vc_data = unnumbered_virtual_chassis(detected, numbering_refusal_text(exc))
 
         context = {
             "libre_device": libre_device,
@@ -2023,15 +2054,18 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
     @staticmethod
     def _build_sync_info(libre_device, existing_device, actor):
         """Build sync comparison data between LibreNMS device and existing NetBox device."""
-        # Trimmed so a padded LibreNMS serial doesn't report drift against the stored trimmed value.
-        librenms_serial = normalize_serial(libre_device.get("serial")) or "-"
+        librenms_serial = display(libre_device.get("serial")) or "-"
         librenms_os = libre_device.get("os") or "-"
         librenms_hardware = libre_device.get("hardware") or "-"
 
-        # Serial comparison (VMs may not have serial in all NetBox versions). The stored side
-        # is normalized too, so a legacy padded serial doesn't render as drift.
-        netbox_serial = normalize_serial(getattr(existing_device, "serial", None))
-        serial_synced = netbox_serial == librenms_serial or librenms_serial == "-"
+        # Serial comparison; a VM has no serial, so nothing compares for it.
+        serial_synced = True
+        if existing_device._meta.model_name == "device":
+            serial_context = SerialRules.load().for_device(existing_device)
+            serial_synced = (
+                not is_identity(libre_device.get("serial"), serial_context)
+                or compare(existing_device.serial, libre_device.get("serial"), serial_context) is Comparison.SAME
+            )
 
         # Platform comparison
         platform_assessment = assess_platform(
@@ -2263,8 +2297,19 @@ class DeviceConflictActionView(
         # object tables. The target-row lock separately preserves concurrent changes to the
         # object receiving the mapping.
         if action in {"link", "update", "update_serial"}:
-            with transaction.atomic():
+            with atomic_with_events():
                 server_key = self.librenms_api.server_key
+                writes_serial = action != "link" and existing_model is Device
+                serial_matched = existing_model is Device and validation.get("existing_match_type") == "serial"
+                serial_rules = SerialRules.load()
+                # A forced DeviceType change decides the identity of the stored serials too.
+                retyped = retype_scope(existing_device) if librenms_device_type and existing_model is Device else None
+                lock_serials = [libre_device.get("serial")] if writes_serial or serial_matched else []
+                # The serial identity locks come before the claim and the row lock.
+                if retyped is not None:
+                    retype_lock(retyped, rules=serial_rules, serials=lock_serials)
+                elif lock_serials:
+                    assignment_lock(lock_serials, model=Device, rules=serial_rules)
                 existing_device, lock_error = _lock_librenms_id_assignment_target(
                     self,
                     existing_model,
@@ -2274,6 +2319,10 @@ class DeviceConflictActionView(
                 )
                 if lock_error is not None:
                     return lock_error
+                if serial_matched and not is_sole_holder(
+                    existing_device, libre_device.get("serial"), rules=serial_rules
+                ):
+                    return _htmx_error_response(_SERIAL_MATCH_LOST)
 
                 # Reject legacy bare-int/string librenms_id: the builders skip a legacy value,
                 # which would leave the device partially updated. User must run "Convert mapping"
@@ -2310,6 +2359,8 @@ class DeviceConflictActionView(
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
                         fields.append("device_type")
+                    if err := _retype_refusal(existing_device, librenms_device_type, serial_rules, retyped):
+                        return err
                     if err := _save_device(
                         existing_device, update_fields=fields, request=request, mapping=mapping_change
                     ):
@@ -2319,45 +2370,56 @@ class DeviceConflictActionView(
                 elif action == "update":
                     # Update hostname, serial, and link to LibreNMS
                     hostname = _get_hostname_for_action(request, validation, libre_device)
-                    # Trimmed like validate/import_single_device, so the stored value and the
-                    # conflict lookup can't disagree with the match paths on whitespace.
-                    incoming_serial = normalize_serial(libre_device.get("serial")) if existing_model is Device else None
+                    incoming_serial = libre_device.get("serial")
                     fields = ["name"]
-                    if incoming_serial and incoming_serial != "-":
-                        if err := _apply_conflict_checked_serial(existing_device, incoming_serial, request.user):
-                            return err
-                        fields.append("serial")
-                    existing_device.name = hostname
+                    # The new type first: the serial is decided under the manufacturer the row will have.
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
                         fields.append("device_type")
+                    if writes_serial:
+                        err, changed = _apply_conflict_checked_serial(
+                            existing_device, incoming_serial, request.user, serial_rules
+                        )
+                        if err:
+                            return err
+                        if changed:
+                            fields.append("serial")
+                    existing_device.name = hostname
+                    if err := _retype_refusal(existing_device, librenms_device_type, serial_rules, retyped):
+                        return err
                     if err := _save_device(
                         existing_device, update_fields=fields, request=request, mapping=mapping_change
                     ):
                         return err
                     logger.info(
-                        f"Updated device '{existing_device.name}': serial={incoming_serial}, "
+                        f"Updated device '{existing_device.name}': serial={display(incoming_serial)}, "
                         f"linked to LibreNMS ID {librenms_id}"
                     )
 
                 elif action == "update_serial":
                     # Update only the serial and link to LibreNMS
-                    # Trimmed like validate/import_single_device (see the update branch above).
-                    incoming_serial = normalize_serial(libre_device.get("serial"))
+                    incoming_serial = libre_device.get("serial")
                     fields = []
-                    if incoming_serial and incoming_serial != "-":
-                        if err := _apply_conflict_checked_serial(existing_device, incoming_serial, request.user):
-                            return err
-                        fields.append("serial")
+                    # The new type first: the serial is decided under the manufacturer the row will have.
                     if librenms_device_type:
                         existing_device.device_type = librenms_device_type
                         fields.append("device_type")
+                    if writes_serial:
+                        err, changed = _apply_conflict_checked_serial(
+                            existing_device, incoming_serial, request.user, serial_rules
+                        )
+                        if err:
+                            return err
+                        if changed:
+                            fields.append("serial")
+                    if err := _retype_refusal(existing_device, librenms_device_type, serial_rules, retyped):
+                        return err
                     if err := _save_device(
                         existing_device, update_fields=fields, request=request, mapping=mapping_change
                     ):
                         return err
                     logger.info(
-                        f"Updated serial on device '{existing_device.name}' to {incoming_serial}, "
+                        f"Updated serial on device '{existing_device.name}' to {display(incoming_serial)}, "
                         f"linked to LibreNMS ID {librenms_id}"
                     )
 
@@ -2372,37 +2434,38 @@ class DeviceConflictActionView(
         elif action == "update_type":
             # Update device type from LibreNMS (requires force for mismatch)
             if librenms_device_type:
-                existing_device.device_type = librenms_device_type
-                if err := _save_device(existing_device, update_fields=["device_type"], request=request):
+                if err := _save_retyped_device(existing_device, librenms_device_type, request):
                     return err
                 logger.info(f"Updated device type on '{existing_device.name}' to {librenms_device_type}")
             else:
                 return _htmx_error_response("No LibreNMS device type available to update")
 
         elif action == "sync_serial":
-            # Sync serial number from LibreNMS.
-            # Wrap conflict-check-and-write in a transaction with a row lock so
-            # concurrent requests cannot both pass the serial uniqueness guard.
-            # Trimmed like validate/import_single_device (see the update branch above).
-            incoming_serial = normalize_serial(libre_device.get("serial"))
-            if incoming_serial and incoming_serial != "-":
-                with transaction.atomic():
-                    try:
-                        locked_device = (
-                            self.restricted_queryset(Device, "change")
-                            .select_for_update(of=("self",))
-                            .get(pk=existing_device.pk)
-                        )
-                    except Device.DoesNotExist:
-                        return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
-                    # Re-check for serial ownership conflict under the locks, on the LOCKED row.
-                    if err := _apply_conflict_checked_serial(locked_device, incoming_serial, request.user):
-                        return err
+            # Sync serial number from LibreNMS: the serial identity locks, then the row lock, then
+            # the conflict check on the LOCKED row, so concurrent requests cannot both pass it.
+            incoming_serial = libre_device.get("serial")
+            with atomic_with_events():
+                serial_rules = SerialRules.load()
+                assignment_lock([incoming_serial], model=Device, rules=serial_rules)
+                try:
+                    locked_device = (
+                        self.restricted_queryset(Device, "change")
+                        .select_for_update(of=("self",))
+                        .get(pk=existing_device.pk)
+                    )
+                except Device.DoesNotExist:
+                    return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
+                if not is_identity(incoming_serial, serial_rules.for_device(locked_device)):
+                    return _htmx_error_response("No valid serial from LibreNMS")
+                err, changed = _apply_conflict_checked_serial(
+                    locked_device, incoming_serial, request.user, serial_rules
+                )
+                if err:
+                    return err
+                if changed:
                     if err := _save_device(locked_device, update_fields=["serial"], request=request):
                         return err
-                    logger.info(f"Synced serial on '{locked_device.name}' to {incoming_serial}")
-            else:
-                return _htmx_error_response("No valid serial from LibreNMS")
+                    logger.info(f"Synced serial on '{locked_device.name}' to {display(incoming_serial)}")
 
         elif action == "sync_platform":
             facts = PlatformFacts.from_librenms(libre_device.get("os"), libre_device.get("version"))
@@ -2429,8 +2492,7 @@ class DeviceConflictActionView(
             hardware = libre_device.get("hardware") or ""
             hw_match = match_librenms_hardware_to_device_type(hardware)
             if hw_match and hw_match.get("matched"):
-                existing_device.device_type = hw_match["device_type"]
-                if err := _save_device(existing_device, update_fields=["device_type"], request=request):
+                if err := _save_retyped_device(existing_device, hw_match["device_type"], request):
                     return err
                 logger.info(f"Synced device type on '{existing_device.name}' to {hw_match['device_type']}")
             else:
@@ -2460,8 +2522,13 @@ class DeviceConflictActionView(
                 return _htmx_error_response(
                     "Serial number not confirmed. Check the force checkbox to migrate without serial verification."
                 )
-            with transaction.atomic():
+            with atomic_with_events():
                 server_key = self.librenms_api.server_key
+                serial_verified = not force and existing_model is Device
+                serial_rules = SerialRules.load()
+                if serial_verified:
+                    # The serial identity locks come before the claim and the row lock.
+                    assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
                 locked_device, lock_error = _lock_librenms_id_assignment_target(
                     self,
                     existing_model,
@@ -2471,6 +2538,14 @@ class DeviceConflictActionView(
                 )
                 if lock_error is not None:
                     return lock_error
+                # The locked row must be the one Device that holds the serial, also among rows the user cannot see.
+                if serial_verified and not is_sole_holder(
+                    locked_device, libre_device.get("serial"), rules=serial_rules
+                ):
+                    return _htmx_error_response(
+                        "Serial number not confirmed: the device does not hold the LibreNMS serial, or another "
+                        "device holds it too. Check the force checkbox to migrate without serial verification."
+                    )
                 # Re-check under lock — another request may have already migrated it
                 locked_legacy = read_mapping(locked_device).legacy
                 if not locked_legacy.is_legacy:
@@ -2979,6 +3054,9 @@ class AddAsOOBView(
         oob_ip_str = oob_candidate.get("ip") or None
 
         with transaction.atomic():
+            # The OOB candidate is a serial match: the serial identity lock comes before the claim and the row lock.
+            serial_rules = SerialRules.load()
+            assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
             try:
                 sync_device, id_conflict = lock_librenms_id_assignment(
                     librenms_id,
@@ -3004,6 +3082,8 @@ class AddAsOOBView(
                     f"LibreNMS device #{librenms_id} is already assigned to {object_label} "
                     f"'{conflict_name}'; refresh and retry."
                 )
+            if not is_sole_holder(existing_device, libre_device.get("serial"), rules=serial_rules):
+                return _htmx_error_response(_SERIAL_MATCH_LOST)
 
             # Re-verify the legacy gate on the LOCKED row (mirrors DeviceConflictActionView's
             # post-lock gate): a legacy bare-int written between the unlocked check above and
@@ -3627,6 +3707,14 @@ class PromoteToHostView(
             )
 
         with transaction.atomic():
+            # The promotion rests on a serial match: the serial identity lock comes before the claim and the row lock.
+            # A type override decides the identity of the stored serials too.
+            serial_rules = SerialRules.load()
+            retyped = retype_scope(existing_device) if override_device_type else None
+            if retyped is not None:
+                retype_lock(retyped, rules=serial_rules, serials=[libre_device.get("serial")])
+            else:
+                assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
             existing_device, lock_error = _lock_librenms_id_assignment_target(
                 self,
                 Device,
@@ -3636,6 +3724,8 @@ class PromoteToHostView(
             )
             if lock_error is not None:
                 return lock_error
+            if not is_sole_holder(existing_device, libre_device.get("serial"), rules=serial_rules):
+                return _htmx_error_response(_SERIAL_MATCH_LOST)
             locked_mapping = read_mapping(existing_device)
             if locked_mapping.legacy.is_legacy:
                 return _htmx_error_response(
@@ -3673,6 +3763,8 @@ class PromoteToHostView(
             if override_device_type and existing_device.device_type_id != override_device_type.pk:
                 existing_device.device_type = override_device_type
                 update_fields.append("device_type")
+                if err := _retype_refusal(existing_device, override_device_type, serial_rules, retyped):
+                    return err
             if override_platform and existing_device.platform_id != override_platform.pk:
                 existing_device.platform = override_platform
                 update_fields.append("platform")
@@ -3774,6 +3866,8 @@ class MergeNetBoxDevicesView(
         if winner_pk not in candidate_pks or len(candidate_pks) != 2:
             return _htmx_error_response("winner_pk does not match the validation result's merge candidates")
         donor_pk = next(pk for pk in candidate_pks if pk != winner_pk)
+        # The "oob_named" candidate is the one that holds the serial, apart from the hostname match.
+        serial_peer_pk = coerce_positive_int((validation["merge_candidates"].get("oob_named") or {}).get("pk"))
 
         # Permission gate: user must be able to change BOTH devices. Model-level first, then
         # object-scoped: the gate below passes for a constrained grant, so both sides must be
@@ -3816,6 +3910,8 @@ class MergeNetBoxDevicesView(
             # it from unlocked rows would let a concurrent VC edit (a member joining/leaving, or the
             # id moving between members) shift the sync member to a row we never locked — splitting
             # the link across the VC. Non-VC merges add no members, so they lock the same two rows.
+            serial_rules = SerialRules.load()
+            assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
             try:
                 lock_pks = {winner.pk, donor.pk}
                 for candidate in (winner, donor):
@@ -3835,6 +3931,14 @@ class MergeNetBoxDevicesView(
             locked_by_pk = {d.pk: d for d in locked}
             winner = locked_by_pk[winner.pk]
             donor = locked_by_pk[donor.pk]
+            hostname_match_pk = winner.pk if serial_peer_pk == donor.pk else donor.pk
+            if serial_peer_pk not in (winner.pk, donor.pk) or not is_sole_holder(
+                locked_by_pk[serial_peer_pk],
+                libre_device.get("serial"),
+                rules=serial_rules,
+                exclude_pks=[hostname_match_pk],
+            ):
+                return _htmx_error_response(_SERIAL_MATCH_LOST)
 
             # Resolve the sync devices from the now-locked, current state.
             try:

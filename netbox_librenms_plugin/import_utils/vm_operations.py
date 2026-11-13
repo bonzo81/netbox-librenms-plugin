@@ -23,6 +23,7 @@ from ..server_mappings import (
     lock_librenms_id_assignment,
     persist_mapping,
 )
+from ..serial_identity import SerialRules
 from ..utils import exception_text_for
 from .bulk_import import _is_job_cancelled
 from .device_operations import (
@@ -255,6 +256,7 @@ def bulk_import_vms(
     # Resolve options once before the loop — they do not change per-VM
     use_sysname_opt = sync_options.get("use_sysname", True) if sync_options else True
     strip_domain_opt = sync_options.get("strip_domain", False) if sync_options else False
+    serial_rules = SerialRules.load()
 
     for idx, vm_id in enumerate(vm_ids, start=1):
         # Check for job cancellation before first VM and every 5 thereafter
@@ -285,6 +287,7 @@ def bulk_import_vms(
                 use_sysname=use_sysname_opt,
                 strip_domain=strip_domain_opt,
                 server_key=api.server_key,
+                serial_rules=serial_rules,
             )
 
             # Check if VM already exists

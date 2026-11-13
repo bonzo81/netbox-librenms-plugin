@@ -133,6 +133,57 @@ def render_module_tab(device, *, user=None, server_key="default"):
     return view.render_sync_partial(request, device, context["server_key"], {"module_sync": context}).content.decode()
 
 
+class _SyncTabParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.containers = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "div" and attrs.get("id") == "librenms-sync-tabs":
+            self.containers.append(attrs)
+
+
+def sync_tab_attributes(html):
+    """Return the attributes of the one rendered sync container."""
+    parser = _SyncTabParser()
+    parser.feed(str(html))
+    parser.close()
+    assert len(parser.containers) == 1
+    return parser.containers[0]
+
+
+class _TitledIconParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.icons = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "i" and "title" in attrs:
+            self.icons.append(attrs)
+
+
+def titled_icons(html):
+    """Return the attributes of each ``<i>`` with a title, after one HTML unescape."""
+    parser = _TitledIconParser()
+    parser.feed(str(html))
+    parser.close()
+    return parser.icons
+
+
+def assert_titled_icons_are_named(html):
+    """Assert each titled icon is an image named by its title, or hidden beside text; return the icons."""
+    icons = titled_icons(html)
+    assert icons, "the markup has no titled icon"
+    for attrs in icons:
+        if attrs.get("aria-hidden") == "true":
+            continue
+        assert attrs.get("role") == "img", attrs
+        assert attrs.get("aria-label") == attrs["title"], attrs
+    return icons
+
+
 class _ModuleTabParser(HTMLParser):
     """Collect the forms, the hx-get controls and the member selects of a rendered Modules tab."""
 
@@ -325,13 +376,16 @@ def missing_pk(model, offset=1000):
 
 def trusted_module_inventory_payload(device, inventory, *, server_key="default", librenms_id=1):
     """Build a module inventory payload bound to the device's verified current LibreNMS mapping."""
+    from netbox_librenms_plugin.serial_identity import SerialRules
     from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
     from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 
     seed_mapping(device, server_key, own=librenms_id)
     # cf is a cached_property over the applicable custom fields: drop it so the next read sees the write.
     device.__dict__.pop("cf", None)
-    return module_inventory_cache_payload(inventory, librenms_id, None)
+    return module_inventory_cache_payload(
+        inventory, librenms_id, None, serial_context=SerialRules.load().for_device(device)
+    )
 
 
 def assert_locked_before_update(captured, table):

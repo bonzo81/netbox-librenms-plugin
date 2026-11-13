@@ -16,6 +16,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
 from netbox_librenms_plugin.tests.view_test_helpers import (
+    assert_titled_icons_are_named,
     assert_update_logged,
     change_logging,
     get as view_get,
@@ -105,18 +106,17 @@ class TestModuleMismatchPreviewView:
         inventory = [_row(100, bay, librenms_model or module_type.model, serial)]
         return device, installed, request, view, inventory
 
-    def test_the_preview_shows_the_serial_without_the_vendor_marker(self):
+    def test_the_preview_shows_the_librenms_serial_and_no_mismatch_for_a_legacy_stored_form(self):
         """
-        Juniper reports "S/N NS123"; the install path stores "NS123" through the serial rules.
+        Juniper reports "S/N NS123"; an older release stored the rule output "NS123".
 
-        Rendering the raw value beside the stored one reads as a mismatch against a module that
-        already agrees with its own inventory row.
+        The serial rules name one part with both texts, so the preview is no serial mismatch.
         """
         from dcim.models import Module
 
         device, installed, request, view, inventory = self._setup("marker", installed_serial="OLD", serial="S/N NS123")
         cache_key = _cache_preview(view, device, inventory, request)
-        # Another writer stores the clean serial after the page renders, so the module agrees with its row.
+        # The legacy stored form lands after the page renders, so the module agrees with its row.
         Module.objects.filter(pk=installed.pk).update(serial="NS123")
         try:
             response = view_get(view, request, pk=device.pk)
@@ -125,10 +125,21 @@ class TestModuleMismatchPreviewView:
 
         html = response.content.decode()
         assert response.status_code == 200
-        assert "S/N NS123" not in html
-        assert "NS123" in html
+        assert "S/N NS123" in html
         # The reported symptom: the row read as a serial mismatch against itself.
         assert "Only the serial differs" not in html
+
+    def test_the_recognised_type_icon_is_named(self):
+        device, installed, request, view, inventory = self._setup("named-icon")
+        cache_key = _cache_preview(view, device, inventory, request)
+        try:
+            response = view_get(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 200
+        icons = assert_titled_icons_are_named(response.content.decode())
+        assert any("mdi-check-decagram" in icon["class"] for icon in icons)
 
     def test_the_preview_refuses_an_oob_row_named_with_the_grant_of_a_host_row(self):
         """OOB-controller inventory renders no Replace button, so a crafted index for it carries another row's grant."""
@@ -279,8 +290,8 @@ class TestReplaceModuleView:
         request = make_request("post", fields, user=user)
         return request, _view(ReplaceModuleView, request), cache_key
 
-    def test_the_replacement_stores_the_serial_without_the_vendor_marker(self):
-        """The stored serial must match what the install path writes for the same inventory row."""
+    def test_the_replacement_stores_the_librenms_text(self):
+        """The replacement stores what the install path writes for the same inventory row: the LibreNMS text."""
         Module, device, _old_type, _new_type, bay, _installed, inventory = self._setup("marker", new_serial="S/N NS123")
         request, view, cache_key = self._post(device, inventory)
         try:
@@ -289,7 +300,7 @@ class TestReplaceModuleView:
             cache.delete(cache_key)
 
         assert response.status_code == 302
-        assert Module.objects.get(device=device, module_bay=bay).serial == "NS123"
+        assert Module.objects.get(device=device, module_bay=bay).serial == "S/N NS123"
 
     def test_a_database_error_in_the_bind_keeps_the_replacement(self):
         """The bind's own savepoint takes a real PostgreSQL error; the replacement still commits."""
@@ -314,9 +325,10 @@ class TestReplaceModuleView:
         assert interface.module_id is None
         assert any("interface binding was skipped: unexpected error" in text for text in message_texts(request))
 
-    def test_a_rule_that_leaves_padding_still_stores_a_clean_serial(self):
-        """A serial rule is operator-written, so it can drop a prefix and leave the space behind."""
+    def test_a_rule_that_leaves_padding_still_keys_the_stored_serial(self):
+        """A serial rule is operator-written, so it can drop a prefix and leave the space behind; the key is trimmed."""
         from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import resolve_module
 
         NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
         NormalizationRule.objects.create(
@@ -332,7 +344,9 @@ class TestReplaceModuleView:
         finally:
             cache.delete(cache_key)
 
-        assert Module.objects.get(device=device, module_bay=bay).serial == "NS123"
+        stored = Module.objects.get(device=device, module_bay=bay)
+        assert stored.serial == "S/N NS123"
+        assert resolve_module("NS123").object == stored
 
     def test_an_oob_row_named_with_the_grant_of_a_host_row_cannot_replace_the_module(self):
         """A crafted POST naming an OOB row's index deleted the real module; the grant now names the host row only."""
@@ -616,6 +630,50 @@ class TestMoveModuleView:
         assert message_texts(response.wsgi_request) == [TRY_AGAIN_MESSAGE]
         moving.refresh_from_db()
         assert moving.device == source_device
+
+    @pytest.mark.skipif(not netbox_relocates_module_subtree(), reason="NetBox moves a module from 4.7.")
+    @pytest.mark.parametrize("holder", ["destination-module", "moved-child"])
+    def test_a_move_refuses_a_subtree_serial_that_the_destination_rules_give_a_held_identity(self, client, holder):
+        """The destination's maker keys the moved child "XABC" to "ABC", which a destination module or a moved child stores."""
+        from dcim.models import Device, DeviceType, Manufacturer, ModuleBay
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        tag = f"move-identity-{holder}"
+        source_device, target_device = make_device(f"{tag}-source"), make_device(f"{tag}-target")
+        target_maker = Manufacturer.objects.create(name=f"Move identity {holder}", slug=f"{tag}-maker")
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=target_maker
+        )
+        target_type = DeviceType.objects.create(
+            manufacturer=target_maker, model=f"Move identity {holder}", slug=f"{tag}-type"
+        )
+        Device.objects.filter(pk=target_device.pk).update(device_type=target_type)
+        target_device.refresh_from_db()
+        module_type = make_module_type(f"{tag}-card".upper())
+        parent = _module(source_device, make_module_bay(source_device, "Source Bay"), module_type, "ROOT123")
+        children = ["XABC", "ABC"] if holder == "moved-child" else ["XABC"]
+        for number, serial in enumerate(children, start=1):
+            bay = ModuleBay.objects.create(device=source_device, module=parent, name=f"Sub {number}")
+            _module(source_device, bay, module_type, serial)
+        if holder == "destination-module":
+            _module(target_device, make_module_bay(target_device, "Held Bay"), module_type, "ABC")
+        target_bay = make_module_bay(target_device, "Target Bay")
+        client.force_login(make_superuser(f"{tag}-user"))
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:move_module", kwargs={"pk": target_device.pk}),
+            {
+                "conflict_module_id": str(parent.pk),
+                "target_bay_id": str(target_bay.pk),
+                "selected_device_id": str(target_device.pk),
+            },
+        )
+
+        assert response.status_code == 302
+        parent.refresh_from_db()
+        assert parent.device == source_device
 
     def test_real_permission_gate_rejects_a_user_without_change_scope(self):
         from dcim.models import Device

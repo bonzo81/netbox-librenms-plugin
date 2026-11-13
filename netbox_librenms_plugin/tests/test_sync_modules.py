@@ -19,6 +19,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_module_type,
     make_superuser,
     make_virtual_chassis,
+    stack_inventory,
     transactional_db_with_all_apps,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
@@ -105,8 +106,8 @@ class TestInstallSerialRulePreloading:
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
 
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
-        from netbox_librenms_plugin.utils import preload_normalization_rules
 
         module_type = make_module_type("WS-X4748")
         device = make_device("install-serial-rules-dev")
@@ -116,17 +117,16 @@ class TestInstallSerialRulePreloading:
             self._install_two_items(device, first_bays, module_type)
 
         # Two items, so the unpreloaded path reads the rule table more than once.
-        assert len(self._rule_queries(per_item)) > 2, self._rule_queries(per_item)
+        assert len(self._rule_queries(per_item)) >= 2, self._rule_queries(per_item)
 
         other = make_device("install-serial-rules-dev-2")
         second_bays = [make_module_bay(other, "Slot 1"), make_module_bay(other, "Slot 2")]
 
         with CaptureQueriesContext(connection) as preloaded:
-            rules = preload_normalization_rules("serial", manufacturer=other.device_type.manufacturer)
-            self._install_two_items(other, second_bays, module_type, norm_rules_serial=rules)
+            self._install_two_items(other, second_bays, module_type, serial_rules=SerialRules.load())
 
-        # The preload itself reads both scopes once; the install loop then reads nothing.
-        assert len(self._rule_queries(preloaded)) == 2, self._rule_queries(preloaded)
+        # The preload itself reads the serial rules once; the install loop then reads nothing.
+        assert len(self._rule_queries(preloaded)) == 1, self._rule_queries(preloaded)
 
     def test_both_install_views_forward_the_serial_rules(self):
         """Every install loop must forward preloaded serial rules to the shared writer."""
@@ -152,7 +152,7 @@ class TestInstallSerialRulePreloading:
             ]
             assert installs, f"{view.name} must install its selected inventory"
             for install in installs:
-                assert "norm_rules_serial" in {keyword.arg for keyword in install.keywords}
+                assert "serial_rules" in {keyword.arg for keyword in install.keywords}
 
 
 pytestmark = pytest.mark.django_db
@@ -1412,6 +1412,7 @@ class TestInstallAndUpdateViews:
             device.virtual_chassis = vc
             device.vc_position = position
             device.save()
+        VirtualChassis.objects.filter(pk=vc.pk).update(master=page)
         seed_stored_mapping(page, {"default": {"id": 77}}, save=True)
         module_type = ModuleType.objects.create(manufacturer=member_mfr, model="TargetRulesModule")
         # Scoped to the MEMBER's manufacturer, so only a target-resolved lookup finds it.
@@ -1427,7 +1428,7 @@ class TestInstallAndUpdateViews:
         view, request = _rendered_post(
             InstallSelectedView,
             page,
-            [item],
+            stack_inventory([item], [page, member]),
             77,
             live_librenms,
             "install-selected",
@@ -1461,6 +1462,7 @@ class TestInstallAndUpdateViews:
             device.virtual_chassis = vc
             device.vc_position = position
             device.save()
+        VirtualChassis.objects.filter(pk=vc.pk).update(master=page)
         seed_stored_mapping(page, {"default": {"id": 78}}, save=True)
         module_type = ModuleType.objects.create(manufacturer=member_mfr, model="AncestorRulesOptic")
         # Scoped to the member's vendor: the serial-less parent stays with the page member, its child goes to the member.
@@ -1472,10 +1474,13 @@ class TestInstallAndUpdateViews:
             require_serial_match_parent=False,
             manufacturer=member_mfr,
         )
-        rows = [
-            _inventory_item(100, "ANCESTOR-PAGE-CARD", "Card A"),
-            _inventory_item(101, module_type.model, "Optic B", parent=100, serial="SN-MEMBER"),
-        ]
+        rows = stack_inventory(
+            [
+                _inventory_item(100, "ANCESTOR-PAGE-CARD", "Card A"),
+                _inventory_item(101, module_type.model, "Optic B", parent=100, serial="SN-MEMBER"),
+            ],
+            [page, member],
+        )
         table_indexes = {row["ent_physical_index"] for row in _run_build_context_real(_make_view(), rows, page)}
         view, request = _rendered_post(
             InstallSelectedView,
@@ -2347,6 +2352,34 @@ class TestVirtualChassisInterfaceNormalization:
         interface.refresh_from_db()
         assert interface.name == "Te1/1/4"
 
+    def test_a_skipped_removal_queues_no_delete_event(self):
+        """NetBox queues a delete event before the DELETE runs; the skipped removal must not send it."""
+        from uuid import uuid4
+
+        from dcim.models import Interface
+        from netbox.context import current_request, events_queue
+
+        from netbox_librenms_plugin.views.sync.modules import _normalize_module_interface_names_for_vc_member
+
+        device, module, interface = self._member_module_interface("normalize-event", "Te1/1/5")
+        make_interface(device, "Te2/1/5")
+        request = make_request("post", user=make_superuser("normalize-event-user"))
+        request.id = uuid4()
+        request_token, queue_token = current_request.set(request), events_queue.set({})
+        try:
+            with failing_statement(lambda sql, params: sql.startswith('DELETE FROM "dcim_interface"'), "23503"):
+                result = _normalize_module_interface_names_for_vc_member(
+                    device, module, Interface.objects.all(), Interface.objects.all()
+                )
+            queued = {(event["object_type"].model, event["object_id"]) for event in events_queue.get().values()}
+        finally:
+            current_request.reset(request_token)
+            events_queue.reset(queue_token)
+
+        assert result["skipped"] == 1
+        assert Interface.objects.filter(pk=interface.pk).exists()
+        assert ("interface", interface.pk) not in queued
+
     @pytest.mark.parametrize(
         ("counts", "expected"),
         [
@@ -2904,9 +2937,8 @@ def test_existing_bay_mapping_rejects_unavailable_targets(client, target):
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("raw_serial, expected", [("S/N SERIAL123", "SERIAL123"), ("00123", "0123")])
-def test_preview_and_replace_normalize_cached_serial_once(client, raw_serial, expected):
-    """Preview and replacement must interpret raw cached serials like installation."""
+def test_preview_and_replace_compare_under_the_rules_and_store_the_librenms_text(client):
+    """A legacy stored rule output names the hardware of the cached serial; the replacement stores the LibreNMS text."""
     from dcim.models import Module
     from django.core.cache import cache
 
@@ -2914,9 +2946,9 @@ def test_preview_and_replace_normalize_cached_serial_once(client, raw_serial, ex
     from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type, make_superuser
     from netbox_librenms_plugin.views.mixins import CacheMixin
 
+    raw_serial, legacy = "S/N SERIAL123", "SERIAL123"
     NormalizationRule.objects.filter(scope="serial").delete()
     NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
-    NormalizationRule.objects.create(scope="serial", match_pattern=r"^0(.*)$", replacement=r"\1")
     device = make_device("serial-normalization")
     module_type = make_module_type("serial-card", manufacturer=device.device_type.manufacturer)
     bay = make_module_bay(device, "Slot 1")
@@ -2940,16 +2972,16 @@ def test_preview_and_replace_normalize_cached_serial_once(client, raw_serial, ex
     user = make_superuser()
     client.force_login(user)
     preview_url = rendered_preview_url(render_module_tab(device, user=user), 100)
-    # The row reads as installed once normalized, so the stored serial lands after the page renders.
-    Module.objects.filter(pk=installed.pk).update(serial=expected)
+    # An older release stored the rule output; it lands after the page renders, as an external edit does.
+    Module.objects.filter(pk=installed.pk).update(serial=legacy)
     preview = client.get(preview_url)
     assert preview.status_code == 200
-    assert preview.context["librenms_serial"] == expected
+    assert preview.context["librenms_serial"] == raw_serial
     assert preview.context["serial_mismatch"] is False
     replace_url, replace_fields = rendered_module_form(preview.content.decode(), "replace-module", 100)
     response = client.post(replace_url, replace_fields)
     assert response.status_code == 302
-    assert Module.objects.get(module_bay=bay).serial == expected
+    assert Module.objects.get(module_bay=bay).serial == raw_serial
     assert cache.get(key)["inventory"][0]["entPhysicalSerialNum"] == raw_serial
 
 
@@ -2959,7 +2991,7 @@ def test_preview_and_replace_normalize_cached_serial_once(client, raw_serial, ex
     [("install_branch", False), ("install_selected", False), ("install_selected", True)],
 )
 def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint, mixed_manufacturers):
-    """A batch must normalize every serial without querying rules for every item."""
+    """A batch compares every serial without querying rules for every item, and stores the LibreNMS text."""
     from dcim.models import Manufacturer, Module, VirtualChassis
     from django.core.cache import cache
     from django.db import connection
@@ -2992,7 +3024,7 @@ def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint,
             scope="serial",
             manufacturer=member.device_type.manufacturer,
             match_pattern=r"^S/N (.+)$",
-            replacement=r"MEMBER-\1",
+            replacement=r"\1",
         )
     rows = [
         {
@@ -3016,8 +3048,13 @@ def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint,
         for number in (1, 2, 3)
     )
     if member is not None:
-        # The position attributes the slot to the member, so the table renders it there.
-        rows[2]["entPhysicalParentRelPos"] = member.vc_position
+        # The stack's member rows give Slot 2 to the member, so the table renders it there.
+        rows.extend(
+            {"entPhysicalIndex": index, "entPhysicalContainedIn": 1, "entPhysicalClass": "chassis", **position}
+            for index, position in ((10, {"entPhysicalParentRelPos": 1}), (11, {"entPhysicalParentRelPos": 2}))
+        )
+        for row, chassis_index in zip(rows[1:4], (10, 11, 10), strict=True):
+            row["entPhysicalContainedIn"] = chassis_index
     cache.set(
         CacheMixin().get_cache_key(device, "inventory", "default"), trusted_module_inventory_payload(device, rows)
     )
@@ -3032,20 +3069,19 @@ def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint,
     with CaptureQueriesContext(connection) as queries:
         response = client.post(reverse(f"plugins:netbox_librenms_plugin:{endpoint}", args=[device.pk]), data)
     assert response.status_code == 302
-    expected = {"BATCH-1", "BATCH-3"}
+    expected = {"S/N BATCH-1", "S/N BATCH-3"}
     if member is None:
-        expected.add("BATCH-2")
+        expected.add("S/N BATCH-2")
     else:
-        assert Module.objects.get(device=member).serial == "MEMBER-BATCH-2"
+        assert Module.objects.get(device=member).serial == "S/N BATCH-2"
     assert set(Module.objects.filter(device=device).values_list("serial", flat=True)) == expected
     serial_queries = [
         query["sql"]
         for query in queries
         if "SELECT" in query["sql"] and "normalizationrule" in query["sql"] and "'serial'" in query["sql"]
     ]
-    # A preload reads the manufacturer's rules and the global rules. A mixed install preloads up to three times:
-    # once for the stack's member attribution and once for each destination manufacturer.
-    assert len(serial_queries) <= (6 if mixed_manufacturers else 2), serial_queries
+    # The inventory policy reads every serial rule once, and each decision of the request reuses it.
+    assert len(serial_queries) == 1, serial_queries
 
 
 def _install_selected(client, device, rows, select):
@@ -3313,6 +3349,7 @@ def test_a_selected_install_uses_each_members_destination_and_ignore_policy(clie
             "entPhysicalSerialNum": member.serial,
         },
     ]
+    rows = stack_inventory(rows, [page, member])
     policy_inputs = load_inventory_policy(page.pk)
     _default, contexts = BaseModuleTableView()._build_inventory_ignore_contexts(
         policy_inputs.page_device, rows, policy_inputs.vc_members, policy_inputs
@@ -3505,7 +3542,7 @@ def test_branch_install_cuts_parent_bay_lookup_at_a_member_boundary(client, tran
             require_serial_match_parent=False,
         )
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
+    cache.set(key, trusted_module_inventory_payload(page, stack_inventory(rows, [page, member])))
     user = make_superuser("branch-boundary-user")
     client.force_login(user)
     try:
@@ -3569,7 +3606,7 @@ def _member_card_under_page_carrier(*, card_on_member):
         },
     ]
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
+    cache.set(key, trusted_module_inventory_payload(page, stack_inventory(rows, [page, member])))
     return page, member, unrelated, card_type, key
 
 
@@ -3675,7 +3712,7 @@ def test_table_counts_a_bay_position_only_under_a_module_of_the_target_member(an
         },
     ]
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
+    cache.set(key, trusted_module_inventory_payload(page, stack_inventory(rows, [page, member])))
     request = make_request("get", {"server_key": "default"}, user=make_superuser("position-boundary-user"), path="/m/")
     view = DeviceModuleTableView()
     view.setup(request, pk=page.pk)
@@ -3802,7 +3839,7 @@ def test_branch_install_runs_onto_the_signed_member_until_it_leaves_the_chassis(
         },
     ]
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
+    cache.set(key, trusted_module_inventory_payload(page, stack_inventory(rows, [page, member])))
     user = make_superuser("branch-moved-user")
     fields = _rendered_fields(page, "install-branch", 2, user=user)
     assert fields["selected_device_id"] == str(member.pk)
@@ -4042,7 +4079,9 @@ def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(
         )
         selected_index = 2
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
+    cache.set(
+        key, trusted_module_inventory_payload(page, stack_inventory(rows, [page, target]) if selected_member else rows)
+    )
     user = make_superuser("selected-fresh-page-user")
     fields = _rendered_fields(page, "install-selected", user=user)
     changed = []
@@ -4224,7 +4263,7 @@ def test_an_install_waits_for_the_serial_lock_of_another_member_page_of_its_chas
         },
     ]
     key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
+    cache.set(key, trusted_module_inventory_payload(page, stack_inventory(rows, [page, member])))
     action, fields = rendered_module_form(render_module_tab(page), "install-module", 2)
     user = make_superuser("chassis-lock-user")
     held, release, holder = Event(), Event(), {}

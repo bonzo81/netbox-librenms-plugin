@@ -17,19 +17,21 @@ class TestStackKey:
 
     def test_member_serials_key_the_stack(self):
         from netbox_librenms_plugin.import_utils.bulk_import import stack_key
+        from netbox_librenms_plugin.serial_identity import plain_context
 
         members = [{"serial": "FOC2"}, {"serial": "FOC1"}]
+        context = plain_context()
 
-        assert (
-            stack_key({"members": members}, 7) == stack_key({"members": members[::-1]}, 8) == "librenms-stack-FOC1,FOC2"
-        )
+        assert stack_key({"members": members}, 7, context) == stack_key({"members": members[::-1]}, 8, context)
+        assert stack_key({"members": members}, 7, context) != stack_key({"members": members[:1]}, 7, context)
 
     def test_stacks_without_member_serials_get_distinct_keys(self):
         """A shared key would let the first such stack suppress chassis creation for every other one."""
         from netbox_librenms_plugin.import_utils.bulk_import import stack_key
+        from netbox_librenms_plugin.serial_identity import plain_context
 
-        first = stack_key({"members": [{"serial": "-"}]}, 7)
-        second = stack_key({"members": [{"serial": "-"}]}, 8)
+        first = stack_key({"members": [{"serial": "-"}]}, 7, plain_context())
+        second = stack_key({"members": [{"serial": "-"}]}, 8, plain_context())
 
         assert first != second
 
@@ -305,8 +307,9 @@ class TestBulkImportIntegration:
         from django.test.utils import CaptureQueriesContext
 
         from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices
-        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data, vc_serial_key
+        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
         from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import SerialRules
         from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
 
@@ -355,7 +358,7 @@ class TestBulkImportIntegration:
             return result, serial_reads
 
         with CaptureQueriesContext(connection) as key_queries:
-            vc_serial_key(DeviceType.objects.get(pk=prerequisites["device_type_id"]).manufacturer)
+            SerialRules.load().candidates()
         one_key_read_count = len([q for q in key_queries if table in q["sql"] and "'serial'" in q["sql"]])
         assert one_key_read_count > 0
 
@@ -363,7 +366,7 @@ class TestBulkImportIntegration:
         assert len(first["failed"]) == 3
         assert all("dcim.add_virtualchassis" in row["error"] for row in first["failed"])
         assert len(reads) == one_key_read_count
-        rule.replacement = r"changed-\1"
+        rule.match_pattern = r"^SN:\s+(.+)$"
         rule.save()
 
         second, reads = run_batch()
@@ -794,7 +797,7 @@ def test_bulk_confirmation_reuses_serial_rules_and_refreshes_them_next_request(c
     entries, batch_reads = confirm(list(rows))
     assert all(entry["validation"]["virtual_chassis"]["master_identified"] for entry in entries)
     assert batch_reads == one_key_reads > 0
-    rule.replacement = r"changed-\1"
+    rule.match_pattern = r"^SN:\s+(.+)$"
     rule.save()
     entries, batch_reads = confirm(list(rows))
     assert all(not entry["validation"]["virtual_chassis"]["master_identified"] for entry in entries)

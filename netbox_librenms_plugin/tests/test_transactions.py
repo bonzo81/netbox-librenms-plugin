@@ -31,6 +31,7 @@ from netbox_librenms_plugin.transactions import (
     classify_conflict,
     database_error_sqlstate,
     run_transaction,
+    saved_in_scope,
     update_existing_row,
 )
 from netbox_librenms_plugin.server_mappings import (
@@ -266,6 +267,238 @@ def _set_description(value):
         row.description = value
 
     return apply
+
+
+@pytest.mark.django_db
+def test_a_saved_row_is_in_scope_only_while_its_saved_state_meets_the_grant_constraint():
+    from dcim.models import Site
+
+    user = make_user_with_perms(
+        f"scope-{uuid4().hex[:8]}", [("add", Site), ("change", Site)], constraints={"description": "in"}
+    )
+    site = Site(name="saved-in-scope", slug="saved-in-scope", description="in")
+    site.save()
+    assert saved_in_scope(site, user, "add")
+    assert saved_in_scope(site, user, "change")
+
+    site.description = "out"
+    site.save()
+    assert not saved_in_scope(site, user, "add")
+    assert not saved_in_scope(site, user, "change")
+
+
+@pytest.mark.django_db
+def test_a_row_savepoint_keeps_the_events_of_a_block_that_succeeds_and_drops_those_of_one_that_fails():
+    from dcim.models import Site
+
+    from netbox_librenms_plugin.transactions import row_savepoint
+
+    class _Refused(Exception):
+        pass
+
+    with _netbox_request_context():
+        with row_savepoint():
+            kept = _site("row-savepoint-kept")
+        with pytest.raises(_Refused), row_savepoint():
+            _site("row-savepoint-dropped")
+            raise _Refused()
+
+        assert [event["object_id"] for event in _queued_events().values()] == [kept.pk]
+    assert list(Site.objects.filter(slug__startswith="row-savepoint-").values_list("slug", flat=True)) == [
+        "row-savepoint-kept"
+    ]
+
+
+@pytest.mark.django_db
+def test_an_atomic_block_marked_for_rollback_drops_its_events():
+    """A caught error leaves the block marked for rollback: Django rolls it back with no exception."""
+    from dcim.models import Site
+    from django.db import transaction
+
+    from netbox_librenms_plugin.transactions import atomic_with_events
+
+    with _netbox_request_context():
+        with atomic_with_events():
+            _site("rollback-only-dropped")
+            transaction.set_rollback(True)
+
+        assert _queued_events() == {}
+    assert not Site.objects.filter(slug="rollback-only-dropped").exists()
+
+
+@transactional_db_with_all_apps()
+def test_an_outermost_atomic_block_keeps_its_events_when_a_commit_callback_fails():
+    """The block committed, so its events stay; the failure of the callback still propagates."""
+    from dcim.models import Site
+
+    from netbox_librenms_plugin.transactions import atomic_with_events
+
+    class _CallbackFailed(Exception):
+        pass
+
+    def fail():
+        raise _CallbackFailed()
+
+    with _netbox_request_context():
+        with pytest.raises(_CallbackFailed), atomic_with_events():
+            site = _site("commit-callback-failed")
+            transaction.on_commit(fail)
+
+        assert [event["object_id"] for event in _queued_events().values()] == [site.pk]
+    assert Site.objects.filter(pk=site.pk).exists()
+
+
+def _write_site(site, description):
+    site.snapshot()
+    site.description = description
+    site.save()
+
+
+def _the_one_event(site):
+    """Return the one queued event; NetBox queues one event per object in a request."""
+    events = list(_queued_events().values())
+    assert [(event["object_type"].model, event["object_id"]) for event in events] == [("site", site.pk)]
+    return events[0]
+
+
+@pytest.mark.django_db
+def test_an_object_that_two_blocks_change_sends_one_event_with_the_first_prechange_and_the_last_postchange():
+    from core.events import OBJECT_UPDATED
+
+    from netbox_librenms_plugin.transactions import atomic_with_events
+
+    site = _site("coalesced-update")
+    with _netbox_request_context():
+        with atomic_with_events():
+            _write_site(site, "first")
+            with atomic_with_events():
+                _write_site(site, "second")
+
+        event = _the_one_event(site)
+    assert event["event_type"] == OBJECT_UPDATED
+    assert event["snapshots"]["prechange"]["description"] == ""
+    assert event["snapshots"]["postchange"]["description"] == "second"
+
+
+@pytest.mark.django_db
+def test_an_object_that_one_block_creates_and_the_next_changes_sends_one_created_event():
+    from core.events import OBJECT_CREATED
+
+    from netbox_librenms_plugin.transactions import atomic_with_events
+
+    with _netbox_request_context():
+        with atomic_with_events():
+            site = _site("coalesced-create")
+        with atomic_with_events():
+            _write_site(site, "changed after the create")
+
+        event = _the_one_event(site)
+    assert event["event_type"] == OBJECT_CREATED
+    assert event["snapshots"]["prechange"] is None
+    assert event["snapshots"]["postchange"]["description"] == "changed after the create"
+
+
+@pytest.mark.django_db
+def test_an_object_that_one_block_changes_and_the_next_deletes_sends_one_deleted_event():
+    from core.events import OBJECT_DELETED
+
+    from netbox_librenms_plugin.transactions import atomic_with_events
+
+    site = _site("coalesced-delete")
+    site_pk = site.pk
+    with _netbox_request_context():
+        with atomic_with_events():
+            _write_site(site, "changed before the delete")
+        with atomic_with_events():
+            site.delete()
+        site.pk = site_pk
+
+        event = _the_one_event(site)
+    assert event["event_type"] == OBJECT_DELETED
+    assert event["snapshots"]["prechange"]["description"] == ""
+    assert event["snapshots"]["postchange"] is None
+
+
+def _run_site_steps(name, steps, *, in_blocks):
+    """Run *steps* on one Site in one request, each in its own block or all in NetBox's queue; return its one event."""
+    from dcim.models import Site
+
+    from netbox_librenms_plugin.transactions import atomic_with_events
+
+    state = {}
+    if steps[0] != "create":
+        state["site"] = _site(name)
+
+    def run(step, number):
+        if step == "create":
+            state["site"] = Site.objects.create(pk=state.get("pk"), name=name, slug=name, description=f"step {number}")
+        elif step == "update":
+            _write_site(state["site"], f"step {number}")
+        else:
+            state["pk"] = state["site"].pk
+            state["site"].delete()
+
+    with _netbox_request_context():
+        for number, step in enumerate(steps):
+            if in_blocks:
+                with atomic_with_events():
+                    run(step, number)
+            else:
+                run(step, number)
+        events = list(_queued_events().values())
+    assert len(events) == 1
+    event = events[0]
+    prechange, postchange = event["snapshots"]["prechange"], event["snapshots"]["postchange"]
+    return (
+        event["event_type"],
+        prechange and prechange["description"],
+        postchange and postchange["description"],
+    )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "steps",
+    [("create", "update"), ("create", "delete"), ("update", "update"), ("update", "delete"), ("delete", "create")],
+)
+def test_two_blocks_that_write_one_object_coalesce_its_events_as_netbox_does_in_one_queue(steps):
+    netbox = _run_site_steps(f"netbox-{'-'.join(steps)}", steps, in_blocks=False)
+
+    assert _run_site_steps(f"blocks-{'-'.join(steps)}", steps, in_blocks=True) == netbox
+
+
+@pytest.mark.django_db
+def test_a_dropped_block_leaves_the_earlier_event_of_its_object_unchanged():
+    from core.events import OBJECT_UPDATED
+
+    from netbox_librenms_plugin.transactions import atomic_with_events
+
+    class _Refused(Exception):
+        pass
+
+    site = _site("coalesced-dropped")
+    with _netbox_request_context():
+        with atomic_with_events():
+            _write_site(site, "kept")
+        with pytest.raises(_Refused), atomic_with_events():
+            _write_site(site, "rolled back")
+            raise _Refused()
+
+        event = _the_one_event(site)
+    assert event["event_type"] == OBJECT_UPDATED
+    assert event["snapshots"]["prechange"]["description"] == ""
+    assert event["snapshots"]["postchange"]["description"] == "kept"
+
+
+@pytest.mark.django_db
+def test_a_saved_row_is_out_of_scope_for_an_action_the_user_lacks():
+    from dcim.models import Site
+
+    user = make_user_with_perms(f"scope-{uuid4().hex[:8]}", [("change", Site)])
+    site = _site("saved-without-add")
+
+    assert saved_in_scope(site, user, "change")
+    assert not saved_in_scope(site, user, "add")
 
 
 @pytest.mark.django_db
@@ -891,18 +1124,14 @@ def test_a_failing_commit_callback_is_not_retried_and_keeps_the_committed_events
 
 
 @transactional_db_with_all_apps()
-def test_a_committed_event_for_an_object_the_request_already_queued_is_kept_as_well():
-    """Two committed transactions of one request can change the same object; both events stay."""
+def test_a_committed_attempt_coalesces_its_event_with_the_event_that_the_request_already_queued():
+    """The object was created before the runner and changed in it: the request sends one created event."""
+    from core.events import OBJECT_CREATED
+
     with _netbox_request_context():
         site = _site("runner-two-transactions")
+        run_transaction(lambda: _write_site(site, "changed in the runner"))
 
-        def work():
-            site.snapshot()
-            site.description = "changed in the runner"
-            site.save()
-
-        run_transaction(work)
-        events = list(_queued_events().values())
-
-    assert len(events) == 2
-    assert events[0] is not events[1]
+        event = _the_one_event(site)
+    assert event["event_type"] == OBJECT_CREATED
+    assert event["snapshots"]["postchange"]["description"] == "changed in the runner"

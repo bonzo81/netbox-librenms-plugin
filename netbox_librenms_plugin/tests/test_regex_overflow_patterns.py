@@ -10,6 +10,7 @@ from netbox_librenms_plugin.models import (
     NormalizationRule,
     PortStackLagPattern,
     RuleConfigurationError,
+    VCMemberNumberingRule,
 )
 from netbox_librenms_plugin.utils import apply_normalization_rules, parse_librenms_location
 
@@ -79,6 +80,11 @@ def _stored(rule):
             lambda: _carrier(netbox_bay_name_pattern=OVERFLOW_PATTERN),
             "netbox_bay_name_pattern",
             lambda rule: rule._compiled_bay_name_pattern,
+        ),
+        (
+            lambda: VCMemberNumberingRule(device_type_pattern=OVERFLOW_PATTERN),
+            "device_type_pattern",
+            lambda rule: rule._compiled_device_type_pattern,
         ),
         (
             lambda: PortStackLagPattern(librenms_os="overflow", lag_name_pattern=OVERFLOW_PATTERN),

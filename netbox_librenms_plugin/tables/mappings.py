@@ -15,6 +15,7 @@ from netbox_librenms_plugin.models import (
     PlatformMapping,
     PortStackLagPattern,
     SerialSensorTypePattern,
+    VCMemberNumberingRule,
 )
 
 
@@ -433,6 +434,25 @@ class CarrierAutoInstallRuleTable(NetBoxTable):
             "description",
             "actions",
         )
+        attrs = {"class": "table table-hover table-headings table-striped"}
+
+
+class VCMemberNumberingRuleTable(NetBoxTable):
+    """Table for displaying VCMemberNumberingRule data; the id orders rules of one tier."""
+
+    id = tables.Column(verbose_name="ID", linkify=True)
+    manufacturer = tables.Column(verbose_name="Manufacturer", linkify=True)
+    device_type_pattern = tables.Column(verbose_name="Device Type Pattern")
+    numbering_mode = tables.Column(verbose_name="Numbering Mode")
+    description = tables.Column(verbose_name="Description", linkify=False)
+    actions = columns.ActionsColumn(actions=("edit", "delete"))
+
+    class Meta:
+        """Meta options for VCMemberNumberingRuleTable."""
+
+        model = VCMemberNumberingRule
+        fields = ("pk", "id", "manufacturer", "device_type_pattern", "numbering_mode", "description", "actions")
+        default_columns = fields
         attrs = {"class": "table table-hover table-headings table-striped"}
 
 

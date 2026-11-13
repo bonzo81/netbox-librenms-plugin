@@ -22,9 +22,9 @@ from netbox_librenms_plugin.data_shapes.compress import compress_recording
 from netbox_librenms_plugin.data_shapes.signature import (
     classify_novelty,
     compute_shape_signature,
-    vc_detecting_serial_key,
+    vc_detecting_context,
 )
-from netbox_librenms_plugin.import_utils.virtual_chassis import candidate_vc_serial_keys, chassis_serial_key
+from netbox_librenms_plugin.serial_identity import SerialRules
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.views.mixins import (
@@ -90,10 +90,11 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             # WITHIN one recording (that is what keeps cross-references matching), and the
             # contributor publishes this file: with the empty default salt, a sha256 of a
             # low-entropy value like a hostname is recoverable by hashing dictionary candidates.
-            serial_key = vc_detecting_serial_key(
-                recording, (chassis_serial_key(sync_device), *candidate_vc_serial_keys())
+            serial_rules = SerialRules.load()
+            serial_context = vc_detecting_context(
+                recording, (serial_rules.for_device(sync_device), *serial_rules.candidates())
             )
-            anonymized = anonymize_recording(recording, salt=secrets.token_hex(16), serial_key=serial_key)
+            anonymized = anonymize_recording(recording, salt=secrets.token_hex(16), serial_context=serial_context)
         except RuntimeError as exc:
             # capture raises on an incomplete capture (a transport failure, or an error status on a
             # required structural route such as a stale librenms_id), and anonymization raises when

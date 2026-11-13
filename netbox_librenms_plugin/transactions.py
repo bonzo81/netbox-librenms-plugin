@@ -16,12 +16,18 @@ that the read returned. It locks the row in ``pre_save``, at the point and in th
 ``update_existing_row`` writes one existing row under its row lock, and records the row's state
 before the write, so NetBox's change log has the before-state of the row. A mapping change that
 the row's ``apply`` returns is saved in the same save.
+
+NetBox object permissions constrain the state of an object after a write. ``saved_in_scope`` reads
+a row that the transaction just wrote through the user's scope, so the caller can refuse the write
+and roll it back.
 """
 
 import logging
+from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import cache
 
+from core.events import OBJECT_DELETED
 from django.core.exceptions import ValidationError
 from django.db import DatabaseError, connections, transaction
 from django.db.models import UniqueConstraint
@@ -244,17 +250,68 @@ def _run_attempt(work, connection):
             _keep_events(attempt_events)
 
 
-def _keep_events(attempt_events):
-    """Add a committed attempt's events to the enclosing queue; an event for the same object gets its own key."""
-    if not attempt_events:
+@contextmanager
+def atomic_with_events():
+    """
+    Run the block in ``transaction.atomic()``, and keep its NetBox events only when its writes stay.
+
+    A save queues its event in a Python dict, which a rollback does not undo. The block collects its
+    events in a queue of its own. They join the enclosing queue when the block commits (outermost) or
+    releases its savepoint. They are dropped on any exception, a failed commit included, and when a
+    caught error left the block marked for rollback. A commit callback that fails after the commit
+    does not drop them, as in ``run_transaction``.
+    """
+    outermost = not transaction.get_connection().in_atomic_block
+    committed = released = False
+
+    def mark_committed():
+        nonlocal committed
+        committed = True
+
+    token = events_queue.set({})
+    try:
+        with transaction.atomic():
+            if outermost:
+                # Registered first, so it runs before any callback that the block registers.
+                transaction.on_commit(mark_committed)
+            yield
+            released = not outermost and not transaction.get_rollback()
+    except BaseException:
+        _close_event_queue(token, keep=committed)
+        raise
+    _close_event_queue(token, keep=committed or released)
+
+
+def _close_event_queue(token, *, keep):
+    block_events = events_queue.get()
+    events_queue.reset(token)
+    if keep:
+        _keep_events(block_events)
+
+
+@contextmanager
+def row_savepoint():
+    """Run one row's writes in a savepoint whose NetBox events are kept only when the block succeeds."""
+    with atomic_with_events():
+        yield
+
+
+def _keep_events(block_events):
+    """
+    Add the events of a block that committed to the enclosing queue, one event per object as NetBox queues them.
+
+    For an object that the enclosing queue already holds, the newer event replaces the older one. It keeps the
+    prechange snapshot of the older event, and the older event type unless it is a delete.
+    """
+    if not block_events:
         return
     queue = events_queue.get()
-    for key, event in attempt_events.items():
-        kept_key, number = key, 1
-        while kept_key in queue:
-            number += 1
-            kept_key = f"{key}#{number}"
-        queue[kept_key] = event
+    for key, event in block_events.items():
+        if (older := queue.get(key)) is not None:
+            event["snapshots"]["prechange"] = older["snapshots"]["prechange"]
+            if event["event_type"] != OBJECT_DELETED:
+                event["event_type"] = older["event_type"]
+        queue[key] = event
 
 
 def _row_version_sql(table):
@@ -311,7 +368,7 @@ def update_existing_row(queryset, apply):
         ValidationError: The changed row is not valid.
 
     """
-    with transaction.atomic():
+    with atomic_with_events():
         row = lock_and_snapshot(queryset)
         result = apply(row)
         if result is False:
@@ -322,6 +379,26 @@ def update_existing_row(queryset, apply):
         from netbox_librenms_plugin.server_mappings import persist_mapping
 
         return persist_mapping(row, result, write=_validate_and_save)
+
+
+def saved_in_scope(obj, user, action):
+    """
+    Return whether *obj*, as this transaction saved it, is in the objects that *user* may *action*.
+
+    Call it after the write and inside the transaction of the write. On False the caller refuses
+    the write and rolls the transaction back, as NetBox's own edit views do. Do not use it for a
+    check before a write: that check is a lookup of an existing object, not a read-back.
+
+    Args:
+        obj (Model): The row that the transaction created or changed.
+        user (User): The user whose object permissions apply.
+        action (str): The permission action of the write (``add`` or ``change``).
+
+    Returns:
+        bool: True when the saved row is in the user's scope for *action*.
+
+    """
+    return type(obj).objects.restrict(user, action).filter(pk=obj.pk).exists()
 
 
 def first_at_version(queryset):

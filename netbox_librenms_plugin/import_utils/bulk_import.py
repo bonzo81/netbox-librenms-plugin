@@ -1,6 +1,5 @@
 """Bulk import orchestration for devices and filter processing."""
 
-import functools
 import logging
 from dataclasses import dataclass
 from typing import List
@@ -19,13 +18,12 @@ from ..import_validation_helpers import (
 )
 from ..librenms_api import LibreNMSAPI
 from ..librenms_ids import coerce_librenms_id
+from ..models import RuleConfigurationError
+from ..serial_identity import ResolutionKind, SerialRules, fingerprint, is_sole_holder, resolve_device
 from ..transactions import classify_conflict
 from ..utils import (
     cached_row_matches,
     exception_text_for,
-    find_devices_by_serial,
-    normalize_serial,
-    normalize_stack_serial,
     preload_normalization_rules,
     row_identity_matches,
 )
@@ -34,6 +32,7 @@ from .cache import (
     get_cache_metadata_key,
     get_import_device_cache_key,
     get_validated_device_cache_key,
+    import_configuration_generation,
 )
 from .collisions import detect_bulk_collisions, scope_bulk_collisions
 from .device_operations import (
@@ -49,13 +48,15 @@ from .filters import _safe_disabled, get_librenms_devices_for_import
 from .permissions import check_user_permissions, require_permissions
 from .virtual_chassis import (
     VC_MASTER_UNKNOWN_WARNING,
-    candidate_vc_serial_keys,
+    VCNumberingError,
     create_virtual_chassis_with_members,
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
-    identify_vc_master,
+    load_numbering_rules,
+    numbering_refusal_text,
     prefetch_vc_data_for_devices,
-    vc_serial_key,
+    prepare_virtual_chassis,
+    prepared_master,
 )
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
@@ -176,7 +177,7 @@ def detect_collisions_for_device_ids(
     devices = []
     unresolved_ids = []
     device_ids = list(device_ids)
-    candidate_keys = functools.cache(candidate_vc_serial_keys)
+    serial_rules = SerialRules.load()
     for idx, device_id in enumerate(device_ids, start=1):
         # Same cancellation cadence as the import loops below (first id, then every 5th):
         # a large batch with many cache misses is one LibreNMS call per id, so a cancelled
@@ -245,6 +246,7 @@ def detect_collisions_for_device_ids(
             server_key=api.server_key,
             include_vc_detection=False,
             collision_only=True,
+            serial_rules=serial_rules,
         )
         if any(str(issue).startswith(VALIDATION_ERROR_ISSUE_PREFIX) for issue in validation.get("issues", [])):
             # validate_device_for_import() caught an exception and returned only a partial result
@@ -255,7 +257,7 @@ def detect_collisions_for_device_ids(
             # guard can't silently drift from the producer's wording.
             unresolved_ids.append(device_id)
             continue
-        if device_id not in vm_id_set and get_virtual_chassis_data(api, device_id, candidate_keys=candidate_keys).get(
+        if device_id not in vm_id_set and get_virtual_chassis_data(api, device_id, serial_rules=serial_rules).get(
             "detection_failed"
         ):
             unresolved_ids.append(device_id)
@@ -369,12 +371,10 @@ def classify_bulk_precheck(collisions, unresolved, device_ids, vm_imports) -> Bu
     )
 
 
-def stack_key(vc_data, device_id) -> str:
-    """Return the key of one physical stack: its member serials, or the device when none is usable."""
-    member_serials = sorted(
-        serial for member in vc_data.get("members", []) if (serial := normalize_stack_serial(member.get("serial")))
-    )
-    return f"librenms-stack-{','.join(member_serials)}" if member_serials else f"librenms-stack-device-{device_id}"
+def stack_key(vc_data, device_id, context) -> str:
+    """Return the key of one physical stack: its member serial identities under *context*, or the device without one."""
+    members = fingerprint((member.get("serial") for member in vc_data.get("members", [])), context)
+    return f"librenms-stack-{members}" if members else f"librenms-stack-device-{device_id}"
 
 
 def bulk_import_devices_shared(  # noqa: C901
@@ -453,8 +453,8 @@ def bulk_import_devices_shared(  # noqa: C901
     # Preload the device_type NormalizationRule set once so the per-device hardware→device-type
     # match doesn't re-query it for every device in the loop (issue #90 / N+1 avoidance, #92).
     device_type_norm_rules = preload_normalization_rules("device_type")
-    serial_key_for = functools.cache(vc_serial_key)
-    candidate_keys = functools.cache(candidate_vc_serial_keys)
+    serial_rules = SerialRules.load()
+    numbering_rules = load_numbering_rules()
 
     for idx, device_id in enumerate(device_ids, start=1):
         # Check for job cancellation on first iteration and every 5th thereafter.
@@ -515,8 +515,8 @@ def bulk_import_devices_shared(  # noqa: C901
                 # flags are stale or omitted.
                 include_vc_detection=True,
                 preloaded_device_type_rules=device_type_norm_rules,
-                serial_key_for=serial_key_for,
-                candidate_keys=candidate_keys,
+                serial_rules=serial_rules,
+                numbering_rules=numbering_rules,
             )
 
             if validation.get("import_as_vm"):
@@ -567,15 +567,28 @@ def bulk_import_devices_shared(  # noqa: C901
                 else:
                     logger.error(f"Cannot import device {device_id}: {exc}")
                 continue
-            # The one master decision for this row; a stack whose master is unknown imports standalone,
-            # so it needs no chassis permission.
-            master_member = None
-            if vc_data.get("is_stack", False):
-                master_member = identify_vc_master(
-                    vc_data["members"],
-                    libre_device.get("serial"),
-                    serial_key_for(getattr(device_type, "manufacturer", None)),
+            # The one numbering and master decision for this row, for its final DeviceType and before any
+            # write; a stack whose master is unknown imports standalone, so it needs no chassis permission.
+            master_context = serial_rules.for_device_type(device_type)
+            try:
+                vc_data = prepare_virtual_chassis(
+                    vc_data,
+                    device_type=device_type,
+                    master_name=validation.get("resolved_name"),
+                    device_serial=libre_device.get("serial"),
+                    serial_rules=serial_rules,
+                    numbering_rules=numbering_rules,
                 )
+            except (VCNumberingError, RuleConfigurationError) as exc:
+                error_msg = f"Cannot import device {device_id}: {numbering_refusal_text(exc)}"
+                failed_list.append({"device_id": device_id, "error": error_msg})
+                if job and job.logger:
+                    job.logger.error(error_msg)
+                else:
+                    logger.error(error_msg)
+                continue
+            validation["virtual_chassis"] = vc_data
+            master_member = prepared_master(vc_data) if vc_data.get("is_stack", False) else None
             creates_vc = master_member is not None
             if creates_vc:
                 has_vc_perm, _ = check_user_permissions(user, ["dcim.add_virtualchassis"])
@@ -612,6 +625,7 @@ def bulk_import_devices_shared(  # noqa: C901
                 libre_device=libre_device,
                 user=user,
                 text_viewer=text_viewer,
+                serial_rules=serial_rules,
             )
 
             if result["success"]:
@@ -643,7 +657,7 @@ def bulk_import_devices_shared(  # noqa: C901
                 # Handle virtual chassis creation for stacks
                 if creates_vc:
                     # One key per physical stack, so VC creation is triggered only once for it.
-                    vc_domain = stack_key(vc_data, device_id)
+                    vc_domain = stack_key(vc_data, device_id, master_context)
 
                     # Only create VC if we haven't processed this stack yet.
                     # Permission was already validated before device import.
@@ -653,10 +667,11 @@ def bulk_import_devices_shared(  # noqa: C901
                         try:
                             vc = create_virtual_chassis_with_members(
                                 result["device"],
-                                vc_data["members"],
+                                vc_data,
                                 libre_device,
                                 server_key=api.server_key,
                                 master_member=master_member,
+                                serial_rules=serial_rules,
                             )
                             vc_created_count += 1
                             log_msg = f"Created VC '{vc.name}' during bulk import for device {device_id}"
@@ -873,7 +888,9 @@ def _reassert_new_import_blockers(validation: dict) -> None:
                 validation["issues"].append(msg)
 
 
-def _refresh_existing_device(validation: dict, libre_device: dict = None, server_key: str = "default") -> None:  # noqa: C901
+def _refresh_existing_device(  # noqa: C901
+    validation: dict, libre_device: dict = None, server_key: str = "default", *, serial_rules=None
+) -> None:
     """
     Refresh existing_device from DB to pick up changes made in NetBox since caching.
 
@@ -884,6 +901,7 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
         validation (dict): The cached validation state, mutated in place.
         libre_device (dict | None): The LibreNMS device data used to re-evaluate the match.
         server_key (str): The active LibreNMS server key.
+        serial_rules (SerialRules | None): The batch's serial rules; None reads them when the serial re-check runs.
 
     """
     existing = validation.get("existing_device")
@@ -916,7 +934,19 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
                     # independent of match_type) on a row that is actually host/OOB-linked. Drop
                     # them; a row already cached as a link type keeps its link-derived fields.
                     _clear_existing_match_derived_fields(validation)
-                if prior_match in ("librenms_id", "librenms_oob") and validation.get("existing_match_type") is None:
+                if (
+                    libre_device
+                    and validation.get("existing_match_type") == "serial"
+                    and not is_sole_holder(
+                        refreshed, libre_device.get("serial"), rules=serial_rules or SerialRules.load()
+                    )
+                ):
+                    # The cached serial match no longer holds under the current rows: drop it like a vanished link.
+                    validation["existing_match_type"] = None
+                if (
+                    prior_match in ("librenms_id", "librenms_oob", "serial")
+                    and validation.get("existing_match_type") is None
+                ):
                     # The librenms-id/OOB link that made this the cached match is gone
                     # (removed/repointed in NetBox since caching). Treat it like a vanished
                     # match — clear it and recompute readiness, then fall through to the fresh
@@ -1192,13 +1222,11 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             # match, so flag the row ambiguous and block instead of picking arbitrarily.
             ambiguous_fallback = False
             if not import_as_vm:
-                serial = normalize_serial(libre_device.get("serial"))
-                if serial and serial != "-":
-                    serial_matches = find_devices_by_serial(serial)
-                    if len(serial_matches) > 1:
-                        ambiguous_fallback = True
-                    elif serial_matches:
-                        new_device, match_type = serial_matches[0], "serial"
+                serial_match = resolve_device(libre_device.get("serial"), rules=serial_rules)
+                if serial_match.kind in (ResolutionKind.AMBIGUOUS, ResolutionKind.UNAVAILABLE):
+                    ambiguous_fallback = True
+                elif serial_match.kind is ResolutionKind.UNIQUE:
+                    new_device, match_type = serial_match.object, "serial"
 
             if not new_device and not ambiguous_fallback:
                 primary_ip = libre_device.get("ip")
@@ -1441,8 +1469,10 @@ def process_device_filters(  # noqa: C901
     # Validate each device
     validated_devices = []
     total = len(libre_devices)
-    serial_key_for = functools.cache(vc_serial_key)
-    candidate_keys = functools.cache(candidate_vc_serial_keys)
+    # Read before the configuration, so a row validated after an edit is stored under the old generation.
+    generation = import_configuration_generation()
+    serial_rules = SerialRules.load()
+    numbering_rules = load_numbering_rules()
     # Always pass api so validate_device_for_import can run hardware/chassis lookups.
     # vc_detection_enabled only gates VC-specific paths inside that function.
 
@@ -1472,6 +1502,8 @@ def process_device_filters(  # noqa: C901
             vc_enabled=vc_detection_enabled,
             use_sysname=use_sysname,
             strip_domain=strip_domain,
+            serial_rules=serial_rules,
+            generation=generation,
         )
 
         # Check if we already have cached validation for this device
@@ -1484,7 +1516,9 @@ def process_device_filters(  # noqa: C901
 
                 # Refresh existing_device from DB to avoid stale data
                 # (user may have changed role, name, etc. in NetBox)
-                _refresh_existing_device(device["_validation"], libre_device=device, server_key=api.server_key)
+                _refresh_existing_device(
+                    device["_validation"], libre_device=device, server_key=api.server_key, serial_rules=serial_rules
+                )
 
                 # Apply exclude_existing filter if enabled
                 if exclude_existing:
@@ -1504,8 +1538,8 @@ def process_device_filters(  # noqa: C901
             server_key=api.server_key,
             use_sysname=use_sysname,
             strip_domain=strip_domain,
-            serial_key_for=serial_key_for,
-            candidate_keys=candidate_keys,
+            serial_rules=serial_rules,
+            numbering_rules=numbering_rules,
         )
 
         # Set VC detection metadata

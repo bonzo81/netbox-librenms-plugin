@@ -3,11 +3,60 @@
 import hashlib
 import json
 import logging
+import time
 from collections.abc import Mapping
 
 from django.core.cache import cache
+from django.db import transaction
+from django.db.models.signals import post_delete, post_save
 
 logger = logging.getLogger(__name__)
+
+IMPORT_CONFIGURATION_GENERATION_KEY = "librenms_import_configuration_generation"
+
+
+def import_configuration_generation() -> int:
+    """
+    Return the generation of the NetBox inputs that select an import row's DeviceType and numbering rule.
+
+    A cached validation keys on it, so an edit of one of those inputs makes every cached validation miss.
+    A new counter starts at the current time, so it is larger than every value of an expired counter.
+    """
+    generation = cache.get(IMPORT_CONFIGURATION_GENERATION_KEY)
+    if generation is None:
+        fresh = time.time_ns()
+        added = cache.add(IMPORT_CONFIGURATION_GENERATION_KEY, fresh, timeout=None)
+        generation = fresh if added else cache.get(IMPORT_CONFIGURATION_GENERATION_KEY, fresh)
+    return generation
+
+
+def _bump_import_configuration_generation() -> None:
+    """Move the generation forward; without a counter, start one that is later than every earlier generation."""
+    try:
+        cache.incr(IMPORT_CONFIGURATION_GENERATION_KEY)
+    except ValueError:
+        cache.add(IMPORT_CONFIGURATION_GENERATION_KEY, time.time_ns(), timeout=None)
+
+
+def _schedule_import_configuration_bump(sender, using, **kwargs):
+    """Move the generation after the write commits, so a validation that reads the old rows keys on the old one."""
+    transaction.on_commit(_bump_import_configuration_generation, using=using, robust=True)
+
+
+def connect_import_configuration_signals():
+    """Subscribe to the writes of every input that selects an import row's DeviceType or numbering rule."""
+    from dcim.models import DeviceType, Manufacturer
+
+    from netbox_librenms_plugin.models import DeviceTypeMapping, NormalizationRule, VCMemberNumberingRule
+
+    for model in (VCMemberNumberingRule, DeviceTypeMapping, NormalizationRule, DeviceType, Manufacturer):
+        label = model._meta.label_lower
+        for signal, kind in ((post_save, "save"), (post_delete, "delete")):
+            signal.connect(
+                _schedule_import_configuration_bump,
+                sender=model,
+                dispatch_uid=f"netbox_librenms_plugin_import_configuration_{kind}_{label}",
+            )
 
 
 def _build_filter_hash(filters: dict) -> str:
@@ -207,6 +256,8 @@ def get_validated_device_cache_key(
     vc_enabled: bool,
     use_sysname: bool = True,
     strip_domain: bool = False,
+    serial_rules=None,
+    generation: int | None = None,
 ) -> str:
     """
     Generate a consistent cache key for validated device data.
@@ -221,6 +272,10 @@ def get_validated_device_cache_key(
         vc_enabled: Whether virtual chassis detection was enabled
         use_sysname: Whether sysName is preferred over hostname for device naming
         strip_domain: Whether domain suffix is stripped from device names
+        serial_rules: The SerialRules the validation used; None reads them. A rule edit changes the key.
+        generation: The :func:`import_configuration_generation` that the caller read before it read the
+            configuration it validates with; None reads it now. An edit that commits later then leaves the
+            result under the old generation, which no reader asks for.
 
     Returns:
         str: Cache key for the validated device
@@ -228,14 +283,18 @@ def get_validated_device_cache_key(
     Example:
         >>> key = get_validated_device_cache_key('default', {'location': 'NYC'}, 123, True)
         >>> key
-        'validated_device_default_154d56ec9289d49c_123_vc_sysname=True_strip=False'
+        'validated_device_default_154d56ec9289d49c_123_vc_sysname=True_strip=False_rules=4f53cda18c2baa0c_config=1'
     """
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
     # Sort filters for a deterministic, cross-process stable hash; None values are excluded
     # (consistent with get_cache_metadata_key).
     filter_hash = _build_filter_hash(filters)
     vc_part = "vc" if vc_enabled else "novc"
+    rules_part = (serial_rules or SerialRules.load()).digest[:16]
     return (
         f"validated_device_{server_key}_{filter_hash}_{device_id}_{vc_part}_sysname={use_sysname}_strip={strip_domain}"
+        f"_rules={rules_part}_config={import_configuration_generation() if generation is None else generation}"
     )
 
 

@@ -59,7 +59,17 @@
       <p class="mb-3">
         This device is part of a <strong>{{ vc_data.member_count }}-member</strong> stack/virtual chassis.
       </p>
-      {% if not vc_data.master_identified %}
+      {% if vc_data.numbering_error %}
+      <div class="alert alert-danger py-2 px-3 small" id="vc-numbering-error">
+        <i class="mdi mdi-alert-circle"></i>
+        {{ vc_data.numbering_error }}
+      </div>
+      {% elif not vc_data.numbering_available %}
+      <div class="alert alert-info py-2 px-3 small" id="vc-numbering-unavailable">
+        <i class="mdi mdi-information-outline"></i>
+        The member numbers and names show when the device matches a device type.
+      </div>
+      {% elif not vc_data.master_identified %}
       <div class="alert alert-warning py-2 px-3 small">
         <i class="mdi mdi-alert"></i>
         No unique member matches the device serial, so the stack master could not be identified.

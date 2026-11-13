@@ -13,6 +13,7 @@ from .models import (
     PlatformMapping,
     PortStackLagPattern,
     SerialSensorTypePattern,
+    VCMemberNumberingRule,
 )
 from .utils import slashless_route_aliases
 from .views import (
@@ -102,6 +103,7 @@ from .views import (
     LocationMappingEditView,
     LocationMappingListView,
     LocationMappingView,
+    MarkBuiltInView,
     MergeNetBoxDevicesView,
     ModuleBayMappingBulkDeleteView,
     ModuleBayMappingBulkExportYAMLView,
@@ -178,6 +180,8 @@ from .views import (
     CreateVRFFromIPRowView,
     SyncCablesView,
     SyncCacheFragmentView,
+    NetBoxOnlyInterfacesView,
+    SyncTabFilterView,
     SyncCacheStatusView,
     SyncInterfaceBridgeView,
     SyncInterfaceLagView,
@@ -202,6 +206,15 @@ from .views import (
     VMIPAddressTableView,
     VMLibreNMSSyncView,
     VMStatusListView,
+    VCMemberNumberingRuleBulkDeleteView,
+    VCMemberNumberingRuleBulkExportYAMLView,
+    VCMemberNumberingRuleBulkImportView,
+    VCMemberNumberingRuleChangeLogView,
+    VCMemberNumberingRuleCreateView,
+    VCMemberNumberingRuleDeleteView,
+    VCMemberNumberingRuleEditView,
+    VCMemberNumberingRuleListView,
+    VCMemberNumberingRuleView,
 )
 
 urlpatterns = [
@@ -220,6 +233,16 @@ urlpatterns = [
         "<str:object_type>/<int:pk>/sync-cache-fragment/<str:tab>/",
         SyncCacheFragmentView.as_view(),
         name="sync_cache_fragment",
+    ),
+    path(
+        "<str:object_type>/<int:pk>/sync-tab-filter/<str:tab>/",
+        SyncTabFilterView.as_view(),
+        name="sync_tab_filter",
+    ),
+    path(
+        "<str:object_type>/<int:pk>/netbox-only-interfaces/",
+        NetBoxOnlyInterfacesView.as_view(),
+        name="netbox_only_interfaces",
     ),
     path(
         "device/<int:device_id>/capture-data-shape/",
@@ -300,6 +323,11 @@ urlpatterns = [
         "devices/<int:pk>/add-bay-template/",
         AddBayTemplateView.as_view(),
         name="add_bay_template",
+    ),
+    path(
+        "devices/<int:pk>/mark-built-in/",
+        MarkBuiltInView.as_view(),
+        name="mark_built_in",
     ),
     path(
         "devices/<int:pk>/ipaddress-sync/",
@@ -1194,6 +1222,49 @@ urlpatterns = [
         SerialSensorTypePatternChangeLogView.as_view(),
         name="serialsensortypepattern_changelog",
         kwargs={"model": SerialSensorTypePattern},
+    ),
+    # VCMemberNumberingRule
+    path("vc-member-numbering-rules/", VCMemberNumberingRuleListView.as_view(), name="vcmembernumberingrule_list"),
+    path(
+        "vc-member-numbering-rules/<int:pk>/",
+        VCMemberNumberingRuleView.as_view(),
+        name="vcmembernumberingrule_detail",
+    ),
+    path(
+        "vc-member-numbering-rules/add/",
+        VCMemberNumberingRuleCreateView.as_view(),
+        name="vcmembernumberingrule_add",
+    ),
+    path(
+        "vc-member-numbering-rules/import/",
+        VCMemberNumberingRuleBulkImportView.as_view(),
+        name="vcmembernumberingrule_bulk_import",
+    ),
+    path(
+        "vc-member-numbering-rules/<int:pk>/edit/",
+        VCMemberNumberingRuleEditView.as_view(),
+        name="vcmembernumberingrule_edit",
+    ),
+    path(
+        "vc-member-numbering-rules/<int:pk>/delete/",
+        VCMemberNumberingRuleDeleteView.as_view(),
+        name="vcmembernumberingrule_delete",
+    ),
+    path(
+        "vc-member-numbering-rules/delete/",
+        VCMemberNumberingRuleBulkDeleteView.as_view(),
+        name="vcmembernumberingrule_bulk_delete",
+    ),
+    path(
+        "vc-member-numbering-rules/export-yaml/",
+        VCMemberNumberingRuleBulkExportYAMLView.as_view(),
+        name="vcmembernumberingrule_bulk_export_yaml",
+    ),
+    path(
+        "vc-member-numbering-rules/<int:pk>/changelog/",
+        VCMemberNumberingRuleChangeLogView.as_view(),
+        name="vcmembernumberingrule_changelog",
+        kwargs={"model": VCMemberNumberingRule},
     ),
     path("api/", include("netbox_librenms_plugin.api.urls")),
 ]

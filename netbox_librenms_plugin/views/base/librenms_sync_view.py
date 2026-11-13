@@ -1,6 +1,7 @@
 import dataclasses
 import re
 from dataclasses import asdict
+from functools import cached_property
 
 from django.conf import settings as django_settings
 from django.contrib import messages
@@ -10,12 +11,7 @@ from netbox.views import generic
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.import_utils import _determine_device_name
-from netbox_librenms_plugin.import_utils.virtual_chassis import (
-    _member_name,
-    chassis_serial_key,
-    extract_vc_members,
-    members_by_serial_key,
-)
+from netbox_librenms_plugin.import_utils.virtual_chassis import _member_name, extract_vc_members
 from netbox_librenms_plugin.platform_versions import (
     PlatformFacts,
     assess_platform,
@@ -23,6 +19,15 @@ from netbox_librenms_plugin.platform_versions import (
     platform_version_tracking_enabled,
     reason_text,
     target_label,
+)
+from netbox_librenms_plugin.serial_identity import (
+    Comparison,
+    SerialRules,
+    compare,
+    display,
+    group,
+    is_identity,
+    stored_form_differs,
 )
 from netbox_librenms_plugin.server_mappings import mapped_device_servers, read_mapping
 from netbox_librenms_plugin.server_selection import (
@@ -36,7 +41,9 @@ from netbox_librenms_plugin.sync_cache import (
     SyncCacheConsistency,
     SyncTab,
     sync_cache_browser_contract,
+    withhold_unavailable_snapshots,
 )
+from netbox_librenms_plugin.sync_query import SyncQuery
 from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_user_pref,
@@ -65,6 +72,17 @@ class BaseLibreNMSSyncView(
     # Render server key resolved in get(); read by get_context_data for the migrated-mode banner.
     # None until get() runs (e.g. a direct get_context_data() call), then active_server_key is used.
     _scoped_render_server_key = None
+
+    @cached_property
+    def serial_rules(self):
+        """Return the serial rules of this request, read once."""
+        return SerialRules.load()
+
+    def _serial_matches(self, obj, incoming) -> bool:
+        """Return whether the stored serial of Device *obj* names the hardware that LibreNMS reports; a VM has none."""
+        if obj is None or obj._meta.model_name != "device":
+            return False
+        return compare(obj.serial, incoming, self.serial_rules.for_device(obj)) is Comparison.SAME
 
     def get_object(self, pk):
         """Retrieve the object the user may view (same seam as the base table views)."""
@@ -187,7 +205,17 @@ class BaseLibreNMSSyncView(
 
         context = self.get_context_data(request, obj)
 
-        return render(request, self.template_name, context)
+        # A filter only decides what a table shows, so only a full page load answers an invalid one
+        # with 400. An htmx tab swap keeps its status, and every tab renders as usual.
+        tab_contexts = [(spec, context.get(spec.context_name)) for spec in TAB_SPECS.values()]
+        invalid_filter = any(
+            isinstance(tab_context, dict)
+            and tab_context.get("filters") is not None
+            and not tab_context["filters"].is_valid
+            for spec, tab_context in tab_contexts
+        )
+        status = 400 if invalid_filter and not request.htmx else 200
+        return render(request, self.template_name, context, status=status)
 
     def _can_manage_server_preference(self, selection):
         """Check plugin write and object change scope for the mapping owner."""
@@ -216,6 +244,7 @@ class BaseLibreNMSSyncView(
                 "object": obj,
                 "tab": self.tab,
                 "active_sync_tab": active_sync_tab,
+                "server_switch_query": SyncQuery.from_request(request).server_switch_query(active_sync_tab),
                 "server_key": selection.active_key,
                 "all_server_mappings": selection.mappings,
                 "server_selection_state": selection.state,
@@ -253,13 +282,10 @@ class BaseLibreNMSSyncView(
         # overwrite the choice, and an unchanged choice must not cost a write per page view.
         if posted_sync_tab in applicable_tab_names and active_sync_tab != remembered_sync_tab:
             save_user_pref(request, SYNC_TAB_PREFERENCE, active_sync_tab)
-        sync_tab_urls = {}
-        for sync_tab in applicable_tabs:
-            query = request.GET.copy()
-            query["tab"] = sync_tab.value
-            # The tab link adds the selected name field itself, so a copy here would grow per click.
-            query.pop("interface_name_field", None)
-            sync_tab_urls[sync_tab.value] = f"{request.path}?{query.urlencode()}"
+        page_query = SyncQuery.from_request(request)
+        sync_tab_urls = {
+            sync_tab.value: page_query.tab_url(request.path, sync_tab.value) for sync_tab in applicable_tabs
+        }
 
         # Add our specific context
         context.update(
@@ -267,6 +293,7 @@ class BaseLibreNMSSyncView(
                 "object": obj,
                 "tab": self.tab,
                 "active_sync_tab": active_sync_tab,
+                "server_switch_query": SyncQuery.from_request(request).server_switch_query(active_sync_tab),
                 "sync_tab_urls": sync_tab_urls,
                 "interface_name_selector_visible": active_sync_tab in INTERFACE_NAME_SELECTOR_TABS,
                 # self.librenms_id is normalised to a positive int or None at assignment
@@ -338,13 +365,11 @@ class BaseLibreNMSSyncView(
         _lookup_device = getattr(self, "_librenms_lookup_device", obj)
         librenms_id_is_legacy = bool(_lookup_device) and read_mapping(_lookup_device).legacy.is_legacy
 
-        # Determine if serial match allows legacy ID conversion.
+        # The legacy ID gate compares the serial of the mapping owner, which can differ from the page device.
         # VMs have no serial field in NetBox; skip the gate so the Convert ID button is enabled.
-        _librenms_serial = librenms_info["librenms_device_details"].get("librenms_device_serial", "-")
-        _netbox_serial = getattr(_lookup_device, "serial", "") or ""
         _lookup_is_vm = _lookup_device._meta.model_name == "virtualmachine" if _lookup_device else False
-        librenms_id_serial_confirmed = _lookup_is_vm or bool(
-            _librenms_serial and _librenms_serial != "-" and _netbox_serial and _librenms_serial == _netbox_serial
+        librenms_id_serial_confirmed = _lookup_is_vm or self._serial_matches(
+            _lookup_device, librenms_info["librenms_serial"]
         )
         device_info_unavailable = librenms_info.get("device_info_unavailable", False)
         show_add_device = not librenms_info["found_in_librenms"] and not device_info_unavailable
@@ -422,17 +447,7 @@ class BaseLibreNMSSyncView(
 
         if sync_cache_status is not None:
             object_type = obj._meta.model_name
-            for sync_tab in applicable_tabs:
-                if sync_cache_status[sync_tab.value]["snapshot_available"]:
-                    continue
-                spec = TAB_SPECS[sync_tab]
-                tab_context = context.get(spec.context_name)
-                if isinstance(tab_context, dict):
-                    context[spec.context_name] = {
-                        **tab_context,
-                        spec.table_context_key: None,
-                        "cache_expiry": None,
-                    }
+            withhold_unavailable_snapshots(context, sync_cache_status, applicable_tabs)
             context.update(
                 {
                     "sync_cache_status": sync_cache_status,
@@ -516,11 +531,14 @@ class BaseLibreNMSSyncView(
         found_in_librenms = False
         mismatched_device = False
         device_info_unavailable = False
+        librenms_serial = None
         lookup_error = getattr(self, "_librenms_id_lookup_error", None)
         librenms_device_details = {
             "librenms_device_url": None,
             "librenms_device_hardware": "-",
             "librenms_device_serial": "-",
+            "serial_matches": False,
+            "serial_stored_form_differs": False,
             "librenms_device_os": "-",
             "librenms_device_version": "-",
             "librenms_device_features": "-",
@@ -549,7 +567,8 @@ class BaseLibreNMSSyncView(
 
                 # Extract new fields; use `or "-"` so null/empty from LibreNMS renders as "-"
                 hardware = device_info.get("hardware") or "-"
-                serial = device_info.get("serial") or "-"
+                librenms_serial = device_info.get("serial")
+                serial = display(librenms_serial) or "-"
                 os_name = device_info.get("os") or "-"
                 version = device_info.get("version") or "-"
                 features = device_info.get("features") or "-"
@@ -576,7 +595,7 @@ class BaseLibreNMSSyncView(
                         and obj.vc_position is not None
                     ):
                         resolved_name = _member_name(
-                            resolved_name, obj.vc_position, obj.serial, None, chassis_serial_key(obj)
+                            resolved_name, obj.vc_position, obj.serial, None, self.serial_rules.for_device(obj)
                         )
 
                 # Update device details regardless of match
@@ -585,6 +604,10 @@ class BaseLibreNMSSyncView(
                         "librenms_device_url": f"{self.librenms_api.librenms_url}/device/device={self.librenms_id}/",
                         "librenms_device_hardware": hardware,
                         "librenms_device_serial": serial,
+                        "serial_matches": self._serial_matches(obj, librenms_serial),
+                        # A legacy stored form names the same hardware; the update action writes the LibreNMS text.
+                        "serial_stored_form_differs": obj._meta.model_name == "device"
+                        and stored_form_differs(obj.serial, librenms_serial, self.serial_rules.for_device(obj)),
                         "librenms_device_os": os_name,
                         "librenms_device_version": version,
                         "librenms_device_features": features,
@@ -669,6 +692,8 @@ class BaseLibreNMSSyncView(
             "found_in_librenms": found_in_librenms,
             "device_info_unavailable": device_info_unavailable,
             "librenms_device_details": librenms_device_details,
+            # The untouched payload value: a numeric 0 is a serial, and the display fallback "-" is not.
+            "librenms_serial": librenms_serial,
             "mismatched_device": mismatched_device,
             "librenms_lookup_error": lookup_error,
         }
@@ -793,7 +818,8 @@ class BaseLibreNMSSyncView(
             list: [
                 {
                     'description': 'Member component description',
-                    'serial': 'serial number',
+                    'serial': 'the LibreNMS serial, as the dialog shows it',
+                    'librenms_serial': 'trimmed raw serial, as the dialog posts it',
                     'model': 'model name',
                     'assigned_member': Device object or None (if serial matches existing assignment)
                 }
@@ -807,23 +833,23 @@ class BaseLibreNMSSyncView(
         # Get all VC members
         vc_members = obj.virtual_chassis.members.all()
 
-        # The ENTITY-MIB serial carries the vendor's decoration ("S/N BCFB9793" on Juniper) while
-        # the stored member serial does not, so compare and display the serial key.
-        serial_key = chassis_serial_key(obj)
-        # A serial key that two members share assigns neither.
-        members_by_key = members_by_serial_key(vc_members, serial_key)
+        # The chassis master's serial rules compare both sides; the dialog shows the LibreNMS text.
+        context = self.serial_rules.for_device(obj)
+        members_by_serial = group(vc_members, context, serial=lambda member: member.serial)
 
         result = []
-        for component in extract_vc_members(inventory, (serial_key,)):
-            serial = serial_key(component["serial"])
-            if not serial:
+        for component in extract_vc_members(inventory, (context,)):
+            if not is_identity(component["serial"], context):
                 continue
-            assigned_member = members_by_key.get(serial)
+            # A serial that two members share assigns neither.
+            holders = members_by_serial.find(component["serial"])
+            assigned_member = holders[0] if len(holders) == 1 else None
 
             result.append(
                 {
                     "description": component["description"] or "-",
-                    "serial": serial,
+                    "serial": display(component["serial"]),
+                    "librenms_serial": display(component["serial"]),
                     "model": component["model"] or "-",
                     "assigned_member": assigned_member,
                 }

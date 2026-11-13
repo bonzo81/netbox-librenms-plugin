@@ -96,6 +96,7 @@ class TestVlanSyncGroupMissing:
                 "action": "create_vlans",
                 "select": ["20"],
                 "vlan_group_20": "",
+                "expected_vlan_name_20": "Users",
                 "server_key": "default",
             },
         )

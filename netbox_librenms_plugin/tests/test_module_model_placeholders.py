@@ -202,7 +202,9 @@ class TestTransceiverMergeTreatsPlaceholdersAsMissing:
             {"status": "ok", "ports": [{"port_id": 99, "ifName": "Eth2/1"}]},
             method="GET",
         )
-        merged, error = view._merge_transceiver_data(inventory)
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        merged, error = view._merge_transceiver_data(inventory, serial_context=SerialRules.load().context(None))
         assert error is None
         return merged
 
