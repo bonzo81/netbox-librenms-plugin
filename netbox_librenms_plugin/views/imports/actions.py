@@ -133,6 +133,7 @@ from netbox_librenms_plugin.utils import (
     INTERFACE_SYNC_OPTIONS_PREFERENCE,
     SET_PRIMARY_IP_PREFERENCE,
     coerce_model_pk,
+    coerce_positive_int,
     resolve_naming_preferences,
     same_host,
     save_interface_name_preference,
@@ -568,6 +569,10 @@ def _oob_ip_is_reassignable(candidate, interface) -> bool:
         .exclude(pk=interface.device_id)
         .exists()
     )
+
+
+# A target that validation found by its serial must still hold the serial alone; the text names no device.
+_SERIAL_MATCH_LOST = "The serial no longer identifies this device alone. Refresh the validation and retry."
 
 
 def _apply_conflict_checked_serial(device, incoming_serial, user, serial_rules) -> tuple[HttpResponse | None, bool]:
@@ -2255,8 +2260,9 @@ class DeviceConflictActionView(
             with atomic_with_events():
                 server_key = self.librenms_api.server_key
                 writes_serial = action != "link" and existing_model is Device
+                serial_matched = existing_model is Device and validation.get("existing_match_type") == "serial"
                 serial_rules = SerialRules.load()
-                if writes_serial:
+                if writes_serial or serial_matched:
                     # The serial identity locks come before the claim and the row lock.
                     assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
                 existing_device, lock_error = _lock_librenms_id_assignment_target(
@@ -2268,6 +2274,10 @@ class DeviceConflictActionView(
                 )
                 if lock_error is not None:
                     return lock_error
+                if serial_matched and not is_sole_holder(
+                    existing_device, libre_device.get("serial"), rules=serial_rules
+                ):
+                    return _htmx_error_response(_SERIAL_MATCH_LOST)
 
                 # Reject legacy bare-int/string librenms_id: the builders skip a legacy value,
                 # which would leave the device partially updated. User must run "Convert mapping"
@@ -2995,6 +3005,9 @@ class AddAsOOBView(
         oob_ip_str = oob_candidate.get("ip") or None
 
         with transaction.atomic():
+            # The OOB candidate is a serial match: the serial identity lock comes before the claim and the row lock.
+            serial_rules = SerialRules.load()
+            assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
             try:
                 sync_device, id_conflict = lock_librenms_id_assignment(
                     librenms_id,
@@ -3020,6 +3033,8 @@ class AddAsOOBView(
                     f"LibreNMS device #{librenms_id} is already assigned to {object_label} "
                     f"'{conflict_name}'; refresh and retry."
                 )
+            if not is_sole_holder(existing_device, libre_device.get("serial"), rules=serial_rules):
+                return _htmx_error_response(_SERIAL_MATCH_LOST)
 
             # Re-verify the legacy gate on the LOCKED row (mirrors DeviceConflictActionView's
             # post-lock gate): a legacy bare-int written between the unlocked check above and
@@ -3643,6 +3658,9 @@ class PromoteToHostView(
             )
 
         with transaction.atomic():
+            # The promotion rests on a serial match: the serial identity lock comes before the claim and the row lock.
+            serial_rules = SerialRules.load()
+            assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
             existing_device, lock_error = _lock_librenms_id_assignment_target(
                 self,
                 Device,
@@ -3652,6 +3670,8 @@ class PromoteToHostView(
             )
             if lock_error is not None:
                 return lock_error
+            if not is_sole_holder(existing_device, libre_device.get("serial"), rules=serial_rules):
+                return _htmx_error_response(_SERIAL_MATCH_LOST)
             locked_mapping = read_mapping(existing_device)
             if locked_mapping.legacy.is_legacy:
                 return _htmx_error_response(
@@ -3790,6 +3810,8 @@ class MergeNetBoxDevicesView(
         if winner_pk not in candidate_pks or len(candidate_pks) != 2:
             return _htmx_error_response("winner_pk does not match the validation result's merge candidates")
         donor_pk = next(pk for pk in candidate_pks if pk != winner_pk)
+        # The "oob_named" candidate is the one that holds the serial, apart from the hostname match.
+        serial_peer_pk = coerce_positive_int((validation["merge_candidates"].get("oob_named") or {}).get("pk"))
 
         # Permission gate: user must be able to change BOTH devices. Model-level first, then
         # object-scoped: the gate below passes for a constrained grant, so both sides must be
@@ -3832,6 +3854,8 @@ class MergeNetBoxDevicesView(
             # it from unlocked rows would let a concurrent VC edit (a member joining/leaving, or the
             # id moving between members) shift the sync member to a row we never locked — splitting
             # the link across the VC. Non-VC merges add no members, so they lock the same two rows.
+            serial_rules = SerialRules.load()
+            assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
             try:
                 lock_pks = {winner.pk, donor.pk}
                 for candidate in (winner, donor):
@@ -3851,6 +3875,14 @@ class MergeNetBoxDevicesView(
             locked_by_pk = {d.pk: d for d in locked}
             winner = locked_by_pk[winner.pk]
             donor = locked_by_pk[donor.pk]
+            hostname_match_pk = winner.pk if serial_peer_pk == donor.pk else donor.pk
+            if serial_peer_pk not in (winner.pk, donor.pk) or not is_sole_holder(
+                locked_by_pk[serial_peer_pk],
+                libre_device.get("serial"),
+                rules=serial_rules,
+                exclude_pks=[hostname_match_pk],
+            ):
+                return _htmx_error_response(_SERIAL_MATCH_LOST)
 
             # Resolve the sync devices from the now-locked, current state.
             try:

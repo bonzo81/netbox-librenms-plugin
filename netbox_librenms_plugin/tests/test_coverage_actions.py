@@ -2811,6 +2811,33 @@ def test_import_action_boundaries_reject_malformed_row_intent(view_name, method)
     assert f"Invalid selection for object_type_{device_id}.".encode() in response.content
 
 
+def _seed_decorated_serial_rule():
+    """Create the global rule that migration 0017 seeds: strip Juniper's "S/N " mark."""
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    NormalizationRule.objects.get_or_create(
+        scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+    )
+
+
+def _serial_match_lost(device, change):
+    """Return a write that, after validation, makes *device* no longer the one holder of its serial; it runs once."""
+    done = []
+
+    def lose():
+        from dcim.models import Device
+
+        if done:
+            return
+        done.append(change)
+        if change == "hidden-duplicate":
+            make_device(f"{device.name}-twin", serial=f"S/N {device.serial}")
+        else:
+            Device.objects.filter(pk=device.pk).update(serial="REPLACED-SERIAL-9")
+
+    return lose
+
+
 @pytest.mark.django_db
 class TestDeviceConflictActionMigrateLibreNMSId:
     """DeviceConflictActionView migrate_librenms_id action through real integration seams."""
@@ -3680,6 +3707,37 @@ class TestDeviceConflictActionBranches:
         assert reloaded.serial == "BRANCHES-UPDATE-SERIAL-NEW"
         assert reloaded.device_type_id == reported_type.pk
         assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
+
+    @pytest.mark.parametrize("change", ["hidden-duplicate", "target-serial-changed"])
+    @pytest.mark.parametrize("action", ["link", "update", "update_serial"])
+    def test_a_serial_match_that_no_longer_holds_under_the_lock_refuses_the_action(self, action, change):
+        """The target came from a serial match; a write after validation leaves it no longer the one holder."""
+        from dcim.models import Device
+
+        _seed_decorated_serial_rule()
+        view = self._make_view()
+        target = make_device(f"branches-serial-{action}-{change}".replace("_", "-"), serial="SERIAL-MATCH-1")
+        self._register_device(42, f"{target.name}-source", serial="SERIAL-MATCH-1")
+        request = self._request(action, target, f"{target.name}-user")
+
+        response = self._post_after_validation(view, request, 42, _serial_match_lost(target, change))
+
+        assert response.headers.get("HX-Reswap") == "none"
+        assert f"{target.name}-twin".encode() not in response.content
+        assert stored_mapping_for_test(Device.objects.get(pk=target.pk)) is None
+
+    def test_a_serial_match_that_still_holds_links_the_device(self):
+        from dcim.models import Device
+
+        _seed_decorated_serial_rule()
+        view = self._make_view()
+        target = make_device("branches-serial-link-holds", serial="SERIAL-MATCH-2")
+        self._register_device(42, f"{target.name}-source", serial="S/N SERIAL-MATCH-2")
+
+        response = post_view(view, self._request("link", target, f"{target.name}-user"), device_id=42)
+
+        self._assert_success(response)
+        assert stored_mapping_for_test(Device.objects.get(pk=target.pk)) == {self.server_key: 42}
 
     @pytest.mark.parametrize("action", ["update", "update_serial"])
     def test_a_forced_type_change_decides_the_serial_under_the_new_manufacturer(self, action):
@@ -5539,6 +5597,29 @@ class TestAddAsOOBViewPost:
         # The universal-fallback id was NOT silently namespaced under one server.
         assert stored_mapping_for_test(Device.objects.get(pk=existing_device.pk)) == 42
 
+    @pytest.mark.parametrize("change", ["hidden-duplicate", "target-serial-changed"])
+    def test_a_serial_match_that_no_longer_holds_under_the_lock_refuses_the_attach(self, change):
+        from dcim.models import Device
+
+        _seed_decorated_serial_rule()
+        view = self._make_view()
+        existing_device = make_device(
+            f"oob-serial-lost-{change}", serial="OOB-SERIAL-LOST", librenms_cf={self.server_key: {"id": 10}}
+        )
+        self._register_oob_device(17, "controller-node", serial=existing_device.serial, generic=True)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer(f"oob-serial-lost-{change}-user"),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = self._post_after_validation(view, request, 17, _serial_match_lost(existing_device, change))
+
+        assert response["HX-Reswap"] == "none"
+        assert f"{existing_device.name}-twin".encode() not in response.content
+        assert stored_mapping_for_test(Device.objects.get(pk=existing_device.pk)) == {self.server_key: {"id": 10}}
+
     def test_existing_different_oob_ip_kept_but_user_warned(self):
         """A different existing oob_ip is kept, but a deferred WARNING tells the user it was not changed."""
         from dcim.models import Device
@@ -6082,6 +6163,29 @@ class TestPromoteToHostViewPost:
         assert entry["id"] == 17
         assert entry["oob"] == {"id": 10, "type": "oob"}
 
+    @pytest.mark.parametrize("change", ["hidden-duplicate", "target-serial-changed"])
+    def test_a_serial_match_that_no_longer_holds_under_the_lock_refuses_the_promotion(self, change):
+        from dcim.models import Device
+
+        _seed_decorated_serial_rule()
+        view = self._make_view()
+        existing_device = make_device(
+            f"promote-serial-lost-{change}", serial="PROMOTE-SERIAL-LOST", librenms_cf={self.server_key: {"id": 10}}
+        )
+        self._register_host_device(17, f"promote-serial-lost-{change}-host", serial=existing_device.serial)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "existing_device_id": str(existing_device.pk)},
+            user=self._device_writer(f"promote-serial-lost-{change}-user"),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = self._post_after_validation(view, request, 17, _serial_match_lost(existing_device, change))
+
+        assert response["HX-Reswap"] == "none"
+        assert f"{existing_device.name}-twin".encode() not in response.content
+        assert stored_mapping_for_test(Device.objects.get(pk=existing_device.pk)) == {self.server_key: {"id": 10}}
+
     def test_override_platform_manufacturer_mismatch_rejected(self):
         """An override platform whose manufacturer differs from the device type's is rejected (update_fields skips full_clean, so the cross-field invariant is enforced explicitly), and nothing is committed."""
         from dcim.models import Device, Manufacturer, Platform
@@ -6206,7 +6310,7 @@ class _MergeViewHarness:
             self.librenms_server = server
             yield
 
-    def _post_merge(self, winner, donor, *, device_id=99):
+    def _post_merge(self, winner, donor, *, device_id=99, after_validation=None):
         from dcim.models import Device
         from netbox_librenms_plugin.views.imports.actions import MergeNetBoxDevicesView
 
@@ -6231,7 +6335,17 @@ class _MergeViewHarness:
             ),
             HTTP_HX_REQUEST="true",
         )
-        return post_view(MergeNetBoxDevicesView(), request, device_id=device_id)
+        view = MergeNetBoxDevicesView()
+        if after_validation is not None:
+            validate = view.get_validated_device_with_selections
+
+            def validate_then_change(*args, **kwargs):
+                result = validate(*args, **kwargs)
+                after_validation()
+                return result
+
+            view.get_validated_device_with_selections = validate_then_change
+        return post_view(view, request, device_id=device_id)
 
 
 class TestMergeNetBoxDevicesViewOOBTransfer(_MergeViewHarness):
@@ -6517,6 +6631,23 @@ class TestMergeNetBoxDevicesViewFailClosed(_MergeViewHarness):
         assert classify_conflict(caught.value)
         donor.refresh_from_db()
         assert stored_mapping_for_test(donor)[self.server_key] == {"id": 10}
+
+    @pytest.mark.parametrize("change", ["hidden-duplicate", "target-serial-changed"])
+    def test_a_serial_peer_that_no_longer_holds_under_the_lock_refuses_the_merge(self, change):
+        """The donor is the serial peer of the hostname match; a write after validation breaks that evidence."""
+        from dcim.models import Device
+
+        _seed_decorated_serial_rule()
+        winner = make_device(f"merge-serial-lost-{change}-winner", librenms_cf={self.server_key: {"id": 20}})
+        donor = make_device(
+            f"merge-serial-lost-{change}-donor", serial="MERGE-SERIAL-LOST", librenms_cf={self.server_key: {"id": 10}}
+        )
+
+        resp = self._post_merge(winner, donor, after_validation=_serial_match_lost(donor, change))
+
+        assert resp["HX-Reswap"] == "none"
+        assert f"{donor.name}-twin".encode() not in resp.content
+        assert stored_mapping_for_test(Device.objects.get(pk=donor.pk))[self.server_key] == {"id": 10}
 
     def test_orphan_host_id_merge_fails_closed_and_leaves_donor_unmigrated(self):
         """A winner holding both host id + oob and a donor with a distinct host-id-only link fails closed."""
