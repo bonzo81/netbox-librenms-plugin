@@ -12,6 +12,7 @@ import pytest
 from django.urls import reverse
 
 from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
+from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
 from netbox_librenms_plugin.tests.conftest import _shared_infra, make_superuser
 from netbox_librenms_plugin.tests.recordings import load_recording
 from netbox_librenms_plugin.tests.test_bulk_import_job_control import _libre_device
@@ -634,6 +635,17 @@ def _module_refresh(device):
     return module_sync
 
 
+def _module_render(device):
+    """Render the Modules tab of *device* from its cached snapshot, as a page load does."""
+    from netbox_librenms_plugin.tests.view_test_helpers import make_request
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    view = DeviceModuleTableView()
+    request = make_request("get", {"server_key": "default"}, user=make_superuser("vc-numbering-render"))
+    view.setup(request)
+    return view.get_context_data(request, device, server_key="default")
+
+
 def _inventory_rows(recording, *, drop_serial_of=None, extra=()):
     """Return the recorded ``/all`` rows, without the serial of the member row *drop_serial_of*, plus *extra*."""
     device_id = recording["device_id"]
@@ -708,6 +720,10 @@ class TestModuleAttribution:
 
         assert module_sync["table"] is None
         assert module_sync["vc_numbering_error"]
+        # The read succeeded, so the tab keeps the refusal instead of a "refresh failed" placeholder.
+        status = SyncCacheConsistency(members[1]).status("default")[SyncTab.MODULES.value]
+        assert (status["state"], status["snapshot_available"]) == ("ready", True)
+        assert _module_render(members[1])["vc_numbering_error"] == module_sync["vc_numbering_error"]
 
     def test_a_member_row_whose_serial_names_another_member_refuses_the_module_table(self, live_librenms):
         from dcim.models import Device
