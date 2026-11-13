@@ -74,6 +74,7 @@ from netbox_librenms_plugin.serial_identity import (
     device_assignment,
     display,
     is_identity,
+    is_sole_holder,
 )
 from netbox_librenms_plugin.import_validation_helpers import (
     apply_cluster_to_validation,
@@ -2462,6 +2463,11 @@ class DeviceConflictActionView(
                 )
             with atomic_with_events():
                 server_key = self.librenms_api.server_key
+                serial_verified = not force and existing_model is Device
+                serial_rules = SerialRules.load()
+                if serial_verified:
+                    # The serial identity locks come before the claim and the row lock.
+                    assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
                 locked_device, lock_error = _lock_librenms_id_assignment_target(
                     self,
                     existing_model,
@@ -2471,14 +2477,14 @@ class DeviceConflictActionView(
                 )
                 if lock_error is not None:
                     return lock_error
-                # The serial gate again on the locked row, with the rules and chassis it reads now.
-                if not force and existing_model is Device:
-                    locked_context = SerialRules.load().for_device(locked_device)
-                    if compare(locked_device.serial, libre_device.get("serial"), locked_context) is not Comparison.SAME:
-                        return _htmx_error_response(
-                            "Serial number not confirmed. Check the force checkbox to migrate without serial "
-                            "verification."
-                        )
+                # The locked row must be the one Device that holds the serial, also among rows the user cannot see.
+                if serial_verified and not is_sole_holder(
+                    locked_device, libre_device.get("serial"), rules=serial_rules
+                ):
+                    return _htmx_error_response(
+                        "Serial number not confirmed: the device does not hold the LibreNMS serial, or another "
+                        "device holds it too. Check the force checkbox to migrate without serial verification."
+                    )
                 # Re-check under lock — another request may have already migrated it
                 locked_legacy = read_mapping(locked_device).legacy
                 if not locked_legacy.is_legacy:

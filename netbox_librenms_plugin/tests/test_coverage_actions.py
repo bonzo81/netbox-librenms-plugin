@@ -8,6 +8,7 @@ from types import SimpleNamespace as Namespace
 import pytest
 from django.db import connection, connections
 from django.test import RequestFactory
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse as url_for
 
 from netbox_librenms_plugin.server_mappings import read_mapping
@@ -3017,10 +3018,15 @@ class TestDeviceConflictActionMigrateLibreNMSId:
             HTTP_HX_REQUEST="true",
         )
 
-        response = post_view(view, request, device_id=42)
+        with CaptureQueriesContext(connection) as queries:
+            response = post_view(view, request, device_id=42)
 
         assert response.status_code == 200
         assert response["HX-Trigger"] == "closeModal"
+        # The serial identity lock comes before the row lock.
+        statements = [query["sql"] for query in queries.captured_queries]
+        identity_lock = next(i for i, sql in enumerate(statements) if "pg_advisory_xact_lock" in sql)
+        assert identity_lock < next(i for i, sql in enumerate(statements) if "FOR UPDATE" in sql)
         assert response.content.strip()
         assert stored_mapping_for_test(Device.objects.get(pk=device.pk)) == {self.server_key: 42}
 
@@ -3112,6 +3118,38 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         assert any("pg_try_advisory_xact_lock" in query["sql"] for query in queries.captured_queries)
         assert stored_mapping_for_test(VirtualMachine.objects.get(pk=vm.pk)) == 42
         assert stored_mapping_for_test(Device.objects.get(pk=device.pk)) == {self.server_key: 42}
+
+    def test_refuses_a_serial_that_a_hidden_device_holds_in_another_form(self):
+        """A serial-verified migration needs the target to be the one Device that holds the serial."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        view = self._make_view()
+        device = make_device("migrate-twin-target", serial="TWIN-MIGRATE", librenms_cf=42)
+        make_device("migrate-twin-hidden", serial="S/N TWIN-MIGRATE")
+        self._register_device(42, "migrate-twin-target", serial="TWIN-MIGRATE")
+        request = make_view_request(
+            "post",
+            {
+                "server_key": self.server_key,
+                "action": "migrate_librenms_id",
+                "existing_device_id": str(device.pk),
+            },
+            user=make_view_user(
+                "migrate-twin-user", [("view", Device), ("change", Device)], constraints={"name": device.name}
+            ),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request, device_id=42)
+
+        assert response.status_code == 200
+        assert response.headers.get("HX-Reswap") == "none"
+        assert stored_mapping_for_test(Device.objects.get(pk=device.pk)) == 42
 
     def test_fails_closed_when_the_row_is_deleted_between_validation_and_the_lock(self):
         """Fail closed when the validated Device is deleted before the locked re-read."""
