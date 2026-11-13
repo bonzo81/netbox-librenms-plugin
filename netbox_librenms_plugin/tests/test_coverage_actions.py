@@ -3681,6 +3681,42 @@ class TestDeviceConflictActionBranches:
         assert reloaded.device_type_id == reported_type.pk
         assert stored_mapping_for_test(reloaded) == {self.server_key: 42}
 
+    @pytest.mark.parametrize("action", ["update", "update_serial"])
+    def test_a_forced_type_change_decides_the_serial_under_the_new_manufacturer(self, action):
+        """Under the old manufacturer's rule "OLD-0" has no identity; under the new type it does, so it is written."""
+        from dcim.models import Device, DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        view = self._make_view()
+        target = make_device(
+            f"branches-type-serial-{action}".replace("_", "-"),
+            serial="BEFORE123",
+            librenms_cf={self.server_key: 42},
+        )
+        NormalizationRule.objects.create(
+            scope="serial",
+            match_pattern=r"^OLD-(.+)$",
+            replacement=r"\1",
+            manufacturer=target.device_type.manufacturer,
+        )
+        new_manufacturer = Manufacturer.objects.create(name=f"New {action}", slug=f"new-{action}".replace("_", "-"))
+        reported_type = DeviceType.objects.create(
+            manufacturer=new_manufacturer,
+            model=f"Branches Type Serial {action}",
+            slug=f"branches-type-serial-{action}".replace("_", "-"),
+            part_number=f"BRANCHES-TYPE-SERIAL-{action}".upper(),
+        )
+        self._register_device(42, target.name, serial="OLD-0", hardware=reported_type.part_number)
+        request = self._request(action, target, f"branches-type-serial-{action}-user", force="on")
+
+        response = post_view(view, request, device_id=42)
+
+        self._assert_success(response)
+        reloaded = Device.objects.get(pk=target.pk)
+        assert reloaded.device_type_id == reported_type.pk
+        assert reloaded.serial == "OLD-0"
+
     def test_update_serial_reports_a_real_serial_conflict(self):
         from dcim.models import Device
 

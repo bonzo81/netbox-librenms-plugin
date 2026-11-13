@@ -2315,6 +2315,10 @@ class DeviceConflictActionView(
                     hostname = _get_hostname_for_action(request, validation, libre_device)
                     incoming_serial = libre_device.get("serial")
                     fields = ["name"]
+                    # The new type first: the serial is decided under the manufacturer the row will have.
+                    if librenms_device_type:
+                        existing_device.device_type = librenms_device_type
+                        fields.append("device_type")
                     if writes_serial:
                         err, changed = _apply_conflict_checked_serial(
                             existing_device, incoming_serial, request.user, serial_rules
@@ -2324,9 +2328,6 @@ class DeviceConflictActionView(
                         if changed:
                             fields.append("serial")
                     existing_device.name = hostname
-                    if librenms_device_type:
-                        existing_device.device_type = librenms_device_type
-                        fields.append("device_type")
                     if err := _save_device(
                         existing_device, update_fields=fields, request=request, mapping=mapping_change
                     ):
@@ -2340,6 +2341,10 @@ class DeviceConflictActionView(
                     # Update only the serial and link to LibreNMS
                     incoming_serial = libre_device.get("serial")
                     fields = []
+                    # The new type first: the serial is decided under the manufacturer the row will have.
+                    if librenms_device_type:
+                        existing_device.device_type = librenms_device_type
+                        fields.append("device_type")
                     if writes_serial:
                         err, changed = _apply_conflict_checked_serial(
                             existing_device, incoming_serial, request.user, serial_rules
@@ -2348,9 +2353,6 @@ class DeviceConflictActionView(
                             return err
                         if changed:
                             fields.append("serial")
-                    if librenms_device_type:
-                        existing_device.device_type = librenms_device_type
-                        fields.append("device_type")
                     if err := _save_device(
                         existing_device, update_fields=fields, request=request, mapping=mapping_change
                     ):
