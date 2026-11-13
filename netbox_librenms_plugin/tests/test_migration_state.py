@@ -170,7 +170,7 @@ def test_reverse_inventory_seed_preserves_operator_rules(operator_edited):
     if operator_edited:
         inventory_rule.description = "Operator-owned inventory rule"
         inventory_rule.save()
-        serial_rule.replacement = r"serial-\1"
+        serial_rule.description = "Operator-owned serial rule"
         serial_rule.save()
     before_inventory = InventoryIgnoreRule.objects.filter(pk=inventory_rule.pk).values().get()
     before_serial = NormalizationRule.objects.filter(pk=serial_rule.pk).values().get()

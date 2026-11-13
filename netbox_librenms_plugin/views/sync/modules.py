@@ -1,7 +1,6 @@
 """Sync action views for module/inventory installation from LibreNMS."""
 
 import copy
-import hashlib
 import json
 import logging
 import re
@@ -19,7 +18,7 @@ from django.utils.html import escape
 from django.views import View
 from utilities.exceptions import AbortRequest
 
-from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE, is_librenms_placeholder
+from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.interface_diff import type_change_refusal
 from netbox_librenms_plugin.inventory_policy import load_inventory_policy
 from netbox_librenms_plugin.module_grants import (
@@ -47,6 +46,19 @@ from netbox_librenms_plugin.server_mappings import (
     persist_mapping,
     read_mapping,
 )
+from netbox_librenms_plugin.serial_identity import (
+    REFUSING,
+    Comparison,
+    ResolutionKind,
+    assignment_lock,
+    compare,
+    display,
+    freshness_token,
+    is_identity,
+    module_assignment,
+    resolve_module,
+    stored_form,
+)
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import (
     SyncTab,
@@ -55,7 +67,13 @@ from netbox_librenms_plugin.sync_cache import (
     module_inventory_oob_matches,
     schedule_request_cache_mutation,
 )
-from netbox_librenms_plugin.transactions import classify_conflict, saved_in_scope, update_existing_row
+from netbox_librenms_plugin.transactions import (
+    atomic_with_events,
+    classify_conflict,
+    row_savepoint,
+    saved_in_scope,
+    update_existing_row,
+)
 from netbox_librenms_plugin.utils import (
     REGEX_COMPILE_ERRORS,
     acquire_advisory_transaction_lock,
@@ -66,9 +84,8 @@ from netbox_librenms_plugin.utils import (
     load_module_type_bay_types,
     is_vc_position,
     module_type_bay_type_ids,
+    librenms_text,
     netbox_relocates_module_subtree,
-    normalize_inventory_serial,
-    normalize_serial,
     prefetch_module_bay_types,
     rewrite_interface_name_for_vc_member,
     exception_text_for,
@@ -225,9 +242,9 @@ def _module_holder_map(device):
     return dict(Module.objects.filter(device=device).values_list("pk", "module_bay__module_id"))
 
 
-def _module_already_on_device(device, serial, *, exclude_pk=None):
+def _module_already_on_device(device, incoming, serial_rules, *, exclude_pk=None) -> bool:
     """
-    Return the Module already holding ``serial`` on ``device``, or None.
+    Return whether a Module on ``device`` already holds the LibreNMS serial ``incoming``.
 
     Identity is device-scoped on purpose. A serial is evidence about one physical part, and
     vendors reuse a serial across unrelated parts, so a match on another device must not block a
@@ -236,16 +253,12 @@ def _module_already_on_device(device, serial, *, exclude_pk=None):
     Existence is read WITHOUT permission filtering. Installing needs ``add_module``, not
     ``change_module``, so a restricted queryset can come back empty for an operator who may still
     create the duplicate. Callers must report the hit without naming objects the operator cannot
-    see; ``_lock_page_device_serials`` must already be held.
+    see; the transaction must already hold ``assignment_lock`` for ``incoming``.
     """
-    from dcim.models import Module
-
-    if not serial:
-        return None
-    conflicts = Module.objects.select_for_update(of=("self",)).filter(device=device, serial=serial)
-    if exclude_pk:
-        conflicts = conflicts.exclude(pk=exclude_pk)
-    return conflicts.first()
+    held = resolve_module(
+        incoming, rules=serial_rules, device_ids=[device.pk], exclude_pks=[exclude_pk] if exclude_pk else (), lock=True
+    )
+    return held.kind in REFUSING
 
 
 def _get_cached_inventory_for_device(sync_device, server_key, get_cache_key):
@@ -548,7 +561,8 @@ def _save_module_with_expected_component_adoption(module, expected_ids):
         else:
             adopted_ids[sender].add(instance.pk)
 
-    with transaction.atomic():
+    # The save queues events before the adoption check can refuse, so a refusal must drop them too.
+    with atomic_with_events():
         module._adopt_components = True
         module.full_clean()
         for component_model in component_models:
@@ -575,7 +589,7 @@ def _save_module_with_expected_component_adoption(module, expected_ids):
 
 def _save_module_with_scoped_component_adoption(module, component_querysets):
     """Authorize, lock, and save every component NetBox can adopt."""
-    with transaction.atomic():
+    with atomic_with_events():
         expected_ids = _authorize_adoptable_module_components(module, component_querysets)
         return _save_module_with_expected_component_adoption(module, expected_ids)
 
@@ -1055,10 +1069,12 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         indexed = bool(request.POST.get("ent_index"))
 
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 _lock_page_device_serials(page_device)
                 bind_item = None
+                incoming = None
                 serial = ""
+                serial_rules = None
                 if indexed:
                     granted = _authorize_module_grant(
                         self, page_device, server_key, ACTION_INSTALL_MODULE, request.POST.get("inventory_binding")
@@ -1069,13 +1085,11 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         action_target={"module_bay_id": module_bay_id, "module_type_id": module_type_id},
                     )
                     bind_item = granted.row(granted.grant.ent_index)
-                    serial = normalize_inventory_serial(
-                        bind_item.get("entPhysicalSerialNum"),
-                        manufacturer=target_device.device_type.manufacturer,
-                        preloaded_rules=granted.policy.serial_rule_sets,
-                    )
-                    if is_librenms_placeholder(serial):
-                        serial = ""
+                    incoming = bind_item.get("entPhysicalSerialNum")
+                    serial = stored_form(incoming, Module)
+                    serial_rules = granted.policy.serial_identity_rules
+                    # The serial identity locks come after the page lock and before any row lock.
+                    assignment_lock([incoming], model=Module, rules=serial_rules)
                 # Re-fetch bay under lock to prevent TOCTOU race with concurrent installs.
                 locked_bay = (
                     self.restricted_queryset(ModuleBay)
@@ -1089,7 +1103,7 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     raise _ModuleActionRefused(
                         f"Module bay '{locked_bay.name}' already has a module installed.", messages.WARNING
                     )
-                if _module_already_on_device(target_device, serial):
+                if serial_rules is not None and _module_already_on_device(target_device, incoming, serial_rules):
                     # The bay is deliberately not named: the conflicting module may be outside
                     # this operator's scope, and its existence is what blocks the install.
                     raise _ModuleActionRefused(
@@ -1213,7 +1227,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         page_device.refresh_from_db()
         return _modules_action_response(request, page_device, server_key)
 
-    @transaction.atomic
+    @atomic_with_events()
     def _install_branch(self, request, page_device, server_key, parent_index):
         """Plan and write under the page lock, then commit before response rendering."""
         from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
@@ -1245,6 +1259,12 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         if not entries:
             messages.warning(request, "No installable items found in this branch.")
             return
+        # The serial identity locks of the whole branch, before any bay or module row lock.
+        assignment_lock(
+            [item.get("entPhysicalSerialNum") for item, _target_id in entries],
+            model=Module,
+            rules=granted.policy.serial_identity_rules,
+        )
         targets = {
             device.pk: device
             for device in self.restricted_queryset(Device)
@@ -1284,7 +1304,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         bound_any = False
 
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 holder_of_by_device = {}
                 for item, target_id in entries:
                     target_device = targets[target_id]
@@ -1303,7 +1323,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         regex_mappings=policy["regex_mappings"],
                         manufacturer_id=mfr_id,
                         norm_rules_bay=norm_rules_bay,
-                        norm_rules_serial=granted.policy.serial_rule_sets,
+                        serial_rules=granted.policy.serial_identity_rules,
                         type_bay_types=type_bay_types,
                         module_bays=module_bays,
                         allowed_module_type_ids=allowed_module_type_ids,
@@ -1400,7 +1420,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         regex_mappings=None,
         manufacturer_id=None,
         norm_rules_bay=None,
-        norm_rules_serial=None,
+        serial_rules=None,
         holder_of=None,
         type_bay_types=None,
         user=None,
@@ -1426,7 +1446,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             regex_mappings (list | None): The optional regular expression module bay mappings.
             manufacturer_id (int | None): The optional device manufacturer ID.
             norm_rules_bay (dict | None): The optional module bay normalization rules.
-            norm_rules_serial (dict | None): The optional serial normalization rules.
+            serial_rules (SerialRules): The serial rules that the caller's transaction locked the serials with.
             holder_of (dict | None): Mutable module ancestry reused during a bulk install.
             type_bay_types (dict | None): Preloaded module bay types per module type, for a bulk install.
             user (User | None): The viewer of a failure reason; only a superuser gets NetBox's message.
@@ -1439,16 +1459,8 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         from netbox_librenms_plugin.utils import module_type_lookup_candidates, resolve_module_type
 
-        model_name = normalize_serial(item.get("entPhysicalModelName"))
-        # The serial-scope rules strip vendor markers such as Juniper's "S/N ", and the
-        # coercion handles the all-digit serials LibreNMS sends as JSON numbers.
-        serial = normalize_inventory_serial(
-            item.get("entPhysicalSerialNum"),
-            manufacturer=device.device_type.manufacturer,
-            preloaded_rules=norm_rules_serial,
-        )
-        if is_librenms_placeholder(serial):
-            serial = ""
+        model_name = librenms_text(item.get("entPhysicalModelName"))
+        incoming = item.get("entPhysicalSerialNum")
         name = item.get("entPhysicalName", "") or model_name
 
         # Reject at this shared chokepoint so both the branch and selected install paths are covered.
@@ -1497,7 +1509,9 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         # Install (lock bay to prevent concurrent installs)
         try:
-            with transaction.atomic():  # savepoint: failure here won't abort parent tx
+            # A savepoint whose events stay only when it succeeds: a failure here won't abort the parent tx.
+            with row_savepoint():
+                serial = stored_form(incoming, Module)
                 locked_bay = (
                     module_bays.select_for_update(of=("self",))
                     .select_related("installed_module")
@@ -1510,7 +1524,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         "reason": "bay already occupied",
                         "module_pk": locked_bay.installed_module.pk,
                     }
-                if _module_already_on_device(device, serial):
+                if _module_already_on_device(device, incoming, serial_rules):
                     return {
                         "status": "skipped",
                         "name": name,
@@ -1977,13 +1991,19 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         installed, skipped, failed = [], [], []
         bound_any = False
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 _lock_page_device_serials(page_device)
                 granted = _authorize_module_grant(
                     self, page_device, server_key, ACTION_INSTALL_SELECTED, request.POST.get("inventory_binding")
                 )
                 granted.grant.require(device_id=page_device.pk)
                 plan = self._granted_selection(request, granted, selected_list, page_device, server_key)
+                # The serial identity locks of the whole selection, before any bay or module row lock.
+                assignment_lock(
+                    [item.get("entPhysicalSerialNum") for item, _target, _pinned in plan],
+                    model=Module,
+                    rules=granted.policy.serial_identity_rules,
+                )
                 # A row walks its parent modules in the render that authorized it: the manifest or a pinned override.
                 manifest_maps = InstallBranchView._ancestry_maps(
                     granted, {target.pk for _item, target, pinned in plan if not pinned}
@@ -2011,7 +2031,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         regex_mappings=regex_mappings,
                         manufacturer_id=mfr_id,
                         norm_rules_bay=norm_rules_bay,
-                        norm_rules_serial=granted.policy.serial_rule_sets,
+                        serial_rules=granted.policy.serial_identity_rules,
                         type_bay_types=type_bay_types,
                         module_bays=module_bays,
                         allowed_module_type_ids=allowed_module_type_ids,
@@ -2147,19 +2167,16 @@ class UpdateModuleSerialView(
             return _modules_action_response(request, page_device, server_key)
 
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 granted = _authorize_module_grant(
                     self, page_device, server_key, ACTION_UPDATE_SERIAL, request.POST.get("inventory_binding")
                 )
                 granted.grant.require(device_id=target_device.pk, ent_index=request.POST.get("ent_index", ""))
                 librenms_item = granted.row(granted.grant.ent_index)
-                serial = normalize_inventory_serial(
-                    librenms_item.get("entPhysicalSerialNum"),
-                    manufacturer=target_device.device_type.manufacturer,
-                    preloaded_rules=granted.policy.serial_rule_sets,
-                )
-                if is_librenms_placeholder(serial):
-                    serial = ""
+                incoming = librenms_item.get("entPhysicalSerialNum")
+                serial_rules = granted.policy.serial_identity_rules
+                # The serial identity locks come before the module row lock.
+                assignment_lock([incoming], model=Module, rules=serial_rules)
                 module = (
                     self.restricted_queryset(Module, "change")
                     .select_for_update(of=("self",))
@@ -2170,10 +2187,20 @@ class UpdateModuleSerialView(
                 if not module:
                     raise _ModuleActionRefused("Module no longer exists.")
                 granted.grant.require(action_target=installed_module_target(module.pk, module.module_bay_id))
-                changed = module.serial != serial
+                serial = display(incoming)
+                # A stored form that names the same hardware is rewritten as the LibreNMS text.
+                assignment = module_assignment(module, incoming, rules=serial_rules)
+                if assignment.absent:
+                    # An update never clears a stored serial because LibreNMS reports none.
+                    raise _ModuleActionRefused("LibreNMS reports no serial for this module. Nothing was changed.")
+                if assignment.conflict is not None:
+                    raise _ModuleActionRefused(
+                        f"Serial '{serial}' is already installed on this device. Nothing was changed."
+                    )
+                changed = assignment.value is not None
                 if changed:
                     module.snapshot()
-                    module.serial = serial
+                    module.serial = assignment.value
                     module.full_clean()
                     module.save(update_fields=["serial", "last_updated"])
             if changed:
@@ -2596,17 +2623,13 @@ class ApplyModuleInterfaceTypesView(
         return _modules_action_response(request, page_device, server_key)
 
 
-def _serial_digest(serial):
-    """Return a positive int that names the stripped stored serial, so the id-only action target can sign it."""
-    return int.from_bytes(hashlib.sha256((serial or "").strip().encode()).digest()[:7], "big") + 1
-
-
-def _replace_target(module, replacement_type):
+def _replace_target(module, replacement_type, serial_context):
     """Return what a replace grant signs: the module, type, bay and serial the preview showed, and the type it resolved."""
     target = {
         **installed_module_target(module.pk, module.module_bay_id),
         "module_type_id": module.module_type_id,
-        "module_serial_digest": _serial_digest(module.serial),
+        # A rule edit or a serial edit after the preview refuses the grant.
+        "module_serial_token": freshness_token(module.serial, serial_context),
     }
     if replacement_type is not None:
         target["replacement_module_type_id"] = replacement_type.pk
@@ -2673,16 +2696,11 @@ class ModuleMismatchPreviewView(
         from netbox_librenms_plugin.utils import module_type_lookup_candidates, resolve_module_type
 
         manufacturer = target_device.device_type.manufacturer
-        librenms_model = normalize_serial(librenms_item.get("entPhysicalModelName")) or "-"
-        # The preview sits beside the stored module serial, which the install path writes through
-        # this same normalization, so the raw inventory value would read as a mismatch.
-        librenms_serial = normalize_inventory_serial(
-            librenms_item.get("entPhysicalSerialNum"),
-            manufacturer=manufacturer,
-            preloaded_rules=granted.policy.serial_rule_sets,
-        )
-        if is_librenms_placeholder(librenms_serial):
-            librenms_serial = ""
+        librenms_model = librenms_text(librenms_item.get("entPhysicalModelName")) or "-"
+        incoming = librenms_item.get("entPhysicalSerialNum")
+        librenms_serial = display(incoming)
+        serial_rules = granted.policy.serial_identity_rules
+        serial_context = serial_rules.for_module_target(target_device)
 
         # Detect type mismatch
         module_types = get_module_types_indexed()
@@ -2699,30 +2717,29 @@ class ModuleMismatchPreviewView(
         # (matched_type is None). The modal uses this to badge the LibreNMS model when its display string
         # differs from the NetBox type but is a confirmed match (the common serial-mismatch case).
         type_matched = matched_type is not None and installed_module.module_type_id == matched_type.pk
-        installed_serial = (installed_module.serial or "").strip()
-        if is_librenms_placeholder(installed_serial):
-            installed_serial = ""
-        serial_mismatch = bool(
-            not type_mismatch and librenms_serial != installed_serial and (librenms_serial or installed_serial)
+        installed_serial = display(installed_module.serial)
+        # The serial rules of the target decide: a stored form that names the same hardware is no mismatch.
+        serial_mismatch = (
+            not type_mismatch
+            and is_identity(incoming, serial_context)
+            and compare(installed_module.serial, incoming, serial_context) is not Comparison.SAME
         )
 
         # Check whether the LibreNMS serial already exists at a different location
         serial_conflict = None
         serial_conflict_ambiguous = False
         serial_conflict_hidden = False
-        if librenms_serial:
-            conflict_qs = Module.objects.filter(serial=librenms_serial).exclude(pk=installed_module.pk)
-            conflict_count = conflict_qs.count()
-            if conflict_count == 1:
-                serial_conflict = (
-                    self.restricted_queryset(Module)
-                    .filter(pk__in=conflict_qs)
-                    .select_related("module_type", "module_bay", "device")
-                    .first()
-                )
-                serial_conflict_hidden = serial_conflict is None
-            elif conflict_count > 1:
-                serial_conflict_ambiguous = True
+        elsewhere = resolve_module(incoming, rules=serial_rules, exclude_pks=[installed_module.pk])
+        if elsewhere.kind is ResolutionKind.UNIQUE:
+            serial_conflict = (
+                self.restricted_queryset(Module)
+                .filter(pk=elsewhere.object.pk)
+                .select_related("module_type", "module_bay", "device")
+                .first()
+            )
+            serial_conflict_hidden = serial_conflict is None
+        elif elsewhere.kind is ResolutionKind.AMBIGUOUS:
+            serial_conflict_ambiguous = True
 
         return render(
             request,
@@ -2746,7 +2763,9 @@ class ModuleMismatchPreviewView(
                 "selected_device_id": target_device.pk,
                 "serial_inventory_binding": self._derived_grant(grant, ACTION_UPDATE_SERIAL),
                 "replace_inventory_binding": self._derived_grant(
-                    grant, ACTION_REPLACE_MODULE, action_target=_replace_target(installed_module, matched_type)
+                    grant,
+                    ACTION_REPLACE_MODULE,
+                    action_target=_replace_target(installed_module, matched_type, serial_context),
                 ),
             },
         )
@@ -2883,22 +2902,18 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
             bind_result = None
             adopted_components = 0
             vc_adjustments = {"renamed": 0, "adopted": 0, "removed": 0, "skipped": 0}
-            with transaction.atomic():
+            with atomic_with_events():
                 granted = _authorize_module_grant(
                     self, page_device, server_key, ACTION_REPLACE_MODULE, request.POST.get("inventory_binding")
                 )
                 granted.grant.require(device_id=target_device.pk, ent_index=request.POST.get("ent_index", ""))
                 librenms_item = granted.row(granted.grant.ent_index)
-                model_name = normalize_serial(librenms_item.get("entPhysicalModelName"))
-                # The replacement is stored and matched against serials the install path already
-                # normalized, so a raw vendor marker here would never match either.
-                serial = normalize_inventory_serial(
-                    librenms_item.get("entPhysicalSerialNum"),
-                    manufacturer=manufacturer,
-                    preloaded_rules=granted.policy.serial_rule_sets,
-                )
-                if is_librenms_placeholder(serial):
-                    serial = ""
+                model_name = librenms_text(librenms_item.get("entPhysicalModelName"))
+                incoming = librenms_item.get("entPhysicalSerialNum")
+                serial = stored_form(incoming, Module)
+                serial_rules = granted.policy.serial_identity_rules
+                # The serial identity locks come before the module row locks.
+                assignment_lock([incoming], model=Module, rules=serial_rules)
                 matched_type = resolve_module_type(
                     model_name,
                     get_module_types_indexed(),
@@ -2922,7 +2937,11 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 )
                 if not installed_module:
                     raise _ModuleActionRefused("Module no longer exists.")
-                granted.grant.require(action_target=_replace_target(installed_module, matched_type))
+                granted.grant.require(
+                    action_target=_replace_target(
+                        installed_module, matched_type, serial_rules.for_module_target(target_device)
+                    )
+                )
 
                 # Read bay/type from locked row to avoid stale snapshot
                 target_bay = installed_module.module_bay
@@ -2946,24 +2965,20 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 # conflicts.  Re-querying under select_for_update() guarantees the
                 # set we delete from is the same set we validated.
                 conflict_module = None
-                if serial:
-                    conflict_qs = (
+                elsewhere = resolve_module(incoming, rules=serial_rules, exclude_pks=[installed_module.pk], lock=True)
+                if elsewhere.kind is ResolutionKind.AMBIGUOUS:
+                    # Roll back and surface a clear error — we don't want to
+                    # guess which of N conflicts to remove.
+                    raise _SerialConflictAmbiguous(serial)
+                if elsewhere.kind is ResolutionKind.UNIQUE:
+                    conflict_module = (
                         self.restricted_queryset(Module, "delete")
-                        .select_for_update(of=("self",))
-                        .filter(serial=serial)
-                        .exclude(pk=installed_module.pk)
+                        .filter(pk=elsewhere.object.pk)
                         .select_related("module_type", "module_bay", "device")
+                        .first()
                     )
-                    locked_conflicts = list(conflict_qs)
-                    conflict_count = Module.objects.filter(serial=serial).exclude(pk=installed_module.pk).count()
-                    if conflict_count > 1:
-                        # Roll back and surface a clear error — we don't want to
-                        # guess which of N conflicts to remove.
-                        raise _SerialConflictAmbiguous(serial)
-                    if conflict_count != len(locked_conflicts):
+                    if conflict_module is None:
                         raise _SerialConflictUnavailable(serial)
-                    if conflict_count == 1:
-                        conflict_module = locked_conflicts[0]
 
                 # Remove the serial-conflicting module from its current location.
                 if conflict_module:
@@ -3828,7 +3843,7 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
         item = granted.row(grant.ent_index)
         ancestry = InstallBranchView._ancestry_maps(granted, {member.pk})[member.pk]
         has_bay = self._matches_a_bay(member, item, granted.index_map, granted.index_map.keys() - ancestry.keys())
-        identity = DeviceIdentity.of(member, granted.policy.chassis_serial_key())
+        identity = DeviceIdentity.of(member, granted.policy.chassis_serial_context())
         candidate = built_in_candidate(item, granted.index_map, identity, has_bay=has_bay)
         if candidate is None:
             raise GrantRefused(GrantRefusal.STALE)

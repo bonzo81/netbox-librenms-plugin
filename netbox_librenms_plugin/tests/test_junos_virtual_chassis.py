@@ -47,7 +47,8 @@ def _detect(recording_server, recording):
 
 @pytest.mark.parametrize("anonymized", [False, True])
 def test_fpc_members_carry_their_member_number_serial_and_model(recording_server, anonymized):
-    from netbox_librenms_plugin.import_utils.virtual_chassis import identify_vc_master, vc_serial_key
+    from netbox_librenms_plugin.import_utils.virtual_chassis import identify_vc_master
+    from netbox_librenms_plugin.serial_identity import SerialRules
 
     recording = load_recording(_RECORDING)
     if anonymized:
@@ -72,7 +73,10 @@ def test_fpc_members_carry_their_member_number_serial_and_model(recording_server
     ]
     # The LibreNMS device serial is the root serial, which FPC 0 carries.
     device = unwrap_response(recording["responses"][f"GET /api/v0/devices/{device_id}"])[1]["devices"][0]
-    assert identify_vc_master(result["members"], device["serial"], vc_serial_key()) is result["members"][0]
+    assert (
+        identify_vc_master(result["members"], device["serial"], SerialRules.load().context(None))
+        is result["members"][0]
+    )
     # Junos reports the member model as the FPC name; the model-name field holds a part number.
     assert [member["model"] for member in result["members"]] == [
         fpcs[120]["entPhysicalName"],
@@ -121,11 +125,13 @@ def test_anonymization_keeps_a_placeholder_fpc_serial_so_the_shape_stays_rejecte
     """A BUILTIN FPC serial is no member serial; anonymizing it must not turn the shape into a stack."""
     from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
     from netbox_librenms_plugin.data_shapes.signature import compute_shape_signature
-    from netbox_librenms_plugin.import_utils.virtual_chassis import vc_serial_key
+    from netbox_librenms_plugin.serial_identity import SerialRules
 
     recording = copy.deepcopy(load_recording(_RECORDING))
     _edit_rows(recording, 121, lambda row: row.update(entPhysicalSerialNum="BUILTIN"))
-    anonymized = anonymize_recording(recording, serial_key=vc_serial_key() if live_capture else None)
+    anonymized = anonymize_recording(
+        recording, serial_context=SerialRules.load().context(None) if live_capture else None
+    )
 
     routes = (f"{anonymized['device_id']}?entPhysicalContainedIn=1", f"{anonymized['device_id']}/all")
     serials = {
@@ -147,7 +153,7 @@ def test_recordings_keep_the_production_serial_equality(recording_server, scoped
 
     from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
     from netbox_librenms_plugin.data_shapes.signature import compute_shape_signature
-    from netbox_librenms_plugin.import_utils.virtual_chassis import vc_serial_key
+    from netbox_librenms_plugin.serial_identity import SerialRules
     from netbox_librenms_plugin.models import NormalizationRule
 
     NormalizationRule.objects.filter(scope="serial").delete()
@@ -167,12 +173,12 @@ def test_recordings_keep_the_production_serial_equality(recording_server, scoped
     recording["expected"]["virtual_chassis"]["member_serials"] = ["MEMBER-A", "MEMBER-B"]
     original = copy.deepcopy(recording)
     assert _detect(recording_server, recording)["member_count"] == 2
-    serial_key = vc_serial_key(manufacturer)
+    serial_context = SerialRules.load().context(manufacturer.pk)
 
     if surface == "signature":
-        signature = compute_shape_signature(recording, serial_key=serial_key)
+        signature = compute_shape_signature(recording, serial_context=serial_context)
     else:
-        anonymized = anonymize_recording(recording, serial_key=serial_key)
+        anonymized = anonymize_recording(recording, serial_context=serial_context)
         # A recording must replay on a host that has none of the capture's rules.
         NormalizationRule.objects.filter(scope="serial").delete()
         assert _detect(recording_server, anonymized)["member_count"] == 2
@@ -186,19 +192,21 @@ def test_recordings_keep_the_production_serial_equality(recording_server, scoped
     assert recording == original
 
 
-@pytest.mark.parametrize(("pattern", "replacement"), [(r"^CAPTURE-.+()$", r"\1"), (r"^CAPTURE-.+$", "unknown")])
+@pytest.mark.parametrize(
+    ("pattern", "replacement"), [(r"^CAPTURE-.+()$", r"\1"), (r"^CAPTURE-(X)?.+$", r"\1"), (r"^CAPTURE-(.)$", r"\1")]
+)
 def test_a_serial_rule_that_removes_identity_does_not_publish_the_original_serial(pattern, replacement):
     import json
 
     from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
-    from netbox_librenms_plugin.import_utils.virtual_chassis import vc_serial_key
+    from netbox_librenms_plugin.serial_identity import SerialRules
     from netbox_librenms_plugin.models import NormalizationRule
 
     NormalizationRule.objects.filter(scope="serial").delete()
     NormalizationRule.objects.create(scope="serial", match_pattern=pattern, replacement=replacement)
     recording = {"device_id": 1, "responses": {"GET /api/v0/devices/1": {"devices": [{"serial": "CAPTURE-A"}]}}}
 
-    anonymized = anonymize_recording(recording, serial_key=vc_serial_key())
+    anonymized = anonymize_recording(recording, serial_context=SerialRules.load().context(None))
 
     assert "CAPTURE-A" not in json.dumps(anonymized)
     assert anonymized["responses"][f"GET /api/v0/devices/{anonymized['device_id']}"]["devices"][0]["serial"] == ""
@@ -219,8 +227,8 @@ def test_capture_download_replays_the_same_normalized_virtual_chassis(client, re
     from netbox_librenms_plugin.import_utils.virtual_chassis import (
         detect_virtual_chassis_from_inventory,
         identify_vc_master,
-        vc_serial_key,
     )
+    from netbox_librenms_plugin.serial_identity import SerialRules
     from netbox_librenms_plugin.models import NormalizationRule
     from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
     from netbox_librenms_plugin.tests.test_data_shapes_view import _captured_recording, _override_servers
@@ -279,7 +287,10 @@ def test_capture_download_replays_the_same_normalized_virtual_chassis(client, re
     assert detected["member_count"] == 2
     ok, replay_device = replay_api.get_device_info(replay_id)
     assert ok
-    assert identify_vc_master(detected["members"], replay_device["serial"], vc_serial_key()) is detected["members"][0]
+    assert (
+        identify_vc_master(detected["members"], replay_device["serial"], SerialRules.load().context(None))
+        is detected["members"][0]
+    )
 
 
 def _import_named_stack(live_librenms, rule_owner):

@@ -25,10 +25,10 @@ def _rule(**fields):
 
 def _check(item, rules, parent=None, index_map=None, *, serial="", models=()):
     from netbox_librenms_plugin.views.base.modules_view import DeviceIdentity, _check_ignore_rules
-    from netbox_librenms_plugin.utils import normalize_stack_serial
+    from netbox_librenms_plugin.serial_identity import plain_context
 
     return _check_ignore_rules(
-        item, parent, rules, index_map, DeviceIdentity(serial, frozenset(models), serial_key=normalize_stack_serial)
+        item, parent, rules, index_map, DeviceIdentity(serial, frozenset(models), serial_context=plain_context())
     )
 
 
@@ -63,7 +63,7 @@ class TestMatcher:
 
     @pytest.mark.parametrize(
         ("item_serial", "parent_serial", "matched"),
-        [("", "", False), ("SN-1", "SN-1", True), ("SN-1", "SN-2", False), ("SN-1", "", False)],
+        [("", "", False), ("SN-100", "SN-100", True), ("SN-100", "SN-200", False), ("SN-100", "", False)],
     )
     def test_a_class_rule_honours_the_serial_guard(self, item_serial, parent_serial, matched):
         rule = _rule(match_type="class_is", pattern="module", action="skip", require_serial_match_parent=True)

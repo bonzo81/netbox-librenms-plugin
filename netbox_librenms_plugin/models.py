@@ -20,7 +20,7 @@ from utilities.querysets import RestrictedQuerySet
 from netbox_librenms_plugin.utils import (
     REGEX_COMPILE_ERRORS,
     get_object_site_id,
-    normalize_serial,
+    librenms_text,
     validate_regex_field,
 )
 
@@ -100,6 +100,34 @@ def check_rule_replacement(rule, compiled, field):
         _validate_replacement_template(compiled, getattr(rule, field))
     except (*REGEX_COMPILE_ERRORS, IndexError) as exc:
         raise RuleConfigurationError(rule, field) from exc
+
+
+# A serial rule extracts one capture group, so its replacement names exactly one group.
+_SERIAL_GROUP_REFERENCE = re.compile(r"\\(?P<number>[1-9][0-9]?)|\\g<(?P<group>[0-9]+|[^\W\d]\w*)>")
+
+
+def serial_group_reference(compiled: re.Pattern, replacement: str):
+    r"""
+    Return the group that a serial rule's *replacement* names, or None when it names no defined group.
+
+    The replacement must be exactly ``\N`` (1-99), ``\g<N>`` or ``\g<name>``. The evaluator reads
+    ``match.group()`` of this reference and never expands a template, so ``\100`` cannot mean an octal escape.
+
+    Args:
+        compiled (re.Pattern): The rule's compiled match_pattern.
+        replacement (str): The rule's replacement.
+
+    Returns:
+        int | str | None: The group number or name, or None.
+
+    """
+    reference = _SERIAL_GROUP_REFERENCE.fullmatch(replacement or "")
+    if reference is None:
+        return None
+    number = reference["number"] or reference["group"]
+    if number.isdigit():
+        return int(number) if 1 <= int(number) <= compiled.groups else None
+    return number if number in compiled.groupindex else None
 
 
 def _trim_python_whitespace(expression):
@@ -804,8 +832,9 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
         max_length=50,
         choices=SCOPE_CHOICES,
         db_index=True,
-        help_text="Which lookup this rule applies to. Serial rules rewrite the stored "
-        "serial, and VLAN name rules the proposed VLAN name, rather than a matching key.",
+        help_text="Which lookup this rule applies to. A serial rule extracts the part of a serial that "
+        "identifies the hardware; the stored serial keeps the LibreNMS text. A VLAN name rule rewrites "
+        "the proposed VLAN name.",
     )
     manufacturer = models.ForeignKey(
         Manufacturer,
@@ -823,7 +852,8 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
     )
     replacement = models.CharField(
         max_length=500,
-        help_text="Replacement string (supports regex back-references \\1, \\2, …)",
+        help_text="Replacement string (supports regex back-references \\1, \\2, …). A serial rule "
+        "takes exactly one group reference, such as \\1 or \\g<name>, and keeps that group of a full match.",
     )
     priority = models.PositiveIntegerField(
         default=100,
@@ -838,6 +868,7 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
         """Validate that match_pattern compiles as a regex and replacement is a valid template."""
         super().clean()
         self.__dict__.pop("compiled_match_pattern", None)
+        self.__dict__.pop("serial_group", None)
         errors = {}
         if not self.match_pattern:
             errors["match_pattern"] = "This field is required."
@@ -848,6 +879,13 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
         if self.VID_PLACEHOLDER in self.match_pattern and self.scope != self.SCOPE_VLAN_NAME:
             raise ValidationError({"match_pattern": f"Only a VLAN name rule can use {self.VID_PLACEHOLDER}."})
         compiled = validate_regex_field(self._pattern_for_vid(1), "match_pattern")
+        if self.scope == self.SCOPE_SERIAL and serial_group_reference(compiled, self.replacement) is None:
+            raise ValidationError(
+                {
+                    "replacement": "A serial rule keeps one capture group of a full match: use \\1, \\g<1> or "
+                    "\\g<name> for a group that the pattern defines, and nothing else."
+                }
+            )
         # Validate the replacement template by running a dummy substitution
         try:
             _validate_replacement_template(compiled, self.replacement)
@@ -867,6 +905,20 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
         check_rule_replacement(self, compiled, "replacement")
         return compiled
 
+    @functools.cached_property
+    def serial_group(self):
+        """
+        Return the capture group that this serial rule keeps; serial_identity reads ``match.group()`` of it.
+
+        Raises:
+            RuleConfigurationError: When the stored replacement is not one group reference that the pattern defines.
+
+        """
+        reference = serial_group_reference(self.compiled_match_pattern, self.replacement)
+        if reference is None:
+            raise RuleConfigurationError(self, "replacement")
+        return reference
+
     def _pattern_for_vid(self, vid):
         """Return match_pattern with each VID placeholder replaced by *vid* as literal text."""
         return self.match_pattern.replace(self.VID_PLACEHOLDER, re.escape(str(vid)))
@@ -879,8 +931,11 @@ class NormalizationRule(FullCleanOnSaveMixin, NetBoxModel):
 
         Raises:
             RuleConfigurationError: When the stored pattern or replacement does not work.
+            TypeError: The rule is a serial rule; serial_identity evaluates those.
 
         """
+        if self.scope == self.SCOPE_SERIAL:
+            raise TypeError("A serial rule extracts a group; serial_identity evaluates it.")
         if self.VID_PLACEHOLDER not in self.match_pattern:
             return self.compiled_match_pattern.sub(self.replacement, value)
         if vid is None:
@@ -1189,7 +1244,7 @@ class InventoryIgnoreRule(FullCleanOnSaveMixin, NetBoxModel):
     def matches_item_class(self, item: dict) -> bool:
         """Return True when this class_is rule's class is the class of *item*."""
         # LibreNMS sends JSON, so a numeric value arrives as an int; a missing one compares as "".
-        return self.matches_class(normalize_serial(item.get("entPhysicalClass")))
+        return self.matches_class(librenms_text(item.get("entPhysicalClass")))
 
     def matches_filters(self, item: dict) -> bool:
         """Return True when every non-blank filter of this rule matches *item*, whatever the action."""

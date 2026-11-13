@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from netbox_librenms_plugin.serial_identity import plain_context
 from netbox_librenms_plugin.tests.conftest import junos_vc_inventory, make_junos_vc_members
 
 # ---------------------------------------------------------------------------
@@ -43,7 +44,7 @@ def _real_api_view(settings, server, *, librenms_id):
             }
         },
     )
-    view = object.__new__(BaseModuleTableView)
+    view = _bare_view(BaseModuleTableView)
     view._device_manufacturer = None
     view.librenms_id = librenms_id
     view._librenms_api = LibreNMSAPI(server_key="test-server")
@@ -62,11 +63,20 @@ def _count_port_requests(server, librenms_id):
     return hits
 
 
+def _bare_view(view_class):
+    """Instantiate *view_class* without __init__; its rows read no serial rules."""
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
+    view = object.__new__(view_class)
+    view._serial_rules = SerialRules(())
+    return view
+
+
 def _make_view():
     """Instantiate BaseModuleTableView bypassing __init__."""
     from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-    view = object.__new__(BaseModuleTableView)
+    view = _bare_view(BaseModuleTableView)
     view._device_manufacturer = None
     view._librenms_api = SimpleNamespace(server_key="test-server")
     view._exact_bay_mappings = []
@@ -148,7 +158,7 @@ class TestInventoryClassIncludeRule:
             DeviceIdentity,
             _check_ignore_rules,
         )
-        from netbox_librenms_plugin.utils import normalize_stack_serial
+        from netbox_librenms_plugin.serial_identity import plain_context
 
         index_map = {item["entPhysicalIndex"]: item for item in items}
         # _collect_top_items reads this cache for any item carrying an index, so a test that
@@ -159,13 +169,13 @@ class TestInventoryClassIncludeRule:
                 index_map.get(item.get("entPhysicalContainedIn")),
                 rules,
                 index_map,
-                DeviceIdentity(serial_key=normalize_stack_serial),
+                DeviceIdentity(serial_context=plain_context()),
             )
             for item in items
         }
         transparent = BaseModuleTableView._find_transparent_indices(items, ignore_cache)
         return BaseModuleTableView._collect_top_items(
-            items, index_map, rules, DeviceIdentity(serial_key=normalize_stack_serial), transparent, ignore_cache
+            items, index_map, rules, DeviceIdentity(serial_context=plain_context()), transparent, ignore_cache
         )
 
     def _include_rule(self, pattern="other"):
@@ -342,9 +352,12 @@ class TestSerialRulesFollowTheTargetDevice:
         }
 
     def _serial_for(self, target_manufacturer, page_manufacturer=None):
+        from netbox_librenms_plugin.serial_identity import SerialRules, naming_token
+
         view = _make_view()
+        view._serial_rules = SerialRules.load()
         view._current_manufacturer = target_manufacturer
-        return view._normalized_item_serial(self._item(), page_manufacturer)
+        return naming_token(self._item()["entPhysicalSerialNum"], view._row_serial_context(page_manufacturer))
 
     def test_the_targets_own_rule_normalizes_the_serial(self):
         from dcim.models import Manufacturer
@@ -404,40 +417,32 @@ class TestSerialRulesFollowTheTargetDevice:
         # The control: the page vendor declares no mapping, so nothing should resolve for it.
         assert row_for(page)["module_type_id"] is None
 
-    def test_a_member_rule_applies_even_though_the_preload_used_the_page_manufacturer(self):
-        """
-        _build_context preloads for the page device, and rows resolve per target member.
-
-        apply_normalization_rules loads a manufacturer it was not preloaded for and caches it
-        into the same dict, so the member's rule still applies and costs one query per vendor.
-        """
+    def test_a_member_rule_applies_without_another_rule_query(self, django_assert_num_queries):
+        """The page reads every serial rule once, so a member row's own rule needs no query of its own."""
         from dcim.models import Manufacturer
 
-        from netbox_librenms_plugin.utils import preload_normalization_rules
+        from netbox_librenms_plugin.serial_identity import SerialRules, naming_token
 
         page = Manufacturer.objects.create(name="Preload Page Vendor", slug="preload-page-vendor")
         member = Manufacturer.objects.create(name="Preload Member Vendor", slug="preload-member-vendor")
         self._rule_for(member)
-        preloaded = preload_normalization_rules("serial", manufacturer=page)
-        assert ("serial", member.pk) not in preloaded, "the member was never preloaded"
-
         view = _make_view()
+        view._serial_rules = SerialRules.load()
+        # The page reads the rules with its first serial decision.
+        view._serial_rules.candidates()
         view._current_manufacturer = member
-        view._norm_rules_serial = preloaded
 
-        serial = view._normalized_item_serial(self._item(), page)
+        with django_assert_num_queries(0):
+            assert naming_token(self._item()["entPhysicalSerialNum"], view._row_serial_context(page)) == "12345"
 
-        assert serial == "12345"
-        assert ("serial", member.pk) in preloaded, "the member's rules were not cached for reuse"
-
-    def test_build_row_reports_the_serial_it_is_given(self):
-        """_build_row must stay free of database access, so the caller resolves the serial."""
+    def test_build_row_shows_the_librenms_serial_text(self):
+        """_build_row stays free of database access, and the row shows the text that LibreNMS reports."""
         view = _make_view()
         item = self._item()
 
-        row = view._build_row(item, {item["entPhysicalIndex"]: item}, {}, {}, normalized_serial="12345")
+        row = view._build_row(item, {item["entPhysicalIndex"]: item}, {}, {})
 
-        assert row["serial"] == "12345"
+        assert row["serial"] == "BBB-12345"
 
 
 class TestRowOrderIsStableAcrossAnInstall:
@@ -973,7 +978,9 @@ class TestMergeTransceiverDataPortIdentity:
             "/api/v0/devices/108/transceivers",
             {
                 "status": "ok",
-                "transceivers": [{"entity_physical_index": 50, "model": "SFP-10G-SR", "serial": "TX-50", "port_id": 9}],
+                "transceivers": [
+                    {"entity_physical_index": 50, "model": "SFP-10G-SR", "serial": "TXR-50", "port_id": 9}
+                ],
             },
             method="GET",
         )
@@ -2904,7 +2911,7 @@ class TestCollectDescendants:
     def _view(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        return object.__new__(BaseModuleTableView)
+        return _bare_view(BaseModuleTableView)
 
     def test_empty_container_children_at_same_depth(self):
         """Children of a no-model container are returned at the same depth as the container."""
@@ -2979,7 +2986,7 @@ class TestDetermineStatus:
     def _view(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        return object.__new__(BaseModuleTableView)
+        return _bare_view(BaseModuleTableView)
 
     def test_matched_bay_and_type(self):
         import types
@@ -3011,7 +3018,7 @@ class TestBuildRowSerialMismatch:
     def _view(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        view = object.__new__(BaseModuleTableView)
+        view = _bare_view(BaseModuleTableView)
         view._device_manufacturer = None
         return view
 
@@ -3201,7 +3208,7 @@ class TestBuildRowSerialMismatch:
             "entPhysicalContainedIn": 0,
         }
         index_map = {1: ancestor, 100: oob_item}
-        assert view._find_integrating_ancestor(oob_item, index_map) is ancestor
+        assert view._find_integrating_ancestor(oob_item, index_map, plain_context()) is ancestor
 
         row = view._build_row(oob_item, index_map, {}, {})
 
@@ -3331,7 +3338,7 @@ class TestDetectSerialConflicts:
     def _view(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        return object.__new__(BaseModuleTableView)
+        return _bare_view(BaseModuleTableView)
 
     def _make_module(self, tag, serial):
         from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
@@ -3589,14 +3596,14 @@ class TestCheckIgnoreRules:
 
     def _check(self, item, parent_item, rules, index_map=None, device_serial="", type_models=()):
         from netbox_librenms_plugin.views.base.modules_view import DeviceIdentity, _check_ignore_rules
-        from netbox_librenms_plugin.utils import normalize_stack_serial
+        from netbox_librenms_plugin.serial_identity import plain_context
 
         return _check_ignore_rules(
             item,
             parent_item,
             rules,
             index_map,
-            DeviceIdentity(device_serial, frozenset(type_models), serial_key=normalize_stack_serial),
+            DeviceIdentity(device_serial, frozenset(type_models), serial_context=plain_context()),
         )
 
     def test_match_with_serial_match_skips(self):
@@ -4282,7 +4289,7 @@ class TestCollectDescendantsIgnoreRules:
     def _view(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        return object.__new__(BaseModuleTableView)
+        return _bare_view(BaseModuleTableView)
 
     def _rule(self, match_type="ends_with", pattern="IDPROM", require_serial=True, action="skip"):
         from netbox_librenms_plugin.models import InventoryIgnoreRule
@@ -5058,7 +5065,7 @@ class TestBuildRowModelWarning:
     def _view(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        v = object.__new__(BaseModuleTableView)
+        v = _bare_view(BaseModuleTableView)
         v._device_manufacturer = None
         return v
 
@@ -5537,7 +5544,7 @@ class TestMatchedInterfaceLinking:
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        view = object.__new__(BaseModuleTableView)
+        view = _bare_view(BaseModuleTableView)
         view._device_manufacturer = None
         view._librenms_api = object.__new__(LibreNMSAPI)
         view._librenms_api.server_key = "test-server"
@@ -5945,7 +5952,7 @@ class TestFindIntegratingAncestor:
             "entPhysicalContainedIn": 100,
         }
         idx = self._index([xiom, mda])
-        ancestor = BaseModuleTableView._find_integrating_ancestor(mda, idx)
+        ancestor = BaseModuleTableView._find_integrating_ancestor(mda, idx, plain_context())
         assert ancestor is xiom
 
     def test_numeric_serial_finds_integrating_ancestor(self):
@@ -5967,7 +5974,7 @@ class TestFindIntegratingAncestor:
             "entPhysicalContainedIn": 100,
         }
 
-        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda])) is xiom
+        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda]), plain_context()) is xiom
 
     @pytest.mark.parametrize("model", [123456, 0])
     def test_numeric_model_finds_integrating_ancestor(self, model):
@@ -5989,7 +5996,7 @@ class TestFindIntegratingAncestor:
             "entPhysicalContainedIn": 100,
         }
 
-        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda])) is xiom
+        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda]), plain_context()) is xiom
 
     def test_returns_none_when_serial_differs(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
@@ -6008,7 +6015,7 @@ class TestFindIntegratingAncestor:
             "entPhysicalModelName": "M",
             "entPhysicalContainedIn": 100,
         }
-        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda])) is None
+        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda]), plain_context()) is None
 
     def test_returns_none_when_model_differs(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
@@ -6027,7 +6034,7 @@ class TestFindIntegratingAncestor:
             "entPhysicalModelName": "Y",
             "entPhysicalContainedIn": 100,
         }
-        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda])) is None
+        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda]), plain_context()) is None
 
     def test_returns_none_for_placeholder_serial(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
@@ -6047,7 +6054,9 @@ class TestFindIntegratingAncestor:
                 "entPhysicalModelName": "M",
                 "entPhysicalContainedIn": 100,
             }
-            assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda])) is None, placeholder
+            assert (
+                BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda]), plain_context()) is None
+            ), placeholder
 
     @pytest.mark.parametrize("placeholder", ["BUILTIN", "unspecified", "none", "null"])
     def test_returns_none_for_placeholder_model(self, placeholder):
@@ -6068,7 +6077,7 @@ class TestFindIntegratingAncestor:
             "entPhysicalModelName": placeholder,
             "entPhysicalContainedIn": 100,
         }
-        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda])) is None
+        assert BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, mda]), plain_context()) is None
 
     def test_skips_chassis_ancestor(self):
         """A chassis ancestor sharing serial (the device serial!) must NEVER be matched."""
@@ -6089,7 +6098,7 @@ class TestFindIntegratingAncestor:
             "entPhysicalModelName": "M",
             "entPhysicalContainedIn": 1,
         }
-        assert BaseModuleTableView._find_integrating_ancestor(mod, self._index([chassis, mod])) is None
+        assert BaseModuleTableView._find_integrating_ancestor(mod, self._index([chassis, mod]), plain_context()) is None
 
     def test_walks_through_container(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
@@ -6097,7 +6106,7 @@ class TestFindIntegratingAncestor:
         xiom = {
             "entPhysicalIndex": 100,
             "entPhysicalClass": "xioModule",
-            "entPhysicalSerialNum": "S",
+            "entPhysicalSerialNum": "SN-XIOM",
             "entPhysicalModelName": "M",
             "entPhysicalContainedIn": 0,
         }
@@ -6111,11 +6120,13 @@ class TestFindIntegratingAncestor:
         mda = {
             "entPhysicalIndex": 200,
             "entPhysicalClass": "mdaModule",
-            "entPhysicalSerialNum": "S",
+            "entPhysicalSerialNum": "SN-XIOM",
             "entPhysicalModelName": "M",
             "entPhysicalContainedIn": 150,
         }
-        ancestor = BaseModuleTableView._find_integrating_ancestor(mda, self._index([xiom, container, mda]))
+        ancestor = BaseModuleTableView._find_integrating_ancestor(
+            mda, self._index([xiom, container, mda]), plain_context()
+        )
         assert ancestor is xiom
 
     def test_skips_non_module_classes(self):
@@ -6136,7 +6147,7 @@ class TestFindIntegratingAncestor:
             "entPhysicalModelName": "M",
             "entPhysicalContainedIn": 1,
         }
-        assert BaseModuleTableView._find_integrating_ancestor(fan, self._index([chassis, fan])) is None
+        assert BaseModuleTableView._find_integrating_ancestor(fan, self._index([chassis, fan]), plain_context()) is None
 
 
 class TestBuildRowIntegratedDedupe:
@@ -6228,9 +6239,9 @@ class TestScopePreservedAcrossIntegratedContainer:
         from netbox_librenms_plugin.models import ModuleBayMapping
         from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView, DeviceIdentity
-        from netbox_librenms_plugin.utils import normalize_stack_serial
+        from netbox_librenms_plugin.serial_identity import plain_context
 
-        view = object.__new__(BaseModuleTableView)
+        view = _bare_view(BaseModuleTableView)
         view._device_manufacturer = None
         view._current_device_bays = {}
         # Exact mapping so XIOM matches its bay → parent_module_id is set →
@@ -6319,7 +6330,7 @@ class TestScopePreservedAcrossIntegratedContainer:
             index_map=index_map,
             children_by_parent={100: [mda_item], 200: [port_item]},
             ignore_rules=[],
-            device_identity=DeviceIdentity(serial_key=normalize_stack_serial),
+            device_identity=DeviceIdentity(serial_context=plain_context()),
             module_types=view._get_module_types(),
             manufacturer=selected_device.device_type.manufacturer,
             selected_device=selected_device,
@@ -6404,7 +6415,7 @@ class TestBuildRowAmbiguityWiring:
     def _view(self):
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
-        view = object.__new__(BaseModuleTableView)
+        view = _bare_view(BaseModuleTableView)
         view._device_manufacturer = None
         view._norm_rules_type = None
         return view
@@ -7014,7 +7025,7 @@ class TestInterfacePortIdActiveServerScope:
         seed_mapping(iface, bound_key, own=111, save=False)
         seed_mapping(iface, "server2", own=222)
 
-        view = object.__new__(BaseModuleTableView)
+        view = _bare_view(BaseModuleTableView)
         view._librenms_api = self._real_configured_api()
         view._active_server_key = "server2"
         view.request = make_request("get", user=make_superuser())
@@ -7688,7 +7699,7 @@ def test_member_contexts_batch_interface_permissions_and_keep_action_scopes():
     user = grant(user, "change", Interface, constraints={"pk__in": [interfaces[1].pk, interfaces[2].pk]})
     # Warm the real user permission cache before measuring the interface reads.
     user.get_all_permissions()
-    view = object.__new__(BaseModuleTableView)
+    view = _bare_view(BaseModuleTableView)
     view._librenms_api = LibreNMSAPI(server_key=configured_server_key())
     view.request = make_request("get", user=user)
 

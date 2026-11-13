@@ -9,6 +9,7 @@ from copy import deepcopy
 
 import pytest
 
+from netbox_librenms_plugin.serial_identity import plain_context
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
@@ -823,7 +824,13 @@ class TestSerialNumberMatching:
         assert result["existing_match_type"] == "hostname"
         # The owner's identity travels as structured data, never in a warning: only the display
         # gate may name it, and only to a viewer who may see it.
-        assert result["serial_conflict"] == {"pk": owner.pk, "serial": "CONFLICTING_SERIAL", "phase": "importing"}
+        assert result["serial_conflict"] == {
+            "pk": owner.pk,
+            "serial": "CONFLICTING_SERIAL",
+            "phase": "importing",
+            "ambiguous": False,
+            "unavailable": "",
+        }
         assert not any("Serial conflict" in warning for warning in result["warnings"])
 
     def test_librenms_id_match_shows_serial_confirmed(self):
@@ -1405,7 +1412,7 @@ class TestVCPositionHandling:
             ],
         }
 
-        result = update_vc_member_suggested_names(vc_data, master_name)
+        result = update_vc_member_suggested_names(vc_data, master_name, plain_context())
 
         assert [member["suggested_name"] for member in result["members"]] == expected_names
         # One invalid position numbers the whole stack in row order from 1.
@@ -1595,8 +1602,8 @@ class TestVirtualChassisHTTPIntegration:
         from netbox_librenms_plugin.import_utils.virtual_chassis import (
             get_virtual_chassis_data,
             identify_vc_master,
-            vc_serial_key,
         )
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         device_id = 42
         librenms_server.device_info_response(device_id=device_id, hostname="stack-master", serial="MEMBER-1")
@@ -1608,7 +1615,9 @@ class TestVirtualChassisHTTPIntegration:
         assert result["is_stack"] is True
         assert result["member_count"] == 2
         assert [member["position"] for member in result["members"]] == [1, 2]
-        assert identify_vc_master(result["members"], "MEMBER-1", vc_serial_key()) is result["members"][0]
+        assert (
+            identify_vc_master(result["members"], "MEMBER-1", SerialRules.load().context(None)) is result["members"][0]
+        )
         assert result["members"][0]["suggested_name"] == "stack-master-M1"
 
     def test_negative_result_is_cached_until_forced_refresh(self, settings, librenms_server):
@@ -1723,7 +1732,7 @@ class TestUpdateVCMemberSuggestedNamesAdditional:
             "is_stack": False,
             "members": [{"serial": "S1", "position": 1, "suggested_name": "old-name"}],
         }
-        result = update_vc_member_suggested_names(vc_data, "sw")
+        result = update_vc_member_suggested_names(vc_data, "sw", plain_context())
         # suggested_name must not be regenerated
         assert result["members"][0]["suggested_name"] == "old-name"
 
@@ -1731,7 +1740,7 @@ class TestUpdateVCMemberSuggestedNamesAdditional:
         """None input is returned as-is (falsy guard)."""
         from netbox_librenms_plugin.import_utils.virtual_chassis import update_vc_member_suggested_names
 
-        result = update_vc_member_suggested_names(None, "sw")
+        result = update_vc_member_suggested_names(None, "sw", plain_context())
         assert result is None
 
     def test_no_members_returns_empty_members(self):
@@ -1739,7 +1748,7 @@ class TestUpdateVCMemberSuggestedNamesAdditional:
         from netbox_librenms_plugin.import_utils.virtual_chassis import update_vc_member_suggested_names
 
         vc_data = {"is_stack": True, "members": []}
-        result = update_vc_member_suggested_names(vc_data, "sw")
+        result = update_vc_member_suggested_names(vc_data, "sw", plain_context())
 
         assert result["members"] == []
 
@@ -1791,11 +1800,12 @@ class TestCreateVirtualChassisWithMembers:
 
     def test_a_stack_without_a_matching_member_names_no_master(self):
         """Guessing the master's slot splits the stack into more devices than switches, so none is named."""
-        from netbox_librenms_plugin.import_utils.virtual_chassis import identify_vc_master, vc_serial_key
+        from netbox_librenms_plugin.import_utils.virtual_chassis import identify_vc_master
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         members = [{"serial": "UNMATCHED-A", "position": 1}, {"serial": "", "position": 2}]
 
-        assert identify_vc_master(members, "ROOT", vc_serial_key()) is None
+        assert identify_vc_master(members, "ROOT", SerialRules.load().context(None)) is None
 
 
 @pytest.mark.django_db
@@ -2152,12 +2162,12 @@ class TestRefreshExistingDeviceCrossModelIdWins:
         assert any("Multiple NetBox devices match" in i for i in validation.get("issues", []))
 
     def test_serial_fallback_ignores_a_serial_that_the_rules_make_a_placeholder(self):
-        """A stored serial that the serial rules turn into N/A binds no device on the refresh re-check."""
+        """A stored serial that the serial rules leave without an identity binds no device on the refresh re-check."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
         from netbox_librenms_plugin.models import NormalizationRule
         from netbox_librenms_plugin.tests.conftest import make_device
 
-        NormalizationRule.objects.create(scope="serial", match_pattern=r"^VENDOR-PLACEHOLDER$", replacement="N/A")
+        NormalizationRule.objects.create(scope="serial", match_pattern=r"^VENDOR-PLACEHOLDER(X)?$", replacement=r"\1")
         make_device("rule-placeholder-host", serial="VENDOR-PLACEHOLDER")
         libre_device = {
             "device_id": 556,

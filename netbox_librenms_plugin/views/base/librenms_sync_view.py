@@ -1,6 +1,7 @@
 import dataclasses
 import re
 from dataclasses import asdict
+from functools import cached_property
 
 from django.conf import settings as django_settings
 from django.contrib import messages
@@ -10,13 +11,7 @@ from netbox.views import generic
 
 from netbox_librenms_plugin.forms import AddToLIbreSNMPV1V2, AddToLIbreSNMPV3
 from netbox_librenms_plugin.import_utils import _determine_device_name
-from netbox_librenms_plugin.import_utils.virtual_chassis import (
-    _member_name,
-    chassis_serial_key,
-    extract_vc_members,
-    members_by_serial_key,
-    serials_match,
-)
+from netbox_librenms_plugin.import_utils.virtual_chassis import _member_name, extract_vc_members
 from netbox_librenms_plugin.platform_versions import (
     PlatformFacts,
     assess_platform,
@@ -24,6 +19,15 @@ from netbox_librenms_plugin.platform_versions import (
     platform_version_tracking_enabled,
     reason_text,
     target_label,
+)
+from netbox_librenms_plugin.serial_identity import (
+    Comparison,
+    SerialRules,
+    compare,
+    display,
+    group,
+    is_identity,
+    stored_form_differs,
 )
 from netbox_librenms_plugin.server_mappings import mapped_device_servers, read_mapping
 from netbox_librenms_plugin.server_selection import (
@@ -42,8 +46,6 @@ from netbox_librenms_plugin.utils import (
     get_interface_name_field,
     get_user_pref,
     match_librenms_hardware_to_device_type,
-    normalize_serial,
-    normalize_stack_serial,
     resolve_naming_preferences,
     save_user_pref,
 )
@@ -68,6 +70,17 @@ class BaseLibreNMSSyncView(
     # Render server key resolved in get(); read by get_context_data for the migrated-mode banner.
     # None until get() runs (e.g. a direct get_context_data() call), then active_server_key is used.
     _scoped_render_server_key = None
+
+    @cached_property
+    def serial_rules(self):
+        """Return the serial rules of this request, read once."""
+        return SerialRules.load()
+
+    def _serial_matches(self, obj, incoming) -> bool:
+        """Return whether the stored serial of Device *obj* names the hardware that LibreNMS reports; a VM has none."""
+        if obj is None or obj._meta.model_name != "device":
+            return False
+        return compare(obj.serial, incoming, self.serial_rules.for_device(obj)) is Comparison.SAME
 
     def get_object(self, pk):
         """Retrieve the object the user may view (same seam as the base table views)."""
@@ -344,11 +357,8 @@ class BaseLibreNMSSyncView(
         # The legacy ID gate compares the serial of the mapping owner, which can differ from the page device.
         # VMs have no serial field in NetBox; skip the gate so the Convert ID button is enabled.
         _lookup_is_vm = _lookup_device._meta.model_name == "virtualmachine" if _lookup_device else False
-        librenms_id_serial_confirmed = _lookup_is_vm or bool(
-            _lookup_device
-            and serials_match(
-                _lookup_device.serial, librenms_info["librenms_serial"], chassis_serial_key(_lookup_device)
-            )
+        librenms_id_serial_confirmed = _lookup_is_vm or self._serial_matches(
+            _lookup_device, librenms_info["librenms_serial"]
         )
         device_info_unavailable = librenms_info.get("device_info_unavailable", False)
         show_add_device = not librenms_info["found_in_librenms"] and not device_info_unavailable
@@ -527,6 +537,7 @@ class BaseLibreNMSSyncView(
             "librenms_device_hardware": "-",
             "librenms_device_serial": "-",
             "serial_matches": False,
+            "serial_stored_form_differs": False,
             "librenms_device_os": "-",
             "librenms_device_version": "-",
             "librenms_device_features": "-",
@@ -556,7 +567,7 @@ class BaseLibreNMSSyncView(
                 # Extract new fields; use `or "-"` so null/empty from LibreNMS renders as "-"
                 hardware = device_info.get("hardware") or "-"
                 librenms_serial = device_info.get("serial")
-                serial = normalize_stack_serial(librenms_serial) or "-"
+                serial = display(librenms_serial) or "-"
                 os_name = device_info.get("os") or "-"
                 version = device_info.get("version") or "-"
                 features = device_info.get("features") or "-"
@@ -583,7 +594,7 @@ class BaseLibreNMSSyncView(
                         and obj.vc_position is not None
                     ):
                         resolved_name = _member_name(
-                            resolved_name, obj.vc_position, obj.serial, None, chassis_serial_key(obj)
+                            resolved_name, obj.vc_position, obj.serial, None, self.serial_rules.for_device(obj)
                         )
 
                 # Update device details regardless of match
@@ -592,9 +603,10 @@ class BaseLibreNMSSyncView(
                         "librenms_device_url": f"{self.librenms_api.librenms_url}/device/device={self.librenms_id}/",
                         "librenms_device_hardware": hardware,
                         "librenms_device_serial": serial,
-                        "serial_matches": serials_match(
-                            getattr(obj, "serial", None), librenms_serial, chassis_serial_key(obj)
-                        ),
+                        "serial_matches": self._serial_matches(obj, librenms_serial),
+                        # A legacy stored form names the same hardware; the update action writes the LibreNMS text.
+                        "serial_stored_form_differs": obj._meta.model_name == "device"
+                        and stored_form_differs(obj.serial, librenms_serial, self.serial_rules.for_device(obj)),
                         "librenms_device_os": os_name,
                         "librenms_device_version": version,
                         "librenms_device_features": features,
@@ -805,7 +817,7 @@ class BaseLibreNMSSyncView(
             list: [
                 {
                     'description': 'Member component description',
-                    'serial': 'serial key, as the dialog shows it',
+                    'serial': 'the LibreNMS serial, as the dialog shows it',
                     'librenms_serial': 'trimmed raw serial, as the dialog posts it',
                     'model': 'model name',
                     'assigned_member': Device object or None (if serial matches existing assignment)
@@ -820,23 +832,23 @@ class BaseLibreNMSSyncView(
         # Get all VC members
         vc_members = obj.virtual_chassis.members.all()
 
-        # Members store the raw serial, so both sides go through the serial key; the dialog shows the key.
-        serial_key = chassis_serial_key(obj)
-        # A serial key that two members share assigns neither.
-        members_by_key = members_by_serial_key(vc_members, serial_key)
+        # The chassis master's serial rules compare both sides; the dialog shows the LibreNMS text.
+        context = self.serial_rules.for_device(obj)
+        members_by_serial = group(vc_members, context, serial=lambda member: member.serial)
 
         result = []
-        for component in extract_vc_members(inventory, (serial_key,)):
-            serial = serial_key(component["serial"])
-            if not serial:
+        for component in extract_vc_members(inventory, (context,)):
+            if not is_identity(component["serial"], context):
                 continue
-            assigned_member = members_by_key.get(serial)
+            # A serial that two members share assigns neither.
+            holders = members_by_serial.find(component["serial"])
+            assigned_member = holders[0] if len(holders) == 1 else None
 
             result.append(
                 {
                     "description": component["description"] or "-",
-                    "serial": serial,
-                    "librenms_serial": normalize_serial(component["serial"]),
+                    "serial": display(component["serial"]),
+                    "librenms_serial": display(component["serial"]),
                     "model": component["model"] or "-",
                     "assigned_member": assigned_member,
                 }

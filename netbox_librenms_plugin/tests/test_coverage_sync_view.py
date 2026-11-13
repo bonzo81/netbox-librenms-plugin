@@ -283,18 +283,24 @@ class TestSyncPageRouting:
 
         assert response.context["serial_matches"] is matches
         assert response.context["librenms_id_serial_confirmed"] is matches
+        # A match keeps the legacy stored form "ABC-SYNC", so the page offers to store the LibreNMS text.
+        assert response.context["serial_stored_form_differs"] is matches
         sync_serial_url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": device.pk})
-        assert (sync_serial_url in response.content.decode()) == (not matches)
+        assert sync_serial_url in response.content.decode()
 
-    def test_a_numeric_zero_serial_matches_a_stored_zero(self, logged_in_client, settings, librenms_server):
+    @pytest.mark.parametrize(("stored", "reported", "matches"), [("100200", 100200, True), ("0", 0, False)])
+    def test_a_numeric_serial_matches_its_stored_text_when_it_has_an_identity(
+        self, logged_in_client, settings, librenms_server, stored, reported, matches
+    ):
+        """A key needs three letters or digits in a row, so a one-digit serial confirms nothing."""
         _configure_servers(settings, librenms_server, SERVER_KEY)
-        device = make_device("sync-zero-serial", serial="0", librenms_cf=6614)
-        _register_device(librenms_server, 6614, device.name, serial=0)
+        device = make_device(f"sync-numeric-serial-{stored}", serial=stored, librenms_cf=6614)
+        _register_device(librenms_server, 6614, device.name, serial=reported)
 
         response = logged_in_client.get(_sync_url(device))
 
-        assert response.context["serial_matches"] is True
-        assert response.context["librenms_id_serial_confirmed"] is True
+        assert response.context["serial_matches"] is matches
+        assert response.context["librenms_id_serial_confirmed"] is matches
 
     def test_a_member_page_gates_the_legacy_id_on_the_mapping_owner_serial(
         self, logged_in_client, settings, librenms_server
@@ -580,7 +586,7 @@ class TestVirtualChassisInventory:
         Juniper reports the chassis serial as "S/N BCFB9793"; NetBox stores it without.
 
         Compared raw the two never match, so an already-assigned member is offered for
-        assignment again and the modal shows the decorated serial.
+        assignment again. The modal shows the LibreNMS text.
         """
         _vc, members = make_virtual_chassis_members("inventory-marker", count=1)
         members[0].serial = "BCFB9793"
@@ -596,7 +602,7 @@ class TestVirtualChassisInventory:
         result = view._get_vc_inventory_serials(members[0])
 
         assert len(result) == 2
-        assert result[0]["serial"] == "BCFB9793"
+        assert result[0]["serial"] == "S/N BCFB9793"
         assert result[0]["assigned_member"] == members[0]
 
     @pytest.mark.parametrize("has_master", [True, False])
@@ -633,15 +639,11 @@ class TestVirtualChassisInventory:
 
         result = view._get_vc_inventory_serials(member)
 
-        assert result[0]["serial"] == member.serial
+        assert result[0]["serial"] == "VENDOR:MEMBER-SERIAL"
         assert result[0]["assigned_member"] == member
 
     def test_the_serial_rules_load_once_for_the_whole_chassis_loop(self, librenms_server):
-        """normalize_inventory_serial re-queries NormalizationRule per call unless rules are preloaded.
-
-        create_virtual_chassis_with_members() already preloads once before its own member loop;
-        this loop must not pay a query per chassis component.
-        """
+        """The view reads its serial rules once, so the chassis loop pays no query per chassis component."""
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
 
@@ -665,9 +667,8 @@ class TestVirtualChassisInventory:
 
         assert len(result) == 5
         rule_queries = [q for q in captured.captured_queries if "normalizationrule" in q["sql"].lower()]
-        # One preload reads the scoped and unscoped rows; per-call lookups would scale with the
-        # five components instead.
-        assert 0 < len(rule_queries) <= 2, f"expected one preload for the loop, saw {len(rule_queries)} queries"
+        # One read of the serial rules; per-call lookups would scale with the five components instead.
+        assert len(rule_queries) == 1, f"expected one rule read for the loop, saw {len(rule_queries)} queries"
 
     def test_failed_inventory_lookup_returns_an_empty_list(self, librenms_server):
         _vc, members = make_virtual_chassis_members("inventory-failure", count=1)
@@ -678,7 +679,7 @@ class TestVirtualChassisInventory:
         assert view._get_vc_inventory_serials(members[0]) == []
 
     def test_the_dialog_stores_the_raw_serial_and_shows_the_member_as_assigned(self, logged_in_client, librenms_server):
-        """The dialog posts the LibreNMS serial, shows its serial key, and finds the member on the next render."""
+        """The dialog posts and shows the LibreNMS serial, and finds the member on the next render."""
         from netbox_librenms_plugin.models import NormalizationRule
 
         NormalizationRule.objects.get_or_create(
@@ -709,7 +710,7 @@ class TestVirtualChassisInventory:
         assert member.serial == "S/N MEMBER-RAW"
         response = logged_in_client.get(_sync_url(owner))
         shown = {item["serial"]: item["assigned_member"] for item in response.context["vc_inventory_serials"]}
-        assert shown == {"OWNER-RAW": owner, "MEMBER-RAW": member}
+        assert shown == {"S/N OWNER-RAW": owner, "S/N MEMBER-RAW": member}
 
     def test_the_serials_form_submits_the_active_server_and_tab(self, logged_in_client, librenms_server):
         """AssignVCSerialView can only preserve the context the rendered form posts."""
