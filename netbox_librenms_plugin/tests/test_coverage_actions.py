@@ -3739,6 +3739,37 @@ class TestDeviceConflictActionBranches:
         self._assert_success(response)
         assert stored_mapping_for_test(Device.objects.get(pk=target.pk)) == {self.server_key: 42}
 
+    @pytest.mark.parametrize("action", ["link", "update", "update_serial", "update_type"])
+    def test_a_forced_type_change_refuses_when_another_device_then_holds_the_stored_serial(self, action):
+        """Under the old manufacturer's rule "XABC" has no identity; under the new type it is the holder's serial."""
+        from dcim.models import Device, DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        view = self._make_view()
+        tag = f"branches-retype-{action}".replace("_", "-")
+        target = make_device(tag, serial="XABC", librenms_cf={self.server_key: 42})
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^X(AB)C$", replacement=r"\1", manufacturer=target.device_type.manufacturer
+        )
+        new_type = DeviceType.objects.create(
+            manufacturer=Manufacturer.objects.create(name=f"Retype {action}", slug=f"{tag}-maker"),
+            model=f"Retype {action}",
+            slug=f"{tag}-type",
+            part_number=f"{tag}-hw".upper(),
+        )
+        holder = make_device(f"{tag}-holder", serial="XABC")
+        Device.objects.filter(pk=holder.pk).update(device_type=new_type)
+        old_type_id = target.device_type_id
+        self._register_device(42, target.name, serial="XABC", hardware=new_type.part_number)
+        request = self._request(action, target, f"{tag}-user", force="on")
+
+        response = post_view(view, request, device_id=42)
+
+        assert response.headers.get("HX-Reswap") == "none"
+        assert holder.name.encode() not in response.content
+        assert Device.objects.get(pk=target.pk).device_type_id == old_type_id
+
     @pytest.mark.parametrize("action", ["update", "update_serial"])
     def test_a_forced_type_change_decides_the_serial_under_the_new_manufacturer(self, action):
         """Under the old manufacturer's rule "OLD-0" has no identity; under the new type it does, so it is written."""

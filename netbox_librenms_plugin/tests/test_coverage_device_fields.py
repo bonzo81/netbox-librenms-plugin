@@ -1140,6 +1140,40 @@ class TestSetPreferredServerView:
 
 
 @pytest.mark.django_db
+class TestUpdateDeviceTypeSerialIdentity:
+    def test_a_type_change_refuses_when_another_device_then_holds_the_stored_serial(
+        self, logged_in_client, librenms_server
+    ):
+        """Under the old manufacturer's rule "XABC" has no identity; under the new type it is the holder's serial."""
+        from dcim.models import Device, DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        device = make_device("retype-sync-target", serial="XABC", librenms_cf={SERVER_KEY: 6571})
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^X(AB)C$", replacement=r"\1", manufacturer=device.device_type.manufacturer
+        )
+        new_type = DeviceType.objects.create(
+            manufacturer=Manufacturer.objects.create(name="Retype sync maker", slug="retype-sync-maker"),
+            model="Retype sync model",
+            slug="retype-sync-model",
+            part_number="RETYPE-SYNC-HW",
+        )
+        holder = make_device("retype-sync-holder", serial="XABC")
+        Device.objects.filter(pk=holder.pk).update(device_type=new_type)
+        old_type_id = device.device_type_id
+        librenms_server.device_info_response(
+            device_id=6571, hostname=device.name, serial="XABC", hardware=new_type.part_number
+        )
+
+        response = _post(logged_in_client, "update_device_type", device, {})
+
+        assert Device.objects.get(pk=device.pk).device_type_id == old_type_id
+        assert _messages(response, "error")
+        assert not any(holder.name in text for text in _messages(response, "error"))
+
+
+@pytest.mark.django_db
 class TestConvertLegacyLibreNMSIdView:
     def test_matching_device_serial_converts_the_legacy_id(self, logged_in_client, librenms_server):
         device = make_device("legacy-convert", serial="LEGACY-SERIAL", librenms_cf=" 6561 ")
