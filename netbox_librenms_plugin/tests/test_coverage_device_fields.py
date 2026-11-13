@@ -5,6 +5,8 @@ from copy import deepcopy
 
 import pytest
 from django.core.cache import cache
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
 from netbox_librenms_plugin.middleware import TRY_AGAIN_MESSAGE
@@ -1178,7 +1180,7 @@ class TestConvertLegacyLibreNMSIdView:
 
         device.refresh_from_db()
         assert stored_mapping_for_test(device) == 6562
-        assert any("Serial number mismatch" in text for text in _messages(response, "error"))
+        assert _messages(response, "error")
 
     def test_a_decorated_librenms_serial_confirms_the_stored_serial(self, logged_in_client, librenms_server):
         """The serial rules key both sides, so a stored "ABC" matches LibreNMS "S/N ABC"."""
@@ -1190,10 +1192,38 @@ class TestConvertLegacyLibreNMSIdView:
         device = make_device("legacy-decorated", serial="ABC-LEGACY", librenms_cf=6566)
         librenms_server.device_info_response(device_id=6566, hostname=device.name, serial="S/N ABC-LEGACY")
 
-        _post(logged_in_client, "convert_legacy_librenms_id", device, {"object_type": "device"})
+        with CaptureQueriesContext(connection) as queries:
+            _post(logged_in_client, "convert_legacy_librenms_id", device, {"object_type": "device"})
 
         device.refresh_from_db()
         assert stored_mapping_for_test(device) == {SERVER_KEY: 6566}
+        # The serial identity lock comes before the row lock.
+        statements = [query["sql"] for query in queries.captured_queries]
+        identity_lock = next(i for i, sql in enumerate(statements) if "pg_advisory_xact_lock" in sql)
+        assert identity_lock < next(i for i, sql in enumerate(statements) if "FOR UPDATE" in sql)
+
+    def test_a_hidden_device_with_the_serial_in_another_form_refuses_the_conversion(self, client, librenms_server):
+        """The serial confirms the target only when no other device holds it, also one the user cannot see."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        device = make_device("legacy-twin-target", serial="TWIN-LEGACY", librenms_cf=6567)
+        make_device("legacy-twin-hidden", serial="S/N TWIN-LEGACY")
+        librenms_server.device_info_response(device_id=6567, hostname=device.name, serial="TWIN-LEGACY")
+        client.force_login(
+            make_user_with_perms(
+                "legacy-twin-user", [("view", Device), ("change", Device)], constraints={"name": device.name}
+            )
+        )
+
+        _post(client, "convert_legacy_librenms_id", device, {"object_type": "device"})
+
+        device.refresh_from_db()
+        assert stored_mapping_for_test(device) == 6567
 
     def test_vm_conversion_skips_the_device_serial_gate(self, logged_in_client, librenms_server):
         vm = make_vm("legacy-convert-vm")

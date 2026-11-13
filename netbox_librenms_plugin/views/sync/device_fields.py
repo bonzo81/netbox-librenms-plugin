@@ -38,12 +38,11 @@ from netbox_librenms_plugin.server_mappings import (
     set_preference,
 )
 from netbox_librenms_plugin.serial_identity import (
-    Comparison,
     SerialRules,
     assignment_lock,
-    compare,
     device_assignment,
     display,
+    is_sole_holder,
 )
 from netbox_librenms_plugin.server_selection import build_server_mappings, get_librenms_sync_device
 from netbox_librenms_plugin.sync_cache import SyncTab
@@ -764,12 +763,10 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
         return None
 
 
-_SERIAL_MISMATCH_MESSAGE = "Serial number mismatch — cannot convert legacy ID without serial confirmation."
-
-
-def _serial_confirms(device, incoming) -> bool:
-    """Return whether the stored serial of *device* names the hardware that LibreNMS reports, under the current rules."""
-    return compare(device.serial, incoming, SerialRules.load().for_device(device)) is Comparison.SAME
+_SERIAL_MISMATCH_MESSAGE = (
+    "Serial number not confirmed: the device does not hold the LibreNMS serial, or another device holds it too. "
+    "Cannot convert the legacy ID."
+)
 
 
 def _posted_vc_serial_rows(data):
@@ -1062,7 +1059,9 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
 
         # VMs have no serial field in NetBox; skip the serial gate for them.
         is_vm = object_type == "vm"
-        if not is_vm and not _serial_confirms(obj, device_info.get("serial")):
+        serial_rules = SerialRules.load()
+        incoming_serial = device_info.get("serial")
+        if not is_vm and not is_sole_holder(obj, incoming_serial, rules=serial_rules):
             messages.error(request, _SERIAL_MISMATCH_MESSAGE)
             return self._sync_url(object_type, pk)
 
@@ -1077,8 +1076,8 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             locked_id = locked_mapping.legacy.readable_id
             if locked_id != librenms_id:
                 raise _WriteRefused("Device data changed before lock was acquired; aborting conversion.")
-            # The serial gate again, with the rules and the chassis that the locked row reads now.
-            if not is_vm and not _serial_confirms(locked, device_info.get("serial")):
+            # The serial gate again under the identity lock, with the chassis that the locked row reads now.
+            if not is_vm and not is_sole_holder(locked, incoming_serial, rules=serial_rules):
                 raise _WriteRefused(_SERIAL_MISMATCH_MESSAGE)
             change = convert_legacy(locked, server_key)
             if not change.changed:
@@ -1087,7 +1086,11 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
             return change
 
         try:
-            update_existing_row(self.restricted_queryset(model, "change").filter(pk=pk), convert)
+            with atomic_with_events():
+                if not is_vm:
+                    # The serial identity locks come before the row lock.
+                    assignment_lock([incoming_serial], model=model, rules=serial_rules)
+                update_existing_row(self.restricted_queryset(model, "change").filter(pk=pk), convert)
         except model.DoesNotExist:
             messages.error(request, f"{model.__name__} no longer exists.")
             return self._sync_url(object_type, pk)
