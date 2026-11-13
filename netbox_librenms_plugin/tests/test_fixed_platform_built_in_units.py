@@ -836,6 +836,29 @@ class TestMarkBuiltInScope:
 
         assert written(device) == before
 
+    def test_the_modal_does_not_show_a_reused_rule_outside_the_change_constraint(self):
+        from dcim.models import DeviceType
+
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+        from netbox_librenms_plugin.tests.view_test_helpers import get, make_request
+        from netbox_librenms_plugin.views.sync.modules import MarkBuiltInView
+
+        device = ixr_device("ixr-scope-reused-rule", part_number="")
+        rule = model_rule(manufacturer=device.device_type.manufacturer)
+        user = self._user(
+            "ixr-scope-reused-rule",
+            ("change", DeviceType, None),
+            ("change", InventoryIgnoreRule, {"manufacturer__slug": "another-vendor"}),
+        )
+        _tag, _path, query = controls(device, user=user)[SLOT_1]
+
+        response = get(MarkBuiltInView(), make_request("get", query, user=user), pk=device.pk)
+
+        assert response.status_code == 403
+        body = response.content.decode()
+        assert rule.name not in body
+        assert rule.get_absolute_url() not in body
+
     def test_a_part_number_outside_the_change_constraint_rolls_everything_back(self):
         from dcim.models import DeviceType
 

@@ -3898,6 +3898,8 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
     def get(self, request, pk):
         from dcim.models import Device
 
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+
         self.required_object_permissions = {"GET": self._permissions()}
         if error := self.require_all_permissions("GET"):
             return error
@@ -3915,6 +3917,10 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
         self.required_object_permissions = {"GET": self._permissions(plan)}
         if error := self.require_object_permissions("GET"):
             return error
+        # The write locks the reused rule through the change scope, so the modal shows only a rule in that scope.
+        rules = self.restricted_queryset(InventoryIgnoreRule, "change")
+        if plan.rule is not None and not rules.filter(pk=plan.rule.pk).exists():
+            return HttpResponse("The rule that covers this device type is outside your permission scope.", status=403)
         return render(
             request,
             "netbox_librenms_plugin/htmx/mark_built_in_modal.html",
