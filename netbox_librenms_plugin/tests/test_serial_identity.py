@@ -552,6 +552,34 @@ class TestWriters:
         assert list(chassis.members.values_list("pk", flat=True)) == [master.pk]
         assert not Device.objects.filter(serial="XABC").exists()
 
+    def test_a_chassis_is_not_created_when_the_master_type_changed_after_the_master_decision(self):
+        """Under maker A the root "ABC" is FPC "XABC"; a type change to maker B, which has no rule, leaves no master."""
+        from dcim.models import Device, VirtualChassis
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import (
+            create_virtual_chassis_with_members,
+            identify_vc_master,
+        )
+
+        maker_a, maker_b = _manufacturer("master-decision-a"), _manufacturer("master-decision-b")
+        _rules_only((SEEDED, r"\1", None), (r"^X(.+)$", r"\1", maker_a))
+        master = _device_of(maker_a, "master-decision", "ABC")
+        members = [
+            {"serial": "XABC", "position": 0, "root_serial": "ABC"},
+            {"serial": "XDEF", "position": 1, "root_serial": "ABC"},
+        ]
+        master_member = identify_vc_master(members, master.serial, SerialRules.load().for_device(master))
+        assert master_member is members[0]
+        Device.objects.filter(pk=master.pk).update(
+            device_type=_device_of(maker_b, "master-decision-b", "B-SN1").device_type
+        )
+
+        with pytest.raises(ValueError):
+            create_virtual_chassis_with_members(master, members, {"device_id": 7809}, master_member=master_member)
+
+        assert not VirtualChassis.objects.filter(members__pk=master.pk).exists()
+        assert not Device.objects.filter(serial="XDEF").exists()
+
     def test_an_import_refuses_a_serial_that_a_device_committed_after_the_validation(self, settings):
         from netbox_librenms_plugin.import_utils import validate_device_for_import
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
