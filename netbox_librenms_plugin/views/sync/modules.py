@@ -2986,7 +2986,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 locked_type_context(target_device, rules=serial_rules)
                 elsewhere = resolve_module(incoming, rules=serial_rules, exclude_pks=[installed_module.pk], lock=True)
                 if elsewhere.kind is ResolutionKind.AMBIGUOUS:
-                    # Roll back and surface a clear error — we don't want to
+                    # Roll back and surface a clear error: we don't want to
                     # guess which of N conflicts to remove.
                     raise _SerialConflictAmbiguous(serial)
                 if elsewhere.kind is ResolutionKind.UNIQUE:
