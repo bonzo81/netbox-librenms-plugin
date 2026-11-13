@@ -1,7 +1,8 @@
 import logging
 import re
 from collections import Counter
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 
 from django.contrib import messages
 from django.core.cache import cache
@@ -14,7 +15,7 @@ from netbox_librenms_plugin.constants import (
     OOB_INVENTORY_SOURCE,
     is_librenms_placeholder,
 )
-from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory, vc_serial_key
+from netbox_librenms_plugin.import_utils.virtual_chassis import attribute_inventory, serials_match, vc_serial_key
 from netbox_librenms_plugin.inventory_policy import load_inventory_policy
 from netbox_librenms_plugin.inventory_tree import DANGLING_PARENT_KEY, REPORTED_PARENT_KEY, repair_dangling_parents
 from netbox_librenms_plugin.librenms_ids import (
@@ -55,6 +56,7 @@ from netbox_librenms_plugin.utils import (
     module_bay_type_fit,
     module_type_bay_type_ids,
     normalize_serial,
+    normalize_stack_serial,
     prefetch_module_bay_types,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -280,60 +282,147 @@ class DeviceIdentity:
     serial: str = ""
     # Casefolded DeviceType model and part number, without blanks.
     type_models: frozenset = frozenset()
+    # The key that compares the stored serial with an inventory serial.
+    serial_key: Callable[[object], str] = field(kw_only=True)
 
     @classmethod
-    def of(cls, device) -> "DeviceIdentity":
-        """Return the serial of *device* and the model and part number of its device type."""
+    def of(cls, device, serial_key) -> "DeviceIdentity":
+        """Return the serial of *device* under *serial_key*, and the model and part number of its device type."""
         device_type = device.device_type
         names = (device_type.model, device_type.part_number)
         return cls(
             serial=(device.serial or "").strip(),
             type_models=frozenset(folded for name in names if (folded := (name or "").strip().casefold())),
+            serial_key=serial_key,
         )
 
 
-NO_DEVICE_IDENTITY = DeviceIdentity()
+# No device means no serial, so this key never decides a match.
+NO_DEVICE_IDENTITY = DeviceIdentity(serial_key=normalize_stack_serial)
 
 
-def _sits_at_chassis_level(
-    item: dict, parent_item: dict | None, index_map: dict | None, *, through_containers: bool
-) -> bool:
-    """Return True when an item has no parent or hangs off the chassis, optionally through slot containers only."""
+def _is_built_in_unit(item: dict, device_identity: DeviceIdentity) -> bool:
+    """Return True when a non-chassis item reports the model or part number of the target device type."""
+    if _normalize_librenms_text(item.get("entPhysicalClass")) == "chassis":
+        return False
+    item_model = _clean_librenms_value(item.get("entPhysicalModelName")).casefold()
+    return bool(item_model) and item_model in device_identity.type_models
+
+
+def _sits_at_chassis_level(item: dict, parent_item: dict | None, index_map: dict | None, *, passes=None) -> bool:
+    """
+    Return True when an item has no parent or hangs off the chassis.
+
+    Args:
+        item (dict): The inventory item.
+        parent_item (dict | None): The item's direct parent, if it has one.
+        index_map (dict | None): Inventory items keyed by physical index.
+        passes (Callable[[dict], bool] | None): Whether the walk may look through an ancestor; None takes
+            direct chassis children only.
+
+    Returns:
+        bool: True when the item is top-level, or its parent chain reaches the chassis through ancestors that pass.
+
+    """
     if parent_item is None:
         # A parent index that the inventory does not hold is unknown topology, not the top level.
         return not item.get("entPhysicalContainedIn")
     current, seen = parent_item, set()
-    while through_containers and current is not None and current.get("entPhysicalClass") == "container":
+    while passes is not None and current is not None and passes(current):
         index = current.get("entPhysicalIndex")
         if index_map is None or index in seen:
             return False
         seen.add(index)
         current = index_map.get(current.get("entPhysicalContainedIn"))
     if current is None:
-        # Only a top-level item may skip the chassis; a container chain must end at one.
+        # Only a top-level item may skip the chassis; a chain of passed ancestors must end at one.
         return not seen
     return current.get("entPhysicalClass") == "chassis"
+
+
+def _passes_through_slot_containers(ancestor: dict) -> bool:
+    """Return whether the walk to the chassis may look through *ancestor*: only a slot container."""
+    return ancestor.get("entPhysicalClass") == "container"
+
+
+def _passes_to_the_chassis(device_identity: DeviceIdentity):
+    """Return the ancestor test of the model rule: a slot container or another built-in unit."""
+    return lambda ancestor: (
+        ancestor.get("entPhysicalClass") == "container" or _is_built_in_unit(ancestor, device_identity)
+    )
 
 
 def _matches_target_device(
     rule, item: dict, parent_item: dict | None, index_map: dict | None, device_identity: DeviceIdentity
 ) -> bool:
     """Return True when a pattern-less rule matches a chassis-level item against the target device."""
-    # A line card that shares the device serial is a real FRU, so the serial rule takes direct chassis children only.
-    # A real line card never carries the chassis PID, so the model rule may look through slot containers (NX-OS).
-    through_containers = rule.match_type == rule.MATCH_MODEL_DEVICE_TYPE
-    if not _sits_at_chassis_level(item, parent_item, index_map, through_containers=through_containers):
-        return False
     if rule.match_type == rule.MATCH_SERIAL_DEVICE:
-        item_serial = _clean_librenms_value(item.get("entPhysicalSerialNum"))
-        device_serial = "" if is_librenms_placeholder(device_identity.serial) else device_identity.serial
-        return bool(item_serial and device_serial and item_serial == device_serial)
-    if rule.match_type == rule.MATCH_MODEL_DEVICE_TYPE:
-        if _normalize_librenms_text(item.get("entPhysicalClass")) == "chassis":
+        # A line card that shares the device serial is a real FRU, so the serial rule takes direct chassis children.
+        if not _sits_at_chassis_level(item, parent_item, index_map):
             return False
-        item_model = _clean_librenms_value(item.get("entPhysicalModelName")).casefold()
-        return bool(item_model) and item_model in device_identity.type_models
+        return serials_match(device_identity.serial, item.get("entPhysicalSerialNum"), device_identity.serial_key)
+    if rule.match_type == rule.MATCH_MODEL_DEVICE_TYPE:
+        # A real line card never carries the chassis PID, so the walk passes slot containers and other built-ins.
+        passes = _passes_to_the_chassis(device_identity)
+        return _is_built_in_unit(item, device_identity) and _sits_at_chassis_level(
+            item, parent_item, index_map, passes=passes
+        )
     raise ValueError(f"Unhandled pattern-less match type {rule.match_type!r}")
+
+
+# Classes of a unit that "Mark built-in" may record: the module classes, not ports, optics, fans or supplies.
+_BUILT_IN_CANDIDATE_CLASSES = _INTEGRATED_MODULE_CLASSES - {"port"}
+
+
+@dataclass(frozen=True)
+class BuiltInCandidate:
+    """A unit that "Mark built-in" may mark, and whether the mark records its model as the part number."""
+
+    model: str
+    # False when the device type already holds the model, so only the rule is missing.
+    records_part_number: bool
+
+
+def built_in_candidate(item: dict, index_map: dict, device_identity: DeviceIdentity, *, has_bay: bool):
+    """
+    Return the "Mark built-in" candidate of a row, or None.
+
+    A candidate is a main-inventory unit of a module class that matched no bay and reports a model. When its model
+    is the model or part number of the target device type, it sits at chassis level as the model rule walks:
+    directly below the chassis, or through slot containers and other built-in units; the mark only adds the rule.
+    Otherwise the mark records the model as the part number, so the unit must reach the chassis through slot
+    containers only: below a built-in unit, the device type already names the chassis.
+
+    Args:
+        item (dict): The inventory item of the row.
+        index_map (dict): Inventory items keyed by physical index.
+        device_identity (DeviceIdentity): The identity of the row's target device.
+        has_bay (bool): Whether the row matched a module bay.
+
+    Returns:
+        BuiltInCandidate | None: The candidate, or None.
+
+    """
+    if has_bay or item.get("_source", MAIN_INVENTORY_SOURCE) != MAIN_INVENTORY_SOURCE:
+        return None
+    # A row that the transceiver API created or confirmed is an optic, never a chassis part.
+    if item.get("_from_transceiver_api") or item.get(_TRANSCEIVER_API_MATCH):
+        return None
+    if _normalize_librenms_text(item.get("entPhysicalClass")) not in _BUILT_IN_CANDIDATE_CLASSES:
+        return None
+    model = _clean_librenms_value(item.get("entPhysicalModelName"))
+    parent = index_map.get(item.get("entPhysicalContainedIn"))
+    records_part_number = model.casefold() not in device_identity.type_models
+    # Below a built-in unit the device type already names the chassis, so another model is no chassis part number.
+    passes = _passes_through_slot_containers if records_part_number else _passes_to_the_chassis(device_identity)
+    if not model or not _sits_at_chassis_level(item, parent, index_map, passes=passes):
+        return None
+    return BuiltInCandidate(model, records_part_number=records_part_number)
+
+
+def reusable_built_in_rule(rules):
+    """Return the first of the enabled *rules* that hides every built-in unit, or None."""
+    return next((rule for rule in rules if rule.hides_built_in_units), None)
 
 
 def _check_ignore_rules(
@@ -372,10 +461,12 @@ def _check_ignore_rules(
         Matches an item that is not itself the chassis when its
         ``entPhysicalModelName`` equals the target device type's ``model`` or
         ``part_number``, ignoring case. The item must be chassis-level, or reach
-        the chassis through ``container`` entities only. Fixed IOS XE platforms
+        the chassis through ``container`` entities and other built-in units
+        (items that this rule would match by model). Fixed IOS XE platforms
         report their built-in units ("module 0", "module R0", "module F0") with
         the chassis PID; fixed NX-OS platforms put the built-in line card in a
-        slot container.
+        slot container; a Nokia 7250 IXR-X nests "MDA 1/1" below "Slot 1", and
+        both report the chassis part number.
 
     **Name-based types** (ends_with / starts_with / contains / regex):
         Matches on ``entPhysicalName``.  When ``require_serial_match_parent``
@@ -1383,6 +1474,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         """
         policy_cache = {}
         owners = cls._attribute_to_members(obj, inventory_data, vc_members, policy)
+        serial_key = policy.chassis_serial_key()
 
         def policy_for(device):
             if device.pk not in policy_cache:
@@ -1390,7 +1482,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 policy_cache[device.pk] = {
                     "manufacturer": manufacturer,
                     "ignore_rules": policy.rules_for(manufacturer),
-                    "device_identity": DeviceIdentity.of(device),
+                    "device_identity": DeviceIdentity.of(device, serial_key),
                 }
             return policy_cache[device.pk]
 
@@ -1842,6 +1934,23 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         self._current_manufacturer_name = getattr(manufacturer, "name", None)
         self._carrier_install_rules = self._carrier_install_rules_for(manufacturer)
 
+    @staticmethod
+    def _mark_built_in_candidate(row, item, index_map, ignore_rules, device_identity, selected_device):
+        """Give a top-level row the facts of its "Mark built-in" action when its unit is a candidate."""
+        candidate = built_in_candidate(item, index_map, device_identity, has_bay=bool(row.get("module_bay_id")))
+        if candidate is None:
+            return
+        device_type = selected_device.device_type
+        rule = reusable_built_in_rule(ignore_rules)
+        row["built_in"] = {
+            "model": candidate.model,
+            "records_part_number": candidate.records_part_number,
+            "device_type_id": device_type.pk,
+            "manufacturer_id": device_type.manufacturer_id,
+            "part_number": device_type.part_number,
+            "rule_id": rule.pk if rule else None,
+        }
+
     def _append_rows_for_item_context(  # noqa: C901
         self,
         table_data,
@@ -1902,6 +2011,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 row["device_type_incomplete_name"] = str(device_type)
                 row["device_type_incomplete_target_pk"] = device_type.pk
                 row["device_type_incomplete_suggestion"] = self._derive_bay_template_suggestion(item)
+        self._mark_built_in_candidate(row, item, index_map, ignore_rules, device_identity, selected_device)
 
         # Determine child bay scope based on parent match state
         parent_module_id = None

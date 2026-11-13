@@ -34,12 +34,12 @@ from ..platform_versions import (
 from ..utils import (
     cached_row_matches,
     exception_text_for,
-    find_devices_by_serial,
     find_matching_location,
     find_matching_site,
     is_vc_position,
     match_librenms_hardware_to_device_type,
     normalize_serial,
+    normalize_stack_serial,
     parse_location_for_import,
     resolve_location_mapping,
 )
@@ -48,8 +48,10 @@ from .naming import _name_candidates, _resolve_device_name
 from .virtual_chassis import (
     _member_name,
     chassis_serial_key,
+    devices_with_serial,
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
+    serials_match,
     update_vc_member_suggested_names,
     vc_serial_key,
 )
@@ -944,14 +946,12 @@ def validate_device_for_import(  # noqa: C901
                 # OOB controller's, so comparing it against the host record's serial would surface
                 # bogus replacement/conflict warnings on a row that is already correctly linked.
                 incoming_serial = normalize_serial(libre_device.get("serial"))
-                # Normalize the stored side too: a legacy padded serial equals the incoming one.
-                stored_serial = normalize_serial(existing_device.serial)
-                if result["existing_match_type"] != "librenms_oob" and incoming_serial and incoming_serial != "-":
-                    if stored_serial and stored_serial == incoming_serial:
+                if result["existing_match_type"] != "librenms_oob" and normalize_stack_serial(incoming_serial):
+                    if serials_match(existing_device.serial, incoming_serial, chassis_serial_key(existing_device)):
                         result["serial_confirmed"] = True
-                    elif stored_serial and stored_serial != incoming_serial:
-                        serial_conflict = (
-                            Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
+                    elif normalize_serial(existing_device.serial):
+                        serial_conflict = next(
+                            iter(devices_with_serial(incoming_serial, exclude_pk=existing_device.pk, limit=1)), None
                         )
                         if serial_conflict:
                             result["serial_action"] = "conflict"
@@ -1035,13 +1035,13 @@ def validate_device_for_import(  # noqa: C901
                 # is already linked to LibreNMS isn't mislabelled as "not linked".
                 result["existing_librenms_link"] = _describe_existing_librenms_link(existing_device, server_key)
 
-                # Check for serial conflict on hostname-matched device. Both sides are
-                # normalized so a legacy padded stored serial isn't read as drift.
+                # Check for serial conflict on hostname-matched device.
                 incoming_serial = normalize_serial(libre_device.get("serial"))
-                stored_serial = normalize_serial(existing_device.serial)
-                if incoming_serial and incoming_serial != "-" and stored_serial != incoming_serial:
-                    serial_conflict = (
-                        Device.objects.filter(serial=incoming_serial).exclude(pk=existing_device.pk).first()
+                if normalize_stack_serial(incoming_serial) and not serials_match(
+                    existing_device.serial, incoming_serial, chassis_serial_key(existing_device)
+                ):
+                    serial_conflict = next(
+                        iter(devices_with_serial(incoming_serial, exclude_pk=existing_device.pk, limit=1)), None
                     )
                     if serial_conflict:
                         result["serial_action"] = "conflict"
@@ -1069,12 +1069,12 @@ def validate_device_for_import(  # noqa: C901
                 # canonicalizes legacy Device rows, and every plugin write path stores this same
                 # normalized form, so matching and persistence share one representation.
                 serial = normalize_serial(libre_device.get("serial"))
-                if serial and serial != "-" and not import_as_vm:
+                if normalize_stack_serial(serial) and not import_as_vm:
                     # Serial is not unique in NetBox, so .first() would bind an arbitrary row
                     # and the downstream serial/OOB/merge flow would derive its guidance from a
                     # random device. Require a unique match before binding, mirroring the
                     # merge-peer [:2] guard (issue #101).
-                    serial_matches = find_devices_by_serial(serial)
+                    serial_matches = devices_with_serial(serial)
                     if len(serial_matches) > 1:
                         # Device.serial is not unique in NetBox, so several rows already share it.
                         # Binding to an arbitrary one is wrong, and importing anyway would mint YET
@@ -1148,7 +1148,7 @@ def validate_device_for_import(  # noqa: C901
                 # re-issuing the identical UNIQUE query — keeps the single-query invariant while the
                 # fail-closed guard stays in place. Only defined when existing_match_type == "serial".
                 serial_matches
-                if _dup_eligible and _match_type == "serial" and _serial_now and _serial_now != "-"
+                if _dup_eligible and _match_type == "serial" and normalize_stack_serial(_serial_now)
                 else []
             )
             if _dup_eligible:
@@ -1156,7 +1156,7 @@ def validate_device_for_import(  # noqa: C901
                 if _match_type == "hostname" and hostname:
                     _dup_current = len(_hostname_peers) > 1
                 elif _match_type == "serial":
-                    _dup_current = bool(_serial_now) and _serial_now != "-" and len(_serial_peers) > 1
+                    _dup_current = bool(normalize_stack_serial(_serial_now)) and len(_serial_peers) > 1
                 if _dup_current:
                     # Arbitrary .first() match among duplicates: block link/promote/import and
                     # surface a blocking issue. The match is left for display only.
@@ -1201,8 +1201,7 @@ def validate_device_for_import(  # noqa: C901
             try:
                 _serial_for_pair = normalize_serial(libre_device.get("serial"))
                 if (
-                    _serial_for_pair
-                    and _serial_for_pair != "-"
+                    normalize_stack_serial(_serial_for_pair)
                     and not import_as_vm
                     and result.get("existing_device") is not None
                     and result.get("existing_match_type") in ("hostname", "serial")
@@ -1240,9 +1239,7 @@ def validate_device_for_import(  # noqa: C901
                     # surface the wrong merge target. Fetch up to 2; only pair on exactly one,
                     # otherwise skip the suggestion and warn.
                     if _hostname_match and not _serial_match:
-                        _serial_peers = list(
-                            Device.objects.filter(serial=_serial_for_pair).exclude(pk=_hostname_match.pk)[:2]
-                        )
+                        _serial_peers = devices_with_serial(_serial_for_pair, exclude_pk=_hostname_match.pk)
                         if len(_serial_peers) == 1:
                             _serial_match = _serial_peers[0]
                         elif len(_serial_peers) > 1:
@@ -1964,9 +1961,9 @@ def import_single_device(  # noqa: C901
             if platform_plan.platform is not None:
                 device_data["platform"] = platform_plan.platform
 
-            # Persist the canonical serial used by the exact indexed match lookups.
+            # Persist the trimmed raw serial; the exact indexed match lookups read this form.
             serial = normalize_serial(libre_device.get("serial"))
-            if serial and serial != "-":
+            if normalize_stack_serial(serial):
                 device_data["serial"] = serial
 
             location_name = libre_device.get("location", "")

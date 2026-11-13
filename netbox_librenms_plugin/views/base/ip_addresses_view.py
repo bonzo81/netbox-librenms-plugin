@@ -18,7 +18,11 @@ from virtualization.models import VirtualMachine, VMInterface
 
 from netbox_librenms_plugin.constants import LIBRENMS_GLOBAL_ROUTING_INSTANCE, is_supported_interface_name_field
 from netbox_librenms_plugin.interface_rules import interface_rules_for_request, row_rule_block
-from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix, parse_librenms_ip_entry
+from netbox_librenms_plugin.ip_addressing import (
+    UNAVAILABLE_VRF_MESSAGE,
+    parse_address_with_prefix,
+    parse_librenms_ip_entry,
+)
 from netbox_librenms_plugin.ip_rules import ip_rules_for_request, row_ip_rule_block
 from netbox_librenms_plugin.librenms_ids import (
     coerce_librenms_id,
@@ -1426,6 +1430,15 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
                     vrf_id = int(vrf_id)
                 except (TypeError, ValueError):
                     return JsonResponse({"status": "error", "message": "Invalid VRF ID"}, status=400)
+                # A hidden VRF answers as a deleted one, so the refusal discloses nothing.
+                if not self.restricted_queryset(VRF).filter(pk=vrf_id).exists():
+                    return JsonResponse(
+                        {
+                            "status": "error",
+                            "message": UNAVAILABLE_VRF_MESSAGE,
+                        },
+                        status=400,
+                    )
 
             # Get the object (Device or VirtualMachine)
             try:
@@ -1494,12 +1507,8 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
                     updated_record["interface_name"] = interface.name
                     updated_record["interface_url"] = interface.get_absolute_url()
 
-            # The dropdown lists only viewable VRFs, so a VRF the user cannot view decides as one that does not exist.
-            vrf_viewable = vrf_id is None or self.restricted_queryset(VRF).filter(pk=vrf_id).exists()
-
             # Check if IP exists in NetBox
             exists_any_vrf, exists_specific_vrf, ip_url = self._find_existing_ip(address_no_mask, prefix_len, vrf_id)
-            exists_specific_vrf = exists_specific_vrf and vrf_viewable
 
             if exists_any_vrf:
                 updated_record["exists"] = True
@@ -1513,9 +1522,9 @@ class SingleIPAddressVerifyView(NetBoxObjectPermissionMixin, LibreNMSPermissionM
             ip_rule, held = decide_ip_row_rule(
                 ip_rules_for_request(request),
                 updated_record["ip_with_mask"],
-                vrf_id if vrf_viewable else None,
+                vrf_id,
                 self._row_interface(obj, updated_record, original_port_id, server_key),
-                IPAddress.objects.filter(address=updated_record["ip_with_mask"]) if vrf_viewable else (),
+                IPAddress.objects.filter(address=updated_record["ip_with_mask"]),
             )
             if held:
                 status_html = IPAddressTable(data=[]).render_status("matched", updated_record)

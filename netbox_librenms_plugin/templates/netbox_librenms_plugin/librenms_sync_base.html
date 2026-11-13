@@ -179,14 +179,14 @@
             <tr>
                 <td class="ps-3" style="width:40%">
                     {% if mapping.is_preferred %}
-                    <i class="mdi mdi-star text-warning me-1" title="Preferred server"></i>
+                    <i class="mdi mdi-star text-warning me-1" role="img" title="Preferred server" aria-label="Preferred server"></i>
                     {% endif %}
                     {% if mapping.is_active and mapping.is_selectable %}
-                    <i class="mdi mdi-check-circle text-success me-1" title="Currently active server"></i>
+                    <i class="mdi mdi-check-circle text-success me-1" role="img" title="Currently active server" aria-label="Currently active server"></i>
                     {% elif mapping.is_configured %}
                     <i class="mdi mdi-server-network text-muted me-1"></i>
                     {% else %}
-                    <i class="mdi mdi-server-off text-danger me-1" title="Server not configured in NetBox"></i>
+                    <i class="mdi mdi-server-off text-danger me-1" title="Server not configured in NetBox" aria-hidden="true"></i>
                     {% endif %}
                     {% if mapping.is_configured %}
                     <strong>{{ mapping.display_name }}</strong>
@@ -386,7 +386,7 @@
                         <tr>
                             <th scope="row" style="padding-left: 1rem;">
                                 Serial
-                                {% if object.serial and librenms_device_serial != object.serial %}
+                                {% if object.serial and not serial_matches %}
                                 <span class="text-warning ms-1" title="LibreNMS serial '{{ librenms_device_serial }}' does not match NetBox serial '{{ object.serial }}'">
                                     <i class="mdi mdi-alert"></i>
                                 </span>
@@ -394,7 +394,7 @@
                             </th>
                             <td>
                                 {{ librenms_device_serial }}
-                                {% if object.serial and librenms_device_serial == object.serial %}
+                                {% if serial_matches %}
                                 <span class="text-success ms-1" title="Serial matches NetBox">
                                     <i class="mdi mdi-check-circle"></i>
                                 </span>
@@ -511,8 +511,9 @@
                         <!-- Name Row -->
                         <tr>
                             <td style="padding-left: 1rem;">Name
-                                <i class="mdi mdi-information-outline text-muted ms-1"
+                                <i class="mdi mdi-information-outline text-muted ms-1" role="img"
                                    title="Name check uses your sysName and strip domain preferences. For virtual chassis members, the VC naming pattern is also applied."
+                                   aria-label="Name check uses your sysName and strip domain preferences. For virtual chassis members, the VC naming pattern is also applied."
                                    style="cursor: help;"></i>
                             </td>
                             <td>
@@ -615,7 +616,7 @@
                                             </button>
                                         {% else %}
                                             {% if librenms_device_serial != "-" %}
-                                                {% if object.serial != librenms_device_serial %}
+                                                {% if not serial_matches %}
                                                 <form method="post"
                                                       action="{% url 'plugins:netbox_librenms_plugin:update_device_serial' pk=object.pk %}"
                                                       style="display: inline;">
@@ -795,7 +796,7 @@ that may well be correct.
 {{ sync_cache_status|json_script:"librenms-sync-cache-initial" }}
 {{ sync_cache_contract|json_script:"librenms-sync-cache-contract" }}
 {% endif %}
-<div id="librenms-sync-tabs" data-active-tab="{{ active_sync_tab }}">
+<div id="librenms-sync-tabs" data-active-tab="{{ active_sync_tab }}" data-server-key="{{ server_key|default:'' }}">
 {{ sync_cache_status|json_script:"librenms-sync-rendered-status" }}
 <!-- Tab Navigation -->
 <div class="d-flex justify-content-between align-items-center">
@@ -1198,7 +1199,7 @@ that may well be correct.
                                     {% endif %}
                                 </td>
                                 <td>
-                                    <input type="hidden" name="serial_{{ forloop.counter }}" value="{{ item.serial }}">
+                                    <input type="hidden" name="librenms_serial_{{ forloop.counter }}" value="{{ item.librenms_serial }}">
                                     <select name="member_id_{{ forloop.counter }}" class="form-select form-select-sm">
                                         <option value="">Select member...</option>
                                         {% for member in object.virtual_chassis.members.all %}

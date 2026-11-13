@@ -4,8 +4,8 @@ Render the real _module_sync_content.html template in both modes.
 In migrated mode the Install-Selected POST form is dropped (a migrated donor must not be able
 to install modules). But the module table still renders interactive VC-member dropdowns whose
 verify-module POST reads document.querySelector('[name=csrfmiddlewaretoken]').value (no optional
-chaining → TypeError/403 if missing) and the server_key input. So standalone csrf + server_key
-hidden inputs must be emitted in migrated mode too, mirroring the interface/IP/VLAN fragments.
+chaining → TypeError/403 if missing). So a standalone csrf input must be emitted in migrated mode too.
+The server key of a script request comes from the sync page, not from this fragment.
 """
 
 import pytest
@@ -41,7 +41,7 @@ class TestModuleSyncContentTemplateMigratedMode:
         }
         return render_to_string("netbox_librenms_plugin/_module_sync_content.html", ctx, request=request)
 
-    def test_migrated_mode_drops_install_form_but_keeps_csrf_and_server_key(self):
+    def test_migrated_mode_drops_install_form_but_keeps_csrf(self):
         html = self._render(
             migrated={"server_key": "default", "device_id": 1, "at": "now"},
             has_write_permission=True,
@@ -49,10 +49,9 @@ class TestModuleSyncContentTemplateMigratedMode:
         # The Install-Selected form must be gone in migrated mode.
         assert 'id="install-selected-form"' not in html
         assert "install_selected" not in html
-        # ...but the standalone CSRF token + server_key must remain so the JS-driven verify-module
-        # POSTs (handleModuleChange) still authenticate and scope to the right server.
+        # ...but the standalone CSRF token must remain so the JS-driven verify-module POSTs
+        # (handleModuleChange) still authenticate.
         assert "csrfmiddlewaretoken" in html
-        assert 'name="server_key"' in html
         assert 'name="inventory_binding"' not in html
 
     def test_normal_mode_emits_install_form_with_csrf_and_server_key(self):
@@ -68,15 +67,4 @@ class TestModuleSyncContentTemplateMigratedMode:
         # interface/IP/VLAN sync fragments so a blank key can't be POSTed as an empty string.
         html = self._render(migrated=None, has_write_permission=True, server_key="")
         assert 'id="install-selected-form"' in html
-        assert 'name="server_key"' not in html
-
-    def test_migrated_mode_omits_server_key_input_when_absent(self):
-        html = self._render(
-            migrated={"device_id": 1, "at": "now"},
-            has_write_permission=True,
-            server_key="",
-        )
-        # The standalone CSRF token still renders for the verify-module POST, but the server_key
-        # input is omitted when there is no key.
-        assert "csrfmiddlewaretoken" in html
         assert 'name="server_key"' not in html

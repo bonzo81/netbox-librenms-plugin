@@ -581,12 +581,30 @@ def test_an_exclude_option_accepts_an_existing_path():
     assert package / "librenms_api.py" in scanned, "the option-only scan lost the default package"
 
 
+def test_the_rule_timeout_comes_from_the_environment():
+    """OPENGREP_TIMEOUT replaces the 60 s limit, so a loaded host can scan without a rule timeout."""
+    script = REPOSITORY_ROOT / "scripts" / "opengrep-scan.sh"
+    target = REPOSITORY_ROOT / "netbox_librenms_plugin" / "__init__.py"
+    run = [str(script), "--json", "--", str(target)]
+    result = subprocess.run(run, capture_output=True, text=True, env={**os.environ, "OPENGREP_TIMEOUT": "not-a-number"})
+    if result.returncode == OPENGREP_NOT_INSTALLED:
+        pytest.skip("opengrep is not installed; see .opengrep/README.md")
+
+    assert result.returncode not in (0, OPENGREP_NOT_INSTALLED), result.stdout
+    assert "--timeout" in result.stderr
+    # The control: a valid value scans as the default does.
+    assert subprocess.run(run, capture_output=True, env={**os.environ, "OPENGREP_TIMEOUT": "300"}).returncode == 0
+
+
 def test_each_rule_applies_to_its_declared_paths(tmp_path):
     """The path scoping is the rules' real boundary, so pin it against a staged tree, not fixtures."""
     http_call = "import requests\nrequests.get(url)\n"
     mapping_write = 'device.custom_field_data["librenms_id"] = {"default": 5}\n'
     conflict_raise = 'raise MappingChanged("changed")\n'
     ports_read = "api.get_ports(device_id)\n"
+    titled_icon = '<i class="mdi mdi-alert" title="Missing"></i>'
+    server_key_lookup = "document.querySelector('[name=server_key]');\n"
+    serial_compare = "def same(row, serial):\n    return row.serial == serial\n"
     sources = {
         # Flagged: a direct HTTP call outside the client.
         "netbox_librenms_plugin/worker.py": http_call,
@@ -601,9 +619,13 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
             http_call + "from django.test import TestCase\n"
             "class TestWorker:\n    def check(self):\n        self.assertEqual(1, 1)\n"
         ),
-        # Flagged: tests and templates are in the scope of the mapping rules.
-        "netbox_librenms_plugin/tests/test_seed.py": mapping_write + conflict_raise,
-        "netbox_librenms_plugin/templates/netbox_librenms_plugin/seed.html": "{{ object.cf.librenms_id }}\n",
+        # Flagged: tests and templates are in the scope of the mapping rules. The icon rule excludes tests.
+        "netbox_librenms_plugin/tests/test_seed.py": mapping_write + conflict_raise + f"ICON = '{titled_icon}'\n",
+        "netbox_librenms_plugin/templates/netbox_librenms_plugin/seed.html": "{{ object.cf.librenms_id }}\n"
+        + titled_icon
+        + "\n",
+        # Flagged: the icon rule covers package scripts too.
+        "netbox_librenms_plugin/static/netbox_librenms_plugin/js/seed.js": f"const ICON = '{titled_icon}';\n",
         # Clean: the mapping module and migrations are the only places that may touch the storage.
         "netbox_librenms_plugin/server_mappings.py": mapping_write,
         "netbox_librenms_plugin/migrations/0099_seed.py": mapping_write,
@@ -614,6 +636,15 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
         "netbox_librenms_plugin/views/base/modules_view.py": ports_read,
         "netbox_librenms_plugin/views/base/cables_view.py": ports_read,
         "netbox_librenms_plugin/views/base/interfaces_view.py": ports_read,
+        # Flagged: a page script looks up the server key in the whole document. Clean: vendored code.
+        "netbox_librenms_plugin/static/netbox_librenms_plugin/js/page.js": server_key_lookup,
+        "netbox_librenms_plugin/static/netbox_librenms_plugin/js/vendor/lib.js": server_key_lookup,
+        # Flagged: a stored Device serial in a view or import path compares through serials_match().
+        "netbox_librenms_plugin/views/sync/device_seed.py": serial_compare,
+        "netbox_librenms_plugin/import_utils/seed.py": serial_compare,
+        # Clean: Module writers store a normalized serial, and the rest of the package is out of scope.
+        "netbox_librenms_plugin/views/sync/modules.py": serial_compare,
+        "netbox_librenms_plugin/sync_seed.py": serial_compare,
     }
     for name, source in sources.items():
         staged = tmp_path / name
@@ -630,7 +661,12 @@ def test_each_rule_applies_to_its_declared_paths(tmp_path):
         ("netbox_librenms_plugin/tests/test_worker.py", "no-unittest-assertions"),
         ("netbox_librenms_plugin/tests/test_seed.py", "no-stored-mapping-access"),
         ("netbox_librenms_plugin/templates/netbox_librenms_plugin/seed.html", "no-stored-mapping-access-template"),
+        ("netbox_librenms_plugin/templates/netbox_librenms_plugin/seed.html", "titled-icon-needs-accessible-name"),
+        ("netbox_librenms_plugin/static/netbox_librenms_plugin/js/seed.js", "titled-icon-needs-accessible-name"),
         ("netbox_librenms_plugin/claims.py", "conflict-raised-without-record"),
         ("netbox_librenms_plugin/views/base/modules_view.py", "metadata-ports-skip-vlan-associations"),
         ("netbox_librenms_plugin/views/base/cables_view.py", "metadata-ports-skip-vlan-associations"),
+        ("netbox_librenms_plugin/static/netbox_librenms_plugin/js/page.js", "sync-script-reads-page-server-key"),
+        ("netbox_librenms_plugin/views/sync/device_seed.py", "device-serial-compare-through-serials-match"),
+        ("netbox_librenms_plugin/import_utils/seed.py", "device-serial-compare-through-serials-match"),
     }, found

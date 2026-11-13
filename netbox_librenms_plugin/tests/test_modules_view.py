@@ -148,19 +148,24 @@ class TestInventoryClassIncludeRule:
             DeviceIdentity,
             _check_ignore_rules,
         )
+        from netbox_librenms_plugin.utils import normalize_stack_serial
 
         index_map = {item["entPhysicalIndex"]: item for item in items}
         # _collect_top_items reads this cache for any item carrying an index, so a test that
         # passed {} would report that no rule ever matched.
         ignore_cache = {
             item["entPhysicalIndex"]: _check_ignore_rules(
-                item, index_map.get(item.get("entPhysicalContainedIn")), rules, index_map, DeviceIdentity()
+                item,
+                index_map.get(item.get("entPhysicalContainedIn")),
+                rules,
+                index_map,
+                DeviceIdentity(serial_key=normalize_stack_serial),
             )
             for item in items
         }
         transparent = BaseModuleTableView._find_transparent_indices(items, ignore_cache)
         return BaseModuleTableView._collect_top_items(
-            items, index_map, rules, DeviceIdentity(), transparent, ignore_cache
+            items, index_map, rules, DeviceIdentity(serial_key=normalize_stack_serial), transparent, ignore_cache
         )
 
     def _include_rule(self, pattern="other"):
@@ -3584,9 +3589,14 @@ class TestCheckIgnoreRules:
 
     def _check(self, item, parent_item, rules, index_map=None, device_serial="", type_models=()):
         from netbox_librenms_plugin.views.base.modules_view import DeviceIdentity, _check_ignore_rules
+        from netbox_librenms_plugin.utils import normalize_stack_serial
 
         return _check_ignore_rules(
-            item, parent_item, rules, index_map, DeviceIdentity(device_serial, frozenset(type_models))
+            item,
+            parent_item,
+            rules,
+            index_map,
+            DeviceIdentity(device_serial, frozenset(type_models), serial_key=normalize_stack_serial),
         )
 
     def test_match_with_serial_match_skips(self):
@@ -5447,27 +5457,10 @@ class TestStatusIconNotesHaveAnAccessibleName:
         ids=["repaired-parent", "name-conflict", "model-warning"],
     )
     def test_each_titled_icon_is_an_image_named_by_its_title(self, status, record):
-        from html.parser import HTMLParser
-
         from netbox_librenms_plugin.tables.modules import LibreNMSModuleTable
+        from netbox_librenms_plugin.tests.view_test_helpers import assert_titled_icons_are_named
 
-        class Icons(HTMLParser):
-            def __init__(self):
-                super().__init__()
-                self.titled = []
-
-            def handle_starttag(self, tag, attrs):
-                attrs = dict(attrs)
-                if tag == "i" and "title" in attrs:
-                    self.titled.append(attrs)
-
-        icons = Icons()
-        icons.feed(str(LibreNMSModuleTable([]).render_status(status, record)))
-
-        assert icons.titled
-        for attrs in icons.titled:
-            assert attrs.get("role") == "img"
-            assert attrs.get("aria-label") == attrs["title"]
+        assert_titled_icons_are_named(LibreNMSModuleTable([]).render_status(status, record))
 
 
 class TestRenderStatusNoBayOnParent:
@@ -6235,6 +6228,7 @@ class TestScopePreservedAcrossIntegratedContainer:
         from netbox_librenms_plugin.models import ModuleBayMapping
         from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView, DeviceIdentity
+        from netbox_librenms_plugin.utils import normalize_stack_serial
 
         view = object.__new__(BaseModuleTableView)
         view._device_manufacturer = None
@@ -6325,7 +6319,7 @@ class TestScopePreservedAcrossIntegratedContainer:
             index_map=index_map,
             children_by_parent={100: [mda_item], 200: [port_item]},
             ignore_rules=[],
-            device_identity=DeviceIdentity(),
+            device_identity=DeviceIdentity(serial_key=normalize_stack_serial),
             module_types=view._get_module_types(),
             manufacturer=selected_device.device_type.manufacturer,
             selected_device=selected_device,

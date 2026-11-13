@@ -15,6 +15,7 @@ from django.db import IntegrityError, models, transaction
 from django.http import HttpResponse, QueryDict
 from django.shortcuts import redirect, render
 from django.urls import reverse
+from django.utils.html import escape
 from django.views import View
 from utilities.exceptions import AbortRequest
 
@@ -26,6 +27,7 @@ from netbox_librenms_plugin.module_grants import (
     ACTION_INSTALL_MODULE,
     ACTION_INSTALL_SELECTED,
     ACTION_INSTALL_SELECTED_ROW,
+    ACTION_MARK_BUILT_IN,
     ACTION_MISMATCH_PREVIEW,
     ACTION_REPLACE_MODULE,
     ACTION_UPDATE_INTERFACE,
@@ -53,7 +55,7 @@ from netbox_librenms_plugin.sync_cache import (
     module_inventory_oob_matches,
     schedule_request_cache_mutation,
 )
-from netbox_librenms_plugin.transactions import classify_conflict, update_existing_row
+from netbox_librenms_plugin.transactions import classify_conflict, saved_in_scope, update_existing_row
 from netbox_librenms_plugin.utils import (
     REGEX_COMPILE_ERRORS,
     acquire_advisory_transaction_lock,
@@ -74,10 +76,13 @@ from netbox_librenms_plugin.utils import (
 from netbox_librenms_plugin.utils import coerce_positive_int as _coerce_positive_int
 from netbox_librenms_plugin.views.base.modules_view import (
     BaseModuleTableView,
+    DeviceIdentity,
     _get_item_port_identity,
     _inventory_item_key,
     _is_holder,
     _normalize_librenms_text,
+    built_in_candidate,
+    reusable_built_in_rule,
     select_module_interface,
 )
 from netbox_librenms_plugin.views.mixins import (
@@ -2475,9 +2480,7 @@ class ApplyModuleInterfaceTypesView(
     """Apply selected module interface-template types after checking preview state."""
 
     def _assert_updated_interface_change_scope(self, interface, outcome):
-        from dcim.models import Interface
-
-        if outcome == "updated" and not self.restricted_queryset(Interface, "change").filter(pk=interface.pk).exists():
+        if outcome == "updated" and not saved_in_scope(interface, self.request.user, "change"):
             raise _InterfaceChangeScopeViolation(interface.name)
 
     def post(self, request, pk):  # noqa: C901
@@ -3746,3 +3749,276 @@ class AddBayTemplateView(
             messages.error(request, f"Failed to add bay template: {detail}")
 
         return _modules_action_response(request, device, server_key)
+
+
+@dataclass(frozen=True)
+class _BuiltInPlan:
+    """What "Mark built-in" writes: maybe the model as the part number of one device type, and the rule."""
+
+    target: object
+    # The target's device type as the policy loaded it.
+    device_type: object
+    manufacturer_id: int
+    model: str
+    records_part_number: bool
+    rule: object
+    ent_index: int
+
+    def still_holds(self, device_type) -> bool:
+        """Return whether the locked *device_type* is still in the state the plan was made for."""
+        if device_type.manufacturer_id != self.manufacturer_id:
+            return False
+        if self.records_part_number:
+            return not (device_type.part_number or "").strip()
+        held = {(name or "").strip().casefold() for name in (device_type.model, device_type.part_number)}
+        return self.model.casefold() in held
+
+
+class _MarkBuiltInOutOfScope(Exception):
+    """Roll back a mark whose saved rows leave the caller's permission scope."""
+
+
+class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
+    """
+    Mark a chassis-level unit as built into its device type.
+
+    GET renders the confirm modal. POST records the unit's model as the part number of the target device type
+    when the device type does not hold it yet, and makes sure that an enabled, unfiltered
+    ``model_matches_device_type`` transparent rule covers the device type's manufacturer. The candidate test is
+    ``built_in_candidate``.
+    """
+
+    def _permissions(self, plan=None):
+        """Return the object permissions of the action: each write of the plan adds its own."""
+        from dcim.models import Device, DeviceType
+
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+        required = [("view", Device)]
+        if plan is not None:
+            if plan.records_part_number:
+                required.append(("change", DeviceType))
+            required.append(("change" if plan.rule else "add", InventoryIgnoreRule))
+        return required
+
+    def _plan(self, page_device, server_key, data, *, write):
+        """
+        Return the plan of a granted row, or raise GrantRefused or _ModuleActionRefused.
+
+        The grant binds the snapshot and the policy, which holds every rule and the model and part number of each
+        device type, so the candidate test below sees what the table saw. The bay is matched again.
+        """
+        from dcim.models import Device
+
+        target = _resolve_destination(page_device, data.get("selected_device_id"), self.restricted_queryset(Device))
+        if target is None:
+            raise GrantRefused(GrantRefusal.DESTINATION)
+        if write:
+            # One writer per manufacturer at a time, so two marks cannot both create the rule.
+            acquire_advisory_transaction_lock(
+                f"netbox-librenms-plugin:built-in-rule:{target.device_type.manufacturer_id}"
+            )
+        granted = _authorize_module_grant(
+            self, page_device, server_key, ACTION_MARK_BUILT_IN, data.get("inventory_binding")
+        )
+        grant = granted.grant.require(device_id=target.pk, ent_index=data.get("ent_index", ""))
+        member = granted.policy.member(target.pk)
+        device_type = member.device_type
+        grant.require(action_target={"device_type_id": device_type.pk})
+        item = granted.row(grant.ent_index)
+        ancestry = InstallBranchView._ancestry_maps(granted, {member.pk})[member.pk]
+        has_bay = self._matches_a_bay(member, item, granted.index_map, granted.index_map.keys() - ancestry.keys())
+        identity = DeviceIdentity.of(member, granted.policy.chassis_serial_key())
+        candidate = built_in_candidate(item, granted.index_map, identity, has_bay=has_bay)
+        if candidate is None:
+            raise GrantRefused(GrantRefusal.STALE)
+        if candidate.records_part_number and (device_type.part_number or "").strip():
+            raise _ModuleActionRefused(
+                f"Device type {device_type} already has a part number. Add an Inventory Rule instead."
+            )
+        return _BuiltInPlan(
+            target=target,
+            device_type=device_type,
+            manufacturer_id=device_type.manufacturer_id,
+            model=candidate.model,
+            records_part_number=candidate.records_part_number,
+            rule=reusable_built_in_rule(granted.policy.rules_for(device_type.manufacturer)),
+            ent_index=grant.ent_index,
+        )
+
+    @staticmethod
+    def _matches_a_bay(device, item, index_map, foreign_indices):
+        """
+        Return whether *item* matches a bay of *device* now, as the table matches a chassis-level row.
+
+        Bay mappings are not part of the grant, and a mapping edit keeps the cached snapshot, so the
+        bay that the table found is matched again here.
+        """
+        from dcim.models import ModuleBay
+
+        from netbox_librenms_plugin.utils import (
+            load_bay_mappings,
+            module_type_lookup_candidates,
+            preload_normalization_rules,
+            resolve_module_type,
+        )
+
+        manufacturer = device.device_type.manufacturer
+        matched_type = resolve_module_type(
+            _normalize_librenms_text(item.get("entPhysicalModelName")),
+            get_module_types_indexed(),
+            manufacturer=manufacturer,
+            norm_rules=preload_normalization_rules("module_type", manufacturer=manufacturer),
+            fallback_names=module_type_lookup_candidates(item),
+        )
+        exact_mappings, regex_mappings = load_bay_mappings()
+        bays = prefetch_module_bay_types(
+            ModuleBay.objects.filter(device=device).select_related("installed_module__module_type")
+        )
+        device_bays, module_scoped_bays = {}, {}
+        for bay in bays:
+            if bay.module_id:
+                module_scoped_bays.setdefault(bay.module_id, {})[bay.name] = bay
+            else:
+                device_bays[bay.name] = bay
+        # The install resolver drops a bay name that two modules define; the table keeps it, so a match hides the mark.
+        matched_bay = BaseModuleTableView._match_bay_for_item(
+            item,
+            index_map,
+            BaseModuleTableView._compute_all_bays(device_bays, module_scoped_bays),
+            exact_mappings=exact_mappings,
+            regex_mappings=regex_mappings,
+            manufacturer_id=manufacturer.pk,
+            norm_rules_bay=preload_normalization_rules("module_bay"),
+            foreign_indices=foreign_indices,
+            accepted_bay_types=module_type_bay_type_ids(matched_type, load_module_type_bay_types()),
+        )
+        return matched_bay is not None
+
+    def get(self, request, pk):
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.models import InventoryIgnoreRule
+
+        self.required_object_permissions = {"GET": self._permissions()}
+        if error := self.require_all_permissions("GET"):
+            return error
+        page_device = self.restrict_object_or_404(Device, pk=pk)
+        server_key = self.resolve_posted_server_key_or_none(request.GET)
+        if server_key is None:
+            return HttpResponse(NO_LIBRENMS_SERVER_MESSAGE, status=400)
+        try:
+            plan = self._plan(page_device, server_key, request.GET, write=False)
+        except GrantRefused as exc:
+            return HttpResponse(exc.refusal.message, status=400)
+        except _ModuleActionRefused as exc:
+            # The refusal names the device type, which a user can edit.
+            return HttpResponse(escape(exc.message), status=400)
+        self.required_object_permissions = {"GET": self._permissions(plan)}
+        if error := self.require_object_permissions("GET"):
+            return error
+        # The write locks the reused rule through the change scope, so the modal shows only a rule in that scope.
+        rules = self.restricted_queryset(InventoryIgnoreRule, "change")
+        if plan.rule is not None and not rules.filter(pk=plan.rule.pk).exists():
+            return HttpResponse("The rule that covers this device type is outside your permission scope.", status=403)
+        return render(
+            request,
+            "netbox_librenms_plugin/htmx/mark_built_in_modal.html",
+            {
+                "device_pk": page_device.pk,
+                "device_type": plan.device_type,
+                "model": plan.model,
+                "records_part_number": plan.records_part_number,
+                "rule": plan.rule,
+                "server_key": server_key,
+                "selected_device_id": plan.target.pk,
+                "ent_index": plan.ent_index,
+                "inventory_binding": request.GET.get("inventory_binding", ""),
+            },
+        )
+
+    def _write(self, plan):
+        """Lock the target and its device type, write the plan in the caller's transaction, and return the rule."""
+        from dcim.models import Device, DeviceType
+
+        from netbox_librenms_plugin.models import BUILT_IN_UNITS_RULE, InventoryIgnoreRule
+
+        # A device type reassignment locks only the device row, so lock it first and check it still has the type.
+        target = self.relock_scoped_row(Device, pk=plan.target.pk)
+        if target is None or target.device_type_id != plan.device_type.pk:
+            raise GrantRefused(GrantRefusal.STALE)
+        # The device type comes from the target device, which the request resolved through its scope.
+        locked = self.relock_scoped_row(DeviceType, pk=plan.device_type.pk)
+        if locked is None or not plan.still_holds(locked):
+            raise GrantRefused(GrantRefusal.STALE)
+        if plan.records_part_number:
+
+            def apply(row):
+                row.part_number = plan.model
+
+            update_existing_row(self.restricted_queryset(DeviceType, "change").filter(pk=locked.pk), apply)
+            # A constrained grant decides on the saved row; a denial rolls the whole mark back.
+            if not saved_in_scope(locked, self.request.user, "change"):
+                raise _MarkBuiltInOutOfScope
+        if plan.rule is not None:
+            # A rule edit after the policy read must not leave a mark that no rule covers.
+            rule = (
+                self.restricted_queryset(InventoryIgnoreRule, "change")
+                .select_for_update(of=("self",))
+                .filter(pk=plan.rule.pk)
+                .first()
+            )
+            if rule is None:
+                raise _MarkBuiltInOutOfScope
+            if not rule.hides_built_in_units or rule.manufacturer_id not in {None, plan.manufacturer_id}:
+                raise GrantRefused(GrantRefusal.STALE)
+            return rule
+        rule = InventoryIgnoreRule(**BUILT_IN_UNITS_RULE, manufacturer_id=plan.manufacturer_id)
+        try:
+            rule.full_clean()
+        except ValidationError as exc:
+            detail = exception_text_for(exc, InventoryIgnoreRule, self.request.user)
+            raise _ModuleActionRefused(f"Failed to mark the unit built-in: {detail}") from exc
+        rule.save()
+        if not saved_in_scope(rule, self.request.user, "add"):
+            raise _MarkBuiltInOutOfScope
+        return rule
+
+    def post(self, request, pk):
+        from dcim.models import Device, DeviceType
+
+        self.required_object_permissions = {"POST": self._permissions()}
+        if error := self.require_all_permissions("POST"):
+            return error
+        page_device = self.restrict_object_or_404(Device, pk=pk)
+        server_key = self.resolve_posted_server_key_or_none(request.POST)
+        if server_key is None:
+            messages.error(request, NO_LIBRENMS_SERVER_MESSAGE)
+            return _modules_action_response(request, page_device)
+
+        try:
+            with transaction.atomic():
+                plan = self._plan(page_device, server_key, request.POST, write=True)
+                self.required_object_permissions = {"POST": self._permissions(plan)}
+                if error := self.require_object_permissions("POST"):
+                    return error
+                rule = self._write(plan)
+        except GrantRefused as exc:
+            messages.error(request, exc.refusal.message)
+        except _ModuleActionRefused as exc:
+            exc.report(request)
+        except (_MarkBuiltInOutOfScope, DeviceType.DoesNotExist):
+            messages.error(request, "Nothing was changed: the result is outside your permission scope.")
+        except (ValidationError, IntegrityError) as exc:
+            if classify_conflict(exc):
+                raise
+            messages.error(
+                request, f"Failed to mark the unit built-in: {exception_text_for(exc, DeviceType, request.user)}"
+            )
+        else:
+            recorded = (
+                f"Recorded {plan.model} as the part number of the device type. " if plan.records_part_number else ""
+            )
+            messages.success(request, f"{recorded}The rule '{rule.name}' hides the built-in units of {plan.model}.")
+            _schedule_module_cache_mutation(request, page_device, server_key)
+        return _modules_action_response(request, page_device, server_key)

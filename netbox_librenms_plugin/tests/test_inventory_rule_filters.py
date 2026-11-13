@@ -25,8 +25,11 @@ def _rule(**fields):
 
 def _check(item, rules, parent=None, index_map=None, *, serial="", models=()):
     from netbox_librenms_plugin.views.base.modules_view import DeviceIdentity, _check_ignore_rules
+    from netbox_librenms_plugin.utils import normalize_stack_serial
 
-    return _check_ignore_rules(item, parent, rules, index_map, DeviceIdentity(serial, frozenset(models)))
+    return _check_ignore_rules(
+        item, parent, rules, index_map, DeviceIdentity(serial, frozenset(models), serial_key=normalize_stack_serial)
+    )
 
 
 _CHASSIS = {"entPhysicalIndex": 1, "entPhysicalClass": "chassis", "entPhysicalContainedIn": 0}
