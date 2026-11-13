@@ -1048,7 +1048,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 request, obj, inventory_data, server_key=server_key, sync_device=sync_device, policy=policy
             )
         )
-        refresh_incomplete = refresh_incomplete or context.get("table") is None
+        # A numbering refusal comes from a complete read: the snapshot stays, and each render refuses again.
+        numbering_refused = bool(context.get("vc_numbering_error"))
+        refresh_incomplete = refresh_incomplete or (context.get("table") is None and not numbering_refused)
         if ports_error:
             logger.warning("Port metadata fetch failed for device %s: %s", self.librenms_id, ports_error)
             messages.warning(
@@ -1078,7 +1080,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 server_key,
                 actor_id=request_actor_id(request),
             ):
-                messages.success(request, "Inventory data refreshed successfully.")
+                if not numbering_refused:
+                    messages.success(request, "Inventory data refreshed successfully.")
             else:
                 messages.error(
                     request,
