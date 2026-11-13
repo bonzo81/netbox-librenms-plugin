@@ -1534,8 +1534,9 @@ class TestVCCacheKey:
         from types import SimpleNamespace
 
         from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
-        key = _vc_cache_key(SimpleNamespace(server_key=server_key), device_id)
+        key = _vc_cache_key(SimpleNamespace(server_key=server_key), device_id, SerialRules(()))
 
         assert "librenms_vc_detection" in key
         assert all(part in key for part in expected_parts)
@@ -1544,13 +1545,15 @@ class TestVCCacheKey:
         from types import SimpleNamespace
 
         from netbox_librenms_plugin.import_utils.virtual_chassis import _vc_cache_key
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         server_a = SimpleNamespace(server_key="server-a")
         server_b = SimpleNamespace(server_key="server-b")
+        rules = SerialRules(())
 
-        assert _vc_cache_key(server_a, 1) != _vc_cache_key(server_b, 1)
-        assert _vc_cache_key(server_a, 1) != _vc_cache_key(server_a, 2)
-        assert "default" in _vc_cache_key(object(), 1)
+        assert _vc_cache_key(server_a, 1, rules) != _vc_cache_key(server_b, 1, rules)
+        assert _vc_cache_key(server_a, 1, rules) != _vc_cache_key(server_a, 2, rules)
+        assert "default" in _vc_cache_key(object(), 1, rules)
 
 
 @pytest.mark.django_db

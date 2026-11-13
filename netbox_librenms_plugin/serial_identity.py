@@ -130,6 +130,11 @@ def _text(value) -> str:
     return "" if value is None else str(value).strip()
 
 
+def _rules_digest(rules) -> str:
+    rows = [[rule.pk, rule.manufacturer_id, rule.match_pattern, rule.replacement, rule.priority] for rule in rules]
+    return hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode()).hexdigest()
+
+
 class SerialContext:
     """One serial rule chain: the rules of one manufacturer, then the global rules. Callers never read its keys."""
 
@@ -146,10 +151,7 @@ class SerialContext:
     @property
     def rules_digest(self) -> str:
         """Return a hash of the rule rows of this chain; a rule edit changes it."""
-        rows = [
-            [rule.pk, rule.manufacturer_id, rule.match_pattern, rule.replacement, rule.priority] for rule in self._rules
-        ]
-        return hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode()).hexdigest()
+        return _rules_digest(self._rules)
 
     def _key(self, value) -> str:
         text = _text(value)
@@ -206,6 +208,11 @@ class SerialRules:
                 chains.setdefault(rule.manufacturer_id, []).append(rule)
             self._chains = chains
         return self._chains
+
+    @property
+    def digest(self) -> str:
+        """Return a hash of every serial rule row; a rule edit changes it, so a cached derived result keys on it."""
+        return _rules_digest(rule for chain in self._chains_by_manufacturer().values() for rule in chain)
 
     def context(self, manufacturer_id) -> SerialContext:
         """Return the chain of *manufacturer_id*; a manufacturer without serial rules uses the global chain."""
