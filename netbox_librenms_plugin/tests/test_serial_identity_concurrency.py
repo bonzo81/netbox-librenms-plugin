@@ -257,3 +257,81 @@ def test_an_import_type_change_reads_the_device_serial_again_under_its_locks(lib
 
     assert changed
     assert Device.objects.get(pk=target.pk).device_type_id != new_type.pk
+
+
+@transactional_db_with_all_apps()
+def test_a_member_serial_write_waits_for_a_chassis_master_type_change(librenms_server, monkeypatch):
+    """
+    The master's new type keys the member's new "XABC" to "ABC", which a third device stores.
+
+    The member write runs after the type change passed its check and before it commits; it must
+    wait for the commit and then read the new type.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as FutureTimeout
+    from threading import Event
+
+    from dcim.models import Device, DeviceType, Manufacturer, VirtualChassis
+    from django.test import Client
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+    from netbox_librenms_plugin.views.sync import device_fields
+
+    master = seed_mapping(make_device("ctx-race-master", serial="MASTER1"), SERVER_KEY, own=9831)
+    member = make_device("ctx-race-member", serial="OLD123")
+    chassis = make_virtual_chassis("ctx-race-chassis", master, member)
+    VirtualChassis.objects.filter(pk=chassis.pk).update(master=master)
+    make_device("ctx-race-holder", serial="ABC")
+    new_maker = Manufacturer.objects.create(name="Context race maker", slug="ctx-race-maker")
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=new_maker
+    )
+    new_type = DeviceType.objects.create(
+        manufacturer=new_maker, model="Context race model", slug="ctx-race-model", part_number="CTX-RACE-HW"
+    )
+    librenms_server.device_info_response(device_id=9831, hostname=master.name, hardware=new_type.part_number)
+    user = make_superuser("ctx-race-user")
+    checked, release = Event(), Event()
+    original = device_fields.retype_conflict
+
+    def check_then_wait(*args, **kwargs):
+        refused = original(*args, **kwargs)
+        checked.set()
+        release.wait(timeout=20)
+        return refused
+
+    monkeypatch.setattr(device_fields, "retype_conflict", check_then_wait)
+
+    def post(name, data):
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET lock_timeout = '20s'")
+            client = Client()
+            client.force_login(user)
+            return client.post(reverse(f"plugins:netbox_librenms_plugin:{name}", kwargs={"pk": master.pk}), data)
+        finally:
+            connection.close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        retype = executor.submit(post, "update_device_type", {"server_key": SERVER_KEY})
+        assert checked.wait(timeout=20)
+        assign = executor.submit(
+            post,
+            "assign_vc_serial",
+            {"server_key": SERVER_KEY, "member_id_1": str(member.pk), "librenms_serial_1": "XABC"},
+        )
+        try:
+            assign.result(timeout=3)
+        except FutureTimeout:
+            pass
+        release.set()
+        retype.result(timeout=30)
+        assign.result(timeout=30)
+
+    retyped = Device.objects.get(pk=master.pk).device_type_id == new_type.pk
+    member_serial = Device.objects.get(pk=member.pk).serial
+    assert retyped, "the type change itself must commit"
+    assert member_serial == "OLD123", member_serial

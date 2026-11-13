@@ -581,6 +581,27 @@ class Assignment:
     absent: bool = False
 
 
+def locked_context(device, *, rules: SerialRules) -> SerialContext:
+    """
+    Return the serial context of the locked *device*, under a lock on the row whose DeviceType decides it.
+
+    A standalone device or a chassis master decides its own context: the caller holds its row, and
+    the object may carry a type that the same write sets. A member reads the context of its master
+    after it locks the master row, so a type change of the master that has not committed is
+    waited for and then read.
+    """
+    from dcim.models import Device, VirtualChassis
+
+    chassis_id = device.virtual_chassis_id
+    master_id = VirtualChassis.objects.filter(pk=chassis_id).values_list("master_id", flat=True).first()
+    if chassis_id is None or master_id is None or master_id == device.pk:
+        return rules.for_device(device)
+    master = Device.objects.select_for_update(no_key=True, of=("self",)).select_related("device_type").get(pk=master_id)
+    if master.virtual_chassis_id != chassis_id:
+        return SerialContext(None, (), unavailable=UNAVAILABLE_MASTER_LINK)
+    return rules.for_device_type(master.device_type)
+
+
 def device_assignment(device, incoming, *, rules: SerialRules) -> Assignment:
     """
     Decide the serial write of a locked Device, after ``assignment_lock``.
@@ -590,7 +611,7 @@ def device_assignment(device, incoming, *, rules: SerialRules) -> Assignment:
     """
     from dcim.models import Device
 
-    context = rules.for_device(device)
+    context = locked_context(device, rules=rules)
     if not is_identity(incoming, context):
         if context.unavailable:
             return Assignment(None, Resolution(ResolutionKind.UNAVAILABLE, reason=context.unavailable))
