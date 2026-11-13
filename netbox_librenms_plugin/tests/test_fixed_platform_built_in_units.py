@@ -933,6 +933,39 @@ class TestMarkBuiltInScope:
         assert message_texts(refused, "error") == [GrantRefusal.STALE.message]
         assert DeviceType.objects.get(pk=device.device_type_id).part_number == ""
 
+    def test_a_device_moved_to_another_device_type_before_the_lock_refuses_the_mark(self):
+        from dcim.models import DeviceType
+        from django.db import connection
+
+        from netbox_librenms_plugin.module_grants import GrantRefusal
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts
+
+        device = ixr_device("ixr-scope-retyped", part_number="")
+        planned = device.device_type
+        other = DeviceType.objects.create(manufacturer=planned.manufacturer, model="IXR retyped", slug="ixr-retyped")
+        fields = modal_form(device, SLOT_1)
+        changed = []
+
+        def concurrent_edit(execute, sql, params, many, context):
+            # Another session gives the device another device type just before the writer takes its first row lock.
+            if not changed and "FOR UPDATE" in sql and ('"dcim_devicetype"' in sql or '"dcim_device"' in sql):
+                changed.append(sql)
+                execute(
+                    'UPDATE "dcim_device" SET "device_type_id" = %s WHERE "id" = %s',
+                    [other.pk, device.pk],
+                    False,
+                    context,
+                )
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(concurrent_edit):
+            refused = mark(device, fields)
+
+        assert changed
+        assert message_texts(refused, "error") == [GrantRefusal.STALE.message]
+        assert DeviceType.objects.get(pk=planned.pk).part_number == ""
+        assert built_in_rules() == []
+
     def test_a_refused_rule_names_the_rule_field(self, settings):
         from dcim.models import DeviceType
 

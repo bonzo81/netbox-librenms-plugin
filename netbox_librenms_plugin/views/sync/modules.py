@@ -3938,11 +3938,15 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
         )
 
     def _write(self, plan):
-        """Lock the device type, write the plan inside the caller's transaction, and return the rule that covers it."""
-        from dcim.models import DeviceType
+        """Lock the target and its device type, write the plan in the caller's transaction, and return the rule."""
+        from dcim.models import Device, DeviceType
 
         from netbox_librenms_plugin.models import BUILT_IN_UNITS_RULE, InventoryIgnoreRule
 
+        # A device type reassignment locks only the device row, so lock it first and check it still has the type.
+        target = self.relock_scoped_row(Device, pk=plan.target.pk)
+        if target is None or target.device_type_id != plan.device_type.pk:
+            raise GrantRefused(GrantRefusal.STALE)
         # The device type comes from the target device, which the request resolved through its scope.
         locked = self.relock_scoped_row(DeviceType, pk=plan.device_type.pk)
         if locked is None or not plan.still_holds(locked):
