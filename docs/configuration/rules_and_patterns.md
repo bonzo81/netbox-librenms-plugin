@@ -157,6 +157,8 @@ The plugin stores each Device and Module serial as LibreNMS reports it, with the
 
 To find a device or a module by serial, the plugin keys the LibreNMS serial with the global rules and with the rules of each manufacturer that has serial rules. It then reads every row whose stored serial contains one of these keys, through a trigram index, and keys each stored serial with its own rules. When two or more rows match, the plugin binds none of them, also when you cannot see one of them. An import, a serial update or a virtual chassis member creation then stops and names the conflict.
 
+A device type selects the rules for the serial of its device. For a virtual chassis master, it also selects the rules for the serial of each member. When the plugin changes a device type, for example with **Update Device Type** or an import action, it refuses the change if another device then holds one of these serials. Data that the plugin caches and that the serial rules decide is computed again after a serial rule change: import search results, virtual chassis detection and the Modules tab inventory. The Modules tab inventory is also computed again after a device type change of the chassis.
+
 The plugin seeds a global rule that removes Juniper's `S/N ` mark: `^S/N\s+(.+)$` with the replacement `\1`. With this rule, a stored `BCFB9793` matches a LibreNMS serial `S/N BCFB9793`, and the reverse.
 
 An earlier plugin version stored the serial after the rules for Modules, and for virtual chassis members for a while. Such a row keeps its match under the seeded rule. When the plugin writes the serial of such a row, it stores the LibreNMS text. The LibreNMS Sync page and the Modules tab show **stored form differs** for such a row and offer the update of the serial. Three cases can make such a row stop matching until you update its serial: a doubled mark, such as `S/N S/N ABC` stored as `S/N ABC`; a rule that matches its own output again, such as `^0(.+)$`; and a deleted rule that produced the stored serial. To list the rows whose stored serial the current rules change, run:
@@ -165,7 +167,7 @@ An earlier plugin version stored the serial after the rules for Modules, and for
 python manage.py librenms_serial_report
 ```
 
-The plugin does not coordinate a serial rule change with serial writes that run at the same time. A rule change that commits during an import or a serial update can let two rows store serials that the new rules key to one value. Every later lookup then reports the two rows as a conflict and binds neither.
+The plugin does not coordinate a serial rule change with serial writes that run at the same time. A rule change that commits during an import or a serial update can let two rows store serials that the new rules key to one value. Every later lookup then reports the two rows as a conflict and binds neither. The plugin also does not check a device type change or a serial change that is made outside the plugin, for example in the NetBox UI.
 
 ### VLAN names
 
