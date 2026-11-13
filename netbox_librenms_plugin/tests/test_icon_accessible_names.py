@@ -1,10 +1,7 @@
 """An icon that gives its note only in a title also gives that note as its accessible name."""
 
 import pytest
-from django.template import Context, Template
 
-from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
-from netbox_librenms_plugin.tests.conftest import stamp_rule_decision
 from netbox_librenms_plugin.tests.view_test_helpers import assert_titled_icons_are_named
 
 MARKUP = "<b>x</b>"
@@ -56,7 +53,9 @@ def test_the_inherited_vlan_badge_is_named():
 
 @pytest.mark.django_db
 def test_the_interface_type_note_is_named():
+    from netbox_librenms_plugin.interface_rules import InterfaceRuleMatcher
     from netbox_librenms_plugin.tables.interfaces import LibreNMSInterfaceTable
+    from netbox_librenms_plugin.tests.conftest import stamp_rule_decision
 
     table = LibreNMSInterfaceTable(data=[], device=None, interface_name_field="ifName", server_key="default")
     record = stamp_rule_decision(
@@ -79,6 +78,8 @@ def test_the_interface_type_note_is_named():
 
 
 def test_the_vrf_suggestion_is_named():
+    from django.template import Context, Template
+
     from netbox_librenms_plugin.tables.ipaddresses import IPAddressTable
 
     template = Template(IPAddressTable.base_columns["vrf"].template_code)
