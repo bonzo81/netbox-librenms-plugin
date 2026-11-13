@@ -13,7 +13,7 @@ from django.urls import reverse
 
 from netbox_librenms_plugin.data_shapes.envelope import unwrap_response
 from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab
-from netbox_librenms_plugin.tests.conftest import _shared_infra, make_superuser
+from netbox_librenms_plugin.tests.conftest import _shared_infra, make_superuser, transactional_db_with_all_apps
 from netbox_librenms_plugin.tests.recordings import load_recording
 from netbox_librenms_plugin.tests.test_bulk_import_job_control import _libre_device
 
@@ -729,6 +729,23 @@ class TestConfigurationGeneration:
 
         assert import_configuration_generation() > first
 
+    def test_a_recreated_counter_misses_every_validation_that_survived_it(self, caching_librenms):
+        """The counter can expire while cached validations survive; the new counter must not match them."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.import_utils.cache import IMPORT_CONFIGURATION_GENERATION_KEY
+        from netbox_librenms_plugin.models import VCMemberNumberingRule
+
+        rule = _rule(manufacturer=_cisco_type().manufacturer)
+        row = _serve(caching_librenms.server, _cisco_recording(), "recreated-counter", CISCO_MODEL)
+        assert _positions(_search(caching_librenms, row)) == [1, 2, 3]
+
+        cache.delete(IMPORT_CONFIGURATION_GENERATION_KEY)
+        # A queryset update sends no signal, so only the recreated counter can make the old result miss.
+        VCMemberNumberingRule.objects.filter(pk=rule.pk).update(numbering_mode="reported")
+
+        assert _positions(_search(caching_librenms, row)) == [0, 1, 2]
+
     def test_a_validation_that_a_configuration_edit_overtakes_stays_under_the_old_generation(self, caching_librenms):
         """A commit while the search validates moves the generation; the late result is unreachable."""
         from netbox_librenms_plugin.import_utils.cache import (
@@ -928,6 +945,10 @@ class TestModuleAttribution:
         content = response.content.decode()
         assert module_sync["table"] is None
         assert module_sync["inventory_rule_error"].visible is (viewer == "rule-viewer")
+        # The read was complete, so the tab keeps the rule error instead of a "refresh failed" placeholder.
+        status = SyncCacheConsistency(members[1]).status("default")[SyncTab.MODULES.value]
+        assert (status["state"], status["snapshot_available"]) == ("ready", True)
+        assert _module_render(members[1])["inventory_rule_error"].rule_pk == broken.pk
         assert ("SECRET-MARKER" in content) is (viewer == "rule-viewer")
         assert (broken.get_absolute_url() in content) is (viewer == "rule-viewer")
 
@@ -992,3 +1013,52 @@ def test_a_configuration_edit_between_two_rows_of_one_search_leaves_the_later_ro
         server_key="default", filters=filters, device_id=second["device_id"], vc_enabled=False
     )
     assert cache.get(key) is None
+
+
+@transactional_db_with_all_apps()
+def test_concurrent_commits_each_move_the_generation_and_a_concurrent_start_reads_one_counter():
+    """Workers with their own database connections commit edits at once: no bump is lost, no start is split."""
+    from threading import Barrier
+
+    from django.core.cache import cache
+    from django.db import connection, transaction
+
+    from netbox_librenms_plugin.import_utils.cache import (
+        IMPORT_CONFIGURATION_GENERATION_KEY,
+        import_configuration_generation,
+    )
+    from netbox_librenms_plugin.models import VCMemberNumberingRule
+    from netbox_librenms_plugin.tests.conftest import bounded_executor
+
+    workers = 4
+    cache.delete(IMPORT_CONFIGURATION_GENERATION_KEY)
+    start = Barrier(workers)
+
+    def first_read():
+        start.wait(timeout=10)
+        try:
+            return import_configuration_generation()
+        finally:
+            connection.close()
+
+    with bounded_executor(max_workers=workers) as executor:
+        firsts = [future.result(timeout=30) for future in [executor.submit(first_read) for _ in range(workers)]]
+    assert len(set(firsts)) == 1
+
+    commit = Barrier(workers)
+
+    def commit_an_edit(index):
+        commit.wait(timeout=10)
+        try:
+            with transaction.atomic():
+                VCMemberNumberingRule.objects.create(
+                    device_type_pattern=f"CONCURRENT-{index}", numbering_mode="reported"
+                )
+        finally:
+            connection.close()
+
+    with bounded_executor(max_workers=workers) as executor:
+        for future in [executor.submit(commit_an_edit, index) for index in range(workers)]:
+            future.result(timeout=30)
+
+    assert import_configuration_generation() == firsts[0] + workers
