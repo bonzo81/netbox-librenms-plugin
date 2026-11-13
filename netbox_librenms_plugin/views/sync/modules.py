@@ -56,6 +56,7 @@ from netbox_librenms_plugin.serial_identity import (
     freshness_token,
     is_identity,
     module_assignment,
+    locked_type_context,
     resolve_module,
     stored_form,
 )
@@ -255,6 +256,8 @@ def _module_already_on_device(device, incoming, serial_rules, *, exclude_pk=None
     create the duplicate. Callers must report the hit without naming objects the operator cannot
     see; the transaction must already hold ``assignment_lock`` for ``incoming``.
     """
+    # The lookup reads the module context after the device row lock: a type change commits first.
+    locked_type_context(device, rules=serial_rules)
     held = resolve_module(
         incoming, rules=serial_rules, device_ids=[device.pk], exclude_pks=[exclude_pk] if exclude_pk else (), lock=True
     )
@@ -2965,6 +2968,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 # conflicts.  Re-querying under select_for_update() guarantees the
                 # set we delete from is the same set we validated.
                 conflict_module = None
+                locked_type_context(target_device, rules=serial_rules)
                 elsewhere = resolve_module(incoming, rules=serial_rules, exclude_pks=[installed_module.pk], lock=True)
                 if elsewhere.kind is ResolutionKind.AMBIGUOUS:
                     # Roll back and surface a clear error — we don't want to

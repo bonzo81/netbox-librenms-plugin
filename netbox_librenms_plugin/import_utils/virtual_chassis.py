@@ -26,6 +26,7 @@ from ..serial_identity import (
     group,
     is_identity,
     naming_token,
+    locked_type_context,
     resolve_devices_write,
     stored_form,
 )
@@ -795,13 +796,7 @@ def create_virtual_chassis_with_members(
                 rules=serial_rules,
             )
             # The master row decides the member context: a type change of the master is waited for, then read.
-            master_type = (
-                Device.objects.select_for_update(no_key=True, of=("self",))
-                .select_related("device_type")
-                .get(pk=master_device.pk)
-                .device_type
-            )
-            context = serial_rules.for_device_type(master_type)
+            context = locked_type_context(master_device, rules=serial_rules)
             master_device.snapshot()
             # Load naming pattern once to avoid a DB query per member
             vc_pattern = _load_vc_member_name_pattern()
