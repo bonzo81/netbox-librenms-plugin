@@ -30,6 +30,7 @@ from ..serial_identity import (
     display,
     is_identity,
     resolve_device,
+    resolve_device_write,
     stored_form,
 )
 from ..transactions import atomic_with_events
@@ -392,7 +393,9 @@ def _flag_serial_conflict(result, existing_device, incoming_serial, serial_rules
         bool: True when another Device holds the incoming serial, several do, or the lookup cannot tell.
 
     """
-    other = resolve_device(incoming_serial, rules=serial_rules, exclude_pks=[existing_device.pk])
+    other = resolve_device_write(
+        incoming_serial, serial_rules.for_device(existing_device), rules=serial_rules, exclude_pks=[existing_device.pk]
+    )
     if other.kind not in REFUSING:
         return False
     result["serial_action"] = "conflict"
@@ -1948,7 +1951,9 @@ def import_single_device(  # noqa: C901
             # The serial identity locks come first; then the lookup sees a concurrent import's committed device.
             serial_rules = serial_rules or SerialRules.load()
             assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
-            taken = resolve_device(libre_device.get("serial"), rules=serial_rules)
+            taken = resolve_device_write(
+                libre_device.get("serial"), serial_rules.for_device_type(device_type), rules=serial_rules
+            )
             if taken.kind in REFUSING:
                 return {
                     "success": False,

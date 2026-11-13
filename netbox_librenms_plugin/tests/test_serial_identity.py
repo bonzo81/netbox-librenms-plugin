@@ -536,6 +536,22 @@ class TestWriters:
         assert retype_conflict(master, same_rules_type, rules=rules, scope=scope) is False
         assert retype_scope(member).devices == ()
 
+    def test_a_member_is_skipped_when_another_device_holds_its_key_under_the_master_rules(self):
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+
+        master_maker = _manufacturer("key-member")
+        _rules_only((SEEDED, r"\1", None), (r"^X(.+)$", r"\1", master_maker))
+        master = _device_of(master_maker, "key-member-master", "MASTER-KEY1")
+        make_device("key-member-holder", serial="ABC")
+        members = [{"serial": "MASTER-KEY1", "position": 1}, {"serial": "XABC", "position": 2}]
+
+        chassis = create_virtual_chassis_with_members(master, members, {"device_id": 7808}, master_member=members[0])
+
+        assert list(chassis.members.values_list("pk", flat=True)) == [master.pk]
+        assert not Device.objects.filter(serial="XABC").exists()
+
     def test_an_import_refuses_a_serial_that_a_device_committed_after_the_validation(self, settings):
         from netbox_librenms_plugin.import_utils import validate_device_for_import
         from netbox_librenms_plugin.import_utils.device_operations import import_single_device
@@ -648,6 +664,61 @@ class TestEquivalentFormsAcrossDecisions:
         )
 
         assert Device.objects.get(pk=target.pk).serial == "ASSIGN-OLD1"
+
+    def test_a_serial_update_refuses_a_serial_whose_key_under_the_target_rules_another_device_holds(
+        self, client, serial_librenms
+    ):
+        """The target's maker keys "XABC" to "ABC", which another maker's device stores plainly."""
+        from dcim.models import Device
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.tests.conftest import make_superuser
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
+
+        target_maker = _manufacturer("key-write-target")
+        _rules_only((SEEDED, r"\1", None), (r"^X(.+)$", r"\1", target_maker))
+        target = seed_mapping(_device_of(target_maker, "key-write-target", ""), "default", own=7806)
+        make_device("key-write-holder", serial="ABC")
+        serial_librenms.device_info_response(device_id=7806, hostname=target.name, serial="XABC")
+        client.force_login(make_superuser("key-write-user"))
+
+        client.post(
+            reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": target.pk}),
+            {"server_key": "default"},
+        )
+
+        assert Device.objects.get(pk=target.pk).serial == ""
+
+    def test_an_import_refuses_a_serial_whose_key_under_the_new_type_rules_another_device_holds(self, settings):
+        from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+        from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
+
+        from netbox_librenms_plugin.import_utils import validate_device_for_import
+
+        configure_default_librenms_server(settings)
+        target_maker = _manufacturer("key-import")
+        _rules_only((SEEDED, r"\1", None), (r"^X(.+)$", r"\1", target_maker))
+        new_type = _device_of(target_maker, "key-import-type-donor", "DONOR-SN1").device_type
+        holder = make_device("key-import-holder", serial="ABC")
+        libre_device = {"device_id": 7807, "hostname": "key-import-new", "sysName": "key-import-new", "serial": "XABC"}
+
+        validation = validate_device_for_import(libre_device, include_vc_detection=False)
+        assert validation["existing_device"] is None
+
+        result = import_single_device(
+            7807,
+            server_key="default",
+            validation=validation,
+            manual_mappings={
+                "site_id": holder.site_id,
+                "device_type_id": new_type.pk,
+                "device_role_id": holder.role_id,
+            },
+            libre_device=libre_device,
+        )
+
+        assert result["success"] is False
+        assert "key-import-holder" not in result["error"]
 
     def test_a_serial_update_heals_a_legacy_stored_form(self, client, serial_librenms):
         from dcim.models import Device

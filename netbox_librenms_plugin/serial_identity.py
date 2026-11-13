@@ -403,9 +403,19 @@ def _probe_keys(values, rules: SerialRules) -> dict:
     return {value: {key for context in contexts if (key := context._key(value))} for value in values}
 
 
-def _resolve(queryset, values, *, rules, row_context, lock, spare=0):
+def _resolve(queryset, values, *, rules, row_context, lock, spare=0, own_keys=None):
+    """
+    Read the candidate rows of *values* once and confirm each row under its own context.
+
+    *own_keys* maps a value to the key that a write gives it under the target's context; a row
+    whose own key equals it also matches, because the write would give the two rows one identity.
+    """
+    own_keys = own_keys or {}
     values = list(dict.fromkeys(values))
     probes = _probe_keys(values, rules)
+    for value, key in own_keys.items():
+        if key:
+            probes[value].add(key)
     results = {value: _ABSENT for value, keys in probes.items() if not keys}
     open_values = [value for value in values if probes[value]]
     if not open_values:
@@ -427,7 +437,8 @@ def _resolve(queryset, values, *, rules, row_context, lock, spare=0):
                 if any(key in stored for key in probes[value]) or stored == _text(value):
                     unavailable.setdefault(value, context.unavailable)
                 continue
-            if compare(row.serial, value, context) is Comparison.SAME:
+            own_key = own_keys.get(value)
+            if compare(row.serial, value, context) is Comparison.SAME or (own_key and context._key(stored) == own_key):
                 matches[value].append(row)
         if not unavailable and all(len(found) >= _AMBIGUOUS_AT + spare for found in matches.values()):
             complete = False
@@ -463,6 +474,29 @@ def resolve_devices(serials: Iterable, *, rules: SerialRules | None = None, excl
 def resolve_device(serial, *, rules: SerialRules | None = None, exclude_pks=(), lock=False) -> Resolution:
     """Return the Resolution of one incoming serial among Devices; see :func:`resolve_devices`."""
     return resolve_devices([serial], rules=rules, exclude_pks=exclude_pks, lock=lock)[serial]
+
+
+def resolve_devices_write(serials: Iterable, context: SerialContext, *, rules: SerialRules, exclude_pks=()) -> dict:
+    """
+    Return ``{serial: Resolution}``: the Devices that a write of each serial under *context* would duplicate.
+
+    A row matches when it holds the LibreNMS text under its own context, as in ``resolve_devices``,
+    and also when its own key equals the key that *context* gives the text: after the write, the
+    two rows would have one identity. The lookup is one query.
+    """
+    from dcim.models import Device
+
+    serials = list(dict.fromkeys(serials))
+    queryset = Device.objects.select_related("device_type", "virtual_chassis__master__device_type")
+    if exclude_pks:
+        queryset = queryset.exclude(pk__in=list(exclude_pks))
+    own_keys = {serial: context._key(serial) for serial in serials}
+    return _resolve(queryset, serials, rules=rules, row_context=rules.for_device, lock=False, own_keys=own_keys)
+
+
+def resolve_device_write(incoming, context: SerialContext, *, rules: SerialRules, exclude_pks=()) -> Resolution:
+    """Return the Devices that a write of *incoming* under *context* would duplicate; see ``resolve_devices_write``."""
+    return resolve_devices_write([incoming], context, rules=rules, exclude_pks=exclude_pks)[incoming]
 
 
 def is_sole_holder(device, incoming, *, rules: SerialRules, exclude_pks=()) -> bool:
@@ -564,7 +598,7 @@ def device_assignment(device, incoming, *, rules: SerialRules) -> Assignment:
     value = stored_form(incoming, Device)
     if _text(device.serial) == value:
         return Assignment(None)
-    conflict = resolve_device(incoming, rules=rules, exclude_pks=[device.pk])
+    conflict = resolve_device_write(incoming, context, rules=rules, exclude_pks=[device.pk])
     if conflict.kind in REFUSING:
         return Assignment(None, conflict)
     return Assignment(value)
@@ -675,15 +709,18 @@ def retype_conflict(device, device_type, *, rules: SerialRules, scope: RetypeSco
     module_old = rules.for_module_target(stored)
     if _new_shared_key(rows, old, new) or _new_shared_key(scope.modules, module_old, new):
         return True
-    values = set()
-    for _pk, serial in rows:
-        if new_key := new._key(serial):
-            old_key = old._key(serial)
-            values |= {_text(serial), new_key} - ({_text(serial), old_key} if old_key else set())
-    if not values:
+    admitted = [serial for _pk, serial in rows if new._key(serial)]
+    if not admitted:
         return False
-    found = resolve_devices(values, rules=rules, exclude_pks=[pk for pk, _serial in rows])
-    return any(resolution.kind in REFUSING for resolution in found.values())
+    outside = [pk for pk, _serial in rows]
+    after = resolve_devices_write(admitted, new, rules=rules, exclude_pks=outside)
+    before = resolve_devices_write(
+        [serial for serial in admitted if old._key(serial)], old, rules=rules, exclude_pks=outside
+    )
+    return any(
+        after[serial].kind in REFUSING and (serial not in before or before[serial].kind not in REFUSING)
+        for serial in admitted
+    )
 
 
 def report_rows(rules: SerialRules | None = None):
