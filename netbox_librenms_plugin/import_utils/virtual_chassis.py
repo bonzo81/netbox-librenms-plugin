@@ -760,7 +760,8 @@ def create_virtual_chassis_with_members(
         VirtualChassis: The created virtual chassis instance
 
     Raises:
-        ValueError: If *master_member* is not one of the *members_info* entries
+        ValueError: If *master_member* is not one of the *members_info* entries, or is not the master
+            under the device type that the locked master row holds
         IntegrityError: If duplicate serials/names are detected
         Exception: For other creation errors
 
@@ -796,7 +797,14 @@ def create_virtual_chassis_with_members(
                 rules=serial_rules,
             )
             # The master row decides the member context: a type change of the master is waited for, then read.
+            # The master decision and the member type follow the type that the locked row holds now.
             context = locked_type_context(master_device, rules=serial_rules)
+            locked_master = Device.objects.select_related("device_type").get(pk=master_device.pk)
+            if identify_vc_master(members_info, locked_master.serial, context) is not master_member:
+                raise ValueError(
+                    "The stack master does not match under the current device type; no chassis was created."
+                )
+            master_device.device_type = locked_master.device_type
             master_device.snapshot()
             # Load naming pattern once to avoid a DB query per member
             vc_pattern = _load_vc_member_name_pattern()
