@@ -7,6 +7,7 @@ import pytest
 from django.db import IntegrityError, close_old_connections, connection
 
 from netbox_librenms_plugin.tests.conftest import (
+    bounded_executor,
     configure_librenms_servers,
     install_module,
     make_device,
@@ -267,7 +268,6 @@ def test_a_member_serial_write_waits_for_a_chassis_master_type_change(librenms_s
     The member write runs after the type change passed its check and before it commits; it must
     wait for the commit and then read the new type.
     """
-    from concurrent.futures import ThreadPoolExecutor
     from concurrent.futures import TimeoutError as FutureTimeout
     from threading import Event
 
@@ -315,7 +315,7 @@ def test_a_member_serial_write_waits_for_a_chassis_master_type_change(librenms_s
         finally:
             connection.close()
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with bounded_executor(max_workers=2) as executor:
         retype = executor.submit(post, "update_device_type", {"server_key": SERVER_KEY})
         assert checked.wait(timeout=20)
         assign = executor.submit(
