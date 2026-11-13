@@ -60,7 +60,7 @@
           "entPhysicalModelName": "MODEL-f93a92",
           "entPhysicalName": "entity-0beaae",
           "entPhysicalDescr": "entity-bf3b65",
-          "entPhysicalParentRelPos": 1,
+          "entPhysicalParentRelPos": 0,
           "entPhysicalContainedIn": 1
         },
         {
@@ -70,7 +70,7 @@
           "entPhysicalModelName": "MODEL-f93a92",
           "entPhysicalName": "entity-7fc92a",
           "entPhysicalDescr": "entity-bf3b65",
-          "entPhysicalParentRelPos": 2,
+          "entPhysicalParentRelPos": 1,
           "entPhysicalContainedIn": 1
         },
         {
@@ -80,7 +80,7 @@
           "entPhysicalModelName": "MODEL-fbbcbf",
           "entPhysicalName": "entity-a2f6ed",
           "entPhysicalDescr": "entity-6ebd1d",
-          "entPhysicalParentRelPos": 3,
+          "entPhysicalParentRelPos": 2,
           "entPhysicalContainedIn": 1
         }
       ]
@@ -103,7 +103,7 @@
           "entPhysicalModelName": "MODEL-f93a92",
           "entPhysicalName": "entity-0beaae",
           "entPhysicalDescr": "entity-bf3b65",
-          "entPhysicalParentRelPos": 1,
+          "entPhysicalParentRelPos": 0,
           "entPhysicalContainedIn": 1
         },
         {
@@ -113,7 +113,7 @@
           "entPhysicalModelName": "MODEL-f93a92",
           "entPhysicalName": "entity-7fc92a",
           "entPhysicalDescr": "entity-bf3b65",
-          "entPhysicalParentRelPos": 2,
+          "entPhysicalParentRelPos": 1,
           "entPhysicalContainedIn": 1
         },
         {
@@ -123,7 +123,7 @@
           "entPhysicalModelName": "MODEL-fbbcbf",
           "entPhysicalName": "entity-a2f6ed",
           "entPhysicalDescr": "entity-6ebd1d",
-          "entPhysicalParentRelPos": 3,
+          "entPhysicalParentRelPos": 2,
           "entPhysicalContainedIn": 1
         }
       ]
@@ -139,11 +139,11 @@
         "SN-a47104"
       ],
       "member_positions": [
+        0,
         1,
-        2,
-        3
+        2
       ],
-      "master_position": 1
+      "master_position": 0
     },
     "lag_members": {},
     "sub_interfaces": {}

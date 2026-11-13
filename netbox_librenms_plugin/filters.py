@@ -16,6 +16,7 @@ from .models import (
     PlatformMapping,
     PortStackLagPattern,
     SerialSensorTypePattern,
+    VCMemberNumberingRule,
 )
 
 
@@ -196,6 +197,25 @@ class LocationMappingFilterSet(django_filters.FilterSet):
 
         model = LocationMapping
         fields = ["field_type", "librenms_value", "description"]
+
+
+class VCMemberNumberingRuleFilterSet(django_filters.FilterSet):
+    """Filter set for VCMemberNumberingRule model."""
+
+    manufacturer_id = django_filters.ModelChoiceFilter(
+        field_name="manufacturer",
+        queryset=Manufacturer.objects.all(),
+        label="Manufacturer",
+    )
+    device_type_pattern = django_filters.CharFilter(lookup_expr="icontains")
+    numbering_mode = django_filters.ChoiceFilter(choices=VCMemberNumberingRule.MODE_CHOICES)
+    description = django_filters.CharFilter(lookup_expr="icontains")
+
+    class Meta:
+        """Meta options for VCMemberNumberingRuleFilterSet."""
+
+        model = VCMemberNumberingRule
+        fields = ["manufacturer_id", "device_type_pattern", "numbering_mode", "description"]
 
 
 class CarrierAutoInstallRuleFilterSet(django_filters.FilterSet):

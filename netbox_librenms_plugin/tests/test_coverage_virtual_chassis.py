@@ -9,51 +9,53 @@ from netbox_librenms_plugin.tests.conftest import transactional_db_with_all_apps
 class TestCreateVirtualChassisWithMembers:
     @staticmethod
     def _create(tag, members, *, server_key="default", master_serial="MASTER"):
-        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
-        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.conftest import create_prepared_stack, make_device
 
         master = make_device(f"{tag}-master", serial=master_serial)
         master_row = {"serial": master_serial, "position": 1, "name": "Master"}
-        virtual_chassis = create_virtual_chassis_with_members(
-            master,
-            [master_row, *members],
-            {"device_id": master.pk},
-            server_key=server_key,
-            master_member=master_row,
+        virtual_chassis = create_prepared_stack(
+            master, [master_row, *members], {"device_id": master.pk}, server_key=server_key
         )
         return master, virtual_chassis
 
-    def test_a_shared_position_numbers_the_stack_in_row_order(self):
-        _master, virtual_chassis = self._create(
-            "duplicate-position",
-            [
-                {"serial": "MEMBER-2", "position": 2, "name": "Member 2"},
-                {"serial": "MEMBER-3", "position": 2, "name": "Conflicting member"},
-            ],
-        )
+    @pytest.mark.parametrize("second", [1, None, "2"], ids=["shared", "missing", "text"])
+    def test_a_stack_whose_positions_are_not_numbered_for_import_is_refused_before_any_write(self, second):
+        """Creation writes the prepared numbers; it never numbers a stack itself."""
+        from dcim.models import VirtualChassis
 
-        assert list(virtual_chassis.members.order_by("vc_position").values_list("serial", "vc_position")) == [
-            ("MASTER", 1),
-            ("MEMBER-2", 2),
-            ("MEMBER-3", 3),
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        master = make_device("unnumbered-stack-master", serial="MASTER")
+        members = [
+            {"serial": "MASTER", "position": 1, "name": "Master", "is_master": True},
+            {"serial": "MEMBER-2", "position": second, "name": "Member 2", "is_master": False},
         ]
+        prepared = {"members": members, "device_type_id": master.device_type_id}
 
-    def test_a_missing_position_numbers_the_stack_in_row_order(self):
-        _master, virtual_chassis = self._create(
-            "sequential-position",
-            [
-                {"serial": "MEMBER-2", "position": 2, "name": "Member 2"},
-                {"serial": "MEMBER-3", "position": 3, "name": "Member 3"},
-                {"serial": "MEMBER-4", "position": None, "name": "Sequential member"},
-            ],
+        with pytest.raises(ValueError, match="not numbered for import"):
+            create_virtual_chassis_with_members(master, prepared, {"device_id": master.pk}, master_member=members[0])
+
+        assert not VirtualChassis.objects.exists()
+
+    def test_a_stack_prepared_for_another_device_type_is_refused_before_any_write(self):
+        from dcim.models import DeviceType, VirtualChassis
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+        from netbox_librenms_plugin.tests.conftest import make_device, prepared_stack
+
+        master = make_device("other-type-stack-master", serial="MASTER")
+        prepared, master_member = prepared_stack(
+            master, [{"serial": "MASTER", "position": 1}, {"serial": "MEMBER-2", "position": 2}]
         )
+        other = DeviceType.objects.create(manufacturer=master.device_type.manufacturer, model="Other", slug="other")
 
-        assert list(virtual_chassis.members.order_by("vc_position").values_list("serial", "vc_position")) == [
-            ("MASTER", 1),
-            ("MEMBER-2", 2),
-            ("MEMBER-3", 3),
-            ("MEMBER-4", 4),
-        ]
+        with pytest.raises(ValueError, match="another device type"):
+            create_virtual_chassis_with_members(
+                master, {**prepared, "device_type_id": other.pk}, {"device_id": master.pk}, master_member=master_member
+            )
+
+        assert not VirtualChassis.objects.exists()
 
     def test_two_rows_with_the_master_serial_name_no_master(self):
         """No single member is the master, so the import creates no chassis and no duplicate device."""
@@ -86,17 +88,14 @@ class TestStackMemberSerials:
         [(0, "0"), (123456, "123456"), (None, ""), ("-", ""), ("  SN-1  ", "SN-1")],
     )
     def test_member_creation_normalizes_serials(self, value, expected):
-        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
-        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.conftest import create_prepared_stack, make_device
 
         master = make_device("serial-boundary-master", serial="MASTER")
         members = [
             {"serial": "MASTER", "position": 1, "name": "Master"},
             {"serial": value, "position": 2, "name": "Member 2"},
         ]
-        virtual_chassis = create_virtual_chassis_with_members(
-            master, members, {"device_id": master.pk}, server_key="default", master_member=members[0]
-        )
+        virtual_chassis = create_prepared_stack(master, members, {"device_id": master.pk}, server_key="default")
 
         assert virtual_chassis.members.count() == 2
         assert virtual_chassis.members.get(vc_position=2).serial == expected
@@ -105,8 +104,7 @@ class TestStackMemberSerials:
         """The JSON numbers 123 and 123.0 are one Python dict key, but "123.0" is a serial another device holds."""
         from dcim.models import Device
 
-        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
-        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.conftest import create_prepared_stack, make_device
 
         make_device("numeric-serial-holder", serial="123.0")
         master = make_device("numeric-serial-master", serial="MASTER")
@@ -116,9 +114,7 @@ class TestStackMemberSerials:
             {"serial": 123.0, "position": 3, "name": "Member 3"},
         ]
 
-        virtual_chassis = create_virtual_chassis_with_members(
-            master, members, {"device_id": master.pk}, server_key="default", master_member=members[0]
-        )
+        virtual_chassis = create_prepared_stack(master, members, {"device_id": master.pk}, server_key="default")
 
         assert sorted(virtual_chassis.members.values_list("serial", flat=True)) == ["123", "MASTER"]
         assert Device.objects.filter(serial="123.0").count() == 1
@@ -133,7 +129,13 @@ def test_the_vc_modal_explains_that_no_unique_member_matches(serials):
         "netbox_librenms_plugin/htmx/device_vc_details.html",
         {
             "libre_device": {"hostname": "test-device"},
-            "vc_data": {"is_stack": True, "master_identified": False, "member_count": 2, "members": members},
+            "vc_data": {
+                "is_stack": True,
+                "numbering_available": True,
+                "master_identified": False,
+                "member_count": 2,
+                "members": members,
+            },
         },
     )
 
@@ -204,7 +206,7 @@ def test_member_creation_reads_the_master_maker_under_the_type_row_lock():
 
     from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
     from netbox_librenms_plugin.models import NormalizationRule
-    from netbox_librenms_plugin.tests.conftest import make_device
+    from netbox_librenms_plugin.tests.conftest import make_device, prepared_stack
     from netbox_librenms_plugin.tests.lock_conflict_helpers import second_connection
 
     make_device("vc-type-race-holder", serial="MEMBER-VC-RACE")
@@ -219,6 +221,7 @@ def test_member_creation_reads_the_master_maker_under_the_type_row_lock():
     )
     master.save()
     members = [{"serial": "MASTER-VC-RACE", "position": 1}, {"serial": "XMEMBER-VC-RACE", "position": 2}]
+    prepared, master_member = prepared_stack(master, members)
     attempts = []
 
     def change_after_the_type_read(execute, sql, params, many, context):
@@ -243,7 +246,7 @@ def test_member_creation_reads_the_master_maker_under_the_type_row_lock():
 
     with connection.execute_wrapper(change_after_the_type_read):
         chassis = create_virtual_chassis_with_members(
-            master, members, {"device_id": 7103}, server_key="default", master_member=members[0]
+            master, prepared, {"device_id": 7103}, server_key="default", master_member=master_member
         )
 
     # The type row lock holds the maker that decided the member context until the members exist.

@@ -1,0 +1,29 @@
+{% extends 'generic/object_list.html' %}
+
+{% block tabs %}
+    {% include 'netbox_librenms_plugin/inc/_rules_patterns_tabs.html' with rules_tab_active="vcmembernumberingrule" %}
+    {{ block.super }}
+{% endblock %}
+
+{% block content %}
+    <div class="alert alert-info">
+        <div>
+            <h4>VC Member Numbering Rules</h4>
+            <p>Decide the NetBox virtual chassis position of each stack member that an import creates.
+               <strong>Number from 1</strong> adds 1 to every member number when LibreNMS numbers the stack from 0.
+               <strong>Reported numbers</strong> keeps the numbers that LibreNMS reports. Without a rule, the
+               import keeps the reported numbers.</p>
+            <p>The rule of the imported device type applies: a rule with a manufacturer and a device type
+               pattern first, then a pattern only, then a manufacturer only, then a rule without either.
+               In one of these groups, the lowest ID wins. A rule change does not renumber existing members.</p>
+        </div>
+    </div>
+    {{ block.super }}
+{% endblock %}
+
+{% block bulk_buttons %}
+    {{ block.super }}
+    <button type="submit" formaction="{% url 'plugins:netbox_librenms_plugin:vcmembernumberingrule_bulk_export_yaml' %}" class="btn btn-sm btn-secondary">
+        <i class="mdi mdi-download"></i> Export Selected (YAML)
+    </button>
+{% endblock %}

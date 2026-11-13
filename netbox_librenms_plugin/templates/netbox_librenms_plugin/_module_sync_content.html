@@ -7,6 +7,11 @@
 <!-- Module Sync Table -->
 {% if module_sync.inventory_rule_error %}
 {% include "netbox_librenms_plugin/inc/_rule_configuration_error.html" with rule_error=module_sync.inventory_rule_error alert_id="module-inventory-rule-error" consequence="No module rows are shown and no module action runs. Fix the rule, then reload this tab." %}
+{% elif module_sync.vc_numbering_error %}
+<div class="alert alert-danger" role="alert" id="module-vc-numbering-error">
+    <i class="mdi mdi-alert-circle me-2"></i>
+    <div>{{ module_sync.vc_numbering_error }} No module rows are shown and no module action runs.</div>
+</div>
 {% elif module_sync.table %}
 {% with refused=module_sync.devices_without_inventory_class %}
 {% if refused %}

@@ -70,11 +70,15 @@ from .filters import _safe_disabled, get_librenms_devices_for_import
 from .permissions import check_user_permissions, require_permissions
 from .virtual_chassis import (
     VC_MASTER_UNKNOWN_WARNING,
+    VCNumberingError,
     create_virtual_chassis_with_members,
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
-    identify_vc_master,
+    load_numbering_rules,
+    numbering_refusal_text,
     prefetch_vc_data_for_devices,
+    prepare_virtual_chassis,
+    prepared_master,
 )
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
@@ -474,6 +478,7 @@ def bulk_import_devices_shared(  # noqa: C901
     # match doesn't re-query it for every device in the loop (issue #90 / N+1 avoidance, #92).
     device_type_norm_rules = preload_normalization_rules("device_type")
     serial_rules = SerialRules.load()
+    numbering_rules = load_numbering_rules()
 
     for idx, device_id in enumerate(device_ids, start=1):
         # Check for job cancellation on first iteration and every 5th thereafter.
@@ -535,6 +540,7 @@ def bulk_import_devices_shared(  # noqa: C901
                 include_vc_detection=True,
                 preloaded_device_type_rules=device_type_norm_rules,
                 serial_rules=serial_rules,
+                numbering_rules=numbering_rules,
             )
 
             if validation.get("import_as_vm"):
@@ -585,12 +591,27 @@ def bulk_import_devices_shared(  # noqa: C901
                 else:
                     logger.error(f"Cannot import device {device_id}: {exc}")
                 continue
-            # The one master decision for this row; a stack whose master is unknown imports standalone,
-            # so it needs no chassis permission.
-            master_member = None
-            if vc_data.get("is_stack", False):
-                master_context = serial_rules.for_device_type(device_type)
-                master_member = identify_vc_master(vc_data["members"], libre_device.get("serial"), master_context)
+            # The one numbering and master decision for this row, for its final DeviceType and before any
+            # write; a stack whose master is unknown imports standalone, so it needs no chassis permission.
+            try:
+                vc_data = prepare_virtual_chassis(
+                    vc_data,
+                    device_type=device_type,
+                    master_name=validation.get("resolved_name"),
+                    device_serial=libre_device.get("serial"),
+                    serial_rules=serial_rules,
+                    numbering_rules=numbering_rules,
+                )
+            except (VCNumberingError, RuleConfigurationError) as exc:
+                error_msg = f"Cannot import device {device_id}: {numbering_refusal_text(exc)}"
+                failed_list.append({"device_id": device_id, "error": error_msg})
+                if job and job.logger:
+                    job.logger.error(error_msg)
+                else:
+                    logger.error(error_msg)
+                continue
+            validation["virtual_chassis"] = vc_data
+            master_member = prepared_master(vc_data) if vc_data.get("is_stack", False) else None
             creates_vc = master_member is not None
             if creates_vc:
                 has_vc_perm, _ = check_user_permissions(user, ["dcim.add_virtualchassis"])
@@ -619,7 +640,7 @@ def bulk_import_devices_shared(  # noqa: C901
                 apply_role_to_validation(validation, selected_role, is_vm=False)
 
             # One key per physical stack, so only its first row creates the chassis.
-            vc_domain = stack_key(vc_data, device_id, master_context) if creates_vc else None
+            vc_domain = stack_key(vc_data, device_id, serial_rules.for_device_type(device_type)) if creates_vc else None
             builds_vc = vc_domain is not None and vc_domain not in processed_vc_domains
             vc = None
             try:
@@ -643,7 +664,7 @@ def bulk_import_devices_shared(  # noqa: C901
                     if builds_vc and result["success"]:
                         vc = create_virtual_chassis_with_members(
                             result["device"],
-                            vc_data["members"],
+                            vc_data,
                             libre_device,
                             server_key=api.server_key,
                             master_member=master_member,
@@ -1517,6 +1538,7 @@ def process_device_filters(  # noqa: C901
     validated_devices = []
     total = len(libre_devices)
     serial_rules = serial_rules or SerialRules.load()
+    numbering_rules = load_numbering_rules()
 
     @functools.cache
     def serial_discoveries():
@@ -1589,6 +1611,7 @@ def process_device_filters(  # noqa: C901
             strip_domain=strip_domain,
             serial_rules=serial_rules,
             serial_discoveries=serial_discoveries,
+            numbering_rules=numbering_rules,
         )
 
         # Set VC detection metadata

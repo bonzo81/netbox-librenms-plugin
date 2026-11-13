@@ -783,9 +783,8 @@ class TestVirtualChassisInventory:
         member.device_type = DeviceType.objects.create(manufacturer=other, model="Other member", slug="other-member")
         member.serial = "MEMBER-SERIAL"
         member.save()
-        if has_master:
-            vc.master = master
-            vc.save()
+        vc.master = master if has_master else None
+        vc.save()
         NormalizationRule.objects.create(
             scope="serial",
             manufacturer=master.device_type.manufacturer if has_master else other,
@@ -814,7 +813,9 @@ class TestVirtualChassisInventory:
 
         from netbox_librenms_plugin.models import NormalizationRule
 
-        _vc, (page, member) = make_virtual_chassis_members("inventory-masterless", count=2)
+        chassis, (page, member) = make_virtual_chassis_members("inventory-masterless", count=2)
+        chassis.master = None
+        chassis.save()
         NormalizationRule.objects.create(
             scope="serial", manufacturer=page.device_type.manufacturer, match_pattern=r"^TAG (.+)$", replacement=r"\1"
         )
@@ -846,7 +847,9 @@ class TestVirtualChassisInventory:
 
         from netbox_librenms_plugin.models import NormalizationRule
 
-        _vc, (page, member) = make_virtual_chassis_members("inventory-admits", count=2)
+        chassis, (page, member) = make_virtual_chassis_members("inventory-admits", count=2)
+        chassis.master = None
+        chassis.save()
         NormalizationRule.objects.create(
             scope="serial", manufacturer=page.device_type.manufacturer, match_pattern=r"^TAG-(.+)$", replacement=r"\1"
         )
@@ -875,7 +878,9 @@ class TestVirtualChassisInventory:
 
         from netbox_librenms_plugin.models import NormalizationRule
 
-        _vc, (page, member) = make_virtual_chassis_members("inventory-junos-admits", count=2)
+        chassis, (page, member) = make_virtual_chassis_members("inventory-junos-admits", count=2)
+        chassis.master = None
+        chassis.save()
         NormalizationRule.objects.create(
             scope="serial", manufacturer=page.device_type.manufacturer, match_pattern=r"^TAG-(.+)$", replacement=r"\1"
         )
@@ -904,7 +909,9 @@ class TestVirtualChassisInventory:
         from django.test.utils import CaptureQueriesContext
 
         # Two members of a masterless chassis: each member reads the context of its own type.
-        _vc, members = make_virtual_chassis_members("inventory-preload", count=2)
+        chassis, members = make_virtual_chassis_members("inventory-preload", count=2)
+        chassis.master = None
+        chassis.save()
         inventory = _stack_inventory(
             *(
                 {
