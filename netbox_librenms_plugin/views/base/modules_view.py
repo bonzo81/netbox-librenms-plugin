@@ -405,7 +405,8 @@ def built_in_candidate(item: dict, index_map: dict, device_identity: DeviceIdent
     """
     if has_bay or item.get("_source", MAIN_INVENTORY_SOURCE) != MAIN_INVENTORY_SOURCE:
         return None
-    if item.get("_from_transceiver_api"):
+    # A row that the transceiver API created or confirmed is an optic, never a chassis part.
+    if item.get("_from_transceiver_api") or item.get(_TRANSCEIVER_API_MATCH):
         return None
     if _normalize_librenms_text(item.get("entPhysicalClass")) not in _BUILT_IN_CANDIDATE_CLASSES:
         return None

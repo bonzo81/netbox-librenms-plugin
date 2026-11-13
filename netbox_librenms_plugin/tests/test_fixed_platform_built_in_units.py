@@ -534,6 +534,50 @@ class TestMarkBuiltIn:
 
         assert seeded.FIXED_PLATFORM_RULE == BUILT_IN_UNITS_RULE
 
+    def test_an_entity_row_that_the_transceiver_api_confirms_is_no_candidate(self, settings, librenms_server):
+        """A module-class optic below the chassis matched no bay, but the transceiver API names it an optic."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.test_modules_view import configure_servers
+        from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+        optic = 90
+        device = ixr_device("ixr-api-optic", part_number="")
+        inventory = [
+            *ixr_inventory(),
+            {
+                "entPhysicalIndex": optic,
+                "entPhysicalContainedIn": CHASSIS,
+                "entPhysicalClass": "module",
+                "entPhysicalName": "SFP 1",
+                "entPhysicalDescr": "SFP 1",
+                "entPhysicalModelName": "SFP-10G-LR",
+                "entPhysicalSerialNum": "OPT-SN-9",
+                "entPhysicalParentRelPos": 2,
+            },
+        ]
+        seed_snapshot(device, inventory)
+        assert optic in controls(device)
+        configure_servers(
+            settings, {SERVER_KEY: {"librenms_url": librenms_server.url, "api_token": "t", "verify_ssl": False}}
+        )
+        view = object.__new__(BaseModuleTableView)
+        view._device_manufacturer = None
+        view.librenms_id = 101
+        view._librenms_api = LibreNMSAPI(server_key=SERVER_KEY)
+        transceiver = {"port_id": 99, "entity_physical_index": optic, "model": "SFP-10G-LR", "serial": "OPT-SN-9"}
+        librenms_server.register(
+            "/api/v0/devices/101/transceivers", {"status": "ok", "transceivers": [transceiver]}, method="GET"
+        )
+        librenms_server.register(
+            "/api/v0/devices/101/ports", {"status": "ok", "ports": [{"port_id": 99, "ifName": "1/1/c2"}]}, method="GET"
+        )
+        merged, error = view._merge_transceiver_data(inventory)
+        assert error is None
+
+        seed_snapshot(device, merged)
+
+        assert set(controls(device)) == {SLOT_1, SLOT_A}
+
 
 class TestMarkBuiltInBelowABuiltInUnit:
     """The device type model names the chassis; a unit of another model below the built-in board is a real card."""
