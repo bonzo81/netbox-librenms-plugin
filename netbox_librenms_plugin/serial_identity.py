@@ -153,6 +153,12 @@ class SerialContext:
         """Return a hash of the rule rows of this chain; a rule edit changes it."""
         return _rules_digest(self._rules)
 
+    @property
+    def fingerprint(self) -> str:
+        """Return a hash of what this context decides with: its chain, its rules and an Unavailable reason."""
+        parts = [self.manufacturer_id, self.unavailable, self.rules_digest]
+        return hashlib.sha256(json.dumps(parts, separators=(",", ":")).encode()).hexdigest()
+
     def _key(self, value) -> str:
         text = _text(value)
         if text in self._keys:

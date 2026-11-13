@@ -643,7 +643,7 @@ class TestMergeTransceiverDataPortIdentity:
                 body,
                 method="GET",
             )
-            inventory, error = view._merge_transceiver_data(candidate)
+            inventory, error = view._merge_transceiver_data(candidate, serial_context=SerialRules.load().context(None))
             assert inventory == seed
             assert error == expected_error
 
@@ -685,7 +685,7 @@ class TestMergeTransceiverDataPortIdentity:
             method="GET",
         )
 
-        inventory, error = view._merge_transceiver_data([])
+        inventory, error = view._merge_transceiver_data([], serial_context=SerialRules.load().context(None))
 
         assert error is None
         assert len(inventory) == 1
@@ -732,7 +732,7 @@ class TestMergeTransceiverDataPortIdentity:
             }
         ]
 
-        inventory, error = view._merge_transceiver_data(inventory_seed)
+        inventory, error = view._merge_transceiver_data(inventory_seed, serial_context=SerialRules.load().context(None))
 
         assert error is None
         assert len(inventory) == 1
@@ -765,7 +765,7 @@ class TestMergeTransceiverDataPortIdentity:
             method="GET",
         )
 
-        inventory, error = view._merge_transceiver_data([])
+        inventory, error = view._merge_transceiver_data([], serial_context=SerialRules.load().context(None))
 
         assert error is None
         assert len(inventory) == 1
@@ -796,7 +796,7 @@ class TestMergeTransceiverDataPortIdentity:
             method="GET",
         )
 
-        inventory, error = view._merge_transceiver_data([])
+        inventory, error = view._merge_transceiver_data([], serial_context=SerialRules.load().context(None))
 
         assert error is None
         assert len(inventory) == 1
@@ -827,7 +827,7 @@ class TestMergeTransceiverDataPortIdentity:
             method="GET",
         )
 
-        inventory, error = view._merge_transceiver_data([])
+        inventory, error = view._merge_transceiver_data([], serial_context=SerialRules.load().context(None))
 
         assert error is None
         assert len(inventory) == 1
@@ -869,7 +869,7 @@ class TestMergeTransceiverDataPortIdentity:
             }
         ]
 
-        inventory, error = view._merge_transceiver_data(inventory_seed)
+        inventory, error = view._merge_transceiver_data(inventory_seed, serial_context=SerialRules.load().context(None))
 
         assert error is None
         assert len(inventory) == 1
@@ -912,7 +912,7 @@ class TestMergeTransceiverDataPortIdentity:
             }
         ]
 
-        inventory, error = view._merge_transceiver_data(inventory_seed)
+        inventory, error = view._merge_transceiver_data(inventory_seed, serial_context=SerialRules.load().context(None))
 
         assert error is None
         assert len(inventory) == 1  # supplemented in place, NOT duplicated
@@ -941,7 +941,9 @@ class TestMergeTransceiverDataPortIdentity:
             for index in (10, 11)
         ]
 
-        inventory, error = view._merge_transceiver_data(deepcopy(inventory_seed))
+        inventory, error = view._merge_transceiver_data(
+            deepcopy(inventory_seed), serial_context=SerialRules.load().context(None)
+        )
 
         assert error is None
         assert inventory[:2] == inventory_seed
@@ -965,7 +967,9 @@ class TestMergeTransceiverDataPortIdentity:
         )
         inventory_seed = [{"entPhysicalIndex": 640, "entPhysicalName": "Optic 0/5/0", "ifIndex": 600}]
 
-        inventory, error = view._merge_transceiver_data(deepcopy(inventory_seed))
+        inventory, error = view._merge_transceiver_data(
+            deepcopy(inventory_seed), serial_context=SerialRules.load().context(None)
+        )
 
         assert error is None
         assert inventory == inventory_seed
@@ -998,7 +1002,9 @@ class TestMergeTransceiverDataPortIdentity:
             }
         ]
 
-        inventory, error = view._merge_transceiver_data(deepcopy(inventory_seed))
+        inventory, error = view._merge_transceiver_data(
+            deepcopy(inventory_seed), serial_context=SerialRules.load().context(None)
+        )
 
         assert error is None
         # The index is the fan's, so a synthetic row would duplicate it.
@@ -1035,7 +1041,9 @@ class TestMergeTransceiverDataPortIdentity:
             {"entPhysicalIndex": 12, "entPhysicalName": "Fan 1", "entPhysicalClass": "fan", "ifIndex": 51},
         ]
 
-        inventory, error = view._merge_transceiver_data(deepcopy(inventory_seed))
+        inventory, error = view._merge_transceiver_data(
+            deepcopy(inventory_seed), serial_context=SerialRules.load().context(None)
+        )
 
         assert error is None
         assert inventory[:2] == inventory_seed
@@ -1651,7 +1659,10 @@ class TestPostInventoryRefresh:
         cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
         # Keep both identity fingerprints valid. This makes the malformed inventory guard the
         # only reason the snapshot is removed.
-        cache.set(cache_key, module_inventory_cache_payload([None], 1, None))
+        cache.set(
+            cache_key,
+            module_inventory_cache_payload([None], 1, None, serial_context=SerialRules.load().for_device(device)),
+        )
         request = make_request("get", {"server_key": server_key})
 
         result = bind_and_call(view, request, "get_context_data", obj=device)
@@ -1912,7 +1923,9 @@ class TestPostInventoryRefresh:
         cache.set(api._get_cache_key(device, server_key=server_key), True)
         view = DeviceModuleTableView()
         cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
-        cache.set(cache_key, module_inventory_cache_payload([], 1, None))
+        cache.set(
+            cache_key, module_inventory_cache_payload([], 1, None, serial_context=SerialRules.load().for_device(device))
+        )
         inventory_requests = []
 
         def any_inventory_route(**request_data):
@@ -1954,7 +1967,7 @@ class TestPostInventoryRefresh:
             "inventory": [],
             "librenms_id": 777,
             "oob_librenms_id": None,
-            "serial_rules": SerialRules.load().digest,
+            "serial_context": SerialRules.load().for_device(device).fingerprint,
         }
 
     def test_post_treats_non_int_main_index_as_fetch_failure(self, librenms_server, server_keys):
@@ -6907,7 +6920,9 @@ class TestGetContextDataOOBCacheFingerprint:
         cache.set(api._get_cache_key(device, server_key=server_key), True)
         view = DeviceModuleTableView()
         cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
-        cache.set(cache_key, module_inventory_cache_payload([], 1, None))
+        cache.set(
+            cache_key, module_inventory_cache_payload([], 1, None, serial_context=SerialRules.load().for_device(device))
+        )
         request = make_request("get", {"server_key": server_key})
 
         context = bind_and_call(view, request, "get_context_data", obj=device)

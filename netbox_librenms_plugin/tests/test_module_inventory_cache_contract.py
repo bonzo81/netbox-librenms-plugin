@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from netbox_librenms_plugin.serial_identity import SerialRules
 from netbox_librenms_plugin.module_grants import GrantRefusal
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
@@ -109,7 +110,9 @@ class TestWritersCheckTheOobLinkOfTheSnapshot:
         inventory = [{"entPhysicalIndex": 1, "entPhysicalName": "Bay 1"}]
         cache.set(
             view.get_cache_key(device, "inventory", server_key="default"),
-            module_inventory_cache_payload(inventory, 7, cached_oob),
+            module_inventory_cache_payload(
+                inventory, 7, cached_oob, serial_context=SerialRules.load().for_device(device)
+            ),
         )
         self._link(device, link)
 
@@ -370,7 +373,9 @@ class TestTrustedPayloadMatchesTheDeviceMapping:
 
         payload = trusted_module_inventory_payload(device, [{"index": 1}], librenms_id=9)
 
-        assert payload == module_inventory_cache_payload([{"index": 1}], 9, None)
+        assert payload == module_inventory_cache_payload(
+            [{"index": 1}], 9, None, serial_context=SerialRules.load().for_device(device)
+        )
 
     def test_a_written_mapping_refreshes_the_cached_custom_field_value(self):
         """The helper must verify a write against current custom field data."""
@@ -382,4 +387,6 @@ class TestTrustedPayloadMatchesTheDeviceMapping:
 
         payload = trusted_module_inventory_payload(device, [{"index": 1}], librenms_id=9)
 
-        assert payload == module_inventory_cache_payload([{"index": 1}], 9, None)
+        assert payload == module_inventory_cache_payload(
+            [{"index": 1}], 9, None, serial_context=SerialRules.load().for_device(device)
+        )

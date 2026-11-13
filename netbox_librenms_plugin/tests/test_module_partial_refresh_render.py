@@ -13,6 +13,7 @@ import pytest
 from django.conf import settings
 from django.test import override_settings
 
+from netbox_librenms_plugin.serial_identity import SerialRules
 from netbox_librenms_plugin.sync_cache import module_inventory_cache_payload
 from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server
 from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts
@@ -150,7 +151,11 @@ class TestPartialModuleRefreshRendersEmpty:
         # Built by the production helper, so a change to the key scheme cannot silently make
         # the assertion below vacuous.
         cache_key = sync_snapshot_key(device, "inventory", SERVER_KEY)
-        cache.set(cache_key, module_inventory_cache_payload(INVENTORY, 42, None), timeout=300)
+        cache.set(
+            cache_key,
+            module_inventory_cache_payload(INVENTORY, 42, None, serial_context=SerialRules.load().for_device(device)),
+            timeout=300,
+        )
         assert cache.get(cache_key) is not None, "the seed never landed, so the drop assertion proves nothing"
         state_key = SyncCacheConsistency(device).state_key(SyncTab.MODULES, SERVER_KEY)
 
@@ -190,7 +195,9 @@ class TestSerialRuleEditStalesTheSnapshot:
     def _configure_server(self, settings):
         configure_default_librenms_server(settings)
 
-    def test_a_cached_read_rejects_a_snapshot_merged_under_other_serial_rules(self, librenms_server):
+    @pytest.mark.parametrize("change", ["rule-deleted", "device-type-changed"])
+    def test_a_cached_read_rejects_a_snapshot_merged_under_another_serial_context(self, librenms_server, change):
+        from dcim.models import Device, DeviceType, Manufacturer
         from django.core.cache import cache
 
         from netbox_librenms_plugin.models import NormalizationRule
@@ -198,10 +205,15 @@ class TestSerialRuleEditStalesTheSnapshot:
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
-        NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
-        NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
-        device = make_device("rule-edit-snapshot", librenms_cf={SERVER_KEY: 42})
+        device = make_device(f"context-edit-snapshot-{change}", librenms_cf={SERVER_KEY: 42})
         make_module_bay(device, "Bay 1")
+        NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
+        NormalizationRule.objects.create(
+            scope="serial",
+            match_pattern=r"^S/N\s+(.+)$",
+            replacement=r"\1",
+            manufacturer=device.device_type.manufacturer,
+        )
         # Under the rule the transceiver's "S/N PARTIAL-1" is the module's "PARTIAL-1", so the merge drops it.
         transceivers = [{"entity_physical_index": 20, "serial": "S/N PARTIAL-1", "model": "SFP-RULE", "type": "sfp"}]
         snapshot_key = sync_snapshot_key(device, "inventory", SERVER_KEY)
@@ -211,7 +223,15 @@ class TestSerialRuleEditStalesTheSnapshot:
             cached = cached_module_inventory(cache.get(snapshot_key))
             assert [item["entPhysicalIndex"] for item in cached] == [1]
 
-            NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
+            if change == "rule-deleted":
+                NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
+            else:
+                other_maker = Manufacturer.objects.create(name="Context edit maker", slug="context-edit-maker")
+                other_type = DeviceType.objects.create(
+                    manufacturer=other_maker, model="Context edit model", slug="context-edit-model"
+                )
+                Device.objects.filter(pk=device.pk).update(device_type=other_type)
+                device.refresh_from_db()
             request = make_request("get", {"tab": "modules", "server_key": SERVER_KEY})
             view = DeviceModuleTableView()
             view.setup(request, pk=device.pk)

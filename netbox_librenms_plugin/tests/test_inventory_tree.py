@@ -683,9 +683,10 @@ class TestEvoPicNoMove:
 class TestCacheVersion:
     def test_a_version_3_snapshot_is_refused(self):
         """A version 3 snapshot holds EVO PIC rows that are not below their FPC, so the reader refuses it."""
+        from netbox_librenms_plugin.serial_identity import plain_context
         from netbox_librenms_plugin.sync_cache import cached_module_inventory, module_inventory_cache_payload
 
-        current = module_inventory_cache_payload([{"entPhysicalIndex": 1}], 7, None)
+        current = module_inventory_cache_payload([{"entPhysicalIndex": 1}], 7, None, serial_context=plain_context())
 
         assert cached_module_inventory({**current, "version": 3}) is None
         assert cached_module_inventory(current) == [{"entPhysicalIndex": 1}]

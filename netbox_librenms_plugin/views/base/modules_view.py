@@ -32,7 +32,6 @@ from netbox_librenms_plugin.serial_identity import (
     Comparison,
     ResolutionKind,
     SerialContext,
-    SerialRules,
     compare,
     display,
     is_identity,
@@ -282,7 +281,7 @@ def _admitting_rules(item: dict, rules: list) -> list:
 
 
 class _StaleInventorySnapshot(Exception):
-    """A cached inventory snapshot was merged under serial rules that changed since."""
+    """A cached inventory snapshot grouped serials under a serial context that changed since."""
 
 
 @dataclass(frozen=True)
@@ -941,14 +940,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         from netbox_librenms_plugin.models import RuleConfigurationError
 
         try:
-            # One policy read: the merge uses its serial rules, the snapshot records them, and the table uses it.
+            # One policy read: the merge groups serials under its chassis context, the snapshot records
+            # that context, and the table uses the policy.
             policy = load_inventory_policy(obj.pk)
-            serial_rules = policy.serial_identity_rules
+            serial_context = policy.chassis_serial_context()
             inventory_data, txr_error = self._merge_transceiver_data(
-                inventory_data,
-                ports_data=ports_data,
-                manufacturer=sync_device.device_type.manufacturer,
-                serial_rules=serial_rules,
+                inventory_data, ports_data=ports_data, serial_context=serial_context
             )
         except (Device.DoesNotExist, RuleConfigurationError) as exc:
             # The page device changed while the policy was read, or a rule does not work: no table and no snapshot.
@@ -1034,7 +1031,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         else:
             cache.set(
                 self.get_cache_key(sync_device, "inventory", server_key=server_key),
-                module_inventory_cache_payload(inventory_data, self.librenms_id, oob_id, serial_rules=serial_rules),
+                module_inventory_cache_payload(inventory_data, self.librenms_id, oob_id, serial_context=serial_context),
                 timeout=self.librenms_api.cache_timeout,
             )
 
@@ -1161,7 +1158,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             payload["inventory"],
             server_key=scoped_server,
             sync_device=sync_device,
-            snapshot_serial_rules=payload.get("serial_rules", ""),
+            snapshot_serial_context=payload.get("serial_context", ""),
         )
 
     def get_verify_context_data(self, request, page_device, member, server_key=None):
@@ -1204,7 +1201,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             sync_device=sync_device,
             policy=policy,
             pin_to=member,
-            snapshot_serial_rules=payload.get("serial_rules", ""),
+            snapshot_serial_context=payload.get("serial_context", ""),
         )
 
     def _build_context(
@@ -1217,7 +1214,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         *,
         policy=None,
         pin_to=None,
-        snapshot_serial_rules=None,
+        snapshot_serial_context=None,
     ):
         """
         Build context with matched inventory items and table.
@@ -1230,7 +1227,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             sync_device (Device | None): The device that owns the cached snapshot.
             policy (InventoryPolicy | None): The policy inputs of *obj*, loaded here when None.
             pin_to (Device | None): A member that every row is attributed to, as the verify view renders it.
-            snapshot_serial_rules (str | None): The serial rules digest of a cached snapshot; None for fresh rows.
+            snapshot_serial_context (str | None): The serial context fingerprint of a cached snapshot; None for fresh rows.
 
         Returns:
             dict: The module sync context.
@@ -1254,7 +1251,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 sync_device,
                 policy=policy,
                 pin_to=pin_to,
-                snapshot_serial_rules=snapshot_serial_rules,
+                snapshot_serial_context=snapshot_serial_context,
             )
         except _StaleInventorySnapshot:
             cache.delete(self.get_cache_key(sync_device, "inventory", server_key=self._active_server_key))
@@ -1278,13 +1275,16 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             }
 
     def _build_table_context(
-        self, request, obj, inventory_data, sync_device, *, policy, pin_to, snapshot_serial_rules=None
+        self, request, obj, inventory_data, sync_device, *, policy, pin_to, snapshot_serial_context=None
     ):
         """Build the module table context of ``_build_context``; raise RuleConfigurationError for a broken rule."""
         if policy is None:
             policy = load_inventory_policy(obj.pk)
-        # The refresh merged transceivers by serial under its rules; other rules make the snapshot stale.
-        if snapshot_serial_rules is not None and snapshot_serial_rules != policy.serial_identity_rules.digest:
+        # The refresh grouped transceiver serials under the chassis context; another context makes the snapshot stale.
+        if (
+            snapshot_serial_context is not None
+            and snapshot_serial_context != policy.chassis_serial_context().fingerprint
+        ):
             raise _StaleInventorySnapshot()
         # The collector reads devices from the policy load, so the fingerprint covers what it read.
         self._inventory_policy = policy
@@ -2229,9 +2229,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     child_item
                 )
 
-    def _merge_transceiver_data(  # noqa: C901
-        self, inventory_data, ports_data=None, *, manufacturer=None, serial_rules: SerialRules | None = None
-    ):
+    def _merge_transceiver_data(self, inventory_data, ports_data=None, *, serial_context: SerialContext):  # noqa: C901
         """
         Merge transceiver API data with entity inventory.
 
@@ -2275,7 +2273,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         inv_by_index = {
             idx: item for item in inventory_data if (idx := _coerce_idx(item.get("entPhysicalIndex"))) is not None
         }
-        serial_context = (serial_rules or SerialRules.load()).context(getattr(manufacturer, "pk", None))
         inv_serials = group_serials(
             inventory_data, serial_context, serial=lambda item: item.get("entPhysicalSerialNum")
         )
