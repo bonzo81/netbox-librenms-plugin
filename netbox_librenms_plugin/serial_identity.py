@@ -769,6 +769,35 @@ def retype_conflict(device, device_type, *, rules: SerialRules, scope: RetypeSco
     return any(resolution.kind in REFUSING for resolution in after.values())
 
 
+# The refusal of a module move; it names no module, because the lookup is unrestricted.
+RELOCATION_HELD = (
+    "Moving this module would give one serial identity to two modules of the destination device, or a moved "
+    "serial changed while the move was checked. Nothing was moved."
+)
+
+
+def relocation_conflict(moving, source_device, target_device, *, rules: SerialRules) -> bool:
+    """
+    Return whether a move of the Modules *moving* from *source_device* onto *target_device* must not run.
+
+    *moving* holds the ``(pk, serial)`` pairs of the moved Module and its descendants, read after
+    their Module identity locks. Both device rows are locked first, so a type change of either
+    commits before the read. The destination rules must not give one identity to two moved
+    Modules that the source rules kept apart, or to a moved Module and a Module of the destination.
+    """
+    source = locked_type_context(source_device, rules=rules)
+    target = locked_type_context(target_device, rules=rules)
+    if _new_shared_key(moving, source, target):
+        return True
+    serials = [serial for _pk, serial in moving if target._key(serial)]
+    if not serials:
+        return False
+    found = resolve_modules(
+        serials, rules=rules, device_ids=[target_device.pk], exclude_pks=[pk for pk, _serial in moving]
+    )
+    return any(resolution.kind in REFUSING for resolution in found.values())
+
+
 def report_rows(rules: SerialRules | None = None):
     """
     Yield ``(row, stored text, key or "", reason)`` for each Device and Module whose stored text changes under the rules.

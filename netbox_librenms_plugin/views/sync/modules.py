@@ -47,8 +47,10 @@ from netbox_librenms_plugin.server_mappings import (
     read_mapping,
 )
 from netbox_librenms_plugin.serial_identity import (
+    RELOCATION_HELD,
     REFUSING,
     Comparison,
+    SerialRules,
     ResolutionKind,
     assignment_lock,
     compare,
@@ -57,6 +59,7 @@ from netbox_librenms_plugin.serial_identity import (
     is_identity,
     module_assignment,
     locked_type_context,
+    relocation_conflict,
     resolve_module,
     stored_form,
 )
@@ -1007,6 +1010,34 @@ def _never_installable_reason(item):
     if _is_holder(item):
         return "not hardware"
     return None
+
+
+def _module_subtree_serials(module_pk) -> tuple:
+    """Return the sorted ``(pk, serial)`` pairs of the Module *module_pk* and of every Module below it."""
+    from dcim.models import Module
+
+    found = list(Module.objects.filter(pk=module_pk).values_list("pk", "serial"))
+    frontier = [pk for pk, _serial in found]
+    while frontier:
+        children = list(Module.objects.filter(module_bay__module_id__in=frontier).values_list("pk", "serial"))
+        found.extend(children)
+        frontier = [pk for pk, _serial in children]
+    return tuple(sorted(found))
+
+
+def _refuse_identity_move(module, target_device, moving, serial_rules):
+    """
+    Raise ValidationError when moving the locked *module* and its subtree onto *target_device* must not run.
+
+    Another device's rules decide the moved serials. *moving* is the subtree as read before the
+    identity locks; a change since then refuses too. See ``relocation_conflict``.
+    """
+    if module.device_id == target_device.pk:
+        return
+    if _module_subtree_serials(module.pk) != moving or relocation_conflict(
+        moving, module.device, target_device, rules=serial_rules
+    ):
+        raise ValidationError(RELOCATION_HELD)
 
 
 class _ModuleActionRefused(Exception):
@@ -3172,12 +3203,17 @@ class MoveModuleView(
                 if occupant:
                     occupant_removed_msg = f"Removed {occupant.module_type.model} from {target_bay.name}."
                     occupant.delete()
+            _refuse_identity_move(module, target_device, moving, serial_rules)
             from_device, from_bay = module.device.name, module.module_bay.name
             module.module_bay = target_bay
             module.device = target_device
 
+        serial_rules = SerialRules.load()
+        moving = _module_subtree_serials(conflict_module_id)
         try:
             with transaction.atomic():
+                # The identity locks of the moved serials come before any row lock.
+                assignment_lock([serial for _pk, serial in moving], model=Module, rules=serial_rules)
                 # Lock target bay to prevent concurrent modifications
                 target_bay = (
                     self.restricted_queryset(ModuleBay)

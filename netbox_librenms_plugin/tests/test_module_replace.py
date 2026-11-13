@@ -631,6 +631,50 @@ class TestMoveModuleView:
         moving.refresh_from_db()
         assert moving.device == source_device
 
+    @pytest.mark.skipif(not netbox_relocates_module_subtree(), reason="NetBox moves a module from 4.7.")
+    @pytest.mark.parametrize("holder", ["destination-module", "moved-child"])
+    def test_a_move_refuses_a_subtree_serial_that_the_destination_rules_give_a_held_identity(self, client, holder):
+        """The destination's maker keys the moved child "XABC" to "ABC", which a destination module or a moved child stores."""
+        from dcim.models import Device, DeviceType, Manufacturer, ModuleBay
+        from django.urls import reverse
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        tag = f"move-identity-{holder}"
+        source_device, target_device = make_device(f"{tag}-source"), make_device(f"{tag}-target")
+        target_maker = Manufacturer.objects.create(name=f"Move identity {holder}", slug=f"{tag}-maker")
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=target_maker
+        )
+        target_type = DeviceType.objects.create(
+            manufacturer=target_maker, model=f"Move identity {holder}", slug=f"{tag}-type"
+        )
+        Device.objects.filter(pk=target_device.pk).update(device_type=target_type)
+        target_device.refresh_from_db()
+        module_type = make_module_type(f"{tag}-card".upper())
+        parent = _module(source_device, make_module_bay(source_device, "Source Bay"), module_type, "ROOT123")
+        children = ["XABC", "ABC"] if holder == "moved-child" else ["XABC"]
+        for number, serial in enumerate(children, start=1):
+            bay = ModuleBay.objects.create(device=source_device, module=parent, name=f"Sub {number}")
+            _module(source_device, bay, module_type, serial)
+        if holder == "destination-module":
+            _module(target_device, make_module_bay(target_device, "Held Bay"), module_type, "ABC")
+        target_bay = make_module_bay(target_device, "Target Bay")
+        client.force_login(make_superuser(f"{tag}-user"))
+
+        response = client.post(
+            reverse("plugins:netbox_librenms_plugin:move_module", kwargs={"pk": target_device.pk}),
+            {
+                "conflict_module_id": str(parent.pk),
+                "target_bay_id": str(target_bay.pk),
+                "selected_device_id": str(target_device.pk),
+            },
+        )
+
+        assert response.status_code == 302
+        parent.refresh_from_db()
+        assert parent.device == source_device
+
     def test_real_permission_gate_rejects_a_user_without_change_scope(self):
         from dcim.models import Device
 
