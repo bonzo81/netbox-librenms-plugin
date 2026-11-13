@@ -429,3 +429,63 @@ def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_se
     assert Device.objects.get(pk=device.pk).device_type_id == new_type.pk, "the type change itself must commit"
     stored = (Module.objects.get(pk=first.pk).serial, Module.objects.get(pk=second.pk).serial)
     assert stored != ("ABC", "XABC"), stored
+
+
+@transactional_db_with_all_apps()
+def test_a_module_move_reads_its_subtree_again_after_its_device_locks(client, monkeypatch):
+    """Another session stores "XABC" on the moved child after the subtree read; the destination keys it to "ABC"."""
+    from dcim.models import Device, DeviceType, Manufacturer, Module, ModuleBay
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
+    from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+    from netbox_librenms_plugin.views.sync import modules as module_views
+
+    if not netbox_relocates_module_subtree():
+        pytest.skip("NetBox moves a module from 4.7.")
+    source, target = make_device("move-race-source"), make_device("move-race-target")
+    target_maker = Manufacturer.objects.create(name="Move race maker", slug="move-race-maker")
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=target_maker
+    )
+    target_type = DeviceType.objects.create(manufacturer=target_maker, model="Move race model", slug="move-race-model")
+    Device.objects.filter(pk=target.pk).update(device_type=target_type)
+    card = make_module_type("MOVE-RACE-CARD")
+    parent = Module.objects.create(
+        device=source, module_bay=make_module_bay(source, "Source Bay"), module_type=card, serial="ROOT123"
+    )
+    child = Module.objects.create(
+        device=source,
+        module_bay=ModuleBay.objects.create(device=source, module=parent, name="Sub 1"),
+        module_type=card,
+        serial="OLD111",
+    )
+    Module.objects.create(device=target, module_bay=make_module_bay(target, "Held Bay"), module_type=card, serial="ABC")
+    target_bay = make_module_bay(target, "Target Bay")
+    original = module_views.relocation_conflict
+    changed = []
+
+    def commit_the_child_serial_first(*args, **kwargs):
+        if not changed:
+            changed.append(True)
+            with second_connection() as other:
+                commit_row_change(other, Module, child.pk, {"serial": "XABC"})
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module_views, "relocation_conflict", commit_the_child_serial_first)
+    client.force_login(make_superuser("move-race-user"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:move_module", kwargs={"pk": target.pk}),
+        {
+            "conflict_module_id": str(parent.pk),
+            "target_bay_id": str(target_bay.pk),
+            "selected_device_id": str(target.pk),
+        },
+    )
+
+    assert changed
+    assert response.status_code == 302
+    child.refresh_from_db()
+    assert (child.device_id, child.serial) != (target.pk, "XABC")

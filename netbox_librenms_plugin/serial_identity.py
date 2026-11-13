@@ -776,17 +776,37 @@ RELOCATION_HELD = (
 )
 
 
-def relocation_conflict(moving, source_device, target_device, *, rules: SerialRules) -> bool:
-    """
-    Return whether a move of the Modules *moving* from *source_device* onto *target_device* must not run.
+def module_subtree_serials(module_pk) -> tuple:
+    """Return the sorted ``(pk, serial)`` pairs of the Module *module_pk* and of every Module below it."""
+    from dcim.models import Module
 
-    *moving* holds the ``(pk, serial)`` pairs of the moved Module and its descendants, read after
-    their Module identity locks. Both device rows are locked first, so a type change of either
-    commits before the read. The destination rules must not give one identity to two moved
-    Modules that the source rules kept apart, or to a moved Module and a Module of the destination.
+    found = list(Module.objects.filter(pk=module_pk).values_list("pk", "serial"))
+    frontier = [pk for pk, _serial in found]
+    while frontier:
+        children = list(Module.objects.filter(module_bay__module_id__in=frontier).values_list("pk", "serial"))
+        found.extend(children)
+        frontier = [pk for pk, _serial in children]
+    return tuple(sorted(found))
+
+
+def relocation_conflict(module, target_device, moving, *, rules: SerialRules) -> bool:
     """
-    source = locked_type_context(source_device, rules=rules)
+    Return whether a move of the locked *module* and its subtree onto *target_device* must not run.
+
+    *moving* is ``module_subtree_serials(module.pk)`` as read before the Module identity locks of
+    its serials. The moved rows and then both device rows are locked before the subtree is read
+    again, so a serial write to a moved module and a type change of either device either commit
+    before the read or wait for the move. A changed subtree refuses. The destination rules must not
+    give one identity to two moved Modules that the source rules kept apart, or to a moved Module
+    and a Module of the destination.
+    """
+    from dcim.models import Module
+
+    list(Module.objects.select_for_update().filter(pk__in=[pk for pk, _serial in moving]).values_list("pk", flat=True))
+    source = locked_type_context(module.device, rules=rules)
     target = locked_type_context(target_device, rules=rules)
+    if module_subtree_serials(module.pk) != moving:
+        return True
     if _new_shared_key(moving, source, target):
         return True
     serials = [serial for _pk, serial in moving if target._key(serial)]

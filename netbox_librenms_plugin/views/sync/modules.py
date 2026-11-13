@@ -58,6 +58,7 @@ from netbox_librenms_plugin.serial_identity import (
     freshness_token,
     is_identity,
     module_assignment,
+    module_subtree_serials,
     locked_type_context,
     relocation_conflict,
     resolve_module,
@@ -1012,19 +1013,6 @@ def _never_installable_reason(item):
     return None
 
 
-def _module_subtree_serials(module_pk) -> tuple:
-    """Return the sorted ``(pk, serial)`` pairs of the Module *module_pk* and of every Module below it."""
-    from dcim.models import Module
-
-    found = list(Module.objects.filter(pk=module_pk).values_list("pk", "serial"))
-    frontier = [pk for pk, _serial in found]
-    while frontier:
-        children = list(Module.objects.filter(module_bay__module_id__in=frontier).values_list("pk", "serial"))
-        found.extend(children)
-        frontier = [pk for pk, _serial in children]
-    return tuple(sorted(found))
-
-
 def _refuse_identity_move(module, target_device, moving, serial_rules):
     """
     Raise ValidationError when moving the locked *module* and its subtree onto *target_device* must not run.
@@ -1032,11 +1020,7 @@ def _refuse_identity_move(module, target_device, moving, serial_rules):
     Another device's rules decide the moved serials. *moving* is the subtree as read before the
     identity locks; a change since then refuses too. See ``relocation_conflict``.
     """
-    if module.device_id == target_device.pk:
-        return
-    if _module_subtree_serials(module.pk) != moving or relocation_conflict(
-        moving, module.device, target_device, rules=serial_rules
-    ):
+    if module.device_id != target_device.pk and relocation_conflict(module, target_device, moving, rules=serial_rules):
         raise ValidationError(RELOCATION_HELD)
 
 
@@ -3209,7 +3193,7 @@ class MoveModuleView(
             module.device = target_device
 
         serial_rules = SerialRules.load()
-        moving = _module_subtree_serials(conflict_module_id)
+        moving = module_subtree_serials(conflict_module_id)
         try:
             with transaction.atomic():
                 # The identity locks of the moved serials come before any row lock.
