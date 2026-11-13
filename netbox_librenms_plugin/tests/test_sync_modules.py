@@ -2346,6 +2346,34 @@ class TestVirtualChassisInterfaceNormalization:
         interface.refresh_from_db()
         assert interface.name == "Te1/1/4"
 
+    def test_a_skipped_removal_queues_no_delete_event(self):
+        """NetBox queues a delete event before the DELETE runs; the skipped removal must not send it."""
+        from uuid import uuid4
+
+        from dcim.models import Interface
+        from netbox.context import current_request, events_queue
+
+        from netbox_librenms_plugin.views.sync.modules import _normalize_module_interface_names_for_vc_member
+
+        device, module, interface = self._member_module_interface("normalize-event", "Te1/1/5")
+        make_interface(device, "Te2/1/5")
+        request = make_request("post", user=make_superuser("normalize-event-user"))
+        request.id = uuid4()
+        request_token, queue_token = current_request.set(request), events_queue.set({})
+        try:
+            with failing_statement(lambda sql, params: sql.startswith('DELETE FROM "dcim_interface"'), "23503"):
+                result = _normalize_module_interface_names_for_vc_member(
+                    device, module, Interface.objects.all(), Interface.objects.all()
+                )
+            queued = {(event["object_type"].model, event["object_id"]) for event in events_queue.get().values()}
+        finally:
+            current_request.reset(request_token)
+            events_queue.reset(queue_token)
+
+        assert result["skipped"] == 1
+        assert Interface.objects.filter(pk=interface.pk).exists()
+        assert ("interface", interface.pk) not in queued
+
     @pytest.mark.parametrize(
         ("counts", "expected"),
         [
