@@ -744,9 +744,9 @@ def retype_conflict(device, device_type, *, rules: SerialRules, scope: RetypeSco
 
     Call it after ``retype_lock`` and the device row lock, before the save. It refuses when the
     serials of *scope* changed since they were read, when an Unavailable chassis link hides the
-    current identities, and when the new type gives one identity to two rows that did not share
-    it: two serials in *scope*, or a Device serial and another Device. The serial of *device*
-    comes from the object, so a serial that the same write sets counts.
+    current identities, when the new type gives one identity to two serials in *scope* that did
+    not share it, and when another Device holds a Device serial of *scope* under the new type.
+    The serial of *device* comes from the object, so a serial that the same write sets counts.
     """
     from dcim.models import Device
 
@@ -760,18 +760,13 @@ def retype_conflict(device, device_type, *, rules: SerialRules, scope: RetypeSco
     module_old = rules.for_module_target(stored)
     if _new_shared_key(rows, old, new) or _new_shared_key(scope.modules, module_old, new):
         return True
+    # Another holder refuses the change, also one that held a serial before: the read stops at two
+    # rows, so it cannot tell a new holder from an old one.
     admitted = [serial for _pk, serial in rows if new._key(serial)]
     if not admitted:
         return False
-    outside = [pk for pk, _serial in rows]
-    after = resolve_devices_write(admitted, new, rules=rules, exclude_pks=outside)
-    before = resolve_devices_write(
-        [serial for serial in admitted if old._key(serial)], old, rules=rules, exclude_pks=outside
-    )
-    return any(
-        after[serial].kind in REFUSING and (serial not in before or before[serial].kind not in REFUSING)
-        for serial in admitted
-    )
+    after = resolve_devices_write(admitted, new, rules=rules, exclude_pks=[pk for pk, _serial in rows])
+    return any(resolution.kind in REFUSING for resolution in after.values())
 
 
 def report_rows(rules: SerialRules | None = None):
