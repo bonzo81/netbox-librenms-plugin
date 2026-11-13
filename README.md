@@ -121,6 +121,15 @@ Alternatively, share your ideas for the plugin over in [discussions](https://git
 
 ## Installing
 
+### Database Requirement
+
+The plugin needs the PostgreSQL extension `pg_trgm`, which PostgreSQL ships. The plugin migrations create it with `CREATE EXTENSION IF NOT EXISTS pg_trgm`, and they need a database user that may create extensions (the database owner, on PostgreSQL 13 and later). If the NetBox database user may not create it, run this command as a database owner or a superuser before you run the migrations:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
+```
+
+The plugin uses trigram indexes on the Device and Module serials to find a serial in its other forms, for example `S/N ABC` and `ABC`.
 
 ### Standard Installation
 

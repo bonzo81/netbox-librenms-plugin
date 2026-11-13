@@ -27,17 +27,15 @@ On import, each member gets the position number that the device reports for it. 
 
 ## Member Serials
 
-Each member stores its serial as LibreNMS reports it, with the spaces at the start and end removed. A Juniper member shows `S/N BCFB9751`, for example. A placeholder such as `-`, `N/A` or `unknown` is not stored. A numeric `0` is a real serial and is stored.
+Each member stores its serial as LibreNMS reports it, with the spaces at the start and end removed. A Juniper member shows `S/N BCFB9751`, for example. A placeholder such as `-`, `N/A` or `unknown` is not stored. A serial without three letters or digits in a row, such as `0`, is stored but identifies no member.
 
 The plugin does not store the output of the serial normalization rules. It applies the rules to both serials each time it compares them: the stored serial and the LibreNMS serial. The rules of the manufacturer of the virtual chassis master apply, and the global rules. So a rule change applies to both sides at once, and a member name with `{serial}` is the same on import, on the LibreNMS Sync page and after a name sync. A serial that is a placeholder before or after the rules matches nothing.
 
-The **VC Serials** dialog shows each member serial after the rules, and **Sync All** stores the serial as LibreNMS reports it. If the dialog comes from a page that an earlier plugin version rendered, **Sync All** writes nothing and asks you to reload the page.
+The **VC Serials** dialog shows each member serial as LibreNMS reports it, and **Sync All** stores that text. **Sync All** refuses a serial that another device holds in any form under the rules. If the dialog comes from a page that an earlier plugin version rendered, **Sync All** writes nothing and asks you to reload the page.
 
-On import, the plugin does not create a member when a device with the same serial exists. It looks for a device that stores the LibreNMS serial, or the serial after the rules. When the found device stores the serial after the rules, but the rules give a different value for that stored serial, the two serials can be the same member or two different members. The plugin cannot tell them apart, so it skips the member and logs a warning that names the device. Check the two serials, then assign the serial manually.
+On import, the plugin does not create a member when a device with the same serial exists. It finds a device that stores the serial in another form too: a member that an earlier import stored as `S/N ABC` is found when LibreNMS reports `ABC`, and the reverse. When several devices hold the serial, the plugin skips the member and logs a warning.
 
-The plugin does not find a device that stores another form of the serial. For example, a member that an earlier import stored as `S/N ABC` is not found when LibreNMS reports `ABC`.
-
-Members that an earlier plugin version created store the serial after the rules. They keep their match while the rules give the same value for a value that they already changed, which is true for the seeded Juniper `S/N` rule. If a rule changes its own output again, use **Sync All** in the **VC Serials** dialog to store the LibreNMS serials.
+Members that an earlier plugin version created store the serial after the rules. They keep their match while the rules give the same value for a value that they already changed, which is true for the seeded Juniper `S/N` rule. If a rule changes its own output again, use **Sync All** in the **VC Serials** dialog to store the LibreNMS serials. `python manage.py librenms_serial_report` lists the rows whose stored serial the current rules change; see [Serials](../configuration/rules_and_patterns.md#serials).
 
 ## How It Works
 
