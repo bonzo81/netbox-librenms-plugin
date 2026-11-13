@@ -77,9 +77,11 @@ def _failed_virtual_chassis_data(error: str) -> dict:
 _VC_CACHE_VERSION = "v5"
 
 
-def _vc_cache_key(api: LibreNMSAPI, device_id: int | str) -> str:
+def _vc_cache_key(api: LibreNMSAPI, device_id: int | str, serial_rules: SerialRules | None = None) -> str:
+    """Return the cache key of one detection; the serial rules decide the result, so a rule edit changes the key."""
     server_key = getattr(api, "server_key", "default")
-    return f"librenms_vc_detection_{_VC_CACHE_VERSION}_{server_key}_{device_id}"
+    digest = (serial_rules or SerialRules.load()).digest[:16]
+    return f"librenms_vc_detection_{_VC_CACHE_VERSION}_{server_key}_{device_id}_{digest}"
 
 
 def get_virtual_chassis_data(
@@ -88,7 +90,7 @@ def get_virtual_chassis_data(
     """
     Fetch (and cache) virtual chassis data for a LibreNMS device.
 
-    *serial_rules* are the batch's :class:`SerialRules`; None reads them on a cache miss.
+    *serial_rules* are the batch's :class:`SerialRules`; None reads them.
     """
     if not api or device_id is None:
         return empty_virtual_chassis_data()
@@ -102,7 +104,8 @@ def get_virtual_chassis_data(
 
 def _cached_virtual_chassis_data(api: LibreNMSAPI, device_id, force_refresh: bool, serial_rules) -> dict:
     """Return the cached detection data of *device_id*, and detect and cache it on a miss."""
-    cache_key = _vc_cache_key(api, device_id)
+    serial_rules = serial_rules or SerialRules.load()
+    cache_key = _vc_cache_key(api, device_id, serial_rules)
     _cache_timeout = getattr(api, "cache_timeout", None)
     cache_timeout = 300 if _cache_timeout is None else _cache_timeout
     if not force_refresh and cache_timeout != 0:

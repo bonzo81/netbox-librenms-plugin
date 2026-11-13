@@ -7,6 +7,7 @@ master's. Detection replays the bundled capture through the real client and HTTP
 """
 
 import copy
+import uuid
 
 import pytest
 
@@ -417,3 +418,23 @@ def test_an_imported_stack_master_already_has_the_name_that_validation_and_the_s
     )
     assert response.status_code == 200
     assert response.context["resolved_name"] == master.name
+
+
+def test_a_cached_no_stack_result_is_detected_again_after_a_serial_rule_change(recording_server):
+    """The root "SERIAL-A" matches FPC "S/N SERIAL-A" only under the extractor that a later rule adds."""
+    from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
+    NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
+    recording = copy.deepcopy(load_recording(_RECORDING))
+    _edit_rows(recording, 1, lambda row: row.update(entPhysicalSerialNum="SERIAL-A"))
+    _edit_rows(recording, 120, lambda row: row.update(entPhysicalSerialNum="S/N SERIAL-A"))
+    _edit_rows(recording, 121, lambda row: row.update(entPhysicalSerialNum="S/N SERIAL-B"))
+    _server, api = recording_server(recording, server_key=f"junos-rule-change-{uuid.uuid4().hex}")
+
+    assert get_virtual_chassis_data(api, _DEVICE_ID, serial_rules=SerialRules.load())["is_stack"] is False
+
+    NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
+
+    assert get_virtual_chassis_data(api, _DEVICE_ID, serial_rules=SerialRules.load())["is_stack"] is True

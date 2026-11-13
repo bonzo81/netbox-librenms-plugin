@@ -259,12 +259,14 @@ class TestPrefetchVcData:
             _seed_stack(librenms_server, device_id)
         rows = {device_id: {"device_id": device_id, "hostname": f"sw-{device_id}"} for device_id in device_ids}
         table = f'"{NormalizationRule._meta.db_table}"'
+        current_rules = SerialRules.load()
+        cache_keys = [vc_module._vc_cache_key(api, device_id, current_rules) for device_id in device_ids]
 
         def run_batch():
             if entry == "prefetch":
                 vc_module.prefetch_vc_data_for_devices(api, device_ids, force_refresh=True)
                 return
-            cache.delete_many([vc_module._vc_cache_key(api, device_id) for device_id in device_ids])
+            cache.delete_many(cache_keys)
             detect_collisions_for_device_ids(device_ids, api, libre_devices_cache=dict(rows))
 
         def rule_reads(call):
