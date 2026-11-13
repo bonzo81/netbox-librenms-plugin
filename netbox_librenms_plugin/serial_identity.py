@@ -83,12 +83,14 @@ class Resolution:
 
     ``matches`` holds the confirmed rows of a Unique or an Ambiguous outcome. They come from an
     unrestricted read, so a caller names one only after its own permission check. ``object`` is
-    the row of a Unique outcome and None for every other outcome.
+    the row of a Unique outcome and None for every other outcome. ``complete`` is False when the
+    read stopped before it saw every match.
     """
 
     kind: ResolutionKind
     matches: tuple = ()
     reason: str = ""
+    complete: bool = True
 
     @property
     def object(self):
@@ -96,19 +98,28 @@ class Resolution:
         return self.matches[0] if self.kind is ResolutionKind.UNIQUE else None
 
     def excluding(self, pks) -> "Resolution":
-        """Return this outcome without the rows whose pk is in *pks*."""
+        """
+        Return this outcome without the rows whose pk is in *pks*.
+
+        Raises:
+            RuntimeError: The read stopped early and too few rows remain to count; the lookup needs more ``spare``.
+
+        """
         if self.kind not in (ResolutionKind.UNIQUE, ResolutionKind.AMBIGUOUS):
             return self
         excluded = set(pks)
-        return _counted(tuple(row for row in self.matches if row.pk not in excluded))
+        remaining = tuple(row for row in self.matches if row.pk not in excluded)
+        if not self.complete and len(remaining) < _AMBIGUOUS_AT:
+            raise RuntimeError("The serial lookup stopped before the excluded rows; give it more spare reads.")
+        return _counted(remaining, complete=self.complete)
 
 
-def _counted(matches: tuple) -> Resolution:
+def _counted(matches: tuple, *, complete: bool = True) -> Resolution:
     if not matches:
         return Resolution(ResolutionKind.NO_MATCH)
     if len(matches) == 1:
         return Resolution(ResolutionKind.UNIQUE, matches)
-    return Resolution(ResolutionKind.AMBIGUOUS, matches)
+    return Resolution(ResolutionKind.AMBIGUOUS, matches, complete=complete)
 
 
 _ABSENT = Resolution(ResolutionKind.ABSENT)
@@ -379,7 +390,7 @@ def _probe_keys(values, rules: SerialRules) -> dict:
     return {value: {key for context in contexts if (key := context._key(value))} for value in values}
 
 
-def _resolve(queryset, values, *, rules, row_context, lock):
+def _resolve(queryset, values, *, rules, row_context, lock, spare=0):
     values = list(dict.fromkeys(values))
     probes = _probe_keys(values, rules)
     results = {value: _ABSENT for value, keys in probes.items() if not keys}
@@ -393,6 +404,7 @@ def _resolve(queryset, values, *, rules, row_context, lock):
         queryset = queryset.select_for_update(of=("self",))
     matches = {value: [] for value in open_values}
     unavailable = {}
+    complete = True
     # One client-side read: a server-side cursor plans for its first rows and can leave the trigram index.
     for row in queryset:
         context = row_context(row)
@@ -404,13 +416,14 @@ def _resolve(queryset, values, *, rules, row_context, lock):
                 continue
             if compare(row.serial, value, context) is Comparison.SAME:
                 matches[value].append(row)
-        if not unavailable and all(len(found) >= _AMBIGUOUS_AT for found in matches.values()):
+        if not unavailable and all(len(found) >= _AMBIGUOUS_AT + spare for found in matches.values()):
+            complete = False
             break
     for value in open_values:
         if value in unavailable:
             results[value] = Resolution(ResolutionKind.UNAVAILABLE, reason=unavailable[value])
         else:
-            results[value] = _counted(tuple(matches[value]))
+            results[value] = _counted(tuple(matches[value]), complete=complete)
     return results
 
 
@@ -440,7 +453,7 @@ def resolve_device(serial, *, rules: SerialRules | None = None, exclude_pks=(), 
 
 
 def resolve_modules(
-    serials: Iterable, *, rules: SerialRules | None = None, device_ids=None, exclude_pks=(), lock=False
+    serials: Iterable, *, rules: SerialRules | None = None, device_ids=None, exclude_pks=(), lock=False, spare=0
 ) -> dict:
     """
     Return ``{serial: Resolution}``: the Modules that hold each incoming serial, in one query.
@@ -451,6 +464,8 @@ def resolve_modules(
         device_ids: Only Modules on these Devices count; None counts every Module.
         exclude_pks: Modules to leave out before the count, for example the module that a write replaces.
         lock: Lock every candidate row ``FOR UPDATE``; the caller holds a transaction.
+        spare: Read this many matches past the Ambiguous count, so that ``Resolution.excluding`` can
+            leave out up to this many rows per serial later.
 
     """
     from dcim.models import Module
@@ -462,7 +477,12 @@ def resolve_modules(
     if exclude_pks:
         queryset = queryset.exclude(pk__in=list(exclude_pks))
     return _resolve(
-        queryset, serials, rules=rules, row_context=lambda module: rules.for_module_target(module.device), lock=lock
+        queryset,
+        serials,
+        rules=rules,
+        row_context=lambda module: rules.for_module_target(module.device),
+        lock=lock,
+        spare=spare,
     )
 
 

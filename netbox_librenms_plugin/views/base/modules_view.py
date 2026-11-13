@@ -4587,7 +4587,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
 
         # Existence is read unrestricted: a module the operator cannot see still occupies the
         # serial. Which of them may be NAMED is decided separately, below.
-        resolutions = resolve_modules([row["serial"] for row in rows], rules=serial_rules)
+        # One spare read: each row leaves out the module in its own bay below.
+        resolutions = resolve_modules([row["serial"] for row in rows], rules=serial_rules, spare=1)
         matched_pks = {module.pk for resolution in resolutions.values() for module in resolution.matches}
         # Fail closed when there is no request to scope against: name nothing rather than risk
         # disclosing a module the operator cannot see.
