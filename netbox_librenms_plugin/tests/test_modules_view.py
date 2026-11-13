@@ -3472,6 +3472,22 @@ class TestDetectSerialConflicts:
         assert not row.get("can_move_from")
         assert row.get("serial_conflict_ambiguous") is True
 
+    def test_a_holder_on_the_page_device_blocks_the_install_behind_three_holders_elsewhere(self):
+        """The global read stops after three holders; the holder on this device still withdraws the install."""
+        from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
+
+        view = self._view()
+        for tag in "abc":
+            self._make_module(f"scope-{tag}", "SCOPE-SN1")
+        page = make_device_with_module_bays("serial-conflict-scope-page", ["Slot 1", "Slot 2"])
+        install_module(page, "Slot 1", "SERIAL-CONFLICT-scope-page", serial="SCOPE-SN1")
+        row = {"can_install": True, "serial": "SCOPE-SN1"}
+
+        view._detect_serial_conflicts([row], obj=page)
+
+        assert row.get("serial_conflict_ambiguous") is True
+        assert row["can_install"] is False
+
     def test_can_install_no_serial_not_flagged(self, django_assert_num_queries):
         """A can_install row with no serial is not checked for conflicts."""
         view = self._view()

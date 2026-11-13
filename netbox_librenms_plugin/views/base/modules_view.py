@@ -4631,20 +4631,25 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 .values_list("pk", flat=True)
             )
         scope_device_ids = self._identity_scope_device_ids(obj)
+        # Evidence revokes the install offer only where the write path also refuses it: a holder on a
+        # device in scope. Its own read, so holders elsewhere cannot fill the global read first.
+        scoped = (
+            resolve_modules([row["serial"] for row in rows], rules=serial_rules, device_ids=scope_device_ids, spare=1)
+            if scope_device_ids
+            else {}
+        )
 
         for row in rows:
             installed_id = row.get("installed_module_id")
             # Exclude the module already in the current bay
-            found = resolutions[row["serial"]].excluding([installed_id] if installed_id else ())
+            own_bay = [installed_id] if installed_id else ()
+            found = resolutions[row["serial"]].excluding(own_bay)
             if found.kind is ResolutionKind.UNIQUE:
                 conflict = found.object
                 row["serial_conflict_module"] = conflict
                 row["serial_conflict_visible"] = conflict.pk in visible_conflict_pks
                 row["can_move_from"] = True
-                # Evidence revokes the offer only where the write path would also refuse it.
-                if conflict.device_id in scope_device_ids:
-                    row["can_install"] = False
             elif found.kind is ResolutionKind.AMBIGUOUS:
                 row["serial_conflict_ambiguous"] = True
-                if any(c.device_id in scope_device_ids for c in found.matches):
-                    row["can_install"] = False
+            if scoped and scoped[row["serial"]].excluding(own_bay).matches:
+                row["can_install"] = False
