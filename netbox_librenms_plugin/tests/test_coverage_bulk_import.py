@@ -305,7 +305,7 @@ class TestBulkImportIntegration:
         from django.test.utils import CaptureQueriesContext
 
         from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices
-        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data, vc_serial_key
+        from netbox_librenms_plugin.import_utils.virtual_chassis import get_virtual_chassis_data, DeviceSerialLookup
         from netbox_librenms_plugin.models import NormalizationRule
         from netbox_librenms_plugin.tests.test_virtual_chassis_fallbacks import _seed_stack
         from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms
@@ -355,7 +355,7 @@ class TestBulkImportIntegration:
             return result, serial_reads
 
         with CaptureQueriesContext(connection) as key_queries:
-            vc_serial_key(DeviceType.objects.get(pk=prerequisites["device_type_id"]).manufacturer)
+            DeviceSerialLookup().key_for(DeviceType.objects.get(pk=prerequisites["device_type_id"]).manufacturer)
         one_key_read_count = len([q for q in key_queries if table in q["sql"] and "'serial'" in q["sql"]])
         assert one_key_read_count > 0
 

@@ -273,9 +273,23 @@ def chassis_serial_key(device):
     return vc_serial_key(getattr(getattr(master, "device_type", None), "manufacturer", None))
 
 
-def device_serial_lookup():
-    """Return a batch lookup that reuses one rule snapshot and reads current holders on each call."""
-    return functools.partial(devices_with_serial, preloaded_rules=_serial_lookup_rules())
+class DeviceSerialLookup:
+    """Find current holders and provide comparison keys from one batch's serial rule snapshot."""
+
+    def __init__(self):
+        self.rules = _serial_lookup_rules()
+        self._keys = {}
+
+    def key_for(self, manufacturer=None):
+        """Return the cached comparison key function of one manufacturer in this snapshot."""
+        manufacturer_id = None if manufacturer is None else manufacturer.pk
+        if manufacturer_id not in self._keys:
+            self.rules.setdefault(("serial", manufacturer_id), [])
+            self._keys[manufacturer_id] = vc_serial_key(manufacturer, preloaded_rules=self.rules)
+        return self._keys[manufacturer_id]
+
+    def __call__(self, serial, *, exclude_pk=None, limit=2):
+        return devices_with_serial(serial, exclude_pk=exclude_pk, limit=limit, preloaded_rules=self.rules)
 
 
 def _serial_lookup_rules():
@@ -855,6 +869,7 @@ def create_virtual_chassis_with_members(
     server_key: str | None = None,
     *,
     master_member: dict,
+    serial_lookup=None,
 ) -> VirtualChassis:
     """
     Create Virtual Chassis and member devices from detection info.
@@ -867,6 +882,7 @@ def create_virtual_chassis_with_members(
         members_info: List of member dicts from VC detection, the master included
         libre_device: Original LibreNMS device data
         server_key: LibreNMS server key stored with the created members.
+        serial_lookup: A batch lookup whose rule snapshot also supplies member comparison keys.
         master_member: The entry of *members_info* that is *master_device*, as the caller decided
             it with :func:`identify_vc_master`.
 
@@ -886,7 +902,8 @@ def create_virtual_chassis_with_members(
 
     """
     # Members store the raw serial; names and the duplicate check use the key of the master.
-    member_serial = vc_serial_key(getattr(getattr(master_device, "device_type", None), "manufacturer", None))
+    serial_lookup = serial_lookup or DeviceSerialLookup()
+    member_serial = serial_lookup.key_for(getattr(getattr(master_device, "device_type", None), "manufacturer", None))
     # Caller-supplied members can lack positions; the stack rule then numbers them in row order.
     positions = _member_positions([member.get("position") for member in members_info])
     master_pos = next(
@@ -946,6 +963,7 @@ def create_virtual_chassis_with_members(
                 vc,
                 vc_pattern,
                 member_serial,
+                serial_lookup,
             )
             expected_members = len(members_info) - 1
             if members_created < expected_members:
@@ -977,14 +995,13 @@ def create_virtual_chassis_with_members(
 
 
 def _create_member_devices(
-    master_device, base_name, members_info, positions, master_member, vc, vc_pattern, member_serial
+    master_device, base_name, members_info, positions, master_member, vc, vc_pattern, member_serial, serial_lookup
 ) -> int:
     """Create a device for each non-master member at its stack position; return how many were created."""
     member_rack = master_device.rack
     member_location = master_device.location or (member_rack.location if member_rack and member_rack.location else None)
     created = 0
     created_keys = set()
-    serial_lookup = device_serial_lookup()
     for member, position in zip(members_info, positions, strict=True):
         if member is master_member:
             continue

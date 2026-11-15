@@ -69,7 +69,7 @@ from netbox_librenms_plugin.import_utils.virtual_chassis import (
     candidate_vc_serial_keys,
     chassis_serial_key,
     devices_with_serial,
-    device_serial_lookup,
+    DeviceSerialLookup,
     serials_match,
     vc_master_view,
     vc_serial_key,
@@ -1186,8 +1186,8 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         errors = []
         seen_ids = set()
         cache_expired_count = 0
-        serial_key_for = functools.cache(vc_serial_key)
-        serial_lookup = device_serial_lookup()
+        serial_lookup = DeviceSerialLookup()
+        serial_key_for = serial_lookup.key_for
         candidate_keys = functools.cache(candidate_vc_serial_keys)
 
         for raw_device_id in device_ids:
