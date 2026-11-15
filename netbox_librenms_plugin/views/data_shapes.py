@@ -9,6 +9,7 @@ near zero. Read-only: it hits LibreNMS but mutates nothing in NetBox.
 
 import json
 import secrets
+from itertools import chain
 from urllib.parse import urlencode
 
 from dcim.models import Device
@@ -92,7 +93,7 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             # low-entropy value like a hostname is recoverable by hashing dictionary candidates.
             serial_rules = SerialRules.load()
             serial_context = vc_detecting_context(
-                recording, (serial_rules.for_device(sync_device), *serial_rules.candidates())
+                recording, chain((serial_rules.for_device(sync_device),), serial_rules.iter_candidates())
             )
             anonymized = anonymize_recording(recording, salt=secrets.token_hex(16), serial_context=serial_context)
         except RuntimeError as exc:

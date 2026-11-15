@@ -233,8 +233,14 @@ class SerialRules:
 
     def candidates(self) -> tuple:
         """Return the global context and the context of each manufacturer that has serial rules."""
+        return tuple(self.iter_candidates())
+
+    def iter_candidates(self) -> Iterable[SerialContext]:
+        """Read each candidate context when the caller needs it."""
+        yield self.context(None)
         scoped = sorted(manufacturer_id for manufacturer_id in self._chains_by_manufacturer() if manufacturer_id)
-        return (self.context(None), *(self.context(manufacturer_id) for manufacturer_id in scoped))
+        for manufacturer_id in scoped:
+            yield self.context(manufacturer_id)
 
     def for_device_type(self, device_type) -> SerialContext:
         """Return the context that a Device of *device_type* uses as a chassis master; None gives the global context."""
@@ -403,6 +409,10 @@ def _probe_keys(values, rules: SerialRules) -> dict:
     return {value: {key for context in contexts if (key := context._key(value))} for value in values}
 
 
+def _matches_serial(stored, incoming, context, own_key):
+    return compare(stored, incoming, context) is Comparison.SAME or (own_key and context._key(stored) == own_key)
+
+
 def _resolve(queryset, values, *, rules, row_context, lock, spare=0, own_keys=None):
     """
     Read the candidate rows of *values* once and confirm each row under its own context.
@@ -423,8 +433,6 @@ def _resolve(queryset, values, *, rules, row_context, lock, spare=0, own_keys=No
     exact = sorted({_text(value) for value in open_values} | {key for value in open_values for key in probes[value]})
     patterns = sorted({contains_pattern(key) for value in open_values for key in probes[value]})
     queryset = queryset.filter(_SerialCandidates(exact, patterns)).order_by("pk")
-    if lock:
-        queryset = queryset.select_for_update(of=("self",))
     matches = {value: [] for value in open_values}
     unavailable = {}
     complete = True
@@ -432,13 +440,20 @@ def _resolve(queryset, values, *, rules, row_context, lock, spare=0, own_keys=No
     for row in queryset:
         context = row_context(row)
         stored = _text(row.serial)
+        if lock and any(_matches_serial(stored, value, context, own_keys.get(value)) for value in open_values):
+            # A substring candidate can name unrelated hardware. Lock only confirmed matches,
+            # then read their identity again after the lock to exclude a concurrent change.
+            row = queryset.select_for_update(of=("self",)).filter(pk=row.pk).first()
+            if row is None:
+                continue
+            context = row_context(row)
+            stored = _text(row.serial)
         for value in open_values:
             if context.unavailable:
                 if any(key in stored for key in probes[value]) or stored == _text(value):
                     unavailable.setdefault(value, context.unavailable)
                 continue
-            own_key = own_keys.get(value)
-            if compare(row.serial, value, context) is Comparison.SAME or (own_key and context._key(stored) == own_key):
+            if _matches_serial(stored, value, context, own_keys.get(value)):
                 matches[value].append(row)
         if not unavailable and all(len(found) >= _AMBIGUOUS_AT + spare for found in matches.values()):
             complete = False
@@ -459,7 +474,7 @@ def resolve_devices(serials: Iterable, *, rules: SerialRules | None = None, excl
         serials: The incoming LibreNMS serials.
         rules: The batch's serial rules; None reads them.
         exclude_pks: Devices to leave out before the count, for example the device that a write changes.
-        lock: Lock every candidate row ``FOR UPDATE``; the caller holds a transaction.
+        lock: Lock confirmed matches ``FOR UPDATE`` and check their identity again; the caller holds a transaction.
 
     """
     from dcim.models import Device
@@ -516,7 +531,7 @@ def resolve_modules(
         rules: The batch's serial rules; None reads them.
         device_ids: Only Modules on these Devices count; None counts every Module.
         exclude_pks: Modules to leave out before the count, for example the module that a write replaces.
-        lock: Lock every candidate row ``FOR UPDATE``; the caller holds a transaction.
+        lock: Lock confirmed matches ``FOR UPDATE`` and check their identity again; the caller holds a transaction.
         spare: Read this many matches past the Ambiguous count, so that ``Resolution.excluding`` can
             leave out up to this many rows per serial later.
 
@@ -803,6 +818,8 @@ def relocation_conflict(module, target_device, moving, *, rules: SerialRules) ->
     from dcim.models import Module
 
     list(Module.objects.select_for_update().filter(pk__in=[pk for pk, _serial in moving]).values_list("pk", flat=True))
+    for device_pk in sorted({module.device_id, target_device.pk}):
+        _lock_type_row(device_pk)
     source = locked_type_context(module.device, rules=rules)
     target = locked_type_context(target_device, rules=rules)
     if module_subtree_serials(module.pk) != moving:

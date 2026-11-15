@@ -647,6 +647,27 @@ def test_capture_view_rejects_an_invalid_linked_controller(recording_server, oob
     assert "Anonymized recording" not in html
 
 
+@pytest.mark.django_db
+def test_capture_detects_a_stack_before_reading_an_unrelated_invalid_serial_context(recording_server):
+    from dcim.models import Manufacturer
+
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    maker = Manufacturer.objects.create(name="Unrelated capture maker", slug="unrelated-capture-maker")
+    rule = NormalizationRule.objects.create(
+        scope="serial", manufacturer=maker, match_pattern=r"^S/N\s+(.+)$", replacement=r"\1"
+    )
+    NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"invalid-\1")
+    server, api = recording_server(load_recording("cisco-stackwise-3member"))
+    device = make_device("capture-valid-context", librenms_cf={"test": {"id": _STACK_RECORDING_ID}})
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    assert response.status_code == 200
+    assert "Anonymized recording" in response.content.decode()
+    assert _captured_recording(response)["responses"]
+
+
 def test_recording_issue_field_accepts_downloaded_attachments():
     from pathlib import Path
 

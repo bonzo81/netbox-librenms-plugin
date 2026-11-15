@@ -6068,14 +6068,14 @@ class TestFindIntegratingAncestor:
         xiom = {
             "entPhysicalIndex": 100,
             "entPhysicalClass": "xioModule",
-            "entPhysicalSerialNum": "S",
+            "entPhysicalSerialNum": "SN-XIOM",
             "entPhysicalModelName": "X",
             "entPhysicalContainedIn": 0,
         }
         mda = {
             "entPhysicalIndex": 200,
             "entPhysicalClass": "mdaModule",
-            "entPhysicalSerialNum": "S",
+            "entPhysicalSerialNum": "SN-XIOM",
             "entPhysicalModelName": "Y",
             "entPhysicalContainedIn": 100,
         }
@@ -6111,14 +6111,14 @@ class TestFindIntegratingAncestor:
         xiom = {
             "entPhysicalIndex": 100,
             "entPhysicalClass": "xioModule",
-            "entPhysicalSerialNum": "S",
+            "entPhysicalSerialNum": "SN-XIOM",
             "entPhysicalModelName": placeholder,
             "entPhysicalContainedIn": 0,
         }
         mda = {
             "entPhysicalIndex": 200,
             "entPhysicalClass": "mdaModule",
-            "entPhysicalSerialNum": "S",
+            "entPhysicalSerialNum": "SN-XIOM",
             "entPhysicalModelName": placeholder,
             "entPhysicalContainedIn": 100,
         }

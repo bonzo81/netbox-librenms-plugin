@@ -151,7 +151,15 @@ def vc_detecting_context(recording, contexts):
     """
     root_items, child_items = _vc_rows(recording)
     rows = [*root_items, *child_items]
-    return next((context for context in contexts if extract_vc_stack(rows, (context,)).members), contexts[0])
+    first = None
+    for context in contexts:
+        if first is None:
+            first = context
+        if extract_vc_stack(rows, (context,)).members:
+            return context
+    if first is None:
+        raise ValueError("Stack detection requires at least one serial context.")
+    return first
 
 
 def compute_shape_signature(recording, *, serial_context=None):

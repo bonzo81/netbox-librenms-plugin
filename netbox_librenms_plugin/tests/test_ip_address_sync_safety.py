@@ -686,6 +686,34 @@ def test_add_as_oob_gives_the_created_ip_a_netaddr_address(client, live_librenms
     assert device.oob_ip.assigned_object == interface
 
 
+@pytest.mark.django_db
+def test_add_as_oob_accepts_a_primary_ip_match_without_a_serial(client, live_librenms):
+    device = make_device("oob-ip-match-host")
+    interface = make_interface(device, "iDRAC", iface_type="1000base-t")
+    device.oob_ip = make_ip("198.18.32.5/32", assigned_object=interface)
+    device.save()
+    live_librenms.server.device_info_response(
+        device_id=5303,
+        hostname="oob-ip-match-controller",
+        hardware="iDRAC9",
+        os="idrac",
+        serial="",
+        ip="198.18.32.5",
+    )
+    client.force_login(make_superuser("oob-ip-match-user"))
+
+    response = client.post(
+        reverse("plugins:netbox_librenms_plugin:device_add_as_oob", args=[5303]),
+        {"existing_device_id": str(device.pk), "server_key": "default", "oob_interface_id": str(interface.pk)},
+        HTTP_HX_REQUEST="true",
+    )
+
+    assert response.status_code == 200
+    device.refresh_from_db()
+    assert read_mapping(device).oob_id("default") == 5303
+    assert device.oob_ip.assigned_object == interface
+
+
 @pytest.mark.parametrize(
     "address",
     ["198.18.10.10/24", "2001:db8:10::10/64"],

@@ -39,7 +39,7 @@ from netbox_librenms_plugin.data_shapes.ports import (
     name_matches_lag_pattern,
 )
 from netbox_librenms_plugin.data_shapes.recordings_store import recording_meta
-from netbox_librenms_plugin.serial_identity import SerialContext, anonymize_input
+from netbox_librenms_plugin.serial_identity import SerialContext, anonymize_input, plain_context
 
 # Preserve structural fields. Model SKUs use shared tokens.
 PRESERVE_KEYS = frozenset(
@@ -795,11 +795,10 @@ def _anon_value(key, value, rules, container=None):  # noqa: C901
         serial = str(value).strip()
         if not serial or is_librenms_placeholder(serial):
             return value
-        if rules.serial_context is not None:
-            serial = anonymize_input(value, rules.serial_context)
-            if not serial:
-                # The rules removed the identity of a real serial: never publish the raw value.
-                return ""
+        serial = anonymize_input(value, rules.serial_context or plain_context())
+        if not serial:
+            # An absent identity must stay absent in the recording.
+            return ""
         return f"SN-{_hash(serial, salt)}"
     if key in MODEL_KEYS:
         if isinstance(value, bool) or not isinstance(value, (str, int, float)):

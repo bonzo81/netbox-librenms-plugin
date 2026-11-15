@@ -28,6 +28,128 @@ from netbox_librenms_plugin.tests.view_test_helpers import (
 SERVER_KEY = "default"
 
 
+@transactional_db_with_all_apps()
+def test_a_locked_serial_lookup_does_not_wait_for_an_unrelated_candidate():
+    from dcim.models import Module
+    from django.db import transaction
+
+    from netbox_librenms_plugin.serial_identity import resolve_module
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
+
+    _seeded_rule()
+    device = make_device_with_module_bays("serial-unrelated-candidate", ["Slot 1", "Slot 2"])
+    match = install_module(device, "Slot 1", "UNRELATED-CARD-1", serial="ABC")
+    unrelated = install_module(device, "Slot 2", "UNRELATED-CARD-2", serial="XABC")
+
+    with second_connection() as other:
+        lock_row(other, Module, unrelated.pk)
+        with transaction.atomic(), lock_timeout(100):
+            result = resolve_module("ABC", device_ids=[device.pk], lock=True)
+
+    assert result.object.pk == match.pk
+
+
+@transactional_db_with_all_apps()
+def test_distinct_module_serial_updates_do_not_lock_each_others_candidates():
+    from threading import Event
+
+    from dcim.models import Module
+    from django.db import transaction
+
+    from netbox_librenms_plugin.serial_identity import (
+        SerialRules,
+        assignment_lock,
+        locked_type_context,
+        module_assignment,
+    )
+
+    _seeded_rule()
+    device = make_device_with_module_bays("serial-candidate-locks", ["Slot 1", "Slot 2"])
+    first = install_module(device, "Slot 1", "CANDIDATE-CARD-1", serial="S/N ABC")
+    second = install_module(device, "Slot 2", "CANDIDATE-CARD-2", serial="XABC")
+    device_locked, second_locked = Event(), Event()
+
+    def assign(module_pk, incoming, first_writer):
+        close_old_connections()
+        try:
+            with transaction.atomic():
+                rules = SerialRules.load()
+                assignment_lock([incoming], model=Module, rules=rules)
+                module = Module.objects.select_for_update().get(pk=module_pk)
+                if first_writer:
+                    locked_type_context(module.device, rules=rules)
+                    device_locked.set()
+                    assert second_locked.wait(timeout=10)
+                else:
+                    assert device_locked.wait(timeout=10)
+                    second_locked.set()
+                assignment = module_assignment(module, incoming, rules=rules)
+                assert assignment.conflict is None
+                module.serial = assignment.value
+                module.save(update_fields=["serial"])
+            return incoming
+        finally:
+            connection.close()
+
+    assert run_in_threads(
+        partial(assign, first.pk, "ABC", True),
+        partial(assign, second.pk, "S/N XABC", False),
+        barriers=(),
+        timeout=30,
+    ) == ["ABC", "S/N XABC"]
+
+
+@transactional_db_with_all_apps()
+def test_opposite_module_relocations_lock_the_device_pair_in_one_order():
+    from threading import Event
+
+    from dcim.models import Device, Module
+    from django.db import transaction
+
+    from netbox_librenms_plugin.serial_identity import (
+        SerialRules,
+        assignment_lock,
+        module_subtree_serials,
+        relocation_conflict,
+    )
+
+    first = make_device_with_module_bays("opposite-move-first", ["Slot 1"])
+    second = make_device_with_module_bays("opposite-move-second", ["Slot 1"])
+    modules = [
+        install_module(first, "Slot 1", "OPPOSITE-CARD-1", serial="MOVE-ABC"),
+        install_module(second, "Slot 1", "OPPOSITE-CARD-2", serial="MOVE-XYZ"),
+    ]
+    start = Barrier(2, timeout=10)
+    acquired = [Event(), Event()]
+
+    def relocate(index):
+        close_old_connections()
+        waited = False
+
+        def observe_device_lock(execute, sql, params, many, context):
+            nonlocal waited
+            result = execute(sql, params, many, context)
+            if '"dcim_device"' in sql and "FOR NO KEY UPDATE" in sql and not waited:
+                waited = True
+                acquired[index].set()
+                acquired[1 - index].wait(timeout=2)
+            return result
+
+        try:
+            rules = SerialRules.load()
+            moving = module_subtree_serials(modules[index].pk)
+            with transaction.atomic(), connection.execute_wrapper(observe_device_lock):
+                assignment_lock([serial for _pk, serial in moving], model=Module, rules=rules)
+                module = Module.objects.select_for_update().get(pk=modules[index].pk)
+                target = Device.objects.get(pk=(second if index == 0 else first).pk)
+                start.wait()
+                return relocation_conflict(module, target, moving, rules=rules)
+        finally:
+            connection.close()
+
+    assert run_in_threads(partial(relocate, 0), partial(relocate, 1), barriers=(start,), timeout=30) == [False, False]
+
+
 @pytest.fixture
 def librenms_server(settings, monkeypatch):
     from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
@@ -268,7 +390,6 @@ def test_a_member_serial_write_waits_for_a_chassis_master_type_change(librenms_s
     The member write runs after the type change passed its check and before it commits; it must
     wait for the commit and then read the new type.
     """
-    from concurrent.futures import TimeoutError as FutureTimeout
     from threading import Event
 
     from dcim.models import Device, DeviceType, Manufacturer, VirtualChassis
@@ -277,6 +398,7 @@ def test_a_member_serial_write_waits_for_a_chassis_master_type_change(librenms_s
 
     from netbox_librenms_plugin.models import NormalizationRule
     from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import wait_for_lock_wait
     from netbox_librenms_plugin.views.sync import device_fields
 
     master = seed_mapping(make_device("ctx-race-master", serial="MASTER1"), SERVER_KEY, own=9831)
@@ -293,7 +415,8 @@ def test_a_member_serial_write_waits_for_a_chassis_master_type_change(librenms_s
     )
     librenms_server.device_info_response(device_id=9831, hostname=master.name, hardware=new_type.part_number)
     user = make_superuser("ctx-race-user")
-    checked, release = Event(), Event()
+    checked, release, arrived = Event(), Event(), Event()
+    writer_pids = []
     original = device_fields.retype_conflict
 
     def check_then_wait(*args, **kwargs):
@@ -311,7 +434,15 @@ def test_a_member_serial_write_waits_for_a_chassis_master_type_change(librenms_s
                 cursor.execute("SET lock_timeout = '20s'")
             client = Client()
             client.force_login(user)
-            return client.post(reverse(f"plugins:netbox_librenms_plugin:{name}", kwargs={"pk": master.pk}), data)
+
+            def observe_lock(execute, sql, params, many, context):
+                if name != "update_device_type" and '"dcim_device"' in sql and "FOR NO KEY UPDATE" in sql:
+                    writer_pids.append(connection.connection.info.backend_pid)
+                    arrived.set()
+                return execute(sql, params, many, context)
+
+            with connection.execute_wrapper(observe_lock):
+                return client.post(reverse(f"plugins:netbox_librenms_plugin:{name}", kwargs={"pk": master.pk}), data)
         finally:
             connection.close()
 
@@ -324,10 +455,11 @@ def test_a_member_serial_write_waits_for_a_chassis_master_type_change(librenms_s
             {"server_key": SERVER_KEY, "member_id_1": str(member.pk), "librenms_serial_1": "XABC"},
         )
         try:
-            assign.result(timeout=3)
-        except FutureTimeout:
-            pass
-        release.set()
+            assert arrived.wait(timeout=20)
+            wait_for_lock_wait(connection, writer_pids[0])
+            assert not assign.done()
+        finally:
+            release.set()
         assert retype.result(timeout=30).status_code == 302
         assert assign.result(timeout=30).status_code == 302
 
@@ -343,7 +475,6 @@ def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_se
     Under the new type "XABC" keys to "ABC". Two module serial updates run after the type change
     passed its check and before it commits; they must not leave two modules with one identity.
     """
-    from concurrent.futures import TimeoutError as FutureTimeout
     from threading import Event
 
     from dcim.models import Device, DeviceType, Manufacturer, Module
@@ -352,6 +483,7 @@ def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_se
     from django.urls import reverse
 
     from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import wait_for_lock_wait
     from netbox_librenms_plugin.views.mixins import CacheMixin
     from netbox_librenms_plugin.views.sync import device_fields
 
@@ -384,7 +516,8 @@ def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_se
     user = make_superuser("ctx-module-race-user")
     rendered = render_module_tab(device, user=user)
     updates = [rendered_module_form(rendered, "update-module-serial", index) for index in (7, 8)]
-    checked, release = Event(), Event()
+    checked, release, arrived = Event(), Event(), Event()
+    writer_pids = []
     original = device_fields.retype_conflict
 
     def check_then_wait(*args, **kwargs):
@@ -395,14 +528,22 @@ def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_se
 
     monkeypatch.setattr(device_fields, "retype_conflict", check_then_wait)
 
-    def session(posts):
+    def session(posts, observe=False):
         close_old_connections()
         try:
             with connection.cursor() as cursor:
                 cursor.execute("SET lock_timeout = '20s'")
             client = Client()
             client.force_login(user)
-            return [client.post(url, data).status_code for url, data in posts]
+
+            def observe_lock(execute, sql, params, many, context):
+                if observe and '"dcim_device"' in sql and "FOR NO KEY UPDATE" in sql:
+                    writer_pids.append(connection.connection.info.backend_pid)
+                    arrived.set()
+                return execute(sql, params, many, context)
+
+            with connection.execute_wrapper(observe_lock):
+                return [client.post(url, data).status_code for url, data in posts]
         finally:
             connection.close()
 
@@ -417,12 +558,13 @@ def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_se
             ],
         )
         assert checked.wait(timeout=20)
-        modules = executor.submit(session, updates)
+        modules = executor.submit(session, updates, True)
         try:
-            modules.result(timeout=3)
-        except FutureTimeout:
-            pass
-        release.set()
+            assert arrived.wait(timeout=20)
+            wait_for_lock_wait(connection, writer_pids[0])
+            assert not modules.done()
+        finally:
+            release.set()
         assert retype.result(timeout=30) == [302]
         assert modules.result(timeout=30) == [302, 302]
 

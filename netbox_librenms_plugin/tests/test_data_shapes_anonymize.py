@@ -101,6 +101,20 @@ def test_serials_pseudonymized_and_deterministic():
     assert len(set(serials1)) == 3  # distinct originals stay distinct
 
 
+@pytest.mark.parametrize("serial", ["12", 12, "A-1"])
+def test_offline_anonymization_does_not_give_identity_to_an_unadmitted_serial(serial):
+    from netbox_librenms_plugin.serial_identity import is_identity
+
+    recording = _ports({"entPhysicalSerialNum": serial})
+
+    anonymized = anonymize_recording(recording)
+
+    stored = _response(anonymized, "GET /api/v0/devices/1/ports")["ports"][0]["entPhysicalSerialNum"]
+    assert not is_identity(serial, plain_context())
+    assert stored == ""
+    assert not is_identity(stored, plain_context())
+
+
 def test_cross_reference_serial_preserved():
     """A device serial that equals a stack-member serial must map to the SAME pseudonym."""
     rec = load_recording("cisco-stackwise-3member")

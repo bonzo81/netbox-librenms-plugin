@@ -63,6 +63,7 @@ from netbox_librenms_plugin.import_utils import (
 from netbox_librenms_plugin.import_utils.device_operations import (
     effective_import_device_type,
     match_import_device_type,
+    resolve_device_by_host_ip,
 )
 from netbox_librenms_plugin.import_utils.disclosure import serial_conflict_text
 from netbox_librenms_plugin.import_utils.virtual_chassis import vc_master_view
@@ -3042,9 +3043,11 @@ class AddAsOOBView(
         oob_ip_str = oob_candidate.get("ip") or None
 
         with transaction.atomic():
-            # The OOB candidate is a serial match: the serial identity lock comes before the claim and the row lock.
+            # Serial-derived candidates take their identity lock before the claim and row locks.
             serial_rules = SerialRules.load()
-            assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
+            serial_match = validation.get("existing_match_type") != "primary_ip"
+            if serial_match:
+                assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
             try:
                 sync_device, id_conflict = lock_librenms_id_assignment(
                     librenms_id,
@@ -3070,8 +3073,15 @@ class AddAsOOBView(
                     f"LibreNMS device #{librenms_id} is already assigned to {object_label} "
                     f"'{conflict_name}'; refresh and retry."
                 )
-            if not is_sole_holder(existing_device, libre_device.get("serial"), rules=serial_rules):
-                return _htmx_error_response(_SERIAL_MATCH_LOST)
+            if serial_match:
+                if not is_sole_holder(existing_device, libre_device.get("serial"), rules=serial_rules):
+                    return _htmx_error_response(_SERIAL_MATCH_LOST)
+            else:
+                matched, ambiguous, _matching_ips = resolve_device_by_host_ip(oob_ip_str)
+                if ambiguous or matched is None or matched.pk != existing_device.pk or not isinstance(matched, Device):
+                    return _htmx_error_response(
+                        "The IP address no longer identifies this device alone. Refresh and retry."
+                    )
 
             # Re-verify the legacy gate on the LOCKED row (mirrors DeviceConflictActionView's
             # post-lock gate): a legacy bare-int written between the unlocked check above and
