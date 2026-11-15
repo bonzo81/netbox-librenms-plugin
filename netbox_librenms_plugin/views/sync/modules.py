@@ -2211,7 +2211,9 @@ class UpdateModuleSerialView(
                 # Compare the observed storage value, not hardware identity, before using its claim.
                 # nosemgrep: serial-identity-through-owner  # noqa: ERA001
                 if not module or module.serial != observed_serial:
-                    raise _ModuleActionRefused("The module changed. Refresh Modules and try again.")
+                    raise _ModuleActionRefused(
+                        "The module changed. Refresh Modules and try again." if module else "Module no longer exists."
+                    )
                 granted.grant.require(action_target=installed_module_target(module.pk, module.module_bay_id))
                 serial = display(incoming)
                 # A stored form that names the same hardware is rewritten as the LibreNMS text.
