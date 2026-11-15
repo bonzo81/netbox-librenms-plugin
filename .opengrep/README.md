@@ -348,3 +348,8 @@ aliases and consumers in other modules are outside this check.
 `mapping-create-recovers-validation-races` rejects an IntegrityError-only recovery
 in `_map_os_platform`. The creator must also recover uniqueness errors from
 `full_clean()`. Other creators and exception aliases are outside this check.
+
+The `module-writer-claims-released-identities` rule rejects incoming-only claims in the serial
+update and replacement views, and moved-only claims in the move view. Installation can claim one
+incoming serial. The rule covers these concrete omissions. It cannot infer which identities an
+arbitrary write set needs. Real PostgreSQL concurrency tests cover the writer protocol.

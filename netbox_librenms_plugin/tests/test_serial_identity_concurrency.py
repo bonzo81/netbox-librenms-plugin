@@ -444,7 +444,9 @@ def test_a_member_serial_write_waits_for_a_chassis_master_type_change(librenms_s
             client.force_login(user)
 
             def observe_lock(execute, sql, params, many, context):
-                if name != "update_device_type" and '"dcim_device"' in sql and "FOR NO KEY UPDATE" in sql:
+                if name != "update_device_type" and (
+                    "pg_advisory_xact_lock" in sql or ('"dcim_device"' in sql and "FOR NO KEY UPDATE" in sql)
+                ):
                     writer_pids.append(connection.connection.info.backend_pid)
                     arrived.set()
                 return execute(sql, params, many, context)
@@ -545,7 +547,9 @@ def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_se
             client.force_login(user)
 
             def observe_lock(execute, sql, params, many, context):
-                if observe and '"dcim_device"' in sql and "FOR NO KEY UPDATE" in sql:
+                if observe and (
+                    "pg_advisory_xact_lock" in sql or ('"dcim_device"' in sql and "FOR NO KEY UPDATE" in sql)
+                ):
                     writer_pids.append(connection.connection.info.backend_pid)
                     arrived.set()
                 return execute(sql, params, many, context)
@@ -639,3 +643,247 @@ def test_a_module_move_reads_its_subtree_again_after_its_device_locks(client, mo
     assert response.status_code == 302
     child.refresh_from_db()
     assert (child.device_id, child.serial) != (target.pk, "XABC")
+
+
+@transactional_db_with_all_apps()
+@pytest.mark.parametrize("guard", ["install", "replace"])
+@pytest.mark.parametrize("actor", ["update", "replace"])
+def test_a_module_writer_claims_its_old_identity_before_its_row_lock(client, librenms_server, guard, actor):
+    from threading import Event
+
+    from dcim.models import Module
+    from django.core.cache import cache
+    from django.db import DatabaseError, transaction
+    from django.test import Client
+
+    from netbox_librenms_plugin.serial_identity import SerialRules, assignment_lock, locked_type_context, resolve_module
+    from netbox_librenms_plugin.views.mixins import CacheMixin
+    from netbox_librenms_plugin.views.sync.modules import _module_already_on_device
+
+    device = seed_mapping(make_device_with_module_bays("old-identity-writer", ["Slot 1"]), SERVER_KEY, own=9871)
+    module = install_module(device, "Slot 1", "OLD-IDENTITY-CARD", serial="BBB")
+    row = {
+        "entPhysicalIndex": 7,
+        "entPhysicalClass": "module",
+        "entPhysicalName": "Slot 1",
+        "entPhysicalModelName": module.module_type.model,
+        "entPhysicalSerialNum": "CCC",
+        "entPhysicalContainedIn": 0,
+    }
+    cache.set(
+        CacheMixin().get_cache_key(device, "inventory", SERVER_KEY),
+        trusted_module_inventory_payload(device, [row], librenms_id=9871),
+    )
+    user = make_superuser("old-identity-writer-user")
+    rendered = render_module_tab(device, user=user)
+    if actor == "replace":
+        from netbox_librenms_plugin.tests.view_test_helpers import rendered_preview_url
+
+        client.force_login(user)
+        preview = client.get(rendered_preview_url(rendered, 7))
+        assert preview.status_code == 200
+        action, fields = rendered_module_form(preview.content.decode(), "replace-module", 7)
+    else:
+        action, fields = rendered_module_form(rendered, "update-module-serial", 7)
+    device_locked, module_locked = Event(), Event()
+    errors = []
+
+    def check_conflict():
+        close_old_connections()
+        try:
+            rules = SerialRules.load()
+            with transaction.atomic():
+                assignment_lock(["BBB"], model=Module, rules=rules)
+                locked_type_context(device, rules=rules)
+                device_locked.set()
+                module_locked.wait(timeout=2)
+                if guard == "install":
+                    return _module_already_on_device(device, "BBB", rules)
+                return resolve_module("BBB", rules=rules, device_ids=[device.pk], lock=True).object is not None
+        finally:
+            connection.close()
+
+    def update():
+        close_old_connections()
+
+        def observe(execute, sql, params, many, context):
+            try:
+                result = execute(sql, params, many, context)
+            except DatabaseError as exc:
+                errors.append(getattr(exc.__cause__, "sqlstate", None))
+                raise
+            if '"dcim_module"' in sql and "FOR UPDATE" in sql:
+                module_locked.set()
+            return result
+
+        try:
+            client = Client()
+            client.force_login(user)
+            assert device_locked.wait(timeout=10)
+            with connection.execute_wrapper(observe):
+                return client.post(action, fields).status_code
+        finally:
+            connection.close()
+
+    assert run_in_threads(check_conflict, update, barriers=(), timeout=30) == [True, 302]
+    assert "40P01" not in errors
+    assert Module.objects.get(module_bay_id=module.module_bay_id).serial == "CCC"
+
+
+@transactional_db_with_all_apps()
+def test_a_move_claims_the_removed_occupants_identity_before_locking_it(librenms_server):
+    from threading import Event
+
+    from dcim.models import Module
+    from django.db import DatabaseError, transaction
+    from django.test import Client
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.serial_identity import SerialRules, assignment_lock, locked_type_context
+    from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+    from netbox_librenms_plugin.views.sync.modules import _module_already_on_device
+
+    if not netbox_relocates_module_subtree():
+        pytest.skip("NetBox moves a module from 4.7.")
+    source = make_device_with_module_bays("occupant-lock-source", ["Source Bay"])
+    target = make_device_with_module_bays("occupant-lock-target", ["Target Bay"])
+    moving = install_module(source, "Source Bay", "OCCUPANT-MOVE-CARD", serial="AAA")
+    occupant = install_module(target, "Target Bay", "OCCUPANT-OLD-CARD", serial="BBB")
+    user = make_superuser("occupant-lock-writer")
+    mover = Client()
+    mover.force_login(user)
+    device_locked, occupant_locked = Event(), Event()
+    errors = []
+
+    def install_check():
+        close_old_connections()
+        try:
+            rules = SerialRules.load()
+            with transaction.atomic():
+                assignment_lock(["BBB"], model=Module, rules=rules)
+                locked_type_context(target, rules=rules)
+                device_locked.set()
+                occupant_locked.wait(timeout=10)
+                return _module_already_on_device(target, "BBB", rules)
+        finally:
+            connection.close()
+
+    def move():
+        close_old_connections()
+
+        def observe(execute, sql, params, many, context):
+            try:
+                result = execute(sql, params, many, context)
+            except DatabaseError as exc:
+                errors.append(getattr(exc.__cause__, "sqlstate", None))
+                raise
+            if '"dcim_module"' in sql and "FOR UPDATE" in sql and occupant.pk in (params or ()):
+                occupant_locked.set()
+            return result
+
+        try:
+            client = mover
+            assert device_locked.wait(timeout=10)
+            with connection.execute_wrapper(observe):
+                return client.post(
+                    reverse("plugins:netbox_librenms_plugin:move_module", kwargs={"pk": target.pk}),
+                    {
+                        "conflict_module_id": moving.pk,
+                        "target_bay_id": occupant.module_bay_id,
+                        "module_id": occupant.pk,
+                        "selected_device_id": target.pk,
+                        "server_key": SERVER_KEY,
+                    },
+                ).status_code
+        finally:
+            connection.close()
+
+    assert run_in_threads(install_check, move, barriers=(), timeout=30) == [True, 302]
+    assert "40P01" not in errors
+    assert Module.objects.get(pk=moving.pk).device_id == target.pk
+    assert not Module.objects.filter(pk=occupant.pk).exists()
+
+
+@transactional_db_with_all_apps()
+def test_a_replacement_claims_the_serials_of_children_it_deletes(client, librenms_server):
+    from threading import Event
+
+    from dcim.models import Module
+    from django.core.cache import cache
+    from django.db import DatabaseError
+    from django.test import Client
+
+    from netbox_librenms_plugin.tests.view_test_helpers import rendered_preview_url
+    from netbox_librenms_plugin.views.mixins import CacheMixin
+
+    device = seed_mapping(make_device_with_module_bays("remove-child-identities", ["Slot 1"]), SERVER_KEY, own=9872)
+    parent = install_module(device, "Slot 1", "REMOVAL-PARENT-CARD", serial="AAA", child_bays=("Sub 1",))
+    child = install_module(device, "Sub 1", "REMOVAL-CHILD-CARD", serial="BBB", parent_module=parent)
+    rows = [
+        {
+            "entPhysicalIndex": 7,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Slot 1",
+            "entPhysicalModelName": parent.module_type.model,
+            "entPhysicalSerialNum": "DDD",
+            "entPhysicalContainedIn": 0,
+        },
+        {
+            "entPhysicalIndex": 8,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Sub 1",
+            "entPhysicalModelName": child.module_type.model,
+            "entPhysicalSerialNum": "CCC",
+            "entPhysicalContainedIn": 7,
+        },
+    ]
+    cache.set(
+        CacheMixin().get_cache_key(device, "inventory", SERVER_KEY),
+        trusted_module_inventory_payload(device, rows, librenms_id=9872),
+    )
+    user = make_superuser("remove-child-identities-user")
+    client.force_login(user)
+    rendered = render_module_tab(device, user=user)
+    preview = client.get(rendered_preview_url(rendered, 7))
+    assert preview.status_code == 200
+    replace_action, replace_fields = rendered_module_form(preview.content.decode(), "replace-module", 7)
+    update_action, update_fields = rendered_module_form(rendered, "update-module-serial", 8)
+    replacing_client, updating_client = Client(), Client()
+    replacing_client.force_login(user)
+    updating_client.force_login(user)
+    device_locked, child_locked = Event(), Event()
+    errors = []
+
+    def post(actor):
+        close_old_connections()
+        observed = False
+
+        def observe(execute, sql, params, many, context):
+            nonlocal observed
+            try:
+                result = execute(sql, params, many, context)
+            except DatabaseError as exc:
+                errors.append(getattr(exc.__cause__, "sqlstate", None))
+                raise
+            if actor == "replace" and not observed and '"dcim_device"' in sql and "FOR NO KEY UPDATE" in sql:
+                observed = True
+                device_locked.set()
+                child_locked.wait(timeout=10)
+            elif actor == "update" and '"dcim_module"' in sql and "FOR UPDATE" in sql:
+                child_locked.set()
+            return result
+
+        try:
+            if actor == "update":
+                assert device_locked.wait(timeout=10)
+            with connection.execute_wrapper(observe):
+                if actor == "replace":
+                    return replacing_client.post(replace_action, replace_fields).status_code
+                return updating_client.post(update_action, update_fields).status_code
+        finally:
+            connection.close()
+
+    assert run_in_threads(partial(post, "replace"), partial(post, "update"), barriers=(), timeout=40) == [302, 302]
+    assert "40P01" not in errors
+    assert Module.objects.get(module_bay_id=parent.module_bay_id).serial == "DDD"
+    assert not Module.objects.filter(pk=child.pk).exists()

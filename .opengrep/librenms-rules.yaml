@@ -1957,3 +1957,29 @@ rules:
                 ...
       - pattern: validate_device_for_import(...)
       - pattern-not: validate_device_for_import(..., serial_rules=$RULES, ...)
+
+  - id: module-writer-claims-released-identities
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This module writer claims only its incoming or moved identities. It must also claim the
+      current identities of modules it changes or deletes, before it locks their rows.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/views/sync/modules.py"]
+    pattern-either:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  class UpdateModuleSerialView(...):
+                      ...
+              - pattern-inside: |
+                  class ReplaceModuleView(...):
+                      ...
+          - pattern: assignment_lock([$INCOMING], model=Module, ...)
+      - patterns:
+          - pattern-inside: |
+              class MoveModuleView(...):
+                  ...
+          - pattern: assignment_lock([$SERIAL for $PAIR in moving], model=Module, ...)

@@ -2193,8 +2193,14 @@ class UpdateModuleSerialView(
                 librenms_item = granted.row(granted.grant.ent_index)
                 incoming = librenms_item.get("entPhysicalSerialNum")
                 serial_rules = granted.policy.serial_identity_rules
-                # The serial identity locks come before the module row lock.
-                assignment_lock([incoming], model=Module, rules=serial_rules)
+                observed_serial = (
+                    self.restricted_queryset(Module, "change")
+                    .filter(pk=module_id, device=target_device)
+                    .values_list("serial", flat=True)
+                    .first()
+                )
+                # Claim the identity that is released as well as the identity that is stored.
+                assignment_lock([observed_serial, incoming], model=Module, rules=serial_rules)
                 module = (
                     self.restricted_queryset(Module, "change")
                     .select_for_update(of=("self",))
@@ -2202,8 +2208,10 @@ class UpdateModuleSerialView(
                     .filter(pk=module_id, device=target_device)
                     .first()
                 )
-                if not module:
-                    raise _ModuleActionRefused("Module no longer exists.")
+                # Compare the observed storage value, not hardware identity, before using its claim.
+                # nosemgrep: serial-identity-through-owner  # noqa: ERA001
+                if not module or module.serial != observed_serial:
+                    raise _ModuleActionRefused("The module changed. Refresh Modules and try again.")
                 granted.grant.require(action_target=installed_module_target(module.pk, module.module_bay_id))
                 serial = display(incoming)
                 # A stored form that names the same hardware is rewritten as the LibreNMS text.
@@ -2930,8 +2938,16 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 incoming = librenms_item.get("entPhysicalSerialNum")
                 serial = stored_form(incoming, Module)
                 serial_rules = granted.policy.serial_identity_rules
-                # The serial identity locks come before the module row locks.
-                assignment_lock([incoming], model=Module, rules=serial_rules)
+                removals = {installed_module.pk: module_subtree_serials(installed_module.pk)}
+                previous = resolve_module(incoming, rules=serial_rules, exclude_pks=[installed_module.pk]).object
+                if previous is not None:
+                    removals[previous.pk] = module_subtree_serials(previous.pk)
+                # A replacement also releases the identities of every module that it removes.
+                assignment_lock(
+                    [incoming, *(value for tree in removals.values() for _pk, value in tree)],
+                    model=Module,
+                    rules=serial_rules,
+                )
                 matched_type = resolve_module_type(
                     model_name,
                     get_module_types_indexed(),
@@ -2990,6 +3006,8 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                     # guess which of N conflicts to remove.
                     raise _SerialConflictAmbiguous(serial)
                 if elsewhere.kind is ResolutionKind.UNIQUE:
+                    if elsewhere.object.pk not in removals:
+                        raise _ModuleActionRefused("The conflicting module changed. Refresh Modules and try again.")
                     conflict_module = (
                         self.restricted_queryset(Module, "delete")
                         .filter(pk=elsewhere.object.pk)
@@ -2998,6 +3016,8 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                     )
                     if conflict_module is None:
                         raise _SerialConflictUnavailable(serial)
+
+                _require_unchanged_module_subtrees(removals)
 
                 # Remove the serial-conflicting module from its current location.
                 if conflict_module:
@@ -3101,6 +3121,12 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
         return _modules_action_response(request, page_device, server_key)
 
 
+def _require_unchanged_module_subtrees(observed):
+    """Refuse deletion when the claimed module identities no longer describe the removal trees."""
+    if any(module_subtree_serials(root) != tree for root, tree in observed.items()):
+        raise ValidationError("The modules to remove changed. Refresh Modules and try again.")
+
+
 def _parse_move_ids(post):
     """Return (module, target bay, optional occupant) IDs from a move form, or None when a required one is invalid."""
     try:
@@ -3185,6 +3211,7 @@ class MoveModuleView(
                     .first()
                 )
                 if occupant:
+                    _require_unchanged_module_subtrees({occupant.pk: removing})
                     occupant_removed_msg = f"Removed {occupant.module_type.model} from {target_bay.name}."
                     occupant.delete()
             _refuse_identity_move(module, target_device, moving, serial_rules)
@@ -3194,10 +3221,18 @@ class MoveModuleView(
 
         serial_rules = SerialRules.load()
         moving = module_subtree_serials(conflict_module_id)
+        occupant_id = (
+            self.restricted_queryset(Module, "delete")
+            .filter(pk=module_id, device=target_device, module_bay_id=target_bay_id)
+            .exclude(pk=conflict_module_id)
+            .values_list("pk", flat=True)
+            .first()
+        )
+        removing = module_subtree_serials(occupant_id)
         try:
             with transaction.atomic():
-                # The identity locks of the moved serials come before any row lock.
-                assignment_lock([serial for _pk, serial in moving], model=Module, rules=serial_rules)
+                # The moved and removed identities are claimed before any row lock.
+                assignment_lock([serial for _pk, serial in (*moving, *removing)], model=Module, rules=serial_rules)
                 # Lock target bay to prevent concurrent modifications
                 target_bay = (
                     self.restricted_queryset(ModuleBay)
