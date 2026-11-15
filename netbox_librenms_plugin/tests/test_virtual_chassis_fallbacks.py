@@ -867,12 +867,12 @@ def test_a_serial_lookup_stops_reading_devices_at_its_limit():
 @pytest.mark.django_db
 @pytest.mark.parametrize(("stored", "incoming"), [("S/N ABC-LOOKUP", "ABC-LOOKUP"), ("ABC-LOOKUP", "S/N ABC-LOOKUP")])
 def test_serial_lookup_finds_raw_and_keyed_values_before_limiting(stored, incoming):
-    from netbox_librenms_plugin.import_utils.virtual_chassis import devices_with_serial
+    from netbox_librenms_plugin.serial_identity import resolve_device
 
     _seeded_serial_rule()
     holder = make_device("decorated-lookup-holder", serial=stored)
-    assert [row.pk for row in devices_with_serial(incoming, limit=1)] == [holder.pk]
-    assert devices_with_serial(incoming, exclude_pk=holder.pk, limit=1) == []
+    assert [row.pk for row in resolve_device(incoming).matches] == [holder.pk]
+    assert resolve_device(incoming, exclude_pks=(holder.pk,)).matches == ()
 
 
 @pytest.mark.django_db
@@ -894,20 +894,15 @@ def test_a_decorated_stored_member_blocks_a_keyed_incoming_member():
 
 
 @pytest.mark.django_db
-def test_serial_lookup_applies_noninvertible_rewrite_rules_without_per_device_queries():
-    from django.db import connection
-    from django.test.utils import CaptureQueriesContext
-    from netbox_librenms_plugin.models import NormalizationRule
-    from netbox_librenms_plugin.import_utils.virtual_chassis import devices_with_serial
+def test_serial_lookup_refuses_a_legacy_nonextracting_replacement():
+    from netbox_librenms_plugin.models import NormalizationRule, RuleConfigurationError
+    from netbox_librenms_plugin.serial_identity import resolve_device
 
     NormalizationRule.objects.filter(scope="serial").delete()
-    NormalizationRule.objects.create(scope="serial", match_pattern=r"^PREFIX(.+)$", replacement=r"KEY-\1")
-    for number in range(4):
-        make_device(f"serial-candidate-unrelated-{number}", serial=f"OTHER-{number}")
-    holder = make_device("serial-candidate-rewrite-holder", serial="PREFIXABC")
+    rule = NormalizationRule.objects.create(scope="serial", match_pattern=r"^PREFIX(.+)$", replacement=r"\1")
+    make_device("serial-candidate-rewrite-holder", serial="PREFIXABC")
+    # A legacy stored rule must fail closed instead of using the former general rewrite contract.
+    NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"KEY-\1")
 
-    with CaptureQueriesContext(connection) as queries:
-        matches = devices_with_serial("KEY-ABC", limit=1)
-
-    assert [row.pk for row in matches] == [holder.pk]
-    assert len(queries) == 2
+    with pytest.raises(RuleConfigurationError):
+        resolve_device("KEY-ABC")
