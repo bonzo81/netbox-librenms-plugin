@@ -647,6 +647,21 @@ def test_a_module_move_reads_its_subtree_again_after_its_device_locks(client, mo
     assert (child.device_id, child.serial) != (target.pk, "XABC")
 
 
+def _wait_for_held_serial_claim(writer_pid):
+    """Require the writer to wait on this session's advisory claim before its Module row lock."""
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import wait_for_lock_wait
+
+    wait_for_lock_wait(connection, writer_pid)
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE pid = %s "
+            "AND locktype = 'advisory' AND NOT granted), "
+            "pg_backend_pid() = ANY(pg_blocking_pids(%s))",
+            [writer_pid, writer_pid],
+        )
+        assert cursor.fetchone() == (True, True)
+
+
 @transactional_db_with_all_apps()
 @pytest.mark.parametrize("guard", ["install", "replace"])
 @pytest.mark.parametrize("actor", ["update", "replace"])
@@ -687,7 +702,8 @@ def test_a_module_writer_claims_its_old_identity_before_its_row_lock(client, lib
         action, fields = rendered_module_form(preview.content.decode(), "replace-module", 7)
     else:
         action, fields = rendered_module_form(rendered, "update-module-serial", 7)
-    device_locked, module_locked = Event(), Event()
+    device_locked, module_locked, writer_ready = Event(), Event(), Event()
+    writer_pids = []
     errors = []
 
     def check_conflict():
@@ -698,7 +714,9 @@ def test_a_module_writer_claims_its_old_identity_before_its_row_lock(client, lib
                 assignment_lock(["BBB"], model=Module, rules=rules)
                 locked_type_context(device, rules=rules)
                 device_locked.set()
-                module_locked.wait(timeout=2)
+                assert writer_ready.wait(timeout=10)
+                _wait_for_held_serial_claim(writer_pids[0])
+                assert not module_locked.is_set()
                 if guard == "install":
                     return _module_already_on_device(device, "BBB", rules)
                 return resolve_module("BBB", rules=rules, device_ids=[device.pk], lock=True).object is not None
@@ -721,6 +739,10 @@ def test_a_module_writer_claims_its_old_identity_before_its_row_lock(client, lib
         try:
             client = Client()
             client.force_login(user)
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                writer_pids.append(cursor.fetchone()[0])
+            writer_ready.set()
             assert device_locked.wait(timeout=10)
             with connection.execute_wrapper(observe):
                 return client.post(action, fields).status_code
@@ -728,7 +750,8 @@ def test_a_module_writer_claims_its_old_identity_before_its_row_lock(client, lib
             connection.close()
 
     assert run_in_threads(check_conflict, update, barriers=(), timeout=30) == [True, 302]
-    assert "40P01" not in errors
+    assert errors == []
+    assert module_locked.is_set()
     assert Module.objects.get(module_bay_id=module.module_bay_id).serial == "CCC"
 
 
@@ -754,7 +777,8 @@ def test_a_move_claims_the_removed_occupants_identity_before_locking_it(librenms
     user = make_superuser("occupant-lock-writer")
     mover = Client()
     mover.force_login(user)
-    device_locked, occupant_locked = Event(), Event()
+    device_locked, occupant_locked, writer_ready = Event(), Event(), Event()
+    writer_pids = []
     errors = []
 
     def install_check():
@@ -765,7 +789,9 @@ def test_a_move_claims_the_removed_occupants_identity_before_locking_it(librenms
                 assignment_lock(["BBB"], model=Module, rules=rules)
                 locked_type_context(target, rules=rules)
                 device_locked.set()
-                occupant_locked.wait(timeout=10)
+                assert writer_ready.wait(timeout=10)
+                _wait_for_held_serial_claim(writer_pids[0])
+                assert not occupant_locked.is_set()
                 return _module_already_on_device(target, "BBB", rules)
         finally:
             connection.close()
@@ -785,6 +811,10 @@ def test_a_move_claims_the_removed_occupants_identity_before_locking_it(librenms
 
         try:
             client = mover
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_backend_pid()")
+                writer_pids.append(cursor.fetchone()[0])
+            writer_ready.set()
             assert device_locked.wait(timeout=10)
             with connection.execute_wrapper(observe):
                 return client.post(
@@ -801,7 +831,8 @@ def test_a_move_claims_the_removed_occupants_identity_before_locking_it(librenms
             connection.close()
 
     assert run_in_threads(install_check, move, barriers=(), timeout=30) == [True, 302]
-    assert "40P01" not in errors
+    assert errors == []
+    assert occupant_locked.is_set()
     assert Module.objects.get(pk=moving.pk).device_id == target.pk
     assert not Module.objects.filter(pk=occupant.pk).exists()
 
