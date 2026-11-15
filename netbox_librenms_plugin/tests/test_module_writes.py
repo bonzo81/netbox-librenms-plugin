@@ -378,3 +378,234 @@ def test_existing_module_actions_recheck_their_grant_after_the_owner_wait(writer
     interface.refresh_from_db()
     assert module.serial == "OLD123"
     assert read_mapping(interface).own_id("default") is None
+
+
+@transactional_db_with_all_apps()
+@pytest.mark.parametrize("target_kind", ["module_type", "device_type"])
+@pytest.mark.parametrize("first_writer", ["template", "creation"])
+def test_bay_templates_and_module_creation_serialize_type_membership(target_kind, first_writer, monkeypatch, settings):
+    """Neither contention order may leave a committed type instance without its new bay."""
+    import time
+    from threading import Event
+
+    from dcim.models import Device, Module, ModuleBay, ModuleBayTemplate
+    from django.db import DatabaseError, close_old_connections
+    from django.test import Client
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import (
+        bounded_executor,
+        configure_default_librenms_server,
+        make_superuser,
+    )
+    from netbox_librenms_plugin.views.sync import modules as module_views
+
+    configure_default_librenms_server(settings)
+    first = make_device_with_module_bays("type-membership-existing", ["Slot 1"])
+    second = Device.objects.create(
+        name="type-membership-new", device_type=first.device_type, role=first.role, site=first.site, status="active"
+    )
+    installed = install_module(first, "Slot 1", "TYPE-MEMBERSHIP-CARD")
+    user = make_superuser("type-membership-user")
+    bay_name = "Additional Type Bay"
+    target_pk = installed.module_type_id if target_kind == "module_type" else first.device_type_id
+    requests = {
+        "template": (
+            reverse("plugins:netbox_librenms_plugin:add_bay_template", kwargs={"pk": first.pk}),
+            {"server_key": "default", "target_kind": target_kind, "target_pk": target_pk, "name": bay_name},
+        ),
+        "creation": (
+            reverse("plugins:netbox_librenms_plugin:install_module", kwargs={"pk": second.pk}),
+            {
+                "server_key": "default",
+                "module_bay_id": second.modulebays.get(name="Slot 1").pk,
+                "module_type_id": installed.module_type_id,
+            },
+        ),
+    }
+    paused, release = Event(), Event()
+    pids, errors = {}, []
+    clean_template = ModuleBayTemplate.full_clean
+    save_module = module_views._save_module_with_scoped_component_adoption
+
+    def pause_template(template, *args, **kwargs):
+        result = clean_template(template, *args, **kwargs)
+        if first_writer == "template" and template.name == bay_name:
+            paused.set()
+            assert release.wait(timeout=20)
+        return result
+
+    def pause_creation(module, *args, **kwargs):
+        result = save_module(module, *args, **kwargs)
+        if first_writer == "creation" and module.device_id == second.pk:
+            paused.set()
+            assert release.wait(timeout=20)
+        return result
+
+    monkeypatch.setattr(ModuleBayTemplate, "full_clean", pause_template)
+    monkeypatch.setattr(module_views, "_save_module_with_scoped_component_adoption", pause_creation)
+
+    def post(actor):
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET lock_timeout = '20s'")
+                cursor.execute("SET statement_timeout = '30s'")
+            client = Client()
+            client.force_login(user)
+            pids[actor] = connection.connection.info.backend_pid
+
+            def observe(execute, sql, params, many, context):
+                try:
+                    return execute(sql, params, many, context)
+                except DatabaseError as exc:
+                    errors.append(getattr(exc.__cause__, "sqlstate", None))
+                    raise
+
+            action, data = requests[actor]
+            with connection.execute_wrapper(observe):
+                return client.post(action, data).status_code
+        finally:
+            connection.close()
+
+    other_writer = "creation" if first_writer == "template" else "template"
+    with bounded_executor(max_workers=2) as executor:
+        first_result = executor.submit(post, first_writer)
+        assert paused.wait(timeout=10), "the first writer did not reach its native save boundary"
+        other_result = executor.submit(post, other_writer)
+        try:
+            deadline = time.monotonic() + 10
+            while not other_result.done():
+                assert time.monotonic() < deadline, "the second writer neither completed nor reached a database wait"
+                if other_writer in pids:
+                    with connection.cursor() as cursor:
+                        cursor.execute("SELECT pg_blocking_pids(%s)", [pids[other_writer]])
+                        if cursor.fetchone()[0]:
+                            break
+                time.sleep(0.02)
+        finally:
+            release.set()
+        assert first_result.result(timeout=30) == 302
+        assert other_result.result(timeout=30) == 302
+    assert "40P01" not in errors
+    template_exists = ModuleBayTemplate.objects.filter(name=bay_name).exists()
+    if target_kind == "module_type":
+        expected = set(Module.objects.filter(module_type_id=installed.module_type_id).values_list("pk", flat=True))
+        populated = set(
+            ModuleBay.objects.filter(module__module_type_id=installed.module_type_id, name=bay_name).values_list(
+                "module_id", flat=True
+            )
+        )
+        assert Module.objects.filter(device=second, module_type_id=installed.module_type_id).exists()
+    else:
+        expected = set(Device.objects.filter(device_type_id=first.device_type_id).values_list("pk", flat=True))
+        populated = set(
+            ModuleBay.objects.filter(
+                device__device_type_id=first.device_type_id, module__isnull=True, name=bay_name
+            ).values_list("device_id", flat=True)
+        )
+    assert not template_exists or populated == expected, "a committed template omitted a concurrent type instance"
+    if not template_exists:
+        assert not populated, "a refused template write must leave no partial bays"
+    if first_writer == "template":
+        assert template_exists
+    for device in (first, second):
+        device.refresh_from_db()
+        assert device.module_bay_count == ModuleBay.objects.filter(device=device).count()
+
+
+@transactional_db_with_all_apps()
+@pytest.mark.parametrize("target_kind", ["module_type", "device_type"])
+def test_template_rechecks_instances_after_its_save_before_materialization(
+    target_kind, monkeypatch, settings, flushed_events
+):
+    """An external instance committed before template save must cause a safe rollback."""
+    from threading import Event
+
+    from dcim.models import Device, Module, ModuleBay, ModuleBayTemplate
+    from django.db import close_old_connections
+    from django.test import Client
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import (
+        bounded_executor,
+        configure_default_librenms_server,
+        make_superuser,
+    )
+
+    configure_default_librenms_server(settings)
+    device = make_device_with_module_bays("template-postsave-existing", ["Slot 1"])
+    installed = install_module(device, "Slot 1", "TEMPLATE-POSTSAVE-CARD")
+    user = make_superuser("template-postsave-user")
+    target_pk = installed.module_type_id if target_kind == "module_type" else device.device_type_id
+    before_save, release = Event(), Event()
+    clean_template = ModuleBayTemplate.full_clean
+    bay_name = "Postsave Membership Bay"
+
+    def pause_before_save(template, *args, **kwargs):
+        result = clean_template(template, *args, **kwargs)
+        if template.name == bay_name:
+            before_save.set()
+            assert release.wait(timeout=15)
+        return result
+
+    monkeypatch.setattr(ModuleBayTemplate, "full_clean", pause_before_save)
+
+    def post():
+        close_old_connections()
+        try:
+            client = Client()
+            client.force_login(user)
+            response = client.post(
+                reverse("plugins:netbox_librenms_plugin:add_bay_template", kwargs={"pk": device.pk}),
+                {"server_key": "default", "target_kind": target_kind, "target_pk": target_pk, "name": bay_name},
+            )
+            return response.status_code
+        finally:
+            connection.close()
+
+    with bounded_executor(max_workers=1) as executor:
+        pending = executor.submit(post)
+        try:
+            assert before_save.wait(timeout=10)
+            newcomer = Device.objects.create(
+                name="template-postsave-external",
+                device_type=device.device_type,
+                role=device.role,
+                site=device.site,
+                status="active",
+            )
+            if target_kind == "module_type":
+                Module.objects.create(
+                    device=newcomer,
+                    module_bay=newcomer.modulebays.get(name="Slot 1"),
+                    module_type=installed.module_type,
+                )
+        finally:
+            release.set()
+        assert pending.result(timeout=20) == 302
+    assert not ModuleBayTemplate.objects.filter(name=bay_name).exists(), (
+        "membership expansion must roll back the template"
+    )
+    assert not ModuleBay.objects.filter(name=bay_name).exists(), "a refusal must leave no partial instance bays"
+    assert not any(model == "modulebaytemplate" for model, _pk in flushed_events), (
+        "a rolled-back template must emit no native event"
+    )
+
+
+@transactional_db_with_all_apps()
+def test_a_creation_scope_refuses_unplanned_or_incremental_type_claims():
+    from netbox_librenms_plugin.module_writes import lock_module_write, observe_module_write
+
+    device = make_device_with_module_bays("type-scope-complete", ["Slot 1"])
+    planned = make_module_type("TYPE-SCOPE-PLANNED")
+    unplanned = make_module_type("TYPE-SCOPE-UNPLANNED")
+    with transaction.atomic():
+        scope = lock_module_write(observe_module_write(device_ids=[device.pk])).lock_module_types([planned.pk])
+        scope.require_module_types([planned.pk])
+        with pytest.raises(ValidationError, match="changed"):
+            scope.require_module_types([unplanned.pk])
+        with pytest.raises(RuntimeError, match="complete type set once"):
+            scope.lock_module_types([unplanned.pk])
+        with pytest.raises(RuntimeError, match="complete type set once"):
+            scope.lock_template_type("module_type", planned.pk)

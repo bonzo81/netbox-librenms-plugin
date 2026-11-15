@@ -3170,6 +3170,13 @@ class TestModuleWriterOwnership:
         "MoveModuleView.post",
         "AddBayTemplateView.post",
     }
+    TYPE_GUARDS = {
+        "InstallModuleView.post": "lock_module_types",
+        "InstallBranchView._install_branch": "lock_module_types",
+        "InstallSelectedView.post": "lock_module_types",
+        "ReplaceModuleView.post": "lock_module_types",
+        "AddBayTemplateView.post": "lock_template_type",
+    }
     DOWNSTREAM = {
         "select_for_update",
         "save",
@@ -3218,6 +3225,18 @@ class TestModuleWriterOwnership:
                 failures.append(f"{name}: missing observation")
             if any(call in cls.DOWNSTREAM and node.lineno < lock.lineno for call, node, _parents in calls):
                 failures.append(f"{name}: downstream lock or write precedes owner lock")
+            if type_guard := cls.TYPE_GUARDS.get(name):
+                claims = [(node, parents) for call, node, parents in calls if call == type_guard]
+                if len(claims) != 1:
+                    failures.append(f"{name}: expected one complete type lock")
+                    continue
+                claim, parents = claims[0]
+                if claim.lineno < lock.lineno or any(
+                    isinstance(parent, (ast.For, ast.AsyncFor, ast.While, ast.If)) for parent in parents
+                ):
+                    failures.append(f"{name}: type lock precedes Devices or is conditional or incremental")
+                if any(call in cls.DOWNSTREAM and node.lineno < claim.lineno for call, node, _parents in calls):
+                    failures.append(f"{name}: downstream lock or write precedes type lock")
         return failures
 
     def test_known_writers_take_one_complete_scope_before_downstream_locks(self):
@@ -3255,3 +3274,32 @@ class TestModuleWriterOwnership:
             "        Module().save()\n"
         )
         assert not self._violations(tree, {"writer"})
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "lock_module_write(observe_module_write(device_ids=targets))\nModule().save()",
+            "lock_module_write(observe_module_write(device_ids=targets))\nfor target in targets:\n    scope.lock_module_types([target])\n    Module().save()",
+            "scope.lock_module_types(types)\nlock_module_write(observe_module_write(device_ids=targets))",
+        ],
+        ids=["missing-type", "incremental-types", "types-before-devices"],
+    )
+    def test_guard_rejects_known_type_claim_omissions(self, body):
+        import ast
+        import textwrap
+
+        tree = ast.parse("class InstallSelectedView:\n    def post(self):\n" + textwrap.indent(body, "        "))
+        assert self._violations(tree, {"InstallSelectedView.post"})
+
+    def test_guard_accepts_complete_types_before_the_install_loop(self):
+        import ast
+
+        tree = ast.parse(
+            "class InstallSelectedView:\n"
+            "    def post(self):\n"
+            "        lock_module_write(observe_module_write(device_ids=targets))\n"
+            "        scope.lock_module_types(types)\n"
+            "        for target in targets:\n"
+            "            Module().save()\n"
+        )
+        assert not self._violations(tree, {"InstallSelectedView.post"})

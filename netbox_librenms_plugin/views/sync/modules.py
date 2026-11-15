@@ -1094,11 +1094,12 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                 scope = lock_module_write(
                     observe_module_write(device_ids=[target_device.pk]), incoming=[incoming], rules=serial_rules
                 )
+                target_device = scope.devices[target_device.pk]
+                scope = scope.lock_module_types([module_type.pk])
                 if indexed:
                     granted = _authorize_module_grant(
                         self, page_device, server_key, ACTION_INSTALL_MODULE, request.POST.get("inventory_binding")
                     )
-                target_device = scope.devices[target_device.pk]
                 # Re-fetch bay under lock to prevent TOCTOU race with concurrent installs.
                 locked_bay = (
                     self.restricted_queryset(ModuleBay)
@@ -1193,6 +1194,21 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             messages.error(request, f"Failed to install module: {detail}")
 
         return _modules_action_response(request, page_device, server_key)
+
+
+def _resolve_install_module_type(device, item, module_types, allowed_module_type_ids):
+    """Return the permitted type that both batch planning and the row writer resolve."""
+    from netbox_librenms_plugin.utils import module_type_lookup_candidates, resolve_module_type
+
+    if _never_installable_reason(item):
+        return None
+    matched = resolve_module_type(
+        librenms_text(item.get("entPhysicalModelName")),
+        module_types,
+        manufacturer=device.device_type.manufacturer,
+        fallback_names=module_type_lookup_candidates(item),
+    )
+    return matched if matched is not None and matched.pk in allowed_module_type_ids else None
 
 
 class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreNMSAPIMixin, CacheMixin, View):
@@ -1290,9 +1306,6 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             incoming=[item.get("entPhysicalSerialNum") for item, _target_id in entries],
             rules=granted.policy.serial_identity_rules,
         )
-        granted = _authorize_module_grant(
-            self, page_device, server_key, ACTION_INSTALL_BRANCH, request.POST.get("inventory_binding")
-        )
         targets = scope.devices
 
         # The parent-module walk keeps a row's whole attributed subtree, hidden holders too.
@@ -1301,6 +1314,18 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         # Load module types (with mappings)
         module_types = get_module_types_indexed()
         allowed_module_type_ids = set(self.restricted_queryset(ModuleType).values_list("pk", flat=True))
+        scope = scope.lock_module_types(
+            matched.pk
+            for item, target_id in entries
+            if (
+                matched := _resolve_install_module_type(targets[target_id], item, module_types, allowed_module_type_ids)
+            )
+            is not None
+        )
+
+        granted = _authorize_module_grant(
+            self, page_device, server_key, ACTION_INSTALL_BRANCH, request.POST.get("inventory_binding")
+        )
 
         # Preload all ModuleBayMappings once to avoid N+1 per-item queries.
         # Filter by device manufacturer so vendor-scoped mappings only apply to
@@ -1337,6 +1362,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                         target_device,
                         item,
                         module_types,
+                        write_scope=scope,
                         naming_map=granted.index_map,
                         ancestry_map=member_index_maps[target_device.pk],
                         exact_mappings=policy["exact_mappings"],
@@ -1429,6 +1455,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         item,
         module_types,
         *,
+        write_scope,
         naming_map,
         ancestry_map,
         module_bays,
@@ -1455,6 +1482,7 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             device (Device): The NetBox device that receives the module.
             item (dict): The LibreNMS inventory item to install.
             module_types (dict): The available module types indexed for matching.
+            write_scope: The complete Device and ModuleType claims of the batch.
             naming_map (dict): The rendered inventory items keyed by index, for the bay names.
             ancestry_map (dict): The items keyed by index that the parent-module walk may use.
             module_bays (QuerySet): The module bays available to the caller.
@@ -1477,8 +1505,6 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         """
         from dcim.models import Module
 
-        from netbox_librenms_plugin.utils import module_type_lookup_candidates, resolve_module_type
-
         model_name = librenms_text(item.get("entPhysicalModelName"))
         incoming = item.get("entPhysicalSerialNum")
         name = item.get("entPhysicalName", "") or model_name
@@ -1487,18 +1513,10 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         if refusal := _never_installable_reason(item):
             return {"status": "skipped", "name": name, "reason": refusal}
 
-        # Match module type (direct, then normalization fallback)
-        manufacturer = getattr(getattr(device, "device_type", None), "manufacturer", None)
-        matched_type = resolve_module_type(
-            model_name,
-            module_types,
-            manufacturer=manufacturer,
-            fallback_names=module_type_lookup_candidates(item),
-        )
-        if not matched_type:
+        matched_type = _resolve_install_module_type(device, item, module_types, allowed_module_type_ids)
+        if matched_type is None:
             return {"status": "skipped", "name": name, "reason": "no matching type"}
-        if matched_type.pk not in allowed_module_type_ids:
-            return {"status": "skipped", "name": name, "reason": "no matching type"}
+        write_scope.require_module_types([matched_type.pk])
 
         # Re-fetch module bays (parent install creates new child bays)
         bays = prefetch_module_bay_types(
@@ -2022,6 +2040,13 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                     incoming=[item.get("entPhysicalSerialNum") for item, _target, _pinned in plan],
                     rules=granted.policy.serial_identity_rules,
                 )
+                plan = [(item, scope.devices[target.pk], pinned) for item, target, pinned in plan]
+                scope = scope.lock_module_types(
+                    matched.pk
+                    for item, target, _pinned in plan
+                    if (matched := _resolve_install_module_type(target, item, module_types, allowed_module_type_ids))
+                    is not None
+                )
                 granted = _authorize_module_grant(
                     self, page_device, server_key, ACTION_INSTALL_SELECTED, request.POST.get("inventory_binding")
                 )
@@ -2049,6 +2074,7 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
                         target_device,
                         item,
                         module_types,
+                        write_scope=scope,
                         naming_map=granted.index_map,
                         ancestry_map=(pinned_maps if pinned else manifest_maps)[target_device.pk],
                         exact_mappings=exact_mappings,
@@ -2982,9 +3008,6 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                     incoming=[incoming],
                     rules=serial_rules,
                 )
-                granted = _authorize_module_grant(
-                    self, page_device, server_key, ACTION_REPLACE_MODULE, request.POST.get("inventory_binding")
-                )
                 target_device = scope.devices[target_device.pk]
                 manufacturer = target_device.device_type.manufacturer
                 matched_type = resolve_module_type(
@@ -2996,6 +3019,10 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 if not matched_type or not self.restricted_queryset(ModuleType).filter(pk=matched_type.pk).exists():
                     raise _ModuleActionRefused(f"No matching module type found for '{model_name}'.")
 
+                scope = scope.lock_module_types([matched_type.pk])
+                granted = _authorize_module_grant(
+                    self, page_device, server_key, ACTION_REPLACE_MODULE, request.POST.get("inventory_binding")
+                )
                 # Re-fetch with row lock to prevent concurrent modifications
                 installed_module = (
                     self.restricted_queryset(Module, "change")
@@ -3823,7 +3850,7 @@ class AddBayTemplateView(
         try:
             mapping_created = False
             instantiated_count = 0
-            with transaction.atomic():
+            with atomic_with_events():
                 from dcim.models import Module
 
                 if target_kind == "device_type":
@@ -3833,6 +3860,7 @@ class AddBayTemplateView(
                     instances = list(Module.objects.filter(module_type=target).order_by("pk"))
                     observation = observe_module_write(module_ids=[instance.pk for instance in instances])
                 scope = lock_module_write(observation)
+                scope = scope.lock_template_type(target_kind, target.pk)
                 if target_kind == "device_type":
                     current = list(Device.objects.filter(device_type=target).order_by("pk"))
                 else:
@@ -3845,6 +3873,17 @@ class AddBayTemplateView(
                 bay_template = ModuleBayTemplate(**kwargs)
                 bay_template.full_clean()
                 bay_template.save()
+                # Query after save: a non-participating writer may have committed a new instance.
+                if target_kind == "device_type":
+                    current = list(Device.objects.filter(device_type=target).order_by("pk"))
+                else:
+                    current = list(Module.objects.filter(module_type=target).select_related("device").order_by("pk"))
+                scope.require_devices(
+                    [instance.pk if target_kind == "device_type" else instance.device_id for instance in current]
+                )
+                scope.validate()
+                if [instance.pk for instance in current] != [instance.pk for instance in instances]:
+                    raise ValidationError("The bay template instances changed. Refresh Modules and try again.")
                 instantiated_count = self._instantiate_template_on_existing(bay_template, target_kind, current)
                 if will_add_mapping:
                     mapping = ModuleBayMapping(

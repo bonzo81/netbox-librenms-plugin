@@ -1,11 +1,13 @@
 """Serialize participating plugin module writers through their complete Device scope.
 
 Claim hardware identities once, then lock every Device in pk order, then validate
-membership and topology before Module, bay or component row locks. Native NetBox
-forms, API jobs and other plugins do not participate in this protocol.
+membership and topology before Module, bay or component row locks. Module creators
+then claim their complete ModuleType set with shared advisory locks. Template writers
+claim their type exclusively and recheck membership before materialization. Native
+NetBox forms, API jobs and other plugins do not participate in this protocol.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from dcim.models import Device, Module, ModuleBay
 from django.core.exceptions import ValidationError
@@ -24,6 +26,26 @@ def _topology(device_ids):
         ModuleBay.objects.filter(device_id__in=device_ids).order_by("pk").values_list("pk", "device_id", "module_id")
     )
     return modules, bays
+
+
+def template_type_lock_key(target_kind, target_pk):
+    """Return the one advisory key shared by creation and bay-template materialization."""
+    from netbox_librenms_plugin.utils import advisory_lock_key
+
+    if target_kind not in {"device_type", "module_type"}:
+        raise ValueError("Unknown module bay template target kind.")
+    return advisory_lock_key(f"netbox-librenms-plugin:module-template:{target_kind}:{target_pk}")
+
+
+def _lock_template_types(type_keys, *, shared):
+    """Lock one complete type set after Devices, without relying on deferred native FKs."""
+    if not connection.in_atomic_block:
+        raise RuntimeError("A module write requires an open transaction.")
+    keys = sorted({template_type_lock_key(kind, pk) for kind, pk in type_keys})
+    statement = "SELECT pg_advisory_xact_lock_shared(%s)" if shared else "SELECT pg_advisory_xact_lock(%s)"
+    with connection.cursor() as cursor:
+        for key in keys:
+            cursor.execute(statement, [key])
 
 
 @dataclass(frozen=True)
@@ -64,6 +86,33 @@ class LockedModuleWrite:
 
     observation: ModuleWriteObservation
     devices: dict
+    module_type_ids: frozenset = frozenset()
+    types_locked: bool = False
+
+    def lock_module_types(self, module_type_ids):
+        """Claim every type a creation batch can use before its first downstream row lock."""
+        self._require_type_phase()
+        module_type_ids = frozenset(module_type_ids)
+        _lock_template_types((("module_type", pk) for pk in module_type_ids), shared=True)
+        self.validate()
+        return replace(self, module_type_ids=module_type_ids, types_locked=True)
+
+    def lock_template_type(self, target_kind, target_pk):
+        """Exclude participating creation while a template rechecks and materializes its instances."""
+        self._require_type_phase()
+        _lock_template_types([(target_kind, target_pk)], shared=False)
+        self.validate()
+        return replace(self, types_locked=True)
+
+    def _require_type_phase(self):
+        if self.types_locked:
+            raise RuntimeError("A module write must claim its complete type set once.")
+        self.validate()
+
+    def require_module_types(self, module_type_ids):
+        """Refuse a type resolved after planning instead of expanding the type lock set in place."""
+        if not self.types_locked or not set(module_type_ids).issubset(self.module_type_ids):
+            raise ValidationError(_CHANGED)
 
     def require_devices(self, device_ids):
         """Refuse an unplanned owner before any newly discovered Module is locked."""

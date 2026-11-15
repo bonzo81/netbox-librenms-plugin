@@ -58,6 +58,7 @@ class TestInstallSerialRulePreloading:
 
         from dcim.models import Interface, ModuleBay
 
+        from netbox_librenms_plugin.module_writes import lock_module_write, observe_module_write
         from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
         from netbox_librenms_plugin.views.sync.modules import InstallBranchView, _module_component_specs
 
@@ -73,6 +74,11 @@ class TestInstallSerialRulePreloading:
         ]
         index_map = {item["entPhysicalIndex"]: item for item in items}
         remaining = list(bays)
+        scope = lock_module_write(
+            observe_module_write(device_ids=[device.pk]),
+            incoming=[item["entPhysicalSerialNum"] for item in items],
+            rules=kwargs.get("serial_rules"),
+        ).lock_module_types([module_type.pk])
         with (
             patch.object(InstallBranchView, "_find_parent_module_id", return_value=None),
             patch.object(BaseModuleTableView, "_match_bay_for_item", side_effect=lambda *a, **kw: remaining.pop(0)),
@@ -82,6 +88,7 @@ class TestInstallSerialRulePreloading:
                     device,
                     item,
                     {module_type.model: module_type},
+                    write_scope=scope,
                     naming_map=index_map,
                     ancestry_map=index_map,
                     module_bays=ModuleBay.objects.all(),
@@ -238,12 +245,17 @@ def _run_install_single(device, item, index_map, module_types):
     """Run the shared installer against unrestricted real model querysets."""
     from dcim.models import Interface, ModuleBay
 
+    from netbox_librenms_plugin.module_writes import lock_module_write, observe_module_write
     from netbox_librenms_plugin.views.sync.modules import InstallBranchView, _module_component_specs
 
+    scope = lock_module_write(
+        observe_module_write(device_ids=[device.pk]), incoming=[item.get("entPhysicalSerialNum")]
+    ).lock_module_types(module_type.pk for module_type in module_types.values())
     return InstallBranchView._install_single(
         device,
         item,
         module_types,
+        write_scope=scope,
         naming_map=index_map,
         ancestry_map=index_map,
         module_bays=ModuleBay.objects.all(),
@@ -4128,18 +4140,32 @@ def _backends_blocked_by(observer, holder_pid):
 
 
 @pytest.mark.django_db(transaction=True)
-@pytest.mark.parametrize("change", ["device-serial", "rule-added"])
-@pytest.mark.parametrize("writer", ["install", "selected", "branch"])
-def test_a_writer_waiting_for_the_owner_lock_refuses_a_change_committed_during_the_wait(client, writer, change):
-    """Another session holds the Device owner lock; a change commits while the writer waits, so the writer refuses it."""
+@pytest.mark.parametrize(
+    "writer, lock_phase, change",
+    [
+        (writer, "owner", change)
+        for writer in ("install", "selected", "branch")
+        for change in ("device-serial", "rule-added")
+    ]
+    + [
+        (writer, "type", change)
+        for writer in ("install", "selected", "branch", "replace")
+        for change in ("rule-added", "serial-rule-added")
+    ],
+)
+def test_a_writer_waiting_for_its_write_locks_refuses_a_change_committed_during_the_wait(
+    client, writer, lock_phase, change
+):
+    """The final grant check follows both Device and type waits before any write."""
     import time
 
     from dcim.models import Module
     from django.core.cache import cache
     from django.db import close_old_connections
 
-    from netbox_librenms_plugin.models import InventoryIgnoreRule
+    from netbox_librenms_plugin.models import InventoryIgnoreRule, NormalizationRule
     from netbox_librenms_plugin.module_grants import GrantRefusal
+    from netbox_librenms_plugin.module_writes import template_type_lock_key
     from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type, make_superuser
     from netbox_librenms_plugin.tests.view_test_helpers import render_module_tab, rendered_module_form
     from netbox_librenms_plugin.views.mixins import CacheMixin
@@ -4171,6 +4197,13 @@ def test_a_writer_waiting_for_the_owner_lock_refuses_a_change_committed_during_t
             "entPhysicalSerialNum": "SN-CARD",
         },
     ]
+    user = make_superuser(f"lock-wait-{writer}-{change}")
+    client.force_login(user)
+    if writer == "replace":
+        Module.objects.create(
+            device=page, module_bay=page.modulebays.get(name="Carrier"), module_type=carrier, serial="OLD-CARRIER"
+        )
+    before = tuple(Module.objects.filter(device=page).values_list("pk", "serial"))
     key = CacheMixin().get_cache_key(page, "inventory", "default")
     cache.set(key, trusted_module_inventory_payload(page, rows))
     content = render_module_tab(page)
@@ -4178,10 +4211,12 @@ def test_a_writer_waiting_for_the_owner_lock_refuses_a_change_committed_during_t
         action, fields = rendered_module_form(content, "install-module", 2)
     elif writer == "branch":
         action, fields = rendered_module_form(content, "install-branch", 2)
+    elif writer == "replace":
+        preview = client.get(rendered_preview_url(content, 2))
+        action, fields = rendered_module_form(preview.content.decode(), "replace-module", 2)
     else:
         action, fields = rendered_module_form(content, "install-selected")
         fields = {**fields, "select": ["2"]}
-    user = make_superuser(f"lock-wait-{writer}-{change}")
 
     def post_while_the_lock_is_held():
         close_old_connections()
@@ -4194,21 +4229,25 @@ def test_a_writer_waiting_for_the_owner_lock_refuses_a_change_committed_during_t
     try:
         with second_connection() as holder, second_connection() as observer, bounded_executor(1) as executor:
             with holder.cursor() as cursor:
-                cursor.execute(
-                    'SELECT id FROM "dcim_device" WHERE id = %s FOR NO KEY UPDATE',
-                    [page.pk],
-                )
+                if lock_phase == "owner":
+                    cursor.execute('SELECT id FROM "dcim_device" WHERE id = %s FOR NO KEY UPDATE', [page.pk])
+                else:
+                    cursor.execute(
+                        "SELECT pg_advisory_xact_lock(%s)", [template_type_lock_key("module_type", carrier.pk)]
+                    )
                 cursor.execute("SELECT pg_backend_pid()")
                 holder_pid = cursor.fetchone()[0]
             posted = executor.submit(post_while_the_lock_is_held)
             deadline = time.monotonic() + 5
             while not _backends_blocked_by(observer, holder_pid):
-                assert time.monotonic() < deadline, "the writer never waited for the Device owner lock"
+                assert time.monotonic() < deadline, "the writer never waited for its write lock"
                 time.sleep(0.02)
             # The change commits while the writer waits; this connection is in autocommit.
             if change == "device-serial":
                 with holder.cursor() as cursor:
                     cursor.execute('UPDATE "dcim_device" SET serial = %s WHERE id = %s', ["LOCK-WAIT-CHANGED", page.pk])
+            elif change == "serial-rule-added":
+                NormalizationRule.objects.create(scope="serial", match_pattern=r"^SN-(.+)$", replacement=r"\1")
             else:
                 InventoryIgnoreRule.objects.create(
                     name="Lock wait rule", match_type="contains", pattern="no-such-entity", action="skip"
@@ -4220,7 +4259,7 @@ def test_a_writer_waiting_for_the_owner_lock_refuses_a_change_committed_during_t
 
     assert response.status_code == 302
     assert [str(message) for message in response.wsgi_request._messages] == [GrantRefusal.POLICY.message]
-    assert not Module.objects.filter(device=page).exists()
+    assert tuple(Module.objects.filter(device=page).values_list("pk", "serial")) == before
 
 
 @pytest.mark.django_db(transaction=True)
