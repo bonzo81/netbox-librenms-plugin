@@ -299,6 +299,43 @@ class TestBulkImportIntegration:
         assert imported.serial == "TEST-SERIAL-81"
         assert stored_mapping_for_test(imported)["default"] == 81
 
+    def test_a_later_import_row_sees_the_serial_created_earlier_in_its_batch(self, live_librenms):
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        prerequisites = self._prerequisites()
+        NormalizationRule.objects.filter(scope="serial").delete()
+        NormalizationRule.objects.create(scope="serial", match_pattern=r"^PREFIX(KEY-.+)$", replacement=r"\1")
+        rows = {
+            device_id: _libre_device(
+                device_id,
+                f"live-serial-batch-{device_id}",
+                serial=serial,
+                hardware=prerequisites["hardware"],
+                location=prerequisites["location"],
+            )
+            for device_id, serial in [(781, "PREFIXKEY-LIVE"), (782, "KEY-LIVE")]
+        }
+        for row in rows.values():
+            _register_device(live_librenms, row)
+
+        result = bulk_import_devices(
+            list(rows),
+            server_key="default",
+            manual_mappings_per_device={device_id: prerequisites for device_id in rows},
+            libre_devices_cache=rows,
+            user=make_superuser("live-serial-batch-user"),
+        )
+
+        assert result["failed"] == []
+        assert [row["device_id"] for row in result["success"]] == [781]
+        assert [row["device_id"] for row in result["skipped"]] == [782]
+        assert list(Device.objects.filter(name__startswith="live-serial-batch-").values_list("serial", flat=True)) == [
+            "PREFIXKEY-LIVE"
+        ]
+
     def test_a_batch_reuses_its_serial_rules_and_the_next_batch_sees_a_change(self, live_librenms):
         from dcim.models import Device, DeviceRole, DeviceType, Site
         from django.db import connection
@@ -598,9 +635,135 @@ class TestRefreshStateHelpers:
 
 
 class TestProcessDeviceFilters:
-    def test_live_list_is_validated_cached_and_reused(self, live_librenms):
-        from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
+    @pytest.mark.parametrize("unmatched_count", [2, 8])
+    @pytest.mark.parametrize("rewrite", [False, True], ids=["indexed", "rewritten"])
+    def test_serial_filter_batch_loads_each_unrelated_candidate_at_most_once(
+        self, live_librenms, monkeypatch, unmatched_count, rewrite
+    ):
+        from collections import Counter
 
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.filter(scope="serial").delete()
+        if rewrite:
+            NormalizationRule.objects.create(scope="serial", match_pattern=r"^PREFIX(KEY-.+)$", replacement=r"\1")
+        candidates = [
+            make_device(f"filter-serial-candidate-{index}", serial=f"UNRELATED-{index}") for index in range(12)
+        ]
+        holder = make_device("filter-serial-rewrite-holder", serial="PREFIXKEY-MATCH" if rewrite else "KEY-MATCH")
+        rows = [
+            _libre_device(6900 + index, f"filter-serial-incoming-{index}", serial=f"MISSING-{index}")
+            for index in range(unmatched_count)
+        ]
+        rows.append(_libre_device(6999, "filter-serial-incoming-match", serial="KEY-MATCH"))
+        for row in rows:
+            _register_device(live_librenms, row)
+        live_librenms.server.register("/api/v0/devices", {"status": "ok", "devices": rows})
+        candidate_pks = {device.pk for device in candidates}
+        visits = Counter()
+        from_db = Device.from_db
+
+        def count_candidate_loads(cls, db, field_names, values, **kwargs):
+            device = from_db(db, field_names, values, **kwargs)
+            if device.pk in candidate_pks:
+                visits[device.pk] += 1
+            return device
+
+        monkeypatch.setattr(Device, "from_db", classmethod(count_candidate_loads))
+
+        validated = process_device_filters(
+            live_librenms.api, {}, vc_detection_enabled=False, clear_cache=True, show_disabled=True
+        )
+
+        assert all(row["_validation"]["existing_device"] is None for row in validated[:-1])
+        assert validated[-1]["_validation"]["existing_device"].pk == holder.pk
+        assert sum(visits.values()) <= len(candidates), dict(visits)
+        if not rewrite:
+            assert not visits
+        visits.clear()
+
+        cached = process_device_filters(
+            live_librenms.api, {}, vc_detection_enabled=False, clear_cache=False, show_disabled=True
+        )
+
+        assert len(cached) == len(validated)
+        assert sum(visits.values()) <= len(candidates), dict(visits)
+        if not rewrite:
+            assert not visits
+
+    @pytest.mark.parametrize("context", ["holder", "vc_master"])
+    def test_serial_filter_uses_each_holders_manufacturer_context(self, live_librenms, context):
+        from dcim.models import DeviceType, Manufacturer, VirtualChassis
+
+        from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.filter(scope="serial").delete()
+        manufacturer = Manufacturer.objects.create(name="Serial Context Maker", slug="serial-context-maker")
+        device_type = DeviceType.objects.create(
+            manufacturer=manufacturer, model="Serial Context", slug="serial-context"
+        )
+        NormalizationRule.objects.create(
+            scope="serial", manufacturer=manufacturer, match_pattern=r"^PREFIX(KEY-.+)$", replacement=r"\1"
+        )
+        holder = make_device("filter-context-holder", serial="PREFIXKEY-CONTEXT")
+        if context == "holder":
+            holder.device_type = device_type
+            holder.save(update_fields=["device_type"])
+        else:
+            master = make_device("filter-context-master", serial="MASTER-CONTEXT")
+            master.device_type = device_type
+            master.save(update_fields=["device_type"])
+            chassis = VirtualChassis.objects.create(name="Filter serial context", master=master)
+            for position, device in enumerate([master, holder], 1):
+                device.virtual_chassis = chassis
+                device.vc_position = position
+                device.save()
+        row = _libre_device(791, "filter-context-incoming", serial="KEY-CONTEXT")
+        _register_device(live_librenms, row)
+        live_librenms.server.register("/api/v0/devices", {"status": "ok", "devices": [row]})
+
+        (validated,) = process_device_filters(
+            live_librenms.api, {}, vc_detection_enabled=False, clear_cache=True, show_disabled=True
+        )
+
+        assert validated["_validation"]["existing_device"].pk == holder.pk
+        assert validated["_validation"]["existing_match_type"] == "serial"
+
+    def test_serial_filter_applies_its_duplicate_limit_after_excluding_the_named_holder(self, live_librenms):
+        from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.filter(scope="serial").delete()
+        NormalizationRule.objects.create(scope="serial", match_pattern=r"^PREFIX(KEY-.+)$", replacement=r"\1")
+        named = make_device("filter-serial-named", serial="PREFIXKEY-DUPLICATE")
+        make_device("filter-serial-first-peer", serial="PREFIXKEY-DUPLICATE")
+        make_device("filter-serial-second-peer", serial="KEY-DUPLICATE")
+        row = _libre_device(792, named.name, serial="KEY-DUPLICATE")
+        _register_device(live_librenms, row)
+        live_librenms.server.register("/api/v0/devices", {"status": "ok", "devices": [row]})
+
+        (validated,) = process_device_filters(
+            live_librenms.api, {}, vc_detection_enabled=False, clear_cache=True, show_disabled=True
+        )
+
+        assert validated["_validation"]["existing_device"].pk == named.pk
+        assert validated["_validation"]["merge_candidates"] is None
+        assert any(
+            "Multiple NetBox devices share serial" in warning for warning in validated["_validation"]["warnings"]
+        )
+
+    def test_live_list_is_validated_cached_and_reused(self, live_librenms, monkeypatch):
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.create(scope="serial", match_pattern=r"^PREFIX(KEY-.+)$", replacement=r"\1")
+        unrelated = make_device("filter-cached-unrelated", serial="UNRELATED-CACHED")
         live_librenms.api.cache_timeout = 300
         existing = make_device("filter-existing")
         seed_mapping(existing, "default", own=131)
@@ -622,6 +785,16 @@ class TestProcessDeviceFilters:
             return_cache_status=True,
         )
         request_count = len(live_librenms.server.requests)
+        visits = []
+        from_db = Device.from_db
+
+        def count_candidate_loads(cls, db, field_names, values, **kwargs):
+            device = from_db(db, field_names, values, **kwargs)
+            if device.pk == unrelated.pk:
+                visits.append(device.pk)
+            return device
+
+        monkeypatch.setattr(Device, "from_db", classmethod(count_candidate_loads))
         second, second_from_cache = process_device_filters(
             live_librenms.api,
             filters,
@@ -636,6 +809,7 @@ class TestProcessDeviceFilters:
         assert first[0]["_validation"]["existing_device"] == existing
         assert second[0]["_validation"]["existing_device"] == existing
         assert len(live_librenms.server.requests) == request_count
+        assert not visits
 
     def test_disabled_rows_are_removed_before_validation(self, live_librenms):
         from netbox_librenms_plugin.import_utils.bulk_import import process_device_filters

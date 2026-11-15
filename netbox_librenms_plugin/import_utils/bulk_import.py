@@ -876,7 +876,9 @@ def _reassert_new_import_blockers(validation: dict) -> None:
                 validation["issues"].append(msg)
 
 
-def _refresh_existing_device(validation: dict, libre_device: dict = None, server_key: str = "default") -> None:  # noqa: C901
+def _refresh_existing_device(  # noqa: C901
+    validation: dict, libre_device: dict = None, server_key: str = "default", *, serial_lookup=None
+) -> None:
     """
     Refresh existing_device from DB to pick up changes made in NetBox since caching.
 
@@ -887,8 +889,11 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
         validation (dict): The cached validation state, mutated in place.
         libre_device (dict | None): The LibreNMS device data used to re-evaluate the match.
         server_key (str): The active LibreNMS server key.
+        serial_lookup: Read-only batch lookup, or None for current database holders.
 
     """
+    if serial_lookup is None:
+        serial_lookup = devices_with_serial
     existing = validation.get("existing_device")
     if existing and hasattr(existing, "pk"):
         try:
@@ -1197,7 +1202,7 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             if not import_as_vm:
                 serial = normalize_serial(libre_device.get("serial"))
                 if normalize_stack_serial(serial):
-                    serial_matches = devices_with_serial(serial)
+                    serial_matches = serial_lookup(serial)
                     if len(serial_matches) > 1:
                         ambiguous_fallback = True
                     elif serial_matches:
@@ -1446,6 +1451,7 @@ def process_device_filters(  # noqa: C901
     total = len(libre_devices)
     serial_lookup = DeviceSerialLookup()
     serial_key_for = serial_lookup.key_for
+    batch_serial_lookup = serial_lookup.prefetch(normalize_serial(device.get("serial")) for device in libre_devices)
     candidate_keys = functools.cache(candidate_vc_serial_keys)
     # Always pass api so validate_device_for_import can run hardware/chassis lookups.
     # vc_detection_enabled only gates VC-specific paths inside that function.
@@ -1488,7 +1494,12 @@ def process_device_filters(  # noqa: C901
 
                 # Refresh existing_device from DB to avoid stale data
                 # (user may have changed role, name, etc. in NetBox)
-                _refresh_existing_device(device["_validation"], libre_device=device, server_key=api.server_key)
+                _refresh_existing_device(
+                    device["_validation"],
+                    libre_device=device,
+                    server_key=api.server_key,
+                    serial_lookup=batch_serial_lookup,
+                )
 
                 # Apply exclude_existing filter if enabled
                 if exclude_existing:
@@ -1509,7 +1520,7 @@ def process_device_filters(  # noqa: C901
             use_sysname=use_sysname,
             strip_domain=strip_domain,
             serial_key_for=serial_key_for,
-            serial_lookup=serial_lookup,
+            serial_lookup=batch_serial_lookup,
             candidate_keys=candidate_keys,
         )
 

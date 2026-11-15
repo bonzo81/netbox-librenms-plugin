@@ -1,6 +1,7 @@
 """Virtual chassis detection, creation, and management."""
 
 import functools
+import heapq
 import logging
 import re
 from typing import List, NamedTuple
@@ -290,6 +291,60 @@ class DeviceSerialLookup:
 
     def __call__(self, serial, *, exclude_pk=None, limit=2):
         return devices_with_serial(serial, exclude_pk=exclude_pk, limit=limit, preloaded_rules=self.rules)
+
+    def prefetch(self, serials):
+        """Return a lazy read-only lookup for these serials.
+
+        Regex rules need one candidate scan, using each holder's own or chassis-master context.
+        Aliases share ordered holder lists. Without rules, keep the indexed lookup. Writers keep
+        the live lookup, so earlier creates remain visible.
+        """
+        if not any(self.rules.values()):
+            return self
+        requested = dict.fromkeys(serials)
+
+        @functools.cache
+        def index():
+            contexts = {}
+            if not any(normalize_stack_serial(serial) for serial in requested):
+                return contexts
+            candidates = Device.objects.select_related(
+                "device_type__manufacturer", "virtual_chassis__master__device_type__manufacturer"
+            ).order_by("pk")
+            for device in candidates.iterator(chunk_size=2000):
+                chassis = device.virtual_chassis
+                owner = chassis.master if chassis is not None and chassis.master is not None else device
+                manufacturer = owner.device_type.manufacturer
+                if manufacturer.pk not in contexts:
+                    key = self.key_for(manufacturer)
+                    incoming = {serial: key(serial) for serial in requested}
+                    holders = {value: [] for value in incoming.values() if value}
+                    contexts[manufacturer.pk] = key, incoming, holders
+                key, _incoming, holders = contexts[manufacturer.pk]
+                stored = key(device.serial)
+                if stored in holders:
+                    holders[stored].append(device)
+            return contexts
+
+        def lookup(serial, *, exclude_pk=None, limit=2):
+            if serial not in requested:
+                raise KeyError(serial)
+            if exclude_pk is not None:
+                exclude_pk = Device._meta.pk.to_python(exclude_pk)
+            ordered = heapq.merge(
+                *(holders.get(incoming[serial], ()) for _key, incoming, holders in index().values()),
+                key=lambda device: device.pk,
+            )
+            matches = []
+            for device in ordered:
+                if device.pk == exclude_pk:
+                    continue
+                matches.append(device)
+                if limit is not None and len(matches) >= limit:
+                    break
+            return matches
+
+        return lookup
 
 
 def _serial_lookup_rules():
