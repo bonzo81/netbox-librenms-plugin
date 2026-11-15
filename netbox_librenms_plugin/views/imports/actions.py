@@ -69,6 +69,7 @@ from netbox_librenms_plugin.import_utils.virtual_chassis import (
     candidate_vc_serial_keys,
     chassis_serial_key,
     devices_with_serial,
+    device_serial_lookup,
     serials_match,
     vc_master_view,
     vc_serial_key,
@@ -1186,6 +1187,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         seen_ids = set()
         cache_expired_count = 0
         serial_key_for = functools.cache(vc_serial_key)
+        serial_lookup = device_serial_lookup()
         candidate_keys = functools.cache(candidate_vc_serial_keys)
 
         for raw_device_id in device_ids:
@@ -1228,6 +1230,7 @@ class BulkImportConfirmView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
                 # detect VC membership so stack members are visible before import.
                 include_vc_detection=True,
                 serial_key_for=serial_key_for,
+                serial_lookup=serial_lookup,
                 candidate_keys=candidate_keys,
             )
             # Mark validation with VC detection flag for proper URL generation in table

@@ -51,6 +51,7 @@ from .virtual_chassis import (
     candidate_vc_serial_keys,
     create_virtual_chassis_with_members,
     devices_with_serial,
+    device_serial_lookup,
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
     identify_vc_master,
@@ -454,6 +455,7 @@ def bulk_import_devices_shared(  # noqa: C901
     # match doesn't re-query it for every device in the loop (issue #90 / N+1 avoidance, #92).
     device_type_norm_rules = preload_normalization_rules("device_type")
     serial_key_for = functools.cache(vc_serial_key)
+    serial_lookup = device_serial_lookup()
     candidate_keys = functools.cache(candidate_vc_serial_keys)
 
     for idx, device_id in enumerate(device_ids, start=1):
@@ -516,6 +518,7 @@ def bulk_import_devices_shared(  # noqa: C901
                 include_vc_detection=True,
                 preloaded_device_type_rules=device_type_norm_rules,
                 serial_key_for=serial_key_for,
+                serial_lookup=serial_lookup,
                 candidate_keys=candidate_keys,
             )
 
@@ -1442,6 +1445,7 @@ def process_device_filters(  # noqa: C901
     validated_devices = []
     total = len(libre_devices)
     serial_key_for = functools.cache(vc_serial_key)
+    serial_lookup = device_serial_lookup()
     candidate_keys = functools.cache(candidate_vc_serial_keys)
     # Always pass api so validate_device_for_import can run hardware/chassis lookups.
     # vc_detection_enabled only gates VC-specific paths inside that function.
@@ -1505,6 +1509,7 @@ def process_device_filters(  # noqa: C901
             use_sysname=use_sysname,
             strip_domain=strip_domain,
             serial_key_for=serial_key_for,
+            serial_lookup=serial_lookup,
             candidate_keys=candidate_keys,
         )
 
