@@ -685,7 +685,9 @@ def module_assignment(module, incoming, *, rules: SerialRules) -> Assignment:
     value = stored_form(incoming, Module)
     if _text(module.serial) == value:
         return Assignment(None)
-    conflict = resolve_module(incoming, rules=rules, device_ids=[device.pk], exclude_pks=[module.pk], lock=True)
+    # The Device lock serializes its module writers. A conflict only refuses this write,
+    # so it must not wait for a Module held by a writer that is waiting for this Device.
+    conflict = resolve_module(incoming, rules=rules, device_ids=[device.pk], exclude_pks=[module.pk])
     if conflict.kind in REFUSING:
         return Assignment(None, conflict)
     return Assignment(value)

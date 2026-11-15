@@ -50,7 +50,12 @@ def test_a_locked_serial_lookup_does_not_wait_for_an_unrelated_candidate():
 
 
 @transactional_db_with_all_apps()
-def test_distinct_module_serial_updates_do_not_lock_each_others_candidates():
+@pytest.mark.parametrize(
+    ("stored", "incoming", "first_refused"),
+    [(("S/N ABC", "XABC"), ("ABC", "S/N XABC"), False), (("AAA", "BBB"), ("BBB", "CCC"), True)],
+    ids=["substring-candidate", "confirmed-conflict"],
+)
+def test_module_serial_updates_resolve_conflicts_without_a_lock_cycle(stored, incoming, first_refused):
     from threading import Event
 
     from dcim.models import Module
@@ -65,8 +70,8 @@ def test_distinct_module_serial_updates_do_not_lock_each_others_candidates():
 
     _seeded_rule()
     device = make_device_with_module_bays("serial-candidate-locks", ["Slot 1", "Slot 2"])
-    first = install_module(device, "Slot 1", "CANDIDATE-CARD-1", serial="S/N ABC")
-    second = install_module(device, "Slot 2", "CANDIDATE-CARD-2", serial="XABC")
+    first = install_module(device, "Slot 1", "CANDIDATE-CARD-1", serial=stored[0])
+    second = install_module(device, "Slot 2", "CANDIDATE-CARD-2", serial=stored[1])
     device_locked, second_locked = Event(), Event()
 
     def assign(module_pk, incoming, first_writer):
@@ -84,6 +89,9 @@ def test_distinct_module_serial_updates_do_not_lock_each_others_candidates():
                     assert device_locked.wait(timeout=10)
                     second_locked.set()
                 assignment = module_assignment(module, incoming, rules=rules)
+                if first_writer and first_refused:
+                    assert assignment.conflict is not None
+                    return "refused"
                 assert assignment.conflict is None
                 module.serial = assignment.value
                 module.save(update_fields=["serial"])
@@ -92,11 +100,11 @@ def test_distinct_module_serial_updates_do_not_lock_each_others_candidates():
             connection.close()
 
     assert run_in_threads(
-        partial(assign, first.pk, "ABC", True),
-        partial(assign, second.pk, "S/N XABC", False),
+        partial(assign, first.pk, incoming[0], True),
+        partial(assign, second.pk, incoming[1], False),
         barriers=(),
         timeout=30,
-    ) == ["ABC", "S/N XABC"]
+    ) == ["refused" if first_refused else incoming[0], incoming[1]]
 
 
 @transactional_db_with_all_apps()

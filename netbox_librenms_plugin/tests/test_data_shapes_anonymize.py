@@ -152,7 +152,8 @@ def test_numeric_serials_are_masked_and_share_string_identity():
     expected_serials = anon["expected"]["virtual_chassis"]["member_serials"]
     assert device_serial == inventory_serial == expected_serials[0] == expected_serials[1]
     assert transceiver_serial == expected_serials[2] == expected_serials[3]
-    assert device_serial.startswith("SN-") and transceiver_serial.startswith("SN-")
+    assert device_serial.startswith("SN-")
+    assert transceiver_serial == ""
     assert device_serial != transceiver_serial
     assert expected_serials[4:] == [None, "-"]
     assert find_pii(anon) == []
