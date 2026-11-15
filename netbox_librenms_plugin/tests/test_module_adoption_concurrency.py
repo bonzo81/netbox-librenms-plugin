@@ -14,8 +14,8 @@ pytestmark = pytest.mark.django_db(
 )
 
 
-def test_concurrent_hidden_interface_is_not_adopted(monkeypatch):
-    """Authorize the interface that Module.save adopts after its internal lookup."""
+def test_concurrent_hidden_interface_is_not_adopted():
+    """A hidden interface committed before Device ownership must not be adopted."""
     from dcim.models import Device, Interface, InterfaceTemplate, Module, ModuleBay, ModuleType
     from django.contrib.auth import get_user_model
     from django.db import close_old_connections, connection, transaction
@@ -49,16 +49,12 @@ def test_concurrent_hidden_interface_is_not_adopted(monkeypatch):
     user = grant(user, "change", Interface, constraints={"pk": allowed.pk})
     install_ready = Event()
     winner_committed = Event()
-    original_full_clean = Module.full_clean
 
-    def pause_before_save(module, *args, **kwargs):
-        result = original_full_clean(module, *args, **kwargs)
-        if module.device_id == device.pk and module.module_bay_id == bay.pk and module.pk is None:
+    def pause_before_owner_lock(execute, sql, params, many, context):
+        if '"dcim_device"' in sql and "FOR NO KEY UPDATE" in sql and not install_ready.is_set():
             install_ready.set()
             assert winner_committed.wait(5), "test did not commit the competing interface"
-        return result
-
-    monkeypatch.setattr(Module, "full_clean", pause_before_save)
+        return execute(sql, params, many, context)
 
     def install_module():
         close_old_connections()
@@ -80,7 +76,8 @@ def test_concurrent_hidden_interface_is_not_adopted(monkeypatch):
             view = InstallModuleView()
             view._librenms_api = SimpleNamespace(server_key="default")
             view.setup(request, pk=thread_device.pk)
-            return view.post(request, pk=thread_device.pk)
+            with connection.execute_wrapper(pause_before_owner_lock):
+                return view.post(request, pk=thread_device.pk)
         finally:
             close_old_connections()
 

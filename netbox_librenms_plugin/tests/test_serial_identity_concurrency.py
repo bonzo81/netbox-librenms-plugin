@@ -116,10 +116,11 @@ def test_opposite_module_relocations_lock_the_device_pair_in_one_order():
 
     from netbox_librenms_plugin.serial_identity import (
         SerialRules,
-        assignment_lock,
         module_subtree_serials,
         relocation_conflict,
     )
+
+    from netbox_librenms_plugin.module_writes import lock_module_write, observe_module_write
 
     first = make_device_with_module_bays("opposite-move-first", ["Slot 1"])
     second = make_device_with_module_bays("opposite-move-second", ["Slot 1"])
@@ -147,11 +148,12 @@ def test_opposite_module_relocations_lock_the_device_pair_in_one_order():
             rules = SerialRules.load()
             moving = module_subtree_serials(modules[index].pk)
             with transaction.atomic(), connection.execute_wrapper(observe_device_lock):
-                assignment_lock([serial for _pk, serial in moving], model=Module, rules=rules)
-                module = Module.objects.select_for_update().get(pk=modules[index].pk)
                 target = Device.objects.get(pk=(second if index == 0 else first).pk)
+                observed = observe_module_write(device_ids=[target.pk], subtree_roots=[modules[index].pk])
                 start.wait()
-                return relocation_conflict(module, target, moving, rules=rules)
+                scope = lock_module_write(observed, rules=rules)
+                module = Module.objects.select_for_update().get(pk=modules[index].pk)
+                return relocation_conflict(module, target, moving, rules=rules, scope=scope)
         finally:
             connection.close()
 
@@ -805,7 +807,13 @@ def test_a_move_claims_the_removed_occupants_identity_before_locking_it(librenms
 
 
 @transactional_db_with_all_apps()
-def test_a_replacement_claims_the_serials_of_children_it_deletes(client, librenms_server):
+@pytest.mark.parametrize(
+    "old_serial", ["BBB", "", "12", "REJECTED:"], ids=["admitted", "blank", "short", "rule-rejected"]
+)
+@pytest.mark.parametrize("external_conflict", [False, True], ids=["target-tree", "external-conflict-tree"])
+def test_a_replacement_claims_the_serials_of_children_it_deletes(
+    client, librenms_server, old_serial, external_conflict
+):
     from threading import Event
 
     from dcim.models import Module
@@ -813,12 +821,20 @@ def test_a_replacement_claims_the_serials_of_children_it_deletes(client, librenm
     from django.db import DatabaseError
     from django.test import Client
 
+    from netbox_librenms_plugin.models import NormalizationRule
     from netbox_librenms_plugin.tests.view_test_helpers import rendered_preview_url
     from netbox_librenms_plugin.views.mixins import CacheMixin
 
+    NormalizationRule.objects.create(scope="serial", match_pattern=r"^REJECTED:(.*)$", replacement=r"\1")
     device = seed_mapping(make_device_with_module_bays("remove-child-identities", ["Slot 1"]), SERVER_KEY, own=9872)
     parent = install_module(device, "Slot 1", "REMOVAL-PARENT-CARD", serial="AAA", child_bays=("Sub 1",))
-    child = install_module(device, "Sub 1", "REMOVAL-CHILD-CARD", serial="BBB", parent_module=parent)
+    child_device, child_parent = device, parent
+    if external_conflict:
+        child_device = make_device_with_module_bays("external-removal-owner", ["Slot 1"])
+        child_parent = install_module(
+            child_device, "Slot 1", "REMOVAL-PARENT-CARD", serial="DDD", child_bays=("Sub 1",)
+        )
+    child = install_module(child_device, "Sub 1", "REMOVAL-CHILD-CARD", serial=old_serial, parent_module=child_parent)
     rows = [
         {
             "entPhysicalIndex": 7,
@@ -847,12 +863,22 @@ def test_a_replacement_claims_the_serials_of_children_it_deletes(client, librenm
     preview = client.get(rendered_preview_url(rendered, 7))
     assert preview.status_code == 200
     replace_action, replace_fields = rendered_module_form(preview.content.decode(), "replace-module", 7)
+    if external_conflict:
+        external_rows = [{**rows[0], "entPhysicalSerialNum": "DDD"}, rows[1]]
+        cache.set(
+            CacheMixin().get_cache_key(child_device, "inventory", SERVER_KEY),
+            trusted_module_inventory_payload(child_device, external_rows),
+        )
+        rendered = render_module_tab(child_device, user=user)
     update_action, update_fields = rendered_module_form(rendered, "update-module-serial", 8)
     replacing_client, updating_client = Client(), Client()
     replacing_client.force_login(user)
     updating_client.force_login(user)
     device_locked, child_locked = Event(), Event()
     errors = []
+    updater_pids = []
+
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import wait_for_lock_wait
 
     def post(actor):
         close_old_connections()
@@ -860,6 +886,11 @@ def test_a_replacement_claims_the_serials_of_children_it_deletes(client, librenm
 
         def observe(execute, sql, params, many, context):
             nonlocal observed
+            if actor == "update" and (
+                "pg_advisory_xact_lock" in sql or ('"dcim_device"' in sql and "FOR NO KEY UPDATE" in sql)
+            ):
+                updater_pids.append(connection.connection.info.backend_pid)
+                child_locked.set()
             try:
                 result = execute(sql, params, many, context)
             except DatabaseError as exc:
@@ -868,9 +899,8 @@ def test_a_replacement_claims_the_serials_of_children_it_deletes(client, librenm
             if actor == "replace" and not observed and '"dcim_device"' in sql and "FOR NO KEY UPDATE" in sql:
                 observed = True
                 device_locked.set()
-                child_locked.wait(timeout=10)
-            elif actor == "update" and '"dcim_module"' in sql and "FOR UPDATE" in sql:
-                child_locked.set()
+                assert child_locked.wait(timeout=10)
+                wait_for_lock_wait(connection, updater_pids[0])
             return result
 
         try:
@@ -887,3 +917,102 @@ def test_a_replacement_claims_the_serials_of_children_it_deletes(client, librenm
     assert "40P01" not in errors
     assert Module.objects.get(module_bay_id=parent.module_bay_id).serial == "DDD"
     assert not Module.objects.filter(pk=child.pk).exists()
+
+
+@transactional_db_with_all_apps()
+def test_replacement_refuses_a_child_reparented_within_the_observed_tree(client):
+    """The subtree keeps its identities, but a child changes bay before the owner lock."""
+    from dcim.models import Module, ModuleBay
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
+    from netbox_librenms_plugin.tests.view_test_helpers import rendered_preview_url
+    from netbox_librenms_plugin.views.mixins import CacheMixin
+
+    device = make_device_with_module_bays("replacement-topology", ["Slot 1"])
+    parent = install_module(device, "Slot 1", "TOPOLOGY-PARENT", serial="TOPOLOGY-OLD", child_bays=("Sub 1", "Sub 2"))
+    child = install_module(device, "Sub 1", "TOPOLOGY-CHILD", serial="CHILD123", parent_module=parent)
+    destination = ModuleBay.objects.get(module=parent, name="Sub 2")
+    row = {
+        "entPhysicalIndex": 7,
+        "entPhysicalClass": "module",
+        "entPhysicalName": "Slot 1",
+        "entPhysicalModelName": parent.module_type.model,
+        "entPhysicalSerialNum": "TOPOLOGY-NEW",
+        "entPhysicalContainedIn": 0,
+    }
+    cache.set(
+        CacheMixin().get_cache_key(device, "inventory", SERVER_KEY), trusted_module_inventory_payload(device, [row])
+    )
+    user = make_superuser("replacement-topology-user")
+    client.force_login(user)
+    preview = client.get(rendered_preview_url(render_module_tab(device, user=user), 7))
+    action, fields = rendered_module_form(preview.content.decode(), "replace-module", 7)
+    changed = []
+
+    def change_before_first_claim(execute, sql, params, many, context):
+        if "pg_advisory_xact_lock" in sql and not changed:
+            changed.append(True)
+            with second_connection() as other:
+                commit_row_change(other, Module, child.pk, {"module_bay_id": destination.pk})
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(change_before_first_claim):
+        response = client.post(action, fields)
+
+    assert changed
+    assert response.status_code == 302
+    assert Module.objects.filter(pk=parent.pk).exists(), "stale topology must refuse before deletion"
+    child.refresh_from_db()
+    assert child.module_bay_id == destination.pk
+
+
+@transactional_db_with_all_apps()
+def test_replacement_refuses_a_new_conflict_owner_without_locking_its_module(client):
+    """A conflict found after observation must not extend the locked Device set."""
+    from dcim.models import Module
+    from django.core.cache import cache
+
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import (
+        commit_row_change,
+        lock_row,
+        lock_timeout,
+        second_connection,
+    )
+    from netbox_librenms_plugin.tests.view_test_helpers import rendered_preview_url
+    from netbox_librenms_plugin.views.mixins import CacheMixin
+
+    target = make_device_with_module_bays("unplanned-conflict-target", ["Slot 1"])
+    other = make_device_with_module_bays("unplanned-conflict-other", ["Slot 1"])
+    parent = install_module(target, "Slot 1", "UNPLANNED-TARGET", serial="TARGET123")
+    conflict = install_module(other, "Slot 1", "UNPLANNED-CONFLICT", serial="OTHER123")
+    row = {
+        "entPhysicalIndex": 7,
+        "entPhysicalClass": "module",
+        "entPhysicalName": "Slot 1",
+        "entPhysicalModelName": parent.module_type.model,
+        "entPhysicalSerialNum": "NEW123",
+        "entPhysicalContainedIn": 0,
+    }
+    cache.set(
+        CacheMixin().get_cache_key(target, "inventory", SERVER_KEY), trusted_module_inventory_payload(target, [row])
+    )
+    user = make_superuser("unplanned-conflict-user")
+    client.force_login(user)
+    preview = client.get(rendered_preview_url(render_module_tab(target, user=user), 7))
+    action, fields = rendered_module_form(preview.content.decode(), "replace-module", 7)
+    changed = []
+    with second_connection() as peer:
+
+        def introduce_conflict(execute, sql, params, many, context):
+            if "pg_advisory_xact_lock" in sql and not changed:
+                changed.append(True)
+                commit_row_change(peer, Module, conflict.pk, {"serial": "NEW123"})
+                lock_row(peer, Module, conflict.pk)
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(introduce_conflict), lock_timeout(200):
+            response = client.post(action, fields)
+    assert changed and response.status_code == 302
+    assert Module.objects.filter(pk=parent.pk, serial="TARGET123").exists()
+    assert Module.objects.filter(pk=conflict.pk, serial="NEW123").exists()

@@ -2984,7 +2984,7 @@ def test_preview_and_replace_compare_under_the_rules_and_store_the_librenms_text
     "endpoint,mixed_manufacturers",
     [("install_branch", False), ("install_selected", False), ("install_selected", True)],
 )
-def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint, mixed_manufacturers):
+def test_bulk_install_reads_serial_rules_once_per_policy_phase(client, endpoint, mixed_manufacturers):
     """A batch compares every serial without querying rules for every item, and stores the LibreNMS text."""
     from dcim.models import Manufacturer, Module, VirtualChassis
     from django.core.cache import cache
@@ -3069,8 +3069,8 @@ def test_bulk_install_reads_serial_rules_once_per_manufacturer(client, endpoint,
         for query in queries
         if "SELECT" in query["sql"] and "normalizationrule" in query["sql"] and "'serial'" in query["sql"]
     ]
-    # The inventory policy reads every serial rule once, and each decision of the request reuses it.
-    assert len(serial_queries) == 1, serial_queries
+    # Planning and the post-owner recheck each read the rules once. The install loop reuses them.
+    assert len(serial_queries) == 2, serial_queries
 
 
 def _install_selected(client, device, rows, select):
@@ -3971,7 +3971,7 @@ def test_single_module_refusal_releases_its_lock_before_rendering(client, refusa
     expected = {
         "occupied": "Module bay 'Target' already has a module installed.",
         "duplicate_serial": "Serial 'RENDER-CARD' is already installed on this device. Nothing was installed.",
-        "missing": "Module bay no longer exists.",
+        "missing": "Failed to install module: The modules or module bays changed. Refresh Modules and try again.",
     }
     assert response.status_code == 200
     assert [str(message) for message in response.wsgi_request._messages] == [expected[refusal]]
@@ -3981,8 +3981,8 @@ def test_single_module_refusal_releases_its_lock_before_rendering(client, refusa
     assert set(observed) == {(False, 0)}
 
 
-def test_module_advisory_lock_sections_do_not_render_responses():
-    """Keep response rendering out of the transactions that hold page advisory locks."""
+def test_module_owner_lock_sections_do_not_render_responses():
+    """Keep response rendering out of the transactions that hold Module owner locks."""
     import ast
     import inspect
 
@@ -3998,10 +3998,10 @@ def test_module_advisory_lock_sections_do_not_render_responses():
         if not atomic:
             continue
         calls = [item for item in ast.walk(node) if isinstance(item, ast.Call)]
-        if not any(ast.unparse(call.func) == "_lock_page_device_serials" for call in calls):
+        if not any(ast.unparse(call.func) == "lock_module_write" for call in calls):
             continue
         violations.update(call.lineno for call in calls if ast.unparse(call.func) == "_modules_action_response")
-    assert not violations, f"Response rendering holds a page advisory lock at lines {sorted(violations)}"
+    assert not violations, f"Response rendering holds a Module owner lock at lines {sorted(violations)}"
 
 
 @pytest.mark.django_db(transaction=True)
@@ -4070,6 +4070,11 @@ def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(
     cache.set(key, trusted_module_inventory_payload(page, rows))
     user = make_superuser("selected-fresh-page-user")
     fields = _rendered_fields(page, "install-selected", user=user)
+    client.force_login(user)
+    if selected_member:
+        fields[f"selection_grant_{selected_index}"] = _verified_selection_grant(
+            client, render_module_tab(page, user=user), page, target, selected_index
+        )
     changed = []
 
     def change_serial():
@@ -4085,7 +4090,7 @@ def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(
             close_old_connections()
 
     def edit_before_lock(execute, sql, params, many, context):
-        if "pg_advisory_xact_lock" in sql and not changed:
+        if '"dcim_device"' in sql and "FOR NO KEY UPDATE" in sql and not changed:
             with bounded_executor(max_workers=1) as executor:
                 executor.submit(change_serial).result(timeout=5)
             changed.append(True)
@@ -4104,15 +4109,19 @@ def test_selected_install_refreshes_target_serial_after_waiting_for_its_lock(
     assert response.status_code == 302
     assert not Module.objects.filter(device__in=[page, target]).exists()
     # The edit lands before the page lock, so the policy the writer loads is no longer the rendered one.
-    assert [str(message) for message in response.wsgi_request._messages] == [GrantRefusal.POLICY.message]
+    expected = (
+        "Install failed: The modules or module bays changed. Refresh Modules and try again."
+        if deleted
+        else GrantRefusal.POLICY.message
+    )
+    assert [str(message) for message in response.wsgi_request._messages] == [expected]
 
 
 def _backends_blocked_by(observer, holder_pid):
-    """Return how many backends wait for an advisory lock that *holder_pid* holds; *observer* is any other connection."""
+    """Return how many backends wait for a lock that *holder_pid* holds; *observer* is any other connection."""
     with observer.cursor() as cursor:
         cursor.execute(
-            "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
-            " AND %s = ANY(pg_blocking_pids(pid))",
+            "SELECT count(*) FROM pg_locks WHERE NOT granted AND %s = ANY(pg_blocking_pids(pid))",
             [holder_pid],
         )
         return cursor.fetchone()[0]
@@ -4121,11 +4130,11 @@ def _backends_blocked_by(observer, holder_pid):
 @pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("change", ["device-serial", "rule-added"])
 @pytest.mark.parametrize("writer", ["install", "selected", "branch"])
-def test_a_writer_waiting_for_the_page_lock_refuses_a_change_committed_during_the_wait(client, writer, change):
-    """Another session holds the page lock; a change commits while the writer waits, so the writer refuses it."""
+def test_a_writer_waiting_for_the_owner_lock_refuses_a_change_committed_during_the_wait(client, writer, change):
+    """Another session holds the Device owner lock; a change commits while the writer waits, so the writer refuses it."""
     import time
 
-    from dcim.models import Device, Module
+    from dcim.models import Module
     from django.core.cache import cache
     from django.db import close_old_connections
 
@@ -4133,7 +4142,6 @@ def test_a_writer_waiting_for_the_page_lock_refuses_a_change_committed_during_th
     from netbox_librenms_plugin.module_grants import GrantRefusal
     from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays, make_module_type, make_superuser
     from netbox_librenms_plugin.tests.view_test_helpers import render_module_tab, rendered_module_form
-    from netbox_librenms_plugin.utils import advisory_lock_key
     from netbox_librenms_plugin.views.mixins import CacheMixin
 
     page = make_device_with_module_bays(f"lock-wait-{writer}-{change}", ["Carrier"], serial="LOCK-WAIT-PAGE")
@@ -4187,24 +4195,25 @@ def test_a_writer_waiting_for_the_page_lock_refuses_a_change_committed_during_th
         with second_connection() as holder, second_connection() as observer, bounded_executor(1) as executor:
             with holder.cursor() as cursor:
                 cursor.execute(
-                    "SELECT pg_advisory_xact_lock(%s)",
-                    [advisory_lock_key(f"netbox-librenms-plugin:module-serial:{page.pk}")],
+                    'SELECT id FROM "dcim_device" WHERE id = %s FOR NO KEY UPDATE',
+                    [page.pk],
                 )
                 cursor.execute("SELECT pg_backend_pid()")
                 holder_pid = cursor.fetchone()[0]
             posted = executor.submit(post_while_the_lock_is_held)
             deadline = time.monotonic() + 5
             while not _backends_blocked_by(observer, holder_pid):
-                assert time.monotonic() < deadline, "the writer never waited for the page lock"
+                assert time.monotonic() < deadline, "the writer never waited for the Device owner lock"
                 time.sleep(0.02)
             # The change commits while the writer waits; this connection is in autocommit.
             if change == "device-serial":
-                Device.objects.filter(pk=page.pk).update(serial="LOCK-WAIT-CHANGED")
+                with holder.cursor() as cursor:
+                    cursor.execute('UPDATE "dcim_device" SET serial = %s WHERE id = %s', ["LOCK-WAIT-CHANGED", page.pk])
             else:
                 InventoryIgnoreRule.objects.create(
                     name="Lock wait rule", match_type="contains", pattern="no-such-entity", action="skip"
                 )
-            holder.rollback()
+            holder.commit()
             response = posted.result(timeout=10)
     finally:
         cache.delete(key)
@@ -4215,12 +4224,12 @@ def test_a_writer_waiting_for_the_page_lock_refuses_a_change_committed_during_th
 
 
 @pytest.mark.django_db(transaction=True)
-def test_an_install_waits_for_the_serial_lock_of_another_member_page_of_its_chassis(client):
-    """A writer on one member page may install onto another member, so both pages take one serial lock."""
+def test_an_install_waits_for_its_destination_owner_held_from_another_member_page(client):
+    """A writer on one member page may install onto another member, so both writers lock the actual destination."""
     import time
     from threading import Event
 
-    from dcim.models import Device, Module
+    from dcim.models import Module
     from django.db import close_old_connections, connection, transaction
 
     from netbox_librenms_plugin.tests.conftest import (
@@ -4231,7 +4240,7 @@ def test_an_install_waits_for_the_serial_lock_of_another_member_page_of_its_chas
     )
     from netbox_librenms_plugin.tests.view_test_helpers import render_module_tab, rendered_module_form
     from netbox_librenms_plugin.views.mixins import CacheMixin
-    from netbox_librenms_plugin.views.sync.modules import _lock_page_device_serials
+    from netbox_librenms_plugin.module_writes import lock_module_write, observe_module_write
 
     page = make_device_with_module_bays("chassis-lock-page", ["Slot 1"])
     member = make_device_with_module_bays("chassis-lock-member", ["Slot 1"])
@@ -4258,7 +4267,7 @@ def test_an_install_waits_for_the_serial_lock_of_another_member_page_of_its_chas
         close_old_connections()
         try:
             with transaction.atomic():
-                _lock_page_device_serials(Device.objects.get(pk=member.pk))
+                lock_module_write(observe_module_write(device_ids=[page.pk]))
                 with connection.cursor() as cursor:
                     cursor.execute("SELECT pg_backend_pid()")
                     holder["pid"] = cursor.fetchone()[0]
@@ -4283,8 +4292,8 @@ def test_an_install_waits_for_the_serial_lock_of_another_member_page_of_its_chas
             deadline = time.monotonic() + 5
             try:
                 while not _backends_blocked_by(observer, holder["pid"]):
-                    assert time.monotonic() < deadline, "the install never waited for the member page lock"
-                    assert not posted.done(), "the install finished while the member page lock was held"
+                    assert time.monotonic() < deadline, "the install never waited for the destination owner lock"
+                    assert not posted.done(), "the install finished while the destination owner lock was held"
                     time.sleep(0.02)
             finally:
                 release.set()

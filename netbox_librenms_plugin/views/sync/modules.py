@@ -21,6 +21,7 @@ from utilities.exceptions import AbortRequest
 from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE
 from netbox_librenms_plugin.interface_diff import type_change_refusal
 from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+from netbox_librenms_plugin.module_writes import lock_module_write, observe_module_write
 from netbox_librenms_plugin.module_grants import (
     ACTION_INSTALL_BRANCH,
     ACTION_INSTALL_MODULE,
@@ -52,7 +53,6 @@ from netbox_librenms_plugin.serial_identity import (
     Comparison,
     SerialRules,
     ResolutionKind,
-    assignment_lock,
     compare,
     display,
     freshness_token,
@@ -220,26 +220,6 @@ def _module_bind_result_changed(bind_result):
     )
 
 
-def _lock_page_device_serials(page_device):
-    """
-    Serialise the serial checks of every device that a sync page can write, before any row lock is taken.
-
-    Must be the FIRST lock in the transaction. A bulk install holds one transaction across its
-    whole loop, so acquiring this after a bay lock lets a bulk run holding the advisory lock wait
-    on a bay a single install holds, while that install waits on the advisory lock.
-
-    A page writes to its device or to a member of its Virtual Chassis, so every page of one chassis
-    takes the one key of that chassis. A transaction then never acquires a second key of this kind,
-    and the incremental-acquisition ordering problem cannot arise.
-    """
-    if page_device.virtual_chassis_id:
-        acquire_advisory_transaction_lock(
-            f"netbox-librenms-plugin:module-serial-chassis:{page_device.virtual_chassis_id}"
-        )
-    else:
-        acquire_advisory_transaction_lock(f"netbox-librenms-plugin:module-serial:{page_device.pk}")
-
-
 def _module_holder_map(device):
     """Read module ancestry from all modules on a device, independent of bay permissions."""
     from dcim.models import Module
@@ -392,8 +372,8 @@ def _authorize_module_grant(view, page_device, server_key, action, token):
     """
     Return the posted grant of *action* with the current snapshot and policy, or raise GrantRefused.
 
-    A writer calls it inside its write transaction, after the page lock where it takes one, and
-    before any write. A change committed after this read is not detected.
+    A writer checks the grant to plan its owner set, then checks it again after
+    the owner wait and before writes. A change after the final read is not detected.
 
     Args:
         view (View): The writer, for its cache key.
@@ -410,6 +390,10 @@ def _authorize_module_grant(view, page_device, server_key, action, token):
 
     from netbox_librenms_plugin.models import RuleConfigurationError
 
+    try:
+        page_device = Device.objects.select_related("virtual_chassis").get(pk=page_device.pk)
+    except Device.DoesNotExist as exc:
+        raise GrantRefused(GrantRefusal.DESTINATION) from exc
     sync_device = _get_sync_device_for_inventory(page_device, server_key)
     inventory = _get_cached_inventory_for_device(sync_device, server_key, view.get_cache_key)
     if inventory is None:
@@ -1013,14 +997,16 @@ def _never_installable_reason(item):
     return None
 
 
-def _refuse_identity_move(module, target_device, moving, serial_rules):
+def _refuse_identity_move(module, target_device, moving, serial_rules, scope):
     """
     Raise ValidationError when moving the locked *module* and its subtree onto *target_device* must not run.
 
     Another device's rules decide the moved serials. *moving* is the subtree as read before the
     identity locks; a change since then refuses too. See ``relocation_conflict``.
     """
-    if module.device_id != target_device.pk and relocation_conflict(module, target_device, moving, rules=serial_rules):
+    if module.device_id != target_device.pk and relocation_conflict(
+        module, target_device, moving, rules=serial_rules, scope=scope
+    ):
         raise ValidationError(RELOCATION_HELD)
 
 
@@ -1088,7 +1074,6 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
 
         try:
             with atomic_with_events():
-                _lock_page_device_serials(page_device)
                 bind_item = None
                 incoming = None
                 serial = ""
@@ -1106,8 +1091,14 @@ class InstallModuleView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
                     incoming = bind_item.get("entPhysicalSerialNum")
                     serial = stored_form(incoming, Module)
                     serial_rules = granted.policy.serial_identity_rules
-                    # The serial identity locks come after the page lock and before any row lock.
-                    assignment_lock([incoming], model=Module, rules=serial_rules)
+                scope = lock_module_write(
+                    observe_module_write(device_ids=[target_device.pk]), incoming=[incoming], rules=serial_rules
+                )
+                if indexed:
+                    granted = _authorize_module_grant(
+                        self, page_device, server_key, ACTION_INSTALL_MODULE, request.POST.get("inventory_binding")
+                    )
+                target_device = scope.devices[target_device.pk]
                 # Re-fetch bay under lock to prevent TOCTOU race with concurrent installs.
                 locked_bay = (
                     self.restricted_queryset(ModuleBay)
@@ -1241,21 +1232,28 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
             messages.error(request, "Invalid parent inventory index.")
             return _modules_action_response(request, page_device, server_key)
 
-        self._install_branch(request, page_device, server_key, parent_index)
+        try:
+            self._install_branch(request, page_device, server_key, parent_index)
+        except GrantRefused as exc:
+            messages.error(request, exc.refusal.message)
+        except ValidationError as exc:
+            if classify_conflict(exc):
+                raise
+            # The formatter masks database details through exception_text_for.
+            # nosemgrep: caught-error-text  # noqa: ERA001
+            messages.error(request, _module_write_failure(exc, Module, request.user))
         page_device.refresh_from_db()
         return _modules_action_response(request, page_device, server_key)
 
     @atomic_with_events()
     def _install_branch(self, request, page_device, server_key, parent_index):
-        """Plan and write under the page lock, then commit before response rendering."""
+        """Lock all destinations before the first install, then commit before rendering."""
         from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
 
         module_bays = self.restricted_queryset(ModuleBay)
         changeable_components = _restricted_module_component_querysets(self)
         changeable_interfaces = changeable_components[Interface]
         deletable_interfaces = self.restricted_queryset(Interface, "delete")
-        _lock_page_device_serials(page_device)
-        # The advisory lock does not refresh model instances loaded before its wait.
         page_device = self.restrict_object_or_404(Device, pk=page_device.pk)
         try:
             granted = _authorize_module_grant(
@@ -1277,12 +1275,6 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         if not entries:
             messages.warning(request, "No installable items found in this branch.")
             return
-        # The serial identity locks of the whole branch, before any bay or module row lock.
-        assignment_lock(
-            [item.get("entPhysicalSerialNum") for item, _target_id in entries],
-            model=Module,
-            rules=granted.policy.serial_identity_rules,
-        )
         targets = {
             device.pk: device
             for device in self.restricted_queryset(Device)
@@ -1292,6 +1284,16 @@ class InstallBranchView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Li
         if len(targets) != len({target_id for _item, target_id in entries}):
             messages.error(request, "An inventory destination is unavailable. Refresh Modules and try again.")
             return
+
+        scope = lock_module_write(
+            observe_module_write(device_ids=targets),
+            incoming=[item.get("entPhysicalSerialNum") for item, _target_id in entries],
+            rules=granted.policy.serial_identity_rules,
+        )
+        granted = _authorize_module_grant(
+            self, page_device, server_key, ACTION_INSTALL_BRANCH, request.POST.get("inventory_binding")
+        )
+        targets = scope.devices
 
         # The parent-module walk keeps a row's whole attributed subtree, hidden holders too.
         member_index_maps = self._ancestry_maps(granted, set(targets))
@@ -2010,18 +2012,22 @@ class InstallSelectedView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         bound_any = False
         try:
             with atomic_with_events():
-                _lock_page_device_serials(page_device)
                 granted = _authorize_module_grant(
                     self, page_device, server_key, ACTION_INSTALL_SELECTED, request.POST.get("inventory_binding")
                 )
                 granted.grant.require(device_id=page_device.pk)
                 plan = self._granted_selection(request, granted, selected_list, page_device, server_key)
-                # The serial identity locks of the whole selection, before any bay or module row lock.
-                assignment_lock(
-                    [item.get("entPhysicalSerialNum") for item, _target, _pinned in plan],
-                    model=Module,
+                scope = lock_module_write(
+                    observe_module_write(device_ids=[target.pk for _item, target, _pinned in plan]),
+                    incoming=[item.get("entPhysicalSerialNum") for item, _target, _pinned in plan],
                     rules=granted.policy.serial_identity_rules,
                 )
+                granted = _authorize_module_grant(
+                    self, page_device, server_key, ACTION_INSTALL_SELECTED, request.POST.get("inventory_binding")
+                )
+                plan = self._granted_selection(request, granted, selected_list, page_device, server_key)
+                scope.require_devices([target.pk for _item, target, _pinned in plan])
+                plan = [(item, scope.devices[target.pk], pinned) for item, target, pinned in plan]
                 # A row walks its parent modules in the render that authorized it: the manifest or a pinned override.
                 manifest_maps = InstallBranchView._ancestry_maps(
                     granted, {target.pk for _item, target, pinned in plan if not pinned}
@@ -2193,14 +2199,15 @@ class UpdateModuleSerialView(
                 librenms_item = granted.row(granted.grant.ent_index)
                 incoming = librenms_item.get("entPhysicalSerialNum")
                 serial_rules = granted.policy.serial_identity_rules
-                observed_serial = (
-                    self.restricted_queryset(Module, "change")
-                    .filter(pk=module_id, device=target_device)
-                    .values_list("serial", flat=True)
-                    .first()
+                scope = lock_module_write(
+                    observe_module_write(device_ids=[target_device.pk], module_ids=[module_id]),
+                    incoming=[incoming],
+                    rules=serial_rules,
                 )
-                # Claim the identity that is released as well as the identity that is stored.
-                assignment_lock([observed_serial, incoming], model=Module, rules=serial_rules)
+                granted = _authorize_module_grant(
+                    self, page_device, server_key, ACTION_UPDATE_SERIAL, request.POST.get("inventory_binding")
+                )
+                target_device = scope.devices[target_device.pk]
                 module = (
                     self.restricted_queryset(Module, "change")
                     .select_for_update(of=("self",))
@@ -2208,12 +2215,8 @@ class UpdateModuleSerialView(
                     .filter(pk=module_id, device=target_device)
                     .first()
                 )
-                # Compare the observed storage value, not hardware identity, before using its claim.
-                # nosemgrep: serial-identity-through-owner  # noqa: ERA001
-                if not module or module.serial != observed_serial:
-                    raise _ModuleActionRefused(
-                        "The module changed. Refresh Modules and try again." if module else "Module no longer exists."
-                    )
+                if not module:
+                    raise _ModuleActionRefused("Module no longer exists.")
                 granted.grant.require(action_target=installed_module_target(module.pk, module.module_bay_id))
                 serial = display(incoming)
                 # A stored form that names the same hardware is rewritten as the LibreNMS text.
@@ -2297,6 +2300,17 @@ class UpdateModuleInterfaceView(
                     self, page_device, server_key, ACTION_UPDATE_INTERFACE, request.POST.get("inventory_binding")
                 )
                 granted.grant.require(device_id=target_device.pk, ent_index=request.POST.get("ent_index", ""))
+                scope = lock_module_write(
+                    observe_module_write(device_ids=[target_device.pk], module_ids=[module.pk]),
+                    rules=granted.policy.serial_identity_rules,
+                )
+                granted = _authorize_module_grant(
+                    self, page_device, server_key, ACTION_UPDATE_INTERFACE, request.POST.get("inventory_binding")
+                )
+                target_device = scope.devices[target_device.pk]
+                module.refresh_from_db()
+                if module.device_id != target_device.pk:
+                    raise ValidationError("The module changed devices. Refresh Modules and try again.")
                 # Lock the module row, so it stays in the bay that the row matched while the bind runs.
                 module_bay_id = (
                     self.restricted_queryset(Module, "view")
@@ -2310,6 +2324,13 @@ class UpdateModuleInterfaceView(
                 bind_result, adoption_failed = self._bind_and_adopt(
                     target_device, module, bind_item, server_key, changeable_interfaces
                 )
+        except ValidationError as exc:
+            if classify_conflict(exc):
+                raise
+            # The formatter masks database details through exception_text_for.
+            # nosemgrep: caught-error-text  # noqa: ERA001
+            messages.error(request, _module_write_failure(exc, Module, request.user))
+            return _modules_action_response(request, page_device, server_key)
         except GrantRefused as exc:
             messages.error(request, exc.refusal.message)
             return _modules_action_response(request, page_device, server_key)
@@ -2579,6 +2600,11 @@ class ApplyModuleInterfaceTypesView(
         validation_failures = []
         try:
             with transaction.atomic():
+                scope = lock_module_write(observe_module_write(device_ids=[target_device.pk], module_ids=[module.pk]))
+                target_device = scope.devices[target_device.pk]
+                module.refresh_from_db()
+                if module.device_id != target_device.pk:
+                    raise ValidationError("The module changed devices. Refresh Modules and try again.")
                 template_types = _module_interface_type_targets(target_device, module)
                 interfaces = list(
                     self.restricted_queryset(Interface, "change")
@@ -2600,6 +2626,13 @@ class ApplyModuleInterfaceTypesView(
                         validation_failures.append((interface.name, reason))
                     else:
                         outcomes[outcome].append(interface.name)
+        except ValidationError as exc:
+            if classify_conflict(exc):
+                raise
+            # The formatter masks database details through exception_text_for.
+            # nosemgrep: caught-error-text  # noqa: ERA001
+            messages.error(request, _module_write_failure(exc, Module, request.user))
+            return _modules_action_response(request, page_device, server_key)
         except _InterfaceChangeScopeViolation as exc:
             messages.error(
                 request,
@@ -2944,12 +2977,16 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 previous = resolve_module(incoming, rules=serial_rules, exclude_pks=[installed_module.pk]).object
                 if previous is not None:
                     removals[previous.pk] = module_subtree_serials(previous.pk)
-                # A replacement also releases the identities of every module that it removes.
-                assignment_lock(
-                    [incoming, *(value for tree in removals.values() for _pk, value in tree)],
-                    model=Module,
+                scope = lock_module_write(
+                    observe_module_write(device_ids=[target_device.pk], subtree_roots=removals),
+                    incoming=[incoming],
                     rules=serial_rules,
                 )
+                granted = _authorize_module_grant(
+                    self, page_device, server_key, ACTION_REPLACE_MODULE, request.POST.get("inventory_binding")
+                )
+                target_device = scope.devices[target_device.pk]
+                manufacturer = target_device.device_type.manufacturer
                 matched_type = resolve_module_type(
                     model_name,
                     get_module_types_indexed(),
@@ -2994,25 +3031,23 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                     new_module,
                     changeable_components,
                 )
-                # Re-derive any serial conflict from the database INSIDE the locked
-                # transaction (and lock those rows too) — checking before the lock
-                # opens a TOCTOU window where a concurrent request could change a
-                # module's serial and we'd then delete a row that no longer
-                # conflicts.  Re-querying under select_for_update() guarantees the
-                # set we delete from is the same set we validated.
+                # Resolve before locking a conflict row. An unplanned owner refuses
+                # the write instead of extending the Device set after component locks.
                 conflict_module = None
                 locked_type_context(target_device, rules=serial_rules)
-                elsewhere = resolve_module(incoming, rules=serial_rules, exclude_pks=[installed_module.pk], lock=True)
+                elsewhere = resolve_module(incoming, rules=serial_rules, exclude_pks=[installed_module.pk])
                 if elsewhere.kind is ResolutionKind.AMBIGUOUS:
                     # Roll back and surface a clear error: we don't want to
                     # guess which of N conflicts to remove.
                     raise _SerialConflictAmbiguous(serial)
                 if elsewhere.kind is ResolutionKind.UNIQUE:
+                    scope.require_devices([elsewhere.object.device_id])
                     if elsewhere.object.pk not in removals:
                         raise _ModuleActionRefused("The conflicting module changed. Refresh Modules and try again.")
                     conflict_module = (
                         self.restricted_queryset(Module, "delete")
                         .filter(pk=elsewhere.object.pk)
+                        .select_for_update(of=("self",))
                         .select_related("module_type", "module_bay", "device")
                         .first()
                     )
@@ -3163,7 +3198,7 @@ class MoveModuleView(
     SYNC_SUBJECT_MODEL_LABEL = "dcim.device"
     DROP_SYNC_SUBJECT_CLAIM_WITHOUT_SERVER = True
 
-    def post(self, request, pk):
+    def post(self, request, pk):  # noqa: C901
         from dcim.models import Device, Module, ModuleBay
 
         self.required_object_permissions = {
@@ -3216,7 +3251,7 @@ class MoveModuleView(
                     _require_unchanged_module_subtrees({occupant.pk: removing})
                     occupant_removed_msg = f"Removed {occupant.module_type.model} from {target_bay.name}."
                     occupant.delete()
-            _refuse_identity_move(module, target_device, moving, serial_rules)
+            _refuse_identity_move(module, target_device, moving, serial_rules, scope)
             from_device, from_bay = module.device.name, module.module_bay.name
             module.module_bay = target_bay
             module.device = target_device
@@ -3233,8 +3268,13 @@ class MoveModuleView(
         removing = module_subtree_serials(occupant_id)
         try:
             with transaction.atomic():
-                # The moved and removed identities are claimed before any row lock.
-                assignment_lock([serial for _pk, serial in (*moving, *removing)], model=Module, rules=serial_rules)
+                scope = lock_module_write(
+                    observe_module_write(
+                        device_ids=[target_device.pk], subtree_roots=[conflict_module_id, occupant_id]
+                    ),
+                    rules=serial_rules,
+                )
+                target_device = scope.devices[target_device.pk]
                 # Lock target bay to prevent concurrent modifications
                 target_bay = (
                     self.restricted_queryset(ModuleBay)
@@ -3243,8 +3283,7 @@ class MoveModuleView(
                     .first()
                 )
                 if not target_bay:
-                    messages.error(request, "Module bay no longer exists.")
-                    return _modules_action_response(request, page_device, server_key)
+                    raise _ModuleActionRefused("Module bay no longer exists.")
 
                 # Scoped like the primary lookup: this module's device and bay are reassigned, and
                 # its pk comes straight from the POST, so an unscoped read would move a module the
@@ -3257,8 +3296,7 @@ class MoveModuleView(
                         move,
                     )
                 except Module.DoesNotExist:
-                    messages.error(request, "Module no longer exists.")
-                    return _modules_action_response(request, page_device, server_key)
+                    raise _ModuleActionRefused("Module no longer exists.") from None
 
             if occupant_removed_msg:
                 messages.info(request, occupant_removed_msg)
@@ -3269,6 +3307,8 @@ class MoveModuleView(
             messages.success(request, moved_msg)
             if server_key:
                 _schedule_module_cache_mutation(request, page_device, server_key)
+        except _ModuleActionRefused as exc:
+            exc.report(request)
         except (AbortRequest, ValidationError, IntegrityError) as e:
             if classify_conflict(e):
                 raise
@@ -3316,7 +3356,7 @@ class AddBayTemplateView(
         return getattr(device_type, "manufacturer", None) if device_type else None
 
     @staticmethod
-    def _instantiate_template_on_existing(bay_template, target_kind, target):
+    def _instantiate_template_on_existing(bay_template, target_kind, instances):
         """
         Materialize a saved ``ModuleBayTemplate`` on every existing target instance.
 
@@ -3332,17 +3372,17 @@ class AddBayTemplateView(
         Args:
             bay_template (ModuleBayTemplate): The saved module bay template to instantiate.
             target_kind (str): The target type, either ``device_type`` or ``module_type``.
-            target (DeviceType | ModuleType): The device type or module type that owns the template.
+            instances: The existing instances whose complete Device scope is locked.
 
         Returns:
             int: The number of module bays created on existing instances.
 
         """
-        from dcim.models import Device, Module, ModuleBay
+        from dcim.models import ModuleBay
 
         instantiated = 0
         if target_kind == "device_type":
-            for device in Device.objects.filter(device_type=target):
+            for device in instances:
                 bay = bay_template.instantiate(device=device)
                 if ModuleBay.objects.filter(device=device, module__isnull=True, name=bay.name).exists():
                     continue
@@ -3350,7 +3390,7 @@ class AddBayTemplateView(
                 bay.save()
                 instantiated += 1
         elif target_kind == "module_type":
-            for module in Module.objects.filter(module_type=target).select_related("device"):
+            for module in instances:
                 bay = bay_template.instantiate(device=module.device, module=module)
                 if ModuleBay.objects.filter(device=module.device, module=module, name=bay.name).exists():
                     continue
@@ -3784,10 +3824,28 @@ class AddBayTemplateView(
             mapping_created = False
             instantiated_count = 0
             with transaction.atomic():
+                from dcim.models import Module
+
+                if target_kind == "device_type":
+                    instances = list(Device.objects.filter(device_type=target).order_by("pk"))
+                    observation = observe_module_write(device_ids=[instance.pk for instance in instances])
+                else:
+                    instances = list(Module.objects.filter(module_type=target).order_by("pk"))
+                    observation = observe_module_write(module_ids=[instance.pk for instance in instances])
+                scope = lock_module_write(observation)
+                if target_kind == "device_type":
+                    current = list(Device.objects.filter(device_type=target).order_by("pk"))
+                else:
+                    current = list(Module.objects.filter(module_type=target).select_related("device").order_by("pk"))
+                if [instance.pk for instance in current] != [instance.pk for instance in instances]:
+                    raise ValidationError("The bay template instances changed. Refresh Modules and try again.")
+                scope.require_devices(
+                    [instance.pk if target_kind == "device_type" else instance.device_id for instance in current]
+                )
                 bay_template = ModuleBayTemplate(**kwargs)
                 bay_template.full_clean()
                 bay_template.save()
-                instantiated_count = self._instantiate_template_on_existing(bay_template, target_kind, target)
+                instantiated_count = self._instantiate_template_on_existing(bay_template, target_kind, current)
                 if will_add_mapping:
                     mapping = ModuleBayMapping(
                         librenms_name=mapping_libre_value,

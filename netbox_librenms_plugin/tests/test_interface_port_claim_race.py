@@ -1,12 +1,12 @@
 """Two writers on one device that bind the same LibreNMS port at the same time leave one holder."""
 
 import time
-from concurrent.futures import wait
 from threading import Event
 
 import pytest
 from django.apps import apps
 
+from netbox_librenms_plugin.module_grants import GrantRefusal
 from netbox_librenms_plugin.server_mappings import MappingRole, identity_q
 from netbox_librenms_plugin.tests.conftest import (
     bounded_executor,
@@ -20,7 +20,6 @@ from netbox_librenms_plugin.tests.interface_sync_post_helpers import (
     seed_ports,
     sync_port,
 )
-from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
 
 PORT = 9301
 LIBRENMS_DEVICE_ID = 71
@@ -210,12 +209,6 @@ def _second_waits_on_first(_second_future, pids):
     return False
 
 
-def _second_finishes_alone(second_future, _pids):
-    """Return True when the second writer finishes while the first writer is still paused."""
-    done, _pending = wait([second_future], timeout=PAUSE_TIMEOUT_SECONDS)
-    return second_future in done
-
-
 def test_two_interface_syncs_of_one_device_wait_on_the_device_row_lock(settings):
     """The ifName sync holds the device row; the ifDescr sync waits for it and then finds the holder."""
     configure_default_librenms_server(settings)
@@ -245,7 +238,7 @@ def test_two_interface_syncs_of_one_device_wait_on_the_device_row_lock(settings)
 @pytest.mark.parametrize("first_writer", ["interface_sync", "module_bind"])
 def test_module_bind_and_interface_sync_of_one_device_leave_one_holder(settings, first_writer):
     """The module action binds Gi0/1 by ifName while the ifDescr sync binds GigabitEthernet0/1."""
-    # The module action takes no device row lock, so only the port claim can refuse the second writer.
+    # Both writers serialize on the Device owner before resolving the port again.
     configure_default_librenms_server(settings)
     device, module, short, long = _seed()
     user_pk = make_superuser("port-claim-user").pk
@@ -256,12 +249,30 @@ def test_module_bind_and_interface_sync_of_one_device_leave_one_holder(settings,
     before = _persisted(loser)
     _winner_row, winner_changes = _persisted(winner)
 
-    _first, second_messages, second_finished_alone = _race(first, second, _second_finishes_alone)
+    _first, second_messages, second_waited = _race(first, second, _second_waits_on_first)
 
-    assert second_finished_alone, "the second writer did not finish while the first writer held its claim"
+    assert second_waited, "the second writer did not wait for Device ownership"
     assert _port_holders() == [winner.pk]
-    # A busy claim is a lock conflict: both writers answer with the middleware's one "try again" text.
-    assert second_messages == [("error", TRY_AGAIN_MESSAGE)]
+    if first_writer == "interface_sync":
+        # The commit releases Device before its cache callback runs. The module writer
+        # either refuses the cleared snapshot or resolves the committed port owner.
+        assert second_messages in (
+            [("error", GrantRefusal.CACHE_MISSING.message)],
+            [
+                ("success", f"Updated interface {LONG_NAME} for port-claim-mt in port-claim-bay."),
+                ("info", "Other sync tabs were cleared because you synchronized data from LibreNMS."),
+            ],
+        )
+    else:
+        assert second_messages == [
+            (
+                "warning",
+                f"Interface '{SHORT_NAME}' kept its current name because the reported name is in use "
+                f"on the same interface owner: '{LONG_NAME}'.",
+            ),
+            ("success", "Selected interfaces synced successfully."),
+            ("info", "Other sync tabs were cleared because you synchronized data from LibreNMS."),
+        ]
     assert _persisted(loser) == before
     # A change record for the winner shows that both writers run with change logging on.
     assert _persisted(winner)[1] > winner_changes

@@ -2162,8 +2162,8 @@ class TestModuleCreationIsGuarded:
     # qualified function -> why it may create a Module without the device-scoped guard
     EXEMPT = {
         "ReplaceModuleView.post": (
-            "runs its own global serial-conflict resolution under select_for_update, including the "
-            "permission-masked count refusal; deliberately not narrowed to the device"
+            "runs its own global serial-conflict resolution inside the complete Device scope, including "
+            "the permission-masked count refusal; deliberately not narrowed to the device"
         ),
     }
 
@@ -3149,3 +3149,109 @@ def test_import_reexports_document_the_active_lint_policy():
     assert "F401" in config["tool"]["ruff"]["lint"]["per-file-ignores"]["__init__.py"]
     assert "per-file ignore" in import_utils.__doc__
     assert callable(import_utils.bulk_import_devices)
+
+
+class TestModuleWriterOwnership:
+    """A narrow participation check for the nine known writer groups.
+
+    This does not prove runtime scope completeness. It does not follow aliases,
+    raw SQL, dynamic dispatch, external writers or arbitrary delegated functions.
+    Real owner and concurrency tests establish the runtime contract.
+    """
+
+    WRITERS = {
+        "InstallModuleView.post",
+        "InstallBranchView._install_branch",
+        "InstallSelectedView.post",
+        "UpdateModuleSerialView.post",
+        "UpdateModuleInterfaceView.post",
+        "ApplyModuleInterfaceTypesView.post",
+        "ReplaceModuleView.post",
+        "MoveModuleView.post",
+        "AddBayTemplateView.post",
+    }
+    DOWNSTREAM = {
+        "select_for_update",
+        "save",
+        "delete",
+        "bulk_create",
+        "bulk_update",
+        "update_existing_row",
+        "_install_single",
+        "_save_module_with_scoped_component_adoption",
+        "_save_module_with_expected_component_adoption",
+        "_instantiate_template_on_existing",
+        "_bind_and_adopt",
+    }
+
+    @classmethod
+    def _violations(cls, tree, writers):
+        import ast
+
+        failures = []
+        definitions = dict(TestModuleCreationIsGuarded._definitions(tree))
+        for name in sorted(writers):
+            method = definitions.get(name)
+            if method is None:
+                failures.append(f"{name}: missing writer")
+                continue
+            calls = []
+
+            def walk(node, parents=(), method=method, calls=calls):
+                # A move's mutation callback executes through update_existing_row.
+                if node is not method and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                    return
+                if isinstance(node, ast.Call):
+                    calls.append((getattr(node.func, "id", getattr(node.func, "attr", "")), node, parents))
+                for child in ast.iter_child_nodes(node):
+                    walk(child, (*parents, node))
+
+            walk(method)
+            scopes = [(node, parents) for call, node, parents in calls if call == "lock_module_write"]
+            if len(scopes) != 1:
+                failures.append(f"{name}: expected one complete owner lock")
+                continue
+            lock, parents = scopes[0]
+            if any(isinstance(parent, (ast.For, ast.AsyncFor, ast.While, ast.If)) for parent in parents):
+                failures.append(f"{name}: owner lock is conditional or incremental")
+            if not any(call == "observe_module_write" for call, _node, _parents in calls):
+                failures.append(f"{name}: missing observation")
+            if any(call in cls.DOWNSTREAM and node.lineno < lock.lineno for call, node, _parents in calls):
+                failures.append(f"{name}: downstream lock or write precedes owner lock")
+        return failures
+
+    def test_known_writers_take_one_complete_scope_before_downstream_locks(self):
+        import ast
+
+        from netbox_librenms_plugin.views.sync import modules
+
+        tree = ast.parse(Path(modules.__file__).read_text())
+        assert not self._violations(tree, self.WRITERS)
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "observe_module_write(device_ids=targets)\nModule().save()",
+            "if indexed:\n    lock_module_write(observe_module_write(device_ids=targets))\nModule().save()",
+            "for target in targets:\n    lock_module_write(observe_module_write(device_ids=[target]))\n    Module().save()",
+            "Module.objects.select_for_update()\nlock_module_write(observe_module_write(device_ids=targets))",
+        ],
+        ids=["missing", "carrier-unguarded", "incremental-bulk", "late-owner"],
+    )
+    def test_guard_rejects_known_omissions(self, body):
+        import ast
+        import textwrap
+
+        tree = ast.parse("def writer():\n" + textwrap.indent(body, "    "))
+        assert self._violations(tree, {"writer"})
+
+    def test_guard_accepts_complete_scope_outside_the_install_loop(self):
+        import ast
+
+        tree = ast.parse(
+            "def writer():\n"
+            "    lock_module_write(observe_module_write(device_ids=targets))\n"
+            "    for target in targets:\n"
+            "        Module().save()\n"
+        )
+        assert not self._violations(tree, {"writer"})

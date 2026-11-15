@@ -21,8 +21,9 @@ indexed query: the trimmed stored value equals an incoming value or a key, or co
 candidate row is then confirmed under its own context. The count of confirmed rows is read before
 any permission filter, so a row that the user cannot see still makes a match Ambiguous.
 
-A writer takes ``assignment_lock`` for the incoming serials of its whole write set, before any row
-lock, then locks its rows, resolves again and writes ``stored_form``.
+A writer takes ``assignment_lock`` for the serials of its whole write set before row locks,
+then resolves again and writes ``stored_form``. Participating Module writers use
+``module_writes`` to lock their complete Device scope before Module, bay and component rows.
 """
 
 import enum
@@ -674,7 +675,8 @@ def module_assignment(module, incoming, *, rules: SerialRules) -> Assignment:
     """
     Decide the serial write of a locked Module, after ``assignment_lock``.
 
-    The Module's device decides the context. Another Module on that device that holds the identity
+    The caller holds the Device owner lock before the Module row lock. The Module's
+    device decides the context. Another Module on that device that holds the identity
     refuses the write, as an install refuses it.
     """
     from dcim.models import Module
@@ -806,22 +808,21 @@ def module_subtree_serials(module_pk) -> tuple:
     return tuple(sorted(found))
 
 
-def relocation_conflict(module, target_device, moving, *, rules: SerialRules) -> bool:
-    """
-    Return whether a move of the locked *module* and its subtree onto *target_device* must not run.
+def relocation_conflict(module, target_device, moving, *, rules: SerialRules, scope) -> bool:
+    """Check a move after the shared writer locked both Devices before any Module.
 
-    *moving* is ``module_subtree_serials(module.pk)`` as read before the Module identity locks of
-    its serials. The moved rows and then both device rows are locked before the subtree is read
-    again, so a serial write to a moved module and a type change of either device either commit
-    before the read or wait for the move. A changed subtree refuses. The destination rules must not
-    give one identity to two moved Modules that the source rules kept apart, or to a moved Module
-    and a Module of the destination.
+    The caller holds the complete owner set. This helper never expands that set.
+    Compare the moved identities again before native relocation and counter saves.
     """
     from dcim.models import Module
 
-    list(Module.objects.select_for_update().filter(pk__in=[pk for pk, _serial in moving]).values_list("pk", flat=True))
-    for device_pk in sorted({module.device_id, target_device.pk}):
-        _lock_type_row(device_pk)
+    scope.require_devices([module.device_id, target_device.pk])
+    list(
+        Module.objects.select_for_update()
+        .filter(pk__in=[pk for pk, _serial in moving])
+        .order_by("pk")
+        .values_list("pk", flat=True)
+    )
     source = locked_type_context(module.device, rules=rules)
     target = locked_type_context(target_device, rules=rules)
     if module_subtree_serials(module.pk) != moving:
