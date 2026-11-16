@@ -253,6 +253,7 @@ class TestSerialRuleEditStalesTheSnapshot:
         from dcim.models import DeviceType, Manufacturer
         from django.core.cache import cache
 
+        from netbox_librenms_plugin.import_utils.virtual_chassis import VC_NUMBERING_NO_MASTER
         from netbox_librenms_plugin.models import NormalizationRule
         from netbox_librenms_plugin.sync_cache import (
             SyncCacheConsistency,
@@ -264,7 +265,9 @@ class TestSerialRuleEditStalesTheSnapshot:
         from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
 
-        _chassis, (owner, page) = make_virtual_chassis_members("masterless-context")
+        chassis, (owner, page) = make_virtual_chassis_members("masterless-context")
+        chassis.master = None
+        chassis.save()
         seed_stored_mapping(owner, {SERVER_KEY: 42}, save=True)
         other_maker = Manufacturer.objects.create(name="Masterless page maker", slug="masterless-page-maker")
         page.device_type = DeviceType.objects.create(
@@ -286,7 +289,8 @@ class TestSerialRuleEditStalesTheSnapshot:
         snapshot_key = sync_snapshot_key(owner, "inventory", SERVER_KEY)
         try:
             _response, context, _request = _refresh(page, librenms_server, transceivers=(True, transceivers))
-            assert context.get("table") is not None
+            # Without a master the numbering rule is unknown, so the tab refuses the table but keeps the snapshot.
+            assert context["vc_numbering_error"] == VC_NUMBERING_NO_MASTER
             cached = cached_module_inventory(cache.get(snapshot_key))
             assert [item["entPhysicalIndex"] for item in cached] == [1], "the merge did not use the owner's context"
 
@@ -298,7 +302,7 @@ class TestSerialRuleEditStalesTheSnapshot:
                 view.cache_only = True
                 read = view.get_context_data(request, member, server_key=SERVER_KEY)
 
-                assert read["table"] is not None, member.name
+                assert read["vc_numbering_error"] == VC_NUMBERING_NO_MASTER, member.name
                 assert (status["state"], status["snapshot_available"]) == ("ready", True), member.name
                 assert cache.get(snapshot_key) is not None, f"the read of {member.name} deleted the snapshot"
         finally:
