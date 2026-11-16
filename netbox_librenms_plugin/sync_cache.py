@@ -785,7 +785,8 @@ class SyncCacheConsistency:
                 and module_inventory_snapshot_matches(
                     payload, owner, server_key, module_snapshot_host_id(owner, server_key)
                 )
-                and payload.get("serial_context") == SerialRules.load().for_device(owner).fingerprint
+                # The refresh stamps the page device's context, and the table reader checks that context.
+                and payload.get("serial_context") == SerialRules.load().for_device(self.subject).fingerprint
             )
         return cache.has_key(key)
 

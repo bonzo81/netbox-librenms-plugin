@@ -241,3 +241,50 @@ class TestSerialRuleEditStalesTheSnapshot:
             assert context["table"] is None
         finally:
             cache.delete(snapshot_key)
+
+    def test_a_masterless_chassis_member_status_reads_the_context_that_its_refresh_stamped(self, librenms_server):
+        """Without a master each member has its own context, so status must check the page's, as the table does."""
+        from dcim.models import DeviceType, Manufacturer
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, sync_snapshot_key
+        from netbox_librenms_plugin.tests.conftest import make_module_bay, make_virtual_chassis_members
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        _chassis, (owner, page) = make_virtual_chassis_members("masterless-context")
+        seed_stored_mapping(owner, {SERVER_KEY: 42}, save=True)
+        other_maker = Manufacturer.objects.create(name="Masterless page maker", slug="masterless-page-maker")
+        page.device_type = DeviceType.objects.create(
+            manufacturer=other_maker, model="Masterless page model", slug="masterless-page-model"
+        )
+        page.save()
+        for member in (owner, page):
+            make_module_bay(member, "Bay 1")
+        # The owner's manufacturer has its own chain, so the two members' contexts differ.
+        NormalizationRule.objects.create(
+            scope="serial",
+            match_pattern=r"^S/N\s+(.+)$",
+            replacement=r"\1",
+            manufacturer=owner.device_type.manufacturer,
+        )
+        snapshot_key = sync_snapshot_key(owner, "inventory", SERVER_KEY)
+        coordinator = SyncCacheConsistency(page)
+        try:
+            _response, context, _request = _refresh(page, librenms_server)
+            assert context.get("table") is not None
+            assert cache.get(snapshot_key) is not None, "the page refresh did not write the shared snapshot"
+
+            status = coordinator.status(SERVER_KEY)[SyncTab.MODULES.value]
+            request = make_request("get", {"tab": "modules", "server_key": SERVER_KEY})
+            view = DeviceModuleTableView()
+            view.setup(request, pk=page.pk)
+            view.cache_only = True
+            cached = view.get_context_data(request, page, server_key=SERVER_KEY)
+
+            assert cached["table"] is not None
+            assert (status["state"], status["snapshot_available"]) == ("ready", True)
+        finally:
+            cache.delete(snapshot_key)
+            cache.delete(coordinator.state_key(SyncTab.MODULES, SERVER_KEY))
