@@ -66,6 +66,7 @@ class _VLANSyncOutcome:
     name_taken_count: int = 0
     stale_name_count: int = 0
     add_permission_skipped_count: int = 0
+    change_permission_skipped_count: int = 0
     confirmation_error_count: int = 0
     conflicts: list[dict] = field(default_factory=list)
 
@@ -89,6 +90,8 @@ class _VLANSyncOutcome:
             reasons.append(f"{self.permission_skipped_count} skipped (change permission missing)")
         if self.add_permission_skipped_count:
             reasons.append(f"{self.add_permission_skipped_count} skipped (add permission constraints)")
+        if self.change_permission_skipped_count:
+            reasons.append(f"{self.change_permission_skipped_count} skipped (change permission constraints)")
         if self.ambiguous_count:
             reasons.append(f"{self.ambiguous_count} skipped (VLAN match ambiguous)")
         if self.duplicate_source_count:
@@ -307,6 +310,7 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         proposed_name,
         row_vlan_group,
         changeable_vlans,
+        user,
     ):
         """Recheck and apply one signed VLAN rename while the target row is locked."""
         target_group_id = row_vlan_group.pk if row_vlan_group is not None else None
@@ -326,6 +330,8 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
         try:
             with transaction.atomic():
                 vlan.save(update_fields=["name", "last_updated"])
+                if not saved_in_scope(vlan, user, "change"):
+                    raise PermissionsViolation()
         except IntegrityError as exc:
             raise ValueError(
                 "The proposed VLAN name already exists in the selected group. Refresh the VLAN data and try again."
@@ -482,7 +488,14 @@ class SyncVLANsView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, LibreN
                 proposed_name=proposed_name,
                 row_vlan_group=row_vlan_group,
                 changeable_vlans=changeable_vlans,
+                user=request.user,
             )
+        except PermissionsViolation:
+            messages.error(
+                request,
+                f"VLAN {vid}: the renamed VLAN is outside your change permission constraints; skipped.",
+            )
+            outcome.change_permission_skipped_count += 1
         except ValueError as exc:
             messages.error(request, f"VLAN {vid}: {exc}")
             outcome.confirmation_error_count += 1
