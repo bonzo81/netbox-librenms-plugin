@@ -3,6 +3,7 @@
 import json
 from urllib.parse import parse_qs, urlsplit
 
+import pytest
 from playwright.sync_api import expect
 
 from test_sync_cache_browser import _add_page_scripts, _page_html, _state
@@ -664,3 +665,43 @@ def test_a_live_search_waits_for_the_ime_composition_to_end(page):
     with page.expect_navigation() as navigation:
         ime.send("Input.insertText", {"text": "nihao"})
     assert parse_qs(urlsplit(navigation.value.url).query) == {"tab": ["interfaces"], "interfaces_q": ["nihao"]}
+
+
+def _sync_request_page():
+    return f"""<!doctype html><html><body>
+        <div id="librenms-sync-tabs" data-active-tab="interfaces">
+          <form method="get" id="interfaces_filter-form" class="sync-filter-form">
+            <input type="hidden" name="tab" value="interfaces"></form>
+          <input type="search" form="interfaces_filter-form" name="interfaces_q" id="search">
+          <div id="interface-sync-content">
+            <button id="sync-rows" hx-post="{PAGE_URL}sync/" hx-target="#interface-sync-content">Sync</button>
+            <button id="sync-vlans" hx-post="{PAGE_URL}vlans/" hx-target="#htmx-modal-content">VLANs</button>
+          </div>
+        </div>
+        <div id="htmx-modal-content"></div></body></html>"""
+
+
+@pytest.mark.parametrize("button", ["#sync-rows", "#sync-vlans"])
+def test_a_sync_request_in_the_tabs_cancels_the_pending_live_search(page, button):
+    held = []
+    navigations = []
+
+    def answer(route):
+        if route.request.headers.get("hx-request"):
+            held.append(route)
+        else:
+            route.fulfill(status=200, content_type="text/html", body=_sync_request_page())
+
+    page.route(f"{PAGE_URL}**", answer)
+    page.goto(PAGE_URL)
+    _add_page_scripts(page)
+    page.evaluate("htmxTest.process(document.body); initializeSyncFilters()")
+    page.on("request", lambda request: request.is_navigation_request() and navigations.append(request.url))
+
+    page.fill("#search", "eth")
+    page.click(button)
+    page.wait_for_timeout(700)
+    # The live search must not leave the page while the sync response is pending.
+    assert navigations == []
+    assert len(held) == 1
+    held[0].fulfill(status=200, content_type="text/html", body="<p>done</p>")
