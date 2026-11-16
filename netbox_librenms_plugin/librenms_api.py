@@ -32,6 +32,7 @@ from netbox_librenms_plugin.server_mappings import (
 DEFAULT_API_TIMEOUT = 10
 EXTENDED_API_TIMEOUT = 20  # For endpoints that may take longer (e.g., device listing)
 DEFAULT_CACHE_TIMEOUT = 300
+SNMP_CREDENTIAL_FIELDS = ("community", "authname", "authpass", "cryptopass")
 
 # Short-lived cache for get_device_info(). The device-info header is fetched on every sync-tab
 # render (and again on the post-action redirect), but a device's identity/metadata is stable, so
@@ -43,6 +44,12 @@ DEVICE_INFO_CACHE_TIMEOUT = 60
 HTTP_NOT_FOUND = 404
 
 logger = logging.getLogger(__name__)
+
+
+def _strip_snmp_credentials(device_data):
+    """Remove SNMP secrets that are not needed by plugin consumers."""
+    for field in SNMP_CREDENTIAL_FIELDS:
+        device_data.pop(field, None)
 
 
 def librenms_id_cache_key(obj, server_key):
@@ -769,6 +776,7 @@ class LibreNMSAPI:
             device_data = response.json()["devices"][0]
             if not isinstance(device_data, dict):
                 return False, None
+            _strip_snmp_credentials(device_data)
             # LibreNMS 26.5.0 returns the full location relationship object
             # (keys: id, location, lat, lng, timestamp, fixed_coordinates)
             # instead of a flat location name string. Normalise to the name so
@@ -2111,6 +2119,8 @@ class LibreNMSAPI:
                     return False, msg or "Unexpected response format: missing 'devices' list"
                 if not all(isinstance(item, dict) for item in devices):
                     return False, "Unexpected response format: invalid item shape in 'devices'"
+                for device in devices:
+                    _strip_snmp_credentials(device)
                 # LibreNMS 26.5.0 returns the full location relationship object
                 # (keys: id, location, lat, lng, timestamp, fixed_coordinates)
                 # instead of a flat location name string. Normalise each device's
