@@ -13,7 +13,6 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 import pytest
-from dcim.models import Cable, ConsolePort, ConsoleServerPort, Device, FrontPort, Interface, RearPort
 from django.core.cache import cache
 from django.urls import reverse
 
@@ -115,6 +114,8 @@ def _mixed_device(tag):
         tuple[Device, dict[str, str | None]]: The device, and the comparison of each row by row ID.
 
     """
+    from dcim.models import ConsolePort, ConsoleServerPort
+
     device = _device(tag)
     peer = make_device(f"cables-{tag}-peer")
     console = make_device(f"cables-{tag}-console")
@@ -182,6 +183,8 @@ def _breakout_device(tag):
 
     Channel 1 has the plugin's profiled cable, channel 2 can extend it, and channel 3 must wait for channel 2.
     """
+    from dcim.models import Cable, Interface
+
     device = _device(tag)
     parent = Interface.objects.create(device=device, name="et-0/0/1", type="100gbase-x-qsfp28", channels=4)
     channels = [
@@ -270,19 +273,12 @@ def _chassis(tag):
 class TestCableComparison:
     """The comparison of each row decides the sync-state filter, on every enrichment path."""
 
-    @pytest.mark.parametrize(
-        "path",
-        [
-            "normal-patch-console",
-            pytest.param(
-                "breakout",
-                marks=pytest.mark.skipif(
-                    not hasattr(Interface, "channel_id"), reason="NetBox before 4.7 has no channel interfaces"
-                ),
-            ),
-        ],
-    )
+    @pytest.mark.parametrize("path", ["normal-patch-console", "breakout"])
     def test_cable_comparison_covers_normal_console_breakout_and_patch_paths(self, client, settings, path):
+        from dcim.models import Interface
+
+        if path == "breakout" and not hasattr(Interface, "channel_id"):
+            pytest.skip("NetBox before 4.7 has no channel interfaces")
         client = _superuser_client(client, settings, f"cable-comparison-{path}")
         device, expected = _mixed_device("comparison") if path != "breakout" else _breakout_device("comparison")
 
@@ -315,6 +311,8 @@ class TestCableComparison:
                     assert status == "no cable" and "sync cable" in action, row_id
 
     def test_a_hidden_cable_is_in_no_state(self, client, settings):
+        from dcim.models import ConsolePort, ConsoleServerPort, Device, FrontPort, Interface, RearPort
+
         configure = _superuser_client(client, settings, "cable-hidden-admin")
         device, _expected = _mixed_device("hidden")
         configure.logout()
@@ -332,6 +330,8 @@ class TestCableComparison:
         assert records["1001"]["cable_comparison"] == NOT_IN_NETBOX
 
     def test_a_tagged_serial_cable_whose_path_ends_at_a_panel_is_in_no_state(self, client, settings):
+        from dcim.models import ConsolePort, ConsoleServerPort
+
         client = _superuser_client(client, settings, "cable-open-path")
         device = _device("open-path")
         console = make_device("cables-open-path-console")
@@ -449,6 +449,8 @@ class TestWholeSnapshotData:
         assert all(f"interface_name_field={field}" in signature for field, signature in signatures.items())
 
     def test_whole_device_data_does_not_change_under_a_filter(self, client, settings):
+        from dcim.models import ConsolePort, ConsoleServerPort
+
         client = _superuser_client(client, settings, "cable-whole-device")
         device = _device("whole-device")
         console = make_device("cables-whole-device-console")
@@ -561,6 +563,8 @@ class TestInvalidFilters:
         assert list(_rows(html)) == ["1006"]
 
     def test_a_sync_with_an_invalid_filter_of_another_tab_writes_and_shows_its_own_table(self, client, settings):
+        from dcim.models import Interface
+
         client = _superuser_client(client, settings, "cable-post-prefix")
         device, _expected = _mixed_device("post-prefix")
         data = _sync_data(_fragment(client, device), "1001")
@@ -583,6 +587,8 @@ class TestInvalidFilters:
         assert list(_rows(html)) == ["1001"]
 
     def test_invalid_filter_does_not_refuse_the_sync_action(self, client, settings):
+        from dcim.models import Interface
+
         client = _superuser_client(client, settings, "cable-sync-action")
         device, _expected = _mixed_device("sync-action")
         data = _sync_data(_fragment(client, device), "1001")
@@ -651,6 +657,8 @@ class TestFollowUpsKeepThePageQuery:
     """Every answer that re-renders the cable tab, or sends the browser back to it, keeps the filters and page."""
 
     def test_a_sync_rerender_keeps_the_filter_and_the_clamped_page(self, client, settings):
+        from dcim.models import Interface
+
         client = _superuser_client(client, settings, "cable-sync-rerender")
         device, _free = _picker_device("sync-rerender")
         page = _fragment(client, device, **{**PAGE_QUERY, "cables_page": "9"})
@@ -719,6 +727,8 @@ class TestFollowUpsKeepThePageQuery:
 
 @pytest.mark.django_db
 def test_the_remote_create_modal_posts_with_the_page_query(client, librenms_server, settings):
+    from dcim.models import Interface
+
     from netbox_librenms_plugin.tests.conftest import make_superuser
     from netbox_librenms_plugin.tests.test_cable_remote_matching import TestCheckAndCreateTheRemoteEnd
 
