@@ -48,6 +48,29 @@ def test_owner_refuses_changed_membership_or_topology(change):
 
 
 @transactional_db_with_all_apps()
+def test_a_child_committed_before_the_topology_read_refuses_the_observation(monkeypatch):
+    """A child that the subtree read missed but the topology holds would move without its serial claim."""
+    from dcim.models import Module
+
+    from netbox_librenms_plugin import module_writes
+
+    source = make_device_with_module_bays("owner-late-child", ["Slot 1"])
+    root = install_module(source, "Slot 1", "LATE-ROOT", serial="ROOT123", child_bays=("Sub 1",))
+    original = module_writes._topology
+
+    def commit_child_first(device_ids):
+        # The interleaving point: another writer commits a child after the subtree read.
+        if not Module.objects.filter(module_bay__module=root).exists():
+            install_module(source, "Sub 1", "LATE-CHILD", serial="LATE123", parent_module=root)
+        return original(device_ids)
+
+    monkeypatch.setattr(module_writes, "_topology", commit_child_first)
+
+    with pytest.raises(ValidationError, match="changed"):
+        module_writes.observe_module_write(subtree_roots=[root.pk])
+
+
+@transactional_db_with_all_apps()
 def test_owner_locks_complete_destinations_in_pk_order_before_downstream_rows():
     from netbox_librenms_plugin.module_writes import lock_module_write, observe_module_write
 

@@ -28,6 +28,14 @@ def _topology(device_ids):
     return modules, bays
 
 
+def _subtrees(modules, roots):
+    """Return the pks of every root and every Module below it in the topology rows *modules*."""
+    found = {root for root in roots if root is not None}
+    while added := {row[0] for row in modules if row[3] in found} - found:
+        found |= added
+    return found
+
+
 def template_type_lock_key(target_kind, target_pk):
     """Return the one advisory key shared by creation and bay-template materialization."""
     from netbox_librenms_plugin.utils import advisory_lock_key
@@ -75,7 +83,7 @@ def observe_module_write(*, device_ids=(), module_ids=(), subtree_roots=()) -> M
         raise ValidationError(_CHANGED)
     owners = tuple(sorted({*device_ids, *(row[1] for row in rows)}))
     modules, bays = _topology(owners)
-    if not set(rows).issubset(modules):
+    if not set(rows).issubset(modules) or not _subtrees(modules, subtree_roots) <= selected:
         raise ValidationError(_CHANGED)
     return ModuleWriteObservation(owners, modules, bays, tuple(row[4] for row in rows))
 
