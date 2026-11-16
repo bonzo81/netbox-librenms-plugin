@@ -1,4 +1,5 @@
-"""Serialize participating plugin module writers through their complete Device scope.
+"""
+Serialize participating plugin module writers through their complete Device scope.
 
 Claim hardware identities once, then lock every Device in pk order, then validate
 membership and topology before Module, bay or component row locks. Module creators
@@ -67,7 +68,8 @@ class ModuleWriteObservation:
 
 
 def observe_module_write(*, device_ids=(), module_ids=(), subtree_roots=()) -> ModuleWriteObservation:
-    """Observe destinations and existing or removed modules without permission-filtering the owner set.
+    """
+    Observe destinations and existing or removed modules without permission-filtering the owner set.
 
     The caller still authorizes every actual write. Full per-Device topology lets
     the post-lock check detect new children, removal and same-Device reparenting.
@@ -136,7 +138,8 @@ class LockedModuleWrite:
 
 
 def lock_module_write(observation, *, incoming=(), rules: SerialRules | None = None) -> LockedModuleWrite:
-    """Claim identities once and lock the complete sorted owner set FOR NO KEY UPDATE.
+    """
+    Claim identities once and lock the complete sorted owner set FOR NO KEY UPDATE.
 
     Read types after the lock statement, so a type change that held a Device row
     cannot leave a pre-lock type cached on the returned Device instances.
