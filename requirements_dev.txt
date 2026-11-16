@@ -1,6 +1,6 @@
 Django>=5.2,<6.2
 packaging
-playwright>=1.64.1
+playwright>=1.65.0
 PyYAML
 pytest
 pytest-cov>=7.1.0
