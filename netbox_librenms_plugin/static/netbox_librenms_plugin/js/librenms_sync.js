@@ -4339,6 +4339,14 @@ document.addEventListener('htmx:historyRestore', function () {
     });
 });
 
+// A filter typed before a request in the tabs started must not replace that request's result.
+let lastSyncTabRequestAt = -Infinity;
+document.addEventListener('htmx:beforeRequest', function (event) {
+    const tabs = document.getElementById('librenms-sync-tabs');
+    if (event.detail.elt.matches?.('.sync-filter-form') || !tabs) return;
+    if (tabs.contains(event.detail.elt) || tabs.contains(event.detail.target)) lastSyncTabRequestAt = performance.now();
+});
+
 // An empty field means no filter, so it stays out of the page URL that the response pushes.
 document.addEventListener('htmx:configRequest', function (event) {
     if (event.detail.elt instanceof HTMLFormElement && event.detail.elt.matches('.sync-filter-form')) {
@@ -4354,6 +4362,10 @@ document.addEventListener('htmx:configRequest', function (event) {
         const results = target.querySelector('[data-filter-search]');
         const search = [...form.elements].find(control => control.matches('.sync-filter-search'));
         if (composingSearches.has(search)) {
+            event.preventDefault();
+            return;
+        }
+        if ((event.detail.triggeringEvent?.timeStamp ?? Infinity) < lastSyncTabRequestAt) {
             event.preventDefault();
             return;
         }

@@ -1271,3 +1271,54 @@ def test_a_filter_response_after_refresh_cannot_update_a_detached_results_target
     assert page.url == original_url
     expect(page.locator(f"#{TABLE}")).to_have_attribute("data-rendered-q", "")
     expect(page.locator("#id_interfaces_q")).to_have_value("")
+
+
+SYNC_ROUTE = f"{PAGE_URL}sync-rows/"
+
+
+def _sync_request_page():
+    tab = _filter_tab({}).replace(
+        '<form method="post" id="sync-form" action="/sync/">',
+        f'<form method="post" id="sync-form" action="/sync/" hx-post="{SYNC_ROUTE}" hx-target="#interface-sync-content"'
+        ' hx-swap="innerHTML" hx-sync="#interface-sync-content:drop">'
+        f'<button type="button" id="sync-vlans" hx-post="{SYNC_ROUTE}" hx-target="#htmx-modal-content">VLANs</button>',
+    )
+    return (
+        f'<!doctype html><html><body><div id="librenms-sync-tabs"><div id="interface-sync-content">{tab}</div></div>'
+        '<div id="htmx-modal-content"></div></body></html>'
+    )
+
+
+@pytest.mark.parametrize("button", ["#sync", "#sync-vlans"])
+def test_a_sync_request_in_the_tabs_cancels_the_pending_live_search(page, button):
+    held = []
+    synced = []
+    page.route(
+        f"{PAGE_URL}**", lambda route: route.fulfill(status=200, content_type="text/html", body=_sync_request_page())
+    )
+    page.route(f"{FILTER_ENDPOINT}**", lambda route: held.append(route))
+    page.route(f"{SYNC_ROUTE}**", lambda route: synced.append(route))
+    page.goto(f"{PAGE_URL}?tab=interfaces&server_key=primary")
+    _add_page_scripts(page)
+
+    page.locator("#id_interfaces_q").press_sequentially("eth")
+    page.click(button)
+    for _ in range(100):
+        if synced:
+            break
+        page.wait_for_timeout(50)
+    assert len(synced) == 1
+    page.wait_for_timeout(900)
+    # A filter computed while the sync writes would replace the sync result with rows from before it.
+    assert held == []
+
+    synced[0].fulfill(status=200, content_type="text/html", body='<p id="sync-result">done</p>')
+    expect(page.locator("#sync-result")).to_have_count(1)
+    page.wait_for_timeout(900)
+    assert held == []
+    expect(page.locator("#sync-result")).to_have_count(1)
+    if button == "#sync-vlans":
+        # The search stays on the page, and a new character filters again.
+        page.locator("#id_interfaces_q").press("End")
+        page.locator("#id_interfaces_q").press_sequentially("0")
+        assert parse_qs(urlsplit(_next_request(page, held, 1).request.url).query)["interfaces_q"] == ["eth0"]
