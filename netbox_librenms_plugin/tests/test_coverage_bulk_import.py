@@ -771,6 +771,7 @@ class TestProcessDeviceFilters:
             131,
             existing.name,
             hardware=existing.device_type.model,
+            serial="KEY-CACHED",
             location=existing.site.name,
         )
         live_librenms.server.register("/api/v0/devices", {"status": "ok", "devices": [row]})
