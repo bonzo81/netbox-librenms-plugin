@@ -827,6 +827,35 @@ class TestAssignVCSerialView:
 
         assert any("No serial assignments" in text for text in _messages(response, "info"))
 
+    def test_an_absent_identity_is_refused_and_an_unchanged_serial_is_not_checked(
+        self, logged_in_client, librenms_server
+    ):
+        """A serial without identity refuses its member; a stored duplicate is a baseline that Sync All keeps."""
+        absent = make_device("vc-serial-absent")
+        kept = make_device("vc-serial-kept", serial="DUP-SERIAL")
+        placeholder = make_device("vc-serial-placeholder", serial="PLACEHOLDER-KEPT")
+        make_device("vc-serial-duplicate-holder", serial="DUP-SERIAL")
+        make_virtual_chassis("vc-serial-baseline", absent, kept, placeholder)
+
+        response = _post(
+            logged_in_client,
+            "assign_vc_serial",
+            absent,
+            {
+                "librenms_serial_1": "0",
+                "member_id_1": str(absent.pk),
+                "librenms_serial_2": "DUP-SERIAL",
+                "member_id_2": str(kept.pk),
+                "librenms_serial_3": "-",
+                "member_id_3": str(placeholder.pk),
+            },
+        )
+
+        for member in (absent, kept, placeholder):
+            member.refresh_from_db()
+        assert (absent.serial, kept.serial, placeholder.serial) == ("", "DUP-SERIAL", "PLACEHOLDER-KEPT")
+        assert _messages(response, "error") == [f"{absent.name}: the LibreNMS serial identifies no hardware"]
+
     def test_assignment_without_a_member_id_is_ignored(self, logged_in_client, librenms_server):
         device = make_device("vc-serial-no-member")
         make_virtual_chassis("vc-serial-no-member-chassis", device)
