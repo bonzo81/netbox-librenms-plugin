@@ -4270,10 +4270,11 @@ function initializeSyncFilters() {
     });
 }
 
-// A tab request cancels the pending live search, so the old form cannot load its own tab again.
+// A request from or into the tabs cancels the pending live search, so the page cannot navigate before its response.
 document.addEventListener('htmx:beforeRequest', (event) => {
-    if (event.detail.target?.id !== 'librenms-sync-tabs') return;
-    event.detail.target.querySelectorAll('.sync-filter-form').forEach((form) => clearTimeout(liveSearchTimers.get(form)));
+    const tabs = document.getElementById('librenms-sync-tabs');
+    if (!tabs || !(tabs.contains(event.detail.elt) || tabs.contains(event.detail.target))) return;
+    tabs.querySelectorAll('.sync-filter-form').forEach((form) => clearTimeout(liveSearchTimers.get(form)));
 });
 
 function initializeFilterDisclosures() {
