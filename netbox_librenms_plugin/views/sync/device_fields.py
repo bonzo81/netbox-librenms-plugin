@@ -44,6 +44,7 @@ from netbox_librenms_plugin.serial_identity import (
     device_assignment,
     display,
     is_sole_holder,
+    lock_chassis_of,
     retype_conflict,
     retype_lock,
     retype_scope,
@@ -220,6 +221,7 @@ def _write_device_serial(view, request, pk, server_key, incoming):
         with atomic_with_events():
             serial_rules = SerialRules.load()
             assignment_lock([incoming], model=Device, rules=serial_rules)
+            lock_chassis_of(pk)
             update_existing_row(view.restricted_queryset(Device, "change").filter(pk=pk), apply)
     except Device.DoesNotExist:
         messages.error(request, "Device no longer exists.")
@@ -486,6 +488,7 @@ class UpdateDeviceTypeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
 
         with atomic_with_events():
             retype_lock(scope, rules=serial_rules)
+            lock_chassis_of(pk)
             old_device_type, failed = _write_device_field(
                 self,
                 request,
@@ -741,6 +744,8 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
         serial_rules = SerialRules.load()
         # One set of serial identity locks for every row of the attempt, before any member row lock.
         assignment_lock([raw_serial for raw_serial, member_id in rows if member_id], model=Device, rules=serial_rules)
+        # Every member that the attempt writes must be in this chassis, so one chassis lock covers them.
+        lock_chassis_of(device.pk)
         for raw_serial, member_id in rows:
             if not member_id or not display(raw_serial):
                 continue

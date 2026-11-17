@@ -630,6 +630,17 @@ def _share_locked_master_id(chassis_id):
     return row[0] if row else None
 
 
+def lock_chassis_of(device_pk) -> None:
+    """
+    Take ``FOR SHARE`` on the chassis row of the Device *device_pk*; a writer calls it before the device row lock.
+
+    NetBox's chassis edit locks the chassis row before the member rows, so a writer takes the same order.
+    """
+    from dcim.models import Device
+
+    _share_locked_master_id(Device.objects.filter(pk=device_pk).values_list("virtual_chassis_id", flat=True).first())
+
+
 def locked_context(device, *, rules: SerialRules) -> SerialContext:
     """
     Return the serial context of the locked *device*, under a lock on the row whose DeviceType decides it.
@@ -640,6 +651,7 @@ def locked_context(device, *, rules: SerialRules) -> SerialContext:
     waited for and then read. The master link is read under a share lock on the chassis row.
     """
     chassis_id = device.virtual_chassis_id
+    # Held already after lock_chassis_of(), unless the device changed chassis before its row lock.
     master_id = _share_locked_master_id(chassis_id)
     if chassis_id is None or master_id is None or master_id == device.pk:
         return rules.for_module_target(device)

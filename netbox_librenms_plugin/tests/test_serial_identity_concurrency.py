@@ -629,6 +629,153 @@ def test_a_type_change_of_a_chassis_master_waits_for_a_master_change_and_reads_t
     assert Device.objects.get(pk=old_master.pk).device_type_id != new_type.pk
 
 
+def _write_during_a_chassis_change(user, url, data, before, after=()):
+    """
+    POST *data* to *url* in its own session while another session holds a chassis change.
+
+    The holder runs the *before* statements, the POST starts and must wait for a lock, then the
+    holder runs the *after* statements and commits. Return the status and the SQLSTATEs the POST raised.
+    """
+    from django.test import Client
+
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import (
+        raised_sqlstates,
+        second_connection,
+        wait_for_lock_wait,
+    )
+
+    writer_pids, writer_sqlstates = [], []
+
+    def write():
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET lock_timeout = '20s'")
+            writer_pids.append(connection.connection.info.backend_pid)
+            client = Client()
+            client.force_login(user)
+            with raised_sqlstates() as raised:
+                status = client.post(url, data).status_code
+            writer_sqlstates.extend(raised)
+            return status
+        finally:
+            connection.close()
+
+    with second_connection() as other, bounded_executor(max_workers=1) as executor:
+        with other.cursor() as cursor:
+            for sql, params in before:
+                cursor.execute(sql, params)
+        writer = executor.submit(write)
+        deadline = time.monotonic() + 20
+        while not writer_pids and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert writer_pids, "the write never opened its session"
+        wait_for_lock_wait(connection, writer_pids[0], timeout=10)
+        with other.cursor() as cursor:
+            for sql, params in after:
+                cursor.execute(sql, params)
+        other.commit()
+        status = writer.result(timeout=30)
+    return status, writer_sqlstates
+
+
+def _promoted_member(tag, own):
+    """Return a chassis whose master is a plain device, its mapped member D, and a third device that stores "ABC"."""
+    from dcim.models import DeviceType, Manufacturer, VirtualChassis
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+
+    old_master = make_device(f"{tag}-old-master", serial="MASTER1")
+    promoted = seed_mapping(make_device(f"{tag}-promoted", serial="OLD-D1"), SERVER_KEY, own=own)
+    chassis = make_virtual_chassis(f"{tag}-chassis", old_master, promoted)
+    VirtualChassis.objects.filter(pk=chassis.pk).update(master=old_master)
+    make_device(f"{tag}-holder", serial="ABC")
+    maker = Manufacturer.objects.create(name=f"{tag} maker", slug=f"{tag}-maker")
+    NormalizationRule.objects.create(scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=maker)
+    rule_type = DeviceType.objects.create(
+        manufacturer=maker, model=f"{tag} model", slug=f"{tag}-model", part_number=f"{tag}-HW"
+    )
+    return chassis, promoted, rule_type
+
+
+def _set_master(chassis, device):
+    from dcim.models import VirtualChassis
+
+    return (f'UPDATE "{VirtualChassis._meta.db_table}" SET master_id = %s WHERE id = %s', [device.pk, chassis.pk])
+
+
+@transactional_db_with_all_apps()
+def test_a_serial_write_on_a_member_that_becomes_master_waits_and_uses_its_new_role(librenms_server):
+    """As master, D's own rule keys "XABC" to the held "ABC", so the write refuses; as a member it would not."""
+    from dcim.models import Device, VirtualChassis
+    from django.urls import reverse
+
+    chassis, promoted, rule_type = _promoted_member("promote-serial", 9861)
+    promoted.device_type = rule_type
+    promoted.save()
+    librenms_server.device_info_response(device_id=9861, hostname=promoted.name, serial="XABC")
+    url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": promoted.pk})
+
+    status, sqlstates = _write_during_a_chassis_change(
+        make_superuser("promote-serial-user"), url, {"server_key": SERVER_KEY}, [_set_master(chassis, promoted)]
+    )
+
+    assert "40P01" not in sqlstates
+    assert status == 302
+    assert VirtualChassis.objects.get(pk=chassis.pk).master_id == promoted.pk
+    assert Device.objects.get(pk=promoted.pk).serial == "OLD-D1"
+
+
+@transactional_db_with_all_apps()
+def test_a_type_change_of_a_member_that_becomes_master_waits_and_reads_its_new_scope(librenms_server):
+    """As master, D decides the member serials too, so the scope that the type change read first is stale."""
+    from dcim.models import Device, VirtualChassis
+    from django.urls import reverse
+
+    chassis, promoted, rule_type = _promoted_member("promote-type", 9862)
+    librenms_server.device_info_response(device_id=9862, hostname=promoted.name, hardware=rule_type.part_number)
+    url = reverse("plugins:netbox_librenms_plugin:update_device_type", kwargs={"pk": promoted.pk})
+
+    status, sqlstates = _write_during_a_chassis_change(
+        make_superuser("promote-type-user"), url, {"server_key": SERVER_KEY}, [_set_master(chassis, promoted)]
+    )
+
+    assert "40P01" not in sqlstates
+    assert status == 302
+    assert VirtualChassis.objects.get(pk=chassis.pk).master_id == promoted.pk
+    assert Device.objects.get(pk=promoted.pk).device_type_id != rule_type.pk
+
+
+@transactional_db_with_all_apps()
+def test_a_vc_serial_assignment_and_a_chassis_edit_in_netbox_order_both_commit(librenms_server):
+    """NetBox's chassis edit updates the chassis row, then the member rows, in one transaction."""
+    from dcim.models import Device, VirtualChassis
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+
+    master = make_device("core-order-master", serial="MASTER1")
+    member = make_device("core-order-member", serial="OLD-M1")
+    chassis = make_virtual_chassis("core-order-chassis", master, member)
+    VirtualChassis.objects.filter(pk=chassis.pk).update(master=master)
+    url = reverse("plugins:netbox_librenms_plugin:assign_vc_serial", kwargs={"pk": member.pk})
+    data = {"server_key": SERVER_KEY, "member_id_1": str(member.pk), "librenms_serial_1": "NEWSER1"}
+
+    status, sqlstates = _write_during_a_chassis_change(
+        make_superuser("core-order-user"),
+        url,
+        data,
+        [(f'UPDATE "{VirtualChassis._meta.db_table}" SET name = %s WHERE id = %s', ["core-order-renamed", chassis.pk])],
+        after=[(f'UPDATE "{Device._meta.db_table}" SET vc_priority = %s WHERE id = %s', [7, member.pk])],
+    )
+
+    assert "40P01" not in sqlstates
+    assert status == 302
+    assert VirtualChassis.objects.get(pk=chassis.pk).name == "core-order-renamed"
+    assert Device.objects.filter(pk=member.pk).values_list("serial", "vc_priority").get() == ("NEWSER1", 7)
+
+
 @transactional_db_with_all_apps()
 def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_server, monkeypatch):
     """

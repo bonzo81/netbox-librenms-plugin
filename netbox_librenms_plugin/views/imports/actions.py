@@ -77,6 +77,7 @@ from netbox_librenms_plugin.serial_identity import (
     display,
     is_identity,
     is_sole_holder,
+    lock_chassis_of,
     retype_conflict,
     retype_lock,
     retype_scope,
@@ -500,9 +501,12 @@ def _write_mapping_rows(view, model, lookup, duplicate_message, *, field, target
 
 
 def _lock_librenms_id_assignment_target(view, target_model, target_pk, librenms_id, server_key):
-    """Lock one server/ID claim and its target, then reject ownership across Devices and VMs."""
+    """Lock the chassis of a Device target, one server/ID claim and the target; reject ownership across models."""
+    from dcim.models import Device
     from virtualization.models import VirtualMachine as NetBoxVM
 
+    if target_model is Device:
+        lock_chassis_of(target_pk)
     try:
         locked_target, id_conflict = lock_librenms_id_assignment(
             librenms_id,
@@ -595,6 +599,7 @@ def _save_retyped_device(device, device_type, request) -> HttpResponse | None:
         serial_rules = SerialRules.load()
         scope = retype_scope(device)
         retype_lock(scope, rules=serial_rules)
+        lock_chassis_of(device.pk)
         locked = Device.objects.select_for_update(of=("self",)).filter(pk=device.pk).first()
         if locked is None:
             return _htmx_error_response("Device no longer exists; it may have been deleted concurrently.")
@@ -2436,6 +2441,7 @@ class DeviceConflictActionView(
             with atomic_with_events():
                 serial_rules = SerialRules.load()
                 assignment_lock([incoming_serial], model=Device, rules=serial_rules)
+                lock_chassis_of(existing_device.pk)
                 try:
                     locked_device = (
                         self.restricted_queryset(Device, "change")
