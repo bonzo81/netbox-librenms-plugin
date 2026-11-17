@@ -613,19 +613,21 @@ class Assignment:
     absent: bool = False
 
 
-def _share_locked_master_id(chassis_id):
+def _share_locked_master_id(chassis_id, *, wait=True):
     """
     Return the master id of the chassis *chassis_id* under ``FOR SHARE`` on its row; None without a chassis.
 
     The lock waits for a master change that has not committed, but not for another holder of the lock.
+    Without *wait*, a conflicting holder raises the lock conflict ``55P03`` at once.
     """
     from dcim.models import VirtualChassis
     from django.db import connection
 
     if chassis_id is None:
         return None
+    mode = "FOR SHARE" if wait else "FOR SHARE NOWAIT"
     with connection.cursor() as cursor:
-        cursor.execute(f'SELECT master_id FROM "{VirtualChassis._meta.db_table}" WHERE id = %s FOR SHARE', [chassis_id])
+        cursor.execute(f'SELECT master_id FROM "{VirtualChassis._meta.db_table}" WHERE id = %s {mode}', [chassis_id])
         row = cursor.fetchone()
     return row[0] if row else None
 
@@ -651,8 +653,8 @@ def locked_context(device, *, rules: SerialRules) -> SerialContext:
     waited for and then read. The master link is read under a share lock on the chassis row.
     """
     chassis_id = device.virtual_chassis_id
-    # Held already after lock_chassis_of(), unless the device changed chassis before its row lock.
-    master_id = _share_locked_master_id(chassis_id)
+    # Held already after lock_chassis_of(); a chassis that the device joined later is never waited for under its row.
+    master_id = _share_locked_master_id(chassis_id, wait=False)
     if chassis_id is None or master_id is None or master_id == device.pk:
         return rules.for_module_target(device)
     master_chassis_id, manufacturer_id = _lock_type_row(master_id)
@@ -817,7 +819,7 @@ def retype_conflict(device, device_type, *, rules: SerialRules, scope: RetypeSco
     from dcim.models import Device
 
     # The caller holds the device row, so its chassis stays; this lock holds the master link until the save.
-    _share_locked_master_id(device.virtual_chassis_id)
+    _share_locked_master_id(device.virtual_chassis_id, wait=False)
     if retype_scope(device) != scope:
         return True
     stored = Device.objects.select_related("device_type", "virtual_chassis__master__device_type").get(pk=device.pk)

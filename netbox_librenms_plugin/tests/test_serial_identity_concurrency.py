@@ -777,6 +777,42 @@ def test_a_vc_serial_assignment_and_a_chassis_edit_in_netbox_order_both_commit(l
 
 
 @transactional_db_with_all_apps()
+@pytest.mark.parametrize("write", ["serial", "type"])
+def test_a_writer_under_its_device_row_lock_never_waits_for_a_chassis_it_did_not_lock_first(write):
+    """A device that joined a chassis after the writer's chassis pre-lock: the write fails at once, it does not wait."""
+    from dcim.models import Device, VirtualChassis
+    from django.db import OperationalError, transaction
+
+    from netbox_librenms_plugin.serial_identity import SerialRules, device_assignment, retype_conflict, retype_scope
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_timeout, second_connection
+
+    master = make_device(f"late-chassis-{write}-master", serial="MASTER1")
+    device = make_device(f"late-chassis-{write}-member", serial="OLD-L1")
+    chassis = make_virtual_chassis(f"late-chassis-{write}", master, device)
+    VirtualChassis.objects.filter(pk=chassis.pk).update(master=master)
+    rules = SerialRules.load()
+
+    with second_connection() as other:
+        with other.cursor() as cursor:
+            cursor.execute(
+                f'UPDATE "{VirtualChassis._meta.db_table}" SET name = %s WHERE id = %s', ["late-renamed", chassis.pk]
+            )
+        started = time.monotonic()
+        with pytest.raises(OperationalError) as raised, lock_timeout(10000), transaction.atomic():
+            # The row lock without lock_chassis_of() first: the state of a device that joined the chassis late.
+            locked = Device.objects.select_for_update().get(pk=device.pk)
+            if write == "serial":
+                device_assignment(locked, "NEW-L1", rules=rules)
+            else:
+                retype_conflict(locked, locked.device_type, rules=rules, scope=retype_scope(locked))
+        elapsed = time.monotonic() - started
+
+    assert raised.value.__cause__.sqlstate == "55P03"
+    assert elapsed < 5, f"the writer waited {elapsed:.1f}s for the chassis under its device row lock"
+
+
+@transactional_db_with_all_apps()
 def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_server, monkeypatch):
     """
     Under the new type "XABC" keys to "ABC". Two module serial updates run after the type change
