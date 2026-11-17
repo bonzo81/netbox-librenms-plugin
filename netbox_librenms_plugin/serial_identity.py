@@ -613,6 +613,23 @@ class Assignment:
     absent: bool = False
 
 
+def _share_locked_master_id(chassis_id):
+    """
+    Return the master id of the chassis *chassis_id* under ``FOR SHARE`` on its row; None without a chassis.
+
+    The lock waits for a master change that has not committed, but not for another holder of the lock.
+    """
+    from dcim.models import VirtualChassis
+    from django.db import connection
+
+    if chassis_id is None:
+        return None
+    with connection.cursor() as cursor:
+        cursor.execute(f'SELECT master_id FROM "{VirtualChassis._meta.db_table}" WHERE id = %s FOR SHARE', [chassis_id])
+        row = cursor.fetchone()
+    return row[0] if row else None
+
+
 def locked_context(device, *, rules: SerialRules) -> SerialContext:
     """
     Return the serial context of the locked *device*, under a lock on the row whose DeviceType decides it.
@@ -622,19 +639,8 @@ def locked_context(device, *, rules: SerialRules) -> SerialContext:
     after it locks the master row, so a type change of the master that has not committed is
     waited for and then read. The master link is read under a share lock on the chassis row.
     """
-    from dcim.models import VirtualChassis
-    from django.db import connection
-
     chassis_id = device.virtual_chassis_id
-    master_id = None
-    if chassis_id is not None:
-        with connection.cursor() as cursor:
-            # FOR SHARE waits for a master change, but not for another serial writer of the chassis.
-            cursor.execute(
-                f'SELECT master_id FROM "{VirtualChassis._meta.db_table}" WHERE id = %s FOR SHARE', [chassis_id]
-            )
-            row = cursor.fetchone()
-        master_id = row[0] if row else None
+    master_id = _share_locked_master_id(chassis_id)
     if chassis_id is None or master_id is None or master_id == device.pk:
         return rules.for_module_target(device)
     master_chassis_id, manufacturer_id = _lock_type_row(master_id)
@@ -742,7 +748,11 @@ class RetypeScope:
 
 
 def retype_scope(device) -> RetypeScope:
-    """Read the serials whose identity a new DeviceType of *device* decides, from the database."""
+    """
+    Read the serials whose identity a new DeviceType of *device* decides, from the database.
+
+    It takes no lock: the first read comes before the locks, and ``retype_conflict`` reads it again under them.
+    """
     from dcim.models import Device, Module
 
     row = Device.objects.filter(pk=device.pk).values("virtual_chassis_id", "virtual_chassis__master_id").first()
@@ -794,6 +804,8 @@ def retype_conflict(device, device_type, *, rules: SerialRules, scope: RetypeSco
     """
     from dcim.models import Device
 
+    # The caller holds the device row, so its chassis stays; this lock holds the master link until the save.
+    _share_locked_master_id(device.virtual_chassis_id)
     if retype_scope(device) != scope:
         return True
     stored = Device.objects.select_related("device_type", "virtual_chassis__master__device_type").get(pk=device.pk)

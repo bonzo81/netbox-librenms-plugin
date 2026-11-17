@@ -559,6 +559,77 @@ def test_a_member_serial_write_waits_for_a_chassis_master_change(librenms_server
 
 
 @transactional_db_with_all_apps()
+def test_a_type_change_of_a_chassis_master_waits_for_a_master_change_and_reads_the_new_scope(librenms_server):
+    """
+    Another session moves the master to a second member and has not committed.
+
+    The retype of the old master must wait for the commit, then read its scope again: the old
+    master no longer decides the member serials, so the scope it read first is stale and it refuses.
+    """
+    from dcim.models import Device, DeviceType, Manufacturer, VirtualChassis
+    from django.test import Client
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import second_connection, wait_for_lock_wait
+
+    old_master = seed_mapping(make_device("rescope-old-master", serial="MASTER1"), SERVER_KEY, own=9851)
+    new_master = make_device("rescope-new-master", serial="MASTER2")
+    member = make_device("rescope-member", serial="MEMBER3")
+    chassis = make_virtual_chassis("rescope-chassis", old_master, new_master, member)
+    VirtualChassis.objects.filter(pk=chassis.pk).update(master=old_master)
+    new_maker = Manufacturer.objects.create(name="Rescope maker", slug="rescope-maker")
+    new_type = DeviceType.objects.create(
+        manufacturer=new_maker, model="Rescope model", slug="rescope-model", part_number="RESCOPE-HW"
+    )
+    librenms_server.device_info_response(device_id=9851, hostname=old_master.name, hardware=new_type.part_number)
+    user = make_superuser("rescope-user")
+    writer_pids = []
+
+    def retype():
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET lock_timeout = '20s'")
+            client = Client()
+            client.force_login(user)
+
+            def observe(execute, sql, params, many, context):
+                if not writer_pids:
+                    writer_pids.append(connection.connection.info.backend_pid)
+                return execute(sql, params, many, context)
+
+            with connection.execute_wrapper(observe):
+                return client.post(
+                    reverse("plugins:netbox_librenms_plugin:update_device_type", kwargs={"pk": old_master.pk}),
+                    {"server_key": SERVER_KEY},
+                ).status_code
+        finally:
+            connection.close()
+
+    with second_connection() as other, bounded_executor(max_workers=1) as executor:
+        with other.cursor() as cursor:
+            cursor.execute(
+                f'UPDATE "{VirtualChassis._meta.db_table}" SET master_id = %s WHERE id = %s',
+                [new_master.pk, chassis.pk],
+            )
+        writer = executor.submit(retype)
+        try:
+            deadline = time.monotonic() + 20
+            while not writer_pids and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert writer_pids, "the type change never reached the database"
+            wait_for_lock_wait(connection, writer_pids[0], timeout=10)
+            assert not writer.done()
+        finally:
+            other.commit()
+        assert writer.result(timeout=30) == 302
+
+    assert VirtualChassis.objects.get(pk=chassis.pk).master_id == new_master.pk
+    assert Device.objects.get(pk=old_master.pk).device_type_id != new_type.pk
+
+
+@transactional_db_with_all_apps()
 def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_server, monkeypatch):
     """
     Under the new type "XABC" keys to "ABC". Two module serial updates run after the type change
