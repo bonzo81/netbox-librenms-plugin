@@ -102,6 +102,7 @@ from .views import (
     LocationMappingEditView,
     LocationMappingListView,
     LocationMappingView,
+    MarkBuiltInView,
     MergeNetBoxDevicesView,
     ModuleBayMappingBulkDeleteView,
     ModuleBayMappingBulkExportYAMLView,
@@ -300,6 +301,11 @@ urlpatterns = [
         "devices/<int:pk>/add-bay-template/",
         AddBayTemplateView.as_view(),
         name="add_bay_template",
+    ),
+    path(
+        "devices/<int:pk>/mark-built-in/",
+        MarkBuiltInView.as_view(),
+        name="mark_built_in",
     ),
     path(
         "devices/<int:pk>/ipaddress-sync/",

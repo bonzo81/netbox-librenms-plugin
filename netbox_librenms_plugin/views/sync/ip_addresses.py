@@ -20,7 +20,7 @@ from virtualization.models import VirtualMachine, VMInterface
 from netbox_librenms_plugin.constants import OOB_INVENTORY_SOURCE, is_supported_interface_name_field
 from netbox_librenms_plugin.interface_rules import PortSyncBlocked, interface_rules_for_request
 from netbox_librenms_plugin.interface_sync import resolve_or_create_interface_from_port
-from netbox_librenms_plugin.ip_addressing import parse_address_with_prefix
+from netbox_librenms_plugin.ip_addressing import UNAVAILABLE_VRF_MESSAGE, parse_address_with_prefix
 from netbox_librenms_plugin.ip_rules import ip_rules_for_request
 from netbox_librenms_plugin.librenms_api import LibreNMSIDConflictError
 from netbox_librenms_plugin.librenms_ids import normalize_librenms_port_id
@@ -31,7 +31,7 @@ from netbox_librenms_plugin.sync_cache import (
     render_sync_cache_miss,
     schedule_request_cache_mutation,
 )
-from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, update_existing_row
+from netbox_librenms_plugin.transactions import classify_conflict, run_transaction, saved_in_scope, update_existing_row
 from netbox_librenms_plugin.utils import (
     acquire_advisory_transaction_lock,
     build_migrated_context,
@@ -176,7 +176,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         try:
             return self.restricted_queryset(VRF).get(pk=vrf_id)
         except (VRF.DoesNotExist, TypeError, ValueError):
-            raise ValueError("Selected VRF is no longer available or you do not have permission to view it.") from None
+            raise ValueError(UNAVAILABLE_VRF_MESSAGE) from None
 
     def get_cached_ip_snapshot(self, obj, *, require_create_metadata=False):
         """Return the cached LibreNMS IP snapshot when it satisfies the requested contract."""
@@ -792,7 +792,7 @@ class SyncIPAddressesView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, 
         try:
             return self.restricted_queryset(VRF).get(pk=vrf_id)
         except (VRF.DoesNotExist, TypeError, ValueError):
-            raise ValueError("Selected VRF is no longer available or you do not have permission to view it.") from None
+            raise ValueError(UNAVAILABLE_VRF_MESSAGE) from None
 
     @staticmethod
     def _host_rows(vrf, parsed):
@@ -1586,6 +1586,6 @@ class CreateVRFFromIPRowView(SyncIPAddressesView):
             detail = exception_text_for(exc, VRF, request.user)
             raise _VRFCreateRefusedError(f"NetBox does not accept the LibreNMS VRF '{name}': {detail}") from exc
         # The model-level grant says nothing about WHICH VRFs the user may add; a constrained grant rolls back.
-        if not VRF.objects.restrict(request.user, "add").filter(pk=vrf.pk).exists():
+        if not saved_in_scope(vrf, request.user, "add"):
             raise _VRFCreateRefusedError(f"You may not add the NetBox VRF '{name}'.")
         return vrf

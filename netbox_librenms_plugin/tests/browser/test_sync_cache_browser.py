@@ -1379,7 +1379,8 @@ def test_vlan_row_submit_keeps_another_page_selection_and_group(page):
         <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit">
           <table id="librenms-vlan-table"><tbody><tr>
             <td><input id="vlan-101" type="checkbox" name="select" value="101"></td>
-            <td><select name="vlan_group_101">
+            <td><input type="hidden" name="expected_vlan_name_101" value="users">
+              <select name="vlan_group_101">
               <option value="1">Group A</option><option value="2">Group B</option>
             </select></td>
           </tr></tbody></table>
@@ -1417,6 +1418,52 @@ def test_vlan_row_submit_keeps_another_page_selection_and_group(page):
     assert [pair for pair in posted if pair[0] == "sync_one"] == [["sync_one", "201"]]
     assert [pair for pair in posted if pair == ["select", "101"]] == []
     assert stored["101"]["inputs"]["vlan_group_101"] == "2"
+    assert stored["101"]["inputs"]["expected_vlan_name_101"] == "users"
+
+
+@pytest.mark.parametrize(
+    ("table_id", "field", "selected_value", "shown_value"),
+    [
+        # A VLAN name rule changed the name.
+        ("librenms-vlan-table", "expected_vlan_name_300", "web+300", "web"),
+        # The far end of the cable now resolves to another NetBox interface.
+        ("librenms-cable-table", "expected_remote_id_300", "100", "200"),
+        ("librenms-cable-table-vc", "expected_remote_id_300", "100", "200"),
+    ],
+)
+def test_a_restored_row_posts_the_value_it_shows_now(page, table_id, field, selected_value, shown_value):
+    """A restored selection must post the value the row shows now, not the value it showed when it was selected."""
+
+    def sync_page(value):
+        return f"""
+        <input name="server_key" value="production">
+        <form id="sync-form" method="post" action="{SELECTION_PAGE_URL}/submit">
+          <table id="{table_id}"><tbody><tr data-interface="300">
+            <td><input id="row-300" type="checkbox" name="select" value="300"></td>
+            <td><select name="device_selection_300"><option value="1" selected>m1</option></select>
+              <input type="hidden" name="{field}" value="{value}"></td>
+          </tr></tbody></table>
+        </form>
+        """
+
+    shown = {"value": selected_value}
+    page.route(
+        f"{SELECTION_PAGE_URL}**",
+        lambda route: route.fulfill(status=200, content_type="text/html", body=sync_page(shown["value"])),
+    )
+    page.goto(SELECTION_PAGE_URL)
+    _add_page_scripts(page)
+    page.check("#row-300")
+
+    shown["value"] = shown_value
+    page.goto(SELECTION_PAGE_URL)
+    _add_page_scripts(page)
+    page.evaluate(f"restoreTableSelection(document.getElementById('{table_id}'))")
+
+    assert page.locator("#row-300").is_checked()
+    assert page.locator(f'[name="{field}"]').input_value() == shown_value
+    stored = page.evaluate(f"readStoredSelection(document.getElementById('{table_id}'))")
+    assert stored["300"]["inputs"][field] == shown_value
 
 
 # Tabler's modal layout: the open modal covers the viewport, so a click beside the dialog hits the modal itself.
@@ -5408,3 +5455,39 @@ def test_a_late_verify_answer_for_a_swapped_out_row_leaves_the_cleared_selection
     page.evaluate("() => new Promise((resolve) => setTimeout(resolve))")
 
     assert page.evaluate(stored) == []
+
+
+def test_vlan_modal_warning_icons_are_named_by_their_titles(page):
+    """The missing-VLAN warnings carry their text only in the title, so it is also their accessible name."""
+    vlans = [{"vid": 501, "type": "T", "missing": True}, {"vid": 502, "type": "T", "missing": False, "group_id": ""}]
+    groups = [{"id": "", "name": "Global"}, {"id": 1, "name": "Group A"}]
+    page.set_content(
+        f"""
+        <input name="csrfmiddlewaretoken" value="test-token">
+        <span id="vlanModalInterfaceName"></span>
+        <div id="vlanDetailModal"><table><tbody id="vlanDetailTableBody"></tbody></table></div>
+        <button id="edit" data-interface="Ethernet1" data-row-key="port-1" data-device-id="7"
+                data-vlans='{escape(json.dumps(vlans))}' data-vlan-groups='{escape(json.dumps(groups))}'>Edit</button>
+        """
+    )
+    page.route(
+        "**/plugins/librenms_plugin/verify-vlan-group/",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"status": "success", "css_class": "text-danger", "is_missing": True}),
+        ),
+    )
+    _add_page_scripts(page)
+
+    page.evaluate("openVlanDetailModal(document.getElementById('edit'))")
+    second = page.locator("#vlanDetailTableBody tr").nth(1)
+    second.locator("select").select_option("1")
+    expect(second.locator("i.mdi-alert")).to_have_count(1)
+
+    icons = page.locator("#vlanDetailTableBody i[title]")
+    expect(icons).to_have_count(2)
+    for index in range(2):
+        icon = icons.nth(index)
+        assert icon.get_attribute("role") == "img"
+        assert icon.get_attribute("aria-label") == icon.get_attribute("title")

@@ -1,5 +1,6 @@
 """Integration coverage for the shared LibreNMS object sync page."""
 
+import re
 from copy import deepcopy
 
 import pytest
@@ -262,6 +263,58 @@ class TestSyncPageRouting:
 
         assert response.context["librenms_id_is_legacy"] is True
         assert response.context["librenms_id_serial_confirmed"] is True
+
+    @pytest.mark.parametrize(("librenms_serial", "matches"), [("S/N ABC-SYNC", True), ("XYZ-SYNC", False)])
+    def test_the_serial_row_keys_both_serials_with_the_serial_rules(
+        self, logged_in_client, settings, librenms_server, librenms_serial, matches
+    ):
+        """A stored "ABC" matches LibreNMS "S/N ABC" under the seeded rule, and "XYZ" does not."""
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        _configure_servers(settings, librenms_server, SERVER_KEY)
+        device_id = 6612 if matches else 6613
+        device = make_device(f"sync-keyed-serial-{device_id}", serial="ABC-SYNC", librenms_cf=device_id)
+        _register_device(librenms_server, device_id, device.name, serial=librenms_serial)
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.context["serial_matches"] is matches
+        assert response.context["librenms_id_serial_confirmed"] is matches
+        sync_serial_url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": device.pk})
+        assert (sync_serial_url in response.content.decode()) == (not matches)
+
+    def test_a_numeric_zero_serial_matches_a_stored_zero(self, logged_in_client, settings, librenms_server):
+        _configure_servers(settings, librenms_server, SERVER_KEY)
+        device = make_device("sync-zero-serial", serial="0", librenms_cf=6614)
+        _register_device(librenms_server, 6614, device.name, serial=0)
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.context["serial_matches"] is True
+        assert response.context["librenms_id_serial_confirmed"] is True
+
+    def test_a_member_page_gates_the_legacy_id_on_the_mapping_owner_serial(
+        self, logged_in_client, settings, librenms_server
+    ):
+        """The gate compares the owner's serial; the serial row compares the member's own serial."""
+        _configure_servers(settings, librenms_server, SERVER_KEY)
+        _vc, members = make_virtual_chassis_members("sync-vc-legacy-gate", count=2)
+        owner, viewed = members
+        owner.serial = "MASTER-GATE"
+        owner.save()
+        viewed.serial = "MEMBER-GATE"
+        viewed.save()
+        seed_stored_mapping(owner, 6615, save=True)
+        _register_device(librenms_server, 6615, owner.name, serial="MASTER-GATE")
+
+        response = logged_in_client.get(_sync_url(viewed))
+
+        assert response.context["lookup_device_pk"] == owner.pk
+        assert response.context["librenms_id_serial_confirmed"] is True
+        assert response.context["serial_matches"] is False
 
 
 @pytest.mark.django_db
@@ -623,6 +676,40 @@ class TestVirtualChassisInventory:
         view.librenms_id = 6642
 
         assert view._get_vc_inventory_serials(members[0]) == []
+
+    def test_the_dialog_stores_the_raw_serial_and_shows_the_member_as_assigned(self, logged_in_client, librenms_server):
+        """The dialog posts the LibreNMS serial, shows its serial key, and finds the member on the next render."""
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        _vc, members = make_virtual_chassis_members("inventory-raw-dialog", count=2)
+        owner, member = members
+        owner.serial = "OWNER-RAW"
+        owner.save()
+        seed_mapping(owner, SERVER_KEY, own=6649)
+        inventory = _stack_inventory(
+            {"entPhysicalSerialNum": "S/N OWNER-RAW"}, {"entPhysicalSerialNum": "S/N MEMBER-RAW"}
+        )
+        _register_device(librenms_server, 6649, owner.name, inventory=inventory)
+
+        html = logged_in_client.get(_sync_url(owner)).content.decode()
+        start = html.index('id="vc-serials-form"')
+        form = html[start : html.index("</form>", start)]
+        fields = dict(re.findall(r'<input type="hidden" name="([^"]+)" value="([^"]*)"', form))
+        rows = {name.rsplit("_", 1)[1]: value for name, value in fields.items() if name.startswith("librenms_serial_")}
+        (row,) = (index for index, value in rows.items() if value == "S/N MEMBER-RAW")
+        logged_in_client.post(
+            reverse("plugins:netbox_librenms_plugin:assign_vc_serial", kwargs={"pk": owner.pk}),
+            {**fields, **{f"member_id_{index}": "" for index in rows}, f"member_id_{row}": str(member.pk)},
+        )
+
+        member.refresh_from_db()
+        assert member.serial == "S/N MEMBER-RAW"
+        response = logged_in_client.get(_sync_url(owner))
+        shown = {item["serial"]: item["assigned_member"] for item in response.context["vc_inventory_serials"]}
+        assert shown == {"OWNER-RAW": owner, "MEMBER-RAW": member}
 
     def test_the_serials_form_submits_the_active_server_and_tab(self, logged_in_client, librenms_server):
         """AssignVCSerialView can only preserve the context the rendered form posts."""

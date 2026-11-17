@@ -1365,6 +1365,26 @@ rules:
     patterns:
       - pattern-regex: class=["']table-responsive["'][^>]*>\s*\{%\s*include\s+["']inc/table\.html["']
       - pattern-not-inside: "{# ... #}"
+  - id: titled-icon-needs-accessible-name
+    languages: [generic]
+    severity: ERROR
+    message: >-
+      This icon gives its text only in a title, and a screen reader does not reliably announce the
+      title of an element that cannot get focus. Add role="img" and an aria-label equal to the
+      title. If visible text next to the icon says the same thing, add aria-hidden="true".
+    metadata:
+      category: accessibility
+    paths:
+      include:
+        - "*.py"
+        - "*.html"
+        - "*.js"
+      exclude:
+        - "**/tests/**"
+    patterns:
+      # The attribute set ends at the first ">", also across concatenated Python literals.
+      - pattern-regex: >-
+          <i\b(?=[^>]*[\s'"]title\s*=)(?![^>]*[\s'"]aria-hidden\s*=\s*["']true["'])(?!(?=[^>]*[\s'"]role\s*=\s*["']img["'])[^>]*[\s'"]aria-label\s*=\s*["'](?=\s*[^\s"']))[^>]*>
 
   - id: conflict-raised-without-record
     languages: [python]
@@ -1493,6 +1513,29 @@ rules:
       - pattern-not-inside: |
           def _member_name(...):
               ...
+
+  - id: device-serial-compare-through-serials-match
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This code compares a stored serial with == or !=. Device.serial holds the trimmed raw
+      LibreNMS serial, so a comparison must apply the current serial rules to both sides. Call
+      serials_match(stored, incoming, serial_key) from import_utils.virtual_chassis.
+    metadata:
+      category: correctness
+    paths:
+      include:
+        - "**/netbox_librenms_plugin/views/**"
+        - "**/netbox_librenms_plugin/import_utils/**"
+      exclude:
+        - "**/tests/**"
+        # Module writers store a normalized serial, so a Module comparison stays exact.
+        - "**/views/sync/modules.py"
+    pattern-either:
+      - pattern: $X.serial == $Y
+      - pattern: $Y == $X.serial
+      - pattern: $X.serial != $Y
+      - pattern: $Y != $X.serial
 
   - id: netbox-only-controls-use-replaceable-handlers
     languages: [javascript]
@@ -1768,6 +1811,80 @@ rules:
       - metavariable-regex:
           metavariable: $TYPES
           regex: ^(?![\s\S]*\bValidationError\b)[\s\S]*\bIntegrityError\b
+
+  - id: post-write-scope-through-helper
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This code reads a row that it just saved through an add or change scope inline. Call
+      transactions.saved_in_scope(obj, user, action), so every post-write read-back uses one rule.
+    metadata:
+      category: correctness
+    paths:
+      exclude:
+        - "**/tests/**"
+        - "**/migrations/**"
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              $OBJ.save(...)
+              ...
+          - pattern-inside: |
+              $OBJ = $MANAGER.create(...)
+              ...
+          - pattern-inside: |
+              try:
+                  ...
+                  $OBJ.save(...)
+              except $ERROR:
+                  ...
+              ...
+          - pattern-inside: |
+              try:
+                  ...
+                  $OBJ.save(...)
+              except $ERROR as $NAME:
+                  ...
+              ...
+          - pattern-inside: |
+              try:
+                  ...
+                  $OBJ = $MANAGER.create(...)
+              except $ERROR:
+                  ...
+              ...
+          - pattern-inside: |
+              try:
+                  ...
+                  $OBJ = $MANAGER.create(...)
+              except $ERROR as $NAME:
+                  ...
+              ...
+      - pattern-either:
+          - pattern: $MODEL.objects.restrict($USER, $ACTION).filter(pk=$OBJ.pk).exists()
+          - pattern: $VIEW.restricted_queryset($MODEL, $ACTION).filter(pk=$OBJ.pk).exists()
+      - metavariable-regex:
+          metavariable: $ACTION
+          regex: ^["'](add|change)["']$
+  - id: sync-script-reads-page-server-key
+    languages: [javascript]
+    severity: ERROR
+    message: >-
+      This script looks up a server_key input in the whole document. The server panel renders a
+      server_key input for each other server, so the first match can name the wrong server. Call
+      syncServerKey(), which reads the server of the sync page from #librenms-sync-tabs.
+    metadata:
+      category: correctness
+    paths:
+      include:
+        - "*.js"
+      exclude:
+        - "**/vendor/**"
+        - "*.min.js"
+    pattern-either:
+      - pattern: document.querySelector("=~/server_key/")
+      - pattern: document.querySelectorAll("=~/server_key/")
+      - pattern: document.getElementsByName("server_key")
 
   - id: batch-validation-needs-candidate-keys
     languages: [python]

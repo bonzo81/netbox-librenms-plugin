@@ -2984,12 +2984,16 @@ def get_tagged_vlan_css_class(vid, netbox_tagged_vids, exists_in_netbox, missing
     return "text-danger"
 
 
+def note_icon(icon_classes, note):
+    """Return an icon whose note is both its title and its accessible name."""
+    return format_html('<i class="mdi {}" role="img" title="{}" aria-label="{}"></i>', icon_classes, note, note)
+
+
 def get_missing_vlan_warning(vid, missing_vlans):
     """Return warning icon HTML if VLAN is not found in any NetBox VLAN group."""
     if vid in missing_vlans:
-        return (
-            ' <i class="mdi mdi-alert text-danger" '
-            'title="VLAN not in NetBox\u2014use VLAN Sync first to create it"></i>'
+        return format_html(
+            " {}", note_icon("mdi-alert text-danger", "VLAN not in NetBox\u2014use VLAN Sync first to create it")
         )
     return ""
 
@@ -3038,11 +3042,11 @@ def normalize_serial(value) -> str:
 
     LibreNMS returns all-digit serials as JSON numbers, so the value must be
     coerced before stripping — and ``str(value or "")`` would silently drop the
-    real-but-falsey serial ``0``. Call sites keep their own ``"-"`` placeholder
-    guards.
+    real-but-falsey serial ``0``. Call sites skip a placeholder with
+    ``normalize_stack_serial``.
 
-    A vendor marker such as Juniper's leading "S/N " is removed by a NormalizationRule
-    in the ``serial`` scope, so the operator can see and edit the transformation.
+    ``Device.serial`` stores this form. A vendor marker such as Juniper's leading "S/N "
+    stays: ``serials_match`` applies the ``serial`` NormalizationRule chain to both sides.
 
     Args:
         value: The raw serial as returned by LibreNMS (str, number, or None).
@@ -3057,7 +3061,7 @@ def normalize_stack_serial(value) -> str:
     return "" if is_librenms_placeholder(serial) else serial
 
 
-def find_devices_by_serial(serial: str, limit: int = 2) -> list:
+def find_devices_by_serial(serial: str, limit: int | None = 2) -> list:
     """
     Return up to *limit* Devices whose stored serial matches an already-normalized *serial*.
 
@@ -3067,21 +3071,21 @@ def find_devices_by_serial(serial: str, limit: int = 2) -> list:
 
     Args:
         serial: The incoming serial, already passed through ``normalize_serial``.
-        limit: How many rows to read, enough to tell a unique match from a duplicate.
+        limit: How many rows to read, enough to tell a unique match from a duplicate; None reads all.
 
     """
     from dcim.models import Device
     from django.db.models import CharField, F, Func, Value
 
     matches = list(Device.objects.filter(serial=serial)[:limit])
-    if len(matches) >= limit:
+    if limit is not None and len(matches) >= limit:
         return matches
     # An exact hit does not mean a unique one: a row written with padding normalizes to the same
     # serial, and the caller uses len(matches) > 1 to refuse a duplicate. Returning early on the
     # first exact match would hide that twin and let the import bind an arbitrary row.
     # Django's Trim() strips spaces only; normalize_serial() uses str.strip(), so name the same set.
     trimmed = Func(F("serial"), Value(" \t\n\r\v\f"), function="BTRIM", output_field=CharField())
-    remaining = limit - len(matches)
+    remaining = None if limit is None else limit - len(matches)
     matches.extend(
         Device.objects.annotate(trimmed_serial=trimmed)
         .filter(trimmed_serial=serial)
@@ -3143,6 +3147,27 @@ def index_vlan_source_rows(rows):
     return rows_by_vid, invalid_rows
 
 
+def vlan_source_namer(device):
+    """
+    Return the function that gives a LibreNMS VLAN row the name that a sync proposes for *device*.
+
+    The VLAN tab and the VLAN writer both use it, so the name the tab compares is the name the writer saves.
+    """
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    manufacturer = device.device_type.manufacturer if device is not None else None
+    scope = NormalizationRule.SCOPE_VLAN_NAME
+    rules = preload_normalization_rules(scope, manufacturer=manufacturer)
+
+    def name(row, vid):
+        value = row.get("vlan_name", f"VLAN {vid}" if vid is not None else "")
+        if not isinstance(value, str):
+            return value
+        return apply_normalization_rules(value, scope, manufacturer, preloaded_rules=rules, vid=vid)
+
+    return name
+
+
 # Header attributes for the sync tables: a header may wrap, and librenms_sync.js finds a column by its data-col.
 SYNC_TABLE_HEADER_ATTRS = {"class": "text-wrap", "data-col": lambda bound_column: bound_column.name}
 
@@ -3194,8 +3219,6 @@ def oob_badge_html(record, leading_space=False):
     """
     if record.get("_source") != OOB_INVENTORY_SOURCE:
         return ""
-    # Static trusted markup — mark_safe, not format_html (which requires interpolation
-    # args and raises TypeError when given a bare string).
     # Static trusted markup, no interpolation.
     return mark_safe((" " if leading_space else "") + OOB_BADGE_HTML)
 
@@ -3247,9 +3270,8 @@ def remote_port_html(value, record):
         SafeString: The cell markup.
 
     """
-    # Static trusted markup, mirrors the Serial badge idiom.
     manual_badge = (
-        mark_safe(' <i class="mdi mdi-gesture-tap-button text-muted" title="Remote end picked manually"></i>')
+        format_html(" {}", note_icon("mdi-gesture-tap-button text-muted", "Remote end picked manually"))
         if record.get("manual_remote")
         else ""
     )
@@ -3258,8 +3280,11 @@ def remote_port_html(value, record):
     also = record.get("also_reported_by")
     protocol_badge = (
         format_html(
-            ' <i class="mdi mdi-lan-connect text-muted" title="Also reported over {}"></i>',
-            ", ".join(str(protocol).upper() for protocol in also),
+            " {}",
+            note_icon(
+                "mdi-lan-connect text-muted",
+                f"Also reported over {', '.join(str(protocol).upper() for protocol in also)}",
+            ),
         )
         if also
         else ""
@@ -4286,7 +4311,9 @@ def preload_normalization_rules(scope: str, manufacturer=None) -> dict:
     return cache
 
 
-def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, preloaded_rules: dict | None = None) -> str:
+def apply_normalization_rules(
+    value: str, scope: str, manufacturer=None, *, preloaded_rules: dict | None = None, vid=None
+) -> str:
     """
     Apply NormalizationRule chain to transform a string before matching.
 
@@ -4305,6 +4332,7 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, prel
         preloaded_rules:  Optional dict from :func:`preload_normalization_rules`.
             When provided, DB queries are skipped and preloaded lists are used
             instead, eliminating repeated queries inside loops.
+        vid:  The VLAN ID that a VLAN name rule's placeholder stands for.
 
     Returns:
         The normalized string after all matching rules have been applied.
@@ -4320,7 +4348,7 @@ def apply_normalization_rules(value: str, scope: str, manufacturer=None, *, prel
 
     def _apply_rules(val, rules_qs):
         for rule in rules_qs:
-            val = rule.apply(val)
+            val = rule.apply(val, vid=vid)
         return val
 
     if preloaded_rules is not None:

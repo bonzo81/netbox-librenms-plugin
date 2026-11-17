@@ -16,6 +16,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
 from netbox_librenms_plugin.tests.view_test_helpers import (
+    assert_titled_icons_are_named,
     assert_update_logged,
     change_logging,
     get as view_get,
@@ -129,6 +130,18 @@ class TestModuleMismatchPreviewView:
         assert "NS123" in html
         # The reported symptom: the row read as a serial mismatch against itself.
         assert "Only the serial differs" not in html
+
+    def test_the_recognised_type_icon_is_named(self):
+        device, installed, request, view, inventory = self._setup("named-icon")
+        cache_key = _cache_preview(view, device, inventory, request)
+        try:
+            response = view_get(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert response.status_code == 200
+        icons = assert_titled_icons_are_named(response.content.decode())
+        assert any("mdi-check-decagram" in icon["class"] for icon in icons)
 
     def test_the_preview_refuses_an_oob_row_named_with_the_grant_of_a_host_row(self):
         """OOB-controller inventory renders no Replace button, so a crafted index for it carries another row's grant."""

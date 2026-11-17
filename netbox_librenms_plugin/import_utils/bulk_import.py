@@ -23,7 +23,6 @@ from ..transactions import classify_conflict
 from ..utils import (
     cached_row_matches,
     exception_text_for,
-    find_devices_by_serial,
     normalize_serial,
     normalize_stack_serial,
     preload_normalization_rules,
@@ -51,11 +50,12 @@ from .virtual_chassis import (
     VC_MASTER_UNKNOWN_WARNING,
     candidate_vc_serial_keys,
     create_virtual_chassis_with_members,
+    devices_with_serial,
+    DeviceSerialLookup,
     empty_virtual_chassis_data,
     get_virtual_chassis_data,
     identify_vc_master,
     prefetch_vc_data_for_devices,
-    vc_serial_key,
 )
 from netbox_librenms_plugin.server_mappings import (
     AmbiguousLibreNMSIdError,
@@ -453,7 +453,8 @@ def bulk_import_devices_shared(  # noqa: C901
     # Preload the device_type NormalizationRule set once so the per-device hardware→device-type
     # match doesn't re-query it for every device in the loop (issue #90 / N+1 avoidance, #92).
     device_type_norm_rules = preload_normalization_rules("device_type")
-    serial_key_for = functools.cache(vc_serial_key)
+    serial_lookup = DeviceSerialLookup()
+    serial_key_for = serial_lookup.key_for
     candidate_keys = functools.cache(candidate_vc_serial_keys)
 
     for idx, device_id in enumerate(device_ids, start=1):
@@ -516,6 +517,7 @@ def bulk_import_devices_shared(  # noqa: C901
                 include_vc_detection=True,
                 preloaded_device_type_rules=device_type_norm_rules,
                 serial_key_for=serial_key_for,
+                serial_lookup=serial_lookup,
                 candidate_keys=candidate_keys,
             )
 
@@ -657,6 +659,7 @@ def bulk_import_devices_shared(  # noqa: C901
                                 libre_device,
                                 server_key=api.server_key,
                                 master_member=master_member,
+                                serial_lookup=serial_lookup,
                             )
                             vc_created_count += 1
                             log_msg = f"Created VC '{vc.name}' during bulk import for device {device_id}"
@@ -873,7 +876,9 @@ def _reassert_new_import_blockers(validation: dict) -> None:
                 validation["issues"].append(msg)
 
 
-def _refresh_existing_device(validation: dict, libre_device: dict = None, server_key: str = "default") -> None:  # noqa: C901
+def _refresh_existing_device(  # noqa: C901
+    validation: dict, libre_device: dict = None, server_key: str = "default", *, serial_lookup=None
+) -> None:
     """
     Refresh existing_device from DB to pick up changes made in NetBox since caching.
 
@@ -884,8 +889,11 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
         validation (dict): The cached validation state, mutated in place.
         libre_device (dict | None): The LibreNMS device data used to re-evaluate the match.
         server_key (str): The active LibreNMS server key.
+        serial_lookup: Read-only batch lookup, or None for current database holders.
 
     """
+    if serial_lookup is None:
+        serial_lookup = devices_with_serial
     existing = validation.get("existing_device")
     if existing and hasattr(existing, "pk"):
         try:
@@ -1193,8 +1201,8 @@ def _refresh_existing_device(validation: dict, libre_device: dict = None, server
             ambiguous_fallback = False
             if not import_as_vm:
                 serial = normalize_serial(libre_device.get("serial"))
-                if serial and serial != "-":
-                    serial_matches = find_devices_by_serial(serial)
+                if normalize_stack_serial(serial):
+                    serial_matches = serial_lookup(serial)
                     if len(serial_matches) > 1:
                         ambiguous_fallback = True
                     elif serial_matches:
@@ -1441,7 +1449,9 @@ def process_device_filters(  # noqa: C901
     # Validate each device
     validated_devices = []
     total = len(libre_devices)
-    serial_key_for = functools.cache(vc_serial_key)
+    serial_lookup = DeviceSerialLookup()
+    serial_key_for = serial_lookup.key_for
+    batch_serial_lookup = serial_lookup.prefetch(normalize_serial(device.get("serial")) for device in libre_devices)
     candidate_keys = functools.cache(candidate_vc_serial_keys)
     # Always pass api so validate_device_for_import can run hardware/chassis lookups.
     # vc_detection_enabled only gates VC-specific paths inside that function.
@@ -1484,7 +1494,12 @@ def process_device_filters(  # noqa: C901
 
                 # Refresh existing_device from DB to avoid stale data
                 # (user may have changed role, name, etc. in NetBox)
-                _refresh_existing_device(device["_validation"], libre_device=device, server_key=api.server_key)
+                _refresh_existing_device(
+                    device["_validation"],
+                    libre_device=device,
+                    server_key=api.server_key,
+                    serial_lookup=batch_serial_lookup,
+                )
 
                 # Apply exclude_existing filter if enabled
                 if exclude_existing:
@@ -1505,6 +1520,7 @@ def process_device_filters(  # noqa: C901
             use_sysname=use_sysname,
             strip_domain=strip_domain,
             serial_key_for=serial_key_for,
+            serial_lookup=batch_serial_lookup,
             candidate_keys=candidate_keys,
         )
 

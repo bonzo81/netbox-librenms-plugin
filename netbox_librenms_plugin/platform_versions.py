@@ -24,6 +24,7 @@ from netbox_librenms_plugin.transactions import (
     TransactionConflict,
     classify_conflict,
     run_transaction,
+    saved_in_scope,
     update_existing_row,
 )
 from netbox_librenms_plugin.utils import exception_text_for, write_failure_message
@@ -400,7 +401,7 @@ def _create_platform(actor, assessment, winner, **fields):
             platform.full_clean()
             platform.save()
             # A constrained grant decides on the saved row; a denial rolls this savepoint back.
-            if not Platform.objects.restrict(actor, "add").filter(pk=platform.pk).exists():
+            if not saved_in_scope(platform, actor, "add"):
                 raise _AddDenied
     except _AddDenied:
         raise _Stop(PlatformOutcome(OutcomeStatus.BLOCKED, PlatformReason.ADD_PLATFORM_DENIED, assessment)) from None
@@ -485,11 +486,12 @@ def _create_version_platform(assessment, actor):
 
 def _named_request(new_os_platform, facts, tracking):
     """
-    Return the assessment of the OS platform that the actor names, and the stale outcome of changed facts.
+    Return the assessment of the OS platform that the actor names, and the outcome that refuses it.
 
     Returns:
         tuple[PlatformAssessment, PlatformOutcome | None]: The assessment, and the outcome when
-        LibreNMS now reports another OS than the actor saw, or with tracking on another version.
+        LibreNMS reports no OS, now reports another OS than the actor saw, or with tracking on
+        another version.
 
     """
     named = PlatformAssessment(
@@ -500,6 +502,9 @@ def _named_request(new_os_platform, facts, tracking):
         target_name=new_os_platform.name,
         operation=PlatformOperation.CREATE_OS_PLATFORM,
     )
+    # No OS rule could find a platform named for a device without an OS.
+    if not facts.librenms_os:
+        return named, PlatformOutcome(OutcomeStatus.BLOCKED, PlatformReason.NO_OS, named)
     # The OS platform lookup ignores case, so the OS comparison does too.
     if _fact(new_os_platform.reported_os).casefold() != facts.librenms_os.casefold():
         return named, PlatformOutcome(OutcomeStatus.STALE, PlatformReason.OS_CHANGED, named)
@@ -964,7 +969,7 @@ def _map_os_platform(librenms_os, platform, actor):
             mapping.full_clean()
             mapping.save()
             # A constrained grant decides on the saved row; a denial leaves the runner and rolls it back.
-            if not PlatformMapping.objects.restrict(actor, "add").filter(pk=mapping.pk).exists():
+            if not saved_in_scope(mapping, actor, "add"):
                 raise _AddDenied
     except (ValidationError, IntegrityError) as exc:
         if classify_conflict(exc):

@@ -45,8 +45,8 @@ def librenms_server(settings, monkeypatch):
         yield server
 
 
-def _register(server, hostname):
-    server.device_info_response(device_id=LIBRENMS_ID, hostname=hostname, hardware="Unmatched", os="", serial="", ip="")
+def _register(server, hostname, os=""):
+    server.device_info_response(device_id=LIBRENMS_ID, hostname=hostname, hardware="Unmatched", os=os, serial="", ip="")
     server.vc_inventory_callable(LIBRENMS_ID, [], {})
 
 
@@ -99,7 +99,7 @@ class TestAnImportActionShowsNetBoxsMessageOnlyToASuperuser:
 
         tag = f"vetext-importplatform-{int(superuser)}"
         hidden = make_device(f"{tag}-hidden")
-        _register(librenms_server, tag)
+        _register(librenms_server, tag, os=f"os-{tag}")
         settings.CUSTOM_VALIDATORS = {"dcim.platform": [_Refuses(f"Conflicts with {hidden.name}.")]}
         client.force_login(
             make_superuser(f"{tag}-superuser")
@@ -107,6 +107,7 @@ class TestAnImportActionShowsNetBoxsMessageOnlyToASuperuser:
             else make_user_with_perms(f"{tag}-viewer", [("add", Platform)])
         )
 
-        content = _post(client, "create_platform_from_import", {"platform_name": f"Platform {tag}"})
+        data = {"platform_name": f"Platform {tag}", "librenms_os": f"os-{tag}"}
+        content = _post(client, "create_platform_from_import", data)
 
         _assert_shown(content, hidden, superuser, "the platform")

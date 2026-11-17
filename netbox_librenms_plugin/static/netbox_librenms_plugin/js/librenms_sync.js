@@ -32,6 +32,16 @@ function getCsrfToken() {
 }
 
 /**
+ * Return the LibreNMS server key of the sync page, or '' for the default server.
+ *
+ * The server panel renders a server_key input for every other server, so a page-wide input
+ * lookup can name the wrong server. The page names its own server on #librenms-sync-tabs.
+ */
+function syncServerKey() {
+    return document.getElementById('librenms-sync-tabs')?.dataset.serverKey || '';
+}
+
+/**
  * Show a Bootstrap modal, using native Bootstrap Modal when available,
  * falling back to manual DOM manipulation otherwise.
  * Matches the ModalManager pattern in librenms_import.js.
@@ -1815,8 +1825,7 @@ const SELECTABLE_TABLE_IDS = [
  * @returns {string} The storage key.
  */
 function _selectionStorageKey(table) {
-    const serverKeyInput = document.querySelector('[name=server_key]');
-    const serverKey = serverKeyInput ? serverKeyInput.value : '';
+    const serverKey = syncServerKey();
     return 'lnmsSelection:' + window.location.pathname + ':' + table.id + ':' + serverKey;
 }
 
@@ -1927,20 +1936,30 @@ function _rowCompanionInputs(row) {
  * @returns {boolean}
  */
 function _isSelectionCompanionName(name) {
-    const cableSnapshotPrefixes = [
-        'expected_local_id_',
-        'expected_local_device_id_',
-        'expected_remote_id_',
-        'expected_remote_device_id_',
-    ];
     return (
         Boolean(name) &&
         (name.startsWith('device_selection_') ||
             name.startsWith('selection_grant_') ||
             name.startsWith('vlan_group_') ||
             name.startsWith('vrf_') ||
-            cableSnapshotPrefixes.some((prefix) => name.startsWith(prefix)))
+            _isShownStateName(name))
     );
+}
+
+/**
+ * Return whether a field tells the writer what the row showed, so the writer can refuse a changed row.
+ *
+ * @param {string} name - The submitted field name.
+ * @returns {boolean}
+ */
+function _isShownStateName(name) {
+    return [
+        'expected_local_id_',
+        'expected_local_device_id_',
+        'expected_remote_id_',
+        'expected_remote_device_id_',
+        'expected_vlan_name_',
+    ].some((prefix) => name.startsWith(prefix));
 }
 
 /**
@@ -2030,6 +2049,8 @@ function restoreTableSelection(table) {
             if (input.matches('select.vrf-select') && !chosen.includes(input.name)) return;
             // A grant names the render it was signed for: the row keeps its own, and a restored member gets one from its verify.
             if (input.name.startsWith('selection_grant_')) return;
+            // A rendered row posts the state it shows now; only an off-page row posts its stored state.
+            if (_isShownStateName(input.name)) return;
             const renderedValue = input.value;
             if (input.tomselect) {
                 input.tomselect.setValue(companionInputs[input.name], true);
@@ -2739,6 +2760,12 @@ function initializeVlanGroupSelects() {
     });
 }
 
+// The warning icons carry their text only in the title, so the same text is their accessible name.
+const VLAN_MISSING_ICON = ' <i class="mdi mdi-alert text-danger" role="img" title="VLAN not in NetBox" aria-label="VLAN not in NetBox"></i>';
+const VLAN_MISSING_IN_GROUP_ICON = ' <i class="mdi mdi-alert text-danger" role="img"'
+    + ' title="VLAN not in selected group—use VLAN Sync first to create it"'
+    + ' aria-label="VLAN not in selected group—use VLAN Sync first to create it"></i>';
+
 /**
  * Open the VLAN detail modal for a specific interface.
  * Populates the modal table with per-VLAN rows and group dropdowns.
@@ -2778,7 +2805,7 @@ function openVlanDetailModal(btn) {
         vidSpan.className = vlan.css;
         vidSpan.textContent = vlan.vid;
         if (vlan.missing) {
-            vidSpan.innerHTML += ' <i class="mdi mdi-alert text-danger" title="VLAN not in NetBox"></i>';
+            vidSpan.innerHTML += VLAN_MISSING_ICON;
         }
         tdVid.appendChild(vidSpan);
         tr.appendChild(tdVid);
@@ -2922,7 +2949,7 @@ function verifyVlanInGroup(select, deviceId, vid, vlanType, groupId) {
                         // Update warning icon
                         const existingIcon = vidSpan.querySelector('.mdi-alert');
                         if (isMissing && !existingIcon) {
-                            vidSpan.innerHTML = vid + ' <i class="mdi mdi-alert text-danger" title="VLAN not in selected group\u2014use VLAN Sync first to create it"></i>';
+                            vidSpan.innerHTML = vid + VLAN_MISSING_IN_GROUP_ICON;
                         } else if (!isMissing && existingIcon) {
                             vidSpan.textContent = String(vid);
                         }
@@ -3056,7 +3083,7 @@ function initializeVlanModalSave() {
                             const MAX_INLINE = 3;
                             const inlineParts = btnVlans.slice(0, MAX_INLINE).map(v => {
                                 const warning = v.missing
-                                    ? ' <i class="mdi mdi-alert text-danger" title="VLAN not in selected group\u2014use VLAN Sync first to create it"></i>'
+                                    ? VLAN_MISSING_IN_GROUP_ICON
                                     : '';
                                 return `<span class="${v.css}">${v.vid}(${v.type})${warning}</span>`;
                             });
@@ -3099,7 +3126,7 @@ function initializeVlanModalSave() {
                 body: JSON.stringify({
                     device_id: deviceId,
                     vid_group_map: vidGroupMap,
-                    server_key: document.querySelector('input[name="server_key"]')?.value || null
+                    server_key: syncServerKey() || null
                 })
             }).then(response => {
                 if (!response.ok) {
@@ -3308,7 +3335,7 @@ function handleVRFChange(select, value) {
             ip_address: fullIpAddress,  // Use full IP address with prefix
             row_id: select.dataset.rowId,
             vrf_id: value,
-            server_key: document.querySelector('input[name="server_key"]')?.value || null
+            server_key: syncServerKey() || null
         })
     })
         .then(response => {
@@ -3455,7 +3482,7 @@ function handleInterfaceChange(select, value) {
             // display names collide (host vs OOB controller); interface_name is the fallback.
             port_id: row?.dataset.portId || null,
             interface_name_field: document.querySelector('input[name="interface_name_field"]:checked')?.value || null,
-            server_key: document.querySelector('input[name="server_key"]')?.value || null
+            server_key: syncServerKey() || null
         })
     })
         .then(response => {
@@ -3629,7 +3656,7 @@ function handleCableChange(select, value) {
             device_id: value,
             origin_device_id: verifyContext?.dataset.cableOriginDeviceId || null,
             row_id: select.dataset.interface,
-            server_key: document.querySelector('input[name="server_key"]')?.value || null
+            server_key: syncServerKey() || null
         })
     })
         .then(response => {
@@ -3925,7 +3952,7 @@ function handleModuleChange(select, value, options = {}) {
             verify_binding: select.dataset.verifyBinding || null,
             ent_physical_index: select.dataset.module,
             depth: rowDepth,
-            server_key: document.querySelector('input[name="server_key"]')?.value || null
+            server_key: syncServerKey() || null
         }),
         signal: controller.signal
     })
@@ -4547,7 +4574,7 @@ function deleteSelectedInterfaces(selectedCheckboxes) {
     }
 
     formData.append('csrfmiddlewaretoken', csrfToken);
-    const serverKey = document.querySelector('[name="server_key"]')?.value;
+    const serverKey = syncServerKey();
     if (serverKey) formData.append('server_key', serverKey);
 
     // Add interface IDs
@@ -5178,8 +5205,7 @@ document.addEventListener('click', function (e) {
         return;
     }
 
-    const serverKeyInput = document.querySelector('[name=server_key]');
-    const serverKey = serverKeyInput ? serverKeyInput.value : '';
+    const serverKey = syncServerKey();
 
     const body = new URLSearchParams({
         csrfmiddlewaretoken: csrf,

@@ -133,6 +133,37 @@ def render_module_tab(device, *, user=None, server_key="default"):
     return view.render_sync_partial(request, device, context["server_key"], {"module_sync": context}).content.decode()
 
 
+class _TitledIconParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.icons = []
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "i" and "title" in attrs:
+            self.icons.append(attrs)
+
+
+def titled_icons(html):
+    """Return the attributes of each ``<i>`` with a title, after one HTML unescape."""
+    parser = _TitledIconParser()
+    parser.feed(str(html))
+    parser.close()
+    return parser.icons
+
+
+def assert_titled_icons_are_named(html):
+    """Assert each titled icon is an image named by its title, or hidden beside text; return the icons."""
+    icons = titled_icons(html)
+    assert icons, "the markup has no titled icon"
+    for attrs in icons:
+        if attrs.get("aria-hidden") == "true":
+            continue
+        assert attrs.get("role") == "img", attrs
+        assert attrs.get("aria-label") == attrs["title"], attrs
+    return icons
+
+
 class _ModuleTabParser(HTMLParser):
     """Collect the forms, the hx-get controls and the member selects of a rendered Modules tab."""
 

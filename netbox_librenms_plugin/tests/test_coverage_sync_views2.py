@@ -401,6 +401,7 @@ class TestVLANWriteFailures:
                 "action": "create_vlans",
                 "select": "3131",
                 "vlan_group_3131": group.pk,
+                "expected_vlan_name_3131": "Application",
             },
         )
 
@@ -428,6 +429,7 @@ class TestVLANWriteFailures:
                 "action": "create_vlans",
                 "select": "3136",
                 "vlan_group_3136": "",
+                "expected_vlan_name_3136": "Outside add scope",
             },
         )
 
@@ -449,6 +451,7 @@ class TestVLANWriteFailures:
                 "action": "create_vlans",
                 "select": "3132",
                 "vlan_group_3132": 2_147_483_647,
+                "expected_vlan_name_3132": "Application",
             },
         )
 
@@ -479,6 +482,7 @@ class TestVLANWriteFailures:
                 "select": ["not-a-vid", "0", "3133", "3134"],
                 "vlan_group_3133": "",
                 "vlan_group_3134": "",
+                "expected_vlan_name_3134": "Valid VLAN",
             },
         )
 
@@ -499,7 +503,13 @@ class TestVLANWriteFailures:
 
         response = client.post(
             _vlan_url(device),
-            {"server_key": SERVER_KEY, "action": "create_vlans", "select": "3135", "vlan_group_3135": ""},
+            {
+                "server_key": SERVER_KEY,
+                "action": "create_vlans",
+                "select": "3135",
+                "vlan_group_3135": "",
+                "expected_vlan_name_3135": "Stable VLAN",
+            },
         )
 
         assert response.status_code == 302

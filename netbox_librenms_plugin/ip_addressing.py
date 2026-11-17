@@ -3,6 +3,9 @@
 from ipaddress import IPv4Interface, IPv6Interface, ip_address, ip_interface
 
 
+UNAVAILABLE_VRF_MESSAGE = "Selected VRF is no longer available or you do not have permission to view it."
+
+
 def parse_host_address(address):
     """Return a canonical IPv4 or IPv6 host from a bare or prefixed string."""
     if not isinstance(address, str):

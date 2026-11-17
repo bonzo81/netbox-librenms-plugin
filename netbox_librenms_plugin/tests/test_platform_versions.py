@@ -670,10 +670,10 @@ class TestANamedPlatformThatExistsNeedsViewScope:
         outcome = apply_platform(
             Device,
             device.pk,
-            _facts(os="", version=""),
+            _facts(os="named-os", version=""),
             tracking=False,
             actor=_add_only_actor("named-hidden-existing-actor"),
-            new_os_platform=NewOSPlatform("juniper junos", ""),
+            new_os_platform=NewOSPlatform("juniper junos", "named-os"),
         )
 
         device.refresh_from_db()
@@ -692,10 +692,10 @@ class TestANamedPlatformThatExistsNeedsViewScope:
         outcome = apply_platform(
             Device,
             device.pk,
-            _facts(os="", version=""),
+            _facts(os="named-os", version=""),
             tracking=False,
             actor=actor,
-            new_os_platform=NewOSPlatform("Juniper Junos", ""),
+            new_os_platform=NewOSPlatform("Juniper Junos", "named-os"),
         )
 
         device.refresh_from_db()

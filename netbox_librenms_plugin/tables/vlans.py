@@ -4,7 +4,12 @@ from django.utils.safestring import mark_safe
 from netbox.tables.columns import ToggleColumn
 
 from netbox_librenms_plugin.constants import LIBRENMS_VLAN_STATE_ACTIVE
-from netbox_librenms_plugin.utils import get_vlan_sync_css_class, paginate_sync_table, render_vlan_sync_action
+from netbox_librenms_plugin.utils import (
+    get_vlan_sync_css_class,
+    note_icon,
+    paginate_sync_table,
+    render_vlan_sync_action,
+)
 
 
 class _VLANSelectionColumn(ToggleColumn):
@@ -116,10 +121,19 @@ class LibreNMSVLANTable(tables.Table):
         return format_html('<span class="{}">{}</span>', css_class, value)
 
     def render_name(self, value, record):
-        """Render VLAN name with color based on sync status."""
+        """Render VLAN name with color based on sync status, and the LibreNMS name when a rule changed it."""
         css_class = get_vlan_sync_css_class(
             record.get("exists_in_netbox", False),
             record.get("name_matches", True),
+        )
+        librenms_name = record.get("librenms_name")
+        rule_note = (
+            format_html(
+                " {}",
+                note_icon("mdi-auto-fix text-muted", f"LibreNMS name: {librenms_name}. A VLAN name rule changed it."),
+            )
+            if librenms_name is not None and librenms_name != value
+            else ""
         )
 
         # Add tooltip on name mismatch
@@ -127,13 +141,14 @@ class LibreNMSVLANTable(tables.Table):
             netbox_name = record.get("netbox_vlan_name", "")
             tooltip = f"NetBox: {netbox_name} | LibreNMS: {value}"
             return format_html(
-                '<span class="{}" title="{}">{}</span>',
+                '<span class="{}" title="{}">{}</span>{}',
                 css_class,
                 tooltip,
                 value or "",
+                rule_note,
             )
 
-        return format_html('<span class="{}">{}</span>', css_class, value or "")
+        return format_html('<span class="{}">{}</span>{}', css_class, value or "", rule_note)
 
     def render_vlan_group_selection(self, value, record):
         """
@@ -183,9 +198,13 @@ class LibreNMSVLANTable(tables.Table):
             ],
         )
 
+        # The writer refuses a row whose proposed name is not the name this page shows.
         select_html = format_html(
+            '<input type="hidden" name="expected_vlan_name_{}" value="{}">'
             '<select name="vlan_group_{}" class="form-select form-select-sm vlan-sync-group-select"'
             ' data-vlan-id="{}" data-vlan-name="{}">{}</select>',
+            vlan_id,
+            record.get("name") or "",
             vlan_id,
             vlan_id,
             record.get("name", ""),
@@ -194,9 +213,9 @@ class LibreNMSVLANTable(tables.Table):
 
         # Add warning icon if ambiguous (VID exists in multiple groups at same priority level)
         if record.get("is_ambiguous") and not record.get("exists_in_netbox"):
-            warning_html = mark_safe(
-                '<i class="mdi mdi-alert text-warning ms-1" '
-                'title="VID exists in multiple groups at the same scope level. Please select the target group."></i>'
+            warning_html = note_icon(
+                "mdi-alert text-warning ms-1",
+                "VID exists in multiple groups at the same scope level. Please select the target group.",
             )
             return format_html("{}{}", select_html, warning_html)
 

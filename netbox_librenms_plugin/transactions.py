@@ -16,6 +16,10 @@ that the read returned. It locks the row in ``pre_save``, at the point and in th
 ``update_existing_row`` writes one existing row under its row lock, and records the row's state
 before the write, so NetBox's change log has the before-state of the row. A mapping change that
 the row's ``apply`` returns is saved in the same save.
+
+NetBox object permissions constrain the state of an object after a write. ``saved_in_scope`` reads
+a row that the transaction just wrote through the user's scope, so the caller can refuse the write
+and roll it back.
 """
 
 import logging
@@ -322,6 +326,26 @@ def update_existing_row(queryset, apply):
         from netbox_librenms_plugin.server_mappings import persist_mapping
 
         return persist_mapping(row, result, write=_validate_and_save)
+
+
+def saved_in_scope(obj, user, action):
+    """
+    Return whether *obj*, as this transaction saved it, is in the objects that *user* may *action*.
+
+    Call it after the write and inside the transaction of the write. On False the caller refuses
+    the write and rolls the transaction back, as NetBox's own edit views do. Do not use it for a
+    check before a write: that check is a lookup of an existing object, not a read-back.
+
+    Args:
+        obj (Model): The row that the transaction created or changed.
+        user (User): The user whose object permissions apply.
+        action (str): The permission action of the write (``add`` or ``change``).
+
+    Returns:
+        bool: True when the saved row is in the user's scope for *action*.
+
+    """
+    return type(obj).objects.restrict(user, action).filter(pk=obj.pk).exists()
 
 
 def first_at_version(queryset):

@@ -339,10 +339,12 @@ def test_a_restored_row_on_its_rendered_member_submits_the_grant_of_its_render(p
     page.route(SUBMIT_URL, lambda route: route.fulfill(body="", content_type="text/html"))
     _held, bodies = _answers(page, _success(30, "2", "override-30"), _success(30, "1", "pinned-30-m1"))
     _load(page, [_row(30), _row(31)], url=f"{PAGE_URL}?page=1")
-    for member in ("2", "1"):
+    for member, grant in (("2", "override-30"), ("1", "pinned-30-m1")):
         with page.expect_response(VERIFY_ROUTE):
             _change_member(page, 30, member)
-        # The verified cell brings a new select, which listens once the page script wires it.
+        # The response can precede the DOM replacement. Wait for this render before its listener.
+        expect(page.locator('[name="selection_grant_30"]')).to_have_value(grant)
+        expect(_row_target(page, 30)).to_have_value(member)
         page.wait_for_function("document.getElementById('device_selection_30').dataset.moduleSelectInitialized")
     page.check("#cb-30")
     assert page.locator('[name="selection_grant_30"]').input_value() == "pinned-30-m1"
@@ -540,6 +542,8 @@ def test_a_failed_row_post_keeps_the_buttons_locked_while_a_member_verify_runs(p
     _load(page, [_row(30)], extra=_loader("data-row-form-loader"))
     with page.expect_response(VERIFY_ROUTE):
         _change_member(page, 30, "2")
+    expect(page.locator('[name="selection_grant_30"]')).to_have_value("override-30")
+    expect(_row_target(page, 30)).to_have_value("2")
     page.wait_for_function("document.getElementById('device_selection_30').dataset.moduleSelectInitialized")
     with page.expect_request(f"**{INSTALL_PATH}", timeout=3000):
         page.click("#install-30")

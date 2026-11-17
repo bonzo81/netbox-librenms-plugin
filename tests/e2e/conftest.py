@@ -15,7 +15,7 @@ from uuid import uuid4
 
 import pytest
 import requests
-from playwright.sync_api import Page
+from playwright.sync_api import Page, expect
 
 USERNAME = "admin"
 PASSWORD = "admin"
@@ -24,6 +24,8 @@ SERVER_KEY = "e2e"
 # The stub reports this location for a recording that has none, and the recordings that have one use it too.
 SITE_NAME = "Lab"
 REQUEST_TIMEOUT = 30
+# A slow CI runner can take longer than the 5 s default to load an htmx modal.
+expect.set_options(timeout=15_000)
 JOB_END_STATES = ("completed", "errored", "failed")
 RECORDINGS_DIR = Path(__file__).parents[2] / "netbox_librenms_plugin/data_shapes/recordings"
 MAPPINGS_API = "plugins/librenms_plugin"

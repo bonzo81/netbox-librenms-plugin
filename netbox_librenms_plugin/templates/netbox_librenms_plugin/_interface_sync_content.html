@@ -35,19 +35,8 @@
     document.querySelector('[name=csrfmiddlewaretoken]'). Emit a standalone token so those
     JS-driven requests don't hit a null token (TypeError/403). A bare hidden input never
     auto-submits, so it doesn't reintroduce the live-form problem flagged above.
-    The same JS handlers read input[name="server_key"] to scope verify/sync POSTs to the
-    right LibreNMS server; without it, migrated-mode requests on a non-default server fall
-    back to null and hit the wrong server/cache. Emit it here too (still no auto-submit).
     {% endcomment %}
     <input type="hidden" name="csrfmiddlewaretoken" value="{{ csrf_token }}">
-    {% comment %}
-    Prefer the marker-scoped server_key (the server the donor was migrated under), falling back
-    to the active interface_sync.server_key — the same precedence the migrated Move button uses,
-    so JS handlers reading this input target the right LibreNMS server in either case.
-    {% endcomment %}
-    {% with effective_server_key=migrated_to_marker.server_key|default:interface_sync.server_key %}
-    {% include "netbox_librenms_plugin/inc/_hidden_server_key.html" with server_key=effective_server_key %}
-    {% endwith %}
 {% else %}
 {% url 'plugins:netbox_librenms_plugin:sync_selected_interfaces' object_type=model_name object_id=interface_sync.object.pk as sync_url %}
 {# htmx swaps the tab in place, so the page, page size and scroll position survive; method/action stay as the no-JS fallback. #}

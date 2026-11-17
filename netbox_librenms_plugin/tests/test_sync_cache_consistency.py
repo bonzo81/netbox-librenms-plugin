@@ -1172,7 +1172,13 @@ def test_vlan_sync_invalidates_other_tabs_after_creating_a_vlan(
     with django_capture_on_commit_callbacks(execute=True):
         response = client.post(
             url,
-            {"server_key": "primary", "action": "create_vlans", "select": "3062", "vlan_group_3062": ""},
+            {
+                "server_key": "primary",
+                "action": "create_vlans",
+                "select": "3062",
+                "vlan_group_3062": "",
+                "expected_vlan_name_3062": "Cache Test VLAN",
+            },
         )
 
     assert response.status_code == 302

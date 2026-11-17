@@ -196,6 +196,7 @@ from .sync.modules import (
     InstallBranchView,
     InstallModuleView,
     InstallSelectedView,
+    MarkBuiltInView,
     ModuleInterfaceTypePreviewView,
     ModuleMismatchPreviewView,
     MoveModuleView,

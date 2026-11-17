@@ -48,6 +48,7 @@ def test_selected_grouped_vlan_requires_confirmation_before_rename(client, setti
             "action": "create_vlans",
             "select": "100",
             "vlan_group_100": str(group.pk),
+            "expected_vlan_name_100": "Proposed name",
         },
         HTTP_HX_REQUEST="true",
     )
@@ -83,6 +84,7 @@ def test_confirmed_grouped_vlan_rename_applies_the_disclosed_name(client, settin
             "action": "create_vlans",
             "select": "101",
             "vlan_group_101": str(group.pk),
+            "expected_vlan_name_101": "Confirmed name",
         },
         HTTP_HX_REQUEST="true",
     )
@@ -97,6 +99,7 @@ def test_confirmed_grouped_vlan_rename_applies_the_disclosed_name(client, settin
             "force_conflict": "101",
             "select": "101",
             "vlan_group_101": str(group.pk),
+            "expected_vlan_name_101": "Confirmed name",
             "conflict_intent": conflict["intent"],
         },
         HTTP_HX_REQUEST="true",
@@ -134,6 +137,7 @@ def test_stale_vlan_confirmation_fails_closed(client, settings):
             "action": "create_vlans",
             "select": "102",
             "vlan_group_102": str(group.pk),
+            "expected_vlan_name_102": "Proposed name",
         },
         HTTP_HX_REQUEST="true",
     )
@@ -149,6 +153,7 @@ def test_stale_vlan_confirmation_fails_closed(client, settings):
             "force_conflict": "102",
             "select": "102",
             "vlan_group_102": str(group.pk),
+            "expected_vlan_name_102": "Proposed name",
             "conflict_intent": conflict["intent"],
         },
         HTTP_HX_REQUEST="true",
@@ -182,6 +187,7 @@ def test_tampered_vlan_confirmation_syncs_nothing(client, settings):
             "force_conflict": "103",
             "select": "103",
             "vlan_group_103": str(group.pk),
+            "expected_vlan_name_103": "Proposed name",
             "conflict_intent": "invalid-token",
         },
         HTTP_HX_REQUEST="true",
@@ -215,6 +221,7 @@ def test_native_vlan_conflict_renders_a_complete_page(client, settings):
             "action": "create_vlans",
             "select": "104",
             "vlan_group_104": str(group.pk),
+            "expected_vlan_name_104": "Proposed name",
         },
     )
 
@@ -256,7 +263,9 @@ def test_bulk_vlan_sync_commits_safe_rows_before_confirmation(
                 "action": "create_vlans",
                 "select": ["105", "106"],
                 "vlan_group_105": str(group.pk),
+                "expected_vlan_name_105": "Proposed name",
                 "vlan_group_106": str(group.pk),
+                "expected_vlan_name_106": "Safe name",
             },
             HTTP_HX_REQUEST="true",
         )
@@ -284,3 +293,48 @@ def test_bulk_vlan_sync_commits_safe_rows_before_confirmation(
     assert confirm_response.headers["HX-Redirect"]
     existing.refresh_from_db()
     assert existing.name == "Proposed name"
+
+
+@pytest.mark.django_db
+def test_confirmed_rename_out_of_the_change_scope_is_rolled_back(client, settings):
+    """A confirmed rename must not move a VLAN out of a name-constrained change grant."""
+    from core.models import ObjectChange
+    from dcim.models import Device
+    from django.contrib.contenttypes.models import ContentType
+    from django.contrib import messages
+    from ipam.models import VLAN, VLANGroup
+
+    from netbox_librenms_plugin.tests.view_test_helpers import grant, make_user_with_perms
+
+    configure_default_librenms_server(settings)
+    device = make_device("vlan-rename-scope-device", librenms_cf={"default": {"id": 42}})
+    group = VLANGroup.objects.create(name="Scope group", slug="scope-group")
+    existing = VLAN.objects.create(vid=102, group=group, name="managed-old", status="active")
+    _seed_vlan_snapshot(device, [{"vlan_vlan": 102, "vlan_name": "other"}])
+    user = make_user_with_perms("vlan-rename-scope-user", [("view", Device), ("view", VLANGroup), ("add", VLAN)])
+    client.force_login(grant(user, "change", VLAN, constraints={"name__startswith": "managed-"}))
+    url = _sync_url(device)
+    form = {
+        "server_key": "default",
+        "action": "create_vlans",
+        "select": "102",
+        "vlan_group_102": str(group.pk),
+        "expected_vlan_name_102": "other",
+    }
+    conflict = client.post(url, form, HTTP_HX_REQUEST="true").context["conflicts"][0]
+
+    response = client.post(
+        url,
+        {**form, "confirm_conflicts": "1", "force_conflict": "102", "conflict_intent": conflict["intent"]},
+    )
+
+    assert response.status_code == 302
+    existing.refresh_from_db()
+    assert existing.name == "managed-old"
+    assert not ObjectChange.objects.filter(
+        changed_object_type=ContentType.objects.get_for_model(VLAN),
+        changed_object_id=existing.pk,
+    ).exists()
+    assert [str(m) for m in messages.get_messages(response.wsgi_request) if m.level == messages.ERROR] == [
+        "VLAN 102: the renamed VLAN is outside your change permission constraints; skipped."
+    ]

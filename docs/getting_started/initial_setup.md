@@ -26,7 +26,7 @@
 
 [Mappings Guide](../configuration/mappings.md) - Configure Interface, Platform, Device Type, Module Type, Module Bay, and Location mappings
 
-[Rules & Patterns Guide](../configuration/rules_and_patterns.md) - Configure Normalization, Inventory Ignore, Carrier Auto-Install, and Port Stack LAG behavior
+[Rules & Patterns Guide](../configuration/rules_and_patterns.md) - Configure Normalization, Inventory, Carrier Auto-Install, and Port Stack LAG behavior
 
 ## Device Import
 
