@@ -785,15 +785,28 @@ class TestLibreNMSAPIDeviceOperations:
         """Verify retrieving device info."""
         librenms_server.register(
             "/api/v0/devices/123",
-            {"status": "ok", "devices": [{"device_id": 123, "hostname": "test-device"}]},
+            {
+                "status": "ok",
+                "devices": [
+                    {
+                        "device_id": 123,
+                        "hostname": "test-device",
+                        "community": "test-community",
+                        "authname": "test-user",
+                        "authpass": "test-auth-password",
+                        "cryptopass": "test-privacy-password",
+                        "snmpver": "v3",
+                        "authalgo": "SHA",
+                    }
+                ],
+            },
             method="GET",
         )
 
         success, device_data = local_librenms_api.get_device_info(device_id=123)
 
         assert success is True
-        assert device_data is not None
-        assert device_data["device_id"] == 123
+        assert device_data == {"device_id": 123, "hostname": "test-device", "snmpver": "v3", "authalgo": "SHA"}
 
     def test_get_device_info_not_found(self, local_librenms_api, librenms_server):
         """Empty devices list returns (False, None) without raising."""
@@ -1325,6 +1338,42 @@ class TestLibreNMSAPIPollerAndDevices:
         assert success is True
         assert len(devices) == 3
         assert librenms_server.requests[-1]["method"] == "GET"
+
+    def test_list_devices_strips_credentials_from_every_device(self, local_librenms_api, librenms_server):
+        librenms_server.register(
+            self.DEVICES_PATH,
+            {
+                "status": "ok",
+                "devices": [
+                    {
+                        "device_id": 1,
+                        "hostname": "router",
+                        "community": "test-community",
+                        "authname": None,
+                        "authpass": None,
+                        "cryptopass": None,
+                        "snmpver": "v2c",
+                    },
+                    {
+                        "device_id": 2,
+                        "hostname": "switch",
+                        "authname": "test-user",
+                        "authpass": "test-auth-password",
+                        "cryptopass": "test-privacy-password",
+                        "snmpver": "v3",
+                    },
+                ],
+            },
+            method="GET",
+        )
+
+        success, devices = local_librenms_api.list_devices()
+
+        assert success is True
+        assert devices == [
+            {"device_id": 1, "hostname": "router", "snmpver": "v2c"},
+            {"device_id": 2, "hostname": "switch", "snmpver": "v3"},
+        ]
 
     def test_list_devices_empty(self, local_librenms_api, librenms_server):
         """Verify handling empty device list."""
