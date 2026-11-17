@@ -325,6 +325,42 @@ class TestLookup:
             ResolutionKind.NO_MATCH
         ] * 10
 
+    @pytest.mark.parametrize("lock", [False, True], ids=["read", "locked"])
+    def test_a_large_batch_confirms_each_row_only_against_the_values_of_its_key(self, monkeypatch, lock):
+        from dcim.models import Device
+
+        from netbox_librenms_plugin import serial_identity
+
+        _rules_only((SEEDED, r"\1", None))
+        serials = [f"SCALE-SN{number:03}" for number in range(300)]
+        template = make_device("lookup-scale-template")
+        devices = Device.objects.bulk_create(
+            Device(
+                name=f"lookup-scale-{number}",
+                device_type_id=template.device_type_id,
+                role_id=template.role_id,
+                site_id=template.site_id,
+                status="active",
+                serial=f"S/N {serial}" if number % 2 else serial,
+            )
+            for number, serial in enumerate(serials)
+        )
+        compared = []
+        original = serial_identity._matches_serial
+
+        def counting(*args):
+            compared.append(args)
+            return original(*args)
+
+        monkeypatch.setattr(serial_identity, "_matches_serial", counting)
+
+        found = resolve_devices(serials, lock=lock)
+
+        assert {serial: found[serial].object.pk for serial in serials} == {
+            serial: device.pk for serial, device in zip(serials, devices, strict=True)
+        }
+        assert len(compared) <= 2 * len(serials), len(compared)
+
     def test_a_module_lookup_counts_only_the_devices_it_names(self):
         first = make_device_with_module_bays("module-scope-a", ["Slot 1"])
         second = make_device_with_module_bays("module-scope-b", ["Slot 1"])

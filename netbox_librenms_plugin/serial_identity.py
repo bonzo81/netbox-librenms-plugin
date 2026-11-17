@@ -414,6 +414,15 @@ def _matches_serial(stored, incoming, context, own_key):
     return compare(stored, incoming, context) is Comparison.SAME or (own_key and context._key(stored) == own_key)
 
 
+def _values_by_key(values, probes) -> dict:
+    """Return ``{key: values}`` over the probe keys; a value's key under a row's own context is one of them."""
+    by_key: dict = {}
+    for value in values:
+        for key in probes[value]:
+            by_key.setdefault(key, []).append(value)
+    return by_key
+
+
 def _resolve(queryset, values, *, rules, row_context, lock, spare=0, own_keys=None):
     """
     Read the candidate rows of *values* once and confirm each row under its own context.
@@ -435,13 +444,17 @@ def _resolve(queryset, values, *, rules, row_context, lock, spare=0, own_keys=No
     patterns = sorted({contains_pattern(key) for value in open_values for key in probes[value]})
     queryset = queryset.filter(_SerialCandidates(exact, patterns)).order_by("pk")
     matches = {value: [] for value in open_values}
+    by_key = _values_by_key(open_values, probes)
+    full = _AMBIGUOUS_AT + spare
+    saturated = 0
     unavailable = {}
     complete = True
     # One client-side read: a server-side cursor plans for its first rows and can leave the trigram index.
     for row in queryset:
         context = row_context(row)
         stored = _text(row.serial)
-        if lock and any(_matches_serial(stored, value, context, own_keys.get(value)) for value in open_values):
+        candidates = by_key.get(context._key(stored), ())
+        if lock and any(_matches_serial(stored, value, context, own_keys.get(value)) for value in candidates):
             # A substring candidate can name unrelated hardware. Lock only confirmed matches,
             # then read their identity again after the lock to exclude a concurrent change.
             row = queryset.select_for_update(of=("self",)).filter(pk=row.pk).first()
@@ -449,14 +462,17 @@ def _resolve(queryset, values, *, rules, row_context, lock, spare=0, own_keys=No
                 continue
             context = row_context(row)
             stored = _text(row.serial)
-        for value in open_values:
-            if context.unavailable:
+            candidates = by_key.get(context._key(stored), ())
+        if context.unavailable:
+            for value in open_values:
                 if any(key in stored for key in probes[value]) or stored == _text(value):
                     unavailable.setdefault(value, context.unavailable)
-                continue
-            if _matches_serial(stored, value, context, own_keys.get(value)):
-                matches[value].append(row)
-        if not unavailable and all(len(found) >= _AMBIGUOUS_AT + spare for found in matches.values()):
+        else:
+            for value in candidates:
+                if _matches_serial(stored, value, context, own_keys.get(value)):
+                    matches[value].append(row)
+                    saturated += len(matches[value]) == full
+        if not unavailable and saturated == len(open_values):
             complete = False
             break
     for value in open_values:
