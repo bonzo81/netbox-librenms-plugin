@@ -116,6 +116,6 @@ class Migration(migrations.Migration):
                 models.Model,
             ),
         ),
-        # No reverse: a seeded rule cannot be told apart from an operator's copy of it.
-        migrations.RunPython(seed_cisco_numbering_rule),
+        # The reverse keeps the rows: the reverse of CreateModel drops the table next.
+        migrations.RunPython(seed_cisco_numbering_rule, migrations.RunPython.noop),
     ]

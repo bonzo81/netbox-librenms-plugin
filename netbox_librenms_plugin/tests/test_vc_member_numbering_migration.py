@@ -96,3 +96,31 @@ def test_the_seeded_rule_imports_a_cisco_stack_from_1(live_librenms):
     _bulk_import([row])
 
     assert sorted(_chassis(row)[1]) == [1, 2, 3]
+
+
+class _RollBack(Exception):
+    """Ends the atomic block so the schema changes of the test roll back."""
+
+
+def test_the_migration_unapplies_and_applies_again():
+    from django.db import connection, transaction
+    from django.db.migrations.executor import MigrationExecutor
+
+    from netbox_librenms_plugin.models import VCMemberNumberingRule
+
+    app = "netbox_librenms_plugin"
+    table = VCMemberNumberingRule._meta.db_table
+    _manufacturer("cisco")
+
+    # The rollback also covers a failure part way: Postgres DDL is transactional.
+    with pytest.raises(_RollBack), transaction.atomic():
+        executor = MigrationExecutor(connection)
+        executor.migrate([(app, "0030_serial_trigram_indexes")])
+        assert table not in connection.introspection.table_names()
+
+        executor.loader.build_graph()
+        executor.migrate([(app, "0031_vcmembernumberingrule")])
+        assert list(_rules().values_list("manufacturer__slug", "numbering_mode")) == [("cisco", "one_based")]
+        raise _RollBack
+
+    assert table in connection.introspection.table_names()
