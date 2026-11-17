@@ -776,18 +776,21 @@ class SyncCacheConsistency:
         """Return whether the tab's snapshot exists in a form its reader accepts."""
         key = self.snapshot_key(tab, server_key)
         if tab == SyncTab.MODULES:
+            from netbox_librenms_plugin.models import RuleConfigurationError
             from netbox_librenms_plugin.serial_identity import SerialRules
 
             payload = cache.get(key)
             owner = self._primary_owner(tab, server_key)
-            return (
-                cached_module_inventory(payload) is not None
-                and module_inventory_snapshot_matches(
-                    payload, owner, server_key, module_snapshot_host_id(owner, server_key)
-                )
-                # The refresh stamps the page device's context, and the table reader checks that context.
-                and payload.get("serial_context") == SerialRules.load().for_device(self.subject).fingerprint
-            )
+            if cached_module_inventory(payload) is None or not module_inventory_snapshot_matches(
+                payload, owner, server_key, module_snapshot_host_id(owner, server_key)
+            ):
+                return False
+            try:
+                context = SerialRules.load().for_device(self.subject)
+            except RuleConfigurationError:
+                return False
+            # The refresh stamps the page device's context, and the table reader checks that context.
+            return payload.get("serial_context") == context.fingerprint
         return cache.has_key(key)
 
     def status(self, server_key, *, actor_id=None):

@@ -378,6 +378,39 @@ def test_module_cache_status_reads_the_inventory_snapshot_like_the_tab(client, s
 
 
 @pytest.mark.django_db
+def test_module_cache_status_reports_tab_states_when_an_applicable_serial_rule_is_broken(client, settings):
+    """A broken serial rule makes the Modules snapshot unreadable, and the other tab states still answer."""
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    _configure_servers(settings)
+    device = make_device("cache-status-module-broken-rule", librenms_cf={"primary": {"id": 6409}})
+    cache.set(
+        _cache_key("inventory", device, "primary"),
+        module_inventory_cache_payload([], 6409, None, serial_context=SerialRules.load().for_device(device)),
+        timeout=300,
+    )
+    rule = NormalizationRule.objects.create(
+        scope="serial",
+        manufacturer=device.device_type.manufacturer,
+        match_pattern=r"^S/N\s+(.+)$",
+        replacement=r"\1",
+    )
+    NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"invalid-\1")
+    client.force_login(make_superuser("cache-status-module-broken-rule-user"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_status",
+        kwargs={"object_type": "device", "pk": device.pk},
+    )
+
+    response = client.get(url, {"server_key": "primary"})
+
+    assert response.status_code == 200
+    tabs = response.json()["tabs"]
+    assert set(tabs) == {tab.value for tab in SyncCacheConsistency(device).applicable_tabs()}
+    assert tabs["modules"]["snapshot_available"] is False
+
+
+@pytest.mark.django_db
 def test_module_cache_status_rejects_a_snapshot_of_another_oob_link_like_the_tab(client, settings):
     """A snapshot merged from another OOB controller is one the Modules tab rejects, so status must not call it ready."""
     from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
