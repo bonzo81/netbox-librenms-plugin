@@ -4270,6 +4270,7 @@ def test_an_install_waits_for_its_destination_owner_held_from_another_member_pag
 
     from dcim.models import Module
     from django.db import close_old_connections, connection, transaction
+    from django.urls import reverse
 
     from netbox_librenms_plugin.tests.conftest import (
         make_device_with_module_bays,
@@ -4281,12 +4282,19 @@ def test_an_install_waits_for_its_destination_owner_held_from_another_member_pag
     from netbox_librenms_plugin.views.mixins import CacheMixin
     from netbox_librenms_plugin.module_writes import lock_module_write, observe_module_write
 
-    page = make_device_with_module_bays("chassis-lock-page", ["Slot 1"])
-    member = make_device_with_module_bays("chassis-lock-member", ["Slot 1"])
+    page = make_device_with_module_bays("chassis-lock-page", ["Slot 1"], serial="CHASSIS-LOCK-PAGE")
+    member = make_device_with_module_bays("chassis-lock-member", ["Slot 1"], serial="CHASSIS-LOCK-MEMBER")
     make_virtual_chassis("chassis-lock", page, member)
+    bay = page.modulebays.get(name="Slot 1")
     card = make_module_type("Chassis Lock Card", manufacturer=page.device_type.manufacturer)
+    # The chassis serial attributes the card to the bay of page, although the tab renders for member.
     rows = [
-        {"entPhysicalIndex": 1, "entPhysicalContainedIn": 0, "entPhysicalClass": "chassis"},
+        {
+            "entPhysicalIndex": 1,
+            "entPhysicalContainedIn": 0,
+            "entPhysicalClass": "chassis",
+            "entPhysicalSerialNum": page.serial,
+        },
         {
             "entPhysicalIndex": 2,
             "entPhysicalContainedIn": 1,
@@ -4296,13 +4304,17 @@ def test_an_install_waits_for_its_destination_owner_held_from_another_member_pag
             "entPhysicalSerialNum": "SN-CHASSIS-LOCK",
         },
     ]
-    key = CacheMixin().get_cache_key(page, "inventory", "default")
-    cache.set(key, trusted_module_inventory_payload(page, rows))
-    action, fields = rendered_module_form(render_module_tab(page), "install-module", 2)
+    key = CacheMixin().get_cache_key(member, "inventory", "default")
+    cache.set(key, trusted_module_inventory_payload(member, rows))
+    action, fields = rendered_module_form(render_module_tab(member), "install-module", 2)
+    assert (action, fields["selected_device_id"]) == (
+        reverse("plugins:netbox_librenms_plugin:install_module", args=[member.pk]),
+        str(page.pk),
+    )
     user = make_superuser("chassis-lock-user")
     held, release, holder = Event(), Event(), {}
 
-    def hold_the_member_page_lock():
+    def hold_the_destination_owner_lock():
         close_old_connections()
         try:
             with transaction.atomic():
@@ -4315,7 +4327,7 @@ def test_an_install_waits_for_its_destination_owner_held_from_another_member_pag
         finally:
             close_old_connections()
 
-    def install_from_the_page():
+    def install_from_the_member_page():
         close_old_connections()
         try:
             client.force_login(user)
@@ -4325,15 +4337,19 @@ def test_an_install_waits_for_its_destination_owner_held_from_another_member_pag
 
     try:
         with second_connection() as observer, bounded_executor(2) as executor:
-            holding = executor.submit(hold_the_member_page_lock)
+            holding = executor.submit(hold_the_destination_owner_lock)
             assert held.wait(5)
-            posted = executor.submit(install_from_the_page)
+            posted = executor.submit(install_from_the_member_page)
             deadline = time.monotonic() + 5
             try:
                 while not _backends_blocked_by(observer, holder["pid"]):
                     assert time.monotonic() < deadline, "the install never waited for the destination owner lock"
                     assert not posted.done(), "the install finished while the destination owner lock was held"
                     time.sleep(0.02)
+                # The owner lock comes first, so the waiting install holds no lock on the destination bay yet.
+                with observer.cursor() as cursor:
+                    cursor.execute('SELECT id FROM "dcim_modulebay" WHERE id = %s FOR UPDATE NOWAIT', [bay.pk])
+                observer.rollback()
             finally:
                 release.set()
             holding.result(timeout=10)
@@ -4343,6 +4359,7 @@ def test_an_install_waits_for_its_destination_owner_held_from_another_member_pag
 
     assert response.status_code == 302
     assert list(Module.objects.filter(device=page).values_list("serial", flat=True)) == ["SN-CHASSIS-LOCK"]
+    assert not Module.objects.filter(device=member).exists()
 
 
 @pytest.mark.parametrize(
