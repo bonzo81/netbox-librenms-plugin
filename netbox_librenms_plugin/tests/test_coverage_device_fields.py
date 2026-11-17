@@ -856,6 +856,51 @@ class TestAssignVCSerialView:
         assert (absent.serial, kept.serial, placeholder.serial) == ("", "DUP-SERIAL", "PLACEHOLDER-KEPT")
         assert _messages(response, "error") == [f"{absent.name}: the LibreNMS serial identifies no hardware"]
 
+    def test_only_a_saved_serial_counts_as_an_assignment(self, logged_in_client, librenms_server):
+        """A member that already holds the serial is not saved, so the success count leaves it out."""
+        changed = make_device("vc-serial-count-changed")
+        unchanged = make_device("vc-serial-count-unchanged", serial="COUNT-KEPT")
+        make_virtual_chassis("vc-serial-count", changed, unchanged)
+
+        response = _post(
+            logged_in_client,
+            "assign_vc_serial",
+            changed,
+            {
+                "librenms_serial_1": "COUNT-NEW",
+                "member_id_1": str(changed.pk),
+                "librenms_serial_2": "COUNT-KEPT",
+                "member_id_2": str(unchanged.pk),
+            },
+        )
+
+        changed.refresh_from_db()
+        assert changed.serial == "COUNT-NEW"
+        success = _messages(response, "success")
+        assert len(success) == 1
+        assert "assigned 1 serial" in success[0]
+
+    def test_a_post_of_only_unchanged_serials_reports_no_assignment(self, logged_in_client, librenms_server):
+        first = make_device("vc-serial-all-kept-first", serial="ALL-KEPT-1")
+        second = make_device("vc-serial-all-kept-second", serial="ALL-KEPT-2")
+        make_virtual_chassis("vc-serial-all-kept", first, second)
+
+        response = _post(
+            logged_in_client,
+            "assign_vc_serial",
+            first,
+            {
+                "librenms_serial_1": "ALL-KEPT-1",
+                "member_id_1": str(first.pk),
+                "librenms_serial_2": "ALL-KEPT-2",
+                "member_id_2": str(second.pk),
+            },
+        )
+
+        assert _messages(response, "success") == []
+        assert _messages(response, "error") == []
+        assert any("No serial assignments" in text for text in _messages(response, "info"))
+
     def test_assignment_without_a_member_id_is_ignored(self, logged_in_client, librenms_server):
         device = make_device("vc-serial-no-member")
         make_virtual_chassis("vc-serial-no-member-chassis", device)

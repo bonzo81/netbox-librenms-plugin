@@ -750,19 +750,23 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
                 errors.append(f"Device with ID {member_id} not found")
                 continue
             try:
-                error = self._assign_member_serial(device, member_pk, raw_serial, serial_rules)
+                if self._assign_member_serial(device, member_pk, raw_serial, serial_rules):
+                    assignments_made += 1
             except Device.DoesNotExist:
                 errors.append(f"Device with ID {member_id} not found")
-                continue
-            if error:
-                errors.append(error)
-            else:
-                assignments_made += 1
+            except _WriteRefused as exc:
+                errors.append(str(exc))
         return assignments_made, errors
 
     def _assign_member_serial(self, device, member_id, raw_serial, serial_rules):
-        """Write *raw_serial* to the locked member *member_id* of the chassis of *device*; return the error text, or None."""
+        """Write *raw_serial* to the locked member *member_id* of the chassis of *device*; return whether it saved one.
+
+        Raises:
+            _WriteRefused: The member refuses the serial; the message is for the user.
+
+        """
         locked = []
+        saved = []
 
         def apply(member):
             locked.append(member)
@@ -778,17 +782,18 @@ class AssignVCSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, L
             if assignment.value is None:
                 return False
             member.serial = assignment.value
+            saved.append(member)
             return None
 
         try:
             # Scoped like the page device: the member's pk comes from the POST, so the same-VC
             # check alone would let a constrained grant write a serial onto a member it does not cover.
             update_existing_row(self.restricted_queryset(Device, "change").filter(pk=member_id), apply)
-        except _WriteRefused as exc:
-            return str(exc)
         except (ValidationError, IntegrityError) as e:
-            return write_failure_message(e, f"set serial on {locked[0].name}", "serial", Device, self.request.user)
-        return None
+            raise _WriteRefused(
+                write_failure_message(e, f"set serial on {locked[0].name}", "serial", Device, self.request.user)
+            ) from e
+        return bool(saved)
 
 
 _SERIAL_MISMATCH_MESSAGE = (
