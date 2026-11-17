@@ -1,5 +1,6 @@
 """Two real database sessions that write rule-equivalent serials, and the events of a failed inner install."""
 
+import time
 from functools import partial
 from threading import Barrier
 
@@ -479,6 +480,82 @@ def test_a_member_serial_write_waits_for_a_chassis_master_type_change(librenms_s
     member_serial = Device.objects.get(pk=member.pk).serial
     assert retyped, "the type change itself must commit"
     assert member_serial == "OLD123", member_serial
+
+
+@transactional_db_with_all_apps()
+def test_a_member_serial_write_waits_for_a_chassis_master_change(librenms_server):
+    """
+    The new master's manufacturer keys the member's new "XABC" to "ABC", which a third device stores.
+
+    Another session changes the chassis master and has not committed; the member write must wait
+    for the commit and then read the context of the new master.
+    """
+    from dcim.models import Device, DeviceType, Manufacturer, VirtualChassis
+    from django.test import Client
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import second_connection, wait_for_lock_wait
+
+    old_master = make_device("master-race-old", serial="MASTER1")
+    member = make_device("master-race-member", serial="OLD123")
+    new_master = make_device("master-race-new", serial="MASTER2")
+    new_maker = Manufacturer.objects.create(name="Master race maker", slug="master-race-maker")
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=new_maker
+    )
+    new_master.device_type = DeviceType.objects.create(
+        manufacturer=new_maker, model="Master race model", slug="master-race-model"
+    )
+    new_master.save()
+    chassis = make_virtual_chassis("master-race-chassis", old_master, member, new_master)
+    VirtualChassis.objects.filter(pk=chassis.pk).update(master=old_master)
+    make_device("master-race-holder", serial="ABC")
+    user = make_superuser("master-race-user")
+    writer_pids = []
+
+    def assign():
+        close_old_connections()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET lock_timeout = '20s'")
+            client = Client()
+            client.force_login(user)
+
+            def observe_lock(execute, sql, params, many, context):
+                if "pg_advisory_xact_lock" in sql and not writer_pids:
+                    writer_pids.append(connection.connection.info.backend_pid)
+                return execute(sql, params, many, context)
+
+            with connection.execute_wrapper(observe_lock):
+                return client.post(
+                    reverse("plugins:netbox_librenms_plugin:assign_vc_serial", kwargs={"pk": member.pk}),
+                    {"server_key": SERVER_KEY, "member_id_1": str(member.pk), "librenms_serial_1": "XABC"},
+                ).status_code
+        finally:
+            connection.close()
+
+    with second_connection() as other, bounded_executor(max_workers=1) as executor:
+        with other.cursor() as cursor:
+            cursor.execute(
+                f'UPDATE "{VirtualChassis._meta.db_table}" SET master_id = %s WHERE id = %s',
+                [new_master.pk, chassis.pk],
+            )
+        writer = executor.submit(assign)
+        try:
+            deadline = time.monotonic() + 20
+            while not writer_pids and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert writer_pids, "the member write never reached its identity lock"
+            wait_for_lock_wait(connection, writer_pids[0])
+            assert not writer.done()
+        finally:
+            other.commit()
+        assert writer.result(timeout=30) == 302
+
+    assert VirtualChassis.objects.get(pk=chassis.pk).master_id == new_master.pk
+    assert Device.objects.get(pk=member.pk).serial == "OLD123"
 
 
 @transactional_db_with_all_apps()

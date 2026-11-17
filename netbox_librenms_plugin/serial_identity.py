@@ -604,14 +604,23 @@ def locked_context(device, *, rules: SerialRules) -> SerialContext:
     A standalone device or a chassis master decides its own context: the caller holds its row, and
     the object may carry a type that the same write sets. A member reads the context of its master
     after it locks the master row, so a type change of the master that has not committed is
-    waited for and then read.
+    waited for and then read. The master link is read under a share lock on the chassis row.
     """
     from dcim.models import VirtualChassis
+    from django.db import connection
 
     chassis_id = device.virtual_chassis_id
-    master_id = VirtualChassis.objects.filter(pk=chassis_id).values_list("master_id", flat=True).first()
+    master_id = None
+    if chassis_id is not None:
+        with connection.cursor() as cursor:
+            # FOR SHARE waits for a master change, but not for another serial writer of the chassis.
+            cursor.execute(
+                f'SELECT master_id FROM "{VirtualChassis._meta.db_table}" WHERE id = %s FOR SHARE', [chassis_id]
+            )
+            row = cursor.fetchone()
+        master_id = row[0] if row else None
     if chassis_id is None or master_id is None or master_id == device.pk:
-        return rules.for_device(device)
+        return rules.for_module_target(device)
     master_chassis_id, manufacturer_id = _lock_type_row(master_id)
     if master_chassis_id != chassis_id:
         return SerialContext(None, (), unavailable=UNAVAILABLE_MASTER_LINK)
