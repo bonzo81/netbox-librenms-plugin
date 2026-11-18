@@ -562,6 +562,25 @@ class TestWriters:
     def test_the_refusing_outcomes(self):
         assert REFUSING == {ResolutionKind.UNIQUE, ResolutionKind.AMBIGUOUS, ResolutionKind.UNAVAILABLE}
 
+    @pytest.mark.parametrize("first", ["global", "scoped"])
+    def test_both_write_orders_of_two_rule_equivalent_serials_refuse_the_second(self, first):
+        """A global device reports "PREFIX-ABC123"; a device of a maker whose rule strips "PREFIX-" reports "ABC123"."""
+        from netbox_librenms_plugin.serial_identity import device_assignment
+
+        maker = _manufacturer("write-order")
+        _rules_only((r"^PREFIX-(.+)$", r"\1", maker))
+        devices = {"global": make_device("write-order-global"), "scoped": _device_of(maker, "write-order-scoped", "")}
+        reported = {"global": "PREFIX-ABC123", "scoped": "ABC123"}
+        second = "scoped" if first == "global" else "global"
+        devices[first].serial = reported[first]
+        devices[first].save()
+        rules = SerialRules.load()
+
+        assignment = device_assignment(devices[second], reported[second], rules=rules)
+
+        assert assignment.value is None
+        assert assignment.conflict.object == devices[first]
+
     def test_a_member_of_a_new_chassis_is_skipped_when_a_device_holds_its_decorated_serial(self):
         from dcim.models import Device
 

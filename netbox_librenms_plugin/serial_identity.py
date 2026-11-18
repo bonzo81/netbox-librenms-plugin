@@ -419,8 +419,12 @@ def _probe_keys(values, rules: SerialRules) -> dict:
     return {value: {key for context in contexts if (key := context._key(value))} for value in values}
 
 
-def _matches_serial(stored, incoming, context, own_key):
-    return compare(stored, incoming, context) is Comparison.SAME or (own_key and context._key(stored) == own_key)
+def _matches_serial(stored, incoming, context, writer):
+    if compare(stored, incoming, context) is Comparison.SAME:
+        return True
+    own_key = writer._key(incoming) if writer is not None else ""
+    # Both directions: the row's own key, or the key that the writer's context gives the row's text.
+    return bool(own_key) and own_key in (context._key(stored), writer._key(stored))
 
 
 def _values_by_key(values, probes) -> dict:
@@ -432,19 +436,37 @@ def _values_by_key(values, probes) -> dict:
     return by_key
 
 
-def _resolve(queryset, values, *, rules, row_context, lock, spare=0, own_keys=None):
+def _writer_keys(values, probes, writer) -> dict:
+    """Return ``{key: values}`` over the keys that *writer* gives the values; add each key to its value's probes."""
+    by_own_key: dict = {}
+    if writer is None:
+        return by_own_key
+    for value in values:
+        if key := writer._key(value):
+            probes[value].add(key)
+            by_own_key.setdefault(key, []).append(value)
+    return by_own_key
+
+
+def _row_candidates(stored, context, by_key, by_own_key, writer) -> tuple:
+    """Return the values that a row with *stored* text under *context* can match, each one once."""
+    candidates = by_key.get(context._key(stored), [])
+    if writer is not None:
+        candidates = [*candidates, *by_own_key.get(writer._key(stored), ())]
+    return tuple(dict.fromkeys(candidates))
+
+
+def _resolve(queryset, values, *, rules, row_context, lock, spare=0, writer=None):
     """
     Read the candidate rows of *values* once and confirm each row under its own context.
 
-    *own_keys* maps a value to the key that a write gives it under the target's context; a row
-    whose own key equals it also matches, because the write would give the two rows one identity.
+    *writer* is the target's context of a write. A row also matches when its own key, or the key
+    that *writer* gives its text, equals the key that *writer* gives a value: after the write, the
+    two rows would have one identity, or a lookup of the row's text would find the target.
     """
-    own_keys = own_keys or {}
     values = list(dict.fromkeys(values))
     probes = _probe_keys(values, rules)
-    for value, key in own_keys.items():
-        if key:
-            probes[value].add(key)
+    by_own_key = _writer_keys(values, probes, writer)
     results = {value: _ABSENT for value, keys in probes.items() if not keys}
     open_values = [value for value in values if probes[value]]
     if not open_values:
@@ -462,8 +484,8 @@ def _resolve(queryset, values, *, rules, row_context, lock, spare=0, own_keys=No
     for row in queryset:
         context = row_context(row)
         stored = _text(row.serial)
-        candidates = by_key.get(context._key(stored), ())
-        if lock and any(_matches_serial(stored, value, context, own_keys.get(value)) for value in candidates):
+        candidates = _row_candidates(stored, context, by_key, by_own_key, writer)
+        if lock and any(_matches_serial(stored, value, context, writer) for value in candidates):
             # A substring candidate can name unrelated hardware. Lock only confirmed matches,
             # then read their identity again after the lock to exclude a concurrent change.
             row = queryset.select_for_update(of=("self",)).filter(pk=row.pk).first()
@@ -471,14 +493,14 @@ def _resolve(queryset, values, *, rules, row_context, lock, spare=0, own_keys=No
                 continue
             context = row_context(row)
             stored = _text(row.serial)
-            candidates = by_key.get(context._key(stored), ())
+            candidates = _row_candidates(stored, context, by_key, by_own_key, writer)
         if context.unavailable:
             for value in open_values:
                 if any(key in stored for key in probes[value]) or stored == _text(value):
                     unavailable.setdefault(value, context.unavailable)
         else:
             for value in candidates:
-                if _matches_serial(stored, value, context, own_keys.get(value)):
+                if _matches_serial(stored, value, context, writer):
                     matches[value].append(row)
                     saturated += len(matches[value]) == full
         if not unavailable and saturated == len(open_values):
@@ -517,13 +539,17 @@ def resolve_device(serial, *, rules: SerialRules | None = None, exclude_pks=(), 
     return resolve_devices([serial], rules=rules, exclude_pks=exclude_pks, lock=lock)[serial]
 
 
-def resolve_devices_write(serials: Iterable, context: SerialContext, *, rules: SerialRules, exclude_pks=()) -> dict:
+def resolve_devices_write(
+    serials: Iterable, context: SerialContext, *, rules: SerialRules, exclude_pks=(), master=None
+) -> dict:
     """
     Return ``{serial: Resolution}``: the Devices that a write of each serial under *context* would duplicate.
 
     A row matches when it holds the LibreNMS text under its own context, as in ``resolve_devices``,
-    and also when its own key equals the key that *context* gives the text: after the write, the
-    two rows would have one identity. The lookup is one query.
+    and also when its own key, or the key that *context* gives the row's text, equals the key that
+    *context* gives the incoming text. So the two write orders of two rows give one result. The
+    lookup is one query. When *master* is the chassis master that the write decides, its members
+    are read under *context*, the context that the write gives them.
     """
     from dcim.models import Device
 
@@ -531,13 +557,22 @@ def resolve_devices_write(serials: Iterable, context: SerialContext, *, rules: S
     queryset = Device.objects.select_related("device_type", "virtual_chassis__master__device_type")
     if exclude_pks:
         queryset = queryset.exclude(pk__in=list(exclude_pks))
-    own_keys = {serial: context._key(serial) for serial in serials}
-    return _resolve(queryset, serials, rules=rules, row_context=rules.for_device, lock=False, own_keys=own_keys)
+    row_context = rules.for_device
+    if master is not None and master.virtual_chassis_id is not None:
+
+        def row_context(row):
+            if row.virtual_chassis_id == master.virtual_chassis_id and row.virtual_chassis.master_id == master.pk:
+                return context
+            return rules.for_device(row)
+
+    return _resolve(queryset, serials, rules=rules, row_context=row_context, lock=False, writer=context)
 
 
-def resolve_device_write(incoming, context: SerialContext, *, rules: SerialRules, exclude_pks=()) -> Resolution:
+def resolve_device_write(
+    incoming, context: SerialContext, *, rules: SerialRules, exclude_pks=(), master=None
+) -> Resolution:
     """Return the Devices that a write of *incoming* under *context* would duplicate; see ``resolve_devices_write``."""
-    return resolve_devices_write([incoming], context, rules=rules, exclude_pks=exclude_pks)[incoming]
+    return resolve_devices_write([incoming], context, rules=rules, exclude_pks=exclude_pks, master=master)[incoming]
 
 
 def is_sole_holder(device, incoming, *, rules: SerialRules, exclude_pks=()) -> bool:
@@ -719,7 +754,8 @@ def device_assignment(device, incoming, *, rules: SerialRules) -> Assignment:
     value = stored_form(incoming, Device)
     if _stored_text(device.serial) == value:
         return Assignment(None)
-    conflict = resolve_device_write(incoming, context, rules=rules, exclude_pks=[device.pk])
+    # A master's members take the context of its type as the object holds it, also a type that the same write sets.
+    conflict = resolve_device_write(incoming, context, rules=rules, exclude_pks=[device.pk], master=device)
     if conflict.kind in REFUSING:
         return Assignment(None, conflict)
     return Assignment(value)

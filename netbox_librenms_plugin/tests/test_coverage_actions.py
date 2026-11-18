@@ -3906,6 +3906,45 @@ class TestDeviceConflictActionBranches:
         assert reloaded.device_type_id == reported_type.pk
         assert reloaded.serial == "OLD-0"
 
+    @pytest.mark.parametrize(("member_serial", "written"), [("PREFIX-ABC123", True), ("ABC123", False)])
+    def test_a_forced_type_and_serial_update_checks_the_members_under_the_new_master_type(self, member_serial, written):
+        """The old master rule strips "PREFIX-", the new one does not: only a member that still keys to ABC123 refuses."""
+        from dcim.models import Device, DeviceType, Manufacturer, VirtualChassis
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+
+        view = self._make_view()
+        tag = f"branches-projected-{member_serial}".lower()
+        target = make_device(tag, serial="BEFORE123", librenms_cf={self.server_key: 42})
+        NormalizationRule.objects.create(
+            scope="serial",
+            match_pattern=r"^PREFIX-(.+)$",
+            replacement=r"\1",
+            manufacturer=target.device_type.manufacturer,
+        )
+        member = make_device(f"{tag}-member", serial=member_serial)
+        chassis = make_virtual_chassis(f"{tag}-chassis", target, member)
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=target)
+        reported_type = DeviceType.objects.create(
+            manufacturer=Manufacturer.objects.create(name=f"Projected {member_serial}", slug=f"{tag}-maker"),
+            model=f"Projected {member_serial}",
+            slug=f"{tag}-type",
+            part_number=f"{tag}-hw".upper(),
+        )
+        self._register_device(42, target.name, serial="ABC123", hardware=reported_type.part_number)
+        request = self._request("update", target, f"{tag}-user", force="on")
+
+        response = post_view(view, request, device_id=42)
+
+        reloaded = Device.objects.get(pk=target.pk)
+        if written:
+            self._assert_success(response)
+            assert (reloaded.device_type_id, reloaded.serial) == (reported_type.pk, "ABC123")
+        else:
+            assert response.headers.get("HX-Reswap") == "none"
+            assert (reloaded.device_type_id, reloaded.serial) == (target.device_type_id, "BEFORE123")
+
     def test_update_serial_reports_a_real_serial_conflict(self):
         from dcim.models import Device
 
