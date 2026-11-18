@@ -670,6 +670,7 @@ class TestValidateDeviceForImport:
             "serial_action",
             "serial_confirmed",
             "legacy_id_serial_confirmed",
+            "legacy_id_serial_unavailable",
             "serial_duplicate",
             "serial_conflict",
             "serial_role_choice_available",

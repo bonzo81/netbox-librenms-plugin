@@ -1664,12 +1664,17 @@ class TestDeviceValidationDetailsView:
         reason = RuleConfigurationError(rule, "replacement").public_message
         assert escape(reason) in re.sub(r"<[^>]*>", "", serial_row)
 
-    @pytest.mark.parametrize("shared", [False, True], ids=["sole-holder", "second-holder"])
-    def test_the_legacy_id_conversion_offers_the_force_checkbox_unless_the_device_holds_the_serial_alone(self, shared):
-        """The conversion POST needs the one holder of the serial, so a second holder must show the force checkbox."""
+    @pytest.mark.parametrize("holders", ["sole", "shared", "unavailable"])
+    def test_the_legacy_id_conversion_offers_the_force_checkbox_unless_the_device_holds_the_serial_alone(self, holders):
+        """The conversion POST needs the one holder of the serial; a second or an unreadable holder needs force."""
+        from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
+
         existing = make_device("details-legacy-holder", serial="LEGACY-HOLDER-SN", librenms_cf=1)
-        if shared:
+        if holders == "shared":
             make_device("details-legacy-twin", serial="LEGACY-HOLDER-SN")
+        elif holders == "unavailable":
+            _stray_chassis_member("details-legacy-stray", "LEGACY-HOLDER-SN")
+        shared = holders != "sole"
         self.primary_server.device_info_response(
             device_id=1,
             hostname=existing.name,
@@ -1689,9 +1694,9 @@ class TestDeviceValidationDetailsView:
         assert ('name="force"' in form) is shared
         button = re.search(r"<button[^>]*migrate-btn[^>]*>", form).group(0)
         assert (" disabled" in button) is shared
-        # One serial badge: a shared serial matches but is not confirmed.
-        assert ('data-serial-state="shared"' in content) is shared
-        assert ('data-serial-state="confirmed"' in content) is (not shared)
+        # One serial badge, and it names the state of the other holders.
+        badge = {"sole": "confirmed", "shared": "shared", "unavailable": "unavailable"}[holders]
+        assert re.findall(r'data-serial-state="([a-z]+)"', content) == [badge]
 
     def test_a_serial_without_identity_shows_no_match_and_no_sync_action(self):
         existing = make_device("details-no-identity", serial="ABC123", librenms_cf={"default": {"id": 1}})
