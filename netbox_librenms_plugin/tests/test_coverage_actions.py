@@ -8329,17 +8329,10 @@ class TestSerialActionsNormalizeAndLock:
         return post_view(DeviceConflictActionView(), request, device_id=10)
 
     @staticmethod
-    def _serial_row_locks(sqls):
-        """Return FOR UPDATE queries whose WHERE clause filters by serial."""
-        serial_row_locks = []
-        for sql in sqls:
-            if "FOR UPDATE" not in sql:
-                continue
-            _, separator, where_clause = sql.partition(" WHERE ")
-            assert separator, f"FOR UPDATE query has no WHERE clause: {sql}"
-            if '."serial" = ' in where_clause:
-                serial_row_locks.append(sql)
-        return serial_row_locks
+    def _row_locks_of(sqls, device):
+        """Return the FOR UPDATE queries that lock the row of *device*."""
+        pk_filter = re.compile(rf'"dcim_device"\."id" = {device.pk}(?!\d)')
+        return [sql for sql in sqls if "FOR UPDATE" in sql and pk_filter.search(sql.partition(" WHERE ")[2])]
 
     def test_update_serial_persists_trimmed_serial(self):
         """A padded LibreNMS serial is stored trimmed so the next exact lookup still matches."""
@@ -8369,13 +8362,15 @@ class TestSerialActionsNormalizeAndLock:
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
 
+        holder = make_device("ser-act-lock-holder", serial="SN-7700")
         target = make_device("ser-act-lock")
         with CaptureQueriesContext(connection) as ctx:
-            self._post_action("sync_serial", target, "SN-7700")
+            resp = self._post_action("sync_serial", target, "SN-7700")
         sqls = [q["sql"] for q in ctx.captured_queries]
+        assert b"Serial conflict" in resp.content
         assert any("pg_advisory_xact_lock" in s for s in sqls), "advisory lock on the serial value not taken"
-        # The own-row lock (WHERE "id" = ...) is expected; a conflict-row lock filters on serial.
-        conflict_row_locks = self._serial_row_locks(sqls)
+        # The own-row lock is expected; the conflict lookup must not lock the holder.
+        conflict_row_locks = self._row_locks_of(sqls, holder)
         assert conflict_row_locks == [], f"conflict lookup still takes a row lock: {conflict_row_locks}"
 
     def test_serial_advisory_lock_uses_a_stable_application_key(self):
@@ -8404,24 +8399,28 @@ class TestSerialActionsNormalizeAndLock:
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
 
+        holder = make_device("ser-act-upd-lock-holder", serial="SN-8800")
         target = make_device("ser-act-upd-lock")
         with CaptureQueriesContext(connection) as ctx:
-            self._post_action("update", target, "SN-8800")
+            resp = self._post_action("update", target, "SN-8800")
         sqls = [q["sql"] for q in ctx.captured_queries]
+        assert b"Serial conflict" in resp.content
         assert any("pg_advisory_xact_lock" in s for s in sqls)
-        assert self._serial_row_locks(sqls) == []
+        assert self._row_locks_of(sqls, holder) == []
 
     def test_update_serial_action_serializes_on_the_serial_advisory_lock(self):
         """The dedicated update_serial action takes the same serial-keyed advisory lock."""
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
 
+        holder = make_device("ser-act-upd-serial-lock-holder", serial="SN-8900")
         target = make_device("ser-act-upd-serial-lock")
         with CaptureQueriesContext(connection) as ctx:
-            self._post_action("update_serial", target, "SN-8900")
+            resp = self._post_action("update_serial", target, "SN-8900")
         sqls = [q["sql"] for q in ctx.captured_queries]
+        assert b"Serial conflict" in resp.content
         assert any("pg_advisory_xact_lock" in sql for sql in sqls)
-        assert self._serial_row_locks(sqls) == []
+        assert self._row_locks_of(sqls, holder) == []
 
     def test_conflict_toast_escapes_the_conflicting_device_name(self):
         """_htmx_error_response substitutes the message via format_html('{}', ...), so a marked-up conflicting device name renders escaped — adding escape() at the call site would double-escape."""
