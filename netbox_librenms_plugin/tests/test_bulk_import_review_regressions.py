@@ -301,10 +301,7 @@ def test_unresolved_warning_does_not_claim_an_existing_row_imported(monkeypatch)
     assert "continue through normal import checks" in html
 
 
-CHASSIS_CONFLICT = (
-    "Imported device {}, but another operation was changing the same NetBox objects, "
-    "so its virtual chassis was not created."
-)
+CHASSIS_CONFLICT = f"Cannot import stack device {{}}: {TRY_AGAIN_MESSAGE}"
 
 
 def _importable_row(live_librenms, device_id, tag, *, members=None):
@@ -360,8 +357,8 @@ def test_a_lock_conflict_in_a_device_create_fails_only_that_row_with_the_try_aga
 
 
 @pytest.mark.django_db
-def test_a_lock_conflict_in_the_chassis_create_reports_the_imported_device(live_librenms, caplog):
-    """The device committed in its own transaction, so the warning says it was imported and the chassis was not."""
+def test_a_lock_conflict_in_the_chassis_create_fails_the_stack_row_and_a_retry_imports_both(live_librenms):
+    """The device and its chassis are one rollback unit, so the failed row leaves nothing and a retry creates both."""
     from dcim.models import Device, VirtualChassis
 
     from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
@@ -370,11 +367,8 @@ def test_a_lock_conflict_in_the_chassis_create_reports_the_imported_device(live_
     members = [_chassis(100, "SN-CONFLICT-A", position=1), _chassis(200, "SN-CONFLICT-B", position=2)]
     prerequisites, row = _importable_row(live_librenms, 96311, "stack-conflict", members=members)
 
-    with (
-        caplog.at_level("WARNING", logger="netbox_librenms_plugin.import_utils.bulk_import"),
-        failing_statement(lambda sql, params: sql.startswith('INSERT INTO "dcim_virtualchassis"'), "40P01"),
-    ):
-        result = bulk_import_devices_shared(
+    def run():
+        return bulk_import_devices_shared(
             [96311],
             server_key="default",
             manual_mappings_per_device={96311: prerequisites},
@@ -382,17 +376,27 @@ def test_a_lock_conflict_in_the_chassis_create_reports_the_imported_device(live_
             user=make_superuser("stack-conflict-user"),
         )
 
-    assert [entry["device_id"] for entry in result["success"]] == [96311]
-    assert result["virtual_chassis_created"] == 0
-    assert Device.objects.filter(name=row["hostname"], virtual_chassis__isnull=True).exists()
+    with failing_statement(lambda sql, params: sql.startswith('INSERT INTO "dcim_virtualchassis"'), "40P01"):
+        result = run()
+
+    assert result["success"] == []
+    assert result["warnings"] == []
+    assert result["failed"] == [{"device_id": 96311, "error": CHASSIS_CONFLICT.format(96311)}]
+    assert not Device.objects.filter(serial__in=["SN-CONFLICT-A", "SN-CONFLICT-B"]).exists()
     assert not VirtualChassis.objects.filter(domain="librenms-default-96311").exists()
-    assert CHASSIS_CONFLICT.format(96311) in caplog.messages
+
+    retry = run()
+
+    assert [entry["device_id"] for entry in retry["success"]] == [96311]
+    assert retry["virtual_chassis_created"] == 1
+    chassis = VirtualChassis.objects.get(domain="librenms-default-96311")
+    assert set(chassis.members.values_list("serial", flat=True)) == {"SN-CONFLICT-A", "SN-CONFLICT-B"}
 
 
 @pytest.mark.django_db
 @pytest.mark.parametrize("htmx", [False, True], ids=["plain", "htmx"])
-def test_the_import_answer_names_a_chassis_that_a_lock_conflict_left_uncreated(client, live_librenms, htmx):
-    """The device is imported, so the answer says so; it must also say that the chassis is missing."""
+def test_the_import_answer_fails_a_stack_row_whose_chassis_create_failed(client, live_librenms, htmx):
+    """The failed chassis rolls the device back, so the answer reports a failed row and no import."""
     from dcim.models import Device
 
     from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
@@ -414,18 +418,14 @@ def test_the_import_answer_names_a_chassis_that_a_lock_conflict_left_uncreated(c
             **headers,
         )
 
-    assert Device.objects.filter(name=row["hostname"], virtual_chassis__isnull=True).exists()
-    warning = CHASSIS_CONFLICT.format(device_id)
+    assert not Device.objects.filter(serial__in=[f"SN-ANSWER-A-{htmx}", f"SN-ANSWER-B-{htmx}"]).exists()
     if htmx:
         assert response.status_code == 200
-        assert "Successfully imported 1 LibreNMS device" in response.content.decode()
-        assert warning in response.content.decode()
+        assert "Successfully imported" not in response.content.decode()
+        assert "Failed to import 1 device" in response.content.decode()
     else:
         assert response.status_code == 302
-        assert messages_on(response.wsgi_request) == [
-            ("success", "Successfully imported 1 LibreNMS device"),
-            ("warning", warning),
-        ]
+        assert messages_on(response.wsgi_request) == [("error", "Failed to import 1 device")]
 
 
 MASTER_UNKNOWN = "Imported device {} without a virtual chassis: the stack master could not be identified by serial."

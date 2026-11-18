@@ -1,6 +1,7 @@
 """Bulk import orchestration for devices and filter processing."""
 
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import List
 
@@ -18,8 +19,16 @@ from ..import_validation_helpers import (
 )
 from ..librenms_api import LibreNMSAPI
 from ..librenms_ids import coerce_librenms_id
-from ..serial_identity import ResolutionKind, SerialRules, fingerprint, is_sole_holder, resolve_device
-from ..transactions import classify_conflict
+from ..serial_identity import (
+    ResolutionKind,
+    SerialRules,
+    assignment_lock,
+    display,
+    fingerprint,
+    is_sole_holder,
+    resolve_device,
+)
+from ..transactions import atomic_with_events
 from ..utils import (
     cached_row_matches,
     exception_text_for,
@@ -596,17 +605,45 @@ def bulk_import_devices_shared(  # noqa: C901
                     continue
                 apply_role_to_validation(validation, selected_role, is_vm=False)
 
-            result = import_single_device(
-                device_id,
-                server_key=api.server_key,  # use resolved key, not raw parameter (may be None)
-                validation=validation,
-                sync_options=sync_options,
-                manual_mappings=device_mappings if device_mappings else None,
-                libre_device=libre_device,
-                user=user,
-                text_viewer=text_viewer,
-                serial_rules=serial_rules,
-            )
+            # One key per physical stack, so only its first row creates the chassis.
+            vc_domain = stack_key(vc_data, device_id, master_context) if creates_vc else None
+            builds_vc = vc_domain is not None and vc_domain not in processed_vc_domains
+            vc = None
+            try:
+                # A stack device and its chassis are one rollback unit: a failed chassis fails the row, and a retry imports both.
+                with atomic_with_events() if builds_vc else nullcontext():
+                    if builds_vc:
+                        # The serial write set of the whole stack, locked before any row lock.
+                        serials = [libre_device.get("serial"), *(member.get("serial") for member in vc_data["members"])]
+                        assignment_lock([display(serial) for serial in serials], model=Device, rules=serial_rules)
+                    result = import_single_device(
+                        device_id,
+                        server_key=api.server_key,  # use resolved key, not raw parameter (may be None)
+                        validation=validation,
+                        sync_options=sync_options,
+                        manual_mappings=device_mappings if device_mappings else None,
+                        libre_device=libre_device,
+                        user=user,
+                        text_viewer=text_viewer,
+                        serial_rules=serial_rules,
+                    )
+                    if builds_vc and result["success"]:
+                        vc = create_virtual_chassis_with_members(
+                            result["device"],
+                            vc_data["members"],
+                            libre_device,
+                            server_key=api.server_key,
+                            master_member=master_member,
+                            serial_rules=serial_rules,
+                        )
+            except Exception as vc_error:
+                error_msg = f"Cannot import stack device {device_id}: {exception_text_for(vc_error, VirtualChassis, text_viewer)}"
+                failed_list.append({"device_id": device_id, "error": error_msg})
+                if job and job.logger:
+                    job.logger.error(error_msg)
+                else:
+                    logger.error(error_msg)
+                continue
 
             if result["success"]:
                 success_list.append(
@@ -634,49 +671,14 @@ def bulk_import_devices_shared(  # noqa: C901
                     else:
                         logger.warning(warn_msg)
 
-                # Handle virtual chassis creation for stacks
-                if creates_vc:
-                    # One key per physical stack, so VC creation is triggered only once for it.
-                    vc_domain = stack_key(vc_data, device_id, master_context)
-
-                    # Only create VC if we haven't processed this stack yet.
-                    # Permission was already validated before device import.
-                    if vc_domain not in processed_vc_domains:
-                        # Add to set BEFORE attempting creation to prevent race condition
-                        processed_vc_domains.add(vc_domain)
-                        try:
-                            vc = create_virtual_chassis_with_members(
-                                result["device"],
-                                vc_data["members"],
-                                libre_device,
-                                server_key=api.server_key,
-                                master_member=master_member,
-                                serial_rules=serial_rules,
-                            )
-                            vc_created_count += 1
-                            log_msg = f"Created VC '{vc.name}' during bulk import for device {device_id}"
-                            if job and job.logger:
-                                job.logger.info(log_msg)
-                            else:
-                                logger.info(log_msg)
-                        except Exception as vc_error:
-                            # Remove from set on failure so retry is possible
-                            processed_vc_domains.discard(vc_domain)
-                            if classify_conflict(vc_error):
-                                # The device committed in its own transaction; only the chassis is missing.
-                                warn_msg = (
-                                    f"Imported device {device_id}, but another operation was changing the same "
-                                    "NetBox objects, so its virtual chassis was not created."
-                                )
-                            else:
-                                detail = exception_text_for(vc_error, VirtualChassis, text_viewer)
-                                warn_msg = f"Failed to create VC for device {device_id}: {detail}"
-                            warnings_list.append(warn_msg)
-                            if job and job.logger:
-                                job.logger.warning(warn_msg)
-                            else:
-                                logger.warning(warn_msg)
-                            # Don't fail the import; the caller shows the warning beside the success.
+                if vc is not None:
+                    processed_vc_domains.add(vc_domain)
+                    vc_created_count += 1
+                    log_msg = f"Created VC '{vc.name}' during bulk import for device {device_id}"
+                    if job and job.logger:
+                        job.logger.info(log_msg)
+                    else:
+                        logger.info(log_msg)
 
             elif result.get("device"):  # Device exists
                 skipped_list.append({"device_id": device_id, "reason": result["error"]})

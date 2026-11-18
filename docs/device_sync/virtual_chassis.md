@@ -21,6 +21,8 @@ On import, the plugin reads the ENTITY-MIB inventory root and its direct childre
 
 The master is the one member whose serial matches the device serial. Both serials go through the serial normalization rules first: the global rules and the rules of the manufacturer of the DeviceType that the device imports as. That DeviceType comes from a DeviceType mapping or the hardware string, then from the chassis model in the inventory. So a decorated serial such as Juniper's `S/N BCFB9793` still matches. A Junos Virtual Chassis must also meet the FPC serial conditions again under these rules. If the plugin detects a stack, but no member or more than one member matches, the import creates the device without a virtual chassis and shows a warning. The Virtual Chassis details dialog and the import confirmation say so before the import. If the inventory matches neither shape, the device is imported as a single device. The **VC Serials** dialog on the LibreNMS Sync page lists the same members.
 
+The import creates the device, its virtual chassis and the member devices in one transaction. If the virtual chassis cannot be created, the row fails and the import creates nothing for it. Import the row again to create all of them.
+
 ## Member Positions
 
 On import, each member gets the position number that the device reports for it. Junos numbers its members from 0 (`ge-0/0/0` is on member 0), so a Junos Virtual Chassis gets positions 0, 1, and so on. Cisco StackWise numbers its members from 1. If any member reports no position, a negative position, or the same position as another member, the plugin numbers all members in inventory order, starting at 1, so that no two members share a position.
