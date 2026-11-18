@@ -1689,6 +1689,9 @@ class TestDeviceValidationDetailsView:
         assert ('name="force"' in form) is shared
         button = re.search(r"<button[^>]*migrate-btn[^>]*>", form).group(0)
         assert (" disabled" in button) is shared
+        # One serial badge: a shared serial matches but is not confirmed.
+        assert ('data-serial-state="shared"' in content) is shared
+        assert ('data-serial-state="confirmed"' in content) is (not shared)
 
     def test_a_serial_without_identity_shows_no_match_and_no_sync_action(self):
         existing = make_device("details-no-identity", serial="ABC123", librenms_cf={"default": {"id": 1}})

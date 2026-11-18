@@ -590,8 +590,10 @@
         {% elif validation.name_sync_available %}
           <span class="badge bg-warning-lt me-1"><i class="mdi mdi-alert"></i> Name differs</span>
         {% endif %}
-        {% if validation.serial_confirmed %}
-          <span class="badge bg-success-lt me-1"><i class="mdi mdi-check-circle-outline"></i> Serial confirmed</span>
+        {% if validation.serial_confirmed and validation.librenms_id_needs_migration and not validation.legacy_id_serial_confirmed %}
+          <span class="badge bg-warning-lt me-1" data-serial-state="shared"><i class="mdi mdi-alert"></i> Serial matches, but other devices hold it too</span>
+        {% elif validation.serial_confirmed %}
+          <span class="badge bg-success-lt me-1" data-serial-state="confirmed"><i class="mdi mdi-check-circle-outline"></i> Serial confirmed</span>
         {% elif validation.serial_action == 'conflict' %}
           <span class="badge bg-danger-lt me-1"><i class="mdi mdi-alert-circle"></i> Serial conflict</span>
         {% elif validation.serial_action == 'update_serial' %}
@@ -622,7 +624,11 @@
               <input class="form-check-input" type="checkbox" name="force" id="force-migrate-{{ libre_device.device_id }}"
                      onchange="this.closest('form').querySelector('.migrate-btn').disabled = !this.checked">
               <label class="form-check-label text-warning" for="force-migrate-{{ libre_device.device_id }}">
-                <i class="mdi mdi-alert"></i> Serial not confirmed — check to migrate anyway
+                {% if validation.serial_confirmed %}
+                  <i class="mdi mdi-alert"></i> Several devices hold this serial — check to migrate anyway
+                {% else %}
+                  <i class="mdi mdi-alert"></i> Serial not confirmed — check to migrate anyway
+                {% endif %}
               </label>
             </div>
           {% endif %}
