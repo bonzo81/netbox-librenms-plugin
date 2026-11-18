@@ -83,3 +83,12 @@ def build_context(cache_key):
 def refresh_failed(cache_key):
     # ok: module-snapshot-reader-keeps-the-snapshot
     cache.delete(cache_key)
+
+
+def move_module(queryset, apply):
+    with transaction.atomic():
+        # ruleid: event-aware-block-inside-plain-atomic
+        update_existing_row(queryset, apply)
+    with atomic_with_events():
+        # ok: event-aware-block-inside-plain-atomic
+        update_existing_row(queryset, apply)

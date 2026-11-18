@@ -681,3 +681,43 @@ def test_a_writer_that_keeps_module_serials_does_not_read_a_broken_serial_rule(w
         assert interface.type == "10gbase-x-sfpp"
     else:
         assert ModuleBay.objects.filter(module=module, name="Additional Bay").exists()
+
+
+@transactional_db_with_all_apps()
+def test_a_module_move_whose_commit_meets_a_lock_conflict_sends_no_event(client, flushed_events):
+    """The moved row's savepoint releases, then the commit meets a 55P03: the move rolls back with its events."""
+    from dcim.models import Module
+    from django.contrib.auth import get_user_model
+    from django.contrib.messages import get_messages
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import make_module_bay, make_superuser
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import lock_row, lock_timeout, second_connection
+    from netbox_librenms_plugin.transactions import TRY_AGAIN_MESSAGE
+    from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
+
+    if not netbox_relocates_module_subtree():
+        pytest.skip("NetBox moves a module from 4.7.")
+    device = make_device_with_module_bays("move-events-device", ["Slot 1"])
+    module = install_module(device, "Slot 1", "MOVE-EVENTS-CARD", serial="MOVE12345")
+    target_bay = make_module_bay(device, "Target Bay")
+    user = make_superuser("move-events-user")
+    client.force_login(user)
+    flushed_events.clear()
+
+    # The commit checks the change record's user foreign key; the held user row gives a real 55P03.
+    with second_connection() as other:
+        lock_row(other, get_user_model(), user.pk)
+        with lock_timeout(200):
+            response = client.post(
+                reverse("plugins:netbox_librenms_plugin:move_module", kwargs={"pk": device.pk}),
+                {
+                    "conflict_module_id": str(module.pk),
+                    "target_bay_id": str(target_bay.pk),
+                    "selected_device_id": str(device.pk),
+                },
+            )
+
+    assert TRY_AGAIN_MESSAGE in [str(message) for message in get_messages(response.wsgi_request)]
+    assert Module.objects.get(pk=module.pk).module_bay_id != target_bay.pk
+    assert flushed_events == []

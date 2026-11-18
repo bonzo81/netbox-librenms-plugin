@@ -3315,7 +3315,7 @@ class MoveModuleView(
         )
         removing = module_subtree_serials(occupant_id)
         try:
-            with transaction.atomic():
+            with atomic_with_events():
                 scope = lock_module_write(
                     observe_module_write(
                         device_ids=[target_device.pk], subtree_roots=[conflict_module_id, occupant_id]

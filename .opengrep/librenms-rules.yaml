@@ -2056,3 +2056,27 @@ rules:
               except _StaleInventorySnapshot:
                   ...
       - pattern: cache.delete(...)
+
+  - id: event-aware-block-inside-plain-atomic
+    languages: [python]
+    severity: ERROR
+    message: >-
+      A plain transaction.atomic() encloses an event-aware block. The inner block keeps its NetBox
+      events when it releases its savepoint, so a rollback of the plain block still sends them. Use
+      atomic_with_events() for the outer block. Limits: it finds direct nesting only, not a helper call.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/views/**/*.py"]
+    patterns:
+      - pattern-inside: |
+          with transaction.atomic():
+              ...
+      - pattern-either:
+          - pattern: update_existing_row(...)
+          - pattern: |
+              with atomic_with_events():
+                  ...
+          - pattern: |
+              with row_savepoint():
+                  ...
