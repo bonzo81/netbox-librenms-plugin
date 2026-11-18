@@ -264,7 +264,7 @@ def detect_collisions_for_device_ids(
             # guard can't silently drift from the producer's wording.
             unresolved_ids.append(device_id)
             continue
-        if any(SERIAL_UNAVAILABLE_ISSUE_MARKER in str(issue) for issue in validation.get("issues", [])):
+        if _stopped_at_unavailable_serial(validation):
             # An Unavailable serial lookup gives no identity to collision-check, so the row stays unresolved.
             unresolved_ids.append(device_id)
             continue
@@ -1364,6 +1364,11 @@ def _block_failed_recheck(validation: dict) -> None:
         validation["issues"].append(message)
 
 
+def _stopped_at_unavailable_serial(validation: dict) -> bool:
+    """Return whether validation stopped at an Unavailable serial lookup, before the site and type checks."""
+    return any(SERIAL_UNAVAILABLE_ISSUE_MARKER in str(issue) for issue in validation.get("issues", []))
+
+
 def _empty_return(return_cache_status: bool):
     """Centralised empty-result return value for process_device_filters."""
     return ([], False) if return_cache_status else []
@@ -1514,7 +1519,8 @@ def process_device_filters(  # noqa: C901
         # (only if not forcing refresh)
         if not clear_cache:
             cached_device = cache.get(cache_key)
-            if cached_device:
+            # A row that stopped at an Unavailable serial lookup is partial, so validate it again.
+            if cached_device and not _stopped_at_unavailable_serial(cached_device["_validation"]):
                 # Use cached validation
                 device["_validation"] = cached_device["_validation"]
 

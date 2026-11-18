@@ -459,6 +459,45 @@ class TestImportListRequest:
         assert len(requests) == 1
 
     @pytest.mark.django_db
+    def test_a_warm_search_validates_a_row_again_that_stopped_at_an_unavailable_serial(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+    ):
+        """Validation stops before the site and type checks, so the cached row must not be reused once the lookup reads."""
+        from dcim.models import Device, DeviceType, Manufacturer, Site
+
+        from netbox_librenms_plugin.import_utils.device_operations import SERIAL_UNAVAILABLE_ISSUE_MARKER
+        from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
+
+        manufacturer = Manufacturer.objects.create(name="Test Vendor", slug="test-vendor")
+        DeviceType.objects.create(manufacturer=manufacturer, model="Test Router", slug="test-router")
+        Site.objects.create(name="Test Lab", slug="test-lab")
+        device = _device(4111)
+        stray = _stray_chassis_member("warm-unavailable", device["serial"])
+        _register_devices(librenms_server, [device])
+        client.force_login(_create_user(django_user_model, "warm-unavailable-serial"))
+
+        def validation():
+            response = client.get(_import_url(), _search_params())
+            (row,) = response.context["table"].data
+            return response, row["_validation"]
+
+        _first, blocked = validation()
+        assert any(SERIAL_UNAVAILABLE_ISSUE_MARKER in issue for issue in blocked["issues"])
+        assert blocked["site"]["found"] is False
+
+        # The stray member gets another serial, so the lookup reads and finds no holder.
+        Device.objects.filter(pk=stray.pk).update(serial="WARM-UNAVAILABLE-OTHER")
+        second, revalidated = validation()
+
+        assert second.context["from_cache"] is True
+        assert not any(SERIAL_UNAVAILABLE_ISSUE_MARKER in issue for issue in revalidated["issues"])
+        assert revalidated["site"]["site"].name == "Test Lab"
+        assert revalidated["device_type"]["device_type"].model == "Test Router"
+
+    @pytest.mark.django_db
     def test_every_filter_reaches_the_real_search_and_client_side_matching(
         self,
         client,
@@ -538,6 +577,42 @@ class TestImportListRequest:
         assert [row["device_id"] for row in results.context["table"].data] == [4802]
         assert results.context["from_cache"] is True
         assert len(requests) == 1
+
+    @pytest.mark.django_db
+    def test_the_background_results_page_keeps_a_row_blocked_that_stopped_at_an_unavailable_serial(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+    ):
+        """The results page cannot validate again, so a partial row keeps its blocker until a new search."""
+        from core.models import Job
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_utils.device_operations import SERIAL_UNAVAILABLE_ISSUE_MARKER
+        from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
+
+        device = _device(4112)
+        stray = _stray_chassis_member("results-unavailable", device["serial"])
+        _register_devices(librenms_server, [device])
+        user = _create_user(django_user_model, "results-unavailable-serial")
+        client.force_login(user)
+        client.get(_import_url(), _search_params())
+        Device.objects.filter(pk=stray.pk).update(serial="RESULTS-UNAVAILABLE-OTHER")
+        job = Job.objects.create(
+            name="Completed import search",
+            user=user,
+            job_id=uuid4(),
+            status="completed",
+            data={"device_ids": [4112], "filters": {"hostname": "edge"}, "server_key": SERVER_KEY},
+        )
+
+        # Without filter parameters the page reads the job's cached rows.
+        results = client.get(_import_url(), {"job_id": job.pk})
+
+        (row,) = results.context["table"].data
+        assert any(SERIAL_UNAVAILABLE_ISSUE_MARKER in issue for issue in row["_validation"]["issues"])
+        assert row["_validation"]["can_import"] is False
 
     @pytest.mark.django_db
     def test_clear_cache_forces_a_fresh_http_search(
