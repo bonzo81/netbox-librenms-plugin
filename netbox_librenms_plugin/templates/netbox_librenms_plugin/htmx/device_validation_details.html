@@ -318,7 +318,11 @@
                     {% else %}
                       <span class="text-muted">Not set</span>
                     {% endif %}
-                    {% if sync_info and not sync_info.serial_synced %}
+                    {% if sync_info and sync_info.serial_unavailable %}
+                      <span class="text-warning ms-1" title="{{ sync_info.serial_unavailable }}" data-serial-unavailable>
+                        <i class="mdi mdi-help-circle-outline"></i>
+                      </span>
+                    {% elif sync_info and not sync_info.serial_synced %}
                       {% if validation.serial_action == 'conflict' %}
                         <span class="text-danger ms-1" title="Serial conflict — another device already has this serial">
                           <i class="mdi mdi-alert-circle"></i>

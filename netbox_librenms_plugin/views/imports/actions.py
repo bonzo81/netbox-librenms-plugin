@@ -2054,12 +2054,18 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
 
         # Serial comparison; a VM has no serial, so nothing compares for it.
         serial_synced = True
+        serial_unavailable = ""
         if existing_device._meta.model_name == "device":
             serial_context = SerialRules.load().for_device(existing_device)
-            serial_synced = (
-                not is_identity(libre_device.get("serial"), serial_context)
-                or compare(existing_device.serial, libre_device.get("serial"), serial_context) is Comparison.SAME
-            )
+            if serial_context.unavailable and display(libre_device.get("serial")):
+                # The serials cannot be compared: show the reason, not a match or a sync action.
+                serial_synced = False
+                serial_unavailable = serial_context.unavailable
+            else:
+                serial_synced = (
+                    not is_identity(libre_device.get("serial"), serial_context)
+                    or compare(existing_device.serial, libre_device.get("serial"), serial_context) is Comparison.SAME
+                )
 
         # Platform comparison
         platform_assessment = assess_platform(
@@ -2101,6 +2107,7 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         return {
             "librenms_serial": librenms_serial,
             "serial_synced": serial_synced,
+            "serial_unavailable": serial_unavailable,
             "platform_info": platform_info,
             "platform_synced": platform_synced,
             "librenms_hardware": librenms_hardware,

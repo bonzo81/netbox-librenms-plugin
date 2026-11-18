@@ -1591,6 +1591,41 @@ class TestDeviceValidationDetailsView:
         assert response.content.count(existing.serial.encode()) >= 2
         assert b"mdi-check-circle" in response.content
 
+    def test_a_serial_that_cannot_be_compared_shows_the_reason_not_a_match(self):
+        from dcim.models import Device, VirtualChassis
+        from django.utils.html import escape
+
+        from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+
+        existing = make_device("details-stray-member", serial="STRAY-NETBOX", librenms_cf={"default": {"id": 1}})
+        chassis = make_virtual_chassis("details-stray-chassis", existing)
+        master = make_device("details-stray-master")
+        other = VirtualChassis.objects.create(name="details-stray-other")
+        # The master link names a device of another chassis, so no member serial can be compared.
+        Device.objects.filter(pk=master.pk).update(virtual_chassis=other, vc_position=1)
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=master)
+        self.primary_server.device_info_response(
+            device_id=1,
+            hostname=existing.name,
+            hardware=existing.device_type.model,
+            os="ios",
+            serial="STRAY-LIBRENMS",
+            ip="198.18.0.2",
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        assert response.status_code == 200
+        content = response.content.decode()
+        start = content.index('<td style="padding-left: 0.75rem;">Serial</td>')
+        serial_row = content[start : content.index("</tr>", start)]
+        assert "mdi-check-circle" not in serial_row
+        assert "sync_serial" not in serial_row
+        assert "data-serial-unavailable" in serial_row
+        assert escape(UNAVAILABLE_MASTER_LINK) in serial_row
+
     def test_a_viewer_who_cannot_view_platforms_sees_no_platform_name(self):
         from dcim.models import Platform
 
@@ -1682,6 +1717,27 @@ class TestBuildSyncInfo:
 
         assert result["serial_synced"] is True, "padded stored serial reported as drift"
         assert result["all_synced"] is True
+
+    @pytest.mark.parametrize(("incoming", "unavailable"), [("STRAY-LIBRENMS", True), ("-", False), ("", False)])
+    def test_an_unavailable_context_marks_only_a_reported_serial(self, incoming, unavailable):
+        from dcim.models import Device, VirtualChassis
+
+        from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
+        from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+
+        existing = make_device(f"sync-info-stray-{incoming or 'blank'}", serial="STRAY-NETBOX")
+        chassis = make_virtual_chassis(f"sync-info-stray-chassis-{incoming or 'blank'}", existing)
+        master = make_device(f"sync-info-stray-master-{incoming or 'blank'}")
+        other = VirtualChassis.objects.create(name=f"sync-info-stray-other-{incoming or 'blank'}")
+        Device.objects.filter(pk=master.pk).update(virtual_chassis=other, vc_position=1)
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=master)
+        existing.refresh_from_db()
+
+        result = self._get_method()({"serial": incoming, "os": "-", "hardware": "-"}, existing, None)
+
+        # A LibreNMS serial that is absent stays non-actionable, as for any other device.
+        assert result["serial_unavailable"] == (UNAVAILABLE_MASTER_LINK if unavailable else "")
+        assert result["serial_synced"] is not unavailable
 
     def test_platform_synced_when_matching(self):
         from dcim.models import Platform
