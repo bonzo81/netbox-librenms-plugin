@@ -3283,13 +3283,15 @@ class TestModuleWriterOwnership:
                     calls.append((getattr(node.func, "id", getattr(node.func, "attr", "")), node, parents))
 
             walk(method)
+            # A conditional expression arm or a short-circuited operand can skip a lock, as an if statement can.
+            conditional = (ast.For, ast.AsyncFor, ast.While, ast.If, ast.IfExp, ast.BoolOp)
             order = {id(node): position for position, (_call, node, _parents) in enumerate(calls)}
             scopes = [(node, parents) for call, node, parents in calls if call == "lock_module_write"]
             if len(scopes) != 1:
                 failures.append(f"{name}: expected one complete owner lock")
                 continue
             lock, parents = scopes[0]
-            if any(isinstance(parent, (ast.For, ast.AsyncFor, ast.While, ast.If)) for parent in parents):
+            if any(isinstance(parent, conditional) for parent in parents):
                 failures.append(f"{name}: owner lock is conditional or incremental")
             if not any(call == "observe_module_write" for call, _node, _parents in calls):
                 failures.append(f"{name}: missing observation")
@@ -3301,9 +3303,7 @@ class TestModuleWriterOwnership:
                     failures.append(f"{name}: expected one complete type lock")
                     continue
                 claim, parents = claims[0]
-                if order[id(claim)] < order[id(lock)] or any(
-                    isinstance(parent, (ast.For, ast.AsyncFor, ast.While, ast.If)) for parent in parents
-                ):
+                if order[id(claim)] < order[id(lock)] or any(isinstance(parent, conditional) for parent in parents):
                     failures.append(f"{name}: type lock precedes Devices or is conditional or incremental")
                 if any(call in cls.DOWNSTREAM and order[id(node)] < order[id(claim)] for call, node, _parents in calls):
                     failures.append(f"{name}: downstream lock or write precedes type lock")
@@ -3325,8 +3325,18 @@ class TestModuleWriterOwnership:
             "for target in targets:\n    lock_module_write(observe_module_write(device_ids=[target]))\n    Module().save()",
             "Module.objects.select_for_update()\nlock_module_write(observe_module_write(device_ids=targets))",
             "lock_module_write(observe_module_write(device_ids=targets), incoming=[Module.objects.select_for_update()])",
+            "lock_module_write(observe_module_write(device_ids=targets)) if indexed else None\nModule().save()",
+            "indexed and lock_module_write(observe_module_write(device_ids=targets))\nModule().save()",
         ],
-        ids=["missing", "carrier-unguarded", "incremental-bulk", "late-owner", "write-in-owner-argument"],
+        ids=[
+            "missing",
+            "carrier-unguarded",
+            "incremental-bulk",
+            "late-owner",
+            "write-in-owner-argument",
+            "owner-in-conditional-expression",
+            "owner-in-short-circuit",
+        ],
     )
     def test_guard_rejects_known_omissions(self, body):
         import ast
@@ -3353,8 +3363,17 @@ class TestModuleWriterOwnership:
             "lock_module_write(observe_module_write(device_ids=targets))\nfor target in targets:\n    scope.lock_module_types([target])\n    Module().save()",
             "scope.lock_module_types(types)\nlock_module_write(observe_module_write(device_ids=targets))",
             "lock_module_write(observe_module_write(device_ids=targets)).lock_module_types([Module().save()])",
+            "lock_module_write(observe_module_write(device_ids=targets))\nscope.lock_module_types(types) if types else None\nModule().save()",
+            "lock_module_write(observe_module_write(device_ids=targets))\ntypes or scope.lock_module_types(types)\nModule().save()",
         ],
-        ids=["missing-type", "incremental-types", "types-before-devices", "write-in-type-argument"],
+        ids=[
+            "missing-type",
+            "incremental-types",
+            "types-before-devices",
+            "write-in-type-argument",
+            "types-in-conditional-expression",
+            "types-in-short-circuit",
+        ],
     )
     def test_guard_rejects_known_type_claim_omissions(self, body):
         import ast
