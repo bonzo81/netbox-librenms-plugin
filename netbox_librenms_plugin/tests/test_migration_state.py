@@ -1,6 +1,7 @@
 """Guard against model/migration state drift for the plugin's own models."""
 
 import importlib
+import uuid
 
 import pytest
 
@@ -414,6 +415,11 @@ def _trigram_index_oids():
         return cursor.fetchall()
 
 
+def _probe_schema_name():
+    """Return a schema name that no other run uses, so the cleanup drops only the schema of this test."""
+    return f"nblp_probe_{uuid.uuid4().hex}"
+
+
 def _run_index_step(step):
     from django.db import connection
 
@@ -426,15 +432,16 @@ def test_the_trigram_migration_finds_its_indexes_in_the_schema_of_their_table():
     """A search path whose first schema exists makes current_schema() differ from the schema of the tables."""
     from django.db import connection
 
+    schema = _probe_schema_name()
     try:
         with connection.cursor() as cursor:
-            cursor.execute("CREATE SCHEMA nblp_probe_first")
-            cursor.execute("SET search_path = nblp_probe_first, public")
+            cursor.execute(f"CREATE SCHEMA {schema}")
+            cursor.execute(f"SET search_path = {schema}, public")
         _run_index_step("ensure_serial_trigram_indexes")
     finally:
         with connection.cursor() as cursor:
             cursor.execute("RESET search_path")
-            cursor.execute("DROP SCHEMA IF EXISTS nblp_probe_first")
+            cursor.execute(f"DROP SCHEMA IF EXISTS {schema}")
 
     assert _trigram_index_schemas() == [
         ("nblp_dcim_device_serial_trgm_idx", "public", "public", True),
@@ -455,11 +462,12 @@ def test_the_trigram_migration_uses_the_operator_class_of_the_installed_extensio
         can_move, owner = cursor.fetchone()
     if not can_move:
         pytest.fail(f"Only the owner of pg_trgm can move it: run the tests as {owner!r} or as a superuser")
+    schema = _probe_schema_name()
     moved = False
     try:
         with connection.cursor() as cursor:
-            cursor.execute("CREATE SCHEMA nblp_probe_extensions")
-            cursor.execute("ALTER EXTENSION pg_trgm SET SCHEMA nblp_probe_extensions")
+            cursor.execute(f"CREATE SCHEMA {schema}")
+            cursor.execute(f"ALTER EXTENSION pg_trgm SET SCHEMA {schema}")
         moved = True
         _run_index_step("drop_serial_trigram_indexes")
         _run_index_step("ensure_serial_trigram_indexes")
@@ -471,12 +479,12 @@ def test_the_trigram_migration_uses_the_operator_class_of_the_installed_extensio
         with connection.cursor() as cursor:
             if moved:
                 cursor.execute("ALTER EXTENSION pg_trgm SET SCHEMA public")
-            cursor.execute("DROP SCHEMA IF EXISTS nblp_probe_extensions")
+            cursor.execute(f"DROP SCHEMA IF EXISTS {schema}")
         _run_index_step("ensure_serial_trigram_indexes")
 
     assert built == [
-        ("nblp_dcim_device_serial_trgm_idx", "public", "nblp_probe_extensions", True),
-        ("nblp_dcim_module_serial_trgm_idx", "public", "nblp_probe_extensions", True),
+        ("nblp_dcim_device_serial_trgm_idx", "public", schema, True),
+        ("nblp_dcim_module_serial_trgm_idx", "public", schema, True),
     ]
 
 
