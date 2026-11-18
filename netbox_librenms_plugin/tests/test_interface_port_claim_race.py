@@ -194,19 +194,36 @@ def _race(first, second, while_first_paused):
     return first_result, second_result, observed
 
 
-def _second_waits_on_first(_second_future, pids):
-    """Return True when PostgreSQL reports that the second writer's backend waits on the first writer's backend."""
+def _second_waits_on_the_device_row(device):
+    """Return an observer that is True when the second writer waits on the first writer for the row of *device*."""
+    from dcim.models import Device
     from django.db import connection
 
-    deadline = time.monotonic() + PAUSE_TIMEOUT_SECONDS
-    while time.monotonic() < deadline:
-        if "second" in pids:
-            with connection.cursor() as cursor:
-                cursor.execute("SELECT pg_blocking_pids(%s)", [pids["second"]])
-                if pids["first"] in cursor.fetchone()[0]:
-                    return True
-        time.sleep(0.05)
-    return False
+    # A row lock waiter holds the tuple lock of the row and waits on the holder's transaction id.
+    query = f"""
+        SELECT 1 FROM pg_locks AS waiting
+        JOIN pg_locks AS row_lock ON row_lock.pid = waiting.pid AND row_lock.locktype = 'tuple' AND row_lock.granted
+        WHERE waiting.pid = %s AND waiting.locktype = 'transactionid' AND NOT waiting.granted
+          AND %s = ANY(pg_blocking_pids(waiting.pid))
+          AND row_lock.relation = '"{Device._meta.db_table}"'::regclass
+          AND (row_lock.page, row_lock.tuple) = (
+              SELECT (ctid::text::point)[0]::int, (ctid::text::point)[1]::int
+              FROM "{Device._meta.db_table}" WHERE id = %s
+          )
+    """
+
+    def observe(_second_future, pids):
+        deadline = time.monotonic() + PAUSE_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            if "second" in pids:
+                with connection.cursor() as cursor:
+                    cursor.execute(query, [pids["second"], pids["first"], device.pk])
+                    if cursor.fetchone() is not None:
+                        return True
+            time.sleep(0.05)
+        return False
+
+    return observe
 
 
 def test_two_interface_syncs_of_one_device_wait_on_the_device_row_lock(settings):
@@ -219,7 +236,7 @@ def test_two_interface_syncs_of_one_device_wait_on_the_device_row_lock(settings)
     _first, second_messages, second_waited = _race(
         (_interface_sync, user_pk, device, "ifName"),
         (_interface_sync, user_pk, device, "ifDescr"),
-        _second_waits_on_first,
+        _second_waits_on_the_device_row(device),
     )
 
     assert second_waited, "the second sync did not wait on the first sync's backend"
@@ -249,7 +266,7 @@ def test_module_bind_and_interface_sync_of_one_device_leave_one_holder(settings,
     before = _persisted(loser)
     _winner_row, winner_changes = _persisted(winner)
 
-    _first, second_messages, second_waited = _race(first, second, _second_waits_on_first)
+    _first, second_messages, second_waited = _race(first, second, _second_waits_on_the_device_row(device))
 
     assert second_waited, "the second writer did not wait for Device ownership"
     assert _port_holders() == [winner.pk]
