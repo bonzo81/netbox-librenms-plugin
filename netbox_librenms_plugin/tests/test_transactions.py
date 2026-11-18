@@ -13,6 +13,7 @@ from utilities.exceptions import AbortRequest
 from netbox_librenms_plugin.tests.conftest import make_superuser, transactional_db_with_all_apps
 from netbox_librenms_plugin.tests.mapping_fixtures import mapping_from_change_record, seed_stored_mapping_row
 from netbox_librenms_plugin.tests.lock_conflict_helpers import (
+    commit_row_change,
     failing_statement,
     hold_port_claim,
     lock_row,
@@ -496,6 +497,53 @@ def test_a_dropped_block_leaves_the_earlier_event_of_its_object_unchanged(nested
     assert event["snapshots"]["prechange"]["description"] == ""
     assert event["snapshots"]["postchange"]["description"] == "kept"
     assert (Site.objects.get(pk=site.pk).description, payload["description"]) == ("kept", "kept")
+
+
+@transactional_db_with_all_apps()
+@pytest.mark.parametrize("instance", ["same", "separate"])
+def test_a_dropped_block_keeps_another_sessions_later_values_out_of_a_committed_event(instance):
+    """The first block commits; another session changes the row; a later block writes it and rolls back."""
+    from dcim.models import Site
+
+    from netbox_librenms_plugin.transactions import atomic_with_events
+
+    class _Refused(Exception):
+        pass
+
+    site = _site("committed-then-changed")
+    with _netbox_request_context():
+        with atomic_with_events():
+            _write_site(site, "kept")
+        with second_connection() as other:
+            commit_row_change(other, Site, site.pk, {"description": "other session"})
+        written = site if instance == "same" else Site.objects.get(pk=site.pk)
+        with pytest.raises(_Refused), atomic_with_events():
+            _write_site(written, "rolled back")
+            raise _Refused()
+
+        payload = _the_one_event(site)["data"]
+    # The committed event describes the first request's write, not the other session's values.
+    assert payload["description"] == "kept"
+
+
+@pytest.mark.django_db
+def test_a_block_that_drops_inside_the_open_writer_reloads_the_writers_event():
+    """The open outer block wrote the row and holds it; its event reads the row again after the inner rollback."""
+    from netbox_librenms_plugin.transactions import atomic_with_events
+
+    class _Refused(Exception):
+        pass
+
+    site = _site("open-writer-reload")
+    with _netbox_request_context():
+        with atomic_with_events():
+            _write_site(site, "kept")
+            with pytest.raises(_Refused), atomic_with_events():
+                _write_site(site, "rolled back")
+                raise _Refused()
+
+        payload = _the_one_event(site)["data"]
+    assert payload["description"] == "kept"
 
 
 @pytest.mark.django_db
