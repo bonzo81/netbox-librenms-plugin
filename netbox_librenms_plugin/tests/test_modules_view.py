@@ -974,8 +974,12 @@ class TestMergeTransceiverDataPortIdentity:
         assert error is None
         assert inventory == inventory_seed
 
+    # "TX-50" has no identity, so only the fan's class tells that it is not the optic.
+    @pytest.mark.parametrize("transceiver_serial", ["TXR-50", "TX-50"])
     @pytest.mark.parametrize("port_ifindex", [50, None])
-    def test_entity_at_the_index_with_another_serial_is_not_the_optic(self, settings, librenms_server, port_ifindex):
+    def test_entity_at_the_index_with_another_serial_is_not_the_optic(
+        self, settings, librenms_server, port_ifindex, transceiver_serial
+    ):
         """An entity at the transceiver's index that has a different serial is another part and keeps its data."""
         view = _real_api_view(settings, librenms_server, librenms_id=108)
         librenms_server.register(
@@ -983,7 +987,7 @@ class TestMergeTransceiverDataPortIdentity:
             {
                 "status": "ok",
                 "transceivers": [
-                    {"entity_physical_index": 50, "model": "SFP-10G-SR", "serial": "TXR-50", "port_id": 9}
+                    {"entity_physical_index": 50, "model": "SFP-10G-SR", "serial": transceiver_serial, "port_id": 9}
                 ],
             },
             method="GET",

@@ -140,8 +140,19 @@ def _names_another_part(item: dict, transceiver: dict, context: SerialContext) -
     return compare(item.get("entPhysicalSerialNum"), transceiver.get("serial"), context) is Comparison.DIFFERENT
 
 
+# ENTITY-MIB classes of hardware that is never an optic; a port, module, container or other entity can be.
+_NON_OPTIC_CLASSES = frozenset({"backplane", "chassis", "cpu", "fan", "powerSupply", "sensor", "stack"})
+
+
+def _never_an_optic(item: dict) -> bool:
+    """Return whether an entity's class names hardware that is never a transceiver, whatever its serial."""
+    return _normalize_librenms_text(item.get("entPhysicalClass")) in _NON_OPTIC_CLASSES
+
+
 def _ifindex_entity_is_the_optic(item: dict, transceiver: dict, context: SerialContext) -> bool:
     """Return whether an entity matched only by port ifIndex has the optic's serial, or neither model nor serial."""
+    if _never_an_optic(item):
+        return False
     if is_identity(item.get("entPhysicalSerialNum"), context):
         return compare(item.get("entPhysicalSerialNum"), transceiver.get("serial"), context) is Comparison.SAME
     return not _clean_librenms_value(item.get("entPhysicalModelName"))
@@ -2307,7 +2318,8 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             existing = inv_by_index.get(ent_idx)
             index_taken = existing is not None
             if existing is not None and (
-                _names_another_part(existing, txr, serial_context)
+                _never_an_optic(existing)
+                or _names_another_part(existing, txr, serial_context)
                 or (port_ifindex is not None and _coerce_idx(existing.get("ifIndex")) not in {None, port_ifindex})
             ):
                 existing = None
