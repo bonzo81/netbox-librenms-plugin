@@ -3438,6 +3438,24 @@ class TestDetectSerialConflicts:
         assert "serial_conflict_module" not in row
         assert not row.get("can_move_from")
 
+    def test_numeric_serials_are_looked_up_by_their_text(self):
+        """LibreNMS sends 123 and 123.0 as JSON numbers; they are one dict key but two serials."""
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        conflict = self._make_module("numeric-text", "123.0")
+        view = _make_view()
+        view._serial_rules = SerialRules.load()
+        rows = [
+            view._build_row({"entPhysicalIndex": index, "entPhysicalSerialNum": serial}, {}, {}, {})
+            for index, serial in ((1, 123), (2, 123.0))
+        ]
+
+        view._detect_serial_conflicts(rows)
+
+        assert [row["serial"] for row in rows] == ["123", "123.0"]
+        assert "serial_conflict_module" not in rows[0]
+        assert rows[1].get("serial_conflict_module") == conflict
+
     def test_conflict_detected_for_can_install_row(self):
         """Serial conflicts are also detected for empty-bay (can_install) rows."""
         view = self._view()
