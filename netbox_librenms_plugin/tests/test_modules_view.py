@@ -2754,6 +2754,31 @@ class TestPostInventoryRefresh:
         assert (cache.get(cache_key) is not None) is well_formed
         assert bool(message_texts(request, "error")) is not well_formed
 
+    @pytest.mark.parametrize("serial", [["OPTIC123"], {"serial": "OPTIC123"}, True, 12345, None])
+    def test_post_treats_a_malformed_transceiver_serial_as_fetch_failure(self, librenms_server, server_keys, serial):
+        """A transceiver serial that is not text or a number leaves the refresh incomplete, so no row carries it."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, message_texts, post
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        server_key, _ = server_keys
+        device = _mapped_device("module-refresh-optic-serial-shape", server_key)
+        view = DeviceModuleTableView()
+        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
+        self._register_successful_refresh(
+            librenms_server,
+            transceivers=[{"entity_physical_index": 300, "model": "SFP-10G-LR", "serial": serial, "type": "SFP+"}],
+        )
+        request = make_request("post", {"server_key": server_key})
+
+        response = post(view, request, pk=device.pk)
+
+        well_formed = isinstance(serial, (int, type(None))) and not isinstance(serial, bool)
+        assert response.status_code == 200
+        assert (cache.get(cache_key) is not None) is well_formed
+        assert bool(message_texts(request, "warning")) is not well_formed
+
     def test_post_treats_a_malformed_oob_serial_as_fetch_failure(self, librenms_server, server_keys):
         """An OOB inventory serial that is not text or a number leaves the refresh incomplete."""
         from django.core.cache import cache
