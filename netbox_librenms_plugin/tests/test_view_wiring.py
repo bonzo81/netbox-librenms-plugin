@@ -2664,6 +2664,72 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         # The preview showed no holder of the serial, so the grant refuses the holder that appeared since.
         assert message_texts(request, "error") == [GrantRefusal.STALE.message]
 
+    def test_module_replace_keeps_a_previewed_serial_holder_outside_delete_scope(self):
+        """The preview shows the holder, so the grant is fresh; the delete scope of the holder must refuse."""
+        from dcim.models import Device, Interface, Module, ModuleType
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.module_grants import GrantRefusal
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts, rendered_modal_form
+        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
+
+        device = make_device("scope-replace-kept")
+        other_device = make_device("scope-replace-kept-holder")
+        module_type = make_module_type("MT-scope-replace-kept")
+        target = Module.objects.create(
+            device=device,
+            module_bay=make_module_bay(device, "Slot 1"),
+            module_type=module_type,
+            serial="OLD-KEPT",
+        )
+        holder = Module.objects.create(
+            device=other_device,
+            module_bay=make_module_bay(other_device, "Holder Slot"),
+            module_type=module_type,
+            serial="INCOMING-KEPT",
+        )
+        user = self._user(
+            "scope-replace-kept",
+            [
+                (Device, "view", {"pk": device.pk}),
+                (ModuleType, "view", {"pk": module_type.pk}),
+                (Module, "view", {"pk__in": [target.pk, holder.pk]}),
+                (Module, "add", None),
+                (Module, "change", {"pk": target.pk}),
+                (Module, "delete", {"pk": target.pk}),
+                (Interface, "add", None),
+                (Interface, "change", None),
+                (Interface, "delete", None),
+            ],
+        )
+        view = ReplaceModuleView()
+        server_key = configured_server_key()
+        view._librenms_api = LibreNMSAPI(server_key=server_key)
+        inventory_item = {
+            "entPhysicalIndex": 100,
+            "entPhysicalClass": "module",
+            "entPhysicalName": target.module_bay.name,
+            "entPhysicalModelName": module_type.model,
+            "entPhysicalSerialNum": "INCOMING-KEPT",
+        }
+        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
+        cache.set(cache_key, trusted_module_inventory_payload(device, [inventory_item], server_key=server_key))
+        _action, fields = rendered_modal_form(device, 100, "replace-module", user=user, server_key=server_key)
+        request = self._request(user, fields)
+        view.setup(request)
+        try:
+            view.post(request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        target.refresh_from_db()
+        holder.refresh_from_db()
+        assert (target.serial, holder.serial) == ("OLD-KEPT", "INCOMING-KEPT")
+        errors = message_texts(request, "error")
+        assert len(errors) == 1 and errors != [GrantRefusal.STALE.message]
+
     def test_module_preview_does_not_expose_a_hidden_serial_conflict(self):
         """The preview must not render the location or id of a conflict outside view scope."""
         from dcim.models import Device, Module
