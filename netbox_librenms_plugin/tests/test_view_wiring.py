@@ -2593,6 +2593,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.module_grants import GrantRefusal
         from netbox_librenms_plugin.tests.view_test_helpers import message_texts, rendered_modal_form
         from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
 
@@ -2660,7 +2661,8 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         assert target.serial == "OLD-CONFLICT"
         assert hidden.serial == "INCOMING-CONFLICT"
         assert Module.objects.filter(serial="INCOMING-CONFLICT").count() == 1
-        assert any("cannot remove" in text for text in message_texts(request, "error"))
+        # The preview showed no holder of the serial, so the grant refuses the holder that appeared since.
+        assert message_texts(request, "error") == [GrantRefusal.STALE.message]
 
     def test_module_preview_does_not_expose_a_hidden_serial_conflict(self):
         """The preview must not render the location or id of a conflict outside view scope."""

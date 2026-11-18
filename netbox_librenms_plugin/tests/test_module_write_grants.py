@@ -342,6 +342,27 @@ def test_replace_refuses_a_module_changed_after_its_preview(ui, c8300, change):
     assert written_state(device) == before
 
 
+def test_replace_refuses_a_serial_conflict_that_appeared_after_its_preview(ui, c8300):
+    """The preview showed no conflict, so the replace must not delete a module that holds the serial since."""
+    from dcim.models import Module
+
+    from netbox_librenms_plugin.module_grants import GrantRefusal
+    from netbox_librenms_plugin.tests.conftest import install_module as install_in_bay
+    from netbox_librenms_plugin.tests.conftest import make_device_with_module_bays
+
+    device, entities = c8300
+    form = _replace_form(ui, device, entities)
+    elsewhere_device = make_device_with_module_bays("c8300-grants-elsewhere", ["Slot 1"])
+    elsewhere = install_in_bay(elsewhere_device, "Slot 1", "GRANT-ELSEWHERE-CARD", serial=_nim(entities)[1])
+    before = written_state(device)
+
+    response = post(ui, *form)
+
+    assert GrantRefusal.STALE.message in messages_of(response)
+    assert written_state(device) == before
+    assert Module.objects.filter(pk=elsewhere.pk, device=elsewhere_device).exists()
+
+
 def _preview_serial_form(client, device, entities):
     install_module(
         device, entities[entities[REAL_NIM]["entPhysicalContainedIn"]]["entPhysicalName"], *_nim(entities, "OLD")

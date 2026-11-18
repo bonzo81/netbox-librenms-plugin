@@ -1,6 +1,7 @@
 """Sync action views for module/inventory installation from LibreNMS."""
 
 import copy
+import hashlib
 import json
 import logging
 import re
@@ -2715,13 +2716,27 @@ class ApplyModuleInterfaceTypesView(
         return _modules_action_response(request, page_device, server_key)
 
 
-def _replace_target(module, replacement_type, serial_context):
-    """Return what a replace grant signs: the module, type, bay and serial the preview showed, and the type it resolved."""
+def _serial_holder_token(elsewhere):
+    """Return a positive int for the other module that holds the incoming serial: none, several, or its row and place."""
+    held = elsewhere.object
+    place = [held.pk, held.device_id, held.module_bay_id] if held is not None else []
+    # A hash, so the grant does not carry the pk of a module that the viewer may not see.
+    payload = json.dumps([elsewhere.kind.value, *place], separators=(",", ":"))
+    return int.from_bytes(hashlib.sha256(payload.encode()).digest()[:7], "big") + 1
+
+
+def _replace_target(module, replacement_type, serial_context, elsewhere):
+    """
+    Return what a replace grant signs: the module, type, bay and serial the preview showed, and the type it resolved.
+
+    It also signs the other holder of the incoming serial that the preview showed, so the replace deletes no other module.
+    """
     target = {
         **installed_module_target(module.pk, module.module_bay_id),
         "module_type_id": module.module_type_id,
         # A rule edit or a serial edit after the preview refuses the grant.
         "module_serial_token": freshness_token(module.serial, serial_context),
+        "serial_holder_token": _serial_holder_token(elsewhere),
     }
     if replacement_type is not None:
         target["replacement_module_type_id"] = replacement_type.pk
@@ -2857,7 +2872,7 @@ class ModuleMismatchPreviewView(
                 "replace_inventory_binding": self._derived_grant(
                     grant,
                     ACTION_REPLACE_MODULE,
-                    action_target=_replace_target(installed_module, matched_type, serial_context),
+                    action_target=_replace_target(installed_module, matched_type, serial_context, elsewhere),
                 ),
             },
         )
@@ -3042,11 +3057,6 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 )
                 if not installed_module:
                     raise _ModuleActionRefused("Module no longer exists.")
-                granted.grant.require(
-                    action_target=_replace_target(
-                        installed_module, matched_type, serial_rules.for_module_target(target_device)
-                    )
-                )
 
                 # Read bay/type from locked row to avoid stale snapshot
                 target_bay = installed_module.module_bay
@@ -3068,6 +3078,12 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 conflict_module = None
                 locked_type_context(target_device, rules=serial_rules)
                 elsewhere = resolve_module(incoming, rules=serial_rules, exclude_pks=[installed_module.pk])
+                # The locked module and the locked holder of the incoming serial must be the ones the preview showed.
+                granted.grant.require(
+                    action_target=_replace_target(
+                        installed_module, matched_type, serial_rules.for_module_target(target_device), elsewhere
+                    )
+                )
                 if elsewhere.kind is ResolutionKind.AMBIGUOUS:
                     # Roll back and surface a clear error: we don't want to
                     # guess which of N conflicts to remove.
