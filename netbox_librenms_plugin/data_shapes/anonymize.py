@@ -778,16 +778,13 @@ def _serial_text(value):
     return "" if is_librenms_placeholder(serial) else serial
 
 
-def _holds_serial(obj):
-    """Return whether the walk of *obj* reaches a serial field value that a serial rule reads."""
+def _holds_serial(obj, key=None):
+    """Return whether the walk of *obj* under field *key* reaches a serial field value that a serial rule reads."""
     if isinstance(obj, dict):
-        return any(
-            _holds_serial(value)
-            if isinstance(value, (dict, list))
-            else key in SERIAL_KEYS and bool(_serial_text(value))
-            for key, value in obj.items()
-        )
-    return isinstance(obj, list) and any(_holds_serial(item) for item in obj)
+        return any(_holds_serial(value, key if key in SERIAL_KEYS else name) for name, value in obj.items())
+    if isinstance(obj, list):
+        return any(_holds_serial(item, key) for item in obj)
+    return key in SERIAL_KEYS and bool(_serial_text(obj))
 
 
 def has_serial_input(recording) -> bool:
@@ -944,13 +941,21 @@ def _compile_serial_default_labels(recording):
 def _walk(obj, rules, container=None):
     """Recursively anonymize a parsed JSON body (dict/list/scalar)."""
     if isinstance(obj, dict):
-        return {
-            k: (_walk(v, rules, k) if isinstance(v, (dict, list)) else _anon_value(k, v, rules, container))
-            for k, v in obj.items()
-        }
+        return {k: _anon_field(k, v, rules, container) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_walk(item, rules, container) for item in obj]
     return obj
+
+
+def _anon_field(key, value, rules, container=None):
+    """Anonymize the value of field *key*: a scalar in a list takes the rule of *key*, as does all text under a serial."""
+    if isinstance(value, dict) and key not in SERIAL_KEYS:
+        return _walk(value, rules, key)
+    if isinstance(value, dict):
+        return {name: _anon_field(key, item, rules, container) for name, item in value.items()}
+    if isinstance(value, list):
+        return [_anon_field(key, item, rules, container) for item in value]
+    return _anon_value(key, value, rules, container)
 
 
 def anonymize_recording(recording, *, salt="", serial_context=None):
@@ -1005,9 +1010,7 @@ def anonymize_recording(recording, *, salt="", serial_context=None):
         if isinstance(virtual_chassis, dict) and isinstance(virtual_chassis.get("member_serials"), list):
             out["expected"]["virtual_chassis"] = {
                 **virtual_chassis,
-                "member_serials": [
-                    _anon_value("serial", serial, rules) for serial in virtual_chassis["member_serials"]
-                ],
+                "member_serials": _anon_field("serial", virtual_chassis["member_serials"], rules),
             }
     # Pseudonymize meta.os too (it's outside `responses`, so _walk doesn't reach it) and key the
     # neutral name off the pseudonymized token, so neither the metadata nor the name leaks the OS.

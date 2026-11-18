@@ -806,6 +806,20 @@ def test_a_junos_stack_under_a_master_outside_the_chassis_renders_the_unavailabl
     assert "Anonymized recording" not in html
 
 
+@pytest.mark.django_db
+def test_a_capture_pseudonymizes_a_list_valued_serial(recording_server):
+    recording = deepcopy(load_recording("iosxe-c8300"))
+    route = next(key for key, body in recording["responses"].items() if "/inventory/" in key and body.get("inventory"))
+    recording["responses"][route]["inventory"][0]["entPhysicalSerialNum"] = ["ASSET123"]
+    server, api = recording_server(recording)
+    device = make_device("capture-list-serial", librenms_cf={"test": {"id": recording["device_id"]}})
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    assert response.status_code == 200
+    assert "ASSET123" not in json.dumps(_captured_recording(response))
+
+
 def _junos_fpc_recording(root_serial, fpc_serials):
     from netbox_librenms_plugin.constants import JUNOS_FPC_DESCR_PREFIX, JUNOS_VC_ROOT_DESCR_MARKER
 
