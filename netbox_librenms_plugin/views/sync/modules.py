@@ -2869,11 +2869,13 @@ class ModuleMismatchPreviewView(
         except (TypeError, ValueError):
             return HttpResponse("Missing or invalid module_id/ent_index.", status=400)
 
+        # The modal names the installed module's bay, so the bay must be in view scope too.
         installed_module = self.restrict_object_or_404(
             Module,
             select_related=("module_type", "module_bay", "device"),
             pk=module_id,
             device=target_device,
+            pk__in=nameable_modules(self).values("pk"),
         )
 
         # The preview signs the replace and serial actions, so it needs the table's own grant for this row.
