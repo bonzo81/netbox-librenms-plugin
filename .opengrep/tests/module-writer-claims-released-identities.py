@@ -99,3 +99,14 @@ def move_module(queryset, apply):
     with atomic_with_events():
         # ok: event-aware-block-inside-plain-atomic
         update_existing_row(queryset, apply)
+
+
+def replace_rows(rows, apply):
+    with transaction.atomic(savepoint=True):
+        # ruleid: event-aware-block-inside-plain-atomic
+        with row_savepoint():
+            apply(rows)
+    with atomic_with_events():
+        # ok: event-aware-block-inside-plain-atomic
+        with row_savepoint():
+            apply(rows)
