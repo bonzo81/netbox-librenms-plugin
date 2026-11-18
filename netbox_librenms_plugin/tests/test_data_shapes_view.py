@@ -501,6 +501,21 @@ def test_capture_view_reports_an_unanonymizable_recording(recording_server, monk
 
 
 @pytest.mark.django_db
+def test_capture_view_reports_a_malformed_database_id(recording_server):
+    recording = deepcopy(load_recording("iosxe-c8300"))
+    recording["responses"][f"GET /api/v0/devices/{recording['device_id']}"]["devices"][0]["poller_group"] = ["7"]
+    server, api = recording_server(recording)
+    device = make_device("capture-malformed-id", librenms_cf={"test": {"id": recording["device_id"]}})
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    html = response.content.decode()
+    assert response.status_code == 200
+    assert "Capture failed" in html
+    assert "Anonymized recording" not in html
+
+
+@pytest.mark.django_db
 def test_capture_view_reports_an_unavailable_novelty_manifest(recording_server, monkeypatch):
     """A broken packaged manifest must render an error instead of a false novelty verdict."""
     server, api = recording_server(load_recording("cisco-stackwise-3member"))

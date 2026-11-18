@@ -176,7 +176,18 @@ def test_expected_member_serials_follow_anonymized_inventory():
     assert rec["expected"]["virtual_chassis"]["member_serials"] == original
 
 
-@pytest.mark.parametrize("serial", [["ASSET123"], [["ASSET123"]], {"value": "ASSET123"}, [{"value": "ASSET123"}]])
+@pytest.mark.parametrize(
+    "serial",
+    [
+        ["ASSET123"],
+        [["ASSET123"]],
+        {"value": "ASSET123"},
+        [{"value": "ASSET123"}],
+        {"ASSET123": True},
+        [{"ASSET123": None}],
+        {"id": "ASSET123"},
+    ],
+)
 def test_a_malformed_serial_value_is_pseudonymized_and_reads_the_serial_context(serial):
     from netbox_librenms_plugin.data_shapes.anonymize import has_serial_input
 
