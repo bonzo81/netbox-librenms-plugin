@@ -224,18 +224,21 @@ def test_member_creation_reads_the_master_maker_under_the_type_row_lock():
     def change_after_the_type_read(execute, sql, params, many, context):
         result = execute(sql, params, many, context)
         if not attempts and 'FROM "dcim_devicetype"' in sql and connection.in_atomic_block:
-            with second_connection() as other:
+            with second_connection() as other, other.cursor() as cursor:
+                cursor.execute("SET lock_timeout = '200ms'")
                 try:
-                    with other.cursor() as cursor:
-                        cursor.execute("SET lock_timeout = '200ms'")
-                        cursor.execute(
-                            'UPDATE "dcim_devicetype" SET "manufacturer_id" = %s WHERE id = %s',
-                            [rule_maker.pk, master.device_type_id],
-                        )
+                    cursor.execute(
+                        'UPDATE "dcim_devicetype" SET "manufacturer_id" = %s WHERE id = %s',
+                        [rule_maker.pk, master.device_type_id],
+                    )
+                except OperationalError as exc:
+                    # Only a lock timeout proves the wait; any other error fails the test.
+                    if getattr(exc.__cause__, "sqlstate", None) != "55P03":
+                        raise
+                    attempts.append("waited")
+                else:
                     other.commit()
                     attempts.append("committed")
-                except OperationalError:
-                    attempts.append("waited")
         return result
 
     with connection.execute_wrapper(change_after_the_type_read):
