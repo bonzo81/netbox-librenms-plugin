@@ -150,6 +150,7 @@ from netbox_librenms_plugin.utils import (
     coerce_model_pk,
     coerce_positive_int,
     resolve_naming_preferences,
+    row_identity_matches,
     same_host,
     save_interface_name_preference,
     save_user_pref,
@@ -895,7 +896,7 @@ class DeviceImportHelperMixin:
     """Mixin providing common validation and rendering helpers for device import views."""
 
     def get_validated_device_with_selections(
-        self, device_id: int, request, *, libre_device: dict | None = None
+        self, device_id: int, request, *, libre_device: dict | None = None, live: bool = False
     ) -> tuple[dict | None, dict | None, ImportRowIntent]:
         """
         Get LibreNMS device, validate it, and apply user selections.
@@ -910,16 +911,27 @@ class DeviceImportHelperMixin:
                 promote/merge can pass the device fetched earlier to skip a redundant
                 ``fetch_device_with_cache`` call. The NetBox-side ``validate_device_for_import``
                 is still re-run so the refreshed row reflects the just-committed state.
+            live: Read the device from LibreNMS, not from the row cache. An action whose decision uses the
+                LibreNMS serial passes True, because the cached serial can name replaced hardware.
 
         Returns:
             tuple: The LibreNMS device, validation, and parsed intent. The first two
-                values are None when the device is not found.
+                values are None when the device is not found, or a live read describes another device.
 
         """
-        # Reuse a caller-supplied device, else use cached device data from the table load
-        # (both eliminate redundant API calls).
-        prefetched = libre_device is not None
-        if libre_device is None:
+        # Reuse a caller-supplied device, else read it live or from the row cache of the table load.
+        if libre_device is None and live:
+            libre_device = get_librenms_device_by_id(self.librenms_api, device_id, use_cache=False)
+            # A response for another device ID is no evidence about this one, so it is neither used nor cached.
+            if libre_device is not None and not row_identity_matches(libre_device, device_id):
+                libre_device = None
+            if libre_device is not None:
+                cache.set(
+                    get_import_device_cache_key(device_id, self.librenms_api.server_key),
+                    libre_device,
+                    timeout=self.librenms_api.cache_timeout,
+                )
+        elif libre_device is None:
             libre_device = fetch_device_with_cache(device_id, self.librenms_api)
 
         if not libre_device:
@@ -933,21 +945,6 @@ class DeviceImportHelperMixin:
             )
 
         validation, selections = self.validate_and_apply_selections(device_id, request, libre_device)
-        if request.method == "POST" and not prefetched and validation.get("existing_match_type") == "serial":
-            # A serial match selects the Device that the action writes, so the serial comes from a live read.
-            live_device = get_librenms_device_by_id(self.librenms_api, device_id, use_cache=False)
-            if live_device is None:
-                return None, None, selections
-            serial_context = SerialRules.load().for_device(validation["existing_device"])
-            if compare(libre_device.get("serial"), live_device.get("serial"), serial_context) is not Comparison.SAME:
-                # Replaced hardware: the cached row and its validation describe the old serial.
-                cache.set(
-                    get_import_device_cache_key(device_id, self.librenms_api.server_key),
-                    live_device,
-                    timeout=self.librenms_api.cache_timeout,
-                )
-                libre_device = live_device
-                validation, selections = self.validate_and_apply_selections(device_id, request, libre_device)
         return libre_device, validation, selections
 
     def validate_and_apply_selections(
@@ -2299,7 +2296,7 @@ class DeviceConflictActionView(
         except (existing_model.DoesNotExist, ValueError):
             return _htmx_error_response("Existing device not found")
 
-        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request, live=True)
         if not libre_device:
             return _htmx_error_response("LibreNMS device not found")
 
@@ -3052,7 +3049,7 @@ class AddAsOOBView(
         except (Device.DoesNotExist, ValueError):
             return _htmx_error_response("Existing device not found")
 
-        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request, live=True)
         if not libre_device:
             return _htmx_error_response("LibreNMS device not found")
 
@@ -3729,7 +3726,7 @@ class PromoteToHostView(
             except (Platform.DoesNotExist, ValueError, TypeError):
                 return _htmx_error_response("Invalid override_platform_id")
 
-        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request, live=True)
         if not libre_device:
             return _htmx_error_response("LibreNMS device not found")
 
@@ -3919,7 +3916,7 @@ class MergeNetBoxDevicesView(
         except (TypeError, ValueError):
             return _htmx_error_response("Invalid winner_pk")
 
-        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request, live=True)
         if not libre_device:
             return _htmx_error_response("LibreNMS device not found")
 
