@@ -436,9 +436,20 @@ class TestSerialRulesFollowTheTargetDevice:
             assert naming_token(self._item()["entPhysicalSerialNum"], view._row_serial_context(page)) == "12345"
 
     def test_build_row_shows_the_librenms_serial_text(self):
-        """_build_row stays free of database access, and the row shows the text that LibreNMS reports."""
+        """The row shows the text that LibreNMS reports, not the identity key that the row's rule extracts."""
+        from dcim.models import Manufacturer
+
+        from netbox_librenms_plugin.serial_identity import SerialRules, naming_token
+
+        owner = Manufacturer.objects.create(name="Row Text Vendor", slug="row-text-vendor")
+        self._rule_for(owner)
         view = _make_view()
+        view._serial_rules = SerialRules.load()
+        view._serial_rules.candidates()
+        view._current_manufacturer = owner
         item = self._item()
+        # The control: under the row's rule the identity key is not the LibreNMS text.
+        assert naming_token(item["entPhysicalSerialNum"], view._row_serial_context()) == "12345"
 
         row = view._build_row(item, {item["entPhysicalIndex"]: item}, {}, {})
 
@@ -3413,11 +3424,12 @@ class TestDetectSerialConflicts:
     def test_no_conflict_when_conflict_is_same_module(self):
         """When the only module with the serial IS the installed module, no conflict is set."""
         view = self._view()
-        conflict = self._make_module("same", "S1")
+        # An admitted serial, so only the own-module exclusion keeps the row free of a conflict.
+        conflict = self._make_module("same", "SAME-SERIAL")
 
         row = {
             "can_replace": True,
-            "serial": "S1",
+            "serial": "SAME-SERIAL",
             "installed_module_id": conflict.pk,  # Same as the conflicting module.
         }
 
