@@ -3996,19 +3996,19 @@ def test_single_module_refusal_releases_its_lock_before_rendering(client, refusa
     assert set(observed) == {(False, 0)}
 
 
-def test_module_owner_lock_sections_do_not_render_responses():
-    """Keep response rendering out of the transactions that hold Module owner locks."""
+# The decorators that run a whole function in one transaction.
+_ATOMIC_DECORATORS = {"transaction.atomic", "transaction.atomic()", "atomic_with_events", "atomic_with_events()"}
+
+
+def _responses_under_module_owner_locks(source):
+    """Return the lines where a transaction that takes a Module owner lock renders a module response."""
     import ast
-    import inspect
 
-    from netbox_librenms_plugin.views.sync import modules
-
-    tree = ast.parse(inspect.getsource(modules))
     violations = set()
-    for node in ast.walk(tree):
+    for node in ast.walk(ast.parse(source)):
         atomic = isinstance(node, ast.With) or (
             isinstance(node, ast.FunctionDef)
-            and any(ast.unparse(decorator) == "transaction.atomic" for decorator in node.decorator_list)
+            and any(ast.unparse(decorator) in _ATOMIC_DECORATORS for decorator in node.decorator_list)
         )
         if not atomic:
             continue
@@ -4016,7 +4016,30 @@ def test_module_owner_lock_sections_do_not_render_responses():
         if not any(ast.unparse(call.func) == "lock_module_write" for call in calls):
             continue
         violations.update(call.lineno for call in calls if ast.unparse(call.func) == "_modules_action_response")
+    return violations
+
+
+def test_module_owner_lock_sections_do_not_render_responses():
+    """Keep response rendering out of the transactions that hold Module owner locks."""
+    import inspect
+
+    from netbox_librenms_plugin.views.sync import modules
+
+    violations = _responses_under_module_owner_locks(inspect.getsource(modules))
     assert not violations, f"Response rendering holds a Module owner lock at lines {sorted(violations)}"
+
+
+@pytest.mark.parametrize("decorator", ["atomic_with_events()", "transaction.atomic"])
+def test_the_owner_lock_scan_finds_a_response_in_a_decorated_writer(decorator):
+    """The control: a writer that one decorator makes atomic renders under its owner lock."""
+    source = (
+        f"@{decorator}\n"
+        "def _install_branch(self, request, page_device):\n"
+        "    scope = lock_module_write(observe_module_write(device_ids=[page_device.pk]))\n"
+        "    return _modules_action_response(request, page_device)\n"
+    )
+
+    assert _responses_under_module_owner_locks(source) == {4}
 
 
 @pytest.mark.django_db(transaction=True)
