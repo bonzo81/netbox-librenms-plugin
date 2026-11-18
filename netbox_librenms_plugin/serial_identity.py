@@ -7,9 +7,10 @@ context's manufacturer, then the global rules, each ordered by priority and pk. 
 extracts: when its pattern fullmatches the current value, the value becomes the one capture group
 that the rule names. So a key is always a contiguous substring of the trimmed value.
 
-A key is Absent when the value is a LibreNMS placeholder (before or after the rules), when a rule
-extracts a group that did not take part in the match or is empty, or when the key has no run of
-three ASCII letters or digits. An Absent key never identifies hardware.
+A key is Absent when the value is not text or a number (a JSON boolean, list or object), when the
+value is a LibreNMS placeholder (before or after the rules), when a rule extracts a group that did
+not take part in the match or is empty, or when the key has no run of three ASCII letters or digits.
+An Absent key never identifies hardware.
 
 Contexts: a Device in a Virtual Chassis uses the manufacturer of the chassis master's DeviceType
 (its own one without a master); a Module uses the manufacturer of the Device that holds it. Before
@@ -179,6 +180,9 @@ class SerialContext:
         return hashlib.sha256(json.dumps(parts, separators=(",", ":")).encode()).hexdigest()
 
     def _key(self, value) -> str:
+        # The text of a boolean, a list or an object can equal a stored serial, but the value names no hardware.
+        if not is_serial_value(value):
+            return ""
         text = _text(value)
         if text in self._keys:
             return self._keys[text]
@@ -640,6 +644,9 @@ def resolve_devices(serials: Iterable, *, rules: SerialRules | None = None, excl
 
 def resolve_device(serial, *, rules: SerialRules | None = None, exclude_pks=(), lock=False) -> Resolution:
     """Return the Resolution of one incoming serial among Devices; see :func:`resolve_devices`."""
+    # A list or an object is no dict key of the lookup; it has no identity either.
+    if not is_serial_value(serial):
+        return _ABSENT
     return resolve_devices([serial], rules=rules, exclude_pks=exclude_pks, lock=lock)[_text(serial)]
 
 
@@ -675,6 +682,8 @@ def resolve_device_write(
     incoming, context: SerialContext, *, rules: SerialRules, exclude_pks=(), master=None
 ) -> Resolution:
     """Return the Devices that a write of *incoming* under *context* would duplicate; see ``resolve_devices_write``."""
+    if not is_serial_value(incoming):
+        return _ABSENT
     return resolve_devices_write([incoming], context, rules=rules, exclude_pks=exclude_pks, master=master)[
         _text(incoming)
     ]
@@ -682,9 +691,6 @@ def resolve_device_write(
 
 def is_sole_holder(device, incoming, *, rules: SerialRules, exclude_pks=()) -> bool:
     """Return whether *device* is the one Device, apart from *exclude_pks*, that holds the hardware *incoming* names."""
-    # The text of a boolean or a list can equal a stored serial, but such a value names no hardware.
-    if not is_serial_value(incoming):
-        return False
     holder = resolve_device(incoming, rules=rules, exclude_pks=exclude_pks).object
     return holder is not None and holder.pk == device.pk
 
@@ -741,6 +747,8 @@ def resolve_module(
     serial, *, rules: SerialRules | None = None, device_ids=None, exclude_pks=(), lock=False, writer=None
 ):
     """Return the Resolution of one incoming serial among Modules; see :func:`resolve_modules`."""
+    if not is_serial_value(serial):
+        return _ABSENT
     return resolve_modules(
         [serial], rules=rules, device_ids=device_ids, exclude_pks=exclude_pks, lock=lock, writer=writer
     )[_text(serial)]
@@ -762,7 +770,7 @@ def assignment_lock(serials: Iterable, *, model, rules: SerialRules) -> None:
 
     label = model._meta.label_lower
     # Text first: the probe map keys on the value, and the JSON numbers 123 and 123.0 are one Python key.
-    texts = [_text(serial) for serial in serials]
+    texts = [_text(serial) for serial in serials if is_serial_value(serial)]
     identities = {f"{_LOCK_PREFIX}:{label}:{key}" for keys in _probe_keys(texts, rules).values() for key in keys}
     for identity in sorted(identities, key=advisory_lock_key):
         acquire_advisory_transaction_lock(identity)

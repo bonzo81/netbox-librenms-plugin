@@ -34,7 +34,6 @@ from netbox_librenms_plugin.serial_identity import (
     compare,
     display,
     is_identity,
-    is_serial_value,
     is_sole_holder,
     keeps_stored_serial,
     stored_form_differs,
@@ -104,8 +103,7 @@ class BaseLibreNMSSyncView(
 
     def _legacy_id_serial_confirmed(self, device, incoming) -> bool:
         """Return whether the legacy ID conversion may run: *device* is the one Device that holds the serial."""
-        # A list or an object is no serial, and the resolver can not look it up.
-        if not is_serial_value(incoming) or self._serial_context(device).unavailable:
+        if self._serial_context(device).unavailable:
             return False
         try:
             return is_sole_holder(device, incoming, rules=self.serial_rules)
@@ -637,7 +635,6 @@ class BaseLibreNMSSyncView(
                         else "",
                         # The writer refuses a serial without an identity, so the page offers no sync for it.
                         "serial_admitted": obj._meta.model_name == "device"
-                        and is_serial_value(librenms_serial)
                         and is_identity(librenms_serial, self._serial_context(obj)),
                         # A legacy stored form names the same hardware; the update action writes the LibreNMS text.
                         "serial_stored_form_differs": obj._meta.model_name == "device"
@@ -891,8 +888,7 @@ class BaseLibreNMSSyncView(
         result = []
         # Like admits(), the stack holds when the rules of any member explain it; the dialog shows the LibreNMS text.
         for component in extract_vc_members(inventory, members_by_serial.contexts()):
-            # The dialog posts text, so the writer can no longer tell a boolean or a list from a serial.
-            if not is_serial_value(component["serial"]) or not members_by_serial.admits(component["serial"]):
+            if not members_by_serial.admits(component["serial"]):
                 continue
             # A serial that two members share assigns neither.
             holders = members_by_serial.find(component["serial"])

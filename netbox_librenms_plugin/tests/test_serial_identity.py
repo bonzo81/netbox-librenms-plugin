@@ -204,6 +204,20 @@ class TestKeyAdmission:
 
         assert is_identity(value, SerialRules.load().context(None)) is identity
 
+    @pytest.mark.parametrize(
+        "value", [True, False, ["ABC123"], {"serial": "ABC123"}], ids=["true", "false", "list", "object"]
+    )
+    def test_a_value_that_is_not_text_or_a_number_has_no_identity(self, value):
+        """A JSON boolean, list or object has text that a stored serial can equal, but it names no hardware."""
+        _rules_only()
+        stored = str(value)
+        make_device(f"malformed-serial-{len(stored)}", serial=stored)
+        context = SerialRules.load().context(None)
+
+        assert not is_identity(value, context)
+        assert compare(stored, value, context) is Comparison.ABSENT
+        assert resolve_device(value).kind is ResolutionKind.ABSENT
+
     @pytest.mark.parametrize("stored", ["unknown", "AB", "S/N N/A", "1"])
     def test_a_value_without_an_identity_binds_no_device_and_costs_no_lookup(self, stored):
         from netbox_librenms_plugin.serial_identity import ResolutionKind, SerialRules, resolve_device
@@ -617,6 +631,9 @@ class TestGroupingAndPresentation:
         with pytest.raises(ValidationError) as refused:
             stored_form("S" * 51, Device)
         assert "serial" in refused.value.message_dict
+        with pytest.raises(ValidationError) as malformed:
+            stored_form(True, Device)
+        assert "serial" in malformed.value.message_dict
 
     def test_a_legacy_stored_form_is_same_hardware_in_another_form(self):
         from netbox_librenms_plugin.serial_identity import SerialRules, display, stored_form_differs

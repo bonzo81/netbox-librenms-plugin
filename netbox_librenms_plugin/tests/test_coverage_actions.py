@@ -5046,8 +5046,8 @@ class TestDeviceConflictActionBranches:
         assert Device.objects.get(pk=target.pk).serial == "BRANCHES-SYNC-SERIAL-KEEP"
 
     @pytest.mark.parametrize("action", ["sync_serial", "update_serial"])
-    def test_a_serial_write_refuses_a_json_boolean_serial(self, action):
-        """LibreNMS sends `serial: true`; its text "True" has an identity, but the value is no serial."""
+    def test_a_serial_write_stores_no_json_boolean_serial(self, action):
+        """LibreNMS sends `serial: true`: its text is "True", but the value has no identity, as a placeholder has none."""
         from dcim.models import Device
 
         target = make_device(f"branches-boolean-serial-{action}".replace("_", "-"))
@@ -5055,8 +5055,25 @@ class TestDeviceConflictActionBranches:
 
         response = post_view(self._make_view(), self._request(action, target, f"boolean-serial-{action}"), device_id=42)
 
-        self._assert_htmx_error(response, "Validation error")
+        if action == "sync_serial":
+            self._assert_htmx_error(response, "No valid serial from LibreNMS")
+        else:
+            self._assert_success(response)
         assert Device.objects.get(pk=target.pk).serial == ""
+
+    def test_a_json_boolean_serial_finds_no_target_for_a_field_sync(self):
+        """A device stores the text "True"; LibreNMS sends `serial: true` and no other key matches that device."""
+        from dcim.models import Device
+
+        holder = make_device("branches-boolean-holder", serial="True")
+        self._register_device(42, "branches-boolean-librenms-name", serial=True)
+
+        response = post_view(
+            self._make_view(), self._request("sync_name", holder, "boolean-serial-sync-name"), device_id=42
+        )
+
+        self._assert_htmx_error(response, "Missing validated conflict target")
+        assert Device.objects.get(pk=holder.pk).name == "branches-boolean-holder"
 
     def test_sync_serial_reports_when_the_row_is_deleted_before_the_lock(self):
         from dcim.models import Device

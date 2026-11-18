@@ -149,6 +149,7 @@ A `serial` rule decides which part of a serial identifies the hardware. When its
 
 A serial key never identifies hardware when:
 
+- LibreNMS reports a value that is not text or a number, such as JSON `true` or a list
 - the serial is a placeholder, such as `-`, `N/A` or `unknown`, before or after the rules
 - a rule extracts a group that is empty or that does not take part in the match
 - the key has no three ASCII letters or digits in a row, for example `0`, `AB-1` or `A++`
