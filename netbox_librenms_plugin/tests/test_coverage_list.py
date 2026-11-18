@@ -407,6 +407,7 @@ class TestImportListRequest:
 
         from netbox_librenms_plugin.models import NormalizationRule
 
+        rule = NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
         _register_devices(librenms_server, [_device()])
         client.force_login(_create_user(django_user_model, "serial-rule-readiness"))
         # A synchronous search caches the validated rows and the search metadata.
@@ -417,7 +418,8 @@ class TestImportListRequest:
             assert warm.context is not None and "table" in warm.context
             assert not Job.objects.exists()
 
-            NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
+            # An edit keeps the rule PK and the rule count; only the pattern changes.
+            NormalizationRule.objects.filter(pk=rule.pk).update(match_pattern=r"^SN:\s*(.+)$")
             cold = client.get(_import_url(), _search_params(use_background_job="1"))
 
         assert cold.json()["use_polling"] is True
@@ -513,26 +515,27 @@ class TestImportListRequest:
         """The page that a finished search opens keeps the form options, so the cached search filters again."""
         from core.models import Job
 
-        requests = _register_devices(librenms_server, [_device(4801)])
+        requests = _register_devices(librenms_server, [_device(4801), _device(4802)])
         user = _create_user(django_user_model, "results-exclude-existing")
         client.force_login(user)
         params = _search_params(exclude_existing="on")
         first = client.get(_import_url(), params)
-        assert [row["device_id"] for row in first.context["table"].data] == [4801]
+        assert sorted(row["device_id"] for row in first.context["table"].data) == [4801, 4802]
         make_device("results-exclude-existing-mapped", librenms_cf={SERVER_KEY: {"id": 4801}})
         job = Job.objects.create(
             name="Completed import search",
             user=user,
             job_id=uuid4(),
             status="completed",
-            data={"device_ids": [4801], "filters": {"hostname": "edge"}, "server_key": SERVER_KEY},
+            data={"device_ids": [4801, 4802], "filters": {"hostname": "edge"}, "server_key": SERVER_KEY},
         )
 
         # The background search opens this URL: the form parameters and the job ID.
         results = client.get(_import_url(), {**params, "use_background_job": "on", "job_id": job.pk})
 
         assert results.status_code == 200
-        assert list(results.context["table"].data) == []
+        # Only the mapped row goes: the unmapped row stays in the cached result.
+        assert [row["device_id"] for row in results.context["table"].data] == [4802]
         assert results.context["from_cache"] is True
         assert len(requests) == 1
 

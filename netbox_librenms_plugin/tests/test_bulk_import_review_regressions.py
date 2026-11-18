@@ -644,6 +644,31 @@ def test_the_collision_scan_leaves_a_row_with_an_unavailable_serial_unresolved()
 
 
 @pytest.mark.django_db
+def test_collision_precheck_reads_the_serial_rules_once_for_the_batch():
+    """Each Device row with a real serial needs the serial rules, so the batch must share one read of them."""
+    from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    make_device("serial-rules-once-a", serial="SERIAL-RULES-ONCE-A")
+    make_device("serial-rules-once-b", serial="SERIAL-RULES-ONCE-B")
+    rows = _collision_rows(96211, 96212, "serial-rules-once-a")
+    rows[96212].update(hostname="serial-rules-once-b", sysName="serial-rules-once-b")
+    rows[96211]["serial"] = "SERIAL-RULES-ONCE-A"
+    rows[96212]["serial"] = "SERIAL-RULES-ONCE-B"
+
+    with CaptureQueriesContext(connection) as reference:
+        list(NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL))
+    (serial_only_query,) = (query["sql"] for query in reference.captured_queries)
+    with CaptureQueriesContext(connection) as captured:
+        collisions, unresolved = detect_collisions_for_device_ids(
+            [96211, 96212], _LibreNMSBoundary(rows), libre_devices_cache=rows, sync_options={"use_sysname": True}
+        )
+
+    assert (collisions, unresolved) == ([], [])
+    assert [query["sql"] for query in captured.captured_queries].count(serial_only_query) == 1
+
+
+@pytest.mark.django_db
 def test_collision_precheck_skips_import_prerequisite_queries():
     """Collision matching must not query site, type, role, or platform import prerequisites."""
     from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids

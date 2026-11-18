@@ -24,6 +24,8 @@ class TestStackKey:
 
         assert stack_key({"members": members}, 7, context) == stack_key({"members": members[::-1]}, 8, context)
         assert stack_key({"members": members}, 7, context) != stack_key({"members": members[:1]}, 7, context)
+        other = [{"serial": "FOC3"}, {"serial": "FOC4"}]
+        assert stack_key({"members": members}, 7, context) != stack_key({"members": other}, 7, context)
 
     def test_stacks_without_member_serials_get_distinct_keys(self):
         """A shared key would let the first such stack suppress chassis creation for every other one."""

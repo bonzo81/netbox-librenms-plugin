@@ -126,6 +126,9 @@ class TestCacheKeyContracts:
         seeded = SerialRules(
             [NormalizationRule(pk=1, scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1", priority=100)]
         )
+        edited = SerialRules(
+            [NormalizationRule(pk=1, scope="serial", match_pattern=r"^SN:\s*(.+)$", replacement=r"\1", priority=100)]
+        )
         baseline = get_validated_device_cache_key("default", {"type": "network"}, 42, False, serial_rules=no_rules)
         same = get_validated_device_cache_key("default", {"type": "network"}, 42, False, serial_rules=no_rules)
 
@@ -139,6 +142,10 @@ class TestCacheKeyContracts:
         assert baseline != get_validated_device_cache_key(
             "default", {"type": "network"}, 42, False, serial_rules=seeded
         )
+        # One rule PK and one rule count: only the edited pattern tells the two keys apart.
+        assert get_validated_device_cache_key(
+            "default", {"type": "network"}, 42, False, serial_rules=seeded
+        ) != get_validated_device_cache_key("default", {"type": "network"}, 42, False, serial_rules=edited)
         assert "_42_novc_sysname=True_strip=False_rules=" in baseline
 
     def test_import_device_key_includes_the_server_and_device(self):

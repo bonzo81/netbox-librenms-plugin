@@ -854,14 +854,19 @@ def test_a_serial_lookup_stops_reading_devices_at_its_limit():
 
     from netbox_librenms_plugin.serial_identity import ResolutionKind, resolve_device
 
+    found = {}
+
     def queries_for(serial, count):
         for n in range(count):
             make_device(f"{serial.lower()}-{n}", serial=serial)
         with CaptureQueriesContext(connection) as queries:
-            assert resolve_device(serial).kind is ResolutionKind.AMBIGUOUS
+            found[serial] = resolve_device(serial)
+            assert found[serial].kind is ResolutionKind.AMBIGUOUS
         return len(queries)
 
     assert queries_for("FEW-SN", 2) == queries_for("MANY-SN", 6)
+    # The read stops at the second confirmed match, so the other four rows are never read.
+    assert (len(found["MANY-SN"].matches), found["MANY-SN"].complete) == (2, False)
 
 
 @pytest.mark.django_db
