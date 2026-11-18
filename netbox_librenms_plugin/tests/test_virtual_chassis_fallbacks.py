@@ -760,6 +760,18 @@ def test_placeholder_stack_detection_and_creation_preserve_distinct_members(sett
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("malformed", [True, ["SECOND-CARD"]], ids=["boolean", "list"])
+def test_a_malformed_member_serial_is_never_the_stack_master(malformed):
+    """The device stores the text "True"; a member that reports JSON `true` has that text but no identity."""
+    from netbox_librenms_plugin.import_utils.virtual_chassis import identify_vc_master
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
+    members = [{"serial": malformed, "position": 1}, {"serial": "SECOND-CARD", "position": 2}]
+
+    assert identify_vc_master(members, str(malformed), SerialRules.load().context(None)) is None
+
+
+@pytest.mark.django_db
 def test_a_serial_shorter_than_three_letters_or_digits_is_no_stack_identity(settings, librenms_server):
     """A one-digit member serial names no master, so the stack imports as one device; the members keep their text."""
     from netbox_librenms_plugin.import_utils.bulk_import import stack_key

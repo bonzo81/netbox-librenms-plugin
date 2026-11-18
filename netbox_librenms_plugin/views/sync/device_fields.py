@@ -1104,10 +1104,7 @@ class ConvertLegacyLibreNMSIdView(LibreNMSPermissionMixin, NetBoxObjectPermissio
         is_vm = object_type == "vm"
         serial_rules = SerialRules.load()
         incoming_serial = device_info.get("serial")
-        # A list or an object is no serial, and the resolver can not look it up.
-        if not is_vm and not (
-            is_serial_value(incoming_serial) and is_sole_holder(obj, incoming_serial, rules=serial_rules)
-        ):
+        if not is_vm and not is_sole_holder(obj, incoming_serial, rules=serial_rules):
             messages.error(request, _SERIAL_MISMATCH_MESSAGE)
             return self._sync_url(object_type, pk)
 
