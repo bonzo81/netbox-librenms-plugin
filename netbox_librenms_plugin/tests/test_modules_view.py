@@ -1421,6 +1421,33 @@ class TestPostInventoryRefresh:
             method="GET",
         )
 
+    def test_post_saves_no_discovered_id_on_a_master_outside_the_chassis(self, librenms_server, server_keys):
+        """The chassis names an outside master with a primary IP; ID discovery must not write that device."""
+        from dcim.models import Device, VirtualChassis
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_interface, make_ip, make_virtual_chassis
+        from netbox_librenms_plugin.tests.mapping_fixtures import stored_mapping_for_test
+        from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        server_key, _ = server_keys
+        page = make_device("module-outside-master-page")
+        member = make_device("module-outside-master-member")
+        chassis = make_virtual_chassis("module-outside-master-vc", page, member)
+        outside = make_device("module-outside-master")
+        address = make_ip("198.18.52.9/24", assigned_object=make_interface(outside, "eth0"))
+        Device.objects.filter(pk=outside.pk).update(primary_ip4=address)
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=outside)
+        librenms_server.register(
+            "/api/v0/devices/198.18.52.9", {"status": "ok", "devices": [{"device_id": 777}]}, method="GET"
+        )
+        self._register_successful_refresh(librenms_server)
+
+        response = post(DeviceModuleTableView(), make_request("post", {"server_key": server_key}), pk=page.pk)
+
+        assert response.status_code == 200
+        assert stored_mapping_for_test(Device.objects.get(pk=outside.pk)) is None
+
     @pytest.mark.parametrize("entity_index", [300, 7], ids=["entity-index", "port-ifindex"])
     def test_post_compares_optic_serials_with_the_device_manufacturer_rules(
         self, librenms_server, server_keys, entity_index

@@ -8778,6 +8778,42 @@ class TestConflictActionsObjectScope:
         assert b"Existing device not found" not in response.content
         assert stored_mapping_for_test(Device.objects.get(pk=in_scope.pk))["default"] == 4242
 
+    def test_an_ip_matched_oob_attach_never_writes_to_a_master_outside_the_chassis(self):
+        """No member is linked, and the chassis names an outside master with a primary IP: it owns nothing."""
+        from dcim.models import Device, VirtualChassis
+
+        from netbox_librenms_plugin.tests.conftest import make_interface, make_ip, make_virtual_chassis
+        from netbox_librenms_plugin.views.imports.actions import AddAsOOBView
+
+        target = make_device("oob-outside-member")
+        other_member = make_device("oob-outside-other-member")
+        chassis = make_virtual_chassis("oob-outside-vc", target, other_member)
+        outside = make_device("oob-outside-master")
+        outside_ip = make_ip("198.18.51.9/24", assigned_object=make_interface(outside, "eth0"))
+        Device.objects.filter(pk=outside.pk).update(primary_ip4=outside_ip)
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=outside)
+        address = make_ip("198.18.51.4/24", assigned_object=make_interface(target, "mgmt0"))
+        Device.objects.filter(pk=target.pk).update(oob_ip=address)
+        self.librenms_server.device_info_response(
+            device_id=4343,
+            hostname=f"{target.name}-idrac",
+            hardware="Integrated Remote Access Controller",
+            os="idrac",
+            serial="OOB-OUTSIDE-UNMATCHED",
+            ip="198.18.51.4",
+        )
+        self.librenms_server.vc_inventory_callable(4343, [], {})
+        request = make_view_request(
+            "post",
+            {"existing_device_id": str(target.pk), "server_key": "default"},
+            user=make_superuser(),
+            HTTP_HX_REQUEST="true",
+        )
+
+        post_view(AddAsOOBView(), request, device_id=4343)
+
+        assert stored_mapping_for_test(Device.objects.get(pk=outside.pk)) is None
+
     def test_add_as_oob_cannot_attach_to_an_out_of_scope_device(self):
         """AddAsOOB must object-scope its target too: a constrained grant cannot attach an OOB link elsewhere."""
         from dcim.models import Device
