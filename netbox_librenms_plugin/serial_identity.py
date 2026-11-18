@@ -141,6 +141,9 @@ def is_serial_value(value) -> bool:
     return value is None or (isinstance(value, (str, int, float)) and not isinstance(value, bool))
 
 
+MALFORMED_SERIAL = "LibreNMS reports a serial that is not text or a number."
+
+
 def _stored_text(value) -> str:
     """Return the persisted text of a NetBox serial field, untrimmed."""
     return "" if value is None else str(value)
@@ -327,6 +330,8 @@ def keeps_stored_serial(stored, incoming, model) -> bool:
 
 def stored_form_refusal(value, model) -> str:
     """Return why a serial writer refuses to store the LibreNMS *value* in ``model.serial``, or "" when it can."""
+    if not is_serial_value(value):
+        return MALFORMED_SERIAL
     text = display(value)
     max_length = model._meta.get_field("serial").max_length
     if max_length is not None and len(text) > max_length:
@@ -351,7 +356,8 @@ def stored_form(value, model) -> str:
     Return the text that a plugin writer stores in ``model.serial`` for the LibreNMS *value*.
 
     Raises:
-        ValidationError: The text is longer than the field; the writer refuses rather than cut it.
+        ValidationError: The value is not text or a number, or the text is longer than the field; the
+            writer refuses rather than store the text of a boolean or a list, or cut the text.
 
     """
     if refusal := stored_form_refusal(value, model):

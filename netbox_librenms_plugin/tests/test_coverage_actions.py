@@ -5026,6 +5026,19 @@ class TestDeviceConflictActionBranches:
         self._assert_htmx_error(response, "No valid serial from LibreNMS")
         assert Device.objects.get(pk=target.pk).serial == "BRANCHES-SYNC-SERIAL-KEEP"
 
+    @pytest.mark.parametrize("action", ["sync_serial", "update_serial"])
+    def test_a_serial_write_refuses_a_json_boolean_serial(self, action):
+        """LibreNMS sends `serial: true`; its text "True" has an identity, but the value is no serial."""
+        from dcim.models import Device
+
+        target = make_device(f"branches-boolean-serial-{action}".replace("_", "-"))
+        self._register_device(42, target.name, serial=True)
+
+        response = post_view(self._make_view(), self._request(action, target, f"boolean-serial-{action}"), device_id=42)
+
+        self._assert_htmx_error(response, "Validation error")
+        assert Device.objects.get(pk=target.pk).serial == ""
+
     def test_sync_serial_reports_when_the_row_is_deleted_before_the_lock(self):
         from dcim.models import Device
 

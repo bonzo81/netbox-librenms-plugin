@@ -38,6 +38,7 @@ from netbox_librenms_plugin.server_mappings import (
     set_preference,
 )
 from netbox_librenms_plugin.serial_identity import (
+    MALFORMED_SERIAL,
     RETYPE_HELD,
     SerialRules,
     assignment_lock,
@@ -398,7 +399,7 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
 
         incoming = device_info.get("serial")
         if not is_serial_value(incoming):
-            messages.error(request, "LibreNMS reports a serial that is not text or a number.")
+            messages.error(request, MALFORMED_SERIAL)
             return _device_sync_redirect(request, pk, server_key)
         serial = display(incoming)
         old_serial, failed = _write_device_serial(self, request, pk, server_key, incoming)
