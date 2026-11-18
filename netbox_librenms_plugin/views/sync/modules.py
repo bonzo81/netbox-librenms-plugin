@@ -3069,7 +3069,10 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 # Read bay/type from locked row to avoid stale snapshot
                 target_bay = installed_module.module_bay
                 old_type_name = installed_module.module_type.model
-                old_bay_name = target_bay.name
+                # The change and delete scopes do not include view scope, so name the bay only when the viewer may see it.
+                old_bay_name = (
+                    target_bay.name if nameable_modules(self).filter(pk=installed_module.pk).exists() else None
+                )
                 new_module = Module(
                     device=target_device,
                     module_bay=target_bay,
@@ -3160,7 +3163,8 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 messages.info(request, conflict_removed_msg)
             messages.success(
                 request,
-                f"Replaced {old_type_name} with {matched_type.model} in {old_bay_name}"
+                f"Replaced {old_type_name} with {matched_type.model}"
+                + (f" in {old_bay_name}" if old_bay_name is not None else "")
                 + (f" (serial: {serial})" if serial else "")
                 + ".",
             )

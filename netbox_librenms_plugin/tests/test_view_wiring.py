@@ -2979,6 +2979,68 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         assert holder_device.name not in html
         assert holder.module_bay.name not in html
 
+    def test_module_replace_does_not_name_the_replaced_bay_outside_view_scope(self):
+        """The viewer loses the target bay after the preview; the success message must not name that bay."""
+        from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
+        from django.contrib.auth import get_user_model
+        from django.core.cache import cache
+        from users.models import ObjectPermission
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts, rendered_modal_form
+        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
+
+        device = make_device("scope-replace-target-bay")
+        module_type = make_module_type("MT-scope-replace-target-bay")
+        target = Module.objects.create(
+            device=device,
+            module_bay=make_module_bay(device, "Unlisted Target Bay"),
+            module_type=module_type,
+            serial="OLD-TARGET-BAY",
+        )
+        user = self._user(
+            "scope-replace-target-bay",
+            [
+                (Device, "view", {"pk": device.pk}),
+                (ModuleBay, "view", {"pk": target.module_bay_id}),
+                (ModuleType, "view", None),
+                (Module, "view", None),
+                (Module, "add", None),
+                (Module, "change", None),
+                (Module, "delete", None),
+                (Interface, "add", None),
+                (Interface, "change", None),
+                (Interface, "delete", None),
+            ],
+        )
+        view = ReplaceModuleView()
+        server_key = configured_server_key()
+        view._librenms_api = LibreNMSAPI(server_key=server_key)
+        inventory_item = {
+            "entPhysicalIndex": 100,
+            "entPhysicalClass": "module",
+            "entPhysicalName": target.module_bay.name,
+            "entPhysicalModelName": module_type.model,
+            "entPhysicalSerialNum": "NEW-TARGET-BAY",
+        }
+        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
+        cache.set(cache_key, trusted_module_inventory_payload(device, [inventory_item], server_key=server_key))
+        _action, fields = rendered_modal_form(device, 100, "replace-module", user=user, server_key=server_key)
+        # The ModuleBay grant loses the target bay after the preview.
+        ObjectPermission.objects.filter(name="scope-replace-target-bay-view-1").update(constraints={"pk": 0})
+        user = get_user_model().objects.get(pk=user.pk)
+        request = self._request(user, fields)
+        view.setup(request)
+        try:
+            view.post(request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert not Module.objects.filter(pk=target.pk).exists()
+        assert message_texts(request, "success")
+        assert all(target.module_bay.name not in text for text in message_texts(request))
+
     def test_module_replace_does_not_name_a_removed_holder_bay_outside_view_scope(self):
         """The delete scope removes the holder; the message names its place only when the viewer may see the bay."""
         from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
