@@ -73,6 +73,8 @@ def test_cached_search_aggregation_omits_expired_stale_and_removed_server_metada
         get_active_cached_searches_for_servers,
         get_cache_metadata_key,
     )
+    from netbox_librenms_plugin.import_utils.cache import serial_rules_version
+    from netbox_librenms_plugin.serial_identity import SerialRules
 
     now = datetime.now(timezone.utc)
 
@@ -86,6 +88,7 @@ def test_cached_search_aggregation_omits_expired_stale_and_removed_server_metada
             "use_sysname": True,
             "strip_domain": False,
             "device_count": 1,
+            "serial_rules": serial_rules_version(SerialRules(())),
         }
 
     primary_key = get_cache_metadata_key("primary", {"hostname": "shared-edge"}, False)
@@ -123,7 +126,7 @@ def test_cached_search_aggregation_omits_expired_stale_and_removed_server_metada
         cache.set(retired_key, metadata("retired", now), timeout=300)
 
         searches = get_active_cached_searches_for_servers(
-            {"primary": "Primary LibreNMS", "secondary": "Secondary LibreNMS"}
+            {"primary": "Primary LibreNMS", "secondary": "Secondary LibreNMS"}, SerialRules(())
         )
 
         assert [(search["server_key"], search["cache_key"]) for search in searches] == [("primary", primary_key)]

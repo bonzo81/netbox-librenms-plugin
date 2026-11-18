@@ -321,6 +321,11 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
 
         self._filters_submitted = filters_submitted
 
+        from netbox_librenms_plugin.serial_identity import SerialRules
+
+        # The cache check and the cached-search links read one serial rule version.
+        serial_rules = SerialRules.load()
+
         # Check if this should be processed as a background job
         # Skip if we're loading results from a completed job (job_id in URL)
         # IMPORTANT: Only process if form is valid (filter requirement enforced)
@@ -363,7 +368,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
                         use_sysname=self._use_sysname,
                         strip_domain=self._strip_domain,
                     )
-                    validated_cached = search_metadata_is_current(cache.get(metadata_key))
+                    validated_cached = search_metadata_is_current(cache.get(metadata_key), serial_rules)
                 except Exception as e:
                     logger.debug("Cache check failed; proceeding without cached result: %s", e, exc_info=True)
 
@@ -431,7 +436,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
 
         filter_warning = self._filter_warning
 
-        cached_searches = get_active_cached_searches_for_servers(LibreNMSAPI.get_available_servers())
+        cached_searches = get_active_cached_searches_for_servers(LibreNMSAPI.get_available_servers(), serial_rules)
 
         server_key = self._active_server_key
         import_columns = resolve_import_context_columns(request)

@@ -85,7 +85,7 @@ def _is_valid_cached_search_metadata(metadata, server_key: str) -> bool:
     )
 
 
-def get_active_cached_searches(server_key: str) -> list[dict]:
+def get_active_cached_searches(server_key: str, serial_rules) -> list[dict]:
     """
     Retrieve all active cached searches for a server and enrich with display-friendly values.
 
@@ -94,6 +94,7 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
 
     Args:
         server_key: LibreNMS server identifier
+        serial_rules: The SerialRules that a search must have validated its rows under to be listed.
 
     Returns:
         List of dicts containing cache metadata with enriched display_filters
@@ -131,7 +132,10 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
 
     for cache_key in cache_index:
         metadata = cache.get(cache_key)
-        if _is_valid_cached_search_metadata(metadata, server_key):
+        # A search that validated under other serial rules has no rows to reopen, so it is not listed.
+        if _is_valid_cached_search_metadata(metadata, server_key) and search_metadata_is_current(
+            metadata, serial_rules
+        ):
             metadata = metadata.copy()
             # Cache still exists, calculate time remaining
             cache_timeout = metadata.get("cache_timeout", 300)
@@ -184,11 +188,11 @@ def get_active_cached_searches(server_key: str) -> list[dict]:
     return active_searches
 
 
-def get_active_cached_searches_for_servers(servers: Mapping[str, str]) -> list[dict]:
+def get_active_cached_searches_for_servers(servers: Mapping[str, str], serial_rules) -> list[dict]:
     """Return active cached searches from configured servers without merging namespaces."""
     active_searches = []
     for server_key, display_name in servers.items():
-        for search in get_active_cached_searches(server_key):
+        for search in get_active_cached_searches(server_key, serial_rules):
             active_searches.append(
                 {
                     **search,

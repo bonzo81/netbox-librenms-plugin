@@ -738,6 +738,31 @@ class TestImportListRequest:
         assert overrides.context["strip_domain"] is False
 
     @pytest.mark.django_db
+    def test_a_serial_rule_edit_removes_the_cached_search_link_it_made_stale(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+    ):
+        """A link to a search of other serial rules would only start validation again, so the page omits it."""
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        rule = NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
+        _register_devices(librenms_server, [{**_device(5301), "hostname": "stale-link-edge.example.test"}])
+        client.force_login(_create_user(django_user_model, "stale-cached-search-link"))
+        filters = {"hostname": "stale-link-edge"}
+        assert client.get(_import_url(), _search_params(librenms_hostname="stale-link-edge")).status_code == 200
+
+        def linked_filters():
+            response = client.get(_import_url(), {"server_key": SERVER_KEY})
+            assert response.status_code == 200
+            return [search["filters"] for search in response.context["cached_searches"]]
+
+        assert filters in linked_filters()
+        NormalizationRule.objects.filter(pk=rule.pk).update(match_pattern=r"^SN:\s*(.+)$")
+        assert filters not in linked_filters()
+
+    @pytest.mark.django_db
     def test_expired_completed_job_renders_one_actionable_warning(
         self,
         client,
