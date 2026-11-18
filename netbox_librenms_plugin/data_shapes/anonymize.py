@@ -678,6 +678,10 @@ _ID_CONTAINER_NAMESPACES = {
 _DEVICE_ROUTE_RE = re.compile(r"(/api/v0/(?:devices|inventory)/)([0-9]+)(?=/|\?|$)")
 
 
+class MalformedRecordingError(ValueError):
+    """A recorded value that anonymization cannot read, so the recording is refused."""
+
+
 def _id_namespace(key, container=None):
     """Resolve ID fields and bare row IDs to their database table."""
     if container == "devices" and key in ("parent_id", "dependency_parent_id"):
@@ -686,7 +690,7 @@ def _id_namespace(key, container=None):
         try:
             return _ID_CONTAINER_NAMESPACES[container]
         except KeyError:
-            raise ValueError("Database ID has no recognized table context.") from None
+            raise MalformedRecordingError("Database ID has no recognized table context.") from None
     return _ID_NAMESPACES.get(key, key[:-3] if key.endswith("_id") else None)
 
 
@@ -702,9 +706,9 @@ def _database_id(value):
     if value is None or value in ("", "-"):
         return None
     if isinstance(value, bool) or not isinstance(value, (int, str)):
-        raise ValueError("Database IDs must be integers or numeric strings.")
+        raise MalformedRecordingError("Database IDs must be integers or numeric strings.")
     if isinstance(value, str) and not re.fullmatch(r"-?[0-9]+", value):
-        raise ValueError("Database IDs must be integers or numeric strings.")
+        raise MalformedRecordingError("Database IDs must be integers or numeric strings.")
     number = int(value)
     return number if number > 0 else None
 
@@ -736,6 +740,9 @@ class _DatabaseIDs:
     def _collect(self, obj, container=None):
         if isinstance(obj, dict):
             for key, value in obj.items():
+                if key in SERIAL_KEYS or key == "member_serials":
+                    # A serial value is never a database ID; the expected member serials hold serials too.
+                    continue
                 if _id_namespace(key, container) is not None:
                     for reference in _database_id_references(key, value, container):
                         if (number := _database_id(reference)) is not None:
@@ -780,8 +787,10 @@ def _serial_text(value):
 
 def _holds_serial(obj, key=None):
     """Return whether the walk of *obj* under field *key* reaches a serial field value that a serial rule reads."""
+    if isinstance(obj, dict) and key in SERIAL_KEYS:
+        return any(_holds_serial(name, key) or _holds_serial(value, key) for name, value in obj.items())
     if isinstance(obj, dict):
-        return any(_holds_serial(value, key if key in SERIAL_KEYS else name) for name, value in obj.items())
+        return any(_holds_serial(value, name) for name, value in obj.items())
     if isinstance(obj, list):
         return any(_holds_serial(item, key) for item in obj)
     return key in SERIAL_KEYS and bool(_serial_text(obj))
@@ -948,11 +957,14 @@ def _walk(obj, rules, container=None):
 
 
 def _anon_field(key, value, rules, container=None):
-    """Anonymize the value of field *key*: a scalar in a list takes the rule of *key*, as does all text under a serial."""
+    """Anonymize the value of field *key*: a scalar in a list takes the rule of *key*, as does all text under a serial, keys too."""
     if isinstance(value, dict) and key not in SERIAL_KEYS:
         return _walk(value, rules, key)
     if isinstance(value, dict):
-        return {name: _anon_field(key, item, rules, container) for name, item in value.items()}
+        return {
+            _anon_value(key, name, rules, container): _anon_field(key, item, rules, container)
+            for name, item in value.items()
+        }
     if isinstance(value, list):
         return [_anon_field(key, item, rules, container) for item in value]
     return _anon_value(key, value, rules, container)

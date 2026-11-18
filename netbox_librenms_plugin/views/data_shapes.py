@@ -17,7 +17,12 @@ from django.shortcuts import render
 from django.views import View
 
 from netbox_librenms_plugin.data_shapes import recordings_store
-from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording, find_pii, has_serial_input
+from netbox_librenms_plugin.data_shapes.anonymize import (
+    MalformedRecordingError,
+    anonymize_recording,
+    find_pii,
+    has_serial_input,
+)
 from netbox_librenms_plugin.data_shapes.capture import capture_device_recording
 from netbox_librenms_plugin.data_shapes.compress import compress_recording
 from netbox_librenms_plugin.data_shapes.signature import (
@@ -107,10 +112,11 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
         except RuleConfigurationError as exc:
             # A broken serial rule that the capture needs: name it only to a viewer of the rule.
             return self._error(request, device, f"Capture failed: {exc.shown_to(request.user).public_message}")
-        except RuntimeError as exc:
+        except (RuntimeError, MalformedRecordingError) as exc:
             # capture raises on an incomplete capture (a transport failure, or an error status on a
             # required structural route such as a stale librenms_id), and anonymization raises when
-            # a device carries more distinct addresses than the documentation ranges hold. An
+            # a device carries more distinct addresses than the documentation ranges hold, or a
+            # recorded value it cannot read, such as a malformed database ID. An
             # unhandled raise would 500 — and htmx doesn't swap non-2xx responses, so the Capture
             # button would just appear dead. Render the error panel built for this.
             return self._error(request, device, f"Capture failed: {exc}")
