@@ -1007,11 +1007,18 @@ def _serial_bypasses(source):
         if isinstance(node, ast.Call):
             callee = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
             if callee in {"filter", "exclude", "get", "Q"}:
-                found += [
-                    (node.lineno, keyword.arg)
-                    for keyword in node.keywords
-                    if keyword.arg and (keyword.arg == "serial" or keyword.arg.startswith("serial__"))
-                ]
+                for keyword in node.keywords:
+                    # A ``**{...}`` keyword has no arg; its literal string keys name the lookups.
+                    names = (
+                        [keyword.arg]
+                        if keyword.arg
+                        else [
+                            key.value
+                            for key in getattr(keyword.value, "keys", ())
+                            if isinstance(key, ast.Constant) and isinstance(key.value, str)
+                        ]
+                    )
+                    found += [(node.lineno, name) for name in names if "serial" in name.split("__")]
     return found
 
 
@@ -1024,9 +1031,13 @@ def test_the_guard_scan_finds_each_bypass_form():
         "Module.objects.exclude(device=device, serial__in=values)\n"
         "Q(serial__iexact=value)\n"
         "Module(device=device, serial=value)\n"
+        "Module.objects.filter(device__serial=value)\n"
+        "Q(module__serial__iexact=value)\n"
+        "Device.objects.filter(**{'serial': value})\n"
+        "Device.objects.filter(serial_number=value, **{'name': value})\n"
     )
 
-    assert sorted(line for line, _form in _serial_bypasses(source)) == [1, 2, 3, 4, 5]
+    assert sorted(line for line, _form in _serial_bypasses(source)) == [1, 2, 3, 4, 5, 7, 8, 9]
 
 
 def test_no_module_outside_the_owner_uses_a_replaced_helper_or_the_serial_column():

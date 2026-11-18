@@ -72,6 +72,14 @@ def orm_lookups(serial, serials):
     # ruleid: serial-identity-through-owner
     Device.objects.exclude(serial__iexact=serial)
     # ruleid: serial-identity-through-owner
+    Module.objects.filter(device__serial=serial)
+    # ruleid: serial-identity-through-owner
+    Module.objects.filter(Q(module__serial__iexact=serial))
+    # ruleid: serial-identity-through-owner
+    Device.objects.filter(**{"serial": serial})
+    # ok: serial-identity-through-owner
+    Device.objects.filter(serial_number=serial, **{"name": serial})
+    # ruleid: serial-identity-through-owner
     return Device.objects.filter(Q(serial=serial) | Q(name="x"))
 
 

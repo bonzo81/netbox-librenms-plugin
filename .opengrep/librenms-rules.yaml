@@ -1576,7 +1576,17 @@ rules:
               - pattern: Q(..., $KW=$V, ...)
           - metavariable-regex:
               metavariable: $KW
-              regex: ^(serial|trimmed_serial)(__\w+)?$
+              regex: ^(\w+__)?(serial|trimmed_serial)(__\w+)?$
+      # The same lookup unpacked from a dict literal.
+      - patterns:
+          - pattern-either:
+              - pattern: '$Q.filter(..., **{..., $KEY: $V, ...}, ...)'
+              - pattern: '$Q.exclude(..., **{..., $KEY: $V, ...}, ...)'
+              - pattern: '$Q.get(..., **{..., $KEY: $V, ...}, ...)'
+              - pattern: 'Q(..., **{..., $KEY: $V, ...}, ...)'
+          - metavariable-regex:
+              metavariable: $KEY
+              regex: ^["'](\w+__)?(serial|trimmed_serial)(__\w+)?["']$
       # The serial rules applied outside the owner.
       - pattern: apply_normalization_rules(..., "serial", ...)
       - pattern: apply_normalization_rules(..., scope="serial", ...)
