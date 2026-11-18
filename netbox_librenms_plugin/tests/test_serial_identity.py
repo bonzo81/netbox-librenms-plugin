@@ -522,6 +522,28 @@ class TestGroupingAndPresentation:
         assert not stored_form_differs("OTHER-SN1", "S/N LEGACY-SN1", context)
         assert display(" S/N LEGACY-SN1 ") == "S/N LEGACY-SN1"
 
+    def test_padding_around_a_matching_stored_serial_is_another_form_that_the_writers_heal(self):
+        from dcim.models import Device, Module
+
+        from netbox_librenms_plugin.serial_identity import device_assignment, module_assignment
+
+        _rules_only()
+        rules = SerialRules.load()
+        assert stored_form_differs(" PAD12345 ", "PAD12345", rules.context(None))
+        assert not stored_form_differs("PAD12345", " PAD12345 ", rules.context(None))
+        device = make_device_with_module_bays("padded-serial", ["Slot 1"])
+        module = install_module(device, "Slot 1", "PADDED-CARD")
+        Device.objects.filter(pk=device.pk).update(serial=" PAD12345 ")
+        Module.objects.filter(pk=module.pk).update(serial="\tCARD12345")
+        device.refresh_from_db()
+        module.refresh_from_db()
+
+        assert device_assignment(device, "PAD12345", rules=rules).value == "PAD12345"
+        assert module_assignment(module, "CARD12345", rules=rules).value == "CARD12345"
+        Device.objects.filter(pk=device.pk).update(serial="PAD12345")
+        device.refresh_from_db()
+        assert device_assignment(device, " PAD12345 ", rules=rules).value is None
+
     def test_a_rule_edit_changes_the_freshness_token(self):
         (rule,) = _rules_only((SEEDED, r"\1", None))
         before = freshness_token("S/N FRESH-SN1", SerialRules.load().context(None))

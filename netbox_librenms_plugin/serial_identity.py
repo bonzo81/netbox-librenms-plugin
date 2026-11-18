@@ -131,6 +131,11 @@ def _text(value) -> str:
     return "" if value is None else str(value).strip()
 
 
+def _stored_text(value) -> str:
+    """Return the persisted text of a NetBox serial field, untrimmed."""
+    return "" if value is None else str(value)
+
+
 def _rules_digest(rules) -> str:
     rows = [[rule.pk, rule.manufacturer_id, rule.match_pattern, rule.replacement, rule.priority] for rule in rules]
     return hashlib.sha256(json.dumps(rows, separators=(",", ":")).encode()).hexdigest()
@@ -293,7 +298,8 @@ def is_identity(value, context: SerialContext) -> bool:
 
 def stored_form_differs(stored, incoming, context: SerialContext) -> bool:
     """Return whether *stored* names the hardware of *incoming* but is not the form a writer stores for it."""
-    return compare(stored, incoming, context) is Comparison.SAME and _text(stored) != display(incoming)
+    # The exact stored text: padding around a matching serial is another form too.
+    return compare(stored, incoming, context) is Comparison.SAME and _stored_text(stored) != display(incoming)
 
 
 def display(value) -> str:
@@ -711,7 +717,7 @@ def device_assignment(device, incoming, *, rules: SerialRules) -> Assignment:
             return Assignment(None, Resolution(ResolutionKind.UNAVAILABLE, reason=context.unavailable))
         return Assignment(None, absent=True)
     value = stored_form(incoming, Device)
-    if _text(device.serial) == value:
+    if _stored_text(device.serial) == value:
         return Assignment(None)
     conflict = resolve_device_write(incoming, context, rules=rules, exclude_pks=[device.pk])
     if conflict.kind in REFUSING:
@@ -733,7 +739,7 @@ def module_assignment(module, incoming, *, rules: SerialRules) -> Assignment:
     if not is_identity(incoming, locked_type_context(device, rules=rules)):
         return Assignment(None, absent=True)
     value = stored_form(incoming, Module)
-    if _text(module.serial) == value:
+    if _stored_text(module.serial) == value:
         return Assignment(None)
     # The Device lock serializes its module writers. A conflict only refuses this write,
     # so it must not wait for a Module held by a writer that is waiting for this Device.
