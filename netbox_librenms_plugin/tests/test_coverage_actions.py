@@ -4739,6 +4739,24 @@ class TestDeviceConflictActionBranches:
             assert reloaded.device_type_id == old_type_id
             assert stored_mapping_for_test(reloaded) is None
 
+    def test_a_serial_match_reads_a_replaced_serial_live_and_links_no_device(self):
+        """LibreNMS reports new hardware under the same ID after the search; the cached serial must not link the old Device."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
+
+        view = self._make_view()
+        target = make_device("branches-serial-replaced", serial="SERIAL-REPLACED-1")
+        self._register_device(42, f"{target.name}-source", serial="SERIAL-REPLACED-1")
+        # The import search cached the row with the serial of the old hardware.
+        assert fetch_device_with_cache(42, view.librenms_api)["serial"] == "SERIAL-REPLACED-1"
+        self._register_device(42, f"{target.name}-source", serial="SERIAL-REPLACED-2")
+
+        response = post_view(view, self._request("link", target, f"{target.name}-user"), device_id=42)
+
+        assert response.headers.get("HX-Reswap") == "none"
+        assert self.server_key not in (stored_mapping_for_test(Device.objects.get(pk=target.pk)) or {})
+
     @pytest.mark.parametrize("action", ["link", "update", "update_serial", "update_type"])
     def test_a_forced_type_change_refuses_when_another_device_then_holds_the_stored_serial(self, action):
         """Under the old manufacturer's rule "XABC" has no identity; under the new type it is the holder's serial."""

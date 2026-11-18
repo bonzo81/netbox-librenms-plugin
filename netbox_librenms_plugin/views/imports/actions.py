@@ -936,6 +936,7 @@ class DeviceImportHelperMixin:
         """
         # Reuse a caller-supplied device, else use cached device data from the table load
         # (both eliminate redundant API calls).
+        prefetched = libre_device is not None
         if libre_device is None:
             libre_device = fetch_device_with_cache(device_id, self.librenms_api)
 
@@ -950,6 +951,21 @@ class DeviceImportHelperMixin:
             )
 
         validation, selections = self.validate_and_apply_selections(device_id, request, libre_device)
+        if request.method == "POST" and not prefetched and validation.get("existing_match_type") == "serial":
+            # A serial match selects the Device that the action writes, so the serial comes from a live read.
+            live_device = get_librenms_device_by_id(self.librenms_api, device_id, use_cache=False)
+            if live_device is None:
+                return None, None, selections
+            serial_context = SerialRules.load().for_device(validation["existing_device"])
+            if compare(libre_device.get("serial"), live_device.get("serial"), serial_context) is not Comparison.SAME:
+                # Replaced hardware: the cached row and its validation describe the old serial.
+                cache.set(
+                    get_import_device_cache_key(device_id, self.librenms_api.server_key),
+                    live_device,
+                    timeout=self.librenms_api.cache_timeout,
+                )
+                libre_device = live_device
+                validation, selections = self.validate_and_apply_selections(device_id, request, libre_device)
         return libre_device, validation, selections
 
     def validate_and_apply_selections(
