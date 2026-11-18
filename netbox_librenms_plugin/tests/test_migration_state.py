@@ -402,6 +402,18 @@ def _trigram_index_schemas():
         return cursor.fetchall()
 
 
+def _trigram_index_oids():
+    from django.db import connection
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT relname, oid FROM pg_class"
+            " WHERE relname IN ('nblp_dcim_device_serial_trgm_idx', 'nblp_dcim_module_serial_trgm_idx')"
+            " ORDER BY relname"
+        )
+        return cursor.fetchall()
+
+
 def _run_index_step(step):
     from django.db import connection
 
@@ -414,15 +426,15 @@ def test_the_trigram_migration_finds_its_indexes_in_the_schema_of_their_table():
     """A search path whose first schema exists makes current_schema() differ from the schema of the tables."""
     from django.db import connection
 
-    with connection.cursor() as cursor:
-        cursor.execute("CREATE SCHEMA nblp_probe_first")
-        cursor.execute("SET search_path = nblp_probe_first, public")
     try:
+        with connection.cursor() as cursor:
+            cursor.execute("CREATE SCHEMA nblp_probe_first")
+            cursor.execute("SET search_path = nblp_probe_first, public")
         _run_index_step("ensure_serial_trigram_indexes")
     finally:
         with connection.cursor() as cursor:
             cursor.execute("RESET search_path")
-            cursor.execute("DROP SCHEMA nblp_probe_first")
+            cursor.execute("DROP SCHEMA IF EXISTS nblp_probe_first")
 
     assert _trigram_index_schemas() == [
         ("nblp_dcim_device_serial_trgm_idx", "public", "public", True),
@@ -436,19 +448,30 @@ def test_the_trigram_migration_uses_the_operator_class_of_the_installed_extensio
     from django.db import connection
 
     with connection.cursor() as cursor:
-        cursor.execute("CREATE SCHEMA nblp_probe_extensions")
-        cursor.execute("ALTER EXTENSION pg_trgm SET SCHEMA nblp_probe_extensions")
+        cursor.execute(
+            "SELECT pg_has_role(extowner, 'MEMBER'), pg_get_userbyid(extowner) FROM pg_extension"
+            " WHERE extname = 'pg_trgm'"
+        )
+        can_move, owner = cursor.fetchone()
+    if not can_move:
+        pytest.fail(f"Only the owner of pg_trgm can move it: run the tests as {owner!r} or as a superuser")
+    moved = False
     try:
+        with connection.cursor() as cursor:
+            cursor.execute("CREATE SCHEMA nblp_probe_extensions")
+            cursor.execute("ALTER EXTENSION pg_trgm SET SCHEMA nblp_probe_extensions")
+        moved = True
         _run_index_step("drop_serial_trigram_indexes")
         _run_index_step("ensure_serial_trigram_indexes")
-        built = _trigram_index_schemas()
+        built, built_oids = _trigram_index_schemas(), _trigram_index_oids()
         # A second run reuses the indexes that it built.
         _run_index_step("ensure_serial_trigram_indexes")
-        assert _trigram_index_schemas() == built
+        assert _trigram_index_oids() == built_oids
     finally:
         with connection.cursor() as cursor:
-            cursor.execute("ALTER EXTENSION pg_trgm SET SCHEMA public")
-            cursor.execute("DROP SCHEMA nblp_probe_extensions")
+            if moved:
+                cursor.execute("ALTER EXTENSION pg_trgm SET SCHEMA public")
+            cursor.execute("DROP SCHEMA IF EXISTS nblp_probe_extensions")
         _run_index_step("ensure_serial_trigram_indexes")
 
     assert built == [
