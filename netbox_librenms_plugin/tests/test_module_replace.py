@@ -639,6 +639,7 @@ class TestMoveModuleView:
         from django.urls import reverse
 
         from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.serial_identity import RELOCATION_HELD
 
         tag = f"move-identity-{holder}"
         source_device, target_device = make_device(f"{tag}-source"), make_device(f"{tag}-target")
@@ -672,6 +673,8 @@ class TestMoveModuleView:
         )
 
         assert response.status_code == 302
+        # Another refusal also redirects and keeps the parent, so the refusal must be the identity conflict.
+        assert message_texts(response.wsgi_request) == [f"Move failed: {RELOCATION_HELD}"]
         parent.refresh_from_db()
         assert parent.device == source_device
 

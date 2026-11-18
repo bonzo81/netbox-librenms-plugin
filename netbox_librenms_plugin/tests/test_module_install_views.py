@@ -496,7 +496,6 @@ class TestUpdateModuleSerialView:
     @pytest.mark.parametrize("placeholder", ["N/A", "BUILTIN", "null"])
     def test_a_placeholder_serial_keeps_the_stored_serial(self, live_librenms, placeholder):
         """An update never clears a stored serial because LibreNMS reports none."""
-        """A grant signed for a placeholder row, e.g. by an older page, must store a blank serial."""
         from netbox_librenms_plugin.inventory_policy import load_inventory_policy
         from netbox_librenms_plugin.module_grants import (
             ACTION_UPDATE_SERIAL,
@@ -507,6 +506,7 @@ class TestUpdateModuleSerialView:
         )
         from netbox_librenms_plugin.sync_cache import cached_module_inventory
         from netbox_librenms_plugin.views.sync.modules import (
+            NO_INCOMING_SERIAL_MESSAGE,
             UpdateModuleSerialView,
             _get_cached_module_snapshot,
         )
@@ -536,6 +536,8 @@ class TestUpdateModuleSerialView:
         response = view_post(view, request, pk=device.pk)
 
         assert response.status_code == 302
+        # A stale grant also redirects and keeps the serial, so the refusal must be the missing serial.
+        assert message_texts(request, "error") == [NO_INCOMING_SERIAL_MESSAGE]
         module.refresh_from_db()
         assert module.serial == "OLD"
 

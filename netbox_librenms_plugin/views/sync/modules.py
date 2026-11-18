@@ -125,6 +125,7 @@ NO_LIBRENMS_SERVER_MESSAGE = (
     "The selected LibreNMS server is not configured. Reload the page, or add the server to the plugin "
     "configuration before syncing modules."
 )
+NO_INCOMING_SERIAL_MESSAGE = "LibreNMS reports no serial for this module. Nothing was changed."
 
 # OOB-controller rows are merged into the cached snapshot for display only, and every entry point
 # that can act on an inventory row rejects them. The marker itself is shared with the readers in
@@ -2253,7 +2254,7 @@ class UpdateModuleSerialView(
                 assignment = module_assignment(module, incoming, rules=serial_rules)
                 if assignment.absent:
                     # An update never clears a stored serial because LibreNMS reports none.
-                    raise _ModuleActionRefused("LibreNMS reports no serial for this module. Nothing was changed.")
+                    raise _ModuleActionRefused(NO_INCOMING_SERIAL_MESSAGE)
                 if assignment.conflict is not None:
                     raise _ModuleActionRefused(
                         f"Serial '{serial}' is already installed on this device. Nothing was changed."
