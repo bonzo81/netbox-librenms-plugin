@@ -101,6 +101,28 @@ class TestStackMemberSerials:
         assert virtual_chassis.members.count() == 2
         assert virtual_chassis.members.get(vc_position=2).serial == expected
 
+    def test_numeric_member_serials_that_compare_equal_keep_their_own_text(self):
+        """The JSON numbers 123 and 123.0 are one Python dict key, but "123.0" is a serial another device holds."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+        from netbox_librenms_plugin.tests.conftest import make_device
+
+        make_device("numeric-serial-holder", serial="123.0")
+        master = make_device("numeric-serial-master", serial="MASTER")
+        members = [
+            {"serial": "MASTER", "position": 1, "name": "Master"},
+            {"serial": 123, "position": 2, "name": "Member 2"},
+            {"serial": 123.0, "position": 3, "name": "Member 3"},
+        ]
+
+        virtual_chassis = create_virtual_chassis_with_members(
+            master, members, {"device_id": master.pk}, server_key="default", master_member=members[0]
+        )
+
+        assert sorted(virtual_chassis.members.values_list("serial", flat=True)) == ["123", "MASTER"]
+        assert Device.objects.filter(serial="123.0").count() == 1
+
 
 @pytest.mark.parametrize("serials", [["OTHER", "MEMBER"], ["MASTER", "MASTER"]])
 def test_the_vc_modal_explains_that_no_unique_member_matches(serials):

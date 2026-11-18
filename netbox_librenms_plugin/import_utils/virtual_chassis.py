@@ -23,6 +23,7 @@ from ..serial_identity import (
     SerialRules,
     assignment_lock,
     compare,
+    display,
     group,
     is_identity,
     naming_token,
@@ -795,7 +796,7 @@ def create_virtual_chassis_with_members(
         with atomic_with_events():
             # The serial identity locks of every member come before any row lock.
             assignment_lock(
-                [member.get("serial") for member in members_info if member is not master_member],
+                [display(member.get("serial")) for member in members_info if member is not master_member],
                 model=Device,
                 rules=serial_rules,
             )
@@ -890,24 +891,24 @@ def _create_member_devices(
     """Create a device for each non-master member at its stack position; return how many were created."""
     member_rack = master_device.rack
     member_location = master_device.location or (member_rack.location if member_rack and member_rack.location else None)
+    # Text keys: the JSON numbers 123 and 123.0 are one dict key, but two serials.
     members = [
-        (member, position)
+        (member, position, display(member.get("serial")))
         for member, position in zip(members_info, positions, strict=True)
         if member is not master_member
     ]
     # One lookup for the whole stack, after the caller took the serial identity locks.
     taken = resolve_devices_write(
-        [member.get("serial") for member, _position in members if is_identity(member.get("serial"), context)],
+        [serial for _member, _position, serial in members if is_identity(serial, context)],
         context,
         rules=serial_rules,
     )
     created_members = SerialGroups(context)
     created = 0
-    for member, position in members:
-        raw_serial = member.get("serial")
-        if is_identity(raw_serial, context) and _member_serial_taken(raw_serial, taken[raw_serial], created_members):
+    for member, position, serial in members:
+        if is_identity(serial, context) and _member_serial_taken(serial, taken[serial], created_members):
             continue
-        member_name = _member_name(base_name, position, raw_serial, vc_pattern, context)
+        member_name = _member_name(base_name, position, serial, vc_pattern, context)
         if Device.objects.filter(name=member_name).exists():
             logger.warning(f"Device with name '{member_name}' already exists, skipping VC member creation")
             continue
@@ -919,12 +920,12 @@ def _create_member_devices(
             location=member_location,
             rack=member_rack,
             platform=master_device.platform,
-            serial=stored_form(raw_serial, Device),
+            serial=stored_form(serial, Device),
             virtual_chassis=vc,
             vc_position=position,
             comments=f"VC member (LibreNMS: {member.get('name', 'Unknown')})\nAuto-created from stack inventory",
         )
-        created_members.add(raw_serial, device)
+        created_members.add(serial, device)
         created += 1
     return created
 
