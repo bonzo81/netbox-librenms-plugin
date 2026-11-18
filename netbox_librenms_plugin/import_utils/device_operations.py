@@ -84,6 +84,8 @@ logger = logging.getLogger(__name__)
 # not-reliably-checked. Keep it a shared constant so the producer and every consumer can't drift
 # apart — a silent text change would otherwise defeat the fail-closed guarantee.
 VALIDATION_ERROR_ISSUE_PREFIX = "Validation error:"
+# The fragment of the blocker of a row whose serial no lookup can read; the refresh strips a stale copy by it.
+SERIAL_UNAVAILABLE_ISSUE_MARKER = "cannot be matched:"
 STACK_DETECTION_FAILED_MESSAGE = "Stack detection failed. Refresh LibreNMS data and try again."
 
 
@@ -409,6 +411,12 @@ def _flag_serial_conflict(result, existing_device, incoming_serial, serial_rules
         "unavailable": other.reason,
     }
     return True
+
+
+def serial_unavailable_issue(incoming_serial) -> str:
+    """Return the blocker of a row whose serial lookup is Unavailable; validation and the refresh both add it."""
+    # The constant, not the lookup's reason: the issue text must carry nothing that an unscoped lookup returned.
+    return f"Serial '{display(incoming_serial)}' {SERIAL_UNAVAILABLE_ISSUE_MARKER} {UNAVAILABLE_MASTER_LINK}"
 
 
 def _serial_taken_message(device_id, incoming_serial, taken) -> str:
@@ -1108,9 +1116,12 @@ def validate_device_for_import(  # noqa: C901
                     discovery = resolve_device(incoming_serial, rules=serial_rules)
                     serial_matches = list(discovery.matches)
                     if discovery.kind is ResolutionKind.UNAVAILABLE:
-                        result["issues"].append(f"Serial '{serial}' cannot be matched: {UNAVAILABLE_MASTER_LINK}")
-                        existing_by_serial = None
-                    elif len(serial_matches) > 1:
+                        # The row stays unresolved: a weaker IP match must not bind it.
+                        result["issues"].append(serial_unavailable_issue(incoming_serial))
+                        result["can_import"] = False
+                        result["is_ready"] = False
+                        return result
+                    if len(serial_matches) > 1:
                         # Device.serial is not unique in NetBox, so several rows already share it.
                         # Binding to an arbitrary one is wrong, and importing anyway would mint YET
                         # ANOTHER same-serial device. Make it a blocking issue (issue -> can_import

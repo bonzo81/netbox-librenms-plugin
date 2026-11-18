@@ -2181,6 +2181,52 @@ class TestRefreshExistingDeviceCrossModelIdWins:
         assert validation["existing_match_type"] == "ambiguous_hostname_or_serial"
         assert any("Multiple NetBox devices match" in i for i in validation.get("issues", []))
 
+    def test_an_unavailable_serial_names_the_reason_and_clears_when_the_link_is_repaired(self):
+        """An Unavailable lookup is no duplicate: the row names the reason, stays blocked, and recovers after repair."""
+        from dcim.models import VirtualChassis
+
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.import_utils.device_operations import serial_unavailable_issue
+        from netbox_librenms_plugin.tests.conftest import ip_on, make_device
+        from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
+
+        member = _stray_chassis_member("refresh-stray", "STRAY-REFRESH-2")
+        holder = make_device("refresh-stray-ip-holder")
+        ip_on(holder, "198.18.30.7/24", "management")
+        libre_device = {
+            "device_id": 557,
+            "hostname": "no-name-match",
+            "sysName": "no-name-match",
+            "serial": "STRAY-REFRESH-2",
+            "ip": "198.18.30.7",
+        }
+        validation = {
+            "existing_device": None,
+            "existing_vm": None,
+            "import_as_vm": False,
+            "is_ready": True,
+            "can_import": True,
+            "issues": [],
+            "warnings": [],
+            "site": {"found": True, "site": holder.site},
+            "device_type": {"found": True, "device_type": holder.device_type},
+            "device_role": {"found": True, "role": holder.role},
+        }
+        unavailable = serial_unavailable_issue("STRAY-REFRESH-2")
+
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert validation["issues"] == [unavailable]
+        assert (validation["existing_device"], validation.get("existing_match_type")) == (None, None)
+        assert (validation["can_import"], validation["is_ready"]) == (False, False)
+
+        # Repair the link: the stale blocker goes, and the serial now names its holder.
+        VirtualChassis.objects.filter(pk=member.virtual_chassis_id).update(master=None)
+        _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert unavailable not in validation["issues"]
+        assert (validation["existing_device"], validation["existing_match_type"]) == (member, "serial")
+
     def test_serial_fallback_ignores_a_serial_that_the_rules_make_a_placeholder(self):
         """A stored serial that the serial rules leave without an identity binds no device on the refresh re-check."""
         from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device

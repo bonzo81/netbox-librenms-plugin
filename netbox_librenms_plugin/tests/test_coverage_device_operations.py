@@ -36,6 +36,20 @@ def _broken_serial_rule(tag):
     return rule
 
 
+def _stray_chassis_member(tag, serial):
+    """Return a chassis member whose chassis names a master outside it, so its serial lookup is Unavailable."""
+    from dcim.models import Device, VirtualChassis
+
+    master = make_device(f"{tag}-master", serial=f"{serial}-MASTER")
+    member = make_device(f"{tag}-member", serial=serial)
+    chassis = make_virtual_chassis(f"{tag}-chassis", member)
+    other = VirtualChassis.objects.create(name=f"{tag}-other")
+    # NetBox refuses this link in clean(), so only a write that skips it stores it.
+    Device.objects.filter(pk=master.pk).update(virtual_chassis=other, vc_position=1)
+    VirtualChassis.objects.filter(pk=chassis.pk).update(master=master)
+    return member
+
+
 @pytest.mark.django_db
 def test_a_padded_duplicate_serial_is_reported_alongside_the_exact_match():
     """The caller blocks an import on an Ambiguous match, so a padded twin must not stay hidden."""
@@ -1054,6 +1068,24 @@ class TestValidateDeviceForImport:
         result = self._validate(_device_payload(5434, serial=serial))
 
         assert not [issue for issue in result["issues"] if issue.startswith(VALIDATION_ERROR_ISSUE_PREFIX)]
+
+    def test_an_unavailable_serial_binds_no_device_by_its_ip(self):
+        """The chassis link hides the serial holder, so validation stops before the IP fallback binds an OOB holder."""
+        from netbox_librenms_plugin.import_utils.device_operations import serial_unavailable_issue
+
+        _stray_chassis_member("validation-stray", "STRAY-5436")
+        holder = make_device("validation-stray-oob-holder")
+        holder.oob_ip = make_ip("198.18.20.36/32")
+        holder.save()
+        payload = _device_payload(
+            5436, hostname="unmatched-stray", sysName="unmatched-stray", serial="STRAY-5436", ip="198.18.20.36"
+        )
+
+        result = self._validate(payload)
+
+        assert (result["existing_device"], result["oob_candidate"], result["serial_action"]) == (None, None, None)
+        assert (result["can_import"], result["is_ready"]) == (False, False)
+        assert serial_unavailable_issue("STRAY-5436") in result["issues"]
 
     def test_a_real_serial_still_fails_closed_on_a_broken_rule(self):
         from netbox_librenms_plugin.import_utils.device_operations import VALIDATION_ERROR_ISSUE_PREFIX

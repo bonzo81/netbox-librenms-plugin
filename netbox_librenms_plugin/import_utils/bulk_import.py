@@ -34,12 +34,14 @@ from .cache import (
 )
 from .collisions import detect_bulk_collisions, scope_bulk_collisions
 from .device_operations import (
+    SERIAL_UNAVAILABLE_ISSUE_MARKER,
     VALIDATION_ERROR_ISSUE_PREFIX,
     DeviceTypeOverrideError,
     _describe_existing_librenms_link,
     effective_import_device_type,
     import_single_device,
     resolve_device_by_host_ip,
+    serial_unavailable_issue,
     validate_device_for_import,
 )
 from .filters import _safe_disabled, get_librenms_devices_for_import
@@ -1050,6 +1052,12 @@ def _refresh_existing_device(  # noqa: C901
         msgs = validation.get("warnings")
         if isinstance(msgs, list):
             validation["warnings"] = [m for m in msgs if not (isinstance(m, str) and _CROSS_MODEL_HOSTNAME_MARKER in m)]
+        # Same for the serial-unavailable blocker: the serial fallback below adds it again while the lookup cannot read.
+        msgs = validation.get("issues")
+        if isinstance(msgs, list):
+            validation["issues"] = [
+                m for m in msgs if not (isinstance(m, str) and SERIAL_UNAVAILABLE_ISSUE_MARKER in m)
+            ]
 
         new_device = None
         match_type = None
@@ -1199,7 +1207,13 @@ def _refresh_existing_device(  # noqa: C901
             ambiguous_fallback = False
             if not import_as_vm:
                 serial_match = resolve_device(libre_device.get("serial"), rules=serial_rules)
-                if serial_match.kind in (ResolutionKind.AMBIGUOUS, ResolutionKind.UNAVAILABLE):
+                if serial_match.kind is ResolutionKind.UNAVAILABLE:
+                    # No duplicate is known, so the row names the reason and stays blocked without an IP match.
+                    validation.setdefault("issues", []).append(serial_unavailable_issue(libre_device.get("serial")))
+                    validation["can_import"] = False
+                    validation["is_ready"] = False
+                    return
+                if serial_match.kind is ResolutionKind.AMBIGUOUS:
                     ambiguous_fallback = True
                 elif serial_match.kind is ResolutionKind.UNIQUE:
                     new_device, match_type = serial_match.object, "serial"
