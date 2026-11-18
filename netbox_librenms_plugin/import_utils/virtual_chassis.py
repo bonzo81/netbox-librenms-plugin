@@ -949,4 +949,10 @@ def _member_serial_taken(serial, resolution, created_members) -> bool:
     if resolution.kind in REFUSING:
         logger.warning(f"Skipped VC member with serial '{serial}': {resolution.reason}")
         return True
+    if resolution.uncertain:
+        logger.warning(
+            f"Skipped VC member with serial '{serial}': a device stores serial "
+            f"'{display(resolution.uncertain[0].serial)}', which can be the same member. Check the two serials manually."
+        )
+        return True
     return False

@@ -37,6 +37,8 @@ The **VC Serials** dialog shows each member serial as LibreNMS reports it, and *
 
 On import, the plugin does not create a member when a device with the same serial exists. It finds a device that stores the serial in another form too: a member that an earlier import stored as `S/N ABC` is found when LibreNMS reports `ABC`, and the reverse. When several devices hold the serial, the plugin skips the member and logs a warning.
 
+A device can also store the value that the rules make of the LibreNMS serial, while the rules change that stored value again. For example, the rule `^0(.+)$` makes `0ABC12` of `00ABC12`, and `ABC12` of `0ABC12`. The two serials do not match, but the device can be a member that an earlier plugin version stored. The plugin does not create the member and logs a different warning: the warning names the stored serial and asks you to compare the two serials. A device with a matching serial gets the "already exists" warning.
+
 Members that an earlier plugin version created store the serial after the rules. They keep their match while the rules give the same value for a value that they already changed, which is true for the seeded Juniper `S/N` rule. If a rule changes its own output again, use **Sync All** in the **VC Serials** dialog to store the LibreNMS serials. `python manage.py librenms_serial_report` lists the rows whose stored serial the current rules change; see [Serials](../configuration/rules_and_patterns.md#serials).
 
 ## How It Works

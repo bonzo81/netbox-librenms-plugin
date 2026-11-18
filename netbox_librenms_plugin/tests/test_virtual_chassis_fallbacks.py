@@ -701,7 +701,12 @@ class TestCreateVirtualChassisWithMembers:
 
     @pytest.mark.parametrize("earlier", ["batch", "legacy"])
     def test_a_rule_that_matches_its_own_output_keeps_two_serials_apart_and_the_report_lists_them(self, earlier):
-        """Under ^X(.+)$ a stored "X123" keys to "123" and "XX123" to "X123": two identities, a documented limit."""
+        """
+        Under ^X(.+)$ a stored "X123" keys to "123" and "XX123" to "X123": two identities, a documented limit.
+
+        One batch creates both. A device that already stores "X123" can be an earlier keyed member,
+        so the import skips "XX123".
+        """
         from dcim.models import Device
 
         from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
@@ -720,9 +725,11 @@ class TestCreateVirtualChassisWithMembers:
 
         vc = create_virtual_chassis_with_members(master, members, {"device_id": 8009}, master_member=members[0])
 
-        assert Device.objects.filter(serial="XX123").exists()
-        assert vc.members.count() == (3 if earlier == "batch" else 2)
-        assert {"X123", "XX123"} <= {stored for _row, stored, _key, _reason in report_rows()}
+        assert Device.objects.filter(serial="XX123").exists() is (earlier == "batch")
+        assert vc.members.count() == (3 if earlier == "batch" else 1)
+        reported = {stored for _row, stored, _key, _reason in report_rows()}
+        assert "X123" in reported
+        assert ("XX123" in reported) is (earlier == "batch")
 
     def test_a_member_name_already_in_netbox_is_skipped(self, caplog):
         from dcim.models import Device
@@ -844,6 +851,31 @@ def test_placeholder_members_do_not_match_an_unrelated_device(use_manufacturer_r
     # A rule that blanks a real raw serial only stops comparisons; the member keeps the raw value.
     stored = "VENDOR-PLACEHOLDER" if use_manufacturer_rule else ""
     assert list(vc.members.exclude(pk=master.pk).values_list("serial", flat=True)) == [stored, stored]
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("patterns", "legacy", "incoming"),
+    [([r"^0(.+)$"], "0ABC12", "00ABC12"), ([r"^ABC-(.+)$", r"^RAW-(.+)$"], "ABC-123", "RAW-ABC-123")],
+    ids=["rule-matches-its-output", "later-rule-feeds-an-earlier-one"],
+)
+def test_a_member_is_not_created_beside_a_legacy_row_that_stores_its_rule_output(patterns, legacy, incoming):
+    """The rules key the legacy row again, so it does not match; it can still be the member, so the import skips it."""
+    from dcim.models import Device
+
+    from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    for priority, pattern in enumerate(patterns, start=1):
+        NormalizationRule.objects.create(scope="serial", match_pattern=pattern, replacement=r"\1", priority=priority)
+    master = make_device("legacy-output-master", serial="MASTER-LEGACY-OUTPUT")
+    make_device("legacy-output-member", serial=legacy)
+    members = [{"serial": master.serial, "position": 1}, {"serial": incoming, "position": 2}]
+
+    vc = create_virtual_chassis_with_members(master, members, {"device_id": 985}, master_member=members[0])
+
+    assert list(vc.members.values_list("pk", flat=True)) == [master.pk]
+    assert not Device.objects.filter(serial=incoming).exists()
 
 
 @pytest.mark.django_db

@@ -85,13 +85,16 @@ class Resolution:
     ``matches`` holds the confirmed rows of a Unique or an Ambiguous outcome. They come from an
     unrestricted read, so a caller names one only after its own permission check. ``object`` is
     the row of a Unique outcome and None for every other outcome. ``complete`` is False when the
-    read stopped before it saw every match.
+    read stopped before it saw every match. ``uncertain`` holds the rows of a write lookup that
+    store the writer's key of the value but do not match: a legacy row that stores rule output
+    keys again under a rule that changes its own output, so it can be the same hardware.
     """
 
     kind: ResolutionKind
     matches: tuple = ()
     reason: str = ""
     complete: bool = True
+    uncertain: tuple = ()
 
     @property
     def object(self):
@@ -115,9 +118,9 @@ class Resolution:
         return _counted(remaining, complete=self.complete)
 
 
-def _counted(matches: tuple, *, complete: bool = True) -> Resolution:
+def _counted(matches: tuple, *, complete: bool = True, uncertain: tuple = ()) -> Resolution:
     if not matches:
-        return Resolution(ResolutionKind.NO_MATCH)
+        return Resolution(ResolutionKind.NO_MATCH, uncertain=uncertain)
     if len(matches) == 1:
         return Resolution(ResolutionKind.UNIQUE, matches)
     return Resolution(ResolutionKind.AMBIGUOUS, matches, complete=complete)
@@ -473,6 +476,7 @@ def _resolve(queryset, values, *, rules, row_context, lock, spare=0, writer=None
     patterns = sorted({contains_pattern(key) for value in open_values for key in probes[value]})
     queryset = queryset.filter(_SerialCandidates(exact, patterns)).order_by("pk")
     matches = {value: [] for value in open_values}
+    uncertain = {value: [] for value in open_values}
     by_key = _values_by_key(open_values, probes)
     full = _AMBIGUOUS_AT + spare
     saturated = 0
@@ -501,6 +505,9 @@ def _resolve(queryset, values, *, rules, row_context, lock, spare=0, writer=None
                 if _matches_serial(stored, value, context, writer):
                     matches[value].append(row)
                     saturated += len(matches[value]) == full
+            for value in by_own_key.get(stored, ()):
+                if row not in matches[value]:
+                    uncertain[value].append(row)
         if not unavailable and saturated == len(open_values):
             complete = False
             break
@@ -508,7 +515,7 @@ def _resolve(queryset, values, *, rules, row_context, lock, spare=0, writer=None
         if value in unavailable:
             results[value] = Resolution(ResolutionKind.UNAVAILABLE, reason=unavailable[value])
         else:
-            results[value] = _counted(tuple(matches[value]), complete=complete)
+            results[value] = _counted(tuple(matches[value]), complete=complete, uncertain=tuple(uncertain[value]))
     return results
 
 
