@@ -379,3 +379,138 @@ def test_interface_rules_validate_legacy_output_before_schema_changes(librenms_t
     finally:
         with connection.schema_editor() as editor:
             editor.delete_model(model)
+
+
+_TRGM_MIGRATION = "netbox_librenms_plugin.migrations.0030_serial_trigram_indexes"
+
+
+def _trigram_index_schemas():
+    from django.db import connection
+
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT index_class.relname, index_class.relnamespace::regnamespace::text,
+                   operator_class.opcnamespace::regnamespace::text, index_state.indisvalid
+            FROM pg_index AS index_state
+            JOIN pg_class AS index_class ON index_class.oid = index_state.indexrelid
+            JOIN pg_opclass AS operator_class ON operator_class.oid = index_state.indclass[0]
+            WHERE index_class.relname IN ('nblp_dcim_device_serial_trgm_idx', 'nblp_dcim_module_serial_trgm_idx')
+            ORDER BY index_class.relname
+            """
+        )
+        return cursor.fetchall()
+
+
+def _run_index_step(step):
+    from django.db import connection
+
+    with connection.schema_editor(atomic=False) as editor:
+        getattr(importlib.import_module(_TRGM_MIGRATION), step)(None, editor)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_the_trigram_migration_finds_its_indexes_in_the_schema_of_their_table():
+    """A search path whose first schema exists makes current_schema() differ from the schema of the tables."""
+    from django.db import connection
+
+    with connection.cursor() as cursor:
+        cursor.execute("CREATE SCHEMA nblp_probe_first")
+        cursor.execute("SET search_path = nblp_probe_first, public")
+    try:
+        _run_index_step("ensure_serial_trigram_indexes")
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute("RESET search_path")
+            cursor.execute("DROP SCHEMA nblp_probe_first")
+
+    assert _trigram_index_schemas() == [
+        ("nblp_dcim_device_serial_trgm_idx", "public", "public", True),
+        ("nblp_dcim_module_serial_trgm_idx", "public", "public", True),
+    ]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_the_trigram_migration_uses_the_operator_class_of_the_installed_extension():
+    """pg_trgm installed in a schema outside the search path still gives the indexes their operator class."""
+    from django.db import connection
+
+    with connection.cursor() as cursor:
+        cursor.execute("CREATE SCHEMA nblp_probe_extensions")
+        cursor.execute("ALTER EXTENSION pg_trgm SET SCHEMA nblp_probe_extensions")
+    try:
+        _run_index_step("drop_serial_trigram_indexes")
+        _run_index_step("ensure_serial_trigram_indexes")
+        built = _trigram_index_schemas()
+        # A second run reuses the indexes that it built.
+        _run_index_step("ensure_serial_trigram_indexes")
+        assert _trigram_index_schemas() == built
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute("ALTER EXTENSION pg_trgm SET SCHEMA public")
+            cursor.execute("DROP SCHEMA nblp_probe_extensions")
+        _run_index_step("ensure_serial_trigram_indexes")
+
+    assert built == [
+        ("nblp_dcim_device_serial_trgm_idx", "public", "nblp_probe_extensions", True),
+        ("nblp_dcim_module_serial_trgm_idx", "public", "nblp_probe_extensions", True),
+    ]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_the_trigram_migration_reverse_does_not_block_new_reads_behind_an_open_read():
+    """A plain DROP INDEX queues for ACCESS EXCLUSIVE behind an open read, and a new read waits behind it."""
+    import threading
+    import time
+
+    from dcim.models import Device
+    from django.db import connection, transaction
+
+    from netbox_librenms_plugin.tests.conftest import run_in_threads
+
+    reading, release = threading.Event(), threading.Event()
+
+    def open_read():
+        try:
+            with transaction.atomic():
+                Device.objects.exists()
+                reading.set()
+                assert release.wait(30)
+        finally:
+            connection.close()
+
+    def reverse():
+        assert reading.wait(30)
+        try:
+            _run_index_step("drop_serial_trigram_indexes")
+        finally:
+            connection.close()
+
+    def new_read():
+        try:
+            assert reading.wait(30)
+            deadline = time.monotonic() + 30
+            with connection.cursor() as cursor:
+                while True:
+                    cursor.execute(
+                        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() "
+                        "AND wait_event_type = 'Lock' AND query LIKE 'DROP INDEX%'"
+                    )
+                    if cursor.fetchone()[0]:
+                        break
+                    assert time.monotonic() < deadline, "the reverse did not start to wait"
+                    time.sleep(0.05)
+            with transaction.atomic(), connection.cursor() as cursor:
+                cursor.execute("SET LOCAL lock_timeout = '2s'")
+                cursor.execute("SELECT count(*) FROM dcim_device")
+                return cursor.fetchone()[0]
+        finally:
+            release.set()
+            connection.close()
+
+    try:
+        _reader, _reverse, count = run_in_threads(open_read, reverse, new_read, barriers=(), timeout=60)
+        assert count == Device.objects.count()
+        assert _trigram_index_schemas() == []
+    finally:
+        _run_index_step("ensure_serial_trigram_indexes")

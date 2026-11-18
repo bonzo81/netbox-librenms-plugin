@@ -13,15 +13,15 @@ _EXTENSION_SQL = "CREATE EXTENSION IF NOT EXISTS pg_trgm;"
 
 
 class _RequirePgTrgm(TrigramExtension):
-    """Create pg_trgm, or stop with the SQL that a database owner runs; a reverse keeps the extension."""
+    """Create pg_trgm, or stop with the SQL that a privileged user runs; a reverse keeps the extension."""
 
     def database_forwards(self, app_label, schema_editor, from_state, to_state):
         try:
             super().database_forwards(app_label, schema_editor, from_state, to_state)
         except DatabaseError as exc:
             raise RuntimeError(
-                f"The plugin needs the PostgreSQL extension pg_trgm. Run {_EXTENSION_SQL!r} as a database owner, "
-                "then run the migrations again."
+                f"The plugin needs the PostgreSQL extension pg_trgm. In the NetBox database, run {_EXTENSION_SQL!r} "
+                "as a user with the CREATE privilege on that database, then run the migrations again."
             ) from exc
 
     def database_backwards(self, app_label, schema_editor, from_state, to_state):
@@ -29,7 +29,27 @@ class _RequirePgTrgm(TrigramExtension):
         return
 
 
-def _existing_index(connection, table, name):
+def _schemas(connection, table):
+    """Return the oid and name of the schema of *table*, then of the schema that holds pg_trgm."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT table_namespace.oid, table_namespace.nspname, extension_namespace.oid, extension_namespace.nspname
+            FROM pg_class AS table_class
+            JOIN pg_namespace AS table_namespace ON table_namespace.oid = table_class.relnamespace
+            LEFT JOIN pg_extension AS extension ON extension.extname = 'pg_trgm'
+            LEFT JOIN pg_namespace AS extension_namespace ON extension_namespace.oid = extension.extnamespace
+            WHERE table_class.oid = to_regclass(%s)
+            """,
+            [table],
+        )
+        found = cursor.fetchone()
+    if found is None:
+        raise RuntimeError(f"Table {table!r} does not exist")
+    return found
+
+
+def _existing_index(connection, table, name, table_namespace, extension_namespace):
     with connection.cursor() as cursor:
         # pg_get_expr follows quote_all_identifiers, so read the expression under a known setting.
         cursor.execute("SHOW quote_all_identifiers")
@@ -47,16 +67,16 @@ def _existing_index(connection, table, name):
                 access_method.amname,
                 index_state.indnkeyatts = 1 AND index_state.indkey[0] = 0,
                 operator_class.opcname,
+                operator_class.opcnamespace = %s::oid,
                 pg_get_expr(index_state.indexprs, index_state.indrelid)
             FROM pg_index AS index_state
             JOIN pg_class AS index_class ON index_class.oid = index_state.indexrelid
-            JOIN pg_namespace AS index_namespace ON index_namespace.oid = index_class.relnamespace
             JOIN pg_am AS access_method ON access_method.oid = index_class.relam
             LEFT JOIN pg_opclass AS operator_class ON operator_class.oid = index_state.indclass[0]
             WHERE index_class.relname = %s
-              AND index_namespace.nspname = current_schema()
+              AND index_class.relnamespace = %s::oid
             """,
-            [table, name],
+            [table, extension_namespace, name, table_namespace],
         )
         existing = cursor.fetchone()
         cursor.execute(f"SET quote_all_identifiers = {'on' if previous_quoting == 'on' else 'off'}")
@@ -67,14 +87,29 @@ def ensure_serial_trigram_indexes(apps, schema_editor):
     """Create both trigram indexes, reusing a valid copy or repairing an interrupted concurrent build."""
     del apps
     connection = schema_editor.connection
+    quote = schema_editor.quote_name
     # A literal, not a bound parameter: CREATE INDEX takes none under server-side binding.
     trim_literal = "'" + _SERIAL_TRIM_CHARACTERS.replace("'", "''") + "'"
     for name, table in _TRIGRAM_INDEXES:
-        existing = _existing_index(connection, table, name)
+        # An index lives in the schema of its table; pg_trgm can live in another schema.
+        table_namespace, table_schema, extension_namespace, extension_schema = _schemas(connection, table)
+        if extension_schema is None:
+            raise RuntimeError("The PostgreSQL extension pg_trgm is not installed")
+        existing = _existing_index(connection, table, name, table_namespace, extension_namespace)
         if existing is not None:
-            valid, ready, on_table, unique, unfiltered, no_includes, method, one_expression, opclass, expression = (
-                existing
-            )
+            (
+                valid,
+                ready,
+                on_table,
+                unique,
+                unfiltered,
+                no_includes,
+                method,
+                one_expression,
+                opclass,
+                opclass_of_extension,
+                expression,
+            ) = existing
             expected_shape = (
                 on_table
                 and not unique
@@ -83,25 +118,28 @@ def ensure_serial_trigram_indexes(apps, schema_editor):
                 and method == "gin"
                 and one_expression
                 and opclass == "gin_trgm_ops"
+                and opclass_of_extension
                 and expression == f"btrim((serial)::text, '{_SERIAL_TRIM_CHARACTERS}'::text)"
             )
             if not expected_shape:
                 raise RuntimeError(f"Existing index {name!r} has an incompatible definition")
             if valid and ready:
                 continue
-            schema_editor.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {schema_editor.quote_name(name)}")
+            schema_editor.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {quote(table_schema)}.{quote(name)}")
         schema_editor.execute(
-            f"CREATE INDEX CONCURRENTLY {schema_editor.quote_name(name)} ON {schema_editor.quote_name(table)} "
-            f"USING gin ((BTRIM({schema_editor.quote_name('serial')}, {trim_literal})) gin_trgm_ops)"
+            f"CREATE INDEX CONCURRENTLY {quote(name)} ON {quote(table_schema)}.{quote(table)} "
+            f"USING gin ((BTRIM({quote('serial')}, {trim_literal})) {quote(extension_schema)}.gin_trgm_ops)"
         )
 
 
 def drop_serial_trigram_indexes(apps, schema_editor):
     """Drop the plugin-owned trigram indexes when reversing the migration."""
     del apps
-    for name, _table in _TRIGRAM_INDEXES:
-        # Not CONCURRENTLY: a reverse can run inside a transaction, and a drop is short.
-        schema_editor.execute(f"DROP INDEX IF EXISTS {schema_editor.quote_name(name)}")
+    quote = schema_editor.quote_name
+    for name, table in _TRIGRAM_INDEXES:
+        table_schema = _schemas(schema_editor.connection, table)[1]
+        # CONCURRENTLY: a plain drop waits for ACCESS EXCLUSIVE and blocks new reads of the table.
+        schema_editor.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {quote(table_schema)}.{quote(name)}")
 
 
 class Migration(migrations.Migration):
