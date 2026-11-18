@@ -3568,6 +3568,25 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         assert response.content.strip()
         assert stored_mapping_for_test(Device.objects.get(pk=device.pk)) == {self.server_key: 42}
 
+    def test_a_json_boolean_serial_confirms_no_device_that_stores_its_text(self):
+        """LibreNMS sends `serial: true` and the device stores "True": the text matches, but the value is no serial."""
+        from dcim.models import Device
+
+        device = make_device("migrate-boolean-serial", serial="True", librenms_cf=42)
+        self._register_device(42, "migrate-boolean-serial", serial=True)
+        request = make_view_request(
+            "post",
+            {"server_key": self.server_key, "action": "migrate_librenms_id", "existing_device_id": str(device.pk)},
+            user=make_view_user("migrate-boolean-serial-user", [("change", Device)]),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(self._make_view(), request, device_id=42)
+
+        assert response.headers.get("HX-Reswap") == "none"
+        assert b"Serial number not confirmed" in response.content
+        assert stored_mapping_for_test(Device.objects.get(pk=device.pk)) == 42
+
     def test_migrates_a_vm_when_force_is_supplied(self):
         """Migrate a VM mapping when the request explicitly supplies force."""
         from virtualization.models import VirtualMachine

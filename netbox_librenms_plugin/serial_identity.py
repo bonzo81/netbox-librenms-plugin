@@ -682,6 +682,9 @@ def resolve_device_write(
 
 def is_sole_holder(device, incoming, *, rules: SerialRules, exclude_pks=()) -> bool:
     """Return whether *device* is the one Device, apart from *exclude_pks*, that holds the hardware *incoming* names."""
+    # The text of a boolean or a list can equal a stored serial, but such a value names no hardware.
+    if not is_serial_value(incoming):
+        return False
     holder = resolve_device(incoming, rules=rules, exclude_pks=exclude_pks).object
     return holder is not None and holder.pk == device.pk
 
