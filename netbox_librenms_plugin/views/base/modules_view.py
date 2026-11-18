@@ -295,6 +295,15 @@ def _inventory_serial_well_formed(item: dict) -> bool:
     return is_serial_value(item.get("entPhysicalSerialNum"))
 
 
+def nameable_modules(view):
+    """Return the Modules that *view* may name to its user: the Module, its Device and its bay are in view scope."""
+    from dcim.models import Device, Module, ModuleBay
+
+    return view.restricted_queryset(Module).filter(
+        device__in=view.restricted_queryset(Device), module_bay__in=view.restricted_queryset(ModuleBay)
+    )
+
+
 def _inventory_item_offsettable(item: dict) -> bool:
     """
     Return True if an inventory item's index fields support offset arithmetic.
@@ -4874,8 +4883,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         visible_conflict_pks = set()
         scoped = matched_pks and getattr(self, "request", None) is not None
         if scoped:
-            # A module is named only when the user may view it and its device.
-            visible_conflict_pks = set(viewable_modules(self).filter(pk__in=matched_pks).values_list("pk", flat=True))
+            visible_conflict_pks = set(nameable_modules(self).filter(pk__in=matched_pks).values_list("pk", flat=True))
         bay_ids = {row["module_bay_id"] for row in rows if row.get("module_bay_id")}
         bay_owners = dict(ModuleBay.objects.filter(pk__in=bay_ids).values_list("pk", "module_id")) if bay_ids else {}
         pending_installs = defaultdict(list)

@@ -112,6 +112,7 @@ from netbox_librenms_plugin.views.base.modules_view import (
     _normalize_librenms_text,
     _unlinked_optic_refusal,
     built_in_candidate,
+    nameable_modules,
     reusable_built_in_rule,
     all_trees_in_scope,
     movable_modules,
@@ -2930,8 +2931,9 @@ class ModuleMismatchPreviewView(
             incoming, serial_context, rules=serial_rules, exclude_pk=installed_module.pk
         )
         if elsewhere.kind is ResolutionKind.UNIQUE:
+            # The modal names the Device and the bay of the holder.
             serial_conflict = (
-                viewable_modules(self)
+                nameable_modules(self)
                 .filter(pk=elsewhere.object.pk)
                 .select_related("module_type", "module_bay", "device")
                 .first()
