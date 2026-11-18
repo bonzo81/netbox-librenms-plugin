@@ -862,13 +862,12 @@ class BaseLibreNMSSyncView(
         # Each member reads its own serial context, so load the rows that decide it with the members.
         vc_members = obj.virtual_chassis.members.select_related("device_type", "virtual_chassis__master__device_type")
 
-        # The chassis master's serial rules find the stack rows; the dialog shows the LibreNMS text.
-        context = self._serial_context(obj)
         # Each member's own Device serial context admits and compares: a masterless member keeps its own rules.
         members_by_serial = MemberSerials(vc_members, self._serial_context)
 
         result = []
-        for component in extract_vc_members(inventory, (context,)):
+        # Like admits(), the stack holds when the rules of any member explain it; the dialog shows the LibreNMS text.
+        for component in extract_vc_members(inventory, members_by_serial.contexts()):
             if not members_by_serial.admits(component["serial"]):
                 continue
             # A serial that two members share assigns neither.

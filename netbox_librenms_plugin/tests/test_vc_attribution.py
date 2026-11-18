@@ -442,3 +442,33 @@ def test_a_masterless_member_serial_names_its_owner_only_under_its_own_rules():
     )
 
     assert contexts[("index", 5)]["selected_device"].pk == page.pk
+
+
+def test_a_masterless_junos_stack_is_detected_under_the_rules_of_any_member():
+    """The page maker strips "TAG-" to a short value; the member's rules keep FPC 1's serial, so its PSU follows it."""
+    from dcim.models import Device, DeviceType, Manufacturer
+
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    page, member = make_junos_vc_members("junos-masterless-admits")
+    # FPC 1 carries the serial of the NetBox device at position 0, so only the stack rows, not the position, name it.
+    maker = Manufacturer.objects.create(name="Junos masterless member maker", slug="junos-masterless-member-maker")
+    member_type = DeviceType.objects.create(manufacturer=maker, model="Junos masterless", slug="junos-masterless")
+    Device.objects.filter(pk=page.pk).update(vc_position=9, serial="12345")
+    Device.objects.filter(pk=member.pk).update(vc_position=0, serial="TAG-AB", device_type=member_type)
+    Device.objects.filter(pk=page.pk).update(vc_position=1)
+    page.refresh_from_db()
+    member.refresh_from_db()
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^TAG-(.+)$", replacement=r"\1", manufacturer=page.device_type.manufacturer
+    )
+    inventory = [
+        {**row, "entPhysicalSerialNum": "TAG-AB"} if row["entPhysicalSerialNum"] == "12350" else row
+        for row in junos_vc_inventory()
+    ]
+    rules = SerialRules.load()
+
+    owners = attribute_inventory(inventory, [page, member], rules.for_device(page), member_context=rules.for_device)
+
+    owner = {row["entPhysicalIndex"]: found or page for row, (found, _source) in zip(inventory, owners, strict=True)}
+    assert (owner[121], owner[4]) == (member, member)

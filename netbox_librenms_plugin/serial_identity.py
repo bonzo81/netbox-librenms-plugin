@@ -411,6 +411,10 @@ class MemberSerials:
         """Return whether *value* has an identity under the context of at least one member."""
         return any(is_identity(value, groups.context) for groups in self._groups)
 
+    def contexts(self) -> tuple:
+        """Return the distinct serial contexts of the members, one per context."""
+        return tuple(groups.context for groups in self._groups)
+
 
 def trimmed_serial(field_name: str = "serial") -> Func:
     """Return the trimmed serial expression that the trigram and exact indexes of migrations 0018 and 0030 store."""

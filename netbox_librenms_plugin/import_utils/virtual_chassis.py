@@ -403,7 +403,8 @@ class _Attribution:
         # Without members every row stays on the page, and context can be None.
         self.by_serial = MemberSerials(vc_members, member_context or (lambda _member: context))
         self.by_index = {index: row for row in rows if (index := row.get("entPhysicalIndex")) is not None}
-        self.stack = _stack_rows(rows, (context,)) if vc_members else _StackRows(None, {}, {})
+        # The stack holds when the rules of any member explain it, as by_serial admits each row.
+        self.stack = _stack_rows(rows, self.by_serial.contexts()) if vc_members else _StackRows(None, {}, {})
         self.results = {}
 
     def member_at(self, position):
