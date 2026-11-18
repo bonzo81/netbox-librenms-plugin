@@ -31,6 +31,8 @@ from .cache import (
     get_cache_metadata_key,
     get_import_device_cache_key,
     get_validated_device_cache_key,
+    search_metadata_is_current,
+    serial_rules_version,
 )
 from .collisions import detect_bulk_collisions, scope_bulk_collisions
 from .device_operations import (
@@ -1570,7 +1572,8 @@ def process_device_filters(  # noqa: C901
         # Check if metadata already exists to preserve original timestamp
         # BUT: if clear_cache was requested or data came fresh from LibreNMS, update it
         existing_metadata = cache.get(cache_metadata_key)
-        should_update = clear_cache or not from_cache
+        # Metadata of other serial rules describes rows that these rules no longer read.
+        should_update = clear_cache or not from_cache or not search_metadata_is_current(existing_metadata, serial_rules)
 
         if existing_metadata and not should_update:
             # Metadata exists and cache wasn't cleared, keep using it (preserves original cache time)
@@ -1586,6 +1589,7 @@ def process_device_filters(  # noqa: C901
                 "use_sysname": use_sysname,
                 "strip_domain": strip_domain,
                 "device_count": len(validated_devices),
+                "serial_rules": serial_rules_version(serial_rules),
             }
             cache.set(cache_metadata_key, cache_metadata, timeout=api.cache_timeout)
 

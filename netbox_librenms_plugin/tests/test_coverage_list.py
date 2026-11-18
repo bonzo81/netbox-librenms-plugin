@@ -394,6 +394,36 @@ class TestImportListRequest:
         assert not Job.objects.exists()
 
     @pytest.mark.django_db
+    def test_a_serial_rule_edit_makes_a_warm_search_cold_for_the_background_decision(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+    ):
+        """The validated rows key on the serial rules, so after a rule edit the search queues a job instead."""
+        from unittest.mock import patch
+
+        from core.models import Job
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        _register_devices(librenms_server, [_device()])
+        client.force_login(_create_user(django_user_model, "serial-rule-readiness"))
+        # A synchronous search caches the validated rows and the search metadata.
+        assert client.get(_import_url(), _search_params()).status_code == 200
+
+        with patch("netbox_librenms_plugin.views.imports.list.get_workers_for_queue", return_value=1):
+            warm = client.get(_import_url(), _search_params(use_background_job="1"))
+            assert warm.context is not None and "table" in warm.context
+            assert not Job.objects.exists()
+
+            NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
+            cold = client.get(_import_url(), _search_params(use_background_job="1"))
+
+        assert cold.json()["use_polling"] is True
+        assert Job.objects.count() == 1
+
+    @pytest.mark.django_db
     def test_synchronous_search_renders_the_real_validated_device(
         self,
         client,

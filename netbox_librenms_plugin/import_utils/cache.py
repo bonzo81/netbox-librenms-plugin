@@ -200,6 +200,18 @@ def get_active_cached_searches_for_servers(servers: Mapping[str, str]) -> list[d
     return active_searches
 
 
+def serial_rules_version(serial_rules=None) -> str:
+    """Return the serial rule version that validated rows key on; None reads the rules."""
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
+    return (serial_rules or SerialRules.load()).digest[:16]
+
+
+def search_metadata_is_current(metadata, serial_rules=None) -> bool:
+    """Return whether cached search *metadata* exists for the serial rules that its validated rows key on."""
+    return isinstance(metadata, dict) and metadata.get("serial_rules") == serial_rules_version(serial_rules)
+
+
 def get_validated_device_cache_key(
     server_key: str,
     filters: dict,
@@ -232,13 +244,11 @@ def get_validated_device_cache_key(
         >>> key
         'validated_device_default_154d56ec9289d49c_123_vc_sysname=True_strip=False_rules=4f53cda18c2baa0c'
     """
-    from netbox_librenms_plugin.serial_identity import SerialRules
-
     # Sort filters for a deterministic, cross-process stable hash; None values are excluded
     # (consistent with get_cache_metadata_key).
     filter_hash = _build_filter_hash(filters)
     vc_part = "vc" if vc_enabled else "novc"
-    rules_part = (serial_rules or SerialRules.load()).digest[:16]
+    rules_part = serial_rules_version(serial_rules)
     return (
         f"validated_device_{server_key}_{filter_hash}_{device_id}_{vc_part}_sysname={use_sysname}_strip={strip_domain}"
         f"_rules={rules_part}"

@@ -341,11 +341,13 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
                 get_cache_metadata_key,
                 get_device_count_for_filters,
             )
+            from netbox_librenms_plugin.import_utils.cache import search_metadata_is_current
 
             # Check if validated results already exist for this naming-mode
             # namespace.  The metadata key encodes server, filters, vc_enabled,
             # use_sysname and strip_domain, so a naming-preference change
             # correctly shows the cache as cold and triggers the background path.
+            # A serial rule edit changes the validated row keys, so it also shows the cache as cold.
             validated_cached = False
             if not self._cache_cleared:
                 try:
@@ -356,7 +358,7 @@ class LibreNMSImportView(LibreNMSGenericPermissionMixin, LibreNMSAPIMixin, gener
                         use_sysname=self._use_sysname,
                         strip_domain=self._strip_domain,
                     )
-                    validated_cached = cache.get(metadata_key) is not None
+                    validated_cached = search_metadata_is_current(cache.get(metadata_key))
                 except Exception as e:
                     logger.debug("Cache check failed; proceeding without cached result: %s", e, exc_info=True)
 
