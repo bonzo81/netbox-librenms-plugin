@@ -759,6 +759,27 @@ class TestValidateDeviceForImport:
         assert result["cluster"]["found"] is True
         assert result["is_ready"] is False
 
+    def test_a_malformed_serial_keeps_a_new_device_from_being_ready(self):
+        """The create refuses a serial that is not text or a number, so the preview must not mark the row ready."""
+        from netbox_librenms_plugin.import_validation_helpers import apply_role_to_validation
+        from netbox_librenms_plugin.serial_identity import MALFORMED_SERIAL
+
+        infrastructure = make_device("malformed-serial-infrastructure")
+        payload = _device_payload(
+            5406,
+            hostname="malformed-serial-device",
+            sysName="malformed-serial-device",
+            location=infrastructure.site.name,
+            hardware=infrastructure.device_type.model,
+            serial=True,
+        )
+
+        result = self._validate(payload)
+        apply_role_to_validation(result, infrastructure.role)
+
+        assert (result["can_import"], result["is_ready"]) == (False, False)
+        assert MALFORMED_SERIAL in result["issues"]
+
     def test_new_vm_skips_device_fields_and_requires_valid_placement(self):
         cluster = make_cluster("Validation available cluster")
 
