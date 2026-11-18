@@ -924,7 +924,7 @@ def test_a_member_serial_that_only_the_master_rules_blank_is_not_created_beside_
 
 
 @pytest.mark.django_db
-def test_a_serial_lookup_stops_reading_devices_at_its_limit():
+def test_a_serial_lookup_keeps_two_matches_and_adds_no_queries_past_them():
     """Devices that share one serial past two add no queries, and every count is Ambiguous."""
     from django.db import connection
     from django.test.utils import CaptureQueriesContext
@@ -942,7 +942,7 @@ def test_a_serial_lookup_stops_reading_devices_at_its_limit():
         return len(queries)
 
     assert queries_for("FEW-SN", 2) == queries_for("MANY-SN", 6)
-    # The read stops at the second confirmed match, so the other four rows are never read.
+    # One query reads every candidate row; the resolver stops comparing rows at the second match.
     assert (len(found["MANY-SN"].matches), found["MANY-SN"].complete) == (2, False)
 
 
