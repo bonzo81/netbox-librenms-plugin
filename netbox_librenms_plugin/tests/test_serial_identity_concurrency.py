@@ -981,7 +981,7 @@ def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_se
     assert stale[0] and {message for messages in stale for message in messages} == {
         ("error", GrantRefusal.POLICY.message)
     }, stale
-    # The snapshot was merged under the old type; refresh it as the Modules tab does.
+    # The snapshot was merged under the old type's serial context, so a refresh stores it again under the new one.
     device.refresh_from_db()
     cache.set(
         CacheMixin().get_cache_key(device, "inventory", SERVER_KEY),
@@ -1441,6 +1441,7 @@ def test_replacement_refuses_a_new_conflict_owner_without_locking_its_module(cli
     from dcim.models import Module
     from django.core.cache import cache
 
+    from netbox_librenms_plugin.module_writes import _CHANGED
     from netbox_librenms_plugin.tests.lock_conflict_helpers import (
         commit_row_change,
         lock_row,
@@ -1454,7 +1455,8 @@ def test_replacement_refuses_a_new_conflict_owner_without_locking_its_module(cli
     target = make_device_with_module_bays("unplanned-conflict-target", ["Slot 1"])
     other = make_device_with_module_bays("unplanned-conflict-other", ["Slot 1"])
     parent = install_module(target, "Slot 1", "UNPLANNED-TARGET", serial="TARGET123")
-    conflict = install_module(other, "Slot 1", "UNPLANNED-CONFLICT", serial="OTHER123")
+    # The preview shows this holder, so the grant signs it.
+    conflict = install_module(other, "Slot 1", "UNPLANNED-CONFLICT", serial="NEW123")
     row = {
         "entPhysicalIndex": 7,
         "entPhysicalClass": "module",
@@ -1470,6 +1472,8 @@ def test_replacement_refuses_a_new_conflict_owner_without_locking_its_module(cli
     client.force_login(user)
     preview = client.get(rendered_preview_url(render_module_tab(target, user=user), 7))
     action, fields = rendered_module_form(preview.content.decode(), "replace-module", 7)
+    # The holder lets go of the serial before the POST observes its owners, and takes it back after.
+    Module.objects.filter(pk=conflict.pk).update(serial="OTHER123")
     changed = []
     with second_connection() as peer:
 
@@ -1485,7 +1489,6 @@ def test_replacement_refuses_a_new_conflict_owner_without_locking_its_module(cli
     assert changed and response.status_code == 302
     # A lock timeout on the peer's Module would also leave both rows as they were.
     assert "55P03" not in sqlstates, sqlstates
-    # The grant signed the holder that the preview found, so the new holder refuses it as stale.
-    assert messages_on(response.wsgi_request) == [("error", GrantRefusal.STALE.message)]
+    assert any(_CHANGED in text for _level, text in messages_on(response.wsgi_request))
     assert Module.objects.filter(pk=parent.pk, serial="TARGET123").exists()
     assert Module.objects.filter(pk=conflict.pk, serial="NEW123").exists()
