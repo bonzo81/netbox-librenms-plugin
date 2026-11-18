@@ -604,6 +604,9 @@ class BaseLibreNMSSyncView(
                         "librenms_device_hardware": hardware,
                         "librenms_device_serial": serial,
                         "serial_matches": self._serial_matches(obj, librenms_serial),
+                        "serial_unavailable": self.serial_rules.for_device(obj).unavailable
+                        if obj._meta.model_name == "device"
+                        else "",
                         # A legacy stored form names the same hardware; the update action writes the LibreNMS text.
                         "serial_stored_form_differs": obj._meta.model_name == "device"
                         and stored_form_differs(obj.serial, librenms_serial, self.serial_rules.for_device(obj)),

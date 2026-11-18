@@ -322,6 +322,34 @@ class TestSyncPageRouting:
         assert response.context["librenms_id_serial_confirmed"] is True
         assert response.context["serial_matches"] is False
 
+    def test_a_serial_that_cannot_be_compared_shows_the_reason_and_no_sync(
+        self, logged_in_client, settings, librenms_server
+    ):
+        from dcim.models import Device, VirtualChassis
+        from django.utils.html import escape
+
+        from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
+
+        _configure_servers(settings, librenms_server, SERVER_KEY)
+        chassis, (viewed,) = make_virtual_chassis_members("sync-stray-master", count=1)
+        viewed.serial = "STRAY-NETBOX"
+        viewed.save()
+        seed_stored_mapping(viewed, 6616, save=True)
+        master = make_device("sync-stray-master-elsewhere")
+        other = VirtualChassis.objects.create(name="sync-stray-other")
+        # The master link names a device of another chassis, so no member serial can be compared.
+        Device.objects.filter(pk=master.pk).update(virtual_chassis=other, vc_position=1)
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=master)
+        _register_device(librenms_server, 6616, viewed.name, serial="STRAY-LIBRENMS")
+
+        response = logged_in_client.get(_sync_url(viewed))
+
+        content = response.content.decode()
+        assert "does not match NetBox serial" not in content
+        sync_serial_url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": viewed.pk})
+        assert sync_serial_url not in content
+        assert escape(UNAVAILABLE_MASTER_LINK) in content
+
 
 @pytest.mark.django_db
 class TestServerMappingContext:

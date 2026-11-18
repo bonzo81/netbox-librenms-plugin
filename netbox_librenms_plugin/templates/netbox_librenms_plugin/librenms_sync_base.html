@@ -386,7 +386,11 @@
                         <tr>
                             <th scope="row" style="padding-left: 1rem;">
                                 Serial
-                                {% if object.serial and not serial_matches %}
+                                {% if serial_unavailable %}
+                                <span class="text-warning ms-1" title="{{ serial_unavailable }}" data-serial-unavailable>
+                                    <i class="mdi mdi-help-circle-outline"></i>
+                                </span>
+                                {% elif object.serial and not serial_matches %}
                                 <span class="text-warning ms-1" title="LibreNMS serial '{{ librenms_device_serial }}' does not match NetBox serial '{{ object.serial }}'">
                                     <i class="mdi mdi-alert"></i>
                                 </span>
@@ -618,7 +622,7 @@
                                                 <i class="mdi mdi-server-network"></i> VC Serials ({{ vc_inventory_serials|length }})
                                             </button>
                                         {% else %}
-                                            {% if librenms_device_serial != "-" %}
+                                            {% if librenms_device_serial != "-" and not serial_unavailable %}
                                                 {% if not serial_matches or serial_stored_form_differs %}
                                                 <form method="post"
                                                       action="{% url 'plugins:netbox_librenms_plugin:update_device_serial' pk=object.pk %}"
