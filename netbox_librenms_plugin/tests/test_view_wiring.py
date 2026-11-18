@@ -15,6 +15,7 @@ import pytest
 from netbox_librenms_plugin.tests.conftest import configured_server_key
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, stored_mapping_for_test
 from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
 
 
 class TestSlashlessRouteAliases:
@@ -2916,6 +2917,125 @@ class TestGatedViewsRefuseOutOfScopeObjects:
 
         assert holder_device.name not in html
         assert holder.module_bay.name not in html
+
+    def test_module_replace_does_not_name_a_removed_holder_bay_outside_view_scope(self):
+        """The delete scope removes the holder; the message names its place only when the viewer may see the bay."""
+        from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
+        from django.contrib.auth import get_user_model
+        from django.core.cache import cache
+        from users.models import ObjectPermission
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import message_texts, rendered_modal_form
+        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
+
+        device = make_device("scope-replace-named")
+        other_device = make_device("scope-replace-named-holder")
+        module_type = make_module_type("MT-scope-replace-named")
+        target = Module.objects.create(
+            device=device, module_bay=make_module_bay(device, "Slot 1"), module_type=module_type, serial="OLD-NAMED"
+        )
+        holder = Module.objects.create(
+            device=other_device,
+            module_bay=make_module_bay(other_device, "Unlisted Holder Bay"),
+            module_type=module_type,
+            serial="INCOMING-NAMED",
+        )
+        user = self._user(
+            "scope-replace-named",
+            [
+                (Device, "view", {"pk__in": [device.pk, other_device.pk]}),
+                (ModuleBay, "view", {"pk__in": [target.module_bay_id, holder.module_bay_id]}),
+                (ModuleType, "view", None),
+                (Module, "view", None),
+                (Module, "add", None),
+                (Module, "change", None),
+                (Module, "delete", None),
+                (Interface, "add", None),
+                (Interface, "change", None),
+                (Interface, "delete", None),
+            ],
+        )
+        view = ReplaceModuleView()
+        server_key = configured_server_key()
+        view._librenms_api = LibreNMSAPI(server_key=server_key)
+        inventory_item = {
+            "entPhysicalIndex": 100,
+            "entPhysicalClass": "module",
+            "entPhysicalName": target.module_bay.name,
+            "entPhysicalModelName": module_type.model,
+            "entPhysicalSerialNum": holder.serial,
+        }
+        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
+        cache.set(cache_key, trusted_module_inventory_payload(device, [inventory_item], server_key=server_key))
+        _action, fields = rendered_modal_form(device, 100, "replace-module", user=user, server_key=server_key)
+        assert fields["conflict_module_id"] == str(holder.pk)
+        # The ModuleBay grant loses the holder's bay after the preview.
+        ObjectPermission.objects.filter(name="scope-replace-named-view-1").update(
+            constraints={"pk": target.module_bay_id}
+        )
+        user = get_user_model().objects.get(pk=user.pk)
+        request = self._request(user, fields)
+        view.setup(request)
+        try:
+            view.post(request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        assert not Module.objects.filter(pk=holder.pk).exists()
+        assert message_texts(request, "success")
+        assert all(holder.module_bay.name not in text for text in message_texts(request))
+
+    @pytest.mark.skipif(not netbox_relocates_module_subtree(), reason="NetBox moves a module from 4.7.")
+    def test_module_move_does_not_name_a_source_bay_outside_view_scope(self):
+        """The change scope moves the module; the message names its source bay only when the viewer may see it."""
+        from types import SimpleNamespace
+
+        from dcim.models import Device, Module, ModuleBay
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import make_view, message_texts, post
+        from netbox_librenms_plugin.views.sync.modules import MoveModuleView
+
+        source_device = make_device("scope-move-named-source")
+        target_device = make_device("scope-move-named-target")
+        source_bay = make_module_bay(source_device, "Unlisted Source Bay")
+        target_bay = make_module_bay(target_device, "Target Bay")
+        moving = Module.objects.create(
+            device=source_device, module_bay=source_bay, module_type=make_module_type("MT-scope-move-named")
+        )
+        user = self._user(
+            "scope-move-named",
+            [
+                (Device, "view", {"pk__in": [source_device.pk, target_device.pk]}),
+                (ModuleBay, "view", {"pk": target_bay.pk}),
+                (Module, "view", None),
+                (Module, "change", None),
+                (Module, "delete", None),
+            ],
+        )
+        server_key = configured_server_key()
+        request = self._request(
+            user,
+            {
+                "conflict_module_id": str(moving.pk),
+                "target_bay_id": str(target_bay.pk),
+                "selected_device_id": str(target_device.pk),
+                "server_key": server_key,
+            },
+        )
+
+        post(
+            make_view(MoveModuleView, request, librenms_api=SimpleNamespace(server_key=server_key)),
+            request,
+            pk=target_device.pk,
+        )
+
+        moving.refresh_from_db()
+        assert moving.module_bay_id == target_bay.pk
+        assert message_texts(request, "success")
+        assert all(source_bay.name not in text for text in message_texts(request))
 
     def test_site_location_push_refuses_a_site_outside_the_grant(self):
         """SyncSiteLocationView is gated by the plugin write permission alone and takes the site pk from the POST body."""
