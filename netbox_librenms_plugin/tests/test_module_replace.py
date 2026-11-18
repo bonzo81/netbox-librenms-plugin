@@ -266,6 +266,49 @@ class TestModuleMismatchPreviewView:
         assert str(conflict.device) in html
         assert "CONFLICT-SERIAL" in html
 
+    def test_a_conflict_on_a_device_the_viewer_cannot_see_is_not_named(self):
+        """A viewer of the Module who cannot view its Device gets the hidden-conflict text, not the Device and bay."""
+        from dcim.models import Device, Module, ModuleBay, ModuleType
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant
+        from netbox_librenms_plugin.views.sync.modules import ModuleMismatchPreviewView
+
+        device, installed, _request, _view_unused, inventory = self._setup("hidden-device", serial="HIDDEN-SERIAL")
+        other_device = make_device("preview-hidden-device-owner")
+        _module(
+            other_device,
+            make_module_bay(other_device, "Hidden Owner Bay"),
+            make_module_type("HIDDEN-T"),
+            "HIDDEN-SERIAL",
+        )
+        user = make_user_with_perms(
+            "preview-hidden-device",
+            [
+                ("view", Module),
+                ("add", Module),
+                ("change", Module),
+                ("delete", Module),
+                ("view", ModuleBay),
+                ("view", ModuleType),
+            ],
+        )
+        user = grant(user, "view", Device, constraints={"name": device.name})
+        request = make_request(
+            "get", {"module_id": str(installed.pk), "ent_index": "100", "server_key": "default"}, user=user
+        )
+        view = _view(ModuleMismatchPreviewView, request)
+        cache_key = _cache_preview(view, device, inventory, request)
+        try:
+            response = view_get(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        html = response.content.decode()
+        assert response.status_code == 200
+        assert other_device.name not in html
+        assert "Hidden Owner Bay" not in html
+        assert 'name="conflict_module_id"' not in html
+
 
 class TestReplaceModuleView:
     def _setup(self, tag, *, new_serial="NEW-SERIAL", item_extra=None):

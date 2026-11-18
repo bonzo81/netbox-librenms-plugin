@@ -254,6 +254,15 @@ def _inventory_serial_well_formed(item: dict) -> bool:
     return is_serial_value(item.get("entPhysicalSerialNum"))
 
 
+def nameable_modules(view):
+    """Return the Modules that *view* may name to its user: the Module, its Device and its bay are in view scope."""
+    from dcim.models import Device, Module, ModuleBay
+
+    return view.restricted_queryset(Module).filter(
+        device__in=view.restricted_queryset(Device), module_bay__in=view.restricted_queryset(ModuleBay)
+    )
+
+
 def _inventory_item_offsettable(item: dict) -> bool:
     """
     Return True if an inventory item's index fields support offset arithmetic.
@@ -4674,8 +4683,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             serial_rules (SerialRules | None): The page's serial rules; None reads them.
 
         """
-        from dcim.models import Device, Module
-
         rows = self._identity_candidate_rows(table_data, index_map)
         if not rows:
             return
@@ -4689,12 +4696,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # disclosing a module the operator cannot see.
         visible_conflict_pks = set()
         if matched_pks and getattr(self, "request", None) is not None:
-            # A module is named only when the user may view it and its device.
-            visible_conflict_pks = set(
-                self.restricted_queryset(Module)
-                .filter(pk__in=matched_pks, device__in=self.restricted_queryset(Device))
-                .values_list("pk", flat=True)
-            )
+            visible_conflict_pks = set(nameable_modules(self).filter(pk__in=matched_pks).values_list("pk", flat=True))
         scope_device_ids = self._identity_scope_device_ids(obj)
         # Evidence revokes the install offer only where the write path also refuses it: a holder on a
         # device in scope. Its own read, so holders elsewhere cannot fill the global read first.

@@ -2812,6 +2812,111 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         assert "cannot view" in html
         assert "Update Serial Only" not in html
 
+    def test_module_preview_does_not_name_a_conflict_bay_outside_view_scope(self):
+        """The viewer sees the conflicting Module and its Device but not its bay, so the preview must not name the bay."""
+        from dcim.models import Device, Module, ModuleBay
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import rendered_preview_query
+        from netbox_librenms_plugin.views.sync.modules import ModuleMismatchPreviewView
+
+        device = make_device("scope-preview-bay-target")
+        holder_device = make_device("scope-preview-bay-holder")
+        module_type = make_module_type("MT-scope-preview-bay")
+        target = Module.objects.create(
+            device=device,
+            module_bay=make_module_bay(device, "Visible Slot"),
+            module_type=module_type,
+            serial="OLD-PREVIEW-BAY",
+        )
+        holder = Module.objects.create(
+            device=holder_device,
+            module_bay=make_module_bay(holder_device, "Unlisted Bay"),
+            module_type=module_type,
+            serial="INCOMING-PREVIEW-BAY",
+        )
+        user = self._user(
+            "scope-preview-bay",
+            [
+                (Device, "view", {"pk__in": [device.pk, holder_device.pk]}),
+                (ModuleBay, "view", {"pk": target.module_bay_id}),
+                (Module, "view", {"pk__in": [target.pk, holder.pk]}),
+                (Module, "add", None),
+                (Module, "change", {"pk": target.pk}),
+                (Module, "delete", {"pk": target.pk}),
+            ],
+        )
+        view = ModuleMismatchPreviewView()
+        server_key = configured_server_key()
+        view._librenms_api = LibreNMSAPI(server_key=server_key)
+        item = {
+            "entPhysicalIndex": 100,
+            "entPhysicalClass": "module",
+            "entPhysicalName": target.module_bay.name,
+            "entPhysicalModelName": module_type.model,
+            "entPhysicalSerialNum": holder.serial,
+        }
+        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
+        cache.set(cache_key, trusted_module_inventory_payload(device, [item], server_key=server_key))
+        query = rendered_preview_query(device, 100, user=user, server_key=server_key)
+        request = self._request(user, query, method="get")
+        view.setup(request)
+        try:
+            response = view.get(request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        html = response.content.decode()
+        assert response.status_code == 200
+        assert holder.module_bay.name not in html
+        assert f'name="conflict_module_id" value="{holder.pk}"' not in html
+
+    def test_module_table_does_not_name_a_conflict_bay_outside_view_scope(self):
+        """The table names the holder of a serial only when the viewer may see the holder's bay too."""
+        from dcim.models import Device, Module, ModuleBay
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import render_module_tab
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        device = make_device("scope-table-bay-target")
+        holder_device = make_device("scope-table-bay-holder")
+        module_type = make_module_type("MT-scope-table-bay")
+        holder = Module.objects.create(
+            device=holder_device,
+            module_bay=make_module_bay(holder_device, "Unlisted Bay"),
+            module_type=module_type,
+            serial="INCOMING-TABLE-BAY",
+        )
+        user = self._user(
+            "scope-table-bay",
+            [
+                (Device, "view", {"pk__in": [device.pk, holder_device.pk]}),
+                (ModuleBay, "view", {"device_id": device.pk}),
+                (Module, "view", None),
+            ],
+        )
+        server_key = configured_server_key()
+        item = {
+            "entPhysicalIndex": 100,
+            "entPhysicalClass": "module",
+            "entPhysicalName": "Slot 9",
+            "entPhysicalModelName": module_type.model,
+            "entPhysicalSerialNum": holder.serial,
+        }
+        cache_key = DeviceModuleTableView().get_cache_key(device, "inventory", server_key=server_key)
+        cache.set(cache_key, trusted_module_inventory_payload(device, [item], server_key=server_key))
+        try:
+            html = render_module_tab(device, user=user, server_key=server_key)
+        finally:
+            cache.delete(cache_key)
+
+        assert holder_device.name not in html
+        assert holder.module_bay.name not in html
+
     def test_site_location_push_refuses_a_site_outside_the_grant(self):
         """SyncSiteLocationView is gated by the plugin write permission alone and takes the site pk from the POST body."""
         from dcim.models import Site
