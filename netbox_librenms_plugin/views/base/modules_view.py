@@ -2318,6 +2318,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # is already settled here (see its Returns contract).
         if not transceivers:
             return inventory_data, None
+        # The merge copies this serial into a row, so it must have the shape that the inventory check requires.
+        if not all(is_serial_value(txr.get("serial")) for txr in transceivers):
+            return inventory_data, "transceiver payload has a serial that is not text or a number"
 
         # LibreNMS may return SNMP entity indices as ints on one endpoint and numeric strings on
         # another (e.g. ENTITY-MIB "300" vs the transceiver API's 300). Coerce both sides to int
