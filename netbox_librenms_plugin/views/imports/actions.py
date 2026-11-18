@@ -2540,7 +2540,7 @@ class DeviceConflictActionView(
                     f"Legacy librenms_id ({cf_int}) does not match the active device ID "
                     f"({librenms_id}); cannot migrate safely."
                 )
-            if not validation.get("serial_confirmed") and not force:
+            if not validation.get("legacy_id_serial_confirmed") and not force:
                 return _htmx_error_response(
                     "Serial number not confirmed. Check the force checkbox to migrate without serial verification."
                 )

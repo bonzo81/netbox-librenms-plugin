@@ -1664,6 +1664,32 @@ class TestDeviceValidationDetailsView:
         reason = RuleConfigurationError(rule, "replacement").public_message
         assert escape(reason) in re.sub(r"<[^>]*>", "", serial_row)
 
+    @pytest.mark.parametrize("shared", [False, True], ids=["sole-holder", "second-holder"])
+    def test_the_legacy_id_conversion_offers_the_force_checkbox_unless_the_device_holds_the_serial_alone(self, shared):
+        """The conversion POST needs the one holder of the serial, so a second holder must show the force checkbox."""
+        existing = make_device("details-legacy-holder", serial="LEGACY-HOLDER-SN", librenms_cf=1)
+        if shared:
+            make_device("details-legacy-twin", serial="LEGACY-HOLDER-SN")
+        self.primary_server.device_info_response(
+            device_id=1,
+            hostname=existing.name,
+            hardware=existing.device_type.model,
+            os="ios",
+            serial=existing.serial,
+            ip="198.18.0.5",
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        assert response.status_code == 200
+        content = response.content.decode()
+        start = content.index('value="migrate_librenms_id"')
+        form = content[start : content.index("</form>", start)]
+        assert ('name="force"' in form) is shared
+        button = re.search(r"<button[^>]*migrate-btn[^>]*>", form).group(0)
+        assert (" disabled" in button) is shared
+
     def test_a_serial_without_identity_shows_no_match_and_no_sync_action(self):
         existing = make_device("details-no-identity", serial="ABC123", librenms_cf={"default": {"id": 1}})
         self.primary_server.device_info_response(

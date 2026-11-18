@@ -669,6 +669,7 @@ class TestValidateDeviceForImport:
             "ambiguous_librenms_id",
             "serial_action",
             "serial_confirmed",
+            "legacy_id_serial_confirmed",
             "serial_duplicate",
             "serial_conflict",
             "serial_role_choice_available",

@@ -617,7 +617,7 @@
           {% if validation.existing_device.cluster %}
           <input type="hidden" name="cluster_{{ libre_device.device_id }}" value="{{ validation.existing_device.cluster.pk }}">
           {% endif %}
-          {% if not validation.serial_confirmed %}
+          {% if not validation.legacy_id_serial_confirmed %}
             <div class="form-check mb-2">
               <input class="form-check-input" type="checkbox" name="force" id="force-migrate-{{ libre_device.device_id }}"
                      onchange="this.closest('form').querySelector('.migrate-btn').disabled = !this.checked">
@@ -626,7 +626,7 @@
               </label>
             </div>
           {% endif %}
-          <button type="submit" class="btn btn-sm btn-warning migrate-btn"{% if not validation.serial_confirmed %} disabled{% endif %}>
+          <button type="submit" class="btn btn-sm btn-warning migrate-btn"{% if not validation.legacy_id_serial_confirmed %} disabled{% endif %}>
             <i class="mdi mdi-database-sync"></i> Migrate ID format
           </button>
         </form>
