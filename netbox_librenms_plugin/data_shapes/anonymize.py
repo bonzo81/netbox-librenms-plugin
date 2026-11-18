@@ -709,7 +709,11 @@ def _database_id(value):
         raise MalformedRecordingError("Database IDs must be integers or numeric strings.")
     if isinstance(value, str) and not re.fullmatch(r"-?[0-9]+", value):
         raise MalformedRecordingError("Database IDs must be integers or numeric strings.")
-    number = int(value)
+    try:
+        number = int(value)
+    except ValueError:
+        # int() refuses a string longer than the interpreter's digit limit.
+        raise MalformedRecordingError("Database IDs must be integers or numeric strings.") from None
     return number if number > 0 else None
 
 
@@ -725,8 +729,8 @@ class _DatabaseIDs:
         self._collect(recording)
         for route in recording.get("responses", {}):
             match = _DEVICE_ROUTE_RE.search(route)
-            if match:
-                self.originals.add(int(match[2]))
+            if match and (number := _database_id(match[2])) is not None:
+                self.originals.add(number)
         expected = recording.get("expected")
         if isinstance(expected, dict):
             for name in ("lag_members", "sub_interfaces"):
@@ -961,10 +965,16 @@ def _anon_field(key, value, rules, container=None):
     if isinstance(value, dict) and key not in SERIAL_KEYS:
         return _walk(value, rules, key)
     if isinstance(value, dict):
-        return {
-            _anon_value(key, name, rules, container): _anon_field(key, item, rules, container)
-            for name, item in value.items()
-        }
+        entries = {}
+        for name, item in value.items():
+            pseudonym = base = _anon_value(key, name, rules, container)
+            attempt = 0
+            while pseudonym in entries:
+                # Two keys can share one pseudonym, such as two texts without a serial identity.
+                attempt += 1
+                pseudonym = f"{base}~{_hash(f'{attempt}:{name}', rules.salt)}"
+            entries[pseudonym] = _anon_field(key, item, rules, container)
+        return entries
     if isinstance(value, list):
         return [_anon_field(key, item, rules, container) for item in value]
     return _anon_value(key, value, rules, container)

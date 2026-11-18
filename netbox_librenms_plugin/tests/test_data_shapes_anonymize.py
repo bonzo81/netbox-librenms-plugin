@@ -203,6 +203,20 @@ def test_a_malformed_serial_value_is_pseudonymized_and_reads_the_serial_context(
     assert type(stored) is type(serial)
 
 
+def test_a_serial_object_keeps_every_entry_without_its_keys():
+    serial = {"A": 1, "B": 2, "ASSET123": 3, " ASSET123 ": 4}
+    recording = _ports({"entPhysicalSerialNum": serial})
+
+    first = anonymize_recording(recording, salt="keys")
+    second = anonymize_recording(recording, salt="keys")
+
+    stored = _response(first, "GET /api/v0/devices/1/ports")["ports"][0]["entPhysicalSerialNum"]
+    assert len(stored) == len(serial)
+    assert not set(stored) & set(serial)
+    assert "ASSET123" not in json.dumps(first)
+    assert first["responses"] == second["responses"]
+
+
 def test_a_scalar_in_a_list_takes_the_rule_of_the_lists_field():
     recording = _ports({"hostname": ["core-rtr01"]})
 
@@ -2207,10 +2221,22 @@ def test_database_id_absence_sentinels_survive_anonymization(field, value):
     assert _response(anonymized, "GET /api/v0/devices/1/ports")["ports"][0][field] == value
 
 
-@pytest.mark.parametrize("value", [True, False, 1.5, "invalid", {}, []])
+@pytest.mark.parametrize("value", [True, False, 1.5, "invalid", {}, [], "9" * 5000])
 def test_anonymization_rejects_invalid_database_ids(value):
-    with pytest.raises(ValueError, match="Database IDs"):
+    from netbox_librenms_plugin.data_shapes.anonymize import MalformedRecordingError
+
+    with pytest.raises(MalformedRecordingError, match="Database IDs"):
         anonymize_recording(_ports({"port_id": value}), salt="invalid-id")
+
+
+def test_anonymization_rejects_an_oversized_device_id_in_a_route():
+    from netbox_librenms_plugin.data_shapes.anonymize import MalformedRecordingError
+
+    recording = _ports({"port_id": 1})
+    recording["responses"]["GET /api/v0/devices/" + "9" * 5000] = {"devices": []}
+
+    with pytest.raises(MalformedRecordingError, match="Database IDs"):
+        anonymize_recording(recording, salt="invalid-id")
 
 
 def test_bare_database_ids_share_their_containing_table_mapping():
