@@ -1569,6 +1569,36 @@ class TestValidationWithRealLibreNMS:
         assert result["virtual_chassis"]["member_count"] == 2
         assert [member["position"] for member in result["virtual_chassis"]["members"]] == [1, 2]
 
+    def test_a_member_serial_that_the_chassis_create_refuses_keeps_the_stack_from_being_ready(self, librenms_api):
+        """The chassis create stores each non-master member serial, so a too-long one would roll the row back."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.import_utils.device_operations import validate_device_for_import
+        from netbox_librenms_plugin.import_validation_helpers import apply_role_to_validation
+        from netbox_librenms_plugin.serial_identity import serial_refusal
+
+        api, server = librenms_api
+        infrastructure = make_device("vc-refused-member-infrastructure")
+        payload = _device_payload(
+            5503,
+            hostname="vc-refused-member-master",
+            sysName="vc-refused-member-master",
+            serial="MEMBER-OK",
+            location=infrastructure.site.name,
+            hardware=infrastructure.device_type.model,
+        )
+        server.device_info_response(device_id=5503, hostname=payload["hostname"], serial="MEMBER-OK")
+        long_serial = "M" * 51
+        server.vc_inventory_callable(
+            5503, [_stack_root()], {100: [_chassis(101, "MEMBER-OK", 1), _chassis(102, long_serial, 2)]}
+        )
+
+        result = validate_device_for_import(payload, api=api, include_vc_detection=True)
+        apply_role_to_validation(result, infrastructure.role)
+
+        assert (result["can_import"], result["is_ready"]) == (False, False)
+        assert any(serial_refusal(long_serial, Device) in issue for issue in result["issues"])
+
     def test_chassis_inventory_recovers_an_unmatched_hardware_string(self, librenms_api):
         from dcim.models import DeviceType, Manufacturer
 

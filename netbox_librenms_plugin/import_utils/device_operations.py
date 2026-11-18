@@ -66,6 +66,7 @@ from .virtual_chassis import (
     get_virtual_chassis_data,
     numbering_refusal_text,
     prepare_virtual_chassis,
+    prepared_master,
     unnumbered_virtual_chassis,
 )
 from netbox_librenms_plugin.server_mappings import (
@@ -415,6 +416,16 @@ def _flag_serial_conflict(result, existing_device, incoming_serial, serial_rules
         "unavailable": other.reason,
     }
     return True
+
+
+def _member_serial_refusals(prepared) -> list:
+    """Return the blockers of the member serials that a chassis create refuses; it stores each non-master member."""
+    master = prepared_master(prepared)
+    if master is None:
+        return []
+    members = prepared["members"]
+    refusals = ((member, serial_refusal(member.get("serial"), Device)) for member in members if member is not master)
+    return [f"Stack member {member.get('position')}: {refusal}" for member, refusal in refusals if refusal]
 
 
 def serial_unavailable_issue(incoming_serial) -> str:
@@ -1709,6 +1720,9 @@ def validate_device_for_import(  # noqa: C901
                                     serial_rules=serial_rules,
                                     numbering_rules=numbering_rules,
                                 )
+                                # The DeviceType sets only the member numbers, so the text names no NetBox object.
+                                # nosemgrep: import-disclosure
+                                result["issues"].extend(_member_serial_refusals(result["virtual_chassis"]))
                             except (VCNumberingError, RuleConfigurationError) as exc:
                                 # The import numbers the stack again for its final DeviceType.
                                 refusal = numbering_refusal_text(exc)
