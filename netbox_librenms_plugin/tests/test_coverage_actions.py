@@ -1664,9 +1664,12 @@ class TestDeviceValidationDetailsView:
         reason = RuleConfigurationError(rule, "replacement").public_message
         assert escape(reason) in re.sub(r"<[^>]*>", "", serial_row)
 
-    @pytest.mark.parametrize("holders", ["sole", "shared", "unavailable"])
+    @pytest.mark.parametrize("holders", ["sole", "shared", "unavailable", "broken-rule"])
     def test_the_legacy_id_conversion_offers_the_force_checkbox_unless_the_device_holds_the_serial_alone(self, holders):
         """The conversion POST needs the one holder of the serial; a second or an unreadable holder needs force."""
+        from dcim.models import Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
         from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
 
         existing = make_device("details-legacy-holder", serial="LEGACY-HOLDER-SN", librenms_cf=1)
@@ -1674,6 +1677,13 @@ class TestDeviceValidationDetailsView:
             make_device("details-legacy-twin", serial="LEGACY-HOLDER-SN")
         elif holders == "unavailable":
             _stray_chassis_member("details-legacy-stray", "LEGACY-HOLDER-SN")
+        elif holders == "broken-rule":
+            # Another maker's rule: the device's own comparison works, the lookup over every maker raises.
+            other = Manufacturer.objects.create(name="Details broken maker", slug="details-broken-maker")
+            rule = NormalizationRule.objects.create(
+                scope="serial", manufacturer=other, match_pattern=r"^OTHER-(.+)$", replacement=r"\1"
+            )
+            NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"KEY-\1")
         shared = holders != "sole"
         self.primary_server.device_info_response(
             device_id=1,
@@ -1695,7 +1705,7 @@ class TestDeviceValidationDetailsView:
         button = re.search(r"<button[^>]*migrate-btn[^>]*>", form).group(0)
         assert (" disabled" in button) is shared
         # One serial badge, and it names the state of the other holders.
-        badge = {"sole": "confirmed", "shared": "shared", "unavailable": "unavailable"}[holders]
+        badge = {"sole": "confirmed", "shared": "shared"}.get(holders, "unavailable")
         assert re.findall(r'data-serial-state="([a-z]+)"', content) == [badge]
 
     def test_a_serial_without_identity_shows_no_match_and_no_sync_action(self):

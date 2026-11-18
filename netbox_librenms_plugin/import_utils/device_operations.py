@@ -1012,6 +1012,8 @@ def validate_device_for_import(  # noqa: C901
                     result["serial_confirmed"] = True
                     # The legacy ID converts on the serial only for its one holder; the POST checks it again under lock.
                     if result["librenms_id_needs_migration"]:
+                        # Unreadable until the lookup returns: a broken serial rule raises out of it.
+                        result["legacy_id_serial_unavailable"] = True
                         holders = resolve_device(incoming_serial, rules=serial_rules)
                         holder = holders.object
                         result["legacy_id_serial_confirmed"] = holder is not None and holder.pk == existing_device.pk
