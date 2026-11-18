@@ -82,6 +82,9 @@ class TestSerialRuleLanguage:
             (r"^S/N\s+(?P<serial>.+)$", r"\g<missing>"),
             (SEEDED, r"\1 "),
             (SEEDED, ""),
+            (r"^S/N\s+(?P<serial>.+)$", r"X\g<serial>"),
+            (r"^S/N\s+(?P<serial>.+)$", r"\g<serial >"),
+            (SEEDED, "\\g<\u0661>"),
         ],
     )
     def test_clean_refuses_a_replacement_that_is_not_one_defined_group(self, pattern, replacement):
@@ -94,12 +97,20 @@ class TestSerialRuleLanguage:
 
     @pytest.mark.parametrize(
         ("pattern", "replacement"),
-        [(SEEDED, r"\1"), (SEEDED, r"\g<1>"), (r"^S/N\s+(?P<serial>.+)$", r"\g<serial>")],
+        [
+            (SEEDED, r"\1"),
+            (SEEDED, r"\g<1>"),
+            (r"^S/N\s+(?P<serial>.+)$", r"\g<serial>"),
+            ("^S/N\\s+(?P<a\u0301>.+)$", "\\g<a\u0301>"),
+        ],
     )
     def test_clean_accepts_one_group_reference(self, pattern, replacement):
         from netbox_librenms_plugin.models import NormalizationRule
 
         NormalizationRule(scope="serial", match_pattern=pattern, replacement=replacement).full_clean()
+        _rules_only((pattern, replacement, None))
+
+        assert naming_token("S/N ABC123", SerialRules.load().context(None)) == "ABC123"
 
     def test_another_scope_keeps_a_substitution_template(self):
         from netbox_librenms_plugin.models import NormalizationRule

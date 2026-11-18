@@ -103,7 +103,7 @@ def check_rule_replacement(rule, compiled, field):
 
 
 # A serial rule extracts one capture group, so its replacement names exactly one group.
-_SERIAL_GROUP_REFERENCE = re.compile(r"\\(?P<number>[1-9][0-9]?)|\\g<(?P<group>[0-9]+|[^\W\d]\w*)>")
+_SERIAL_GROUP_REFERENCE = re.compile(r"\\(?P<number>[1-9][0-9]?)|\\g<(?P<group>[^>]+)>")
 
 
 def serial_group_reference(compiled: re.Pattern, replacement: str):
@@ -125,7 +125,8 @@ def serial_group_reference(compiled: re.Pattern, replacement: str):
     if reference is None:
         return None
     number = reference["number"] or reference["group"]
-    if number.isdigit():
+    # A name is checked against the pattern's own groups, so every name that Python accepts works.
+    if number.isascii() and number.isdigit():
         return int(number) if 1 <= int(number) <= compiled.groups else None
     return number if number in compiled.groupindex else None
 
