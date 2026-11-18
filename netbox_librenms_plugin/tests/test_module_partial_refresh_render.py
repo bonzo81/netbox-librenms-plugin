@@ -127,6 +127,33 @@ class TestPartialModuleRefreshRendersEmpty:
             for key in written_keys:
                 cache.delete(key)
 
+    def test_a_module_serial_with_a_nul_renders_and_reads_back(self, librenms_server):
+        """PostgreSQL text cannot hold a NUL, so the serial has no identity and no lookup sends it to the database."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, sync_snapshot_key
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        device = self._device("partial-refresh-nul-serial")
+        written_keys = (
+            sync_snapshot_key(device, "inventory", SERVER_KEY),
+            SyncCacheConsistency(device).state_key(SyncTab.MODULES, SERVER_KEY),
+        )
+        inventory = [{**INVENTORY[0], "entPhysicalSerialNum": "ABC\x00DEF"}]
+        try:
+            response, context, _request = _refresh(device, librenms_server, inventory=(True, inventory))
+
+            assert response.status_code == 200
+            assert context.get("table") is not None
+            request = make_request("get", {"tab": "modules", "server_key": SERVER_KEY})
+            view = DeviceModuleTableView()
+            view.setup(request, pk=device.pk)
+            view.cache_only = True
+            assert view.get_context_data(request, device, server_key=SERVER_KEY)["table"] is not None
+        finally:
+            for key in written_keys:
+                cache.delete(key)
+
     @pytest.mark.parametrize(
         "failure,expected,empty_rows_notice",
         [
