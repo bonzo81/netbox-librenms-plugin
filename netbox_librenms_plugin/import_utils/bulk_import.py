@@ -264,6 +264,10 @@ def detect_collisions_for_device_ids(
             # guard can't silently drift from the producer's wording.
             unresolved_ids.append(device_id)
             continue
+        if any(SERIAL_UNAVAILABLE_ISSUE_MARKER in str(issue) for issue in validation.get("issues", [])):
+            # An Unavailable serial lookup gives no identity to collision-check, so the row stays unresolved.
+            unresolved_ids.append(device_id)
+            continue
         if device_id not in vm_id_set and get_virtual_chassis_data(api, device_id, serial_rules=serial_rules).get(
             "detection_failed"
         ):

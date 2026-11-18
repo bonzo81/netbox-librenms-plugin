@@ -617,6 +617,33 @@ def test_a_failed_module_bay_count_write_fails_the_chassis_create():
 
 
 @pytest.mark.django_db
+def test_the_collision_scan_leaves_a_row_with_an_unavailable_serial_unresolved():
+    """The scan cannot check a serial whose lookup is Unavailable, so the precheck must skip that row."""
+    from netbox_librenms_plugin.import_utils.bulk_import import classify_bulk_precheck, detect_collisions_for_device_ids
+    from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
+
+    _stray_chassis_member("scan-stray", "STRAY-SCAN-1")
+    rows = {
+        96401: {
+            "device_id": 96401,
+            "hostname": "scan-stray-row",
+            "sysName": "scan-stray-row",
+            "serial": "STRAY-SCAN-1",
+            "hardware": "Review hardware",
+            "location": "Review location",
+            "os": "review-os",
+        }
+    }
+
+    collisions, unresolved = detect_collisions_for_device_ids(
+        [96401], _LibreNMSBoundary(rows), libre_devices_cache=rows
+    )
+
+    assert (collisions, unresolved) == ([], [96401])
+    assert classify_bulk_precheck(collisions, unresolved, [96401], {}).importable_device_ids == []
+
+
+@pytest.mark.django_db
 def test_collision_precheck_skips_import_prerequisite_queries():
     """Collision matching must not query site, type, role, or platform import prerequisites."""
     from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
