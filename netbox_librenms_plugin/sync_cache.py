@@ -31,7 +31,7 @@ _MAX_ACKNOWLEDGED_REVISIONS = 200
 
 
 # Increase when cached inventory rows change meaning; a reader treats any other payload as a miss.
-MODULE_INVENTORY_CACHE_VERSION = 4
+MODULE_INVENTORY_CACHE_VERSION = 5
 
 
 def module_snapshot_serial_context(policy, sync_device):

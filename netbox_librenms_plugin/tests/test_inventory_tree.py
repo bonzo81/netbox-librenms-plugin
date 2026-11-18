@@ -690,3 +690,13 @@ class TestCacheVersion:
 
         assert cached_module_inventory({**current, "version": 3}) is None
         assert cached_module_inventory(current) == [{"entPhysicalIndex": 1}]
+
+    def test_a_version_4_snapshot_is_refused(self):
+        """A version 4 snapshot can hold an optic that the old merge put on a short serial, so the reader refuses it."""
+        from netbox_librenms_plugin.serial_identity import plain_context
+        from netbox_librenms_plugin.sync_cache import cached_module_inventory, module_inventory_cache_payload
+
+        current = module_inventory_cache_payload([{"entPhysicalIndex": 1}], 7, None, serial_context=plain_context())
+
+        assert cached_module_inventory({**current, "version": 4}) is None
+        assert cached_module_inventory(current) == [{"entPhysicalIndex": 1}]
