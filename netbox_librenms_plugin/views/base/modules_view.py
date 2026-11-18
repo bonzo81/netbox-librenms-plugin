@@ -1296,6 +1296,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             and snapshot_serial_context != module_snapshot_serial_context(policy, sync_device).fingerprint
         ):
             raise _StaleInventorySnapshot()
+        if policy.vc_members and (unavailable := policy.chassis_serial_context().unavailable):
+            # Without member serials a row has no owner, and the page device must not take it.
+            messages.warning(request, f"{unavailable} The Modules tab shows no rows and runs no module action.")
+            return {"table": None, "object": obj, "cache_expiry": None, "server_key": self._active_server_key}
         # The collector reads devices from the policy load, so the fingerprint covers what it read.
         self._inventory_policy = policy
         owner = policy.page_device if pin_to is None else policy.member(pin_to.pk)

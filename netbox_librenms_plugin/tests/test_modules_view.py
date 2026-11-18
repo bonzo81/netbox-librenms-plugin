@@ -7264,6 +7264,66 @@ def test_the_stored_form_badge_does_not_show_the_stored_serial(client, settings)
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("master_link_broken", [True, False])
+def test_a_chassis_page_without_member_serials_offers_no_module_action(client, settings, master_link_broken):
+    """Without member serials a row has no owner, so it must not fall back to the page device's bays."""
+    from dcim.models import Device, VirtualChassis
+    from django.core.cache import cache
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.tests.conftest import (
+        make_device,
+        make_module_bay,
+        make_module_type,
+        make_superuser,
+        make_virtual_chassis_members,
+    )
+    from netbox_librenms_plugin.tests.view_test_helpers import trusted_module_inventory_payload
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    configure_servers(
+        settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
+    )
+    chassis, (owner, page) = make_virtual_chassis_members(f"chassis-unavailable-{master_link_broken}")
+    make_module_bay(page, "Slot 1")
+    module_type = make_module_type("CHASSIS-UNAVAILABLE-CARD", manufacturer=page.device_type.manufacturer)
+    if master_link_broken:
+        # The master link names a device of another chassis, so no member serial can be compared.
+        master = make_device(f"chassis-unavailable-elsewhere-{master_link_broken}")
+        other = VirtualChassis.objects.create(name=f"chassis-unavailable-other-{master_link_broken}")
+        Device.objects.filter(pk=master.pk).update(virtual_chassis=other, vc_position=1)
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=master)
+        owner.refresh_from_db()
+    item = {
+        "entPhysicalIndex": 84,
+        "entPhysicalClass": "module",
+        "entPhysicalName": "Slot 1",
+        "entPhysicalContainedIn": 0,
+        "entPhysicalModelName": module_type.model,
+        "entPhysicalSerialNum": "CHASSIS-ROW-1",
+    }
+    payload = trusted_module_inventory_payload(owner, [item], librenms_id=9305)
+    cache.set(DeviceModuleTableView().get_cache_key(owner, "inventory", server_key="default"), payload, 300)
+    cache.set("librenms_device_info_default_9305", (True, {"device_id": 9305, "hostname": owner.name}), 300)
+    client.force_login(make_superuser(f"chassis-unavailable-user-{master_link_broken}"))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[page.pk]),
+        {"tab": "modules", "server_key": "default"},
+    )
+
+    assert response.status_code == 200
+    table = response.context["module_sync"]["table"]
+    if master_link_broken:
+        assert table is None
+        assert 'name="inventory_binding"' not in response.content.decode()
+    else:
+        # The control: with a usable master link the same row offers its install.
+        (row,) = list(table.data)
+        assert row["can_install"] is True
+
+
+@pytest.mark.django_db
 def test_vc_inventory_ignore_rules_follow_each_attributed_member(client, settings):
     """VC rows must use the attributed member's manufacturer rules and device serial."""
     from dcim.models import Manufacturer, VirtualChassis
