@@ -327,13 +327,16 @@ def serial_refusal(value, model) -> str:
     """
     Return why a plugin writer refuses to store the LibreNMS *value* in ``model.serial``, or "".
 
-    The value is not text or a number, or its text is longer than the field: the writer refuses
-    rather than store the text of a boolean or a list, or cut the text. Import validation reads
-    the same reason, so a row that the create refuses is never ready.
+    The value is not text or a number, its text holds a NUL, or its text is longer than the field:
+    the writer refuses rather than store the text of a boolean or a list, fail in the database, or
+    cut the text. Import validation reads the same reason, so a row that the create refuses is never ready.
     """
     if not is_serial_value(value):
         return MALFORMED_SERIAL
     text = display(value)
+    if "\x00" in text:
+        # PostgreSQL text cannot hold a NUL character.
+        return "The LibreNMS serial holds a NUL character, which the serial field cannot store."
     max_length = model._meta.get_field("serial").max_length
     if max_length is not None and len(text) > max_length:
         return f"The LibreNMS serial has {len(text)} characters; the field holds at most {max_length}."
