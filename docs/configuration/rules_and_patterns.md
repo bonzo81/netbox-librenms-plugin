@@ -167,7 +167,11 @@ An earlier plugin version stored the serial after the rules for Modules, and for
 python manage.py librenms_serial_report
 ```
 
-The plugin does not coordinate a serial rule change with serial writes that run at the same time. A rule change that commits during an import or a serial update can let two rows store serials that the new rules key to one value. Every later lookup then reports the two rows as a conflict and binds neither. The plugin also does not check a device type change or a serial change that is made outside the plugin, for example in the NetBox UI.
+The report lists a row whose serial rules do not work, such as a rule with the replacement `X\1`, with the rule error instead of a key, and then scans the other rows. Correct the rule, then run the report again.
+
+The report cannot find a row that a deleted rule produced. For example, a deleted rule turned `ID-ABC123` into `ABC123`: NetBox stores `ABC123`, LibreNMS reports `ID-ABC123`, and the current rules do not change `ABC123`. An empty report does not show that no such row exists. After you delete a serial rule, compare the serials in NetBox with LibreNMS.
+
+The plugin does not coordinate a serial rule change with serial writes that run at the same time. A rule change that commits during an import or a serial update can let two rows store serials that the new rules key to one value. A later lookup whose serial matches both rows then reports a conflict and binds neither. The plugin also does not check a device type change or a serial change that is made outside the plugin, for example in the NetBox UI.
 
 ### VLAN names
 
