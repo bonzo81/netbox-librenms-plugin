@@ -1,6 +1,7 @@
 """Coverage tests for views/imports/actions.py missing lines."""
 
 import json
+import re
 from contextlib import contextmanager
 from functools import partial
 from types import SimpleNamespace as Namespace
@@ -1624,7 +1625,30 @@ class TestDeviceValidationDetailsView:
         assert "mdi-check-circle" not in serial_row
         assert "sync_serial" not in serial_row
         assert "data-serial-unavailable" in serial_row
-        assert escape(UNAVAILABLE_MASTER_LINK) in serial_row
+        # The reason is visible text, not only a hover title.
+        assert escape(UNAVAILABLE_MASTER_LINK) in re.sub(r"<[^>]*>", "", serial_row)
+
+    def test_a_serial_without_identity_shows_no_match_and_no_sync_action(self):
+        existing = make_device("details-no-identity", serial="ABC123", librenms_cf={"default": {"id": 1}})
+        self.primary_server.device_info_response(
+            device_id=1,
+            hostname=existing.name,
+            hardware=existing.device_type.model,
+            os="ios",
+            serial="A-7",
+            ip="198.18.0.3",
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        assert response.status_code == 200
+        content = response.content.decode()
+        start = content.index('<td style="padding-left: 0.75rem;">Serial</td>')
+        serial_row = content[start : content.index("</tr>", start)]
+        assert "A-7" in serial_row
+        assert "mdi-check-circle" not in serial_row
+        assert "sync_serial" not in serial_row
 
     def test_a_viewer_who_cannot_view_platforms_sees_no_platform_name(self):
         from dcim.models import Platform
@@ -1696,6 +1720,17 @@ class TestBuildSyncInfo:
 
         result = build_sync_info(libre_device, existing, None)
         assert result["serial_synced"] is False
+
+    @pytest.mark.parametrize(
+        ("incoming", "synced", "same"),
+        [("SN-SAME-1", True, True), ("SN-OTHER-1", False, False), ("A-7", True, False), ("-", True, False)],
+    )
+    def test_only_a_confirmed_match_is_the_same_serial(self, incoming, synced, same):
+        existing = make_device(f"sync-info-same-{incoming}", serial="SN-SAME-1")
+
+        result = self._get_method()({"serial": incoming, "os": "-", "hardware": "-"}, existing, None)
+
+        assert (result["serial_synced"], result["serial_same"]) == (synced, same)
 
     def test_padded_incoming_serial_counts_as_synced(self):
         """A whitespace-padded LibreNMS serial equal to the stored trimmed value must not report drift."""

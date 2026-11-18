@@ -322,6 +322,7 @@
                       <span class="text-warning ms-1" title="{{ sync_info.serial_unavailable }}" data-serial-unavailable>
                         <i class="mdi mdi-help-circle-outline"></i>
                       </span>
+                      <span class="text-muted small">{{ sync_info.serial_unavailable }}</span>
                     {% elif sync_info and not sync_info.serial_synced %}
                       {% if validation.serial_action == 'conflict' %}
                         <span class="text-danger ms-1" title="Serial conflict — another device already has this serial">
@@ -341,7 +342,7 @@
                         </button>
                       </form>
                       {% endif %}
-                    {% elif sync_info and sync_info.serial_synced and sync_info.librenms_serial != '-' %}
+                    {% elif sync_info and sync_info.serial_same %}
                       <span class="text-success"><i class="mdi mdi-check-circle"></i></span>
                     {% endif %}
                   {% else %}
