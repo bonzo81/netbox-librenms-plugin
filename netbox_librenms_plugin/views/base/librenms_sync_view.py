@@ -868,7 +868,8 @@ class BaseLibreNMSSyncView(
         result = []
         # Like admits(), the stack holds when the rules of any member explain it; the dialog shows the LibreNMS text.
         for component in extract_vc_members(inventory, members_by_serial.contexts()):
-            if not members_by_serial.admits(component["serial"]):
+            # The dialog posts text, so the writer can no longer tell a boolean or a list from a serial.
+            if not is_serial_value(component["serial"]) or not members_by_serial.admits(component["serial"]):
                 continue
             # A serial that two members share assigns neither.
             holders = members_by_serial.find(component["serial"])

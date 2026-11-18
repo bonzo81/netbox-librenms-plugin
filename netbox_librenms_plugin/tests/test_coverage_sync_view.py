@@ -906,6 +906,18 @@ class TestVirtualChassisInventory:
 
         assert view._get_vc_inventory_serials(members[0]) == []
 
+    def test_the_dialog_offers_no_row_for_a_serial_that_is_not_text_or_a_number(self, librenms_server):
+        """The dialog posts text, so a JSON `true` would reach Sync All as the serial "True"."""
+        _vc, members = make_virtual_chassis_members("inventory-boolean", count=2)
+        inventory = _stack_inventory({"entPhysicalSerialNum": True}, {"entPhysicalSerialNum": "VC-REAL-SERIAL"})
+        _register_device(librenms_server, 6649, members[0].name, inventory=inventory)
+        view = _device_view()
+        view.librenms_id = 6649
+
+        result = view._get_vc_inventory_serials(members[0])
+
+        assert [item["librenms_serial"] for item in result] == ["VC-REAL-SERIAL"]
+
     def test_the_dialog_stores_the_raw_serial_and_shows_the_member_as_assigned(self, logged_in_client, librenms_server):
         """The dialog posts and shows the LibreNMS serial, and finds the member on the next render."""
         from netbox_librenms_plugin.models import NormalizationRule
