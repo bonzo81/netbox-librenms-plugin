@@ -7217,6 +7217,53 @@ def test_a_name_match_bound_to_another_port_is_not_shown(client, settings, ifnam
 
 
 @pytest.mark.django_db
+def test_the_stored_form_badge_does_not_show_the_stored_serial(client, settings):
+    """The bay loader is not scoped to the viewer's Module access, so the badge names no NetBox serial."""
+    from dcim.models import Device
+    from django.core.cache import cache
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import install_module, make_device_with_module_bays
+    from netbox_librenms_plugin.tests.view_test_helpers import make_user_with_perms, trusted_module_inventory_payload
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    configure_servers(
+        settings, {"default": {"librenms_url": "https://librenms.example.com", "api_token": "test-token"}}
+    )
+    device = make_device_with_module_bays("stored-form-hidden-module", ["Slot 1"])
+    maker = device.device_type.manufacturer
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1", manufacturer=maker
+    )
+    module = install_module(device, "Slot 1", "STORED-FORM-CARD", serial="S/N STORED-123", manufacturer=maker)
+    item = {
+        "entPhysicalIndex": 83,
+        "entPhysicalClass": "module",
+        "entPhysicalName": "Slot 1",
+        "entPhysicalContainedIn": 0,
+        "entPhysicalModelName": module.module_type.model,
+        "entPhysicalSerialNum": "STORED-123",
+    }
+    payload = trusted_module_inventory_payload(device, [item], librenms_id=9304)
+    cache.set(DeviceModuleTableView().get_cache_key(device, "inventory", server_key="default"), payload, 300)
+    cache.set("librenms_device_info_default_9304", (True, {"device_id": 9304, "hostname": device.name}), 300)
+    # The viewer may see the Device but not its Modules.
+    client.force_login(make_user_with_perms("stored-form-device-viewer", [("view", Device)]))
+
+    response = client.get(
+        reverse("plugins:netbox_librenms_plugin:device_librenms_sync", args=[device.pk]),
+        {"tab": "modules", "server_key": "default"},
+    )
+
+    assert response.status_code == 200
+    table = response.context["module_sync"]["table"]
+    (row,) = list(table.data)
+    assert row.get("serial_stored_form_differs") is True
+    assert "S/N STORED-123" not in table.as_html(response.wsgi_request)
+
+
+@pytest.mark.django_db
 def test_vc_inventory_ignore_rules_follow_each_attributed_member(client, settings):
     """VC rows must use the attributed member's manufacturer rules and device serial."""
     from dcim.models import Manufacturer, VirtualChassis
