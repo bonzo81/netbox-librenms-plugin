@@ -492,7 +492,7 @@ class TestReplaceModuleView:
         assert any("Removed REPLACE-CONFLICT-OWNER-TYPE" in text for text in message_texts(request, "info"))
 
     def test_interface_scope_is_checked_before_the_old_module_is_deleted(self):
-        from dcim.models import Device, Interface, InterfaceTemplate, Module, ModuleType
+        from dcim.models import Device, Interface, InterfaceTemplate, Module, ModuleBay, ModuleType
 
         from netbox_librenms_plugin.tests.view_test_helpers import grant
 
@@ -507,6 +507,7 @@ class TestReplaceModuleView:
             "replace-adoption-scope",
             [
                 ("view", Device),
+                ("view", ModuleBay),
                 ("view", ModuleType),
                 ("view", Module),
                 ("add", Module),

@@ -2590,7 +2590,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
 
     def test_module_replace_fails_closed_on_a_hidden_serial_conflict(self):
         """An existing serial outside delete scope must block replacement, not become a duplicate."""
-        from dcim.models import Device, Interface, Module, ModuleType
+        from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
         from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
@@ -2617,6 +2617,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             "scope-replace-conflict",
             [
                 (Device, "view", {"pk": device.pk}),
+                (ModuleBay, "view", {"pk": target.module_bay_id}),
                 (ModuleType, "view", {"pk": module_type.pk}),
                 (Module, "view", {"pk": target.pk}),
                 (Module, "add", None),
@@ -2735,7 +2736,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
 
     def test_module_preview_does_not_expose_a_hidden_serial_conflict(self):
         """The preview must not render the location or id of a conflict outside view scope."""
-        from dcim.models import Device, Module
+        from dcim.models import Device, Module, ModuleBay
         from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
@@ -2761,6 +2762,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             "scope-preview-conflict",
             [
                 (Device, "view", {"pk": device.pk}),
+                (ModuleBay, "view", {"pk": target.module_bay_id}),
                 (Module, "view", {"pk": target.pk}),
                 (Module, "add", None),
                 (Module, "change", {"pk": target.pk}),
@@ -2873,6 +2875,65 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         assert response.status_code == 200
         assert holder.module_bay.name not in html
         assert f'name="conflict_module_id" value="{holder.pk}"' not in html
+
+    def test_module_preview_does_not_name_an_installed_bay_outside_view_scope(self):
+        """The viewer loses the target bay after the table rendered, so the preview must not name that bay."""
+        from dcim.models import Device, Module, ModuleBay
+        from django.contrib.auth import get_user_model
+        from django.core.cache import cache
+        from django.http import Http404
+        from users.models import ObjectPermission
+
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
+        from netbox_librenms_plugin.tests.view_test_helpers import rendered_preview_query
+        from netbox_librenms_plugin.views.sync.modules import ModuleMismatchPreviewView
+
+        device = make_device("scope-preview-installed-bay")
+        module_type = make_module_type("MT-scope-preview-installed-bay")
+        target = Module.objects.create(
+            device=device,
+            module_bay=make_module_bay(device, "Unlisted Installed Bay"),
+            module_type=module_type,
+            serial="OLD-INSTALLED-BAY",
+        )
+        user = self._user(
+            "scope-preview-installed-bay",
+            [
+                (Device, "view", {"pk": device.pk}),
+                (ModuleBay, "view", {"pk": target.module_bay_id}),
+                (Module, "view", {"pk": target.pk}),
+                (Module, "add", None),
+                (Module, "change", {"pk": target.pk}),
+                (Module, "delete", {"pk": target.pk}),
+            ],
+        )
+        view = ModuleMismatchPreviewView()
+        server_key = configured_server_key()
+        view._librenms_api = LibreNMSAPI(server_key=server_key)
+        item = {
+            "entPhysicalIndex": 100,
+            "entPhysicalClass": "module",
+            "entPhysicalName": target.module_bay.name,
+            "entPhysicalModelName": module_type.model,
+            "entPhysicalSerialNum": "NEW-INSTALLED-BAY",
+        }
+        cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
+        cache.set(cache_key, trusted_module_inventory_payload(device, [item], server_key=server_key))
+        query = rendered_preview_query(device, 100, user=user, server_key=server_key)
+        # The ModuleBay grant loses the target bay after the table rendered.
+        ObjectPermission.objects.filter(name="scope-preview-installed-bay-view-1").update(constraints={"pk": 0})
+        user = get_user_model().objects.get(pk=user.pk)
+        request = self._request(user, query, method="get")
+        view.setup(request)
+        try:
+            html = view.get(request, pk=device.pk).content.decode()
+        except Http404:
+            html = ""
+        finally:
+            cache.delete(cache_key)
+
+        assert target.module_bay.name not in html
 
     def test_module_table_does_not_name_a_conflict_bay_outside_view_scope(self):
         """The table names the holder of a serial only when the viewer may see the holder's bay too."""
