@@ -1013,7 +1013,7 @@ def _create_member_devices(
             location=member_location,
             rack=member_rack,
             platform=master_device.platform,
-            serial=stored_form(serial, Device),
+            serial=stored_form(member.get("serial"), Device),
             virtual_chassis=vc,
             vc_position=position,
             comments=f"VC member (LibreNMS: {member.get('name', 'Unknown')})\nAuto-created from stack inventory",
