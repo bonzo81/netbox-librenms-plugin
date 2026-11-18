@@ -1177,9 +1177,10 @@ def _create_member_devices(
     """Create a device for each non-master member at its stack position; return how many were created."""
     member_rack = master_device.rack
     member_location = master_device.location or (member_rack.location if member_rack and member_rack.location else None)
-    # Text keys: the JSON numbers 123 and 123.0 are one dict key, but two serials.
+    # The stored text, before any member write: a value that is not text or a number refuses the stack, as
+    # it refuses a single device import. Text keys: the JSON numbers 123 and 123.0 are one dict key.
     members = [
-        (member, position, display(member.get("serial")))
+        (member, position, stored_form(member.get("serial"), Device))
         for member, position in zip(members_info, positions, strict=True)
         if member is not master_member
     ]
@@ -1202,7 +1203,7 @@ def _create_member_devices(
             location=member_location,
             rack=member_rack,
             platform=master_device.platform,
-            serial=stored_form(member.get("serial"), Device),
+            serial=serial,
             virtual_chassis=vc,
             vc_position=position,
             comments=f"VC member (LibreNMS: {member.get('name', 'Unknown')})\nAuto-created from stack inventory",
