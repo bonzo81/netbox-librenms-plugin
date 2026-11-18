@@ -802,7 +802,8 @@ class TestVirtualChassisInventory:
         from django.db import connection
         from django.test.utils import CaptureQueriesContext
 
-        _vc, members = make_virtual_chassis_members("inventory-preload", count=1)
+        # Two members of a masterless chassis: each member reads the context of its own type.
+        _vc, members = make_virtual_chassis_members("inventory-preload", count=2)
         inventory = _stack_inventory(
             *(
                 {
@@ -824,6 +825,13 @@ class TestVirtualChassisInventory:
         rule_queries = [q for q in captured.captured_queries if "normalizationrule" in q["sql"].lower()]
         # One read of the serial rules; per-call lookups would scale with the five components instead.
         assert len(rule_queries) == 1, f"expected one rule read for the loop, saw {len(rule_queries)} queries"
+        # The members come with their types and chassis, so no member reads its own row of either table.
+        per_member = [
+            q["sql"]
+            for q in captured.captured_queries
+            if re.search(r'FROM "dcim_(devicetype|virtualchassis)"', q["sql"])
+        ]
+        assert per_member == []
 
     def test_failed_inventory_lookup_returns_an_empty_list(self, librenms_server):
         _vc, members = make_virtual_chassis_members("inventory-failure", count=1)

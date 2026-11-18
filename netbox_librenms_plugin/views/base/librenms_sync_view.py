@@ -859,8 +859,8 @@ class BaseLibreNMSSyncView(
         if not success:
             return []
 
-        # Get all VC members
-        vc_members = obj.virtual_chassis.members.all()
+        # Each member reads its own serial context, so load the rows that decide it with the members.
+        vc_members = obj.virtual_chassis.members.select_related("device_type", "virtual_chassis__master__device_type")
 
         # The chassis master's serial rules admit the rows; the dialog shows the LibreNMS text.
         context = self._serial_context(obj)
