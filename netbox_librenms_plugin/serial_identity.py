@@ -407,6 +407,10 @@ class MemberSerials:
         """Return the members whose serial names the hardware of *value* under their own context."""
         return [member for groups in self._groups for member in groups.find(value)]
 
+    def admits(self, value) -> bool:
+        """Return whether *value* has an identity under the context of at least one member."""
+        return any(is_identity(value, groups.context) for groups in self._groups)
+
 
 def trimmed_serial(field_name: str = "serial") -> Func:
     """Return the trimmed serial expression that the trigram and exact indexes of migrations 0018 and 0030 store."""

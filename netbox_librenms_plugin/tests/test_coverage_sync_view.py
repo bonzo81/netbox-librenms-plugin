@@ -797,6 +797,35 @@ class TestVirtualChassisInventory:
         assert result[0]["serial"] == "TAG ABC-DIALOG"
         assert result[0]["assigned_member"] is None
 
+    def test_a_masterless_dialog_keeps_a_row_that_only_a_member_rule_admits(self, librenms_server):
+        """The page maker strips "TAG-" to a short value, but the member that stores "TAG-AB" keeps it whole."""
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        _vc, (page, member) = make_virtual_chassis_members("inventory-admits", count=2)
+        NormalizationRule.objects.create(
+            scope="serial", manufacturer=page.device_type.manufacturer, match_pattern=r"^TAG-(.+)$", replacement=r"\1"
+        )
+        other = Manufacturer.objects.create(name="Admitting member vendor", slug="admitting-member-vendor")
+        member.device_type = DeviceType.objects.create(
+            manufacturer=other, model="Admitting member", slug="admitting-member"
+        )
+        member.serial = "TAG-AB"
+        member.save()
+        _register_device(
+            librenms_server,
+            6651,
+            page.name,
+            inventory=_stack_inventory({"entPhysicalSerialNum": "TAG-AB"}, {"entPhysicalSerialNum": "VC-OTHER-3"}),
+        )
+        view = _device_view()
+        view.librenms_id = 6651
+
+        result = view._get_vc_inventory_serials(page)
+
+        assert [(item["serial"], item["assigned_member"]) for item in result][0] == ("TAG-AB", member)
+
     def test_the_serial_rules_load_once_for_the_whole_chassis_loop(self, librenms_server):
         """The view reads its serial rules once, so the chassis loop pays no query per chassis component."""
         from django.db import connection
