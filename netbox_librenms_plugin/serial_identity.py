@@ -860,15 +860,18 @@ def retype_conflict(device, device_type, *, rules: SerialRules, scope: RetypeSco
     current identities, when the new type gives one identity to two serials in *scope* that did
     not share it, and when another Device holds a Device serial of *scope* under the new type.
     The serial of *device* comes from the object, so a serial that the same write sets counts.
+    The manufacturer of *device_type* is read again under a lock on its row.
     """
-    from dcim.models import Device
+    from dcim.models import Device, DeviceType
 
     # The caller holds the device row, so its chassis stays; this lock holds the master link until the save.
     _share_locked_master_id(device.virtual_chassis_id, wait=False)
     if retype_scope(device) != scope:
         return True
     stored = Device.objects.select_related("device_type", "virtual_chassis__master__device_type").get(pk=device.pk)
-    old, new = rules.for_device(stored), rules.for_device_type(device_type)
+    # The save writes the type row's device count anyway; lock it now, so a manufacturer edit cannot pass the check.
+    locked_type = DeviceType.objects.select_for_update(no_key=True).get(pk=device_type.pk)
+    old, new = rules.for_device(stored), rules.for_device_type(locked_type)
     if old.unavailable:
         return True
     rows = [(pk, device.serial if pk == device.pk else serial) for pk, serial in scope.devices]

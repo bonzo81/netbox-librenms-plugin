@@ -397,6 +397,65 @@ def test_an_import_type_change_reads_the_device_serial_again_under_its_locks(lib
 
 
 @transactional_db_with_all_apps()
+@pytest.mark.parametrize("surface", ["import", "sync"])
+def test_a_type_change_reads_the_new_type_again_under_its_lock(librenms_server, surface):
+    """Another session moves the new type to a maker whose rule keys "XABC" to the holder's "ABC" after the match."""
+    from dcim.models import Device, DeviceType, Manufacturer
+    from django.test import Client
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
+    from netbox_librenms_plugin.tests.view_test_helpers import make_request
+    from netbox_librenms_plugin.tests.view_test_helpers import post as post_view
+    from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+    target = make_device(f"type-lock-{surface}-target", serial="XABC", librenms_cf={SERVER_KEY: 9815})
+    make_device(f"type-lock-{surface}-holder", serial="ABC")
+    plain_maker = Manufacturer.objects.create(name=f"Type lock plain {surface}", slug=f"type-lock-plain-{surface}")
+    strip_maker = Manufacturer.objects.create(name=f"Type lock strip {surface}", slug=f"type-lock-strip-{surface}")
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=strip_maker
+    )
+    new_type = DeviceType.objects.create(
+        manufacturer=plain_maker, model=f"Type lock {surface}", slug=f"type-lock-{surface}", part_number="TYPE-LOCK-HW"
+    )
+    librenms_server.device_info_response(
+        device_id=9815, hostname=target.name, serial="XABC", hardware=new_type.part_number
+    )
+    librenms_server.vc_inventory_callable(9815, [], {})
+    user = make_superuser(f"type-lock-{surface}-user")
+    changed = []
+
+    def change_before_the_first_lock(execute, sql, params, many, context):
+        if "pg_advisory_xact_lock" in sql and not changed:
+            changed.append(True)
+            with second_connection() as other:
+                commit_row_change(other, DeviceType, new_type.pk, {"manufacturer_id": strip_maker.pk})
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(change_before_the_first_lock):
+        if surface == "import":
+            view = DeviceConflictActionView()
+            view._librenms_api = LibreNMSAPI(server_key=SERVER_KEY)
+            data = {"server_key": SERVER_KEY, "action": "update_type", "existing_device_id": str(target.pk)}
+            post_view(
+                view, make_request("post", {**data, "force": "on"}, user=user, HTTP_HX_REQUEST="true"), device_id=9815
+            )
+        else:
+            client = Client()
+            client.force_login(user)
+            client.post(
+                reverse("plugins:netbox_librenms_plugin:update_device_type", kwargs={"pk": target.pk}),
+                {"server_key": SERVER_KEY},
+            )
+
+    assert changed
+    assert Device.objects.get(pk=target.pk).device_type_id != new_type.pk
+
+
+@transactional_db_with_all_apps()
 def test_a_member_serial_write_waits_for_a_chassis_master_type_change(librenms_server, monkeypatch):
     """
     The master's new type keys the member's new "XABC" to "ABC", which a third device stores.
