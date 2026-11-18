@@ -432,6 +432,9 @@ def test_the_trigram_migration_finds_its_indexes_in_the_schema_of_their_table():
     """A search path whose first schema exists makes current_schema() differ from the schema of the tables."""
     from django.db import connection
 
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT extnamespace::regnamespace::text FROM pg_extension WHERE extname = 'pg_trgm'")
+        (extension_schema,) = cursor.fetchone()
     schema = _probe_schema_name()
     try:
         with connection.cursor() as cursor:
@@ -444,8 +447,8 @@ def test_the_trigram_migration_finds_its_indexes_in_the_schema_of_their_table():
             cursor.execute(f"DROP SCHEMA IF EXISTS {schema}")
 
     assert _trigram_index_schemas() == [
-        ("nblp_dcim_device_serial_trgm_idx", "public", "public", True),
-        ("nblp_dcim_module_serial_trgm_idx", "public", "public", True),
+        ("nblp_dcim_device_serial_trgm_idx", "public", extension_schema, True),
+        ("nblp_dcim_module_serial_trgm_idx", "public", extension_schema, True),
     ]
 
 
