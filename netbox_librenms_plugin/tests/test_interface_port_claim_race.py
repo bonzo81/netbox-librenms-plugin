@@ -194,6 +194,21 @@ def _race(first, second, while_first_paused):
     return first_result, second_result, observed
 
 
+def _second_waits_on_first(_second_future, pids):
+    """Return True when PostgreSQL reports that the second writer's backend waits on the first writer's backend."""
+    from django.db import connection
+
+    deadline = time.monotonic() + PAUSE_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if "second" in pids:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT pg_blocking_pids(%s)", [pids["second"]])
+                if pids["first"] in cursor.fetchone()[0]:
+                    return True
+        time.sleep(0.05)
+    return False
+
+
 def _second_waits_on_the_device_row(device):
     """Return an observer that is True when the second writer waits on the first writer for the row of *device*."""
     from dcim.models import Device
