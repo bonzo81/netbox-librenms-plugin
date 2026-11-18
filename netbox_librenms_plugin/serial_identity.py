@@ -182,6 +182,9 @@ class SerialContext:
         if not is_serial_value(value):
             return ""
         text = _text(value)
+        # PostgreSQL text cannot hold a NUL, so such a serial has no identity and no lookup sends it.
+        if "\x00" in text:
+            return ""
         if text in self._keys:
             return self._keys[text]
         key = self._extract(text)
