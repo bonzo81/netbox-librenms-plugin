@@ -2666,7 +2666,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
 
     def test_module_replace_keeps_a_previewed_serial_holder_outside_delete_scope(self):
         """The preview shows the holder, so the grant is fresh; the delete scope of the holder must refuse."""
-        from dcim.models import Device, Interface, Module, ModuleType
+        from dcim.models import Device, Interface, Module, ModuleBay, ModuleType
         from django.core.cache import cache
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
@@ -2690,10 +2690,12 @@ class TestGatedViewsRefuseOutOfScopeObjects:
             module_type=module_type,
             serial="INCOMING-KEPT",
         )
+        # The viewer sees the holder, its Device and its bay, so the preview signs the Replace with the holder.
         user = self._user(
             "scope-replace-kept",
             [
-                (Device, "view", {"pk": device.pk}),
+                (Device, "view", {"pk__in": [device.pk, other_device.pk]}),
+                (ModuleBay, "view", {"pk__in": [target.module_bay_id, holder.module_bay_id]}),
                 (ModuleType, "view", {"pk": module_type.pk}),
                 (Module, "view", {"pk__in": [target.pk, holder.pk]}),
                 (Module, "add", None),
@@ -2717,6 +2719,7 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
         cache.set(cache_key, trusted_module_inventory_payload(device, [inventory_item], server_key=server_key))
         _action, fields = rendered_modal_form(device, 100, "replace-module", user=user, server_key=server_key)
+        assert fields["conflict_module_id"] == str(holder.pk)
         request = self._request(user, fields)
         view.setup(request)
         try:
