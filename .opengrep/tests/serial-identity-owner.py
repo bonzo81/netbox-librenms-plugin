@@ -25,10 +25,10 @@ def ancestor_walk(current, item_serial):
     return ancestor_serial == item_serial
 
 
-def lowered_inventory_field(item, serial):
+def lowered_inventory_field(item, incoming):
     """modules_view.py: an inventory field, lowercased, compared with a serial."""
     # ruleid: serial-identity-through-owner
-    return item.get("entPhysicalSerialNum").strip().lower() == serial
+    return item.get("entPhysicalSerialNum").strip().lower() == incoming
 
 
 def grouped_rows(table_data):
@@ -51,6 +51,17 @@ def stack_fingerprint(vc_data):
     """bulk_import.py: a stack keyed by its sorted member serials."""
     # ruleid: serial-identity-through-owner
     return sorted(serial for member in vc_data["members"] if (serial := normalize_stack_serial(member["serial"])))
+
+
+def sorted_serial_list(member_serials):
+    """A stack fingerprint built from a list of raw serials."""
+    # ruleid: serial-identity-through-owner
+    return sorted(member_serials)
+
+
+def sorted_names(device_names):
+    # ok: serial-identity-through-owner
+    return sorted(device_names)
 
 
 def orm_lookups(serial, serials):

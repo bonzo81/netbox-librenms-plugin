@@ -4,6 +4,12 @@ class UpdateModuleSerialView(View):
         assignment_lock([incoming], model=Module, rules=rules)
         # ok: module-writer-claims-released-identities
         assignment_lock([observed_serial, incoming], model=Module, rules=rules)
+        # ruleid: module-writer-claims-released-identities
+        lock_module_write(observe_module_write(device_ids=[device_id]), incoming=[incoming], rules=rules)
+        # ok: module-writer-claims-released-identities
+        lock_module_write(
+            observe_module_write(device_ids=[device_id], module_ids=[module_id]), incoming=[incoming], rules=rules
+        )
 
 
 class ReplaceModuleView(View):
@@ -12,6 +18,8 @@ class ReplaceModuleView(View):
         assignment_lock([incoming], model=Module, rules=rules)
         # ok: module-writer-claims-released-identities
         assignment_lock([incoming, *removed], model=Module, rules=rules)
+        # ok: module-writer-claims-released-identities
+        lock_module_write(observe_module_write(device_ids=[device_id], subtree_roots=removals), incoming=[incoming])
 
 
 class MoveModuleView(View):
@@ -26,6 +34,8 @@ class InstallModuleView(View):
     def post(self):
         # ok: module-writer-claims-released-identities
         assignment_lock([incoming], model=Module, rules=rules)
+        # ok: module-writer-claims-released-identities
+        lock_module_write(observe_module_write(device_ids=[device_id]), incoming=[incoming], rules=rules)
 
 
 class ApplyModuleInterfaceTypesView(View):

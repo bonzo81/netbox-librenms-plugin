@@ -38,6 +38,8 @@ rules:
       - pattern: resolve_device_by_host_ip(...)
       - pattern: resolve_device(...)
       - pattern: resolve_devices(...)
+      - pattern: resolve_device_write(...)
+      - pattern: resolve_devices_write(...)
       - pattern: find_mapping(...)
       - pattern: get_librenms_sync_device(...)
       # a match an unrestricted search already bound into the validation dict
@@ -1560,6 +1562,11 @@ rules:
           - metavariable-regex:
               metavariable: $E
               regex: '^(?!["'']).*?(["''](serial|entPhysicalSerialNum)["'']|(^|\W)\w*serial(\.(strip|lower|upper|casefold)\(\))*$)'
+      - patterns:
+          - pattern: sorted($L, ...)
+          - metavariable-regex:
+              metavariable: $L
+              regex: '^(?!["''])(\w+\.)*\w*serials?$'
       # A Device or Module lookup on the serial column.
       - patterns:
           - pattern-either:
@@ -1955,8 +1962,12 @@ rules:
           - pattern-inside: |
               while $C:
                 ...
-      - pattern: validate_device_for_import(...)
-      - pattern-not: validate_device_for_import(..., serial_rules=$RULES, ...)
+      - pattern-either:
+          - patterns:
+              - pattern: validate_device_for_import(...)
+              - pattern-not: validate_device_for_import(..., serial_rules=$RULES, ...)
+          # None makes the validator load a fresh SerialRules on each call.
+          - pattern: validate_device_for_import(..., serial_rules=None, ...)
 
   - id: module-writer-claims-released-identities
     languages: [python]
@@ -1983,6 +1994,21 @@ rules:
               class MoveModuleView(...):
                   ...
           - pattern: assignment_lock([$SERIAL for $PAIR in moving], model=Module, ...)
+      # The production helper: an observation without the changed modules claims only the incoming serial.
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  class UpdateModuleSerialView(...):
+                      ...
+              - pattern-inside: |
+                  class ReplaceModuleView(...):
+                      ...
+              - pattern-inside: |
+                  class MoveModuleView(...):
+                      ...
+          - pattern: lock_module_write(observe_module_write(...), ...)
+          - pattern-not: lock_module_write(observe_module_write(..., module_ids=$MODULES, ...), ...)
+          - pattern-not: lock_module_write(observe_module_write(..., subtree_roots=$ROOTS, ...), ...)
 
   - id: module-writer-keeps-observed-serials
     languages: [python]

@@ -228,6 +228,28 @@ def probe_flag12(result, serial):
     result["warnings"].append(f"owner {owner.name}")
 
 
+# --- [flag] the write-side lookup names the holder in a warning
+def probe_flag12_write(result, serial, context, rules):
+    other = resolve_device_write(serial, context, rules=rules)
+    # ruleid: import-disclosure
+    result["warnings"].append(f"serial held by {other.object.name}")
+
+
+# --- [flag] the batch write-side lookup names the holder in an issue
+def probe_flag12_writes(result, serials, context, rules):
+    found = resolve_devices_write(serials, context, rules=rules)
+    # ruleid: import-disclosure
+    result["issues"].append(f"serial held by {found[serials[0]].object.name}")
+
+
+# --- [exact] the write-side match stays structured for the disclosure gate
+def probe_exact12_write(result, serial, context, rules):
+    other = resolve_device_write(serial, context, rules=rules)
+    result["serial_conflict"] = {"pk": other.object.pk, "serial": serial}
+    # ok: import-disclosure
+    result["warnings"].append("The serial belongs to another device.")
+
+
 # --- [flag] read straight out of the validation dict
 def probe_flag13(result):
     # ruleid: import-disclosure

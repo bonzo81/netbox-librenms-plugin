@@ -14,6 +14,12 @@ def shared_batch(rows, api):
         validate_device_for_import(row, api=api, serial_rules=serial_rules)
 
 
+def none_batch(rows, api):
+    for row in rows:
+        # ruleid: batch-validation-shares-serial-rules
+        validate_device_for_import(row, api=api, serial_rules=None)
+
+
 def one_device(row, api):
     # ok: batch-validation-shares-serial-rules
     validate_device_for_import(row, api=api)
