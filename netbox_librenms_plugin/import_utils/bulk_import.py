@@ -912,15 +912,20 @@ def _refresh_existing_device(  # noqa: C901
                     # independent of match_type) on a row that is actually host/OOB-linked. Drop
                     # them; a row already cached as a link type keeps its link-derived fields.
                     _clear_existing_match_derived_fields(validation)
-                if (
-                    libre_device
-                    and validation.get("existing_match_type") == "serial"
-                    and not is_sole_holder(
-                        refreshed, libre_device.get("serial"), rules=serial_rules or SerialRules.load()
-                    )
-                ):
-                    # The cached serial match no longer holds under the current rows: drop it like a vanished link.
-                    validation["existing_match_type"] = None
+                if libre_device and validation.get("existing_match_type") == "serial":
+                    try:
+                        sole_holder = is_sole_holder(
+                            refreshed, libre_device.get("serial"), rules=serial_rules or SerialRules.load()
+                        )
+                    except Exception as exc:
+                        # A failed check proves nothing about the holder: keep the match, drop its actions, block.
+                        logger.error("Serial holder re-check failed for device pk=%s: %s", refreshed.pk, exc)
+                        _clear_existing_match_derived_fields(validation)
+                        _block_failed_recheck(validation)
+                        return
+                    if not sole_holder:
+                        # The cached serial match no longer holds under the current rows: drop it like a vanished link.
+                        validation["existing_match_type"] = None
                 if (
                     prior_match in ("librenms_id", "librenms_oob", "serial")
                     and validation.get("existing_match_type") is None
@@ -1336,14 +1341,19 @@ def _refresh_existing_device(  # noqa: C901
         # previously-cached "importable" row importable — that would let a duplicate import
         # slip through exactly when the duplicate check couldn't run. Matches the fail-closed
         # behaviour of every other failure branch in this function.
-        validation["can_import"] = False
-        validation["is_ready"] = False
-        message = "Duplicate re-check failed (transient lookup error); import blocked. Refresh to retry."
-        # Append to issues (not just a warning) — a later recalculate_validation_status()
-        # recomputes can_import from the issues list, so anything weaker would be silently
-        # re-enabled. Dedup so repeated refreshes don't stack the same message.
-        if message not in validation.setdefault("issues", []):
-            validation["issues"].append(message)
+        _block_failed_recheck(validation)
+
+
+def _block_failed_recheck(validation: dict) -> None:
+    """Block a row whose refresh re-check did not run; a later refresh retries it."""
+    validation["can_import"] = False
+    validation["is_ready"] = False
+    message = "Duplicate re-check failed (transient lookup error); import blocked. Refresh to retry."
+    # Append to issues (not just a warning) — a later recalculate_validation_status()
+    # recomputes can_import from the issues list, so anything weaker would be silently
+    # re-enabled. Dedup so repeated refreshes don't stack the same message.
+    if message not in validation.setdefault("issues", []):
+        validation["issues"].append(message)
 
 
 def _empty_return(return_cache_status: bool):

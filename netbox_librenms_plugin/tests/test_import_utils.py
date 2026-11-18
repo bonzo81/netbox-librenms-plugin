@@ -2181,6 +2181,36 @@ class TestRefreshExistingDeviceCrossModelIdWins:
         assert validation["existing_match_type"] == "ambiguous_hostname_or_serial"
         assert any("Multiple NetBox devices match" in i for i in validation.get("issues", []))
 
+    def test_a_failed_serial_holder_check_keeps_the_match_and_drops_its_actions(self):
+        """A database error in the holder check proves nothing: the row keeps its match, loses its actions, and blocks."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import failing_statement
+
+        holder = make_device("holder-check-failure", serial="HOLDER-CHECK-1")
+        validation = {
+            "existing_device": holder,
+            "existing_match_type": "serial",
+            "serial_action": "update_serial",
+            "import_as_vm": False,
+            "is_ready": False,
+            "can_import": False,
+            "issues": [],
+            "warnings": [],
+        }
+        libre_device = {"device_id": 558, "hostname": holder.name, "sysName": holder.name, "serial": "HOLDER-CHECK-1"}
+
+        # The serial lookup is the one statement that reads the trimmed serial.
+        with failing_statement(lambda sql, params: "BTRIM(" in sql, "57014") as failed:
+            _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
+
+        assert failed, "precondition: the holder check ran"
+        assert (validation["existing_device"], validation["existing_match_type"]) == (holder, "serial")
+        assert validation["serial_action"] is None
+        assert (validation["can_import"], validation["is_ready"]) == (False, False)
+        # A blocking issue keeps the row blocked through a later recalculation.
+        assert len(validation["issues"]) == 1
+
     def test_an_unavailable_serial_names_the_reason_and_clears_when_the_link_is_repaired(self):
         """An Unavailable lookup is no duplicate: the row names the reason, stays blocked, and recovers after repair."""
         from dcim.models import VirtualChassis
