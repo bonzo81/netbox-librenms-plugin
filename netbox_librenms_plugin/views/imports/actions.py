@@ -67,8 +67,10 @@ from netbox_librenms_plugin.import_utils.device_operations import (
 )
 from netbox_librenms_plugin.import_utils.disclosure import serial_conflict_text
 from netbox_librenms_plugin.import_utils.virtual_chassis import vc_master_view
+from netbox_librenms_plugin.models import RuleConfigurationError
 from netbox_librenms_plugin.serial_identity import (
     Comparison,
+    SerialContext,
     SerialRules,
     assignment_lock,
     compare,
@@ -2064,7 +2066,11 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         serial_same = False
         serial_unavailable = ""
         if existing_device._meta.model_name == "device":
-            serial_context = SerialRules.load().for_device(existing_device)
+            try:
+                serial_context = SerialRules.load().for_device(existing_device)
+            except RuleConfigurationError as exc:
+                # Only the serial row stops; the reason names the rule only to a viewer of the rule.
+                serial_context = SerialContext(None, (), unavailable=exc.shown_to(actor).public_message)
             if serial_context.unavailable and display(libre_device.get("serial")):
                 # The serials cannot be compared: show the reason, not a match or a sync action.
                 serial_synced = False

@@ -1628,6 +1628,42 @@ class TestDeviceValidationDetailsView:
         # The reason is visible text, not only a hover title.
         assert escape(UNAVAILABLE_MASTER_LINK) in re.sub(r"<[^>]*>", "", serial_row)
 
+    def test_a_broken_serial_rule_of_the_device_shows_the_reason_and_keeps_the_dialog(self):
+        from django.utils.html import escape
+
+        from netbox_librenms_plugin.models import NormalizationRule, RuleConfigurationError
+
+        existing = make_device("details-broken-rule", serial="RULE-NETBOX", librenms_cf={"default": {"id": 1}})
+        rule = NormalizationRule.objects.create(
+            scope="serial",
+            match_pattern=r"^S/N (.+)$",
+            replacement=r"\1",
+            manufacturer=existing.device_type.manufacturer,
+        )
+        # A legacy row: clean() refuses this replacement today.
+        NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"X\1")
+        rule.refresh_from_db()
+        self.primary_server.device_info_response(
+            device_id=1,
+            hostname=existing.name,
+            hardware=existing.device_type.model,
+            os="ios",
+            serial="RULE-LIBRENMS",
+            ip="198.18.0.4",
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        assert response.status_code == 200
+        content = response.content.decode()
+        start = content.index('<td style="padding-left: 0.75rem;">Serial</td>')
+        serial_row = content[start : content.index("</tr>", start)]
+        assert "mdi-check-circle" not in serial_row
+        assert "sync_serial" not in serial_row
+        reason = RuleConfigurationError(rule, "replacement").public_message
+        assert escape(reason) in re.sub(r"<[^>]*>", "", serial_row)
+
     def test_a_serial_without_identity_shows_no_match_and_no_sync_action(self):
         existing = make_device("details-no-identity", serial="ABC123", librenms_cf={"default": {"id": 1}})
         self.primary_server.device_info_response(
