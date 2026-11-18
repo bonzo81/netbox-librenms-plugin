@@ -38,7 +38,8 @@ def module_snapshot_serial_context(policy, sync_device):
     """
     Return the serial context of the module snapshot that *sync_device* owns; every member that shares it reads it.
 
-    The owner comes from the Devices that *policy* loaded, so the stamp and the signed policy read one observation.
+    The owner and the master come from the Devices that *policy* loaded, so the stamp and the signed policy read
+    one observation. A chassis without a master gives the owner's own context, as ``SerialRules.for_device`` does.
 
     Raises:
         Device.DoesNotExist: *sync_device* is not a device of *policy*.
@@ -49,7 +50,9 @@ def module_snapshot_serial_context(policy, sync_device):
         from dcim.models import Device
 
         raise Device.DoesNotExist(f"Device {sync_device.pk} is not a device of the Modules policy")
-    return policy.serial_identity_rules.for_device(owner)
+    if policy.master_id is None:
+        return policy.serial_identity_rules.for_module_target(owner)
+    return policy.chassis_serial_context()
 
 
 def module_inventory_cache_payload(inventory, librenms_id, oob_librenms_id, *, serial_context) -> dict:

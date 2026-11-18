@@ -378,6 +378,57 @@ class TestSerialRuleEditStalesTheSnapshot:
         assert payload["serial_context"] == SerialRules.load().for_device(device).fingerprint
         assert [item["entPhysicalIndex"] for item in payload["inventory"]] == [1], "the merge used the old type"
 
+    def test_a_master_type_change_after_the_policy_load_does_not_reach_the_stamp(self, librenms_server, monkeypatch):
+        """A non-master owner's snapshot uses the master that the policy loaded, not one read after the load."""
+        from dcim.models import Device, DeviceType, Manufacturer, VirtualChassis
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, sync_snapshot_key
+        from netbox_librenms_plugin.tests.conftest import make_module_bay, make_virtual_chassis_members
+        from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
+        from netbox_librenms_plugin.views.base import modules_view
+
+        chassis, (master, owner) = make_virtual_chassis_members("master-retype-after-load")
+        VirtualChassis.objects.filter(pk=chassis.pk).update(master=master)
+        seed_stored_mapping(owner, {SERVER_KEY: 42}, save=True)
+        for member in (master, owner):
+            make_module_bay(member, "Bay 1")
+        NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
+        new_maker = Manufacturer.objects.create(name="Master retype maker", slug="master-retype-maker")
+        new_type = DeviceType.objects.create(
+            manufacturer=new_maker, model="Master retype model", slug="master-retype-model"
+        )
+        # Only the new master maker's chain makes "S/N PARTIAL-1" the module's "PARTIAL-1".
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1", manufacturer=new_maker
+        )
+        observed = SerialRules.load().for_device(Device.objects.get(pk=owner.pk)).fingerprint
+        transceivers = [{"entity_physical_index": 20, "serial": "S/N PARTIAL-1", "model": "SFP-RULE", "type": "sfp"}]
+        original = modules_view.load_inventory_policy
+        loads = []
+
+        def retype_the_master_after_the_first_load(page_device_id):
+            policy = original(page_device_id)
+            if not loads:
+                # The policy has read the master; its type changes before the merge reads a context.
+                Device.objects.filter(pk=master.pk).update(device_type=new_type)
+            loads.append(policy)
+            return policy
+
+        monkeypatch.setattr(modules_view, "load_inventory_policy", retype_the_master_after_the_first_load)
+        snapshot_key = sync_snapshot_key(owner, "inventory", SERVER_KEY)
+        try:
+            _refresh(owner, librenms_server, transceivers=(True, transceivers))
+            payload = cache.get(snapshot_key)
+        finally:
+            cache.delete(snapshot_key)
+            cache.delete(SyncCacheConsistency(owner).state_key(SyncTab.MODULES, SERVER_KEY))
+
+        assert loads, "precondition: the refresh loaded a policy"
+        assert payload["serial_context"] == observed == loads[0].chassis_serial_context().fingerprint
+        assert [item["entPhysicalIndex"] for item in payload["inventory"]] == [1, 20], "the merge read the new master"
+
 
 @pytest.mark.django_db
 class TestASnapshotReaderKeepsAFreshSnapshot:
