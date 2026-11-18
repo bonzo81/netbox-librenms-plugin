@@ -10,6 +10,7 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
 from netbox_librenms_plugin.middleware import TRY_AGAIN_MESSAGE
+from netbox_librenms_plugin.serial_identity import RETYPE_HELD
 from netbox_librenms_plugin.tests.conftest import (
     make_device,
     make_superuser,
@@ -1267,7 +1268,7 @@ class TestUpdateDeviceTypeSerialIdentity:
         response = _post(logged_in_client, "update_device_type", device, {})
 
         assert Device.objects.get(pk=device.pk).device_type_id == old_type_id
-        assert _messages(response, "error")
+        assert RETYPE_HELD in _messages(response, "error")
         assert not any(holder.name in text for text in _messages(response, "error"))
 
     @pytest.mark.parametrize("shape", ["chassis-members", "device-modules"])
@@ -1291,17 +1292,20 @@ class TestUpdateDeviceTypeSerialIdentity:
         response = _post(logged_in_client, "update_device_type", device, {})
 
         assert Device.objects.get(pk=device.pk).device_type_id == old_type_id
-        assert _messages(response, "error")
+        assert RETYPE_HELD in _messages(response, "error")
 
-    def test_a_type_change_refuses_a_new_holder_behind_an_existing_duplicate(self, logged_in_client, librenms_server):
-        """A and B already share "XABC"; under the new rule A also takes C's "ABC"."""
+    @pytest.mark.parametrize("holder_serial", ["XABC", "ABC"], ids=["existing-holder", "new-holder"])
+    def test_a_type_change_refuses_each_holder_of_the_new_identity(
+        self, logged_in_client, librenms_server, holder_serial
+    ):
+        """Under the new rule A's "XABC" keys to "ABC": a holder of "XABC" already shares it, one of "ABC" then does."""
         from dcim.models import Device, DeviceType, Manufacturer
 
         from netbox_librenms_plugin.models import NormalizationRule
 
         device = make_device("retype-masked-a", serial="XABC", librenms_cf={SERVER_KEY: 6574})
-        make_device("retype-masked-b", serial="XABC")
-        make_device("retype-masked-c", serial="ABC")
+        # The only other Device, so the refusal needs this holder.
+        make_device("retype-masked-holder", serial=holder_serial)
         new_maker = Manufacturer.objects.create(name="Retype masked maker", slug="retype-masked-maker")
         NormalizationRule.objects.create(
             scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=new_maker
@@ -1312,9 +1316,10 @@ class TestUpdateDeviceTypeSerialIdentity:
         old_type_id = device.device_type_id
         librenms_server.device_info_response(device_id=6574, hostname=device.name, hardware=new_type.part_number)
 
-        _post(logged_in_client, "update_device_type", device, {})
+        response = _post(logged_in_client, "update_device_type", device, {})
 
         assert Device.objects.get(pk=device.pk).device_type_id == old_type_id
+        assert RETYPE_HELD in _messages(response, "error")
 
     def test_a_type_change_without_a_new_shared_serial_is_saved(self, logged_in_client, librenms_server):
         """Two module serials that the old and the new rules both keep apart do not block the change."""
