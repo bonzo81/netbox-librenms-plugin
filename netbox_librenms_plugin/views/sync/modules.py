@@ -2838,9 +2838,10 @@ class ModuleMismatchPreviewView(
         serial_conflict_hidden = False
         elsewhere = resolve_module(incoming, rules=serial_rules, exclude_pks=[installed_module.pk])
         if elsewhere.kind is ResolutionKind.UNIQUE:
+            # The modal names the Device and the bay, so the viewer must see the Device too.
             serial_conflict = (
                 self.restricted_queryset(Module)
-                .filter(pk=elsewhere.object.pk)
+                .filter(pk=elsewhere.object.pk, device__in=self.restricted_queryset(Device))
                 .select_related("module_type", "module_bay", "device")
                 .first()
             )
@@ -3101,6 +3102,13 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                     )
                     if conflict_module is None:
                         raise _SerialConflictUnavailable(serial)
+                    # The grant signed the holder's place from an unlocked read; a bay edit since then refuses.
+                    held = elsewhere.object
+                    if (conflict_module.device_id, conflict_module.module_bay_id) != (
+                        held.device_id,
+                        held.module_bay_id,
+                    ):
+                        raise _ModuleActionRefused("The conflicting module changed. Refresh Modules and try again.")
 
                 _require_unchanged_module_subtrees(removals)
 
@@ -4022,7 +4030,11 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
         item = granted.row(grant.ent_index)
         ancestry = InstallBranchView._ancestry_maps(granted, {member.pk})[member.pk]
         has_bay = self._matches_a_bay(member, item, granted.index_map, granted.index_map.keys() - ancestry.keys())
-        identity = DeviceIdentity.of(member, granted.policy.chassis_serial_context())
+        identity = DeviceIdentity.of(
+            member,
+            granted.policy.chassis_serial_context(),
+            granted.policy.serial_identity_rules.for_module_target(member),
+        )
         candidate = built_in_candidate(item, granted.index_map, identity, has_bay=has_bay)
         if candidate is None:
             raise GrantRefused(GrantRefusal.STALE)

@@ -35,6 +35,7 @@ from netbox_librenms_plugin.serial_identity import (
     compare,
     display,
     is_identity,
+    is_serial_value,
     plain_context,
     resolve_modules,
     stored_form_differs,
@@ -153,9 +154,11 @@ def _ifindex_entity_is_the_optic(item: dict, transceiver: dict, context: SerialC
     """Return whether an entity matched only by port ifIndex has the optic's serial, or neither model nor serial."""
     if _never_an_optic(item):
         return False
-    if is_identity(item.get("entPhysicalSerialNum"), context):
-        return compare(item.get("entPhysicalSerialNum"), transceiver.get("serial"), context) is Comparison.SAME
-    return not _clean_librenms_value(item.get("entPhysicalModelName"))
+    serial = item.get("entPhysicalSerialNum")
+    if is_identity(serial, context):
+        return compare(serial, transceiver.get("serial"), context) is Comparison.SAME
+    # A reported serial without an identity still names a part, so only a blank entity is the optic's holder.
+    return not display(serial) and not _clean_librenms_value(item.get("entPhysicalModelName"))
 
 
 # Physical classes whose entities only hold hardware when they report no serial.
@@ -241,6 +244,11 @@ def _own_ignore_action(item, index_map, ignore_contexts, default_rules, default_
     return _check_ignore_rules(item, parent, rules, index_map, identity)
 
 
+def _inventory_serial_well_formed(item: dict) -> bool:
+    """Return whether an inventory item's serial is absent, text, or a JSON number."""
+    return is_serial_value(item.get("entPhysicalSerialNum"))
+
+
 def _inventory_item_offsettable(item: dict) -> bool:
     """
     Return True if an inventory item's index fields support offset arithmetic.
@@ -305,21 +313,24 @@ class DeviceIdentity:
     type_models: frozenset = frozenset()
     # The serial context that compares the stored serial with an inventory serial.
     serial_context: SerialContext = field(kw_only=True)
+    # The serial context of a Module on the device, which compares two inventory serials.
+    module_serial_context: SerialContext = field(kw_only=True)
 
     @classmethod
-    def of(cls, device, serial_context) -> "DeviceIdentity":
-        """Return the serial of *device* and its *serial_context*, and the model and part number of its device type."""
+    def of(cls, device, serial_context, module_serial_context) -> "DeviceIdentity":
+        """Return the serial of *device*, its two serial contexts, and the model and part number of its device type."""
         device_type = device.device_type
         names = (device_type.model, device_type.part_number)
         return cls(
             serial=(device.serial or "").strip(),
             type_models=frozenset(folded for name in names if (folded := (name or "").strip().casefold())),
             serial_context=serial_context,
+            module_serial_context=module_serial_context,
         )
 
 
 # No device means no serial, so this identity never decides a serial match.
-NO_DEVICE_IDENTITY = DeviceIdentity(serial_context=plain_context())
+NO_DEVICE_IDENTITY = DeviceIdentity(serial_context=plain_context(), module_serial_context=plain_context())
 
 
 def _is_built_in_unit(item: dict, device_identity: DeviceIdentity) -> bool:
@@ -538,7 +549,7 @@ def _check_ignore_rules(
             continue
         if not (rule.serial_guard_applies and rule.require_serial_match_parent):
             return rule.action
-        if _serial_matches_an_ancestor(item, parent_item, index_map, device_identity.serial_context):
+        if _serial_matches_an_ancestor(item, parent_item, index_map, device_identity.module_serial_context):
             return rule.action
     return None
 
@@ -558,7 +569,8 @@ def _serial_matches_an_ancestor(item: dict, parent_item: dict | None, index_map:
                 return False
             visited.add(current_idx)
         ancestor_serial = current.get("entPhysicalSerialNum")
-        if is_identity(ancestor_serial, context):
+        # A reported serial without an identity still stops the walk; only a blank ancestor is passed.
+        if display(ancestor_serial):
             return compare(ancestor_serial, item_serial, context) is Comparison.SAME
         if index_map is None:
             return False
@@ -905,6 +917,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 False,
                 "inventory payload has a negative or non-integer entPhysicalIndex or entPhysicalContainedIn",
             )
+        # A module writer locks and resolves the raw serial, so a list or an object must not reach the snapshot.
+        if success and not all(_inventory_serial_well_formed(item) for item in inventory_data):
+            success, inventory_data = (
+                False,
+                "inventory payload has an entPhysicalSerialNum that is not text or a number",
+            )
 
         # Treat transport errors, invalid containers, and invalid index types as fetch failures.
         if not success:
@@ -960,6 +978,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 inventory_data, ports_data=ports_data, serial_context=serial_context
             )
         except (Device.DoesNotExist, RuleConfigurationError) as exc:
+            module_sync = {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}
+            if isinstance(exc, Device.DoesNotExist) and sync_device.pk != obj.pk:
+                # The page left the chassis of the owner, so the owner's snapshot and state stay.
+                messages.error(request, "The device changed during the refresh. Refresh Modules to try again.")
+                return self.render_sync_partial(request, obj, server_key, {"module_sync": module_sync})
             # The page device changed while the policy was read, or a rule does not work: no table and no snapshot.
             cache.delete(self.get_cache_key(sync_device, "inventory", server_key=server_key))
             SyncCacheConsistency(obj).mark_refresh_failure(
@@ -968,7 +991,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 actor_id=request_actor_id(request),
             )
             logger.error("Module table for %s not built: %s", obj, exc)
-            module_sync = {"object": obj, "table": None, "cache_expiry": None, "server_key": server_key}
             if isinstance(exc, RuleConfigurationError):
                 module_sync["inventory_rule_error"] = exc.shown_to(request.user)
             return self.render_sync_partial(request, obj, server_key, {"module_sync": module_sync})
@@ -1005,7 +1027,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             # get_device_inventory guarantees a list of dicts on success, but not the TYPE of
             # entPhysicalIndex/entPhysicalContainedIn: a numeric string would crash the offset
             # loop below (TypeError on "5" + offset), so fail closed to a host-only snapshot.
-            if oob_success and all(_inventory_item_offsettable(item) for item in oob_inventory):
+            if oob_success and all(
+                _inventory_item_offsettable(item) and _inventory_serial_well_formed(item) for item in oob_inventory
+            ):
                 main_max_idx = max(
                     (idx for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None),
                     default=0,
@@ -1536,7 +1560,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 policy_cache[device.pk] = {
                     "manufacturer": manufacturer,
                     "ignore_rules": policy.rules_for(manufacturer),
-                    "device_identity": DeviceIdentity.of(device, serial_context),
+                    "device_identity": DeviceIdentity.of(
+                        device, serial_context, policy.serial_identity_rules.for_module_target(device)
+                    ),
                 }
             return policy_cache[device.pk]
 

@@ -28,7 +28,13 @@ def _check(item, rules, parent=None, index_map=None, *, serial="", models=()):
     from netbox_librenms_plugin.serial_identity import plain_context
 
     return _check_ignore_rules(
-        item, parent, rules, index_map, DeviceIdentity(serial, frozenset(models), serial_context=plain_context())
+        item,
+        parent,
+        rules,
+        index_map,
+        DeviceIdentity(
+            serial, frozenset(models), serial_context=plain_context(), module_serial_context=plain_context()
+        ),
     )
 
 

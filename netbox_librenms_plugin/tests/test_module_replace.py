@@ -266,6 +266,49 @@ class TestModuleMismatchPreviewView:
         assert str(conflict.device) in html
         assert "CONFLICT-SERIAL" in html
 
+    def test_a_conflict_on_a_device_the_viewer_cannot_see_is_not_named(self):
+        """A viewer of the Module who cannot view its Device gets the hidden-conflict text, not the Device and bay."""
+        from dcim.models import Device, Module, ModuleBay, ModuleType
+
+        from netbox_librenms_plugin.tests.view_test_helpers import grant
+        from netbox_librenms_plugin.views.sync.modules import ModuleMismatchPreviewView
+
+        device, installed, _request, _view_unused, inventory = self._setup("hidden-device", serial="HIDDEN-SERIAL")
+        other_device = make_device("preview-hidden-device-owner")
+        _module(
+            other_device,
+            make_module_bay(other_device, "Hidden Owner Bay"),
+            make_module_type("HIDDEN-T"),
+            "HIDDEN-SERIAL",
+        )
+        user = make_user_with_perms(
+            "preview-hidden-device",
+            [
+                ("view", Module),
+                ("add", Module),
+                ("change", Module),
+                ("delete", Module),
+                ("view", ModuleBay),
+                ("view", ModuleType),
+            ],
+        )
+        user = grant(user, "view", Device, constraints={"name": device.name})
+        request = make_request(
+            "get", {"module_id": str(installed.pk), "ent_index": "100", "server_key": "default"}, user=user
+        )
+        view = _view(ModuleMismatchPreviewView, request)
+        cache_key = _cache_preview(view, device, inventory, request)
+        try:
+            response = view_get(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        html = response.content.decode()
+        assert response.status_code == 200
+        assert other_device.name not in html
+        assert "Hidden Owner Bay" not in html
+        assert 'name="conflict_module_id"' not in html
+
 
 class TestReplaceModuleView:
     def _setup(self, tag, *, new_serial="NEW-SERIAL", item_extra=None):
@@ -447,6 +490,37 @@ class TestReplaceModuleView:
         assert replacement.module_type == new_type
         assert replacement.serial == "SHARED-NEW-SERIAL"
         assert any("Removed REPLACE-CONFLICT-OWNER-TYPE" in text for text in message_texts(request, "info"))
+
+    def test_replacement_refuses_a_holder_that_moved_bays_before_its_lock(self, monkeypatch):
+        """The grant signed the holder's bay; a native bay edit before the holder's lock must keep the holder."""
+        from netbox_librenms_plugin.module_writes import LockedModuleWrite
+
+        Module, device, _old_type, _new_type, bay, installed, inventory = self._setup(
+            "moved-holder", new_serial="MOVED-HOLDER-SERIAL"
+        )
+        holder_bay = make_module_bay(device, "Replace Holder Bay")
+        other_bay = make_module_bay(device, "Replace Other Bay")
+        holder = _module(device, holder_bay, make_module_type("REPLACE-MOVED-HOLDER"), "MOVED-HOLDER-SERIAL")
+        request, view, cache_key = self._post(device, inventory)
+        require_devices = LockedModuleWrite.require_devices
+
+        def move_then_require(scope, device_ids):
+            # The timing seam: a native bay edit commits after the holder was read and before it is locked.
+            Module.objects.filter(pk=holder.pk).update(module_bay=other_bay)
+            return require_devices(scope, device_ids)
+
+        monkeypatch.setattr(LockedModuleWrite, "require_devices", move_then_require)
+        try:
+            response = view_post(view, request, pk=device.pk)
+        finally:
+            cache.delete(cache_key)
+
+        # The refusal rolls the seam's bay edit back too; the replace must have deleted neither module.
+        assert response.status_code == 302
+        assert Module.objects.filter(pk=holder.pk).exists()
+        assert Module.objects.get(pk=installed.pk).module_bay == bay
+        assert message_texts(request, "success") == []
+        assert len(message_texts(request, "error")) == 1
 
     def test_interface_scope_is_checked_before_the_old_module_is_deleted(self):
         from dcim.models import Device, Interface, InterfaceTemplate, Module, ModuleType
@@ -661,15 +735,20 @@ class TestMoveModuleView:
         if holder == "destination-module":
             _module(target_device, make_module_bay(target_device, "Held Bay"), module_type, "ABC")
         target_bay = make_module_bay(target_device, "Target Bay")
+        fields = {
+            "conflict_module_id": str(parent.pk),
+            "target_bay_id": str(target_bay.pk),
+            "selected_device_id": str(target_device.pk),
+        }
+        occupant = None
+        if holder == "destination-module":
+            # The move deletes the named occupant first, so the refusal must roll the delete back.
+            occupant = _module(target_device, target_bay, make_module_type(f"{tag}-occupant".upper()), "OCCUPANT123")
+            fields["module_id"] = str(occupant.pk)
         client.force_login(make_superuser(f"{tag}-user"))
 
         response = client.post(
-            reverse("plugins:netbox_librenms_plugin:move_module", kwargs={"pk": target_device.pk}),
-            {
-                "conflict_module_id": str(parent.pk),
-                "target_bay_id": str(target_bay.pk),
-                "selected_device_id": str(target_device.pk),
-            },
+            reverse("plugins:netbox_librenms_plugin:move_module", kwargs={"pk": target_device.pk}), fields
         )
 
         assert response.status_code == 302
@@ -677,6 +756,9 @@ class TestMoveModuleView:
         assert message_texts(response.wsgi_request) == [f"Move failed: {RELOCATION_HELD}"]
         parent.refresh_from_db()
         assert parent.device == source_device
+        if occupant is not None:
+            occupant.refresh_from_db()
+            assert occupant.module_bay == target_bay
 
     def test_real_permission_gate_rejects_a_user_without_change_scope(self):
         from dcim.models import Device
