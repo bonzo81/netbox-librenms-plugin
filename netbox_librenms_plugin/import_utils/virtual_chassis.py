@@ -4,7 +4,7 @@ import logging
 import re
 from typing import List, NamedTuple
 
-from dcim.models import Device, VirtualChassis
+from dcim.models import Device, DeviceType, VirtualChassis
 from django.core.cache import cache
 from redis.exceptions import RedisError
 
@@ -26,7 +26,6 @@ from ..serial_identity import (
     group,
     is_identity,
     naming_token,
-    locked_type_context,
     resolve_devices_write,
     stored_form,
 )
@@ -802,13 +801,15 @@ def create_virtual_chassis_with_members(
             )
             # The master row decides the member context: a type change of the master is waited for, then read.
             # The master decision and the member type follow the type that the locked row holds now.
-            context = locked_type_context(master_device, rules=serial_rules)
-            locked_master = Device.objects.select_related("device_type").get(pk=master_device.pk)
+            locked_master = Device.objects.select_for_update(no_key=True).get(pk=master_device.pk)
+            # The member inserts write the type row's device count anyway; lock it now, so the context is its maker.
+            member_type = DeviceType.objects.select_for_update(no_key=True).get(pk=locked_master.device_type_id)
+            context = serial_rules.for_device_type(member_type)
             if identify_vc_master(members_info, locked_master.serial, context) is not master_member:
                 raise ValueError(
                     "The stack master does not match under the current device type; no chassis was created."
                 )
-            master_device.device_type = locked_master.device_type
+            master_device.device_type = member_type
             master_device.snapshot()
             # Load naming pattern once to avoid a DB query per member
             vc_pattern = _load_vc_member_name_pattern()

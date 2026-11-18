@@ -14,6 +14,7 @@ from netbox_librenms_plugin.tests.conftest import (
     make_ip,
     make_virtual_chassis,
     make_vm,
+    transactional_db_with_all_apps,
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
@@ -2138,3 +2139,43 @@ def test_lazy_bulk_import_export_and_unknown_attributes():
     assert callable(operations.bulk_import_devices_shared)
     with pytest.raises(AttributeError):
         _ = operations.unknown_device_operation
+
+
+@transactional_db_with_all_apps()
+def test_an_import_reads_its_device_type_again_under_the_type_row_lock(librenms_api):
+    """Another session moves the type to a maker whose rule keys "XABC" to the holder's "ABC" before the import locks."""
+    from dcim.models import Device, DeviceType, Manufacturer
+
+    from netbox_librenms_plugin.import_utils.device_operations import import_single_device
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
+
+    holder = make_device("type-race-holder", serial="ABC-TYPE-RACE")
+    plain_maker = Manufacturer.objects.create(name="Type race plain maker", slug="type-race-plain-maker")
+    rule_maker = Manufacturer.objects.create(name="Type race rule maker", slug="type-race-rule-maker")
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=rule_maker
+    )
+    device_type = DeviceType.objects.create(manufacturer=plain_maker, model="Type race model", slug="type-race-model")
+    validation = _validation(site=holder.site, device_type=device_type, role=holder.role, resolved_name="type-race")
+    changed = []
+
+    def change_before_the_first_lock(execute, sql, params, many, context):
+        if "pg_advisory_xact_lock" in sql and not changed:
+            changed.append(True)
+            with second_connection() as other:
+                commit_row_change(other, DeviceType, device_type.pk, {"manufacturer_id": rule_maker.pk})
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(change_before_the_first_lock):
+        result = import_single_device(
+            5605,
+            SERVER_KEY,
+            validation,
+            sync_options={"sync_interfaces": False, "sync_cables": False},
+            libre_device=_device_payload(5605, serial="XABC-TYPE-RACE"),
+        )
+
+    assert changed
+    assert result["success"] is False
+    assert not Device.objects.filter(name="type-race").exists()

@@ -2,6 +2,8 @@
 
 import pytest
 
+from netbox_librenms_plugin.tests.conftest import transactional_db_with_all_apps
+
 
 @pytest.mark.django_db
 class TestCreateVirtualChassisWithMembers:
@@ -170,3 +172,57 @@ def test_a_junos_fpc_decision_reads_a_broken_rule_only_when_it_needs_it(live_lib
     result = detect_virtual_chassis_from_inventory(live_librenms.api, 7102)
 
     assert (bool(result and result["is_stack"]), bool(result and result["detection_failed"])) == (is_stack, failed)
+
+
+@transactional_db_with_all_apps()
+def test_member_creation_reads_the_master_maker_under_the_type_row_lock():
+    """A maker change of the master type after the context read must wait, or "XMEMBER" would duplicate "MEMBER"."""
+    from dcim.models import Device, DeviceType, Manufacturer
+    from django.db import OperationalError, connection
+
+    from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import make_device
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import second_connection
+
+    make_device("vc-type-race-holder", serial="MEMBER-VC-RACE")
+    master = make_device("vc-type-race-master", serial="MASTER-VC-RACE")
+    plain_maker = Manufacturer.objects.create(name="VC race plain maker", slug="vc-race-plain-maker")
+    rule_maker = Manufacturer.objects.create(name="VC race rule maker", slug="vc-race-rule-maker")
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1", manufacturer=rule_maker
+    )
+    master.device_type = DeviceType.objects.create(
+        manufacturer=plain_maker, model="VC race model", slug="vc-race-model"
+    )
+    master.save()
+    members = [{"serial": "MASTER-VC-RACE", "position": 1}, {"serial": "XMEMBER-VC-RACE", "position": 2}]
+    attempts = []
+
+    def change_after_the_type_read(execute, sql, params, many, context):
+        result = execute(sql, params, many, context)
+        if not attempts and 'FROM "dcim_devicetype"' in sql and connection.in_atomic_block:
+            with second_connection() as other:
+                try:
+                    with other.cursor() as cursor:
+                        cursor.execute("SET lock_timeout = '200ms'")
+                        cursor.execute(
+                            'UPDATE "dcim_devicetype" SET "manufacturer_id" = %s WHERE id = %s',
+                            [rule_maker.pk, master.device_type_id],
+                        )
+                    other.commit()
+                    attempts.append("committed")
+                except OperationalError:
+                    attempts.append("waited")
+        return result
+
+    with connection.execute_wrapper(change_after_the_type_read):
+        chassis = create_virtual_chassis_with_members(
+            master, members, {"device_id": 7103}, server_key="default", master_member=members[0]
+        )
+
+    # The type row lock holds the maker that decided the member context until the members exist.
+    assert attempts == ["waited"]
+    assert DeviceType.objects.get(pk=master.device_type_id).manufacturer_id == plain_maker.pk
+    assert sorted(chassis.members.values_list("serial", flat=True)) == ["MASTER-VC-RACE", "XMEMBER-VC-RACE"]
+    assert Device.objects.filter(serial="MEMBER-VC-RACE").count() == 1

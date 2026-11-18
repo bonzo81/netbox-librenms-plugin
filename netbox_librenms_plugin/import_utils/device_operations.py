@@ -1962,6 +1962,8 @@ def import_single_device(  # noqa: C901
             # The serial identity locks come first; then the lookup sees a concurrent import's committed device.
             serial_rules = serial_rules or SerialRules.load()
             assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
+            # The insert writes the type row's device count anyway; lock it now, so the context is its manufacturer.
+            device_type = DeviceType.objects.select_for_update(no_key=True).get(pk=device_type.pk)
             taken = resolve_device_write(
                 libre_device.get("serial"), serial_rules.for_device_type(device_type), rules=serial_rules
             )
