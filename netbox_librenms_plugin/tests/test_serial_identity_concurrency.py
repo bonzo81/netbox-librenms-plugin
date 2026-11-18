@@ -942,6 +942,7 @@ def test_a_module_move_reads_its_subtree_again_after_its_device_locks(client, mo
     from django.urls import reverse
 
     from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.serial_identity import RELOCATION_HELD
     from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
     from netbox_librenms_plugin.utils import netbox_relocates_module_subtree
     from netbox_librenms_plugin.views.sync import modules as module_views
@@ -991,6 +992,8 @@ def test_a_module_move_reads_its_subtree_again_after_its_device_locks(client, mo
 
     assert changed
     assert response.status_code == 302
+    # The refusal names the identity check, not another failure that also leaves the child in place.
+    assert any(RELOCATION_HELD in text for level, text in messages_on(response.wsgi_request) if level == "error")
     child.refresh_from_db()
     assert (child.device_id, child.serial) != (target.pk, "XABC")
 
