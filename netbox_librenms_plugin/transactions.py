@@ -49,6 +49,8 @@ _active_recorder = ContextVar("librenms_conflict_recorder", default=None)
 _VERSIONED_SAVE = "_librenms_versioned_save"
 # The annotation that carries the row version of a read.
 _ROW_VERSION = "_librenms_row_version"
+# The event queues that enclose the current block's queue, outermost first.
+_enclosing_queues = ContextVar("librenms_enclosing_event_queues", default=())
 
 
 class TransactionConflict(Exception):
@@ -210,6 +212,7 @@ def _run_attempt(work, connection):
 
     recorder = _ConflictRecorder()
     recorder_token = _active_recorder.set(recorder)
+    enclosing_token = _enclosing_queues.set((*_enclosing_queues.get(), events_queue.get()))
     queue_token = events_queue.set({})
     try:
         # durable: Django refuses an enclosing atomic block, except a test case's own block.
@@ -246,8 +249,11 @@ def _run_attempt(work, connection):
         _active_recorder.reset(recorder_token)
         attempt_events = events_queue.get()
         events_queue.reset(queue_token)
+        _enclosing_queues.reset(enclosing_token)
         if committed:
             _keep_events(attempt_events)
+        else:
+            _reload_event_sources(attempt_events)
 
 
 @contextmanager
@@ -268,7 +274,8 @@ def atomic_with_events():
         nonlocal committed
         committed = True
 
-    token = events_queue.set({})
+    enclosing_token = _enclosing_queues.set((*_enclosing_queues.get(), events_queue.get()))
+    tokens = events_queue.set({}), enclosing_token
     try:
         with transaction.atomic():
             if outermost:
@@ -277,16 +284,41 @@ def atomic_with_events():
             yield
             released = not outermost and not transaction.get_rollback()
     except BaseException:
-        _close_event_queue(token, keep=committed)
+        _close_event_queue(tokens, keep=committed)
         raise
-    _close_event_queue(token, keep=committed or released)
+    _close_event_queue(tokens, keep=committed or released)
 
 
-def _close_event_queue(token, *, keep):
+def _close_event_queue(tokens, *, keep):
+    queue_token, enclosing_token = tokens
     block_events = events_queue.get()
-    events_queue.reset(token)
+    events_queue.reset(queue_token)
+    _enclosing_queues.reset(enclosing_token)
     if keep:
         _keep_events(block_events)
+    else:
+        _reload_event_sources(block_events)
+
+
+def _reload_event_sources(dropped):
+    """
+    Point the enclosing events of each object that a dropped block wrote at the row that the database holds now.
+
+    NetBox serializes an event's ``data`` from the saved instance when a consumer first reads it. A
+    dropped block can leave its rolled-back values on that instance, so the payload reads the row again.
+    """
+    if not dropped or transaction.get_connection().needs_rollback:
+        # The enclosing block rolls back too and drops or reloads its own events.
+        return
+    for queue in (*_enclosing_queues.get(), events_queue.get()):
+        for key in dropped.keys() & queue.keys():
+            event = queue[key]
+            if "data" in event:
+                # Serialized already (a delete, or a consumer read it): the payload is fixed.
+                continue
+            row = type(event["object"])._default_manager.filter(pk=event["object_id"]).first()
+            if row is not None:
+                event.refresh_serialization_source(row)
 
 
 @contextmanager

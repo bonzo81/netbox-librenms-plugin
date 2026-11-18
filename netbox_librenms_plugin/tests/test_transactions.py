@@ -468,8 +468,12 @@ def test_two_blocks_that_write_one_object_coalesce_its_events_as_netbox_does_in_
 
 
 @pytest.mark.django_db
-def test_a_dropped_block_leaves_the_earlier_event_of_its_object_unchanged():
+@pytest.mark.parametrize("nested", [False, True], ids=["next-block", "inside-a-committed-block"])
+def test_a_dropped_block_leaves_the_earlier_event_of_its_object_unchanged(nested):
+    from contextlib import nullcontext
+
     from core.events import OBJECT_UPDATED
+    from dcim.models import Site
 
     from netbox_librenms_plugin.transactions import atomic_with_events
 
@@ -480,14 +484,18 @@ def test_a_dropped_block_leaves_the_earlier_event_of_its_object_unchanged():
     with _netbox_request_context():
         with atomic_with_events():
             _write_site(site, "kept")
-        with pytest.raises(_Refused), atomic_with_events():
-            _write_site(site, "rolled back")
-            raise _Refused()
+        with atomic_with_events() if nested else nullcontext():
+            with pytest.raises(_Refused), atomic_with_events():
+                _write_site(site, "rolled back")
+                raise _Refused()
 
         event = _the_one_event(site)
+        # NetBox reads the payload from the saved instance when a consumer first reads it.
+        payload = event["data"]
     assert event["event_type"] == OBJECT_UPDATED
     assert event["snapshots"]["prechange"]["description"] == ""
     assert event["snapshots"]["postchange"]["description"] == "kept"
+    assert (Site.objects.get(pk=site.pk).description, payload["description"]) == ("kept", "kept")
 
 
 @pytest.mark.django_db
