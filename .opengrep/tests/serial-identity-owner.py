@@ -97,6 +97,7 @@ def owner_comparison(device, incoming):
 
 def owner_grouping(members, context):
     # ok: serial-identity-through-owner
+    # ruleid: member-serials-under-own-context
     return group(members, context, serial=lambda member: member.serial)
 
 
@@ -124,3 +125,19 @@ def other_fields(result, source, match_type):
 def module_type_rules(name, manufacturer):
     # ok: serial-identity-through-owner
     return apply_normalization_rules(name, "module_type", manufacturer)
+
+
+def vc_inventory_serials(vc_members, context, member_context):
+    # ruleid: member-serials-under-own-context
+    members_by_serial = group(vc_members, context, serial=lambda member: member.serial)
+    # ok: member-serials-under-own-context
+    members_by_serial = MemberSerials(vc_members, member_context)
+    # ok: member-serials-under-own-context
+    rows_by_serial = group(rows, context, serial=lambda row: row.get("entPhysicalSerialNum"))
+    return members_by_serial, rows_by_serial
+
+
+class MemberSerials:
+    def __init__(self, members, member_context):
+        # ok: member-serials-under-own-context
+        self._groups = tuple(group(found, context, serial=lambda member: member.serial) for context, found in members)

@@ -2093,3 +2093,22 @@ rules:
           - pattern: |
               with row_savepoint():
                   ...
+
+  - id: member-serials-under-own-context
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This groups the Device serials of chassis members under one context. A chassis without a master
+      gives each member the context of its own type, so a page context can match a member that its own
+      rules keep apart. Use MemberSerials(members, member_context). Limits: it matches only group() with
+      serial=lambda $M: $M.serial.
+    metadata:
+      category: correctness
+    paths:
+      exclude:
+        - "**/tests/**"
+    patterns:
+      - pattern: "group($MEMBERS, $CONTEXT, serial=lambda $M: $M.serial)"
+      - pattern-not-inside: |
+          class MemberSerials:
+              ...

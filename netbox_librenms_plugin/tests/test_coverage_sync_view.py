@@ -765,6 +765,38 @@ class TestVirtualChassisInventory:
         assert result[0]["serial"] == "VENDOR:MEMBER-SERIAL"
         assert result[0]["assigned_member"] == member
 
+    def test_a_masterless_member_serial_is_compared_under_its_own_rules(self, librenms_server):
+        """Only the page maker strips "TAG ", so "TAG ABC" assigns no member of another maker that stores "ABC"."""
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        _vc, (page, member) = make_virtual_chassis_members("inventory-masterless", count=2)
+        NormalizationRule.objects.create(
+            scope="serial", manufacturer=page.device_type.manufacturer, match_pattern=r"^TAG (.+)$", replacement=r"\1"
+        )
+        other = Manufacturer.objects.create(name="Masterless dialog vendor", slug="masterless-dialog-vendor")
+        member.device_type = DeviceType.objects.create(
+            manufacturer=other, model="Masterless dialog", slug="masterless-dialog"
+        )
+        member.serial = "ABC-DIALOG"
+        member.save()
+        _register_device(
+            librenms_server,
+            6650,
+            page.name,
+            inventory=_stack_inventory(
+                {"entPhysicalSerialNum": "TAG ABC-DIALOG"}, {"entPhysicalSerialNum": "VC-OTHER-2"}
+            ),
+        )
+        view = _device_view()
+        view.librenms_id = 6650
+
+        result = view._get_vc_inventory_serials(page)
+
+        assert result[0]["serial"] == "TAG ABC-DIALOG"
+        assert result[0]["assigned_member"] is None
+
     def test_the_serial_rules_load_once_for_the_whole_chassis_loop(self, librenms_server):
         """The view reads its serial rules once, so the chassis loop pays no query per chassis component."""
         from django.db import connection

@@ -18,6 +18,7 @@ from ..librenms_api import LibreNMSAPI
 from ..serial_identity import (
     REFUSING,
     Comparison,
+    MemberSerials,
     ResolutionKind,
     SerialGroups,
     SerialRules,
@@ -400,16 +401,7 @@ class _Attribution:
     def __init__(self, rows, vc_members, context, member_context=None):
         self.vc_members = vc_members
         # Without members every row stays on the page, and context can be None.
-        # Each member's serial is grouped under its own context: one group per context.
-        member_context = member_context or (lambda _member: context)
-        by_context = {}
-        for member in vc_members:
-            member_serial_context = member_context(member)
-            by_context.setdefault(member_serial_context.fingerprint, (member_serial_context, []))[1].append(member)
-        self.by_serial = [
-            group(members, member_serial_context, serial=lambda member: member.serial)
-            for member_serial_context, members in by_context.values()
-        ]
+        self.by_serial = MemberSerials(vc_members, member_context or (lambda _member: context))
         self.by_index = {index: row for row in rows if (index := row.get("entPhysicalIndex")) is not None}
         self.stack = _stack_rows(rows, (context,)) if vc_members else _StackRows(None, {}, {})
         self.results = {}
@@ -423,7 +415,7 @@ class _Attribution:
 
     def serial_owner(self, row):
         """Return the member whose serial the row carries, or None; a serial that two members share names neither."""
-        members = [member for groups in self.by_serial for member in groups.find(row.get("entPhysicalSerialNum"))]
+        members = self.by_serial.find(row.get("entPhysicalSerialNum"))
         return members[0] if len(members) == 1 else None
 
     def resolve(self, row, resolving=frozenset()):

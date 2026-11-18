@@ -23,11 +23,11 @@ from netbox_librenms_plugin.platform_versions import (
 from netbox_librenms_plugin.models import RuleConfigurationError
 from netbox_librenms_plugin.serial_identity import (
     Comparison,
+    MemberSerials,
     SerialContext,
     SerialRules,
     compare,
     display,
-    group,
     is_identity,
     is_serial_value,
     is_sole_holder,
@@ -862,9 +862,10 @@ class BaseLibreNMSSyncView(
         # Get all VC members
         vc_members = obj.virtual_chassis.members.all()
 
-        # The chassis master's serial rules compare both sides; the dialog shows the LibreNMS text.
+        # The chassis master's serial rules admit the rows; the dialog shows the LibreNMS text.
         context = self._serial_context(obj)
-        members_by_serial = group(vc_members, context, serial=lambda member: member.serial)
+        # Each member's own Device serial context compares its serial: a masterless member keeps its own rules.
+        members_by_serial = MemberSerials(vc_members, self._serial_context)
 
         result = []
         for component in extract_vc_members(inventory, (context,)):

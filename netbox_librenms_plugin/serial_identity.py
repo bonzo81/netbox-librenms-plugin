@@ -391,6 +391,23 @@ def group(observations: Iterable, context: SerialContext, *, serial: Callable = 
     return groups
 
 
+class MemberSerials:
+    """The Device serials of chassis members, each grouped under the context of its own Device serial."""
+
+    def __init__(self, members: Iterable, member_context: Callable):
+        by_context = {}
+        for member in members:
+            context = member_context(member)
+            by_context.setdefault(context.fingerprint, (context, []))[1].append(member)
+        self._groups = tuple(
+            group(found, context, serial=lambda member: member.serial) for context, found in by_context.values()
+        )
+
+    def find(self, value) -> list:
+        """Return the members whose serial names the hardware of *value* under their own context."""
+        return [member for groups in self._groups for member in groups.find(value)]
+
+
 def trimmed_serial(field_name: str = "serial") -> Func:
     """Return the trimmed serial expression that the trigram and exact indexes of migrations 0018 and 0030 store."""
     # The trim set is a literal, never a bound parameter, so the expression is the indexed one in every binding mode.
