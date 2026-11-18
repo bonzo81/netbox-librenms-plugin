@@ -879,6 +879,51 @@ def test_a_member_is_not_created_beside_a_legacy_row_that_stores_its_rule_output
 
 
 @pytest.mark.django_db
+def test_the_new_stack_master_is_no_legacy_row_for_another_member():
+    """Under ^X(.+)$ the master "X123" keys to "123" and the member "XX123" to "X123": the master holds its own serial."""
+    from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    NormalizationRule.objects.create(scope="serial", match_pattern=r"^X(.+)$", replacement=r"\1")
+    _name_pattern()
+    master = make_device("vc-raw-master", serial="X123")
+    members = [{"serial": "X123", "position": 1}, {"serial": "XX123", "position": 2}]
+
+    vc = create_virtual_chassis_with_members(master, members, {"device_id": 8018}, master_member=members[0])
+
+    assert sorted(vc.members.values_list("serial", flat=True)) == ["X123", "XX123"]
+
+
+@pytest.mark.django_db
+def test_a_member_serial_that_only_the_master_rules_blank_is_not_created_beside_its_holder():
+    """The master's maker blanks "VENDOR-PLACEHOLDER", but a device of another maker holds it as its serial."""
+    from dcim.models import Device, DeviceType, Manufacturer
+
+    from netbox_librenms_plugin.import_utils.virtual_chassis import create_virtual_chassis_with_members
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    master = make_device("blanked-member-master", serial="REAL-MASTER-BLANKED")
+    NormalizationRule.objects.create(
+        scope="serial",
+        manufacturer=master.device_type.manufacturer,
+        match_pattern="^VENDOR-PLACEHOLDER(X)?$",
+        replacement=r"\1",
+    )
+    holder = make_device("blanked-member-holder", serial="VENDOR-PLACEHOLDER")
+    other_maker = Manufacturer.objects.create(name="Blanked member other maker", slug="blanked-member-other-maker")
+    holder.device_type = DeviceType.objects.create(
+        manufacturer=other_maker, model="Blanked member other model", slug="blanked-member-other-model"
+    )
+    holder.save()
+    members = [{"serial": master.serial, "position": 1}, {"serial": "VENDOR-PLACEHOLDER", "position": 2}]
+
+    vc = create_virtual_chassis_with_members(master, members, {"device_id": 8019}, master_member=members[0])
+
+    assert list(vc.members.values_list("pk", flat=True)) == [master.pk]
+    assert list(Device.objects.filter(serial="VENDOR-PLACEHOLDER").values_list("pk", flat=True)) == [holder.pk]
+
+
+@pytest.mark.django_db
 def test_a_serial_lookup_stops_reading_devices_at_its_limit():
     """Devices that share one serial past two add no queries, and every count is Ambiguous."""
     from django.db import connection

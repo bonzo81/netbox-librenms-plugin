@@ -25,7 +25,6 @@ from ..serial_identity import (
     compare,
     display,
     group,
-    is_identity,
     naming_token,
     resolve_devices_write,
     stored_form,
@@ -897,16 +896,15 @@ def _create_member_devices(
         for member, position in zip(members_info, positions, strict=True)
         if member is not master_member
     ]
-    # One lookup for the whole stack, after the caller took the serial identity locks.
+    # One lookup for the whole stack, after the serial identity locks. A holder's own rules can admit a serial
+    # that the master's rules blank. The master holds its own entry's serial, apart from every other member.
     taken = resolve_devices_write(
-        [serial for _member, _position, serial in members if is_identity(serial, context)],
-        context,
-        rules=serial_rules,
+        [serial for _member, _position, serial in members], context, rules=serial_rules, exclude_pks=[master_device.pk]
     )
     created_members = SerialGroups(context)
     created = 0
     for member, position, serial in members:
-        if is_identity(serial, context) and _member_serial_taken(serial, taken[serial], created_members):
+        if _member_serial_taken(serial, taken[serial], created_members):
             continue
         member_name = _member_name(base_name, position, serial, vc_pattern, context)
         if Device.objects.filter(name=member_name).exists():
@@ -935,7 +933,7 @@ def _member_serial_taken(serial, resolution, created_members) -> bool:
     Return whether a stack member with *serial* exists already, and log why it is skipped.
 
     Args:
-        serial: The LibreNMS member serial; it has a hardware identity.
+        serial: The LibreNMS member serial.
         resolution: The Devices that held *serial* before this stack's members were created.
         created_members: The members that this stack created so far, grouped by serial.
 
