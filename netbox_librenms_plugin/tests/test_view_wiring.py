@@ -3208,12 +3208,14 @@ class TestModuleWriterOwnership:
                 # A move's mutation callback executes through update_existing_row.
                 if node is not method and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
                     return
-                if isinstance(node, ast.Call):
-                    calls.append((getattr(node.func, "id", getattr(node.func, "attr", "")), node, parents))
                 for child in ast.iter_child_nodes(node):
                     walk(child, (*parents, node))
+                # After its receiver and arguments, so the list is in call order.
+                if isinstance(node, ast.Call):
+                    calls.append((getattr(node.func, "id", getattr(node.func, "attr", "")), node, parents))
 
             walk(method)
+            order = {id(node): position for position, (_call, node, _parents) in enumerate(calls)}
             scopes = [(node, parents) for call, node, parents in calls if call == "lock_module_write"]
             if len(scopes) != 1:
                 failures.append(f"{name}: expected one complete owner lock")
@@ -3223,7 +3225,7 @@ class TestModuleWriterOwnership:
                 failures.append(f"{name}: owner lock is conditional or incremental")
             if not any(call == "observe_module_write" for call, _node, _parents in calls):
                 failures.append(f"{name}: missing observation")
-            if any(call in cls.DOWNSTREAM and node.lineno < lock.lineno for call, node, _parents in calls):
+            if any(call in cls.DOWNSTREAM and order[id(node)] < order[id(lock)] for call, node, _parents in calls):
                 failures.append(f"{name}: downstream lock or write precedes owner lock")
             if type_guard := cls.TYPE_GUARDS.get(name):
                 claims = [(node, parents) for call, node, parents in calls if call == type_guard]
@@ -3231,11 +3233,11 @@ class TestModuleWriterOwnership:
                     failures.append(f"{name}: expected one complete type lock")
                     continue
                 claim, parents = claims[0]
-                if claim.lineno < lock.lineno or any(
+                if order[id(claim)] < order[id(lock)] or any(
                     isinstance(parent, (ast.For, ast.AsyncFor, ast.While, ast.If)) for parent in parents
                 ):
                     failures.append(f"{name}: type lock precedes Devices or is conditional or incremental")
-                if any(call in cls.DOWNSTREAM and node.lineno < claim.lineno for call, node, _parents in calls):
+                if any(call in cls.DOWNSTREAM and order[id(node)] < order[id(claim)] for call, node, _parents in calls):
                     failures.append(f"{name}: downstream lock or write precedes type lock")
         return failures
 
@@ -3254,8 +3256,9 @@ class TestModuleWriterOwnership:
             "if indexed:\n    lock_module_write(observe_module_write(device_ids=targets))\nModule().save()",
             "for target in targets:\n    lock_module_write(observe_module_write(device_ids=[target]))\n    Module().save()",
             "Module.objects.select_for_update()\nlock_module_write(observe_module_write(device_ids=targets))",
+            "lock_module_write(observe_module_write(device_ids=targets), incoming=[Module.objects.select_for_update()])",
         ],
-        ids=["missing", "carrier-unguarded", "incremental-bulk", "late-owner"],
+        ids=["missing", "carrier-unguarded", "incremental-bulk", "late-owner", "write-in-owner-argument"],
     )
     def test_guard_rejects_known_omissions(self, body):
         import ast
@@ -3281,8 +3284,9 @@ class TestModuleWriterOwnership:
             "lock_module_write(observe_module_write(device_ids=targets))\nModule().save()",
             "lock_module_write(observe_module_write(device_ids=targets))\nfor target in targets:\n    scope.lock_module_types([target])\n    Module().save()",
             "scope.lock_module_types(types)\nlock_module_write(observe_module_write(device_ids=targets))",
+            "lock_module_write(observe_module_write(device_ids=targets)).lock_module_types([Module().save()])",
         ],
-        ids=["missing-type", "incremental-types", "types-before-devices"],
+        ids=["missing-type", "incremental-types", "types-before-devices", "write-in-type-argument"],
     )
     def test_guard_rejects_known_type_claim_omissions(self, body):
         import ast
@@ -3301,5 +3305,17 @@ class TestModuleWriterOwnership:
             "        scope.lock_module_types(types)\n"
             "        for target in targets:\n"
             "            Module().save()\n"
+        )
+        assert not self._violations(tree, {"InstallSelectedView.post"})
+
+    def test_guard_accepts_a_type_lock_on_the_owner_lock_result(self):
+        """The receiver takes the owner lock before the type lock runs."""
+        import ast
+
+        tree = ast.parse(
+            "class InstallSelectedView:\n"
+            "    def post(self):\n"
+            "        lock_module_write(observe_module_write(device_ids=targets)).lock_module_types(types)\n"
+            "        Module().save()\n"
         )
         assert not self._violations(tree, {"InstallSelectedView.post"})
