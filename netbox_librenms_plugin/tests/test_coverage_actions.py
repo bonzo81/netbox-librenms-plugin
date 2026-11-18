@@ -1737,7 +1737,7 @@ class TestBuildSyncInfo:
 
         # A LibreNMS serial that is absent stays non-actionable, as for any other device.
         assert result["serial_unavailable"] == (UNAVAILABLE_MASTER_LINK if unavailable else "")
-        assert result["serial_synced"] is not unavailable
+        assert result["serial_synced"] is (not unavailable)
 
     def test_platform_synced_when_matching(self):
         from dcim.models import Platform
