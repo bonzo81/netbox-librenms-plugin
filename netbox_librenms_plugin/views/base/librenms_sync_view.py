@@ -20,13 +20,16 @@ from netbox_librenms_plugin.platform_versions import (
     reason_text,
     target_label,
 )
+from netbox_librenms_plugin.models import RuleConfigurationError
 from netbox_librenms_plugin.serial_identity import (
     Comparison,
+    SerialContext,
     SerialRules,
     compare,
     display,
     group,
     is_identity,
+    is_sole_holder,
     stored_form_differs,
 )
 from netbox_librenms_plugin.server_mappings import mapped_device_servers, read_mapping
@@ -76,11 +79,28 @@ class BaseLibreNMSSyncView(
         """Return the serial rules of this request, read once."""
         return SerialRules.load()
 
+    def _serial_context(self, device) -> SerialContext:
+        """Return the serial context of *device*; a broken serial rule gives an Unavailable context that names it."""
+        try:
+            return self.serial_rules.for_device(device)
+        except RuleConfigurationError as exc:
+            # Only the serial decisions stop; the reason names the rule only to a viewer of the rule.
+            return SerialContext(None, (), unavailable=exc.shown_to(self.request.user).public_message)
+
     def _serial_matches(self, obj, incoming) -> bool:
         """Return whether the stored serial of Device *obj* names the hardware that LibreNMS reports; a VM has none."""
         if obj is None or obj._meta.model_name != "device":
             return False
-        return compare(obj.serial, incoming, self.serial_rules.for_device(obj)) is Comparison.SAME
+        return compare(obj.serial, incoming, self._serial_context(obj)) is Comparison.SAME
+
+    def _legacy_id_serial_confirmed(self, device, incoming) -> bool:
+        """Return whether the legacy ID conversion may run: *device* is the one Device that holds the serial."""
+        if self._serial_context(device).unavailable:
+            return False
+        try:
+            return is_sole_holder(device, incoming, rules=self.serial_rules)
+        except RuleConfigurationError:
+            return False
 
     def get_object(self, pk):
         """Retrieve the object the user may view (same seam as the base table views)."""
@@ -357,8 +377,9 @@ class BaseLibreNMSSyncView(
         # The legacy ID gate compares the serial of the mapping owner, which can differ from the page device.
         # VMs have no serial field in NetBox; skip the gate so the Convert ID button is enabled.
         _lookup_is_vm = _lookup_device._meta.model_name == "virtualmachine" if _lookup_device else False
-        librenms_id_serial_confirmed = _lookup_is_vm or self._serial_matches(
-            _lookup_device, librenms_info["librenms_serial"]
+        # The conversion requires the sole holder of the serial, as the POST does; the badge compares the pair.
+        librenms_id_serial_confirmed = librenms_id_is_legacy and (
+            _lookup_is_vm or self._legacy_id_serial_confirmed(_lookup_device, librenms_info["librenms_serial"])
         )
         device_info_unavailable = librenms_info.get("device_info_unavailable", False)
         show_add_device = not librenms_info["found_in_librenms"] and not device_info_unavailable
@@ -594,7 +615,7 @@ class BaseLibreNMSSyncView(
                         and obj.vc_position is not None
                     ):
                         resolved_name = _member_name(
-                            resolved_name, obj.vc_position, obj.serial, None, self.serial_rules.for_device(obj)
+                            resolved_name, obj.vc_position, obj.serial, None, self._serial_context(obj)
                         )
 
                 # Update device details regardless of match
@@ -604,12 +625,15 @@ class BaseLibreNMSSyncView(
                         "librenms_device_hardware": hardware,
                         "librenms_device_serial": serial,
                         "serial_matches": self._serial_matches(obj, librenms_serial),
-                        "serial_unavailable": self.serial_rules.for_device(obj).unavailable
+                        "serial_unavailable": self._serial_context(obj).unavailable
                         if obj._meta.model_name == "device"
                         else "",
+                        # The writer refuses a serial without an identity, so the page offers no sync for it.
+                        "serial_admitted": obj._meta.model_name == "device"
+                        and is_identity(librenms_serial, self._serial_context(obj)),
                         # A legacy stored form names the same hardware; the update action writes the LibreNMS text.
                         "serial_stored_form_differs": obj._meta.model_name == "device"
-                        and stored_form_differs(obj.serial, librenms_serial, self.serial_rules.for_device(obj)),
+                        and stored_form_differs(obj.serial, librenms_serial, self._serial_context(obj)),
                         "librenms_device_os": os_name,
                         "librenms_device_version": version,
                         "librenms_device_features": features,
@@ -836,7 +860,7 @@ class BaseLibreNMSSyncView(
         vc_members = obj.virtual_chassis.members.all()
 
         # The chassis master's serial rules compare both sides; the dialog shows the LibreNMS text.
-        context = self.serial_rules.for_device(obj)
+        context = self._serial_context(obj)
         members_by_serial = group(vc_members, context, serial=lambda member: member.serial)
 
         result = []

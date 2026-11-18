@@ -325,6 +325,8 @@ class TestSyncPageRouting:
     def test_a_serial_that_cannot_be_compared_shows_the_reason_and_no_sync(
         self, logged_in_client, settings, librenms_server
     ):
+        from html import unescape
+
         from dcim.models import Device, VirtualChassis
         from django.utils.html import escape
 
@@ -349,6 +351,69 @@ class TestSyncPageRouting:
         sync_serial_url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": viewed.pk})
         assert sync_serial_url not in content
         assert escape(UNAVAILABLE_MASTER_LINK) in content
+        # The reason is page text, not only a tooltip: a keyboard user cannot hover the icon.
+        assert UNAVAILABLE_MASTER_LINK in unescape(re.sub(r"<[^>]*>", " ", content))
+
+    def test_a_device_that_shares_the_legacy_id_serial_gets_no_convert_offer(
+        self, logged_in_client, settings, librenms_server
+    ):
+        """The conversion needs the sole holder of the serial; the badge still compares the pair."""
+        _configure_servers(settings, librenms_server, SERVER_KEY)
+        device = make_device("sync-legacy-shared", serial="SHARED-LEGACY", librenms_cf=6617)
+        make_device("sync-legacy-shared-peer", serial="SHARED-LEGACY")
+        _register_device(librenms_server, 6617, device.name, serial="SHARED-LEGACY")
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.context["serial_matches"] is True
+        assert response.context["librenms_id_is_legacy"] is True
+        assert response.context["librenms_id_serial_confirmed"] is False
+
+    @pytest.mark.parametrize(("reported", "offered"), [("12", False), ("NEW-SERIAL-12", True)])
+    def test_a_librenms_serial_without_an_identity_offers_no_serial_sync(
+        self, logged_in_client, settings, librenms_server, reported, offered
+    ):
+        """The writer refuses a serial without an identity, so the page shows the text and offers no sync."""
+        _configure_servers(settings, librenms_server, SERVER_KEY)
+        device = make_device(f"sync-no-identity-{offered}", serial="STORED-SERIAL", librenms_cf={SERVER_KEY: 6618})
+        _register_device(librenms_server, 6618, device.name, serial=reported)
+
+        response = logged_in_client.get(_sync_url(device))
+
+        content = response.content.decode()
+        assert response.context["librenms_device_serial"] == reported
+        sync_serial_url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": device.pk})
+        assert (sync_serial_url in content) is offered
+
+    def test_a_broken_serial_rule_of_the_device_keeps_the_sync_page(self, logged_in_client, settings, librenms_server):
+        """The serial decisions are unavailable and name the rule; the other tabs still render."""
+        from html import unescape
+
+        from netbox_librenms_plugin.models import NormalizationRule, RuleConfigurationError
+
+        _configure_servers(settings, librenms_server, SERVER_KEY)
+        device = make_device("sync-broken-serial-rule", serial="BROKEN-RULE", librenms_cf={SERVER_KEY: 6619})
+        rule = NormalizationRule.objects.create(
+            scope="serial",
+            match_pattern=r"^S/N\s+(.+)$",
+            replacement=r"\1",
+            manufacturer=device.device_type.manufacturer,
+        )
+        # A stored legacy rule that no longer meets the extraction format.
+        NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"invalid-\1")
+        rule.refresh_from_db()
+        _register_device(librenms_server, 6619, device.name, serial="BROKEN-RULE-LIBRENMS")
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.status_code == 200
+        assert response.context["interface_sync"] is not None
+        assert response.context["serial_matches"] is False
+        reason = RuleConfigurationError(rule, "replacement").public_message
+        assert response.context["serial_unavailable"] == reason
+        assert reason in unescape(re.sub(r"<[^>]*>", " ", response.content.decode()))
+        sync_serial_url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": device.pk})
+        assert sync_serial_url not in response.content.decode()
 
 
 @pytest.mark.django_db
