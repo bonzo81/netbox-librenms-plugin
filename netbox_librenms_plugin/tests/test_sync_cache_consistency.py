@@ -414,7 +414,8 @@ def test_module_cache_status_reports_tab_states_when_an_applicable_serial_rule_i
 def test_module_cache_status_rejects_a_snapshot_of_another_oob_link_like_the_tab(client, settings):
     """A snapshot merged from another OOB controller is one the Modules tab rejects, so status must not call it ready."""
     from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-    from netbox_librenms_plugin.views.sync.modules import _get_cached_inventory_for_device
+    from netbox_librenms_plugin.sync_cache import cached_module_inventory
+    from netbox_librenms_plugin.views.sync.modules import _get_cached_module_snapshot
 
     _configure_servers(settings)
     device = make_device("cache-status-module-oob", librenms_cf={"primary": {"id": 6407, "oob": {"id": 6408}}})
@@ -437,14 +438,14 @@ def test_module_cache_status_rejects_a_snapshot_of_another_oob_link_like_the_tab
         timeout=300,
     )
     current = client.get(status_url, {"server_key": "primary"}).json()["tabs"]["modules"]
-    current_rows = _get_cached_inventory_for_device(device, "primary", get_cache_key)
+    current_rows = cached_module_inventory(_get_cached_module_snapshot(device, "primary", get_cache_key))
     cache.set(
         key,
         module_inventory_cache_payload([], 6407, 6499, serial_context=SerialRules.load().for_device(device)),
         timeout=300,
     )
     stale = client.get(status_url, {"server_key": "primary"}).json()["tabs"]["modules"]
-    stale_rows = _get_cached_inventory_for_device(device, "primary", get_cache_key)
+    stale_rows = cached_module_inventory(_get_cached_module_snapshot(device, "primary", get_cache_key))
     fragment = client.get(fragment_url, {"server_key": "primary"})
 
     assert (current["state"], current["snapshot_available"], current_rows) == ("ready", True, [])

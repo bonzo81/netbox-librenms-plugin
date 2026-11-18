@@ -293,24 +293,26 @@ class TestInventoryCacheContract:
         assert cached_module_inventory(payload) == expected
 
     def test_current_fingerprint_returns_the_real_cached_rows(self, live_librenms):
-        from netbox_librenms_plugin.views.sync.modules import _get_cached_inventory_for_device
+        from netbox_librenms_plugin.sync_cache import cached_module_inventory
+        from netbox_librenms_plugin.views.sync.modules import _get_cached_module_snapshot
 
         device = make_device("module-current-cache", librenms_cf={"default": 41})
         view = _view(_cache_view_class(), _post_request({}), live_librenms)
         rows = [_inventory_item(1, "CARD", "Slot 1")]
         key = seed_inventory(view, device, rows, librenms_id=41)
 
-        assert _get_cached_inventory_for_device(device, "default", view.get_cache_key) == rows
+        assert cached_module_inventory(_get_cached_module_snapshot(device, "default", view.get_cache_key)) == rows
         assert cache.get(key)["librenms_id"] == 41
 
     def test_stale_fingerprint_is_rejected(self, live_librenms):
-        from netbox_librenms_plugin.views.sync.modules import _get_cached_inventory_for_device
+        from netbox_librenms_plugin.sync_cache import cached_module_inventory
+        from netbox_librenms_plugin.views.sync.modules import _get_cached_module_snapshot
 
         device = make_device("module-stale-cache", librenms_cf={"default": 42})
         view = _view(_cache_view_class(), _post_request({}), live_librenms)
         seed_inventory(view, device, [_inventory_item(1, "CARD", "Slot 1")], librenms_id=99)
 
-        assert _get_cached_inventory_for_device(device, "default", view.get_cache_key) is None
+        assert cached_module_inventory(_get_cached_module_snapshot(device, "default", view.get_cache_key)) is None
 
     def test_an_authorized_grant_hands_back_the_cached_row_itself(self, live_librenms):
         """The writer reads the row from the authenticated snapshot it checked the grant against."""
@@ -884,7 +886,8 @@ class TestInstallAndUpdateViews:
 
         from netbox_librenms_plugin.inventory_policy import load_inventory_policy
         from netbox_librenms_plugin.module_grants import ACTION_INSTALL_MODULE, RENDER_ATTRIBUTED, sign_module_grant
-        from netbox_librenms_plugin.views.sync.modules import InstallModuleView, _get_cached_inventory_for_device
+        from netbox_librenms_plugin.sync_cache import cached_module_inventory
+        from netbox_librenms_plugin.views.sync.modules import InstallModuleView, _get_cached_module_snapshot
 
         device = make_device(f"view-install-holder-{phys_class}", librenms_cf={"default": 52})
         bay = make_module_bay(device, "Holder Bay")
@@ -893,7 +896,7 @@ class TestInstallAndUpdateViews:
         view = InstallModuleView()
         view._librenms_api = live_librenms.api
         seed_inventory(view, device, [holder], librenms_id=52)
-        inventory = _get_cached_inventory_for_device(device, "default", view.get_cache_key)
+        inventory = cached_module_inventory(_get_cached_module_snapshot(device, "default", view.get_cache_key))
         grant = sign_module_grant(
             page_device_id=device.pk,
             device_id=device.pk,

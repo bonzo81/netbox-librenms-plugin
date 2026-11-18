@@ -70,6 +70,7 @@ from netbox_librenms_plugin.sync_cache import (
     apply_request_cache_transition,
     cached_module_inventory,
     module_inventory_oob_matches,
+    module_snapshot_serial_context,
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.transactions import (
@@ -248,15 +249,16 @@ def _module_already_on_device(device, incoming, serial_rules, *, exclude_pk=None
     return held.kind in REFUSING
 
 
-def _get_cached_inventory_for_device(sync_device, server_key, get_cache_key):
+def _get_cached_module_snapshot(sync_device, server_key, get_cache_key):
     """
-    Return cached inventory for ``sync_device``, or ``None`` when it is absent or stale.
+    Return the cached module inventory payload of ``sync_device``, or ``None`` when it is absent or stale.
 
     Cache entries are namespaced by server key and include ``librenms_id``.
     When both current and cached IDs are valid positive integers, they must
     match; otherwise cached data is treated as stale. The OOB controller link must
     match too, the same check the module table makes. A malformed payload or one
-    from an older schema version is deleted and read as absent.
+    from an older schema version reads as absent. The reader deletes nothing, because
+    another request can store a fresh snapshot under the key after this read.
 
     Args:
         sync_device (object): The NetBox device whose inventory is requested.
@@ -264,14 +266,11 @@ def _get_cached_inventory_for_device(sync_device, server_key, get_cache_key):
         get_cache_key (Callable): The function that builds the inventory cache key.
 
     Returns:
-        list[dict] | None: The cached inventory, or ``None`` when it is absent or stale.
+        dict | None: The payload that :func:`cached_module_inventory` accepts, or ``None``.
 
     """
-    cache_key = get_cache_key(sync_device, "inventory", server_key=server_key)
-    cached_payload = cache.get(cache_key)
-    inventory = cached_module_inventory(cached_payload)
-    if inventory is None:
-        cache.delete(cache_key)
+    cached_payload = cache.get(get_cache_key(sync_device, "inventory", server_key=server_key))
+    if cached_module_inventory(cached_payload) is None:
         return None
 
     current_librenms_id = _coerce_positive_int(read_mapping(sync_device).own_id(server_key))
@@ -281,7 +280,7 @@ def _get_cached_inventory_for_device(sync_device, server_key, get_cache_key):
     if not module_inventory_oob_matches(cached_payload, sync_device, server_key):
         return None
 
-    return inventory
+    return cached_payload
 
 
 def _module_write_failure(exc, model, user):
@@ -395,11 +394,13 @@ def _authorize_module_grant(view, page_device, server_key, action, token):
     except Device.DoesNotExist as exc:
         raise GrantRefused(GrantRefusal.DESTINATION) from exc
     sync_device = _get_sync_device_for_inventory(page_device, server_key)
-    inventory = _get_cached_inventory_for_device(sync_device, server_key, view.get_cache_key)
-    if inventory is None:
+    snapshot = _get_cached_module_snapshot(sync_device, server_key, view.get_cache_key)
+    if snapshot is None:
         raise GrantRefused(GrantRefusal.CACHE_MISSING)
+    inventory = cached_module_inventory(snapshot)
     try:
         policy = load_inventory_policy(page_device.pk)
+        serial_context = module_snapshot_serial_context(policy, sync_device)
     except Device.DoesNotExist as exc:
         raise GrantRefused(GrantRefusal.DESTINATION) from exc
     except RuleConfigurationError as exc:
@@ -407,6 +408,9 @@ def _authorize_module_grant(view, page_device, server_key, action, token):
         raise GrantRefused(GrantRefusal.RULE_ERROR) from exc
     grant = read_module_grant(token, action=action, page_device_id=page_device.pk, server_key=server_key)
     grant.check_state(inventory, policy)
+    # The grant signs the rows and the policy; the merge of those rows must have used the policy's context.
+    if snapshot.get("serial_context") != serial_context.fingerprint:
+        raise GrantRefused(GrantRefusal.SNAPSHOT)
     return _GrantedInventory(grant, inventory, _inventory_index_map(inventory), policy)
 
 

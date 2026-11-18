@@ -50,3 +50,36 @@ class UpdateModuleSerialView(View):
     def update(self):
         # ok: module-writer-keeps-observed-serials
         observe_module_write(device_ids=[device.pk], module_ids=[module.pk])
+
+
+def read_render_inventory(cache_key):
+    cached_payload = cache.get(cache_key)
+    cached_inventory = cached_module_inventory(cached_payload)
+    if cached_inventory is None:
+        # ruleid: module-snapshot-reader-keeps-the-snapshot
+        cache.delete(cache_key)
+        return None
+    return cached_inventory
+
+
+def get_cached_module_snapshot(cache_key):
+    cached_payload = cache.get(cache_key)
+    if cached_module_inventory(cached_payload) is None:
+        # ruleid: module-snapshot-reader-keeps-the-snapshot
+        cache.delete(cache_key)
+        return None
+    return cached_payload
+
+
+def build_context(cache_key):
+    try:
+        return build_table_context()
+    except _StaleInventorySnapshot:
+        # ruleid: module-snapshot-reader-keeps-the-snapshot
+        cache.delete(cache_key)
+        return {"table": None}
+
+
+def refresh_failed(cache_key):
+    # ok: module-snapshot-reader-keeps-the-snapshot
+    cache.delete(cache_key)

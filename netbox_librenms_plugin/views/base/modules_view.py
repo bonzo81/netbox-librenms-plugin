@@ -955,7 +955,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             # One policy read: the merge groups serials under the snapshot owner's context, the snapshot records
             # that context, and the table uses the policy.
             policy = load_inventory_policy(obj.pk)
-            serial_context = module_snapshot_serial_context(policy.serial_identity_rules, sync_device)
+            serial_context = module_snapshot_serial_context(policy, sync_device)
             inventory_data, txr_error = self._merge_transceiver_data(
                 inventory_data, ports_data=ports_data, serial_context=serial_context
             )
@@ -1136,7 +1136,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         cached_payload = cache.get(cache_key)
         cached_inventory = cached_module_inventory(cached_payload)
         if cached_inventory is None:
-            cache.delete(cache_key)
             return None, None, None, empty
         # Validate that the cached inventory was built for the same LibreNMS device.
         # If the object has been remapped to a different device, discard stale inventory.
@@ -1153,7 +1152,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 messages.error(request, self.scoped_lookup_message(lookup_error))
         # The linked OOB controller must match too: merged inventory built for another link is stale.
         if not module_inventory_snapshot_matches(cached_payload, sync_device, scoped_server, current_librenms_id):
-            cache.delete(cache_key)
             return None, None, None, empty
         return scoped_server, sync_device, cached_payload, None
 
@@ -1266,7 +1264,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 snapshot_serial_context=snapshot_serial_context,
             )
         except _StaleInventorySnapshot:
-            cache.delete(self.get_cache_key(sync_device, "inventory", server_key=self._active_server_key))
+            # No delete: another request can have stored a fresh snapshot under the key since the read.
             return {"table": None, "object": obj, "cache_expiry": None, "server_key": self._active_server_key}
         except Device.DoesNotExist:
             return {
@@ -1295,8 +1293,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         # The refresh grouped transceiver serials under the owner's context; another context makes the snapshot stale.
         if (
             snapshot_serial_context is not None
-            and snapshot_serial_context
-            != module_snapshot_serial_context(policy.serial_identity_rules, sync_device).fingerprint
+            and snapshot_serial_context != module_snapshot_serial_context(policy, sync_device).fingerprint
         ):
             raise _StaleInventorySnapshot()
         # The collector reads devices from the policy load, so the fingerprint covers what it read.

@@ -1662,7 +1662,7 @@ class TestPostInventoryRefresh:
         view = DeviceModuleTableView()
         cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
         # Keep both identity fingerprints valid. This makes the malformed inventory guard the
-        # only reason the snapshot is removed.
+        # only reason the snapshot is rejected.
         cache.set(
             cache_key,
             module_inventory_cache_payload([None], 1, None, serial_context=SerialRules.load().for_device(device)),
@@ -1671,7 +1671,6 @@ class TestPostInventoryRefresh:
 
         result = bind_and_call(view, request, "get_context_data", obj=device)
 
-        assert cache.get(cache_key) is None
         assert result["table"] is None
         assert result["object"].pk == device.pk
         assert result["server_key"] == server_key
@@ -4246,7 +4245,6 @@ class TestHolderEntitiesAreNotRows:
         stale = bind_and_call(view, make_request("get", {"server_key": server_key}), "get_context_data", obj=device)
 
         assert stale["table"] is None
-        assert cache.get(key) is None
         rows = {row["ent_physical_index"]: row for row in _refresh_module_rows(device, server_key)}
         assert rows[cage["entPhysicalIndex"]]["model"] == transceiver["model"]
 
@@ -6877,14 +6875,13 @@ class TestRenderActionsPortIdentityFields:
 
 @pytest.mark.django_db
 class TestGetContextDataOOBCacheFingerprint:
-    """get_context_data must invalidate cached inventory when the linked OOB controller changes (re-link / unlink), not only when the main id changes."""
+    """get_context_data must reject cached inventory when the linked OOB controller changes (re-link / unlink), not only when the main id changes."""
 
     @pytest.fixture
     def server_keys(self, settings, librenms_server):
         return _two_server_keys(settings, librenms_server, "fingerprint")
 
     def test_invalidates_when_oob_relinked(self, server_keys):
-        from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
         from netbox_librenms_plugin.server_mappings import attach_oob
@@ -6901,12 +6898,10 @@ class TestGetContextDataOOBCacheFingerprint:
 
         context = bind_and_call(view, request, "get_context_data", obj=device)
 
-        assert cache.get(cache_key) is None
         assert context["table"] is None
         assert context["server_key"] == server_key
 
     def test_invalidates_when_oob_unlinked(self, server_keys):
-        from django.core.cache import cache
 
         from netbox_librenms_plugin.tests.view_test_helpers import bind_and_call, make_request
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
@@ -6919,7 +6914,6 @@ class TestGetContextDataOOBCacheFingerprint:
 
         context = bind_and_call(view, request, "get_context_data", obj=device)
 
-        assert cache.get(cache_key) is None
         assert context["table"] is None
         assert context["server_key"] == server_key
 
@@ -6947,7 +6941,6 @@ class TestGetContextDataOOBCacheFingerprint:
 
         context = bind_and_call(view, request, "get_context_data", obj=device)
 
-        assert cache.get(cache_key) is None
         assert context["table"] is None
         assert context["server_key"] == server_key
 
@@ -6996,7 +6989,6 @@ class TestGetContextDataOOBCacheFingerprint:
 
         context = bind_and_call(view, request, "get_context_data", obj=device)
 
-        assert cache.get(cache_key) is None
         assert context["table"] is None
         assert context["server_key"] == server_key
 

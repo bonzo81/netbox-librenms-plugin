@@ -2025,3 +2025,34 @@ rules:
       - pattern-not-inside: |
           class UpdateModuleSerialView(...):
               ...
+
+  - id: module-snapshot-reader-keeps-the-snapshot
+    languages: [python]
+    severity: ERROR
+    message: >-
+      A reader of the module inventory snapshot deletes the snapshot that it rejected. Another
+      request can store a fresh snapshot under the key after this read, and the delete removes it.
+      Return the empty result and leave the key alone.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/views/**/*.py", "**/netbox_librenms_plugin/sync_cache.py"]
+    patterns:
+      - pattern-either:
+          - pattern-inside: |
+              def $F(...):
+                  ...
+                  $INVENTORY = cached_module_inventory(...)
+                  ...
+          - pattern-inside: |
+              def $F(...):
+                  ...
+                  if cached_module_inventory(...) is None:
+                      ...
+                  ...
+          - pattern-inside: |
+              try:
+                  ...
+              except _StaleInventorySnapshot:
+                  ...
+      - pattern: cache.delete(...)

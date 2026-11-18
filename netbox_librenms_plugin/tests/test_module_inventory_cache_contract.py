@@ -41,14 +41,17 @@ class TestSeedInventoryMatchesTheReaderContract:
         """Without a matching id the reader returns None, so every seeded assertion would be vacuous."""
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.views.sync.modules import _get_cached_inventory_for_device
+        from netbox_librenms_plugin.sync_cache import cached_module_inventory
+        from netbox_librenms_plugin.views.sync.modules import _get_cached_module_snapshot
 
         view, device = self._view_and_device("seed-inventory-contract", 7)
         inventory = [{"entPhysicalIndex": 1, "entPhysicalName": "Bay 1"}]
         key = seed_inventory(view, device, inventory, librenms_id=7)
 
         try:
-            assert _get_cached_inventory_for_device(device, "default", view.get_cache_key) == inventory
+            assert (
+                cached_module_inventory(_get_cached_module_snapshot(device, "default", view.get_cache_key)) == inventory
+            )
         finally:
             cache.delete(key)
 
@@ -104,7 +107,8 @@ class TestWritersCheckTheOobLinkOfTheSnapshot:
     def test_the_reader_follows_the_table_fingerprint(self, cached_oob, link, readable):
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.views.sync.modules import _get_cached_inventory_for_device
+        from netbox_librenms_plugin.sync_cache import cached_module_inventory
+        from netbox_librenms_plugin.views.sync.modules import _get_cached_module_snapshot
 
         view, device = TestSeedInventoryMatchesTheReaderContract._view_and_device(f"oob-reader-{link}", 7)
         inventory = [{"entPhysicalIndex": 1, "entPhysicalName": "Bay 1"}]
@@ -116,7 +120,9 @@ class TestWritersCheckTheOobLinkOfTheSnapshot:
         )
         self._link(device, link)
 
-        assert (_get_cached_inventory_for_device(device, "default", view.get_cache_key) == inventory) is readable
+        assert (
+            cached_module_inventory(_get_cached_module_snapshot(device, "default", view.get_cache_key)) == inventory
+        ) is readable
 
     def test_install_selected_refuses_a_snapshot_built_before_an_oob_link(self):
         from dcim.models import Device, Interface, Module, ModuleBay, ModuleType

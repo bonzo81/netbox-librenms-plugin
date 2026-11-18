@@ -34,9 +34,22 @@ _MAX_ACKNOWLEDGED_REVISIONS = 200
 MODULE_INVENTORY_CACHE_VERSION = 4
 
 
-def module_snapshot_serial_context(rules, sync_device):
-    """Return the serial context of the module snapshot that *sync_device* owns; every member that shares it reads it."""
-    return rules.for_device(sync_device)
+def module_snapshot_serial_context(policy, sync_device):
+    """
+    Return the serial context of the module snapshot that *sync_device* owns; every member that shares it reads it.
+
+    The owner comes from the Devices that *policy* loaded, so the stamp and the signed policy read one observation.
+
+    Raises:
+        Device.DoesNotExist: *sync_device* is not a device of *policy*.
+
+    """
+    owner = policy.member(sync_device.pk)
+    if owner is None:
+        from dcim.models import Device
+
+        raise Device.DoesNotExist(f"Device {sync_device.pk} is not a device of the Modules policy")
+    return policy.serial_identity_rules.for_device(owner)
 
 
 def module_inventory_cache_payload(inventory, librenms_id, oob_librenms_id, *, serial_context) -> dict:
@@ -781,8 +794,10 @@ class SyncCacheConsistency:
         """Return whether the tab's snapshot exists in a form its reader accepts."""
         key = self.snapshot_key(tab, server_key)
         if tab == SyncTab.MODULES:
+            from dcim.models import Device
+
+            from netbox_librenms_plugin.inventory_policy import load_inventory_policy
             from netbox_librenms_plugin.models import RuleConfigurationError
-            from netbox_librenms_plugin.serial_identity import SerialRules
 
             payload = cache.get(key)
             owner = self._primary_owner(tab, server_key)
@@ -791,8 +806,9 @@ class SyncCacheConsistency:
             ):
                 return False
             try:
-                context = module_snapshot_serial_context(SerialRules.load(), owner)
-            except RuleConfigurationError:
+                # The table policy validates every rule, so a rule that empties the table also empties the status.
+                context = module_snapshot_serial_context(load_inventory_policy(self.subject.pk), owner)
+            except (Device.DoesNotExist, RuleConfigurationError):
                 return False
             return payload.get("serial_context") == context.fingerprint
         return cache.has_key(key)

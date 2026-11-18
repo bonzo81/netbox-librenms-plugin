@@ -298,3 +298,169 @@ class TestSerialRuleEditStalesTheSnapshot:
         finally:
             cache.delete(snapshot_key)
             cache.delete(SyncCacheConsistency(page).state_key(SyncTab.MODULES, SERVER_KEY))
+
+    def test_status_rejects_a_snapshot_when_another_makers_serial_rule_breaks(self, librenms_server):
+        """The table validates every serial chain, so the status must not call its snapshot available."""
+        from dcim.models import Manufacturer
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, sync_snapshot_key
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        device = make_device("status-unrelated-broken-rule", librenms_cf={SERVER_KEY: 42})
+        make_module_bay(device, "Bay 1")
+        snapshot_key = sync_snapshot_key(device, "inventory", SERVER_KEY)
+        state_key = SyncCacheConsistency(device).state_key(SyncTab.MODULES, SERVER_KEY)
+        try:
+            _response, context, _request = _refresh(device, librenms_server)
+            assert context.get("table") is not None
+            other_maker = Manufacturer.objects.create(name="Unrelated status maker", slug="unrelated-status-maker")
+            rule = NormalizationRule.objects.create(
+                scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1", manufacturer=other_maker
+            )
+            NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"invalid-\1")
+
+            status = SyncCacheConsistency(device).status(SERVER_KEY)[SyncTab.MODULES.value]
+            request = make_request("get", {"tab": "modules", "server_key": SERVER_KEY})
+            view = DeviceModuleTableView()
+            view.setup(request, pk=device.pk)
+            view.cache_only = True
+            read = view.get_context_data(request, device, server_key=SERVER_KEY)
+
+            assert read["table"] is None
+            assert status["snapshot_available"] is False
+        finally:
+            cache.delete(snapshot_key)
+            cache.delete(state_key)
+
+    def test_a_device_type_change_during_the_fetch_stamps_the_context_the_merge_used(
+        self, librenms_server, monkeypatch
+    ):
+        """The merge, the stamp and the signed policy read one observation of the Device."""
+        from dcim.models import Device, DeviceType, Manufacturer
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, sync_snapshot_key
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay
+        from netbox_librenms_plugin.views.base import modules_view
+
+        device = make_device("type-change-during-fetch", librenms_cf={SERVER_KEY: 42})
+        make_module_bay(device, "Bay 1")
+        NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
+        new_maker = Manufacturer.objects.create(name="Fetch race maker", slug="fetch-race-maker")
+        new_type = DeviceType.objects.create(manufacturer=new_maker, model="Fetch race model", slug="fetch-race-model")
+        # Only the new maker's chain makes "S/N PARTIAL-1" the module's "PARTIAL-1".
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1", manufacturer=new_maker
+        )
+        transceivers = [{"entity_physical_index": 20, "serial": "S/N PARTIAL-1", "model": "SFP-RULE", "type": "sfp"}]
+        original = modules_view.load_inventory_policy
+
+        def retype_before_the_policy_read(page_device_id):
+            # The refresh read its sync device before the LibreNMS fetch; the type changes during the fetch.
+            Device.objects.filter(pk=device.pk).update(device_type=new_type)
+            return original(page_device_id)
+
+        monkeypatch.setattr(modules_view, "load_inventory_policy", retype_before_the_policy_read)
+        snapshot_key = sync_snapshot_key(device, "inventory", SERVER_KEY)
+        try:
+            _response, context, _request = _refresh(device, librenms_server, transceivers=(True, transceivers))
+            payload = cache.get(snapshot_key)
+        finally:
+            cache.delete(snapshot_key)
+            cache.delete(SyncCacheConsistency(device).state_key(SyncTab.MODULES, SERVER_KEY))
+
+        device.refresh_from_db()
+        assert context.get("table") is not None
+        assert payload["serial_context"] == SerialRules.load().for_device(device).fingerprint
+        assert [item["entPhysicalIndex"] for item in payload["inventory"]] == [1], "the merge used the old type"
+
+
+@pytest.mark.django_db
+class TestASnapshotReaderKeepsAFreshSnapshot:
+    """A reader that rejects the snapshot it read must not delete one that another request stored since."""
+
+    @pytest.fixture(autouse=True)
+    def _configure_server(self, settings):
+        configure_default_librenms_server(settings)
+
+    @staticmethod
+    def _stored_after_the_read(monkeypatch, key, old, fresh):
+        """Return *old* to the reader of *key*, as if another request stored *fresh* just after the read."""
+        from django.core.cache import cache, caches
+
+        backend = caches["default"]
+        real_get = backend.get
+
+        def get(cache_key, *args, **kwargs):
+            if cache_key == key:
+                cache.set(key, fresh, timeout=300)
+                return old
+            return real_get(cache_key, *args, **kwargs)
+
+        monkeypatch.setattr(backend, "get", get)
+        return real_get
+
+    @pytest.mark.parametrize("rejected", ["malformed", "other-device", "other-serial-context"])
+    def test_the_module_table_reader(self, monkeypatch, rejected):
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.serial_identity import SerialContext
+        from netbox_librenms_plugin.sync_cache import sync_snapshot_key
+        from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay
+        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+        device = make_device(f"fresh-snapshot-{rejected}", librenms_cf={SERVER_KEY: 42})
+        make_module_bay(device, "Bay 1")
+        context = SerialRules.load().for_device(device)
+        fresh = module_inventory_cache_payload(INVENTORY, 42, None, serial_context=context)
+        old = {
+            "malformed": {"version": -1},
+            "other-device": module_inventory_cache_payload(INVENTORY, 43, None, serial_context=context),
+            "other-serial-context": module_inventory_cache_payload(
+                INVENTORY, 42, None, serial_context=SerialContext(None, (), unavailable="another context")
+            ),
+        }[rejected]
+        key = sync_snapshot_key(device, "inventory", SERVER_KEY)
+        real_get = self._stored_after_the_read(monkeypatch, key, old, fresh)
+        request = make_request("get", {"tab": "modules", "server_key": SERVER_KEY})
+        view = DeviceModuleTableView()
+        view.setup(request, pk=device.pk)
+        view.cache_only = True
+        try:
+            read = view.get_context_data(request, device, server_key=SERVER_KEY)
+            stored = real_get(key)
+        finally:
+            cache.delete(key)
+
+        assert read["table"] is None
+        assert stored == fresh
+
+    def test_the_module_writer_reader(self, monkeypatch):
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.sync_cache import sync_snapshot_key
+        from netbox_librenms_plugin.tests.conftest import make_device
+        from netbox_librenms_plugin.views.mixins import CacheMixin
+        from netbox_librenms_plugin.sync_cache import cached_module_inventory
+        from netbox_librenms_plugin.views.sync.modules import _get_cached_module_snapshot
+
+        device = make_device("fresh-snapshot-writer", librenms_cf={SERVER_KEY: 42})
+        fresh = module_inventory_cache_payload(
+            INVENTORY, 42, None, serial_context=SerialRules.load().for_device(device)
+        )
+        key = sync_snapshot_key(device, "inventory", SERVER_KEY)
+        real_get = self._stored_after_the_read(monkeypatch, key, {"version": -1}, fresh)
+        try:
+            inventory = cached_module_inventory(
+                _get_cached_module_snapshot(device, SERVER_KEY, CacheMixin().get_cache_key)
+            )
+            stored = real_get(key)
+        finally:
+            cache.delete(key)
+
+        assert inventory is None
+        assert stored == fresh
