@@ -7,7 +7,6 @@ import re
 import pytest
 
 from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording, find_pii, pseudonymize_os
-from netbox_librenms_plugin.serial_identity import SerialRules, plain_context
 from netbox_librenms_plugin.serial_utils import map_sensors_to_serial_links
 from netbox_librenms_plugin.tests.recordings import load_recording
 
@@ -103,7 +102,7 @@ def test_serials_pseudonymized_and_deterministic():
 
 @pytest.mark.parametrize("serial", ["12", 12, "A-1"])
 def test_offline_anonymization_does_not_give_identity_to_an_unadmitted_serial(serial):
-    from netbox_librenms_plugin.serial_identity import is_identity
+    from netbox_librenms_plugin.serial_identity import is_identity, plain_context
 
     recording = _ports({"entPhysicalSerialNum": serial})
 
@@ -1340,6 +1339,7 @@ def test_numeric_model_fields_share_the_string_token(field, value):
 @pytest.mark.parametrize("value", [100, 123456, 123456.25])
 @pytest.mark.parametrize("numeric_parent", [True, False])
 def test_anonymization_preserves_mixed_numeric_inventory_identity(recording_server, field, value, numeric_parent):
+    from netbox_librenms_plugin.serial_identity import SerialRules, plain_context
     from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
 
     parent = {
