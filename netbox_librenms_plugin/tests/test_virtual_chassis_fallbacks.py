@@ -947,6 +947,32 @@ def test_a_serial_lookup_keeps_two_matches_and_adds_no_queries_past_them():
 
 
 @pytest.mark.django_db
+def test_a_batch_write_lookup_compares_no_rows_beside_many_duplicate_holders(monkeypatch):
+    """Thirty holders of one serial and a serial without a holder: the read goes on, and each row costs one check."""
+    from django.db.models import Model
+
+    from netbox_librenms_plugin.serial_identity import SerialRules, resolve_devices_write
+
+    for n in range(30):
+        make_device(f"duplicate-holder-{n}", serial="DUP-HOLDER-SN")
+    rules = SerialRules.load()
+    compare_rows = Model.__eq__
+    comparisons = []
+
+    def counted(row, other):
+        comparisons.append(row.pk)
+        return compare_rows(row, other)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Model, "__eq__", counted)
+        found = resolve_devices_write(["DUP-HOLDER-SN", "NO-HOLDER-SN"], rules.context(None), rules=rules)
+
+    assert len(found["DUP-HOLDER-SN"].matches) == 30
+    # A list scan per row compares each new holder with every earlier one: 435 comparisons for 30 rows.
+    assert len(comparisons) < 30
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize(("stored", "incoming"), [("S/N ABC-LOOKUP", "ABC-LOOKUP"), ("ABC-LOOKUP", "S/N ABC-LOOKUP")])
 def test_serial_lookup_finds_raw_and_keyed_values_before_limiting(stored, incoming):
     from netbox_librenms_plugin.serial_identity import resolve_device

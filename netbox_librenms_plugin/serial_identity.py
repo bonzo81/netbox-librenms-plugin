@@ -481,6 +481,8 @@ def _resolve(queryset, values, *, rules, row_context, lock, spare=0, writer=None
     patterns = sorted({contains_pattern(key) for value in open_values for key in probes[value]})
     queryset = queryset.filter(_SerialCandidates(exact, patterns)).order_by("pk")
     matches = {value: [] for value in open_values}
+    # The pks of matches[value]: a list scan for each row would make many duplicate holders quadratic.
+    matched_pks = {value: set() for value in open_values}
     uncertain = {value: [] for value in open_values}
     by_key = _values_by_key(open_values, probes)
     full = _AMBIGUOUS_AT + spare
@@ -509,9 +511,10 @@ def _resolve(queryset, values, *, rules, row_context, lock, spare=0, writer=None
             for value in candidates:
                 if _matches_serial(stored, value, context, writer):
                     matches[value].append(row)
+                    matched_pks[value].add(row.pk)
                     saturated += len(matches[value]) == full
             for value in by_own_key.get(stored, ()):
-                if row not in matches[value]:
+                if row.pk not in matched_pks[value]:
                     uncertain[value].append(row)
         if not unavailable and saturated == len(open_values):
             complete = False
