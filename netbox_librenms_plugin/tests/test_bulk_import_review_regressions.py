@@ -580,6 +580,36 @@ def test_an_unavailable_member_serial_rolls_back_the_stack_even_with_two_holders
 
 
 @pytest.mark.django_db
+def test_a_stack_with_a_nul_in_a_member_serial_is_refused_before_any_write(live_librenms):
+    """PostgreSQL text cannot hold a NUL, so validation refuses the member serial and the import writes nothing."""
+    from dcim.models import Device, VirtualChassis
+
+    from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+    from netbox_librenms_plugin.serial_identity import stored_form_refusal
+    from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
+
+    nul_serial = "SN-NUL-B\x00X"
+    members = [_chassis(100, "SN-NUL-A", position=1), _chassis(200, nul_serial, position=2)]
+    prerequisites, row = _importable_row(live_librenms, 96321, "stack-nul", members=members)
+
+    result = bulk_import_devices_shared(
+        [96321],
+        server_key="default",
+        manual_mappings_per_device={96321: prerequisites},
+        libre_devices_cache={96321: row},
+        user=make_superuser("stack-nul-user"),
+    )
+
+    refusal = stored_form_refusal(nul_serial, Device)
+    assert refusal, result
+    assert result["success"] == []
+    assert [entry["device_id"] for entry in result["failed"]] == [96321]
+    assert refusal in result["failed"][0]["error"]
+    assert not Device.objects.filter(name=row["hostname"]).exists()
+    assert not VirtualChassis.objects.filter(domain="librenms-default-96321").exists()
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize("htmx", [False, True], ids=["plain", "htmx"])
 def test_the_import_answer_fails_a_stack_row_whose_chassis_create_failed(client, live_librenms, htmx):
     """The failed chassis rolls the device back, so the answer reports a failed row and no import."""

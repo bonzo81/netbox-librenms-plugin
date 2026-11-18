@@ -337,6 +337,9 @@ def stored_form_refusal(value, model) -> str:
     if not is_serial_value(value):
         return MALFORMED_SERIAL
     text = display(value)
+    if "\x00" in text:
+        # PostgreSQL text cannot hold a NUL character.
+        return "The LibreNMS serial holds a NUL character, which the serial field cannot store."
     max_length = model._meta.get_field("serial").max_length
     if max_length is not None and len(text) > max_length:
         return f"The LibreNMS serial has {len(text)} characters; the field holds at most {max_length}."
