@@ -102,7 +102,7 @@ def test_serials_pseudonymized_and_deterministic():
 
 @pytest.mark.parametrize("serial", ["12", 12, "A-1"])
 def test_offline_anonymization_does_not_give_identity_to_an_unadmitted_serial(serial):
-    from netbox_librenms_plugin.serial_identity import is_identity, plain_context
+    from netbox_librenms_plugin.serial_identity import display, is_identity, plain_context
 
     recording = _ports({"entPhysicalSerialNum": serial})
 
@@ -110,7 +110,8 @@ def test_offline_anonymization_does_not_give_identity_to_an_unadmitted_serial(se
 
     stored = _response(anonymized, "GET /api/v0/devices/1/ports")["ports"][0]["entPhysicalSerialNum"]
     assert not is_identity(serial, plain_context())
-    assert stored == ""
+    # The serial stays reported, so a reader still tells it apart from a blank one.
+    assert display(stored) and stored != str(serial)
     assert not is_identity(stored, plain_context())
 
 
@@ -131,6 +132,8 @@ def test_cross_reference_serial_preserved():
 
 
 def test_numeric_serials_are_masked_and_share_string_identity():
+    from netbox_librenms_plugin.serial_identity import display, is_identity, plain_context
+
     recording = {
         "schema_version": 1,
         "name": "numeric-serials",
@@ -152,7 +155,7 @@ def test_numeric_serials_are_masked_and_share_string_identity():
     assert device_serial == inventory_serial == expected_serials[0] == expected_serials[1]
     assert transceiver_serial == expected_serials[2] == expected_serials[3]
     assert device_serial.startswith("SN-")
-    assert transceiver_serial == ""
+    assert display(transceiver_serial) and not is_identity(transceiver_serial, plain_context())
     assert device_serial != transceiver_serial
     assert expected_serials[4:] == [None, "-"]
     assert find_pii(anon) == []

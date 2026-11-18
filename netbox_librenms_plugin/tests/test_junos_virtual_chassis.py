@@ -200,17 +200,19 @@ def test_a_serial_rule_that_removes_identity_does_not_publish_the_original_seria
     import json
 
     from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
-    from netbox_librenms_plugin.serial_identity import SerialRules
+    from netbox_librenms_plugin.serial_identity import SerialRules, display, is_identity
     from netbox_librenms_plugin.models import NormalizationRule
 
     NormalizationRule.objects.filter(scope="serial").delete()
     NormalizationRule.objects.create(scope="serial", match_pattern=pattern, replacement=replacement)
     recording = {"device_id": 1, "responses": {"GET /api/v0/devices/1": {"devices": [{"serial": "CAPTURE-A"}]}}}
+    context = SerialRules.load().context(None)
 
-    anonymized = anonymize_recording(recording, serial_context=SerialRules.load().context(None))
+    anonymized = anonymize_recording(recording, serial_context=context)
 
     assert "CAPTURE-A" not in json.dumps(anonymized)
-    assert anonymized["responses"][f"GET /api/v0/devices/{anonymized['device_id']}"]["devices"][0]["serial"] == ""
+    stored = anonymized["responses"][f"GET /api/v0/devices/{anonymized['device_id']}"]["devices"][0]["serial"]
+    assert display(stored) and not is_identity(stored, context)
     assert recording["responses"]["GET /api/v0/devices/1"]["devices"][0]["serial"] == "CAPTURE-A"
 
 

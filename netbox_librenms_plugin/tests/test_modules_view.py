@@ -1111,6 +1111,58 @@ class TestMergeTransceiverDataPortIdentity:
             for item in inventory[1:]
         ] == [(77, "OPTIC123", 9)]
 
+    def test_a_replay_of_the_anonymized_recording_merges_the_optic_as_the_live_data_does(
+        self, settings, librenms_server
+    ):
+        """Anonymization keeps a serial without an identity reported, so the port stays apart from the optic."""
+        from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
+        from netbox_librenms_plugin.serial_identity import display
+
+        live = {
+            "device_id": 110,
+            "responses": {
+                "GET /api/v0/inventory/110/all": {
+                    "status": "ok",
+                    "inventory": [
+                        {
+                            "entPhysicalIndex": 10,
+                            "entPhysicalName": "Port 9",
+                            "entPhysicalClass": "port",
+                            "entPhysicalSerialNum": "AB-12",
+                            "ifIndex": 50,
+                        }
+                    ],
+                },
+                "GET /api/v0/devices/110/transceivers": {
+                    "status": "ok",
+                    "transceivers": [
+                        {"entity_physical_index": 77, "model": "SFP-10G-SR", "serial": "OPTIC123", "port_id": 9}
+                    ],
+                },
+                "GET /api/v0/devices/110/ports": {
+                    "status": "ok",
+                    "ports": [{"port_id": 9, "ifName": "Eth9", "ifIndex": 50}],
+                },
+            },
+        }
+
+        def merged(recording):
+            device_id = recording["device_id"]
+            librenms_server.load_recording(recording)
+            view = _real_api_view(settings, librenms_server, librenms_id=device_id)
+            inventory = recording["responses"][f"GET /api/v0/inventory/{device_id}/all"]["inventory"]
+            result, error = view._merge_transceiver_data(
+                deepcopy(inventory), serial_context=SerialRules.load().context(None)
+            )
+            assert error is None
+            return [
+                (item["entPhysicalIndex"], bool(display(item.get("entPhysicalSerialNum"))), "_librenms_port_id" in item)
+                for item in result
+            ]
+
+        assert merged(live) == [(10, True, False), (77, True, True)]
+        assert merged(anonymize_recording(live, salt="replay")) == merged(live)
+
     def test_enrich_inventory_port_identity_backfills_port_rows_from_ports_api(self, settings, librenms_server):
         view = _real_api_view(settings, librenms_server, librenms_id=102)
         librenms_server.register(
@@ -3970,6 +4022,32 @@ class TestCheckIgnoreRules:
         }
         index_map = {1: grandparent, 30: parent, 7: item}
         assert self._check(item, parent, [self._rule()], index_map=index_map) == action
+
+    @pytest.mark.parametrize("parent_serial", ["AB-12", ""])
+    def test_the_ancestor_walk_stops_at_the_same_parent_after_anonymization(self, parent_serial):
+        from netbox_librenms_plugin.data_shapes.anonymize import anonymize_recording
+        from netbox_librenms_plugin.views.base.modules_view import _serial_matches_an_ancestor
+
+        rows = [
+            {"entPhysicalIndex": 1, "entPhysicalSerialNum": "ABC123", "entPhysicalContainedIn": 0},
+            {"entPhysicalIndex": 30, "entPhysicalSerialNum": parent_serial, "entPhysicalContainedIn": 1},
+            {
+                "entPhysicalIndex": 7,
+                "entPhysicalName": "Board-IDPROM",
+                "entPhysicalSerialNum": "ABC123",
+                "entPhysicalContainedIn": 30,
+            },
+        ]
+        live = {"device_id": 1, "responses": {"GET /api/v0/inventory/1/all": {"inventory": rows}}}
+        anonymized = anonymize_recording(live, salt="walk")
+
+        def matches(recording):
+            items = next(iter(recording["responses"].values()))["inventory"]
+            index_map = {item["entPhysicalIndex"]: item for item in items}
+            return _serial_matches_an_ancestor(index_map[7], index_map[30], index_map, plain_context())
+
+        assert matches(live) is (parent_serial == "")
+        assert matches(anonymized) is matches(live)
 
     def test_ancestor_walk_stops_at_non_matching_serial(self):
         """Ancestor walk stops at first non-empty serial; if it doesn't match → NOT skipped."""

@@ -819,8 +819,9 @@ def _anon_value(key, value, rules, container=None):  # noqa: C901
             return value
         serial = anonymize_input(value, rules.serial_context or plain_context())
         if not serial:
-            # An absent identity must stay absent in the recording.
-            return ""
+            # A reported serial without an identity stays reported: no run of three letters or digits gives it one.
+            digest = _hash(_serial_text(value), salt)
+            return f"{digest[:2]}-{digest[2:4]}-{digest[4:]}"
         return f"SN-{_hash(serial, salt)}"
     if key in MODEL_KEYS:
         if isinstance(value, bool) or not isinstance(value, (str, int, float)):
