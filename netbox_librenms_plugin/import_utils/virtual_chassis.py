@@ -222,6 +222,9 @@ def _junos_fpc_rows(root: dict, children: list, contexts) -> list:
     if not _is_junos_vc_root(root):
         return []
     fpcs = [row for row in children if _is_junos_fpc(row)]
+    # Fewer than two FPCs is no stack, so no serial context decides it.
+    if len(fpcs) < 2:
+        return []
     fpc_serials = [row.get("entPhysicalSerialNum") for row in fpcs]
     # A false stack creates bogus member devices on import, so one serial context must meet every condition.
     if any(_junos_fpc_serials_hold(root.get("entPhysicalSerialNum"), fpc_serials, context) for context in contexts):
@@ -575,8 +578,9 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int, *, s
             return _failed_virtual_chassis_data("LibreNMS child inventory request failed")
 
         # The DeviceType is not known yet, so every candidate context may explain the stack.
-        contexts = (serial_rules or SerialRules.load()).candidates()
-        members = extract_vc_members([*root_items, *(child_items or [])], contexts)
+        # They are read lazily: only a Junos FPC shape compares serials, so a broken rule refuses only that decision.
+        serial_rules = serial_rules or SerialRules.load()
+        members = extract_vc_members([*root_items, *(child_items or [])], serial_rules.iter_candidates())
         if not members:
             return None
 
@@ -584,9 +588,9 @@ def detect_virtual_chassis_from_inventory(api: LibreNMSAPI, device_id: int, *, s
         vc_name_pattern = _load_vc_member_name_pattern() if master_name else None
         for member in members:
             if master_name:
-                # The DeviceType is not known yet, so the global context (the first candidate) names the members.
+                # The DeviceType is not known yet, so the global context names the members.
                 member["suggested_name"] = _member_name(
-                    master_name, member["position"], member["serial"], vc_name_pattern, contexts[0]
+                    master_name, member["position"], member["serial"], vc_name_pattern, serial_rules.context(None)
                 )
             else:
                 member["suggested_name"] = f"Member-{member['position']}"
