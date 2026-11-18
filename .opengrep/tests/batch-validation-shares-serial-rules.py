@@ -29,3 +29,11 @@ def polling_batch(queue, api):
     while queue:
         # ruleid: batch-validation-shares-serial-rules
         validate_device_for_import(queue.pop(), api=api)
+
+
+def reloaded_batch(rows, api):
+    for row in rows:
+        # ruleid: batch-validation-shares-serial-rules
+        validate_device_for_import(row, api=api, serial_rules=SerialRules.load())
+        # ruleid: batch-validation-shares-serial-rules
+        validate_device_for_import(row, api=api, serial_rules=serial_identity.SerialRules.load())

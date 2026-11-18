@@ -1968,6 +1968,9 @@ rules:
               - pattern-not: validate_device_for_import(..., serial_rules=$RULES, ...)
           # None makes the validator load a fresh SerialRules on each call.
           - pattern: validate_device_for_import(..., serial_rules=None, ...)
+          # A load inside the call reads the rules again for each device.
+          - pattern: validate_device_for_import(..., serial_rules=SerialRules.load(...), ...)
+          - pattern: validate_device_for_import(..., serial_rules=$M.SerialRules.load(...), ...)
 
   - id: module-writer-claims-released-identities
     languages: [python]
