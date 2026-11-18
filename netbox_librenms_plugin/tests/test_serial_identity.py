@@ -295,8 +295,17 @@ class TestLookup:
 
     @pytest.mark.parametrize(("stored", "incoming"), [("ABCXDEF", "ABC_DEF"), ("ABC-DEF", "ABC%DEF")])
     def test_like_wildcards_in_a_key_stay_literal(self, stored, incoming):
-        make_device(f"lookup-wildcard-{incoming.replace('%', 'p')}", serial=stored)
+        from dcim.models import Device
 
+        from netbox_librenms_plugin.serial_identity import _SerialCandidates
+
+        tag = incoming.replace("%", "p")
+        make_device(f"lookup-wildcard-{tag}", serial=stored)
+        literal = make_device(f"lookup-wildcard-literal-{tag}", serial=f"Z{incoming}Z")
+        # The SQL candidate read itself, not only the confirmed result: a confirmation drops a wildcard row too.
+        candidates = Device.objects.filter(_SerialCandidates([incoming], [contains_pattern(incoming)]))
+
+        assert list(candidates.values_list("pk", flat=True)) == [literal.pk]
         assert resolve_device(incoming).kind is ResolutionKind.NO_MATCH
 
     def test_a_backslash_in_a_serial_matches_literally(self):
