@@ -7,6 +7,8 @@ from threading import Barrier
 import pytest
 from django.db import IntegrityError, close_old_connections, connection
 
+from netbox_librenms_plugin.module_grants import GrantRefusal
+
 from netbox_librenms_plugin.tests.conftest import (
     bounded_executor,
     configure_librenms_servers,
@@ -21,6 +23,7 @@ from netbox_librenms_plugin.tests.conftest import (
 )
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping
 from netbox_librenms_plugin.tests.view_test_helpers import (
+    messages_on,
     rendered_module_form,
     render_module_tab,
     trusted_module_inventory_payload,
@@ -888,7 +891,7 @@ def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_se
                 return execute(sql, params, many, context)
 
             with connection.execute_wrapper(observe_lock):
-                return [client.post(url, data).status_code for url, data in posts]
+                return [messages_on(client.post(url, data).wsgi_request) for url, data in posts]
         finally:
             connection.close()
 
@@ -910,12 +913,26 @@ def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_se
             assert not modules.done()
         finally:
             release.set()
-        assert retype.result(timeout=30) == [302]
-        assert modules.result(timeout=30) == [302, 302]
+        retype.result(timeout=30)
+        stale = modules.result(timeout=30)
 
     assert Device.objects.get(pk=device.pk).device_type_id == new_type.pk, "the type change itself must commit"
+    # The forms signed the old type, so the waiting updates refuse; fresh forms then run the identity check.
+    # One session: the second response also carries the first one's message.
+    assert stale[0] and {message for messages in stale for message in messages} == {
+        ("error", GrantRefusal.POLICY.message)
+    }, stale
+    fresh = render_module_tab(device, user=user)
+    levels = []
+    for index in (7, 8):
+        url, data = rendered_module_form(fresh, "update-module-serial", index)
+        client = Client()
+        client.force_login(user)
+        levels.append([level for level, _text in messages_on(client.post(url, data).wsgi_request)])
     stored = (Module.objects.get(pk=first.pk).serial, Module.objects.get(pk=second.pk).serial)
-    assert stored != ("ABC", "XABC"), stored
+    # Under the new type "XABC" names the hardware of "ABC", so the second update refuses.
+    assert stored == ("ABC", "OLD222"), stored
+    assert "error" not in levels[0] and levels[1] == ["error"], levels
 
 
 @transactional_db_with_all_apps()
@@ -1239,8 +1256,26 @@ def test_a_replacement_claims_the_serials_of_children_it_deletes(
     device_locked, child_locked = Event(), Event()
     errors = []
     updater_pids = []
+    waits = []
 
+    from netbox_librenms_plugin.serial_identity import _LOCK_PREFIX
     from netbox_librenms_plugin.tests.lock_conflict_helpers import wait_for_lock_wait
+    from netbox_librenms_plugin.utils import advisory_lock_key
+
+    claim = advisory_lock_key(f"{_LOCK_PREFIX}:{Module._meta.label_lower}:{old_serial}")
+
+    def updater_wait(holder_pid, waiter_pid):
+        """Return (the holder has the child's claim and the waiter waits on it, the waiter waits on a row)."""
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks AS held JOIN pg_locks AS waiting USING "
+                "(locktype, classid, objid, objsubid) WHERE locktype = 'advisory' AND held.pid = %s "
+                "AND held.granted AND waiting.pid = %s AND NOT waiting.granted AND held.classid = %s "
+                "AND held.objid = %s AND held.objsubid = 1), "
+                "EXISTS (SELECT 1 FROM pg_locks WHERE pid = %s AND locktype = 'transactionid' AND NOT granted)",
+                [holder_pid, waiter_pid, (claim >> 32) & 0xFFFFFFFF, claim & 0xFFFFFFFF, waiter_pid],
+            )
+            return cursor.fetchone()
 
     def post(actor):
         close_old_connections()
@@ -1263,6 +1298,7 @@ def test_a_replacement_claims_the_serials_of_children_it_deletes(
                 device_locked.set()
                 assert child_locked.wait(timeout=10)
                 wait_for_lock_wait(connection, updater_pids[0])
+                waits.append(updater_wait(connection.connection.info.backend_pid, updater_pids[0]))
             return result
 
         try:
@@ -1277,6 +1313,8 @@ def test_a_replacement_claims_the_serials_of_children_it_deletes(
 
     assert run_in_threads(partial(post, "replace"), partial(post, "update"), barriers=(), timeout=40) == [302, 302]
     assert "40P01" not in errors
+    # Only an admitted serial is an identity: the updater waits on its claim, else on the Device row.
+    assert waits == [(True, False) if old_serial == "BBB" else (False, True)], waits
     assert Module.objects.get(module_bay_id=parent.module_bay_id).serial == "DDD"
     assert not Module.objects.filter(pk=child.pk).exists()
 
@@ -1335,10 +1373,12 @@ def test_replacement_refuses_a_new_conflict_owner_without_locking_its_module(cli
     from dcim.models import Module
     from django.core.cache import cache
 
+    from netbox_librenms_plugin.module_writes import _CHANGED
     from netbox_librenms_plugin.tests.lock_conflict_helpers import (
         commit_row_change,
         lock_row,
         lock_timeout,
+        raised_sqlstates,
         second_connection,
     )
     from netbox_librenms_plugin.tests.view_test_helpers import rendered_preview_url
@@ -1373,8 +1413,11 @@ def test_replacement_refuses_a_new_conflict_owner_without_locking_its_module(cli
                 lock_row(peer, Module, conflict.pk)
             return execute(sql, params, many, context)
 
-        with connection.execute_wrapper(introduce_conflict), lock_timeout(200):
+        with connection.execute_wrapper(introduce_conflict), lock_timeout(200), raised_sqlstates() as sqlstates:
             response = client.post(action, fields)
     assert changed and response.status_code == 302
+    # A lock timeout on the peer's Module would also leave both rows as they were.
+    assert "55P03" not in sqlstates, sqlstates
+    assert any(_CHANGED in text for _level, text in messages_on(response.wsgi_request))
     assert Module.objects.filter(pk=parent.pk, serial="TARGET123").exists()
     assert Module.objects.filter(pk=conflict.pk, serial="NEW123").exists()
