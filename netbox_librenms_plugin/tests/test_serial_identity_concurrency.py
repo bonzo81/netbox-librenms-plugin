@@ -981,6 +981,12 @@ def test_module_serial_writes_wait_for_a_type_change_of_their_device(librenms_se
     assert stale[0] and {message for messages in stale for message in messages} == {
         ("error", GrantRefusal.POLICY.message)
     }, stale
+    # The snapshot was merged under the old type; refresh it as the Modules tab does.
+    device.refresh_from_db()
+    cache.set(
+        CacheMixin().get_cache_key(device, "inventory", SERVER_KEY),
+        trusted_module_inventory_payload(device, rows, librenms_id=9841),
+    )
     fresh = render_module_tab(device, user=user)
     levels = []
     for index in (7, 8):
@@ -1435,7 +1441,6 @@ def test_replacement_refuses_a_new_conflict_owner_without_locking_its_module(cli
     from dcim.models import Module
     from django.core.cache import cache
 
-    from netbox_librenms_plugin.module_writes import _CHANGED
     from netbox_librenms_plugin.tests.lock_conflict_helpers import (
         commit_row_change,
         lock_row,
@@ -1480,6 +1485,7 @@ def test_replacement_refuses_a_new_conflict_owner_without_locking_its_module(cli
     assert changed and response.status_code == 302
     # A lock timeout on the peer's Module would also leave both rows as they were.
     assert "55P03" not in sqlstates, sqlstates
-    assert any(_CHANGED in text for _level, text in messages_on(response.wsgi_request))
+    # The grant signed the holder that the preview found, so the new holder refuses it as stale.
+    assert messages_on(response.wsgi_request) == [("error", GrantRefusal.STALE.message)]
     assert Module.objects.filter(pk=parent.pk, serial="TARGET123").exists()
     assert Module.objects.filter(pk=conflict.pk, serial="NEW123").exists()
