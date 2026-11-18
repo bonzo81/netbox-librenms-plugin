@@ -53,6 +53,7 @@ from netbox_librenms_plugin.sync_cache import (
     module_inventory_cache_payload,
     module_inventory_snapshot_matches,
     module_snapshot_host_id,
+    module_snapshot_serial_context,
     request_actor_id,
 )
 from netbox_librenms_plugin.utils import (
@@ -940,10 +941,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         from netbox_librenms_plugin.models import RuleConfigurationError
 
         try:
-            # One policy read: the merge groups serials under its chassis context, the snapshot records
+            # One policy read: the merge groups serials under the snapshot owner's context, the snapshot records
             # that context, and the table uses the policy.
             policy = load_inventory_policy(obj.pk)
-            serial_context = policy.chassis_serial_context()
+            serial_context = module_snapshot_serial_context(policy.serial_identity_rules, sync_device)
             inventory_data, txr_error = self._merge_transceiver_data(
                 inventory_data, ports_data=ports_data, serial_context=serial_context
             )
@@ -1280,10 +1281,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         """Build the module table context of ``_build_context``; raise RuleConfigurationError for a broken rule."""
         if policy is None:
             policy = load_inventory_policy(obj.pk)
-        # The refresh grouped transceiver serials under the chassis context; another context makes the snapshot stale.
+        # The refresh grouped transceiver serials under the owner's context; another context makes the snapshot stale.
         if (
             snapshot_serial_context is not None
-            and snapshot_serial_context != policy.chassis_serial_context().fingerprint
+            and snapshot_serial_context
+            != module_snapshot_serial_context(policy.serial_identity_rules, sync_device).fingerprint
         ):
             raise _StaleInventorySnapshot()
         # The collector reads devices from the policy load, so the fingerprint covers what it read.

@@ -34,6 +34,11 @@ _MAX_ACKNOWLEDGED_REVISIONS = 200
 MODULE_INVENTORY_CACHE_VERSION = 4
 
 
+def module_snapshot_serial_context(rules, sync_device):
+    """Return the serial context of the module snapshot that *sync_device* owns; every member that shares it reads it."""
+    return rules.for_device(sync_device)
+
+
 def module_inventory_cache_payload(inventory, librenms_id, oob_librenms_id, *, serial_context) -> dict:
     """
     Return the cached module inventory payload, stamped with the current schema version and serial context.
@@ -786,10 +791,9 @@ class SyncCacheConsistency:
             ):
                 return False
             try:
-                context = SerialRules.load().for_device(self.subject)
+                context = module_snapshot_serial_context(SerialRules.load(), owner)
             except RuleConfigurationError:
                 return False
-            # The refresh stamps the page device's context, and the table reader checks that context.
             return payload.get("serial_context") == context.fingerprint
         return cache.has_key(key)
 

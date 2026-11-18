@@ -242,13 +242,18 @@ class TestSerialRuleEditStalesTheSnapshot:
         finally:
             cache.delete(snapshot_key)
 
-    def test_a_masterless_chassis_member_status_reads_the_context_that_its_refresh_stamped(self, librenms_server):
-        """Without a master each member has its own context, so status must check the page's, as the table does."""
+    def test_masterless_chassis_members_read_the_snapshot_that_one_refresh_stamped(self, librenms_server):
+        """Without a master each member has its own context, so the shared snapshot uses its owner's context."""
         from dcim.models import DeviceType, Manufacturer
         from django.core.cache import cache
 
         from netbox_librenms_plugin.models import NormalizationRule
-        from netbox_librenms_plugin.sync_cache import SyncCacheConsistency, SyncTab, sync_snapshot_key
+        from netbox_librenms_plugin.sync_cache import (
+            SyncCacheConsistency,
+            SyncTab,
+            cached_module_inventory,
+            sync_snapshot_key,
+        )
         from netbox_librenms_plugin.tests.conftest import make_module_bay, make_virtual_chassis_members
         from netbox_librenms_plugin.tests.mapping_fixtures import seed_stored_mapping
         from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
@@ -263,28 +268,33 @@ class TestSerialRuleEditStalesTheSnapshot:
         for member in (owner, page):
             make_module_bay(member, "Bay 1")
         # The owner's manufacturer has its own chain, so the two members' contexts differ.
+        NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
         NormalizationRule.objects.create(
             scope="serial",
             match_pattern=r"^S/N\s+(.+)$",
             replacement=r"\1",
             manufacturer=owner.device_type.manufacturer,
         )
+        # Only the owner's chain makes "S/N PARTIAL-1" the module's "PARTIAL-1", so the merge shows the context.
+        transceivers = [{"entity_physical_index": 20, "serial": "S/N PARTIAL-1", "model": "SFP-RULE", "type": "sfp"}]
         snapshot_key = sync_snapshot_key(owner, "inventory", SERVER_KEY)
-        coordinator = SyncCacheConsistency(page)
         try:
-            _response, context, _request = _refresh(page, librenms_server)
+            _response, context, _request = _refresh(page, librenms_server, transceivers=(True, transceivers))
             assert context.get("table") is not None
-            assert cache.get(snapshot_key) is not None, "the page refresh did not write the shared snapshot"
+            cached = cached_module_inventory(cache.get(snapshot_key))
+            assert [item["entPhysicalIndex"] for item in cached] == [1], "the merge did not use the owner's context"
 
-            status = coordinator.status(SERVER_KEY)[SyncTab.MODULES.value]
-            request = make_request("get", {"tab": "modules", "server_key": SERVER_KEY})
-            view = DeviceModuleTableView()
-            view.setup(request, pk=page.pk)
-            view.cache_only = True
-            cached = view.get_context_data(request, page, server_key=SERVER_KEY)
+            for member in (page, owner, page):
+                status = SyncCacheConsistency(member).status(SERVER_KEY)[SyncTab.MODULES.value]
+                request = make_request("get", {"tab": "modules", "server_key": SERVER_KEY})
+                view = DeviceModuleTableView()
+                view.setup(request, pk=member.pk)
+                view.cache_only = True
+                read = view.get_context_data(request, member, server_key=SERVER_KEY)
 
-            assert cached["table"] is not None
-            assert (status["state"], status["snapshot_available"]) == ("ready", True)
+                assert read["table"] is not None, member.name
+                assert (status["state"], status["snapshot_available"]) == ("ready", True), member.name
+                assert cache.get(snapshot_key) is not None, f"the read of {member.name} deleted the snapshot"
         finally:
             cache.delete(snapshot_key)
-            cache.delete(coordinator.state_key(SyncTab.MODULES, SERVER_KEY))
+            cache.delete(SyncCacheConsistency(page).state_key(SyncTab.MODULES, SERVER_KEY))
