@@ -100,7 +100,15 @@ class InventoryPolicy:
 
     def chassis_serial_context(self):
         """Return the serial context of the page device and its Virtual Chassis members: the master's manufacturer."""
-        return self.serial_identity_rules.for_device(self.page_device)
+        from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK, SerialContext
+
+        if self.master_id is None:
+            return self.serial_identity_rules.for_module_target(self.page_device)
+        # The fingerprint signs this master id, so the context reads it, not a new chassis query.
+        master = self.member(self.master_id)
+        if master is None:
+            return SerialContext(None, (), unavailable=UNAVAILABLE_MASTER_LINK)
+        return self.serial_identity_rules.for_module_target(master)
 
 
 def load_inventory_policy(page_device_id) -> InventoryPolicy:
