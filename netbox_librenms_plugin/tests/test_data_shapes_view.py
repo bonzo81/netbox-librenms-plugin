@@ -791,6 +791,36 @@ def test_a_capture_under_a_master_outside_the_chassis_renders_the_unavailable_re
 
 
 @pytest.mark.django_db
+def test_a_capture_refuses_a_linked_master_outside_the_chassis(recording_server):
+    """No member holds a mapping, so the sync owner falls back to the master, which is not a member."""
+    from dcim.models import Device, VirtualChassis
+    from ipam.models import IPAddress
+
+    from netbox_librenms_plugin.server_selection import get_librenms_sync_device
+
+    recording = load_recording("iosxe-c8300")
+    server, api = recording_server(recording)
+    device = make_device("capture-unlinked-member")
+    chassis = VirtualChassis.objects.create(name="capture-unlinked-member-vc")
+    device.virtual_chassis = chassis
+    device.vc_position = 1
+    device.save()
+    outsider = make_device("capture-linked-outsider", librenms_cf={"test": {"id": recording["device_id"]}})
+    address = IPAddress.objects.create(address="198.18.0.20/32")
+    Device.objects.filter(pk=outsider.pk).update(primary_ip4=address)
+    VirtualChassis.objects.filter(pk=chassis.pk).update(master=outsider)
+    device.refresh_from_db()
+    assert get_librenms_sync_device(device, server_key="test") == outsider
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    html = response.content.decode()
+    assert response.status_code == 200
+    assert "Capture failed" in html
+    assert "Anonymized recording" not in html
+
+
+@pytest.mark.django_db
 def test_a_junos_stack_under_a_master_outside_the_chassis_renders_the_unavailable_reason(recording_server):
     """Another serial context can explain the FPC stack, but the device's own context is Unavailable."""
     from dcim.models import VirtualChassis

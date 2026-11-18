@@ -68,6 +68,14 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
             return self._error(request, device, "Selected LibreNMS server is no longer configured.")
 
         sync_device = get_librenms_sync_device(device, server_key=server_key) or device
+        if sync_device.pk != device.pk and sync_device.virtual_chassis_id != device.virtual_chassis_id:
+            # The fallback owner is a master that the chassis names but does not hold.
+            return self._error(
+                request,
+                device,
+                "Capture failed: the Virtual Chassis names a master that is not one of its members, "
+                "so the capture cannot choose its LibreNMS device.",
+            )
         sync_device = self.restrict_object_or_404(Device, pk=sync_device.pk)
         librenms_id = self.librenms_api.get_stored_librenms_id(sync_device, server_key=server_key)
         if not librenms_id:
