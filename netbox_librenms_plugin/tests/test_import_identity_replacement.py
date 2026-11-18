@@ -384,8 +384,9 @@ def test_a_confirmation_is_refused_when_the_proposed_host_id_changed(client, sec
         server=_serve_secondary(secondary_server, 53801, device.name, reported_device_id=53802),
     )
 
+    # The live answer for 53801 carries 53802, so the action refuses it before it reads the proposed ID.
     assert response.status_code == 200
-    assert b"proposed LibreNMS host ID changed" in response.content
+    assert response.headers.get("HX-Reswap") == "none"
     device.refresh_from_db()
     assert stored_mapping_for_test(device) == {"secondary": 53701}
 
