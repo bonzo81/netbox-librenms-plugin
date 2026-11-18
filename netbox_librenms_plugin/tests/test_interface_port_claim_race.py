@@ -6,7 +6,6 @@ from threading import Event
 import pytest
 from django.apps import apps
 
-from netbox_librenms_plugin.module_grants import GrantRefusal
 from netbox_librenms_plugin.server_mappings import MappingRole, identity_q
 from netbox_librenms_plugin.tests.conftest import (
     bounded_executor,
@@ -270,6 +269,8 @@ def test_two_interface_syncs_of_one_device_wait_on_the_device_row_lock(settings)
 @pytest.mark.parametrize("first_writer", ["interface_sync", "module_bind"])
 def test_module_bind_and_interface_sync_of_one_device_leave_one_holder(settings, first_writer):
     """The module action binds Gi0/1 by ifName while the ifDescr sync binds GigabitEthernet0/1."""
+    from netbox_librenms_plugin.module_grants import GrantRefusal
+
     # Both writers serialize on the Device owner before resolving the port again.
     configure_default_librenms_server(settings)
     device, module, short, long = _seed()
