@@ -100,6 +100,9 @@ def cached_module_inventory(payload):
     inventory = payload.get("inventory")
     if not isinstance(inventory, list) or any(not isinstance(item, dict) for item in inventory):
         return None
+    # A render reads a None stamp as rows of the current refresh, so a cached payload must carry a real one.
+    if not isinstance(payload.get("serial_context"), str):
+        return None
     return inventory
 
 
@@ -813,7 +816,8 @@ class SyncCacheConsistency:
                 context = module_snapshot_serial_context(load_inventory_policy(self.subject.pk), owner)
             except (Device.DoesNotExist, RuleConfigurationError):
                 return False
-            return payload.get("serial_context") == context.fingerprint
+            # The table refuses every row under an Unavailable context, so the status offers no snapshot.
+            return not context.unavailable and payload.get("serial_context") == context.fingerprint
         return cache.has_key(key)
 
     def status(self, server_key, *, actor_id=None):

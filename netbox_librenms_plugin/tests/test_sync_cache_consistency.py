@@ -411,6 +411,65 @@ def test_module_cache_status_reports_tab_states_when_an_applicable_serial_rule_i
 
 
 @pytest.mark.django_db
+def test_module_cache_status_offers_no_snapshot_under_an_unavailable_chassis_context(client, settings):
+    """The Modules tab shows no rows when the chassis master is outside the chassis, so status must not call it ready."""
+    from dcim.models import Device, VirtualChassis
+
+    from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+    from netbox_librenms_plugin.sync_cache import module_snapshot_serial_context
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+
+    _configure_servers(settings)
+    device = make_device("cache-status-module-stray", librenms_cf={"primary": {"id": 6411}})
+    chassis = make_virtual_chassis("cache-status-module-stray-vc", device)
+    outsider = make_device("cache-status-module-stray-master")
+    other = VirtualChassis.objects.create(name="cache-status-module-stray-other")
+    # NetBox refuses this link in clean(), so only a write that skips it stores it.
+    Device.objects.filter(pk=outsider.pk).update(virtual_chassis=other, vc_position=1)
+    VirtualChassis.objects.filter(pk=chassis.pk).update(master=outsider)
+    device.refresh_from_db()
+    owner = SyncCacheConsistency(device)._primary_owner(SyncTab.MODULES, "primary")
+    context = module_snapshot_serial_context(load_inventory_policy(device.pk), owner)
+    payload = module_inventory_cache_payload([], 6411, None, serial_context=context)
+    cache.set(_cache_key("inventory", device, "primary"), payload, timeout=300)
+    client.force_login(make_superuser("cache-status-module-stray-user"))
+    url = reverse(
+        "plugins:netbox_librenms_plugin:sync_cache_status",
+        kwargs={"object_type": "device", "pk": device.pk},
+    )
+
+    response = client.get(url, {"server_key": "primary"})
+
+    assert owner.pk == device.pk and context.unavailable
+    assert response.status_code == 200
+    assert response.json()["tabs"]["modules"]["snapshot_available"] is False
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("stamp", ["current", None, 7])
+def test_the_cached_module_table_renders_no_table_for_a_snapshot_without_a_serial_context_stamp(settings, stamp):
+    """Only rows of the current refresh go without a stamp; a cached payload with a null one offers no action."""
+    from netbox_librenms_plugin.tests.view_test_helpers import make_request
+    from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
+
+    _configure_servers(settings)
+    device = make_device(f"cache-module-stamp-{stamp}", librenms_cf={"primary": {"id": 6412}})
+    payload = module_inventory_cache_payload([], 6412, None, serial_context=SerialRules.load().for_device(device))
+    if stamp != "current":
+        payload["serial_context"] = stamp
+    cache.set(_cache_key("inventory", device, "primary"), payload, timeout=300)
+    request = make_request("get", {"tab": "modules", "server_key": "primary"}, user=make_superuser(f"stamp-{stamp}"))
+    view = DeviceModuleTableView()
+    view.setup(request, pk=device.pk)
+    # The module actions re-render the tab through this cache-only read.
+    view.cache_only = True
+
+    context = view.get_context_data(request, device, server_key="primary")
+
+    assert (context["table"] is not None) is (stamp == "current")
+
+
+@pytest.mark.django_db
 def test_module_cache_status_rejects_a_snapshot_of_another_oob_link_like_the_tab(client, settings):
     """A snapshot merged from another OOB controller is one the Modules tab rejects, so status must not call it ready."""
     from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView

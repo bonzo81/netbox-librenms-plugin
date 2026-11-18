@@ -1,6 +1,7 @@
 """End-to-end tests for the module install actions and their inventory ignore rules."""
 
 import pytest
+from django.core.cache import cache
 
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.tests.cache_test_helpers import seed_inventory
@@ -380,13 +381,16 @@ class TestInstallBranchView:
         # The page renders from the current payload; an older writer then replaces it.
         seed_inventory(view, device, rows, librenms_id=72)
         request = make_request("post", _branch_post(device, 10), user=make_superuser(), path="/modules/")
-        _seed_pre_version_snapshot(view, device, rows, 72)
+        key = _seed_pre_version_snapshot(view, device, rows, 72)
+        cached = cache.get(key)
 
         response = view_post(view, request, pk=device.pk)
 
         assert response.status_code == 302
         assert message_texts(request, "error") == ["No cached inventory data. Please refresh modules first."]
         assert not Module.objects.filter(device=device).exists()
+        # A refresh can store a current snapshot under the key after the read, so the reader deletes nothing.
+        assert cache.get(key) == cached
 
     @SKIPPED_HOLDER_SHAPES
     def test_a_row_below_a_skipped_holder_has_no_branch(self, live_librenms, holder_class, holder_model):
@@ -454,12 +458,15 @@ class TestInstallSelectedView:
         seed_inventory(view, device, rows, librenms_id=73)
         _action, fields = rendered_module_form(render_module_tab(device), "install-selected")
         request = make_request("post", {**fields, "select": ["10"]}, user=make_superuser(), path="/modules/")
-        _seed_pre_version_snapshot(view, device, rows, 73)
+        key = _seed_pre_version_snapshot(view, device, rows, 73)
+        cached = cache.get(key)
 
         view_post(view, request, pk=device.pk)
 
         assert message_texts(request, "error") == ["No cached inventory data. Please refresh modules first."]
         assert not Module.objects.filter(device=device).exists()
+        # A refresh can store a current snapshot under the key after the read, so the reader deletes nothing.
+        assert cache.get(key) == cached
 
     @SKIPPED_HOLDER_SHAPES
     def test_a_selected_row_below_a_skipped_holder_installs_nothing(self, live_librenms, holder_class, holder_model):

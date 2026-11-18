@@ -41,7 +41,8 @@ class TestSeedInventoryMatchesTheReaderContract:
         """Without a matching id the reader returns None, so every seeded assertion would be vacuous."""
         from django.core.cache import cache
 
-        from netbox_librenms_plugin.sync_cache import cached_module_inventory
+        from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+        from netbox_librenms_plugin.sync_cache import cached_module_inventory, module_snapshot_serial_context
         from netbox_librenms_plugin.views.sync.modules import _get_cached_module_snapshot
 
         view, device = self._view_and_device("seed-inventory-contract", 7)
@@ -49,9 +50,10 @@ class TestSeedInventoryMatchesTheReaderContract:
         key = seed_inventory(view, device, inventory, librenms_id=7)
 
         try:
-            assert (
-                cached_module_inventory(_get_cached_module_snapshot(device, "default", view.get_cache_key)) == inventory
-            )
+            snapshot = _get_cached_module_snapshot(device, "default", view.get_cache_key)
+            # A module action refuses a snapshot whose stamp is not the context of the loaded policy.
+            stamp = module_snapshot_serial_context(load_inventory_policy(device.pk), device).fingerprint
+            assert (cached_module_inventory(snapshot), snapshot["serial_context"]) == (inventory, stamp)
         finally:
             cache.delete(key)
 
@@ -120,9 +122,12 @@ class TestWritersCheckTheOobLinkOfTheSnapshot:
         )
         self._link(device, link)
 
-        assert (
-            cached_module_inventory(_get_cached_module_snapshot(device, "default", view.get_cache_key)) == inventory
-        ) is readable
+        snapshot = _get_cached_module_snapshot(device, "default", view.get_cache_key)
+        # A writer tests the snapshot itself for None, so a rejected one must not read as an empty payload.
+        if readable:
+            assert cached_module_inventory(snapshot) == inventory
+        else:
+            assert snapshot is None
 
     def test_install_selected_refuses_a_snapshot_built_before_an_oob_link(self):
         from dcim.models import Device, Interface, Module, ModuleBay, ModuleType

@@ -283,13 +283,15 @@ class TestInventoryCacheContract:
             ({"inventory": "bad"}, None),
             ({"inventory": ["bad"]}, None),
             ({"version": True, "inventory": []}, None),
+            ({"inventory": [], "serial_context": None}, None),
+            ({"inventory": [], "serial_context": 7}, None),
         ],
     )
     def test_inventory_container_validation(self, payload, expected):
         from netbox_librenms_plugin.sync_cache import MODULE_INVENTORY_CACHE_VERSION, cached_module_inventory
 
         if isinstance(payload, dict) and "version" not in payload:
-            payload = {"version": MODULE_INVENTORY_CACHE_VERSION, **payload}
+            payload = {"version": MODULE_INVENTORY_CACHE_VERSION, "serial_context": "stamp", **payload}
         assert cached_module_inventory(payload) == expected
 
     def test_current_fingerprint_returns_the_real_cached_rows(self, live_librenms):
