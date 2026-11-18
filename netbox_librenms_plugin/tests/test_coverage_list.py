@@ -9,7 +9,7 @@ from django.http import QueryDict
 from django.test import RequestFactory
 from django.urls import reverse
 
-from netbox_librenms_plugin.tests.conftest import make_superuser
+from netbox_librenms_plugin.tests.conftest import make_device, make_superuser
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
 
@@ -260,11 +260,15 @@ class TestCompletedJobResults:
             cached_device,
             timeout=600,
         )
+        # Mapped after the job cached the row: the loader must refresh the cached match.
+        mapped = make_device("completed-job-mapped", librenms_cf={SERVER_KEY: {"id": 4201}})
 
         view = LibreNMSImportView()
         result = view._load_job_results(job.pk, user)
 
         assert [row["device_id"] for row in result] == [4201]
+        assert result[0]["_validation"]["existing_device"] == mapped
+        assert result[0]["_validation"]["existing_match_type"] == "librenms_id"
         assert view._active_server_key == SERVER_KEY
         assert view._cache_timestamp == "2026-08-30T12:00:00+00:00"
         assert view._cache_timeout == 600
