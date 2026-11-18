@@ -412,10 +412,8 @@ def contains_pattern(key: str) -> str:
 
 def _probe_keys(values, rules: SerialRules) -> dict:
     """Return ``{value: keys}``: the keys of each value under every candidate context."""
-    if not values:
-        # No value needs a context, so no rule is checked.
-        return {}
-    contexts = rules.candidates()
+    # A missing or placeholder serial has no key under any chain, so it reads no rule and a broken rule cannot refuse it.
+    contexts = rules.candidates() if any(display(value) for value in values) else ()
     return {value: {key for context in contexts if (key := context._key(value))} for value in values}
 
 
