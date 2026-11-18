@@ -14,8 +14,19 @@ pytestmark = pytest.mark.django_db(
 )
 
 
-def test_concurrent_hidden_interface_is_not_adopted():
-    """A hidden interface committed before Device ownership must not be adopted."""
+def _before_the_owner_lock(sql):
+    return '"dcim_device"' in sql and "FOR NO KEY UPDATE" in sql
+
+
+def _after_the_adoption_scan(sql):
+    return '"dcim_interface"' in sql and "FOR UPDATE" in sql
+
+
+@pytest.mark.parametrize(
+    "commit_point", [_before_the_owner_lock, _after_the_adoption_scan], ids=["before-owner-lock", "after-scan"]
+)
+def test_concurrent_hidden_interface_is_not_adopted(commit_point):
+    """A hidden interface committed before Device ownership, or after the adoption scan, must not be adopted."""
     from dcim.models import Device, Interface, InterfaceTemplate, Module, ModuleBay, ModuleType
     from django.contrib.auth import get_user_model
     from django.db import close_old_connections, connection, transaction
@@ -50,8 +61,14 @@ def test_concurrent_hidden_interface_is_not_adopted():
     install_ready = Event()
     winner_committed = Event()
 
-    def pause_before_owner_lock(execute, sql, params, many, context):
-        if '"dcim_device"' in sql and "FOR NO KEY UPDATE" in sql and not install_ready.is_set():
+    def pause_at_the_commit_point(execute, sql, params, many, context):
+        if not install_ready.is_set() and commit_point(sql):
+            if commit_point is _after_the_adoption_scan:
+                # The scan finds no candidate; the interface commits before Module.save() adopts by name.
+                result = execute(sql, params, many, context)
+                install_ready.set()
+                assert winner_committed.wait(5), "test did not commit the competing interface"
+                return result
             install_ready.set()
             assert winner_committed.wait(5), "test did not commit the competing interface"
         return execute(sql, params, many, context)
@@ -76,7 +93,7 @@ def test_concurrent_hidden_interface_is_not_adopted():
             view = InstallModuleView()
             view._librenms_api = SimpleNamespace(server_key="default")
             view.setup(request, pk=thread_device.pk)
-            with connection.execute_wrapper(pause_before_owner_lock):
+            with connection.execute_wrapper(pause_at_the_commit_point):
                 return view.post(request, pk=thread_device.pk)
         finally:
             close_old_connections()
@@ -91,7 +108,12 @@ def test_concurrent_hidden_interface_is_not_adopted():
         with transaction.atomic():
             with connection.cursor() as cursor:
                 cursor.execute("SET LOCAL lock_timeout = '5s'")
-            winner = Interface.objects.create(device=device, name="Te1/1/1", type="10gbase-x-sfpp")
+            winner = Interface(device=device, name="Te1/1/1", type="10gbase-x-sfpp")
+            if commit_point is _after_the_adoption_scan:
+                # A save updates the Device interface counter, which waits for the owner lock; an insert does not.
+                Interface.objects.bulk_create([winner])
+            else:
+                winner.save()
         winner_committed.set()
         future.result(timeout=10)
 
