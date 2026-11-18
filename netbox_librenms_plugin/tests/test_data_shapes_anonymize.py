@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from ipaddress import ip_address, ip_network
+import json
 import re
 
 import pytest
@@ -173,6 +174,32 @@ def test_expected_member_serials_follow_anonymized_inventory():
     assert expected_serials == inventory_serials
     assert expected_serials != original
     assert rec["expected"]["virtual_chassis"]["member_serials"] == original
+
+
+@pytest.mark.parametrize("serial", [["ASSET123"], [["ASSET123"]], {"value": "ASSET123"}, [{"value": "ASSET123"}]])
+def test_a_malformed_serial_value_is_pseudonymized_and_reads_the_serial_context(serial):
+    from netbox_librenms_plugin.data_shapes.anonymize import has_serial_input
+
+    recording = _ports({"entPhysicalSerialNum": serial})
+    recording["expected"] = {"virtual_chassis": {"member_serials": [serial]}}
+
+    anonymized = anonymize_recording(recording)
+
+    assert has_serial_input(recording)
+    assert "ASSET123" not in json.dumps(anonymized)
+    stored = _response(anonymized, "GET /api/v0/devices/1/ports")["ports"][0]["entPhysicalSerialNum"]
+    assert stored == anonymized["expected"]["virtual_chassis"]["member_serials"][0]
+    assert type(stored) is type(serial)
+
+
+def test_a_scalar_in_a_list_takes_the_rule_of_the_lists_field():
+    recording = _ports({"hostname": ["core-rtr01"]})
+
+    anonymized = anonymize_recording(recording, salt="s")
+
+    port = _response(anonymized, "GET /api/v0/devices/1/ports")["ports"][0]
+    assert "core-rtr01" not in json.dumps(anonymized)
+    assert port["hostname"][0].startswith("device-")
 
 
 def test_hostname_and_model_pseudonymized():
