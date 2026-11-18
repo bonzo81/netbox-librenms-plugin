@@ -198,7 +198,7 @@ def get_librenms_sync_device(device, server_key: str | None = None):  # noqa: C9
     Priority order for selecting the sync device:
     1. Any member with librenms_id custom field set for *server_key* (highest priority).
        When *server_key* is None, matches any member that has any librenms_id set.
-    2. Master device with primary IP (if master is designated)
+    2. Master device with primary IP (if master is designated and is a member)
     3. Any member with primary IP (fallback when no master or master lacks IP)
     4. Member with lowest vc_position (for error messages when no IPs configured)
 
@@ -255,8 +255,8 @@ def get_librenms_sync_device(device, server_key: str | None = None):  # noqa: C9
             if any(entry.oob_id is not None for entry in mapping.servers):
                 return member
 
-    # Priority 2: Use master device if it has primary IP
-    if vc.master and vc.master.primary_ip:
+    # Priority 2: the master with a primary IP, when it is a member; a link to an outside device names no owner.
+    if vc.master and vc.master.virtual_chassis_id == vc.pk and vc.master.primary_ip:
         return vc.master
 
     # Priority 3: Find any member with primary IP

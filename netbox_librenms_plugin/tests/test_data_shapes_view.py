@@ -791,8 +791,8 @@ def test_a_capture_under_a_master_outside_the_chassis_renders_the_unavailable_re
 
 
 @pytest.mark.django_db
-def test_a_capture_refuses_a_linked_master_outside_the_chassis(recording_server):
-    """No member holds a mapping, so the sync owner falls back to the master, which is not a member."""
+def test_a_capture_never_reads_a_linked_master_outside_the_chassis(recording_server):
+    """No member holds a mapping, and the chassis names a linked master outside it: the owner stays a member."""
     from dcim.models import Device, VirtualChassis
     from ipam.models import IPAddress
 
@@ -810,14 +810,12 @@ def test_a_capture_refuses_a_linked_master_outside_the_chassis(recording_server)
     Device.objects.filter(pk=outsider.pk).update(primary_ip4=address)
     VirtualChassis.objects.filter(pk=chassis.pk).update(master=outsider)
     device.refresh_from_db()
-    assert get_librenms_sync_device(device, server_key="test") == outsider
+    assert get_librenms_sync_device(device, server_key="test") == device
 
     response = _run_capture(_view_with_api(api), server, device)
 
-    html = response.content.decode()
     assert response.status_code == 200
-    assert "Capture failed" in html
-    assert "Anonymized recording" not in html
+    assert "Anonymized recording" not in response.content.decode()
 
 
 @pytest.mark.django_db
