@@ -25,7 +25,6 @@ from ..librenms_api import LibreNMSAPI, librenms_id_owned_message
 from ..librenms_ids import coerce_librenms_id
 from ..models import RuleConfigurationError
 from ..serial_identity import (
-    MALFORMED_SERIAL,
     REFUSING,
     UNAVAILABLE_MASTER_LINK,
     Comparison,
@@ -36,7 +35,6 @@ from ..serial_identity import (
     compare,
     display,
     is_identity,
-    is_serial_value,
     keeps_stored_serial,
     other_device_holder,
     resolve_device,
@@ -1250,9 +1248,6 @@ def validate_device_for_import(  # noqa: C901
             serial_matches = []
             if not result["existing_device"]:
                 if not import_as_vm:
-                    if not is_serial_value(incoming_serial):
-                        # The create refuses such a value in stored_form(), so the row is never ready.
-                        result["issues"].append(MALFORMED_SERIAL)
                     # Serial is not unique in NetBox, so .first() would bind an arbitrary row
                     # and the downstream serial/OOB/merge flow would derive its guidance from a
                     # random device. Require a unique match before binding, mirroring the

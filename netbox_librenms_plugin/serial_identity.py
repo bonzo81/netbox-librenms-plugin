@@ -360,8 +360,7 @@ def stored_form(value, model) -> str:
     Return the text that a plugin writer stores in ``model.serial`` for the LibreNMS *value*.
 
     Raises:
-        ValidationError: The value is not text or a number, or the text is longer than the field; the
-            writer refuses rather than store the text of a boolean or a list, or cut the text.
+        ValidationError: ``stored_form_refusal`` gives a reason.
 
     """
     if refusal := stored_form_refusal(value, model):
