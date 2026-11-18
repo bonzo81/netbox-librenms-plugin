@@ -450,17 +450,29 @@ def test_a_failed_last_member_insert_rolls_back_the_saved_members_and_a_retry_im
 
 
 @pytest.mark.django_db
-def test_a_stack_with_a_nul_in_a_member_serial_is_refused_before_any_write(live_librenms):
-    """PostgreSQL text cannot hold a NUL, so validation refuses the member serial and the import writes nothing."""
+def test_a_stack_with_a_nul_in_a_member_serial_is_blocked_at_validation(live_librenms):
+    """PostgreSQL text cannot hold a NUL, so the search shows the stack blocked and the import writes nothing."""
     from dcim.models import Device, VirtualChassis
 
-    from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared
+    from netbox_librenms_plugin.import_utils.bulk_import import bulk_import_devices_shared, process_device_filters
     from netbox_librenms_plugin.serial_identity import serial_refusal
     from netbox_librenms_plugin.tests.test_bulk_import_job_control import _chassis
 
     nul_serial = "SN-NUL-B\x00X"
     members = [_chassis(100, "SN-NUL-A", position=1), _chassis(200, nul_serial, position=2)]
     prerequisites, row = _importable_row(live_librenms, 96321, "stack-nul", members=members)
+    live_librenms.server.register("/api/v0/devices", {"status": "ok", "devices": [row]})
+    refusal = serial_refusal(nul_serial, Device)
+    assert refusal
+
+    (validated,) = process_device_filters(
+        live_librenms.api, {}, vc_detection_enabled=True, clear_cache=True, show_disabled=True
+    )
+
+    # The validation itself names the member serial, so the search never offers the stack as ready.
+    validation = validated["_validation"]
+    assert (validation["can_import"], validation["is_ready"]) == (False, False)
+    assert any(refusal in str(issue) for issue in validation["issues"])
 
     result = bulk_import_devices_shared(
         [96321],
@@ -470,8 +482,6 @@ def test_a_stack_with_a_nul_in_a_member_serial_is_refused_before_any_write(live_
         user=make_superuser("stack-nul-user"),
     )
 
-    refusal = serial_refusal(nul_serial, Device)
-    assert refusal, result
     assert result["success"] == []
     assert [entry["device_id"] for entry in result["failed"]] == [96321]
     assert refusal in result["failed"][0]["error"]
