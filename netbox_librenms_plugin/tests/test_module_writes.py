@@ -404,10 +404,17 @@ def test_existing_module_actions_recheck_their_grant_after_the_owner_wait(writer
 
 
 @transactional_db_with_all_apps()
-@pytest.mark.parametrize("target_kind", ["module_type", "device_type"])
+@pytest.mark.parametrize(
+    "target_kind", ["module_type", "device_type"], ids=["module-type-membership", "device-type-shared-device"]
+)
 @pytest.mark.parametrize("first_writer", ["template", "creation"])
 def test_bay_templates_and_module_creation_serialize_type_membership(target_kind, first_writer, monkeypatch, settings):
-    """Neither contention order may leave a committed type instance without its new bay."""
+    """
+    Neither contention order may leave a committed type instance without its new bay.
+
+    A module creation adds a Module to the ModuleType, so the module_type case changes membership.
+    It adds no Device to the DeviceType: the device_type case covers the lock on the shared Device.
+    """
     import time
     from threading import Event
 
@@ -492,6 +499,7 @@ def test_bay_templates_and_module_creation_serialize_type_membership(target_kind
             connection.close()
 
     other_writer = "creation" if first_writer == "template" else "template"
+    waited = False
     with bounded_executor(max_workers=2) as executor:
         first_result = executor.submit(post, first_writer)
         assert paused.wait(timeout=10), "the first writer did not reach its native save boundary"
@@ -503,7 +511,8 @@ def test_bay_templates_and_module_creation_serialize_type_membership(target_kind
                 if other_writer in pids:
                     with connection.cursor() as cursor:
                         cursor.execute("SELECT pg_blocking_pids(%s)", [pids[other_writer]])
-                        if cursor.fetchone()[0]:
+                        if pids[first_writer] in cursor.fetchone()[0]:
+                            waited = True
                             break
                 time.sleep(0.02)
         finally:
@@ -511,6 +520,7 @@ def test_bay_templates_and_module_creation_serialize_type_membership(target_kind
         assert first_result.result(timeout=30) == 302
         assert other_result.result(timeout=30) == 302
     assert "40P01" not in errors
+    assert waited, "the second writer did not wait for the first writer's lock"
     template_exists = ModuleBayTemplate.objects.filter(name=bay_name).exists()
     if target_kind == "module_type":
         expected = set(Module.objects.filter(module_type_id=installed.module_type_id).values_list("pk", flat=True))
@@ -562,17 +572,17 @@ def test_template_rechecks_instances_after_its_save_before_materialization(
     user = make_superuser("template-postsave-user")
     target_pk = installed.module_type_id if target_kind == "module_type" else device.device_type_id
     before_save, release = Event(), Event()
-    clean_template = ModuleBayTemplate.full_clean
+    save_template = ModuleBayTemplate.save
     bay_name = "Postsave Membership Bay"
 
     def pause_before_save(template, *args, **kwargs):
-        result = clean_template(template, *args, **kwargs)
+        # Inside save(), before the INSERT: a membership check that runs before save() misses the newcomer.
         if template.name == bay_name:
             before_save.set()
             assert release.wait(timeout=15)
-        return result
+        return save_template(template, *args, **kwargs)
 
-    monkeypatch.setattr(ModuleBayTemplate, "full_clean", pause_before_save)
+    monkeypatch.setattr(ModuleBayTemplate, "save", pause_before_save)
 
     def post():
         close_old_connections()
