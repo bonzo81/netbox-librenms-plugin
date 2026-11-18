@@ -9,7 +9,6 @@ from copy import deepcopy
 
 import pytest
 
-from netbox_librenms_plugin.serial_identity import SerialRules, plain_context
 from netbox_librenms_plugin.tests.mapping_fixtures import seed_mapping, seed_stored_mapping, stored_mapping_for_test
 from netbox_librenms_plugin.tests.mock_librenms_server import librenms_mock_server
 
@@ -75,6 +74,7 @@ class TestCacheKeyGeneration:
     def test_get_validated_device_cache_key(self):
         """Generate validated device cache key."""
         from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         key = get_validated_device_cache_key(
             server_key="default",
@@ -102,6 +102,7 @@ class TestCacheKeyGeneration:
     def test_validated_device_cache_key_unique_per_naming_mode(self):
         """Different naming preferences produce different cache keys."""
         from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         base_args = dict(
             server_key="default", filters={}, device_id=123, vc_enabled=False, serial_rules=SerialRules(())
@@ -389,6 +390,7 @@ class TestDeviceRetrieval:
     def test_get_validated_device_cache_key_no_vc(self):
         """Generate cache key without VC enabled."""
         from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         key = get_validated_device_cache_key(
             server_key="default", filters={}, device_id=100, vc_enabled=False, serial_rules=SerialRules(())
@@ -399,6 +401,7 @@ class TestDeviceRetrieval:
     def test_get_validated_device_cache_key_with_vc(self):
         """Generate cache key with VC enabled."""
         from netbox_librenms_plugin.import_utils import get_validated_device_cache_key
+        from netbox_librenms_plugin.serial_identity import SerialRules
 
         no_rules = SerialRules(())
         key_vc = get_validated_device_cache_key(
@@ -1407,6 +1410,7 @@ class TestVCPositionHandling:
         expected_names,
     ):
         from netbox_librenms_plugin.import_utils.virtual_chassis import update_vc_member_suggested_names
+        from netbox_librenms_plugin.serial_identity import plain_context
         from netbox_librenms_plugin.models import LibreNMSSettings
 
         settings_row = LibreNMSSettings.objects.order_by("pk").first()
@@ -1740,6 +1744,7 @@ class TestUpdateVCMemberSuggestedNamesAdditional:
     def test_not_stack_returns_vc_data_unchanged(self):
         """When is_stack=False, the function returns immediately without modifying members."""
         from netbox_librenms_plugin.import_utils.virtual_chassis import update_vc_member_suggested_names
+        from netbox_librenms_plugin.serial_identity import plain_context
 
         vc_data = {
             "is_stack": False,
@@ -1752,6 +1757,7 @@ class TestUpdateVCMemberSuggestedNamesAdditional:
     def test_none_vc_data_returns_none(self):
         """None input is returned as-is (falsy guard)."""
         from netbox_librenms_plugin.import_utils.virtual_chassis import update_vc_member_suggested_names
+        from netbox_librenms_plugin.serial_identity import plain_context
 
         result = update_vc_member_suggested_names(None, "sw", plain_context())
         assert result is None
@@ -1759,6 +1765,7 @@ class TestUpdateVCMemberSuggestedNamesAdditional:
     def test_no_members_returns_empty_members(self):
         """is_stack=True with empty members list processes without error."""
         from netbox_librenms_plugin.import_utils.virtual_chassis import update_vc_member_suggested_names
+        from netbox_librenms_plugin.serial_identity import plain_context
 
         vc_data = {"is_stack": True, "members": []}
         result = update_vc_member_suggested_names(vc_data, "sw", plain_context())
@@ -2181,7 +2188,7 @@ class TestRefreshExistingDeviceCrossModelIdWins:
         from netbox_librenms_plugin.tests.conftest import make_device
 
         NormalizationRule.objects.create(scope="serial", match_pattern=r"^VENDOR-PLACEHOLDER(X)?$", replacement=r"\1")
-        make_device("rule-placeholder-host", serial="VENDOR-PLACEHOLDER")
+        holder = make_device("rule-placeholder-host", serial="VENDOR-PLACEHOLDER")
         libre_device = {
             "device_id": 556,
             "hostname": "no-name-match",
@@ -2195,12 +2202,18 @@ class TestRefreshExistingDeviceCrossModelIdWins:
             "is_ready": True,
             "can_import": True,
             "issues": [],
+            "warnings": [],
+            "site": {"found": True, "site": holder.site},
+            "device_type": {"found": True, "device_type": holder.device_type},
+            "device_role": {"found": True, "role": holder.role},
         }
 
         _refresh_existing_device(validation, libre_device=libre_device, server_key="default")
 
         assert validation["existing_device"] is None
         assert validation.get("existing_match_type") != "serial"
+        # An absent identity is no serial-rule error: the row stays importable.
+        assert (validation["issues"], validation["can_import"], validation["is_ready"]) == ([], True, True)
 
     def test_stale_serial_ip_ambiguity_blocker_cleared_on_refresh(self):
         """A cached serial/IP ambiguity blocker must be cleared on refresh re-check once the duplicate is resolved (now a single match), so the row isn't stuck blocked on the stale issue until cache expiry."""

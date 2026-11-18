@@ -661,12 +661,13 @@ def test_collision_precheck_skips_import_prerequisite_queries():
         "netbox_librenms_plugin_platformmapping",
         "virtualization_cluster",
     }
-    # The serial rules are identity input, not a prerequisite: the batch reads them once.
-    serial_rule_reads = [
-        query["sql"]
-        for query in captured.captured_queries
-        if "netbox_librenms_plugin_normalizationrule" in query["sql"].lower() and "'serial'" in query["sql"]
-    ]
+    # The serial rules are identity input, not a prerequisite: the batch reads them once, in the serial-only query.
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    with CaptureQueriesContext(connection) as reference:
+        list(NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL))
+    (serial_only_query,) = (query["sql"] for query in reference.captured_queries)
+    serial_rule_reads = [query["sql"] for query in captured.captured_queries if query["sql"] == serial_only_query]
     assert len(serial_rule_reads) <= 1
     unexpected = [
         query["sql"]

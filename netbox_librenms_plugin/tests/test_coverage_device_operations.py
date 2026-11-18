@@ -1007,6 +1007,28 @@ class TestValidateDeviceForImport:
         assert result["existing_device"] is None
         assert result["serial_duplicate"] is True
 
+    def test_a_match_that_its_rules_reject_is_not_counted_beside_one_valid_holder(self):
+        """One rejected and one valid holder: the resolver counts only the valid one, so validation binds it."""
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        rejected = make_device("validation-rule-one-rejected", serial="PAIRED-SERIAL")
+        vendor = Manufacturer.objects.create(name="Paired Placeholder Vendor", slug="paired-placeholder-vendor")
+        rejected.device_type = DeviceType.objects.create(
+            manufacturer=vendor, model="Paired Placeholder Model", slug="paired-placeholder-model"
+        )
+        rejected.save()
+        NormalizationRule.objects.create(
+            scope="serial", manufacturer=vendor, match_pattern=r"^PAIRED-SERIAL(X)?$", replacement=r"\1"
+        )
+        accepted = make_device("validation-rule-one-accepted", serial="PAIRED-SERIAL")
+
+        result = self._validate(_device_payload(5433, serial="PAIRED-SERIAL"))
+
+        assert (result["existing_device"], result["existing_match_type"]) == (accepted, "serial")
+        assert not result.get("serial_duplicate")
+
     def test_linked_serial_drift_and_duplicate_are_distinguished(self):
         linked = make_device(
             "validation-serial-drift",

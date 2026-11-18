@@ -431,10 +431,20 @@ def test_a_cached_no_stack_result_is_detected_again_after_a_serial_rule_change(r
     _edit_rows(recording, 1, lambda row: row.update(entPhysicalSerialNum="SERIAL-A"))
     _edit_rows(recording, 120, lambda row: row.update(entPhysicalSerialNum="S/N SERIAL-A"))
     _edit_rows(recording, 121, lambda row: row.update(entPhysicalSerialNum="S/N SERIAL-B"))
-    _server, api = recording_server(recording, server_key=f"junos-rule-change-{uuid.uuid4().hex}")
+    server, api = recording_server(recording, server_key=f"junos-rule-change-{uuid.uuid4().hex}")
 
+    def inventory_reads():
+        return sum(request["path"].startswith("/api/v0/inventory/") for request in server.requests)
+
+    first = get_virtual_chassis_data(api, _DEVICE_ID, serial_rules=SerialRules.load())
+    assert (first["is_stack"], first["detection_failed"]) == (False, False)
+    reads = inventory_reads()
+    assert reads > 0
+    # The no-stack result is cached: the same rules read no inventory again.
     assert get_virtual_chassis_data(api, _DEVICE_ID, serial_rules=SerialRules.load())["is_stack"] is False
+    assert inventory_reads() == reads
 
     NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N\s+(.+)$", replacement=r"\1")
 
     assert get_virtual_chassis_data(api, _DEVICE_ID, serial_rules=SerialRules.load())["is_stack"] is True
+    assert inventory_reads() > reads
