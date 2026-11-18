@@ -474,6 +474,39 @@ class TestImportListRequest:
         assert second.context["from_cache"] is True
 
     @pytest.mark.django_db
+    def test_the_background_results_page_reapplies_exclude_existing(
+        self,
+        client,
+        django_user_model,
+        librenms_server,
+    ):
+        """The page that a finished search opens keeps the form options, so the cached search filters again."""
+        from core.models import Job
+
+        requests = _register_devices(librenms_server, [_device(4801)])
+        user = _create_user(django_user_model, "results-exclude-existing")
+        client.force_login(user)
+        params = _search_params(exclude_existing="on")
+        first = client.get(_import_url(), params)
+        assert [row["device_id"] for row in first.context["table"].data] == [4801]
+        make_device("results-exclude-existing-mapped", librenms_cf={SERVER_KEY: {"id": 4801}})
+        job = Job.objects.create(
+            name="Completed import search",
+            user=user,
+            job_id=uuid4(),
+            status="completed",
+            data={"device_ids": [4801], "filters": {"hostname": "edge"}, "server_key": SERVER_KEY},
+        )
+
+        # The background search opens this URL: the form parameters and the job ID.
+        results = client.get(_import_url(), {**params, "use_background_job": "on", "job_id": job.pk})
+
+        assert results.status_code == 200
+        assert list(results.context["table"].data) == []
+        assert results.context["from_cache"] is True
+        assert len(requests) == 1
+
+    @pytest.mark.django_db
     def test_clear_cache_forces_a_fresh_http_search(
         self,
         client,
