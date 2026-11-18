@@ -3288,11 +3288,14 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 # Remove the serial-conflicting module from its current location.
                 if conflict_module:
                     c_model = conflict_module.module_type.model
-                    c_bay = conflict_module.module_bay.name
                     conflict_device = conflict_module.device
-                    c_device = conflict_device.name
+                    # The delete scope does not include view scope, so name the place only when the viewer may see it.
+                    if nameable_modules(self).filter(pk=conflict_module.pk).exists():
+                        c_place = f"{conflict_device.name}/{conflict_module.module_bay.name}"
+                        conflict_removed_msg = f"Removed {c_model} from {c_place}."
+                    else:
+                        conflict_removed_msg = f"Removed {c_model} from its other location."
                     conflict_module.delete()
-                    conflict_removed_msg = f"Removed {c_model} from {c_device}/{c_bay}."
 
                 # Delete the currently installed module in the target bay
                 installed_module.delete()
@@ -3505,7 +3508,9 @@ class MoveModuleView(
                 occupant_removed_msg = f"Removed {occupant.module_type.model} from {target_bay.name}."
                 occupant.delete()
             _refuse_identity_move(module, target_device, moving, serial_rules, scope)
-            from_device, from_bay = module.device.name, module.module_bay.name
+            from_device = module.device.name
+            # The change scope does not include view scope, so name the source bay only when the viewer may see it.
+            from_bay = module.module_bay.name if nameable_modules(self).filter(pk=module.pk).exists() else None
             module.module_bay = target_bay
             module.device = target_device
 
@@ -3560,7 +3565,9 @@ class MoveModuleView(
             moved_msg = f"Moved {conflict_module.module_type.model}"
             if from_device != target_device.name:
                 moved_msg += f" from {from_device}"
-            moved_msg += f"/{from_bay} to {target_bay.name}."
+            if from_bay is not None:
+                moved_msg += f"/{from_bay}"
+            moved_msg += f" to {target_bay.name}."
             messages.success(request, moved_msg)
             if server_key:
                 _schedule_module_cache_mutation(request, page_device, server_key)
