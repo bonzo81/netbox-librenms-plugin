@@ -323,24 +323,34 @@ def display(value) -> str:
     return "" if is_librenms_placeholder(text) else text
 
 
+def serial_refusal(value, model) -> str:
+    """
+    Return why a plugin writer refuses to store the LibreNMS *value* in ``model.serial``, or "".
+
+    The value is not text or a number, or its text is longer than the field: the writer refuses
+    rather than store the text of a boolean or a list, or cut the text. Import validation reads
+    the same reason, so a row that the create refuses is never ready.
+    """
+    if not is_serial_value(value):
+        return MALFORMED_SERIAL
+    text = display(value)
+    max_length = model._meta.get_field("serial").max_length
+    if max_length is not None and len(text) > max_length:
+        return f"The LibreNMS serial has {len(text)} characters; the field holds at most {max_length}."
+    return ""
+
+
 def stored_form(value, model) -> str:
     """
     Return the text that a plugin writer stores in ``model.serial`` for the LibreNMS *value*.
 
     Raises:
-        ValidationError: The value is not text or a number, or the text is longer than the field; the
-            writer refuses rather than store the text of a boolean or a list, or cut the text.
+        ValidationError: ``serial_refusal`` gives a reason.
 
     """
-    if not is_serial_value(value):
-        raise ValidationError({"serial": MALFORMED_SERIAL})
-    text = display(value)
-    max_length = model._meta.get_field("serial").max_length
-    if max_length is not None and len(text) > max_length:
-        raise ValidationError(
-            {"serial": f"The LibreNMS serial has {len(text)} characters; the field holds at most {max_length}."}
-        )
-    return text
+    if refusal := serial_refusal(value, model):
+        raise ValidationError({"serial": refusal})
+    return display(value)
 
 
 def naming_token(value, context: SerialContext) -> str:

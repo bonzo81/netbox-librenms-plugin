@@ -759,26 +759,29 @@ class TestValidateDeviceForImport:
         assert result["cluster"]["found"] is True
         assert result["is_ready"] is False
 
-    def test_a_malformed_serial_keeps_a_new_device_from_being_ready(self):
-        """The create refuses a serial that is not text or a number, so the preview must not mark the row ready."""
-        from netbox_librenms_plugin.import_validation_helpers import apply_role_to_validation
-        from netbox_librenms_plugin.serial_identity import MALFORMED_SERIAL
+    @pytest.mark.parametrize("serial", [True, "S" * 51], ids=["boolean", "too-long"])
+    def test_a_serial_that_the_create_refuses_keeps_a_new_device_from_being_ready(self, serial):
+        """The create refuses a serial that is not text or a number, or too long, so the row must not be ready."""
+        from dcim.models import Device
 
-        infrastructure = make_device("malformed-serial-infrastructure")
+        from netbox_librenms_plugin.import_validation_helpers import apply_role_to_validation
+        from netbox_librenms_plugin.serial_identity import serial_refusal
+
+        infrastructure = make_device("refused-serial-infrastructure")
         payload = _device_payload(
             5406,
-            hostname="malformed-serial-device",
-            sysName="malformed-serial-device",
+            hostname="refused-serial-device",
+            sysName="refused-serial-device",
             location=infrastructure.site.name,
             hardware=infrastructure.device_type.model,
-            serial=True,
+            serial=serial,
         )
 
         result = self._validate(payload)
         apply_role_to_validation(result, infrastructure.role)
 
         assert (result["can_import"], result["is_ready"]) == (False, False)
-        assert MALFORMED_SERIAL in result["issues"]
+        assert serial_refusal(serial, Device) in result["issues"]
 
     def test_new_vm_skips_device_fields_and_requires_valid_placement(self):
         cluster = make_cluster("Validation available cluster")
