@@ -5771,6 +5771,36 @@ class TestAddAsOOBViewPost:
         # The selected non-sync member got NO orphan OOB link written to it.
         assert not read_mapping(Device.objects.get(pk=selected_member.pk)).has_oob(self.server_key)
 
+    @transactional_db_with_all_apps()
+    @pytest.mark.parametrize("selected_is_master", [False, True], ids=["member", "master"])
+    def test_a_serial_matched_vc_member_is_held_until_the_oob_link_commits(self, client, selected_is_master):
+        """A concurrent writer that holds the serial-matched member row makes the attach wait, then try again."""
+        from dcim.models import Device, VirtualChassis
+
+        tag = "master" if selected_is_master else "member"
+        vc = VirtualChassis.objects.create(name=f"vc-oob-hold-{tag}")
+        sync_member = make_device(f"vc-oob-hold-sync-{tag}", librenms_cf={self.server_key: {"id": 10}})
+        selected = make_device(f"vc-oob-hold-selected-{tag}", serial=f"VC-OOB-HOLD-{tag}")
+        Device.objects.filter(pk=sync_member.pk).update(virtual_chassis=vc, vc_position=1)
+        Device.objects.filter(pk=selected.pk).update(virtual_chassis=vc, vc_position=2)
+        if selected_is_master:
+            VirtualChassis.objects.filter(pk=vc.pk).update(master=selected)
+        self._register_oob_device(17, "controller-node", serial=selected.serial, generic=True)
+        client.force_login(make_superuser(f"vc-oob-hold-user-{tag}"))
+        url = url_for("plugins:netbox_librenms_plugin:device_add_as_oob", kwargs={"device_id": 17})
+
+        with second_connection() as other:
+            lock_row(other, Device, selected.pk)
+            with lock_timeout(200):
+                response = client.post(
+                    url,
+                    {"server_key": self.server_key, "existing_device_id": str(selected.pk)},
+                    HTTP_HX_REQUEST="true",
+                )
+
+        assert TRY_AGAIN_MESSAGE in response.content.decode()
+        assert not read_mapping(Device.objects.get(pk=sync_member.pk)).has_oob(self.server_key)
+
     def test_legacy_id_written_in_race_window_is_rejected_post_lock(self):
         """The locked-row check rejects a legacy ID written during the race window before OOB link promotion."""
         from dcim.models import Device

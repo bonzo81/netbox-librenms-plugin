@@ -584,6 +584,13 @@ def _oob_ip_is_reassignable(candidate, interface) -> bool:
 _SERIAL_MATCH_LOST = "The serial no longer identifies this device alone. Refresh the validation and retry."
 
 
+def _hold_device_row(device_pk) -> None:
+    """Lock the Device row *device_pk* ``FOR NO KEY UPDATE`` until the transaction ends; a deleted row locks nothing."""
+    from dcim.models import Device
+
+    list(Device.objects.select_for_update(no_key=True, of=("self",)).filter(pk=device_pk).values_list("pk"))
+
+
 def _retype_refusal(device, device_type, serial_rules, scope) -> HttpResponse | None:
     """Return an error response when *device_type* must not be saved on the locked *device*; see ``retype_conflict``."""
     if scope is not None and retype_conflict(device, device_type, rules=serial_rules, scope=scope):
@@ -2987,7 +2994,7 @@ class AddAsOOBView(
         if error := _invalid_import_intent_response(request, device_id):
             return error
 
-        from dcim.models import Device
+        from dcim.models import Device, VirtualChassis
 
         existing_device_id = request.POST.get("existing_device_id")
         if not existing_device_id:
@@ -3062,8 +3069,13 @@ class AddAsOOBView(
             # Serial-derived candidates take their identity lock before the claim and row locks.
             serial_rules = SerialRules.load()
             serial_match = validation.get("existing_match_type") != "primary_ip"
+            # Hold a serial-matched row that is not the sync row; a serial writer locks a member before its master.
+            hold_matched = serial_match and existing_device.pk != sync_device.pk
+            matched_is_master = hold_matched and VirtualChassis.objects.filter(master_id=existing_device.pk).exists()
             if serial_match:
                 assignment_lock([libre_device.get("serial")], model=Device, rules=serial_rules)
+            if hold_matched and not matched_is_master:
+                _hold_device_row(existing_device.pk)
             try:
                 sync_device, id_conflict = lock_librenms_id_assignment(
                     librenms_id,
@@ -3089,6 +3101,8 @@ class AddAsOOBView(
                     f"LibreNMS device #{librenms_id} is already assigned to {object_label} "
                     f"'{conflict_name}'; refresh and retry."
                 )
+            if matched_is_master:
+                _hold_device_row(existing_device.pk)
             if serial_match:
                 if not is_sole_holder(existing_device, libre_device.get("serial"), rules=serial_rules):
                     return _htmx_error_response(_SERIAL_MATCH_LOST)
