@@ -651,6 +651,7 @@ def test_capture_view_rejects_an_invalid_linked_controller(recording_server, oob
 def test_capture_detects_a_stack_before_reading_an_unrelated_invalid_serial_context(recording_server):
     from dcim.models import Manufacturer
 
+    from netbox_librenms_plugin.data_shapes.signature import compute_shape_signature
     from netbox_librenms_plugin.models import NormalizationRule
 
     maker = Manufacturer.objects.create(name="Unrelated capture maker", slug="unrelated-capture-maker")
@@ -665,7 +666,9 @@ def test_capture_detects_a_stack_before_reading_an_unrelated_invalid_serial_cont
 
     assert response.status_code == 200
     assert "Anonymized recording" in response.content.decode()
-    assert _captured_recording(response)["responses"]
+    stack = compute_shape_signature(_captured_recording(response))["virtual_chassis"]
+    assert stack["present"] is True
+    assert stack["member_count"] == 3
 
 
 @pytest.mark.django_db
