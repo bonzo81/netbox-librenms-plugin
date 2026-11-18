@@ -456,10 +456,10 @@ def test_the_trigram_migration_uses_the_operator_class_of_the_installed_extensio
 
     with connection.cursor() as cursor:
         cursor.execute(
-            "SELECT pg_has_role(extowner, 'MEMBER'), pg_get_userbyid(extowner) FROM pg_extension"
-            " WHERE extname = 'pg_trgm'"
+            "SELECT pg_has_role(extowner, 'MEMBER'), pg_get_userbyid(extowner), extnamespace::regnamespace::text"
+            " FROM pg_extension WHERE extname = 'pg_trgm'"
         )
-        can_move, owner = cursor.fetchone()
+        can_move, owner, home = cursor.fetchone()
     if not can_move:
         pytest.fail(f"Only the owner of pg_trgm can move it: run the tests as {owner!r} or as a superuser")
     schema = _probe_schema_name()
@@ -478,7 +478,7 @@ def test_the_trigram_migration_uses_the_operator_class_of_the_installed_extensio
     finally:
         with connection.cursor() as cursor:
             if moved:
-                cursor.execute("ALTER EXTENSION pg_trgm SET SCHEMA public")
+                cursor.execute(f"ALTER EXTENSION pg_trgm SET SCHEMA {home}")
             cursor.execute(f"DROP SCHEMA IF EXISTS {schema}")
         _run_index_step("ensure_serial_trigram_indexes")
 
