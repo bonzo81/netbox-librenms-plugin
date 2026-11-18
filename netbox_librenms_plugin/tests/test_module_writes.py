@@ -632,3 +632,42 @@ def test_a_creation_scope_refuses_unplanned_or_incremental_type_claims():
             scope.lock_module_types([unplanned.pk])
         with pytest.raises(RuntimeError, match="complete type set once"):
             scope.lock_template_type("module_type", planned.pk)
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("writer", ["interface-types", "module-bays"])
+def test_a_writer_that_keeps_module_serials_does_not_read_a_broken_serial_rule(writer, settings):
+    """A legacy serial rule that does not work blocks serial decisions, not a write that changes no serial."""
+    from dcim.models import Interface, InterfaceTemplate, ModuleBay
+    from django.test import Client
+    from django.urls import reverse
+
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import configure_default_librenms_server, make_superuser
+
+    configure_default_librenms_server(settings)
+    device = make_device_with_module_bays("keeps-serial-owner", ["Slot 1"])
+    module = install_module(device, "Slot 1", "KEEPS-SERIAL-CARD", serial="CARD12345")
+    InterfaceTemplate.objects.create(module_type=module.module_type, name="Ethernet1", type="10gbase-x-sfpp")
+    interface = Interface.objects.create(device=device, module=module, name="Ethernet1", type="1000base-t")
+    rule = NormalizationRule.objects.create(scope="serial", match_pattern=r"^S/N (.+)$", replacement=r"\1")
+    NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"X\1")
+    data = {"server_key": "default", "selected_device_id": device.pk}
+    if writer == "interface-types":
+        action = "apply_module_interface_types"
+        data.update(module_id=module.pk, interface_id=[interface.pk])
+        data.update({f"current_type_{interface.pk}": "1000base-t", f"template_type_{interface.pk}": "10gbase-x-sfpp"})
+    else:
+        action = "add_bay_template"
+        data.update(target_kind="module_type", target_pk=module.module_type_id, name="Additional Bay")
+    client = Client()
+    client.force_login(make_superuser("keeps-serial-user"))
+
+    response = client.post(reverse(f"plugins:netbox_librenms_plugin:{action}", kwargs={"pk": device.pk}), data)
+
+    assert response.status_code == 302
+    if writer == "interface-types":
+        interface.refresh_from_db()
+        assert interface.type == "10gbase-x-sfpp"
+    else:
+        assert ModuleBay.objects.filter(module=module, name="Additional Bay").exists()

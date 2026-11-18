@@ -1983,3 +1983,19 @@ rules:
               class MoveModuleView(...):
                   ...
           - pattern: assignment_lock([$SERIAL for $PAIR in moving], model=Module, ...)
+
+  - id: module-writer-keeps-observed-serials
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This module writer keeps the serial of the Module that it observes. Pass that Module in
+      observed_ids: module_ids claims its serial identity, so every serial rule is read.
+    metadata:
+      category: correctness
+    paths:
+      include: ["**/netbox_librenms_plugin/views/sync/modules.py"]
+    patterns:
+      - pattern: observe_module_write(..., module_ids=$IDS, ...)
+      - pattern-not-inside: |
+          class UpdateModuleSerialView(...):
+              ...

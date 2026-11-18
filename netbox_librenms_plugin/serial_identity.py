@@ -406,6 +406,9 @@ def contains_pattern(key: str) -> str:
 
 def _probe_keys(values, rules: SerialRules) -> dict:
     """Return ``{value: keys}``: the keys of each value under every candidate context."""
+    if not values:
+        # No value needs a context, so no rule is checked.
+        return {}
     contexts = rules.candidates()
     return {value: {key for context in contexts if (key := context._key(value))} for value in values}
 

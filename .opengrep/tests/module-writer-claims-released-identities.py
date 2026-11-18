@@ -26,3 +26,17 @@ class InstallModuleView(View):
     def post(self):
         # ok: module-writer-claims-released-identities
         assignment_lock([incoming], model=Module, rules=rules)
+
+
+class ApplyModuleInterfaceTypesView(View):
+    def post(self):
+        # ruleid: module-writer-keeps-observed-serials
+        observe_module_write(device_ids=[device.pk], module_ids=[module.pk])
+        # ok: module-writer-keeps-observed-serials
+        observe_module_write(device_ids=[device.pk], observed_ids=[module.pk])
+
+
+class UpdateModuleSerialView(View):
+    def update(self):
+        # ok: module-writer-keeps-observed-serials
+        observe_module_write(device_ids=[device.pk], module_ids=[module.pk])

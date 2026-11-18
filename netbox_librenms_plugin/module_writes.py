@@ -67,19 +67,22 @@ class ModuleWriteObservation:
     serials: tuple
 
 
-def observe_module_write(*, device_ids=(), module_ids=(), subtree_roots=()) -> ModuleWriteObservation:
+def observe_module_write(*, device_ids=(), module_ids=(), subtree_roots=(), observed_ids=()) -> ModuleWriteObservation:
     """
     Observe destinations and existing or removed modules without permission-filtering the owner set.
 
     The caller still authorizes every actual write. Full per-Device topology lets
     the post-lock check detect new children, removal and same-Device reparenting.
     A concurrent change refuses the observation, rather than expanding its locks.
+    The write claims the serials of *module_ids* and *subtree_roots*. It does not claim the
+    serials of *observed_ids*: Modules whose topology it protects but whose serial it keeps.
     """
-    selected = set(module_ids)
+    released = set(module_ids)
     for root in subtree_roots:
         if root is not None:
-            selected.add(root)
-            selected.update(pk for pk, _serial in module_subtree_serials(root))
+            released.add(root)
+            released.update(pk for pk, _serial in module_subtree_serials(root))
+    selected = released | set(observed_ids)
     rows = tuple(Module.objects.filter(pk__in=selected).order_by("pk").values_list(*_MODULE_FIELDS))
     if {row[0] for row in rows} != selected:
         raise ValidationError(_CHANGED)
@@ -87,7 +90,7 @@ def observe_module_write(*, device_ids=(), module_ids=(), subtree_roots=()) -> M
     modules, bays = _topology(owners)
     if not set(rows).issubset(modules) or not _subtrees(modules, subtree_roots) <= selected:
         raise ValidationError(_CHANGED)
-    return ModuleWriteObservation(owners, modules, bays, tuple(row[4] for row in rows))
+    return ModuleWriteObservation(owners, modules, bays, tuple(row[4] for row in rows if row[0] in released))
 
 
 @dataclass(frozen=True)

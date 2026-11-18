@@ -2327,7 +2327,7 @@ class UpdateModuleInterfaceView(
                 )
                 granted.grant.require(device_id=target_device.pk, ent_index=request.POST.get("ent_index", ""))
                 scope = lock_module_write(
-                    observe_module_write(device_ids=[target_device.pk], module_ids=[module.pk]),
+                    observe_module_write(device_ids=[target_device.pk], observed_ids=[module.pk]),
                     rules=granted.policy.serial_identity_rules,
                 )
                 granted = _authorize_module_grant(
@@ -2626,7 +2626,7 @@ class ApplyModuleInterfaceTypesView(
         validation_failures = []
         try:
             with transaction.atomic():
-                scope = lock_module_write(observe_module_write(device_ids=[target_device.pk], module_ids=[module.pk]))
+                scope = lock_module_write(observe_module_write(device_ids=[target_device.pk], observed_ids=[module.pk]))
                 target_device = scope.devices[target_device.pk]
                 module.refresh_from_db()
                 if module.device_id != target_device.pk:
@@ -3858,7 +3858,7 @@ class AddBayTemplateView(
                     observation = observe_module_write(device_ids=[instance.pk for instance in instances])
                 else:
                     instances = list(Module.objects.filter(module_type=target).order_by("pk"))
-                    observation = observe_module_write(module_ids=[instance.pk for instance in instances])
+                    observation = observe_module_write(observed_ids=[instance.pk for instance in instances])
                 scope = lock_module_write(observation)
                 scope = scope.lock_template_type(target_kind, target.pk)
                 if target_kind == "device_type":
