@@ -382,3 +382,36 @@ def test_serial_matches_device_keys_the_serial_of_the_attributed_member(stored):
     context = contexts[("index", 5)]
     assert context["selected_device"].pk == member.pk
     assert _check_ignore_rules(row, None, context["ignore_rules"], {5: row}, context["device_identity"]) == "skip"
+
+
+def test_serial_matches_device_keys_a_masterless_member_serial_under_its_own_rules():
+    """Only the page maker strips "TAG ", so the member's own rules keep "TAG ABC" and "ABC" apart."""
+    from dcim.models import Device, DeviceType, Manufacturer
+
+    from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+    from netbox_librenms_plugin.models import InventoryIgnoreRule, NormalizationRule
+    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView, _check_ignore_rules
+
+    page, member = _vc_members(["PAGE-MASTERLESS", "ABC-MASTERLESS"])
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^TAG (.+)$", replacement=r"\1", manufacturer=page.device_type.manufacturer
+    )
+    other_maker = Manufacturer.objects.create(name="Masterless member maker", slug="masterless-member-maker")
+    member_type = DeviceType.objects.create(
+        manufacturer=other_maker, model="Masterless member", slug="masterless-member"
+    )
+    Device.objects.filter(pk=member.pk).update(device_type=member_type)
+    InventoryIgnoreRule.objects.all().delete()
+    InventoryIgnoreRule.objects.create(
+        name="Hide the member board", match_type="serial_matches_device", pattern="", action="skip"
+    )
+    row = _row(5, "module", 0, position=2, entPhysicalSerialNum="TAG ABC-MASTERLESS")
+    policy = load_inventory_policy(page.pk)
+
+    _default, contexts = BaseModuleTableView._build_inventory_ignore_contexts(
+        policy.page_device, [row], policy.vc_members, policy
+    )
+
+    context = contexts[("index", 5)]
+    assert context["selected_device"].pk == member.pk
+    assert _check_ignore_rules(row, None, context["ignore_rules"], {5: row}, context["device_identity"]) is None

@@ -98,6 +98,12 @@ class InventoryPolicy:
 
         return SerialRules(self.serial_rules)
 
+    def device_serial_context(self, device):
+        """Return the context of the Device serial of *device*: the master's, or its own type's without a master."""
+        if self.master_id is None:
+            return self.serial_identity_rules.for_module_target(device)
+        return self.chassis_serial_context()
+
     def chassis_serial_context(self):
         """Return the serial context of the page device and its Virtual Chassis members: the master's manufacturer."""
         from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK, SerialContext

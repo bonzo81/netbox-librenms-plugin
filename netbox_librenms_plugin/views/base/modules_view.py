@@ -1552,7 +1552,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         """
         policy_cache = {}
         owners = cls._attribute_to_members(obj, inventory_data, vc_members, policy)
-        serial_context = policy.chassis_serial_context()
 
         def policy_for(device):
             if device.pk not in policy_cache:
@@ -1561,7 +1560,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     "manufacturer": manufacturer,
                     "ignore_rules": policy.rules_for(manufacturer),
                     "device_identity": DeviceIdentity.of(
-                        device, serial_context, policy.serial_identity_rules.for_module_target(device)
+                        device,
+                        policy.device_serial_context(device),
+                        policy.serial_identity_rules.for_module_target(device),
                     ),
                 }
             return policy_cache[device.pk]

@@ -4032,7 +4032,7 @@ class MarkBuiltInView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin, Libr
         has_bay = self._matches_a_bay(member, item, granted.index_map, granted.index_map.keys() - ancestry.keys())
         identity = DeviceIdentity.of(
             member,
-            granted.policy.chassis_serial_context(),
+            granted.policy.device_serial_context(member),
             granted.policy.serial_identity_rules.for_module_target(member),
         )
         candidate = built_in_candidate(item, granted.index_map, identity, has_bay=has_bay)
