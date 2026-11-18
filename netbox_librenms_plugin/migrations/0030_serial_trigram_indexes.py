@@ -138,8 +138,9 @@ def drop_serial_trigram_indexes(apps, schema_editor):
     quote = schema_editor.quote_name
     for name, table in _TRIGRAM_INDEXES:
         table_schema = _schemas(schema_editor.connection, table)[1]
-        # CONCURRENTLY: a plain drop waits for ACCESS EXCLUSIVE and blocks new reads of the table.
-        schema_editor.execute(f"DROP INDEX CONCURRENTLY IF EXISTS {quote(table_schema)}.{quote(name)}")
+        # CONCURRENTLY: a plain drop blocks new reads of the table; an enclosing transaction (a test) refuses it.
+        concurrently = "" if schema_editor.connection.in_atomic_block else " CONCURRENTLY"
+        schema_editor.execute(f"DROP INDEX{concurrently} IF EXISTS {quote(table_schema)}.{quote(name)}")
 
 
 class Migration(migrations.Migration):
