@@ -146,6 +146,8 @@ def vc_detecting_context(recording, contexts):
     """
     Return the first of the serial *contexts* under which a raw capture holds a stack, or the first context.
 
+    An Unavailable first context is returned at once: the device's own context decides whether a capture can run.
+
     Detection accepts a stack that any candidate context explains, so a capture must anonymize serials
     under that context for the recording to keep the stack. Only a Junos FPC stack depends on a context,
     so *contexts* is read after its first item only when the rows describe FPC members to compare.
@@ -156,6 +158,8 @@ def vc_detecting_context(recording, contexts):
     first = next(remaining, None)
     if first is None:
         raise ValueError("Stack detection requires at least one serial context.")
+    if first.unavailable:
+        return first
     read = [first]
 
     def candidates():

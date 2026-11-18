@@ -775,6 +775,37 @@ def test_a_capture_under_a_master_outside_the_chassis_renders_the_unavailable_re
     assert "Anonymized recording" not in html
 
 
+@pytest.mark.django_db
+def test_a_junos_stack_under_a_master_outside_the_chassis_renders_the_unavailable_reason(recording_server):
+    """Another serial context can explain the FPC stack, but the device's own context is Unavailable."""
+    from dcim.models import VirtualChassis
+
+    from netbox_librenms_plugin.data_shapes.signature import compute_shape_signature
+    from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK, plain_context
+
+    recording = deepcopy(load_recording("juniper-ex4400-vc-2member"))
+    assert compute_shape_signature(recording, serial_context=plain_context())["virtual_chassis"]["present"]
+    # The stack recording holds no port routes, so the capture reads those of a standalone recording.
+    ports = load_recording("iosxe-c8300")
+    for route, body in ports["responses"].items():
+        if "/inventory/" not in route and route != f"GET /api/v0/devices/{ports['device_id']}":
+            recording["responses"].setdefault(route.replace(str(ports["device_id"]), str(recording["device_id"])), body)
+    server, api = recording_server(recording)
+    device = make_device("capture-junos-outside-master", librenms_cf={"test": {"id": recording["device_id"]}})
+    chassis = VirtualChassis.objects.create(name="capture-junos-outside-master-vc")
+    device.virtual_chassis = chassis
+    device.vc_position = 1
+    device.save()
+    VirtualChassis.objects.filter(pk=chassis.pk).update(master=make_device("capture-junos-outside-master-other"))
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    html = unescape(response.content.decode())
+    assert response.status_code == 200
+    assert UNAVAILABLE_MASTER_LINK in html
+    assert "Anonymized recording" not in html
+
+
 def _junos_fpc_recording(root_serial, fpc_serials):
     from netbox_librenms_plugin.constants import JUNOS_FPC_DESCR_PREFIX, JUNOS_VC_ROOT_DESCR_MARKER
 
