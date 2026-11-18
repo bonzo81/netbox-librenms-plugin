@@ -304,6 +304,23 @@ def test_each_writer_refuses_a_row_its_include_rule_no_longer_admits(ui, c8300, 
     assert written_state(device) == before
 
 
+def test_a_grant_signed_before_serial_extraction_refuses_the_write(ui, c8300, monkeypatch):
+    """Version 1 signed grants under substitution serial rules; their member attribution is not current."""
+    from netbox_librenms_plugin import inventory_policy
+    from netbox_librenms_plugin.module_grants import GrantRefusal
+
+    device, entities = c8300
+    with monkeypatch.context() as signing:
+        signing.setattr(inventory_policy, "INVENTORY_POLICY_VERSION", 1)
+        form = WRITERS["install"](ui, device, entities)
+    before = written_state(device)
+
+    response = post(ui, *form)
+
+    assert GrantRefusal.POLICY.message in messages_of(response)
+    assert written_state(device) == before
+
+
 # --- Rows the table does not render ----------------------------------------------------------------
 
 BUILT_IN_UNIT = 1000  # module 0: the seeded model rule makes it transparent, so the table hides it.

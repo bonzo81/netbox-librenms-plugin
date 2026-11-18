@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from functools import cached_property
 
 # Change this when the fingerprint reads other inputs or the collector reads them differently.
-INVENTORY_POLICY_VERSION = 1
+INVENTORY_POLICY_VERSION = 2
 
 _SERIAL_SCOPE = "serial"
 
