@@ -943,6 +943,8 @@ def report_rows(rules: SerialRules | None = None):
     """
     from dcim.models import Device, Module
 
+    from netbox_librenms_plugin.models import RuleConfigurationError
+
     rules = rules or SerialRules.load()
     devices = Device.objects.exclude(serial="").select_related("device_type", "virtual_chassis__master__device_type")
     modules = Module.objects.exclude(serial="").select_related("device__device_type", "module_bay")
@@ -955,7 +957,12 @@ def report_rows(rules: SerialRules | None = None):
             stored = display(row.serial)
             if not stored:
                 continue
-            context = row_context(row)
+            try:
+                context = row_context(row)
+            except RuleConfigurationError as exc:
+                # A broken rule fails only the rows of its chain; the scan reports them and goes on.
+                yield row, stored, "", exc.public_message
+                continue
             if context.unavailable:
                 yield row, stored, "", context.unavailable
                 continue
