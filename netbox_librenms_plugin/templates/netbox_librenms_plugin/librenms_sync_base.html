@@ -391,8 +391,8 @@
                                     <i class="mdi mdi-help-circle-outline"></i>
                                 </span>
                                 <span class="text-muted small">{{ serial_unavailable }}</span>
-                                {% elif object.serial and not serial_matches %}
-                                <span class="text-warning ms-1" title="LibreNMS serial '{{ librenms_device_serial }}' does not match NetBox serial '{{ object.serial }}'">
+                                {% elif object.serial and serial_admitted and not serial_matches %}
+                                <span class="text-warning ms-1" title="LibreNMS serial '{{ librenms_device_serial }}' does not match NetBox serial '{{ object.serial }}'" data-serial-mismatch>
                                     <i class="mdi mdi-alert"></i>
                                 </span>
                                 {% endif %}

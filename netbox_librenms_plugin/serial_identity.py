@@ -134,6 +134,11 @@ def _text(value) -> str:
     return "" if value is None else str(value).strip()
 
 
+def is_serial_value(value) -> bool:
+    """Return whether a LibreNMS serial field has a serial's shape: absent, text, or a JSON number."""
+    return value is None or (isinstance(value, (str, int, float)) and not isinstance(value, bool))
+
+
 def _stored_text(value) -> str:
     """Return the persisted text of a NetBox serial field, untrimmed."""
     return "" if value is None else str(value)
@@ -640,9 +645,9 @@ def assignment_lock(serials: Iterable, *, model, rules: SerialRules) -> None:
     from netbox_librenms_plugin.utils import acquire_advisory_transaction_lock, advisory_lock_key
 
     label = model._meta.label_lower
-    identities = {
-        f"{_LOCK_PREFIX}:{label}:{key}" for keys in _probe_keys(list(serials), rules).values() for key in keys
-    }
+    # Text first: the probe map keys on the value, and the JSON numbers 123 and 123.0 are one Python key.
+    texts = [_text(serial) for serial in serials]
+    identities = {f"{_LOCK_PREFIX}:{label}:{key}" for keys in _probe_keys(texts, rules).values() for key in keys}
     for identity in sorted(identities, key=advisory_lock_key):
         acquire_advisory_transaction_lock(identity)
 

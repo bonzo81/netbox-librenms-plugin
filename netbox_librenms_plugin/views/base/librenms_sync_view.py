@@ -29,6 +29,7 @@ from netbox_librenms_plugin.serial_identity import (
     display,
     group,
     is_identity,
+    is_serial_value,
     is_sole_holder,
     stored_form_differs,
 )
@@ -95,7 +96,8 @@ class BaseLibreNMSSyncView(
 
     def _legacy_id_serial_confirmed(self, device, incoming) -> bool:
         """Return whether the legacy ID conversion may run: *device* is the one Device that holds the serial."""
-        if self._serial_context(device).unavailable:
+        # A list or an object is no serial, and the resolver can not look it up.
+        if not is_serial_value(incoming) or self._serial_context(device).unavailable:
             return False
         try:
             return is_sole_holder(device, incoming, rules=self.serial_rules)
@@ -630,6 +632,7 @@ class BaseLibreNMSSyncView(
                         else "",
                         # The writer refuses a serial without an identity, so the page offers no sync for it.
                         "serial_admitted": obj._meta.model_name == "device"
+                        and is_serial_value(librenms_serial)
                         and is_identity(librenms_serial, self._serial_context(obj)),
                         # A legacy stored form names the same hardware; the update action writes the LibreNMS text.
                         "serial_stored_form_differs": obj._meta.model_name == "device"

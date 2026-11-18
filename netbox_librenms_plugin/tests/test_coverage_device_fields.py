@@ -283,6 +283,19 @@ class TestUpdateDeviceSerialView:
         device.refresh_from_db()
         assert device.serial == stored
 
+    @pytest.mark.parametrize("serial", [["LIST-SERIAL"], {"serial": "LIST-SERIAL"}, True])
+    def test_a_malformed_live_serial_preserves_the_stored_value(self, logged_in_client, librenms_server, serial):
+        """A list or an object is no serial: the update refuses it before it locks or resolves it."""
+        device = _linked_device("serial-malformed", 6515, serial="KEPT-SERIAL")
+        librenms_server.device_info_response(device_id=6515, hostname=device.name, serial=serial)
+
+        response = _post(logged_in_client, "update_device_serial", device)
+
+        device.refresh_from_db()
+        assert response.status_code == 302
+        assert device.serial == "KEPT-SERIAL"
+        assert len(_messages(response, "error")) == 1
+
     def test_first_serial_uses_the_set_message(self, logged_in_client, librenms_server):
         device = _linked_device("serial-first", 6513)
         librenms_server.device_info_response(device_id=6513, hostname=device.name, serial="FIRST-SERIAL")
@@ -1441,6 +1454,98 @@ class TestConvertLegacyLibreNMSIdView:
         else:
             assert stored_mapping_for_test(device) == {SERVER_KEY: 6567}
             assert _messages(response, "error") == []
+
+    def test_a_hidden_twin_written_before_the_lock_refuses_the_conversion(self, client, librenms_server, monkeypatch):
+        """The first serial check passes; a twin that appears before the identity lock must refuse the locked check."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.views.sync import device_fields
+
+        NormalizationRule.objects.get_or_create(
+            scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
+        )
+        device = make_device("legacy-late-twin-target", serial="LATE-TWIN", librenms_cf=6568)
+        librenms_server.device_info_response(device_id=6568, hostname=device.name, serial="LATE-TWIN")
+        client.force_login(
+            make_user_with_perms(
+                "legacy-late-twin-user", [("view", Device), ("change", Device)], constraints={"name": device.name}
+            )
+        )
+        lock = device_fields.assignment_lock
+
+        def twin_then_lock(*args, **kwargs):
+            # The timing seam: another writer stores the twin after the first check.
+            make_device("legacy-late-twin-hidden", serial="S/N LATE-TWIN")
+            return lock(*args, **kwargs)
+
+        monkeypatch.setattr(device_fields, "assignment_lock", twin_then_lock)
+
+        response = _post(client, "convert_legacy_librenms_id", device, {"object_type": "device"})
+
+        device.refresh_from_db()
+        assert stored_mapping_for_test(device) == 6568
+        assert _messages(response, "error") == [_SERIAL_MISMATCH_MESSAGE]
+        assert not any("legacy-late-twin-hidden" in text for text in _messages(response))
+
+    @pytest.mark.parametrize("serial", [["MALFORMED-LEGACY"], {"serial": "MALFORMED-LEGACY"}, True])
+    def test_a_malformed_librenms_serial_refuses_the_conversion(self, logged_in_client, librenms_server, serial):
+        """A list or an object is no serial: the conversion refuses it, and the resolver never reads it."""
+        device = make_device("legacy-malformed-serial", serial="MALFORMED-LEGACY", librenms_cf=6569)
+        librenms_server.device_info_response(device_id=6569, hostname=device.name, serial=serial)
+
+        response = _post(logged_in_client, "convert_legacy_librenms_id", device, {"object_type": "device"})
+
+        device.refresh_from_db()
+        assert response.status_code == 302
+        assert stored_mapping_for_test(device) == 6569
+        assert _messages(response, "error") == [_SERIAL_MISMATCH_MESSAGE]
+
+    @transactional_db_with_all_apps()
+    def test_a_master_change_waits_for_the_conversion_that_read_the_master(self, logged_in_client, librenms_server):
+        """The locked check reads the master's rules, so a native master change must wait until the conversion ends."""
+        from dcim.models import DeviceType, Manufacturer, VirtualChassis
+        from django.db import OperationalError
+
+        from netbox_librenms_plugin.models import NormalizationRule
+        from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change
+        from netbox_librenms_plugin.views.sync import device_fields
+
+        vendor = Manufacturer.objects.create(name="Legacy master vendor", slug="legacy-master-vendor")
+        master_type = DeviceType.objects.create(manufacturer=vendor, model="Legacy Master", slug="legacy-master")
+        NormalizationRule.objects.create(
+            scope="serial", manufacturer=vendor, match_pattern=r"^X-(.+)$", replacement=r"\1"
+        )
+        master = make_device("legacy-chassis-master")
+        master.device_type = master_type
+        master.save()
+        member = make_device("legacy-chassis-member", serial="X-ABC123", librenms_cf=6570)
+        other = make_device("legacy-chassis-other")
+        chassis = make_virtual_chassis("legacy-chassis-vc", master, member, other)
+        chassis.master = master
+        chassis.save()
+        librenms_server.device_info_response(device_id=6570, hostname=member.name, serial="ABC123")
+        convert = device_fields.convert_legacy
+        outcome = []
+
+        def change_master_then_convert(locked, server_key):
+            # The timing seam: a native chassis edit runs after the locked check.
+            with second_connection() as session:
+                try:
+                    commit_row_change(session, VirtualChassis, chassis.pk, {"master_id": other.pk})
+                    outcome.append("committed")
+                except OperationalError:
+                    outcome.append("waited")
+            return convert(locked, server_key)
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(device_fields, "convert_legacy", change_master_then_convert)
+            _post(logged_in_client, "convert_legacy_librenms_id", member, {"object_type": "device"})
+
+        member.refresh_from_db()
+        assert outcome == ["waited"]
+        assert stored_mapping_for_test(member) == {SERVER_KEY: 6570}
+        assert VirtualChassis.objects.get(pk=chassis.pk).master_id == master.pk
 
     def test_vm_conversion_skips_the_device_serial_gate(self, logged_in_client, librenms_server):
         vm = make_vm("legacy-convert-vm")

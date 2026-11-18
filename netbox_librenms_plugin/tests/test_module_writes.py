@@ -721,3 +721,24 @@ def test_a_module_move_whose_commit_meets_a_lock_conflict_sends_no_event(client,
     assert TRY_AGAIN_MESSAGE in [str(message) for message in get_messages(response.wsgi_request)]
     assert Module.objects.get(pk=module.pk).module_bay_id != target_bay.pk
     assert flushed_events == []
+
+
+@transactional_db_with_all_apps()
+def test_a_batch_claims_each_json_number_serial_by_its_text():
+    """JSON 123 and 123.0 are one Python key but two stored serials, so a writer of either one waits for the batch."""
+    from dcim.models import Module
+
+    from netbox_librenms_plugin.serial_identity import _LOCK_PREFIX, SerialRules, assignment_lock
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import second_connection
+    from netbox_librenms_plugin.utils import advisory_lock_key
+
+    free = []
+    with transaction.atomic():
+        assignment_lock([123, 123.0], model=Module, rules=SerialRules.load())
+        with second_connection() as other, other.cursor() as cursor:
+            for text in ("123", "123.0"):
+                identity = f"{_LOCK_PREFIX}:{Module._meta.label_lower}:{text}"
+                cursor.execute("SELECT pg_try_advisory_xact_lock(%s)", [advisory_lock_key(identity)])
+                free.append(cursor.fetchone()[0])
+
+    assert free == [False, False]

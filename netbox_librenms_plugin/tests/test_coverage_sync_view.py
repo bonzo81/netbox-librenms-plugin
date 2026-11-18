@@ -264,6 +264,22 @@ class TestSyncPageRouting:
         assert response.context["librenms_id_is_legacy"] is True
         assert response.context["librenms_id_serial_confirmed"] is True
 
+    @pytest.mark.parametrize("librenms_serial", [["LEGACY-SERIAL"], {"serial": "LEGACY-SERIAL"}, True])
+    def test_a_malformed_librenms_serial_offers_no_legacy_conversion(
+        self, logged_in_client, settings, librenms_server, librenms_serial
+    ):
+        """A list or an object is no serial: the page renders, and it offers no conversion and no serial sync."""
+        _configure_servers(settings, librenms_server, SERVER_KEY)
+        device = make_device("sync-legacy-malformed", serial="LEGACY-SERIAL", librenms_cf=6616)
+        _register_device(librenms_server, 6616, device.name, serial=librenms_serial)
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.status_code == 200
+        assert response.context["librenms_id_is_legacy"] is True
+        assert response.context["librenms_id_serial_confirmed"] is False
+        assert response.context["serial_admitted"] is False
+
     @pytest.mark.parametrize(("librenms_serial", "matches"), [("S/N ABC-SYNC", True), ("XYZ-SYNC", False)])
     def test_the_serial_row_keys_both_serials_with_the_serial_rules(
         self, logged_in_client, settings, librenms_server, librenms_serial, matches
@@ -384,6 +400,20 @@ class TestSyncPageRouting:
         assert response.context["librenms_device_serial"] == reported
         sync_serial_url = reverse("plugins:netbox_librenms_plugin:update_device_serial", kwargs={"pk": device.pk})
         assert (sync_serial_url in content) is offered
+
+    @pytest.mark.parametrize(("stored", "reported", "mismatch"), [("12", "12", False), ("STORED-12", "OTHER-12", True)])
+    def test_only_an_admitted_librenms_serial_is_marked_as_a_mismatch(
+        self, logged_in_client, settings, librenms_server, stored, reported, mismatch
+    ):
+        """A serial without an identity matches nothing, but the page must not call two equal texts a mismatch."""
+        _configure_servers(settings, librenms_server, SERVER_KEY)
+        device = make_device(f"sync-mismatch-{mismatch}", serial=stored, librenms_cf={SERVER_KEY: 6620})
+        _register_device(librenms_server, 6620, device.name, serial=reported)
+
+        response = logged_in_client.get(_sync_url(device))
+
+        assert response.context["serial_matches"] is False
+        assert ("data-serial-mismatch" in response.content.decode()) is mismatch
 
     def test_a_broken_serial_rule_of_the_device_keeps_the_sync_page(self, logged_in_client, settings, librenms_server):
         """The serial decisions are unavailable and name the rule; the other tabs still render."""
