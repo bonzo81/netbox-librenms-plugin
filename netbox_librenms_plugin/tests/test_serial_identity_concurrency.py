@@ -456,6 +456,67 @@ def test_a_type_change_reads_the_new_type_again_under_its_lock(librenms_server, 
 
 
 @transactional_db_with_all_apps()
+def test_a_type_and_serial_update_checks_the_serial_under_the_locked_new_type(librenms_server):
+    """
+    The old master rule strips "PREFIX-", so the member "PREFIX-ABC123" keys to "ABC123". The new type
+    moves to a maker with the same rule after the match: the master's new "ABC123" then names the
+    member's hardware, although the stale plain type kept the two apart.
+    """
+    from dcim.models import Device, DeviceType, Manufacturer, VirtualChassis
+
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.conftest import make_virtual_chassis
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
+    from netbox_librenms_plugin.tests.view_test_helpers import make_request
+    from netbox_librenms_plugin.tests.view_test_helpers import post as post_view
+    from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+    master = make_device("stale-type-master", serial="BEFORE123", librenms_cf={SERVER_KEY: 9816})
+    member = make_device("stale-type-member", serial="PREFIX-ABC123")
+    chassis = make_virtual_chassis("stale-type-chassis", master, member)
+    VirtualChassis.objects.filter(pk=chassis.pk).update(master=master)
+    old_type_id = master.device_type_id
+    strip_maker = Manufacturer.objects.create(name="Stale type strip", slug="stale-type-strip")
+    for maker in (master.device_type.manufacturer, strip_maker):
+        NormalizationRule.objects.create(
+            scope="serial", match_pattern=r"^PREFIX-(.+)$", replacement=r"\1", manufacturer=maker
+        )
+    new_type = DeviceType.objects.create(
+        manufacturer=Manufacturer.objects.create(name="Stale type plain", slug="stale-type-plain"),
+        model="Stale type model",
+        slug="stale-type-model",
+        part_number="STALE-TYPE-HW",
+    )
+    librenms_server.device_info_response(
+        device_id=9816, hostname=master.name, serial="ABC123", hardware=new_type.part_number
+    )
+    librenms_server.vc_inventory_callable(9816, [], {})
+    view = DeviceConflictActionView()
+    view._librenms_api = LibreNMSAPI(server_key=SERVER_KEY)
+    request = make_request(
+        "post",
+        {"server_key": SERVER_KEY, "action": "update", "existing_device_id": str(master.pk), "force": "on"},
+        user=make_superuser("stale-type-user"),
+        HTTP_HX_REQUEST="true",
+    )
+    changed = []
+
+    def change_before_the_first_lock(execute, sql, params, many, context):
+        if "pg_advisory_xact_lock" in sql and not changed:
+            changed.append(True)
+            with second_connection() as other:
+                commit_row_change(other, DeviceType, new_type.pk, {"manufacturer_id": strip_maker.pk})
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(change_before_the_first_lock):
+        post_view(view, request, device_id=9816)
+
+    assert changed
+    assert Device.objects.values_list("device_type_id", "serial").get(pk=master.pk) == (old_type_id, "BEFORE123")
+
+
+@transactional_db_with_all_apps()
 def test_a_member_serial_write_waits_for_a_chassis_master_type_change(librenms_server, monkeypatch):
     """
     The master's new type keys the member's new "XABC" to "ABC", which a third device stores.

@@ -840,12 +840,17 @@ def retype_lock(scope: RetypeScope, *, rules: SerialRules, serials=()) -> None:
     assignment_lock([serial for _pk, serial in scope.modules], model=Module, rules=rules)
 
 
-def _new_shared_key(rows, old: SerialContext, new: SerialContext) -> bool:
-    """Return whether *new* keys two of *rows* to one identity that *old* did not give them both."""
+def _new_shared_key(rows, old: SerialContext, new: SerialContext, *, stored=None) -> bool:
+    """
+    Return whether *new* keys two of *rows* to one identity that *old* did not give them both.
+
+    *stored* maps a pk to the serial that the row holds before the write; *old* keys that serial.
+    """
+    stored = stored or {}
     groups: dict = {}
-    for _pk, serial in rows:
+    for pk, serial in rows:
         if key := new._key(serial):
-            groups.setdefault(key, []).append(old._key(serial))
+            groups.setdefault(key, []).append(old._key(stored.get(pk, serial)))
     return any(len(before) > 1 and (not before[0] or len(set(before)) > 1) for before in groups.values())
 
 
@@ -874,7 +879,8 @@ def retype_conflict(device, device_type, *, rules: SerialRules, scope: RetypeSco
         return True
     rows = [(pk, device.serial if pk == device.pk else serial) for pk, serial in scope.devices]
     module_old = rules.for_module_target(stored)
-    if _new_shared_key(rows, old, new) or _new_shared_key(scope.modules, module_old, new):
+    # The old identities are those of the stored serials: a serial that the same write sets is not one of them.
+    if _new_shared_key(rows, old, new, stored=dict(scope.devices)) or _new_shared_key(scope.modules, module_old, new):
         return True
     # Another holder refuses the change, also one that held a serial before: the read stops at two
     # rows, so it cannot tell a new holder from an old one.
