@@ -770,6 +770,31 @@ class _DatabaseIDs:
         return _DEVICE_ROUTE_RE.sub(lambda match: match[1] + self.remap("device", match[2]), route)
 
 
+def _serial_text(value):
+    """Return the text of a serial field value that a serial rule reads, or "" when the value holds no serial."""
+    if isinstance(value, bool) or not isinstance(value, (str, int, float)):
+        return ""
+    serial = str(value).strip()
+    return "" if is_librenms_placeholder(serial) else serial
+
+
+def _holds_serial(obj):
+    """Return whether the walk of *obj* reaches a serial field value that a serial rule reads."""
+    if isinstance(obj, dict):
+        return any(
+            _holds_serial(value)
+            if isinstance(value, (dict, list))
+            else key in SERIAL_KEYS and bool(_serial_text(value))
+            for key, value in obj.items()
+        )
+    return isinstance(obj, list) and any(_holds_serial(item) for item in obj)
+
+
+def has_serial_input(recording) -> bool:
+    """Return whether a response of *recording* holds a serial, so its anonymization reads a serial context."""
+    return any(_holds_serial(body) for body in recording.get("responses", {}).values())
+
+
 def _anon_value(key, value, rules, container=None):  # noqa: C901
     """Apply the field rule for a single scalar (non-container) value keyed by *key*."""
     salt = rules.salt
@@ -790,10 +815,7 @@ def _anon_value(key, value, rules, container=None):  # noqa: C901
         # Same reason: LibreNMS reports the OUI as an integer.
         return _anon_oui(value, salt)
     if key in SERIAL_KEYS:
-        if isinstance(value, bool) or not isinstance(value, (str, int, float)):
-            return value
-        serial = str(value).strip()
-        if not serial or is_librenms_placeholder(serial):
+        if not _serial_text(value):
             return value
         serial = anonymize_input(value, rules.serial_context or plain_context())
         if not serial:

@@ -717,6 +717,64 @@ def test_a_capture_with_an_invalid_own_serial_context_renders_the_rule_error(rec
     assert "Anonymized recording" not in html
 
 
+def _without_serials(recording):
+    """Return *recording* with every serial field blank, as a device that reports no serial gives it."""
+    from netbox_librenms_plugin.data_shapes.anonymize import SERIAL_KEYS
+
+    def blank(obj):
+        if isinstance(obj, dict):
+            return {key: "" if key in SERIAL_KEYS else blank(value) for key, value in obj.items()}
+        if isinstance(obj, list):
+            return [blank(item) for item in obj]
+        return obj
+
+    return {**recording, "responses": blank(recording["responses"])}
+
+
+@pytest.mark.django_db
+def test_a_capture_without_a_serial_does_not_need_its_serial_rules(recording_server):
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    recording = _without_serials(load_recording("iosxe-c8300"))
+    server, api = recording_server(recording)
+    device = make_device("capture-no-serial", librenms_cf={"test": {"id": recording["device_id"]}})
+    rule = NormalizationRule.objects.create(
+        scope="serial",
+        manufacturer=device.device_type.manufacturer,
+        match_pattern=r"^S/N\s+(.+)$",
+        replacement=r"\1",
+    )
+    NormalizationRule.objects.filter(pk=rule.pk).update(replacement="")
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    assert response.status_code == 200
+    assert _captured_recording(response)["responses"]
+
+
+@pytest.mark.django_db
+def test_a_capture_under_a_master_outside_the_chassis_renders_the_unavailable_reason(recording_server):
+    from dcim.models import VirtualChassis
+
+    from netbox_librenms_plugin.serial_identity import UNAVAILABLE_MASTER_LINK
+
+    recording = load_recording("iosxe-c8300")
+    server, api = recording_server(recording)
+    device = make_device("capture-outside-master", librenms_cf={"test": {"id": recording["device_id"]}})
+    chassis = VirtualChassis.objects.create(name="capture-outside-master-vc")
+    device.virtual_chassis = chassis
+    device.vc_position = 1
+    device.save()
+    VirtualChassis.objects.filter(pk=chassis.pk).update(master=make_device("capture-outside-master-other"))
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    html = unescape(response.content.decode())
+    assert response.status_code == 200
+    assert UNAVAILABLE_MASTER_LINK in html
+    assert "Anonymized recording" not in html
+
+
 def _junos_fpc_recording(root_serial, fpc_serials):
     from netbox_librenms_plugin.constants import JUNOS_FPC_DESCR_PREFIX, JUNOS_VC_ROOT_DESCR_MARKER
 
