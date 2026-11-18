@@ -25,6 +25,7 @@ from netbox_librenms_plugin.data_shapes.signature import (
     compute_shape_signature,
     vc_detecting_context,
 )
+from netbox_librenms_plugin.models import RuleConfigurationError
 from netbox_librenms_plugin.serial_identity import SerialRules
 from netbox_librenms_plugin.server_mappings import read_mapping
 from netbox_librenms_plugin.server_selection import get_librenms_sync_device
@@ -96,6 +97,9 @@ class CaptureDataShapeView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixin,
                 recording, chain((serial_rules.for_device(sync_device),), serial_rules.iter_candidates())
             )
             anonymized = anonymize_recording(recording, salt=secrets.token_hex(16), serial_context=serial_context)
+        except RuleConfigurationError as exc:
+            # A broken serial rule that the capture needs: name it only to a viewer of the rule.
+            return self._error(request, device, f"Capture failed: {exc.shown_to(request.user).public_message}")
         except RuntimeError as exc:
             # capture raises on an incomplete capture (a transport failure, or an error status on a
             # required structural route such as a stale librenms_id), and anonymization raises when

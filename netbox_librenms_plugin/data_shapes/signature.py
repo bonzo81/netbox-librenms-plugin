@@ -147,19 +147,25 @@ def vc_detecting_context(recording, contexts):
     Return the first of the serial *contexts* under which a raw capture holds a stack, or the first context.
 
     Detection accepts a stack that any candidate context explains, so a capture must anonymize serials
-    under that context for the recording to keep the stack.
+    under that context for the recording to keep the stack. Only a Junos FPC stack depends on a context,
+    so *contexts* is read after its first item only when the rows describe FPC members to compare.
     """
     root_items, child_items = _vc_rows(recording)
     rows = [*root_items, *child_items]
-    first = None
-    for context in contexts:
-        if first is None:
-            first = context
-        if extract_vc_stack(rows, (context,)).members:
-            return context
+    remaining = iter(contexts)
+    first = next(remaining, None)
     if first is None:
         raise ValueError("Stack detection requires at least one serial context.")
-    return first
+    read = [first]
+
+    def candidates():
+        yield first
+        for context in remaining:
+            read.append(context)
+            yield context
+
+    # extract_vc_stack stops reading candidates at the first context that explains the FPC serials.
+    return read[-1] if extract_vc_stack(rows, candidates()).members else first
 
 
 def compute_shape_signature(recording, *, serial_context=None):

@@ -668,6 +668,115 @@ def test_capture_detects_a_stack_before_reading_an_unrelated_invalid_serial_cont
     assert _captured_recording(response)["responses"]
 
 
+@pytest.mark.django_db
+def test_a_standalone_capture_does_not_read_an_unrelated_invalid_serial_context(recording_server):
+    """No inventory row can make a stack depend on a serial context, so only the device's own is read."""
+    from dcim.models import Manufacturer
+
+    from netbox_librenms_plugin.models import NormalizationRule
+
+    maker = Manufacturer.objects.create(name="Unrelated standalone maker", slug="unrelated-standalone-maker")
+    rule = NormalizationRule.objects.create(
+        scope="serial", manufacturer=maker, match_pattern=r"^S/N\s+(.+)$", replacement=r"\1"
+    )
+    NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"invalid-\1")
+    recording = load_recording("iosxe-c8300")
+    server, api = recording_server(recording)
+    device = make_device("capture-standalone-context", librenms_cf={"test": {"id": recording["device_id"]}})
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    assert response.status_code == 200
+    assert _captured_recording(response)["responses"]
+
+
+@pytest.mark.django_db
+def test_a_capture_with_an_invalid_own_serial_context_renders_the_rule_error(recording_server):
+    from netbox_librenms_plugin.models import NormalizationRule, RuleConfigurationError
+
+    recording = load_recording("iosxe-c8300")
+    server, api = recording_server(recording)
+    device = make_device("capture-own-invalid-context", librenms_cf={"test": {"id": recording["device_id"]}})
+    rule = NormalizationRule.objects.create(
+        scope="serial",
+        manufacturer=device.device_type.manufacturer,
+        match_pattern=r"^S/N\s+(.+)$",
+        replacement=r"\1",
+    )
+    NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"invalid-\1")
+    rule.refresh_from_db()
+
+    response = _run_capture(_view_with_api(api), server, device)
+
+    html = unescape(response.content.decode())
+    assert response.status_code == 200
+    assert RuleConfigurationError(rule, "replacement").public_message in html
+    assert "Anonymized recording" not in html
+
+
+def _junos_fpc_recording(root_serial, fpc_serials):
+    from netbox_librenms_plugin.constants import JUNOS_FPC_DESCR_PREFIX, JUNOS_VC_ROOT_DESCR_MARKER
+
+    root = {
+        "entPhysicalIndex": 1,
+        "entPhysicalClass": "chassis",
+        "entPhysicalContainedIn": 0,
+        "entPhysicalDescr": f"Juniper {JUNOS_VC_ROOT_DESCR_MARKER}",
+        "entPhysicalSerialNum": root_serial,
+    }
+    fpcs = [
+        {
+            "entPhysicalIndex": 10 + slot,
+            "entPhysicalClass": "container",
+            "entPhysicalContainedIn": 1,
+            "entPhysicalDescr": f"{JUNOS_FPC_DESCR_PREFIX}: EX4300 @ {slot}/*/*",
+            "entPhysicalParentRelPos": slot,
+            "entPhysicalSerialNum": serial,
+        }
+        for slot, serial in enumerate(fpc_serials)
+    ]
+    return {
+        "device_id": 1,
+        "responses": {
+            "GET /api/v0/inventory/1?entPhysicalContainedIn=0": {"status": "ok", "inventory": [root]},
+            "GET /api/v0/inventory/1?entPhysicalContainedIn=1": {"status": "ok", "inventory": fpcs},
+        },
+    }
+
+
+@pytest.mark.django_db
+def test_stack_detection_reads_another_serial_context_only_for_junos_fpc_inventory():
+    """Junos FPC members depend on the serial rules, so another context can explain them; other rows cannot."""
+    from dcim.models import Manufacturer
+
+    from netbox_librenms_plugin.data_shapes.signature import vc_detecting_context
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.serial_identity import SerialRules
+
+    NormalizationRule.objects.filter(scope=NormalizationRule.SCOPE_SERIAL).delete()
+    maker = Manufacturer.objects.create(name="FPC context maker", slug="fpc-context-maker")
+    NormalizationRule.objects.create(
+        scope="serial", manufacturer=maker, match_pattern=r"^S/N\s+(.+)$", replacement=r"\1"
+    )
+    rules = SerialRules.load()
+    own, alternate = rules.context(None), rules.context(maker.pk)
+    read = []
+
+    def contexts():
+        for context in (own, alternate):
+            read.append(context)
+            yield context
+
+    # Only the maker's rule makes the root serial the serial of exactly one FPC.
+    fpc_stack = _junos_fpc_recording("FPCROOT1", ["S/N FPCROOT1", "FPCMEMBER2"])
+    assert vc_detecting_context(fpc_stack, contexts()) is alternate
+
+    read.clear()
+    standalone = load_recording("iosxe-c8300")
+    assert vc_detecting_context(standalone, contexts()) is own
+    assert read == [own]
+
+
 def test_recording_issue_field_accepts_downloaded_attachments():
     from pathlib import Path
 
