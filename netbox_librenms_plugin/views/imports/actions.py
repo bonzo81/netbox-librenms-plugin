@@ -80,6 +80,7 @@ from netbox_librenms_plugin.serial_identity import (
     is_identity,
     is_sole_holder,
     lock_chassis_of,
+    locked_device_type,
     retype_conflict,
     retype_lock,
     retype_scope,
@@ -2336,6 +2337,9 @@ class DeviceConflictActionView(
                 )
                 if lock_error is not None:
                     return lock_error
+                if retyped is not None:
+                    # The serial decision and the retype check both read the new type's maker under its row lock.
+                    librenms_device_type = locked_device_type(librenms_device_type)
                 if serial_matched and not is_sole_holder(
                     existing_device, libre_device.get("serial"), rules=serial_rules
                 ):

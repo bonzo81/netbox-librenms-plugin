@@ -854,6 +854,19 @@ def _new_shared_key(rows, old: SerialContext, new: SerialContext, *, stored=None
     return any(len(before) > 1 and (not before[0] or len(set(before)) > 1) for before in groups.values())
 
 
+def locked_device_type(device_type):
+    """
+    Return *device_type* as its row holds it now, locked ``FOR NO KEY UPDATE`` until the transaction ends.
+
+    A writer that sets a new type calls it after the device row lock and before any serial
+    decision, so a manufacturer edit cannot change the context between the decision and the save.
+    The save writes the type row's device count anyway, so the lock adds no new contention.
+    """
+    from dcim.models import DeviceType
+
+    return DeviceType.objects.select_for_update(no_key=True).get(pk=device_type.pk)
+
+
 def retype_conflict(device, device_type, *, rules: SerialRules, scope: RetypeScope) -> bool:
     """
     Return whether the DeviceType *device_type* must not be saved on *device*.
@@ -865,16 +878,14 @@ def retype_conflict(device, device_type, *, rules: SerialRules, scope: RetypeSco
     The serial of *device* comes from the object, so a serial that the same write sets counts.
     The manufacturer of *device_type* is read again under a lock on its row.
     """
-    from dcim.models import Device, DeviceType
+    from dcim.models import Device
 
     # The caller holds the device row, so its chassis stays; this lock holds the master link until the save.
     _share_locked_master_id(device.virtual_chassis_id, wait=False)
     if retype_scope(device) != scope:
         return True
     stored = Device.objects.select_related("device_type", "virtual_chassis__master__device_type").get(pk=device.pk)
-    # The save writes the type row's device count anyway; lock it now, so a manufacturer edit cannot pass the check.
-    locked_type = DeviceType.objects.select_for_update(no_key=True).get(pk=device_type.pk)
-    old, new = rules.for_device(stored), rules.for_device_type(locked_type)
+    old, new = rules.for_device(stored), rules.for_device_type(locked_device_type(device_type))
     if old.unavailable:
         return True
     rows = [(pk, device.serial if pk == device.pk else serial) for pk, serial in scope.devices]

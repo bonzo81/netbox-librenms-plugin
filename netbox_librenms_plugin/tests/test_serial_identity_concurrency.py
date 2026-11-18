@@ -517,6 +517,58 @@ def test_a_type_and_serial_update_checks_the_serial_under_the_locked_new_type(li
 
 
 @transactional_db_with_all_apps()
+@pytest.mark.parametrize("action", ["update", "update_serial"])
+def test_a_type_and_serial_update_admits_the_serial_under_the_locked_new_type(librenms_server, action):
+    """The matched type's maker gives "SN-ABC123" no identity; the maker that the type moves to does."""
+    from dcim.models import Device, DeviceType, Manufacturer
+
+    from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change, second_connection
+    from netbox_librenms_plugin.tests.view_test_helpers import make_request
+    from netbox_librenms_plugin.tests.view_test_helpers import post as post_view
+    from netbox_librenms_plugin.views.imports.actions import DeviceConflictActionView
+
+    tag = f"stale-admission-{action}".replace("_", "-")
+    target = make_device(tag, serial="OLD12345", librenms_cf={SERVER_KEY: 9817})
+    empty_maker = Manufacturer.objects.create(name=f"{tag} empty", slug=f"{tag}-empty")
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^SN-ABC123()$", replacement=r"\1", manufacturer=empty_maker
+    )
+    plain_maker = Manufacturer.objects.create(name=f"{tag} plain", slug=f"{tag}-plain")
+    new_type = DeviceType.objects.create(
+        manufacturer=empty_maker, model=f"{tag} model", slug=f"{tag}-model", part_number=f"{tag}-hw".upper()
+    )
+    librenms_server.device_info_response(
+        device_id=9817, hostname=target.name, serial="SN-ABC123", hardware=new_type.part_number
+    )
+    librenms_server.vc_inventory_callable(9817, [], {})
+    view = DeviceConflictActionView()
+    view._librenms_api = LibreNMSAPI(server_key=SERVER_KEY)
+    request = make_request(
+        "post",
+        {"server_key": SERVER_KEY, "action": action, "existing_device_id": str(target.pk), "force": "on"},
+        user=make_superuser(f"{tag}-user"),
+        HTTP_HX_REQUEST="true",
+    )
+    changed = []
+
+    def change_before_the_first_lock(execute, sql, params, many, context):
+        if "pg_advisory_xact_lock" in sql and not changed:
+            changed.append(True)
+            with second_connection() as other:
+                commit_row_change(other, DeviceType, new_type.pk, {"manufacturer_id": plain_maker.pk})
+        return execute(sql, params, many, context)
+
+    with connection.execute_wrapper(change_before_the_first_lock):
+        post_view(view, request, device_id=9817)
+
+    assert changed
+    # The saved type admits the LibreNMS serial, so the write stores it with the type.
+    assert Device.objects.values_list("device_type_id", "serial").get(pk=target.pk) == (new_type.pk, "SN-ABC123")
+
+
+@transactional_db_with_all_apps()
 def test_a_member_serial_write_waits_for_a_chassis_master_type_change(librenms_server, monkeypatch):
     """
     The master's new type keys the member's new "XABC" to "ABC", which a third device stores.
