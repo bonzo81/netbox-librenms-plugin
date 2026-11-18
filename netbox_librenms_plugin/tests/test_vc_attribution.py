@@ -415,3 +415,30 @@ def test_serial_matches_device_keys_a_masterless_member_serial_under_its_own_rul
     context = contexts[("index", 5)]
     assert context["selected_device"].pk == member.pk
     assert _check_ignore_rules(row, None, context["ignore_rules"], {5: row}, context["device_identity"]) is None
+
+
+def test_a_masterless_member_serial_names_its_owner_only_under_its_own_rules():
+    """Only the page maker strips "TAG ", so "TAG ABC" names no member that stores "ABC", and the position decides."""
+    from dcim.models import Device, DeviceType, Manufacturer
+
+    from netbox_librenms_plugin.inventory_policy import load_inventory_policy
+    from netbox_librenms_plugin.models import NormalizationRule
+    from netbox_librenms_plugin.views.base.modules_view import BaseModuleTableView
+
+    page, member = _vc_members(["PAGE-POSN", "ABC-POSN"])
+    NormalizationRule.objects.create(
+        scope="serial", match_pattern=r"^TAG (.+)$", replacement=r"\1", manufacturer=page.device_type.manufacturer
+    )
+    other_maker = Manufacturer.objects.create(name="Positioned member maker", slug="positioned-member-maker")
+    member_type = DeviceType.objects.create(
+        manufacturer=other_maker, model="Positioned member", slug="positioned-member"
+    )
+    Device.objects.filter(pk=member.pk).update(device_type=member_type)
+    row = _row(5, "module", 0, position=1, entPhysicalSerialNum="TAG ABC-POSN")
+    policy = load_inventory_policy(page.pk)
+
+    _default, contexts = BaseModuleTableView._build_inventory_ignore_contexts(
+        policy.page_device, [row], policy.vc_members, policy
+    )
+
+    assert contexts[("index", 5)]["selected_device"].pk == page.pk

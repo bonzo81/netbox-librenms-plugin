@@ -856,7 +856,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         """Return ``{item key: (Device, source)}`` for the main inventory, with *obj* for an unowned row."""
         rows = [item for item in inventory_data if item.get("_source") != OOB_INVENTORY_SOURCE]
         # Without members every row stays on the page, so the serial rules are not read.
-        owners = attribute_inventory(rows, vc_members, policy.chassis_serial_context() if vc_members else None)
+        owners = attribute_inventory(
+            rows,
+            vc_members,
+            policy.chassis_serial_context() if vc_members else None,
+            member_context=policy.device_serial_context,
+        )
         return {
             _inventory_item_key(item): (member or obj, source)
             for item, (member, source) in zip(rows, owners, strict=True)

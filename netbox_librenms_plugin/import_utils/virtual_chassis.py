@@ -397,10 +397,19 @@ _NAME_HINT_RE = re.compile(r"^\D*([1-9]\d*)[/:\-].*")
 class _Attribution:
     """Attribute the rows of one inventory to Virtual Chassis members; see :func:`attribute_inventory`."""
 
-    def __init__(self, rows, vc_members, context):
+    def __init__(self, rows, vc_members, context, member_context=None):
         self.vc_members = vc_members
         # Without members every row stays on the page, and context can be None.
-        self.by_serial = group(vc_members, context, serial=lambda member: member.serial) if vc_members else None
+        # Each member's serial is grouped under its own context: one group per context.
+        member_context = member_context or (lambda _member: context)
+        by_context = {}
+        for member in vc_members:
+            member_serial_context = member_context(member)
+            by_context.setdefault(member_serial_context.fingerprint, (member_serial_context, []))[1].append(member)
+        self.by_serial = [
+            group(members, member_serial_context, serial=lambda member: member.serial)
+            for member_serial_context, members in by_context.values()
+        ]
         self.by_index = {index: row for row in rows if (index := row.get("entPhysicalIndex")) is not None}
         self.stack = _stack_rows(rows, (context,)) if vc_members else _StackRows(None, {}, {})
         self.results = {}
@@ -414,7 +423,7 @@ class _Attribution:
 
     def serial_owner(self, row):
         """Return the member whose serial the row carries, or None; a serial that two members share names neither."""
-        members = self.by_serial.find(row.get("entPhysicalSerialNum"))
+        members = [member for groups in self.by_serial for member in groups.find(row.get("entPhysicalSerialNum"))]
         return members[0] if len(members) == 1 else None
 
     def resolve(self, row, resolving=frozenset()):
@@ -505,7 +514,7 @@ def _from_one(value) -> int | None:
     return position if position is not None and position >= 1 else None
 
 
-def attribute_inventory(rows: list, vc_members: list, context) -> list[tuple]:
+def attribute_inventory(rows: list, vc_members: list, context, member_context=None) -> list[tuple]:
     """
     Return the Virtual Chassis member that owns each inventory row, in row order.
 
@@ -520,12 +529,13 @@ def attribute_inventory(rows: list, vc_members: list, context) -> list[tuple]:
         rows: The main inventory rows of one device; OOB controller rows are no part of it.
         vc_members: The NetBox Virtual Chassis member Devices.
         context: The serial context of the stack's master; unused without members.
+        member_context: Return the context of one member's Device serial; None uses *context* for every member.
 
     Returns:
         list[tuple]: ``(member Device | None, source)`` per row, where None means the page device.
 
     """
-    attribution = _Attribution(rows, vc_members, context)
+    attribution = _Attribution(rows, vc_members, context, member_context)
     return [attribution.resolve(row) for row in rows]
 
 
