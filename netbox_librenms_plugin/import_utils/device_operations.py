@@ -551,9 +551,6 @@ def _flag_ambiguous_librenms_id(result, librenms_id, exc):
 # The match types of a match by a name: the resolved name, the LibreNMS hostname or the sysName.
 NAME_MATCH_TYPES = ("resolved_name", "hostname", "sysname")
 
-# The match type and the matched_by of an attach offer that the serial role makes.
-_SERIAL_ROLE_OFFER = ("serial", "serial")
-
 # The warning of a controller row whose host already has an OOB link.
 OOB_ALREADY_LINKED_WARNING = (
     "The matched NetBox device already has an OOB controller linked, so no OOB action is offered."
@@ -672,20 +669,6 @@ def _oob_controller_evidence(result, libre_device, server_key) -> bool:
     return bool(_reported_oob_type(libre_device) or _row_name_oob_type(libre_device, matched))
 
 
-def _serial_role_offers_oob(result, candidate, libre_device, server_key) -> bool:
-    """Return whether the serial role offers the row as the OOB controller of its serial match from the current evidence."""
-    if (result.get("existing_match_type"), candidate.get("matched_by")) != _SERIAL_ROLE_OFFER:
-        return False
-    facts = _serial_role_facts(
-        result["existing_device"],
-        result.get("existing_librenms_link"),
-        _current_resolved_name(result, libre_device),
-        libre_device,
-        server_key,
-    )
-    return facts.oob_possible
-
-
 def _current_resolved_name(result, libre_device) -> str:
     """Return the name of the current row under the naming rules that the validation of *result* used."""
     criteria = result.get("naming_criteria") or {}
@@ -698,27 +681,76 @@ def _current_resolved_name(result, libre_device) -> str:
     return name
 
 
+def _withdraw_attach_offer(result) -> None:
+    """Remove the attach offer of the row and the action that names it."""
+    result["oob_candidate"] = None
+    if result.get("serial_action") == "oob_candidate":
+        result["serial_action"] = None
+
+
 def _withdraw_controller_state(result, libre_device, server_key) -> None:
-    """Remove the controller state of a row without controller evidence; a current serial-role offer stays."""
-    candidate = result.get("oob_candidate")
-    if candidate and not _serial_role_offers_oob(result, candidate, libre_device, server_key):
-        result["oob_candidate"] = None
-        if result.get("serial_action") == "oob_candidate":
-            result["serial_action"] = None
+    """Remove the controller state of a row without controller evidence; a verified serial match gets its role again."""
+    matched = result.get("existing_device")
+    if (
+        result.get("existing_match_type") == "serial"
+        and result.get("match_verified", True)
+        and isinstance(matched, Device)
+        and result.get("serial_action") != "merge_netbox_devices"
+    ):
+        _apply_serial_role(result, matched, libre_device, server_key)
+    elif result.get("oob_candidate"):
+        _withdraw_attach_offer(result)
     if result.get("serial_action") == "oob_already_linked":
         result["serial_action"] = None
     if OOB_ALREADY_LINKED_WARNING in result.get("warnings", []):
         result["warnings"] = [warning for warning in result["warnings"] if warning != OOB_ALREADY_LINKED_WARNING]
 
 
+def _apply_serial_role(result, matched, libre_device, server_key) -> None:
+    """Decide the serial role of the row again from current facts, as a fresh validation does."""
+    decision = _detect_serial_match_role(
+        matched,
+        result.get("existing_librenms_link"),
+        _current_resolved_name(result, libre_device),
+        display(libre_device.get("serial")),
+        libre_device,
+        server_key,
+    )
+    # The role's warnings name no NetBox object; the ones that an earlier decision already gave are skipped.
+    known = set(result.setdefault("warnings", []))
+    role_messages = decision.pop("warnings")
+    apply_oob_detection_result(result, **decision, warnings=[text for text in role_messages if text not in known])
+
+
+def _set_attach_offer(result, matched, libre_device, server_key) -> None:
+    """Build the attach offer of a controller row from current facts, or withdraw it when the target has an OOB link."""
+    if read_mapping(librenms_link_owner(matched, server_key)).has_oob(server_key):
+        _withdraw_attach_offer(result)
+        if OOB_ALREADY_LINKED_WARNING not in result["warnings"]:
+            result["warnings"].append(OOB_ALREADY_LINKED_WARNING)
+        return
+    if row_at_oob_target_ip(matched, libre_device, server_key):
+        matched_by = "oob_ip"
+    elif result["existing_match_type"] == "primary_ip":
+        matched_by = "primary_ip"
+    elif result["existing_match_type"] in NAME_MATCH_TYPES:
+        matched_by = "hostname"
+    else:
+        matched_by = "serial"
+    result["serial_action"] = "oob_candidate"
+    result["oob_candidate"] = _oob_candidate(matched, libre_device, matched_by, server_key)
+
+
 def classify_oob_controller(result, libre_device, server_key) -> None:
     """
     Decide once whether the LibreNMS row is the OOB controller of the matched object, and set the state of that decision.
 
-    It sets ``row_is_oob_controller``. A controller row gets no host-side name sync, serial update, host
-    promotion, type mismatch or host warnings. A merge suggestion stays as it is. Else a Device host gets the
-    attach offer when the owner of its LibreNMS links has no OOB link, and the already-linked warning when it
-    has one. Validation and the cached-row refresh both call it, so the rule has one definition.
+    It sets ``row_is_oob_controller`` from the evidence alone. A controller row gets no host-side name sync,
+    serial update, host promotion, type mismatch or host warnings. A merge suggestion stays as it is. Else a
+    Device host gets the attach offer, built again from current facts, when the owner of its LibreNMS links has
+    no OOB link, and the already-linked warning when it has one. A match that the validation did not verify
+    (``match_verified`` False) gets no offer. Validation and the cached-row refresh both call it, so the rule
+    has one definition.
     """
     libre_device = libre_device or {}
     result["row_is_oob_controller"] = _oob_controller_evidence(result, libre_device, server_key)
@@ -743,25 +775,10 @@ def classify_oob_controller(result, libre_device, server_key) -> None:
         return
     if result["existing_match_type"] == "librenms_oob" or not isinstance(matched, Device):
         return
-    if read_mapping(librenms_link_owner(matched, server_key)).has_oob(server_key):
-        if result["serial_action"] == "oob_candidate":
-            result["serial_action"] = None
-        result["oob_candidate"] = None
-        if OOB_ALREADY_LINKED_WARNING not in result["warnings"]:
-            result["warnings"].append(OOB_ALREADY_LINKED_WARNING)
+    if not result.get("match_verified", True):
+        _withdraw_attach_offer(result)
         return
-    if result["serial_action"] == "oob_candidate" and result["oob_candidate"]:
-        return
-    if row_at_oob_target_ip(matched, libre_device, server_key):
-        matched_by = "oob_ip"
-    elif result["existing_match_type"] == "primary_ip":
-        matched_by = "primary_ip"
-    elif result["existing_match_type"] in NAME_MATCH_TYPES:
-        matched_by = "hostname"
-    else:
-        matched_by = "serial"
-    result["serial_action"] = "oob_candidate"
-    result["oob_candidate"] = _oob_candidate(matched, libre_device, matched_by, server_key)
+    _set_attach_offer(result, matched, libre_device, server_key)
 
 
 def _serial_differs_warning(incoming_serial) -> str:
@@ -1060,6 +1077,7 @@ def validate_device_for_import(
                 'serial_role_choice_available': bool,  # Both oob_candidate and promote_to_host valid
                 'oob_candidate': dict or None,  # {device (the OOB target), target_host_id, type, version, ip, matched_by}
                 'row_is_oob_controller': bool,  # The evidence shows the row is the matched object's OOB controller
+                'match_verified': bool,  # False when an error stopped validation before it verified the match
                 # 'promote_to_host': dict — CONDITIONAL, present only when host promotion is available
                 'merge_candidates': dict or None,  # {host_named: {...}, oob_named: {...}} when two
                     # NetBox devices look like the same physical box (devices only)
@@ -1194,6 +1212,7 @@ def _match_and_validate(  # noqa: C901
         "oob_candidate": None,  # dict {device, type, version, ip} when oob_candidate detected
         # True when the row is the OOB controller of the matched object: linked, detected or already linked.
         "row_is_oob_controller": False,
+        "match_verified": True,  # False when an error stopped validation before it verified the match
         # promote_to_host is only set when the host-promotion path is available; absent otherwise.
         "existing_librenms_link": None,  # dict {host_id, oob_id, oob_type} describing existing device's current LibreNMS linkage
         "merge_candidates": None,  # dict {host_named: {pk,name,librenms_link}, oob_named: {pk,name,librenms_link}} when two NB devices look like the same physical box
@@ -2121,6 +2140,9 @@ def _match_and_validate(  # noqa: C901
         # The validation result has no viewer: it is cached and shown to any import user.
         detail = exception_text_for(e, VirtualMachine if import_as_vm else Device, None)
         result["issues"].append(f"{VALIDATION_ERROR_ISSUE_PREFIX} {detail}")
+        # The error can stop validation after a provisional match; a LibreNMS ID link proves its match itself.
+        if result["existing_match_type"] not in ("librenms_id", "librenms_oob"):
+            result["match_verified"] = False
         return result
 
 
