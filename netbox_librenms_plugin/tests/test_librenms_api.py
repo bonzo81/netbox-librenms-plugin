@@ -1548,7 +1548,7 @@ class TestGetDeviceInfoResponseShape:
         ids=["non-dict-row", "missing-devices", "error-body", "non-list-devices"],
     )
     def test_a_body_without_a_device_row_is_unavailable_not_absent(self, local_librenms_api, librenms_server, body):
-        """Only an empty device list says that the device is absent; another shape says nothing about it."""
+        """A 2xx body without the device row says nothing about the device; only an HTTP 404 says it is absent."""
         from netbox_librenms_plugin.librenms_api import LibreNMSLookupError
 
         librenms_server.register("/api/v0/devices/1", body, method="GET")
