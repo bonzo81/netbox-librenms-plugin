@@ -731,8 +731,9 @@ class LibreNMSAPI:
 
         Returns:
             tuple: ``(success, data)``. On success, ``data`` is the device dictionary. For an
-                absent device, ``data`` is ``None``. For a transport failure
-                or another non-2xx response, ``data`` is a :class:`LibreNMSLookupError`.
+                absent device (HTTP 404, or an empty ``devices`` list), ``data`` is ``None``. For a
+                transport failure, another non-2xx response, or any other body, ``data`` is a
+                :class:`LibreNMSLookupError`.
 
         """
         from netbox_librenms_plugin.utils import row_identity_matches
@@ -776,29 +777,33 @@ class LibreNMSAPI:
             return False, LibreNMSLookupError(
                 "LibreNMS answered with a body that is not JSON for this device.", response.status_code
             )
-        try:
-            device_data = body["devices"][0]
-            if isinstance(device_data, dict) and not row_identity_matches(device_data, device_id):
-                # A row for another device ID leaves this device's existence unknown: unavailable, and not cached.
-                logger.warning("LibreNMS answered the request for device %s with another device", device_id)
-                return False, LibreNMSLookupError(
-                    "LibreNMS answered with another device for this device ID.", response.status_code
-                )
-            if not isinstance(device_data, dict):
-                return False, None
-            # LibreNMS 26.5.0 returns the full location relationship object
-            # (keys: id, location, lat, lng, timestamp, fixed_coordinates)
-            # instead of a flat location name string. Normalise to the name so
-            # downstream consumers receive a consistent value.
-            location = device_data.get("location")
-            if isinstance(location, dict):
-                device_data["location"] = location.get("location")
-            result = (True, device_data)
-            cache.set(cache_key, result, timeout=DEVICE_INFO_CACHE_TIMEOUT)
-            return result
-        except (IndexError, KeyError, TypeError):
-            # A JSON body that carries no usable device is treated as absent, as before.
+        devices = body.get("devices") if isinstance(body, dict) else None
+        if devices == []:
+            # An empty device list is LibreNMS's answer for no such device.
             return False, None
+        device_data = devices[0] if isinstance(devices, list) else None
+        if not isinstance(device_data, dict):
+            # Another shape, such as an error body without "devices", says nothing about the device: unavailable.
+            logger.warning("LibreNMS answered the request for device %s without a device row", device_id)
+            return False, LibreNMSLookupError(
+                "LibreNMS answered without a device row for this device.", response.status_code
+            )
+        if not row_identity_matches(device_data, device_id):
+            # A row for another device ID leaves this device's existence unknown: unavailable, and not cached.
+            logger.warning("LibreNMS answered the request for device %s with another device", device_id)
+            return False, LibreNMSLookupError(
+                "LibreNMS answered with another device for this device ID.", response.status_code
+            )
+        # LibreNMS 26.5.0 returns the full location relationship object
+        # (keys: id, location, lat, lng, timestamp, fixed_coordinates)
+        # instead of a flat location name string. Normalise to the name so
+        # downstream consumers receive a consistent value.
+        location = device_data.get("location")
+        if isinstance(location, dict):
+            device_data["location"] = location.get("location")
+        result = (True, device_data)
+        cache.set(cache_key, result, timeout=DEVICE_INFO_CACHE_TIMEOUT)
+        return result
 
     def _raw_get(self, path: str, params: dict | None = None) -> tuple[int, object]:
         """

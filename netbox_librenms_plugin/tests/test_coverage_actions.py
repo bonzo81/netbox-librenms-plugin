@@ -4031,8 +4031,9 @@ class TestDeviceConflictActionBranches:
         assert "LibreNMS device not found" not in unescape(response.content.decode())
         assert self.server_key not in (stored_mapping_for_test(Device.objects.get(pk=target.pk)) or {})
 
-    def test_a_live_answer_that_is_not_json_keeps_the_cached_row(self):
-        """A proxy answers HTTP 200 with an HTML page: the device may exist, so the row stays and Link refuses."""
+    @pytest.mark.parametrize("answer", ["html-page", "json-error"])
+    def test_a_live_answer_that_is_not_json_keeps_the_cached_row(self, answer):
+        """An HTTP 200 HTML page or JSON error body says nothing about the device, so the row stays and Link refuses."""
         from html import unescape
 
         from dcim.models import Device
@@ -4046,7 +4047,10 @@ class TestDeviceConflictActionBranches:
         self._register_device(42, f"{target.name}-source", serial=target.serial)
         # The import search cached the row.
         assert fetch_device_with_cache(42, view.librenms_api) is not None
-        self.librenms_server.register_raw("/api/v0/devices/42", "<html>gateway</html>", content_type="text/html")
+        if answer == "html-page":
+            self.librenms_server.register_raw("/api/v0/devices/42", "<html>gateway</html>", content_type="text/html")
+        else:
+            self.librenms_server.register("/api/v0/devices/42", {"status": "error", "message": "database unavailable"})
 
         response = post_view(view, self._request("link", target, f"{target.name}-user"), device_id=42)
 
