@@ -2020,6 +2020,13 @@ class DeviceVCDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, View):
         )
 
 
+def _oob_interface_queryset(user, device):
+    """Return the interfaces of *device* that *user* can view; the Add as OOB picker lists them and its POST reads them."""
+    from dcim.models import Interface
+
+    return Interface.objects.restrict(user, "view").filter(device=device)
+
+
 def _suggest_oob_interface(device, oob_candidate, interfaces=None):
     """
     Suggest an interface (and default new-interface name) for an OOB IP.
@@ -2130,7 +2137,7 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
             # oob_ip be interface-assigned). Offer the device's interfaces with a
             # sensible default pre-selected.
             if validation.get("oob_candidate") and existing._meta.model_name == "device":
-                oob_interfaces = list(existing.interfaces.all())
+                oob_interfaces = list(_oob_interface_queryset(request.user, existing))
                 context["oob_interfaces"] = oob_interfaces
                 (
                     context["oob_suggested_interface_id"],
@@ -3628,11 +3635,11 @@ class AddAsOOBView(
             # Scope BEFORE locking: locking first lets a caller hold a row it cannot even see and
             # stall concurrent work on it. Lock only within the caller's view scope.
             existing = (
-                Interface.objects.restrict(request.user, "view")
+                _oob_interface_queryset(request.user, device)
                 # of=("self",): restrict() joins the permission tables, and a bare
                 # select_for_update() would try to lock those joined rows too.
                 .select_for_update(of=("self",))
-                .filter(device=device, name=name)
+                .filter(name=name)
                 .first()
             )
             if existing is not None:
@@ -3662,9 +3669,9 @@ class AddAsOOBView(
                 # not FK-protected, so a concurrent delete before the IP save would orphan
                 # oob_ip on a missing interface. select_for_update blocks that delete.
                 existing = (
-                    Interface.objects.restrict(request.user, "view")
+                    _oob_interface_queryset(request.user, device)
                     .select_for_update(of=("self",))
-                    .filter(device=device, name=name)
+                    .filter(name=name)
                     .first()
                 )
                 # The winner of the race can sit outside the caller's view scope, which is the
@@ -3680,9 +3687,7 @@ class AddAsOOBView(
                 # Scoped like every other client-supplied id: the device filter proves where the
                 # interface sits, not that the caller's grant covers it.
                 interface = (
-                    Interface.objects.restrict(request.user, "view")
-                    .select_for_update(of=("self",))
-                    .get(pk=iface_pk, device=device)
+                    _oob_interface_queryset(request.user, device).select_for_update(of=("self",)).get(pk=iface_pk)
                 )
                 return interface, None
             except Interface.DoesNotExist:

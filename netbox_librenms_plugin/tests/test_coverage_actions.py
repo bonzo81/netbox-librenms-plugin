@@ -1858,6 +1858,30 @@ class TestDeviceValidationDetailsView:
             response.content.decode()
         )
 
+    def test_the_oob_interface_picker_lists_only_interfaces_the_viewer_can_see(self):
+        """The viewer sees one interface of the host; the other interface stays out of the form."""
+        from dcim.models import Device, Interface
+
+        from netbox_librenms_plugin.views.imports.actions import DeviceValidationDetailsView
+
+        host = make_device("details-picker-scope-host")
+        make_interface(host, "visible-mgmt0")
+        make_interface(host, "hidden-eth9")
+        self.primary_server.device_info_response(
+            device_id=1, hostname=host.name, hardware="iDRAC9", os="idrac", serial="", ip=""
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+        user = make_view_user("details-picker-scope-user", [("view", Device), ("change", Device)])
+        user = grant_view_permission(user, "view", Interface, constraints={"name": "visible-mgmt0"})
+        request = make_view_request("get", {"server_key": "default"}, user=user, HTTP_HX_REQUEST="true")
+
+        response = get_view(DeviceValidationDetailsView(), request, device_id=1)
+
+        content = response.content.decode()
+        assert url_for("plugins:netbox_librenms_plugin:device_add_as_oob", kwargs={"device_id": 1}) in content
+        assert "visible-mgmt0" in content
+        assert "hidden-eth9" not in content
+
     def test_a_serial_that_cannot_be_compared_shows_the_reason_not_a_match(self):
         from dcim.models import Device, VirtualChassis
         from django.utils.html import escape
