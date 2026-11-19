@@ -497,12 +497,8 @@ def bulk_import_devices_shared(  # noqa: C901
                 # Import decisions (DeviceType match, serial-conflict, hostname) must run against
                 # live LibreNMS data: bypass the short device-info read cache so a value the user
                 # just corrected in LibreNMS isn't read back stale within the cache window.
+                # The client refuses a row for another device ID, so a row here describes this one.
                 success, libre_device = api.get_device_info(device_id, use_cache=False)
-                # Same fail-closed identity rule as the collision pre-check (row_identity_matches):
-                # a payload that isn't a dict carrying the requested device_id must be neither
-                # imported nor written into the shared cache — treat it as a failed retrieval.
-                if success and not row_identity_matches(libre_device, device_id):
-                    success, libre_device = False, None
                 # Backfill the shared cache so the synchronous import's post-import row re-render
                 # (which reads the same dict via fetch_device_with_cache) doesn't issue a second
                 # LibreNMS round-trip per device on a cold cache. The background path passes a

@@ -150,7 +150,6 @@ from netbox_librenms_plugin.utils import (
     coerce_model_pk,
     coerce_positive_int,
     resolve_naming_preferences,
-    row_identity_matches,
     same_host,
     save_interface_name_preference,
     save_user_pref,
@@ -921,10 +920,8 @@ class DeviceImportHelperMixin:
         """
         # Reuse a caller-supplied device, else read it live or from the row cache of the table load.
         if libre_device is None and live:
+            # The client refuses a row for another device ID, so a row here describes this one.
             libre_device = get_librenms_device_by_id(self.librenms_api, device_id, use_cache=False)
-            # A response for another device ID is no evidence about this one, so it is neither used nor cached.
-            if libre_device is not None and not row_identity_matches(libre_device, device_id):
-                libre_device = None
             if libre_device is not None:
                 cache.set(
                     get_import_device_cache_key(device_id, self.librenms_api.server_key),

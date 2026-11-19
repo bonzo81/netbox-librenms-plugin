@@ -765,9 +765,13 @@ class LibreNMSAPI:
                 f"LibreNMS answered with HTTP {response.status_code} for this device.", response.status_code
             )
 
+        from netbox_librenms_plugin.utils import row_identity_matches
+
         try:
             device_data = response.json()["devices"][0]
-            if not isinstance(device_data, dict):
+            # A row for another device ID says nothing about this one, so it is no device and is not cached.
+            if not row_identity_matches(device_data, device_id):
+                logger.warning("LibreNMS answered the request for device %s with another device", device_id)
                 return False, None
             # LibreNMS 26.5.0 returns the full location relationship object
             # (keys: id, location, lat, lng, timestamp, fixed_coordinates)
