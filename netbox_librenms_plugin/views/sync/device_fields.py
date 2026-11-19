@@ -38,18 +38,17 @@ from netbox_librenms_plugin.server_mappings import (
     set_preference,
 )
 from netbox_librenms_plugin.serial_identity import (
-    MALFORMED_SERIAL,
     RETYPE_HELD,
     SerialRules,
     assignment_lock,
     device_assignment,
     display,
-    is_serial_value,
     is_sole_holder,
     lock_chassis_of,
     retype_conflict,
     retype_lock,
     retype_scope,
+    stored_form_refusal,
     written_device_conflict,
 )
 from netbox_librenms_plugin.server_selection import build_server_mappings, get_librenms_sync_device
@@ -398,8 +397,9 @@ class UpdateDeviceSerialView(LibreNMSPermissionMixin, NetBoxObjectPermissionMixi
             return _device_sync_redirect(request, pk, server_key)
 
         incoming = device_info.get("serial")
-        if not is_serial_value(incoming):
-            messages.error(request, MALFORMED_SERIAL)
+        # A value that is not a serial, or that the database cannot hold, is refused before it locks or resolves.
+        if refusal := stored_form_refusal(incoming, Device):
+            messages.error(request, refusal)
             return _device_sync_redirect(request, pk, server_key)
         serial = display(incoming)
         old_serial, failed = _write_device_serial(self, request, pk, server_key, incoming)

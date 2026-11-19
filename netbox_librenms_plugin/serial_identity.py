@@ -143,6 +143,19 @@ def is_serial_value(value) -> bool:
 
 
 MALFORMED_SERIAL = "LibreNMS reports a serial that is not text or a number."
+UNSTORABLE_SERIAL = "The LibreNMS serial holds a character that the serial field cannot store."
+
+
+def _storable(text: str) -> bool:
+    """Return whether PostgreSQL text can hold *text*: it has no NUL and it encodes to UTF-8."""
+    if "\x00" in text:
+        return False
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        # An unpaired surrogate from a JSON escape.
+        return False
+    return True
 
 
 def _stored_text(value) -> str:
@@ -184,8 +197,8 @@ class SerialContext:
         if not is_serial_value(value):
             return ""
         text = _text(value)
-        # PostgreSQL text cannot hold a NUL, so such a serial has no identity and no lookup sends it.
-        if "\x00" in text:
+        # Text that the database cannot hold has no identity, so no lookup or lock key reads it.
+        if not _storable(text):
             return ""
         if text in self._keys:
             return self._keys[text]
@@ -336,13 +349,18 @@ def keeps_stored_serial(stored, incoming, model) -> bool:
 
 
 def stored_form_refusal(value, model) -> str:
-    """Return why a serial writer refuses to store the LibreNMS *value* in ``model.serial``, or "" when it can."""
+    """
+    Return why a serial writer refuses to store the LibreNMS *value* in ``model.serial``, or "" when it can.
+
+    The value is not text or a number, the database cannot hold its text, or its text is longer than
+    the field: the writer refuses rather than store the text of a boolean or a list, fail in the
+    database, or cut the text. Import validation reads the same reason, so a row that the create refuses is never ready.
+    """
     if not is_serial_value(value):
         return MALFORMED_SERIAL
     text = display(value)
-    if "\x00" in text:
-        # PostgreSQL text cannot hold a NUL character.
-        return "The LibreNMS serial holds a NUL character, which the serial field cannot store."
+    if not _storable(text):
+        return UNSTORABLE_SERIAL
     max_length = model._meta.get_field("serial").max_length
     if max_length is not None and len(text) > max_length:
         return f"The LibreNMS serial has {len(text)} characters; the field holds at most {max_length}."
