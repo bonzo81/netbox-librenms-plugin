@@ -735,10 +735,13 @@ class LibreNMSAPI:
                 or another non-2xx response, ``data`` is a :class:`LibreNMSLookupError`.
 
         """
+        from netbox_librenms_plugin.utils import row_identity_matches
+
         cache_key = f"librenms_device_info_{self.server_key}_{device_id}"
         if use_cache:
             cached = cache.get(cache_key)
-            if cached is not None:
+            # The one identity check covers a cached row too: a row for another device ID is read again.
+            if isinstance(cached, tuple) and len(cached) == 2 and row_identity_matches(cached[1], device_id):
                 return cached
         try:
             response = _session.get(
@@ -765,13 +768,15 @@ class LibreNMSAPI:
                 f"LibreNMS answered with HTTP {response.status_code} for this device.", response.status_code
             )
 
-        from netbox_librenms_plugin.utils import row_identity_matches
-
         try:
             device_data = response.json()["devices"][0]
-            # A row for another device ID says nothing about this one, so it is no device and is not cached.
-            if not row_identity_matches(device_data, device_id):
+            if isinstance(device_data, dict) and not row_identity_matches(device_data, device_id):
+                # A row for another device ID leaves this device's existence unknown: unavailable, and not cached.
                 logger.warning("LibreNMS answered the request for device %s with another device", device_id)
+                return False, LibreNMSLookupError(
+                    "LibreNMS answered with another device for this device ID.", response.status_code
+                )
+            if not isinstance(device_data, dict):
                 return False, None
             # LibreNMS 26.5.0 returns the full location relationship object
             # (keys: id, location, lat, lng, timestamp, fixed_coordinates)

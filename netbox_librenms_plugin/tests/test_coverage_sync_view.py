@@ -520,6 +520,32 @@ class TestLibreNMSDeviceInfo:
         assert result["mismatched_device"] is False
         assert result["librenms_device_details"]["librenms_device_hardware"] == "-"
 
+    def test_an_answer_for_another_device_id_is_unavailable_not_absent(self, librenms_server):
+        """LibreNMS answers the request for 6633 with device 6634, so 6633's existence is unknown: no Add Device."""
+        device = make_device("info-other-device-id")
+        librenms_server.register(
+            "/api/v0/devices/6633", {"status": "ok", "devices": [{"device_id": 6634, "hostname": device.name}]}
+        )
+        view = _device_view()
+        view.librenms_id = 6633
+
+        result = view.get_librenms_device_info(device)
+
+        assert result["found_in_librenms"] is False
+        assert result["device_info_unavailable"] is True
+
+    def test_a_cached_row_for_another_device_id_is_read_again(self, librenms_server):
+        """An older worker cached device 6636 under 6635; the client reads 6635 again instead of serving it."""
+        from django.core.cache import cache
+
+        _register_device(librenms_server, 6635, "info-cached-other-id")
+        view = _device_view()
+        cache.set(f"librenms_device_info_{SERVER_KEY}_6635", (True, {"device_id": 6636, "hostname": "other"}), 60)
+
+        found, row = view.librenms_api.get_device_info(6635)
+
+        assert (found, row["device_id"]) == (True, 6635)
+
     def test_real_live_info_populates_details_and_matches_short_hostname(self, librenms_server):
         device = make_device("info-matched")
         _register_device(
