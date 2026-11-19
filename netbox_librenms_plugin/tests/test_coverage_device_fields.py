@@ -1455,12 +1455,14 @@ class TestConvertLegacyLibreNMSIdView:
             assert stored_mapping_for_test(device) == {SERVER_KEY: 6567}
             assert _messages(response, "error") == []
 
-    def test_a_hidden_twin_written_before_the_lock_refuses_the_conversion(self, client, librenms_server, monkeypatch):
-        """The first serial check passes; a twin that appears before the identity lock must refuse the locked check."""
+    def test_a_hidden_twin_written_under_the_row_lock_refuses_the_conversion(
+        self, client, librenms_server, monkeypatch
+    ):
+        """The first serial check passes; a twin that appears after the Device row lock must refuse the locked check."""
         from dcim.models import Device
 
+        from netbox_librenms_plugin import transactions
         from netbox_librenms_plugin.models import NormalizationRule
-        from netbox_librenms_plugin.views.sync import device_fields
 
         NormalizationRule.objects.get_or_create(
             scope="serial", match_pattern=r"^S/N\s+(.+)$", manufacturer=None, defaults={"replacement": r"\1"}
@@ -1472,14 +1474,15 @@ class TestConvertLegacyLibreNMSIdView:
                 "legacy-late-twin-user", [("view", Device), ("change", Device)], constraints={"name": device.name}
             )
         )
-        lock = device_fields.assignment_lock
+        lock = transactions.lock_and_snapshot
 
-        def twin_then_lock(*args, **kwargs):
-            # The timing seam: another writer stores the twin after the first check.
+        def lock_then_twin(queryset):
+            # The timing seam: another writer stores the twin while the view holds the Device row lock.
+            row = lock(queryset)
             make_device("legacy-late-twin-hidden", serial="S/N LATE-TWIN")
-            return lock(*args, **kwargs)
+            return row
 
-        monkeypatch.setattr(device_fields, "assignment_lock", twin_then_lock)
+        monkeypatch.setattr(transactions, "lock_and_snapshot", lock_then_twin)
 
         response = _post(client, "convert_legacy_librenms_id", device, {"object_type": "device"})
 
