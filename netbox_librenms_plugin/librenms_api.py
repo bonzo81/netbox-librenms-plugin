@@ -731,8 +731,8 @@ class LibreNMSAPI:
 
         Returns:
             tuple: ``(success, data)``. On success, ``data`` is the device dictionary. For an
-                absent device (HTTP 404, or an empty ``devices`` list), ``data`` is ``None``. For a
-                transport failure, another non-2xx response, or any other body, ``data`` is a
+                absent device (HTTP 404 only), ``data`` is ``None``. For a transport failure,
+                another non-2xx response, or a 2xx body without the device row, ``data`` is a
                 :class:`LibreNMSLookupError`.
 
         """
@@ -777,13 +777,11 @@ class LibreNMSAPI:
             return False, LibreNMSLookupError(
                 "LibreNMS answered with a body that is not JSON for this device.", response.status_code
             )
+        # LibreNMS answers a missing device with a 404, so a 2xx body without the device row confirms nothing.
         devices = body.get("devices") if isinstance(body, dict) else None
-        if devices == []:
-            # An empty device list is LibreNMS's answer for no such device.
-            return False, None
-        device_data = devices[0] if isinstance(devices, list) else None
+        device_data = devices[0] if isinstance(devices, list) and devices else None
         if not isinstance(device_data, dict):
-            # Another shape, such as an error body without "devices", says nothing about the device: unavailable.
+            # An empty list, an error body or another shape says nothing about the device: unavailable.
             logger.warning("LibreNMS answered the request for device %s without a device row", device_id)
             return False, LibreNMSLookupError(
                 "LibreNMS answered without a device row for this device.", response.status_code
