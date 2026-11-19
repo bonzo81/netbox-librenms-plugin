@@ -1380,13 +1380,15 @@ class TestLibreNMSAPIErrorHandling:
         assert result.status_code is None
 
     def test_invalid_json_response(self, local_librenms_api, librenms_server):
-        """Verify handling of invalid JSON responses — ValueError is now caught gracefully."""
+        """A 2xx body that is not JSON says nothing about the device, so it is unavailable, not absent."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSLookupError
+
         librenms_server.register_raw(self.DEVICE_PATH, "not-json", method="GET")
 
-        # ValueError is now caught, returning (False, None) instead of propagating
         success, result = local_librenms_api.get_device_info(device_id=123, use_cache=False)
         assert success is False
-        assert result is None
+        assert isinstance(result, LibreNMSLookupError)
+        assert result.status_code == 200
 
     def test_http_500_error_handling(self, local_librenms_api, librenms_server):
         """Verify that direct status handling classifies a 500 as server failure, not a missing device or malformed payload."""
