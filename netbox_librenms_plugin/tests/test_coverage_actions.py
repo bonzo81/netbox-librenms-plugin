@@ -4015,6 +4015,22 @@ class TestDeviceConflictActionBranches:
         assert response.headers.get("HX-Reswap") == "none"
         assert self.server_key not in (stored_mapping_for_test(Device.objects.get(pk=target.pk)) or {})
 
+    def test_a_live_read_that_fails_is_no_absence(self):
+        """LibreNMS answers HTTP 500: the action refuses, but it does not report the device as absent."""
+        from html import unescape
+
+        from dcim.models import Device
+
+        view = self._make_view()
+        target = make_device("branches-live-unavailable", serial="SERIAL-LIVE-UNAVAILABLE")
+        self.librenms_server.register("/api/v0/devices/42", {"status": "error"}, status=500)
+
+        response = post_view(view, self._request("link", target, f"{target.name}-user"), device_id=42)
+
+        assert response.headers.get("HX-Reswap") == "none"
+        assert "LibreNMS device not found" not in unescape(response.content.decode())
+        assert self.server_key not in (stored_mapping_for_test(Device.objects.get(pk=target.pk)) or {})
+
     def test_a_live_serial_with_a_second_holder_links_no_device(self):
         """Only the target's maker strips "TAG-": the live "TAG-ABC" names the target and a Device that stores it."""
         from dcim.models import Device, DeviceType, Manufacturer
@@ -5363,6 +5379,31 @@ class TestCreatePlatformAssignmentIndependence:
 
         target.refresh_from_db()
         assert target.platform is None
+
+    @pytest.mark.parametrize("status", [404, 500], ids=["absent", "unavailable"])
+    def test_a_failed_live_read_assigns_nothing_and_says_why(self, status):
+        """A confirmed absence drops the cached row; a LibreNMS failure is no absence and keeps it."""
+        from html import unescape
+
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+        from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        target = self._mapped_device(f"platform-live-{status}")
+        # The import search cached the row.
+        assert fetch_device_with_cache(42, LibreNMSAPI(server_key=self.server_key)) is not None
+        self.librenms_server.register("/api/v0/devices/42", {"status": "error"}, status=status)
+
+        response = self._post(target, f"Live {status} OS", target.device_type.manufacturer_id)
+
+        target.refresh_from_db()
+        assert target.platform is None
+        assert response.headers.get("HX-Reswap") == "none"
+        absent = "Device not found in LibreNMS." in unescape(response.content.decode())
+        cached = cache.get(get_import_device_cache_key(42, self.server_key))
+        assert (absent, cached is None) == (status == 404, status == 404)
 
     def test_a_live_row_that_names_another_device_gets_no_platform_on_the_cached_target(self):
         """The cached hostname selected one Device; the live row for the same LibreNMS ID now names another."""
