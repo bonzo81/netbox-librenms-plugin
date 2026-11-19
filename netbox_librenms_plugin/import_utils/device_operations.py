@@ -504,7 +504,7 @@ _SERIAL_ROLE_OFFER = ("serial", "serial")
 
 # The warning of a controller row whose host already has an OOB link.
 OOB_ALREADY_LINKED_WARNING = (
-    "The matched NetBox device already has an OOB controller linked. Re-import will update the existing OOB entry."
+    "The matched NetBox device already has an OOB controller linked, so no OOB action is offered."
 )
 
 
@@ -543,16 +543,20 @@ def _row_name_oob_type(libre_device, device) -> str | None:
     return None
 
 
-def _oob_candidate(device, libre_device, matched_by) -> dict:
+def _oob_candidate(matched, libre_device, matched_by, server_key) -> dict:
     """
-    Return the attach offer of the LibreNMS row as the OOB controller of *device*.
+    Return the attach offer of the LibreNMS row as the OOB controller of the *matched* Device.
 
-    The type comes from the row's OS or hardware, then its name, then "oob". *matched_by* ("oob_ip",
-    "primary_ip", "serial" or "hostname") names the match that Add as OOB checks again under its locks.
+    The offer's ``device`` is its OOB target: the owner of the LibreNMS links of *matched*, whose one OOB slot
+    Add as OOB writes. The type comes from the row's OS or hardware, then its name, then "oob". *matched_by*
+    ("oob_ip", "primary_ip", "serial" or "hostname") names the match that Add as OOB checks again under its locks.
     """
+    target = librenms_link_owner(matched, server_key)
     return {
-        "device": device,
-        "type": _reported_oob_type(libre_device) or _row_name_oob_type(libre_device, device) or "oob",
+        "device": target,
+        # The host link of the target, which the dialog shows as the attach's unchanged host slot.
+        "target_host_id": read_mapping(target).own_id(server_key),
+        "type": _reported_oob_type(libre_device) or _row_name_oob_type(libre_device, matched) or "oob",
         "version": libre_device.get("version") or None,
         "ip": libre_device.get("ip") or None,
         "matched_by": matched_by,
@@ -583,7 +587,18 @@ def _row_at_oob_ip(device, libre_device) -> bool:
         return False
 
 
-def _oob_controller_evidence(result, libre_device) -> bool:
+def row_at_oob_target_ip(matched, libre_device, server_key) -> bool:
+    """
+    Return whether the row's address is the OOB IP of the *matched* Device or of the offer's OOB target.
+
+    The OOB target is the owner of the LibreNMS links of *matched* (``librenms_link_owner``); either address is
+    controller evidence, and Add as OOB checks the same two addresses again under its locks.
+    """
+    owner = librenms_link_owner(matched, server_key)
+    return _row_at_oob_ip(matched, libre_device) or (owner.pk != matched.pk and _row_at_oob_ip(owner, libre_device))
+
+
+def _oob_controller_evidence(result, libre_device, server_key) -> bool:
     """
     Return whether the evidence shows that the LibreNMS row is the OOB controller of the matched object.
 
@@ -600,7 +615,7 @@ def _oob_controller_evidence(result, libre_device) -> bool:
         return True
     if not isinstance(matched, Device) or match_type not in (*NAME_MATCH_TYPES, "serial", "primary_ip"):
         return False
-    if _row_at_oob_ip(matched, libre_device):
+    if row_at_oob_target_ip(matched, libre_device, server_key):
         return True
     return bool(_reported_oob_type(libre_device) or _row_name_oob_type(libre_device, matched))
 
@@ -654,7 +669,7 @@ def classify_oob_controller(result, libre_device, server_key) -> None:
     has one. Validation and the cached-row refresh both call it, so the rule has one definition.
     """
     libre_device = libre_device or {}
-    result["row_is_oob_controller"] = _oob_controller_evidence(result, libre_device)
+    result["row_is_oob_controller"] = _oob_controller_evidence(result, libre_device, server_key)
     if not result["row_is_oob_controller"]:
         _withdraw_controller_state(result, libre_device, server_key)
         return
@@ -685,7 +700,7 @@ def classify_oob_controller(result, libre_device, server_key) -> None:
         return
     if result["serial_action"] == "oob_candidate" and result["oob_candidate"]:
         return
-    if _row_at_oob_ip(matched, libre_device):
+    if row_at_oob_target_ip(matched, libre_device, server_key):
         matched_by = "oob_ip"
     elif result["existing_match_type"] == "primary_ip":
         matched_by = "primary_ip"
@@ -694,7 +709,7 @@ def classify_oob_controller(result, libre_device, server_key) -> None:
     else:
         matched_by = "serial"
     result["serial_action"] = "oob_candidate"
-    result["oob_candidate"] = _oob_candidate(matched, libre_device, matched_by)
+    result["oob_candidate"] = _oob_candidate(matched, libre_device, matched_by, server_key)
 
 
 def _serial_differs_warning(incoming_serial) -> str:
@@ -804,7 +819,9 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
     oob_type_from_libre, existing_oob_recorded, existing_oob_from_name, oob_possible, host_possible = facts
 
     # --- Compute all values before mutating result ---
-    oob_candidate_data = _oob_candidate(existing_by_serial, libre_device, "serial") if oob_possible else None
+    oob_candidate_data = (
+        _oob_candidate(existing_by_serial, libre_device, "serial", server_key) if oob_possible else None
+    )
 
     promote_to_host_data = None
     if host_possible:
@@ -932,7 +949,8 @@ def validate_device_for_import(
                 'legacy_id_serial_shared': bool,  # The holder lookup found another Device with that serial
                 'serial_duplicate': bool,  # Incoming serial already on a different device
                 'serial_role_choice_available': bool,  # Both oob_candidate and promote_to_host valid
-                'oob_candidate': dict or None,  # {device, type, version, ip} when detected (devices only)
+                'oob_candidate': dict or None,  # {device (the OOB target), target_host_id, type, version, ip, matched_by}
+                'row_is_oob_controller': bool,  # The evidence shows the row is the matched object's OOB controller
                 # 'promote_to_host': dict — CONDITIONAL, present only when host promotion is available
                 'merge_candidates': dict or None,  # {host_named: {...}, oob_named: {...}} when two
                     # NetBox devices look like the same physical box (devices only)

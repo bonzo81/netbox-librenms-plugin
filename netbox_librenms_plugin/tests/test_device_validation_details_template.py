@@ -251,10 +251,10 @@ class TestSerialActionBadges:
         }
         return render_to_string("netbox_librenms_plugin/htmx/device_validation_details.html", ctx, request=request)
 
-    def test_oob_already_linked_shows_dedicated_badge(self):
+    def test_oob_already_linked_shows_the_no_offer_controller_badge(self):
         # Validation always classifies an oob_already_linked row as the controller.
         html = self._render("oob_already_linked", row_is_oob_controller=True)
-        assert "OOB Already Linked" in html
+        assert "data-oob-controller-no-offer" in html
         # It must not fall through to the generic serial-match badge.
         assert "Serial match" not in html
 
@@ -263,7 +263,7 @@ class TestSerialActionBadges:
         # the new branch didn't displace the default.
         html = self._render("some_other_action")
         assert "Serial match" in html
-        assert "OOB Already Linked" not in html
+        assert "data-oob-controller-no-offer" not in html
 
 
 @pytest.mark.django_db
@@ -398,7 +398,8 @@ class TestAddAsOOBFormPanes:
                 "existing_device": existing,
                 "existing_match_type": match_type,
                 "serial_action": serial_action,
-                "oob_candidate": {"type": "idrac", "ip": "10.9.9.9"},
+                # Validation always names the offer's OOB target.
+                "oob_candidate": {"device": existing, "type": "idrac", "ip": "10.9.9.9"},
                 "device_type_mismatch": False,
                 "warnings": [],
             },

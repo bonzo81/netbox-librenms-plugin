@@ -1658,6 +1658,43 @@ class TestValidateDeviceForImport:
         assert result["row_is_oob_controller"] is False
         assert result["oob_candidate"] is None
 
+    def test_offers_of_two_chassis_members_share_the_owner_oob_target(self):
+        """Two controller rows match two members by hostname; the chassis owner holds the one OOB slot."""
+        from netbox_librenms_plugin.import_utils.collisions import detect_bulk_collisions
+
+        owner = make_device("validation-target-owner")
+        first = make_device("validation-target-member-1")
+        second = make_device("validation-target-member-2")
+        make_virtual_chassis("validation-target-chassis", owner, first, second)
+        seed_mapping(owner, SERVER_KEY, own=7181)
+        rows = [
+            (5481, self._validate(_device_payload(5481, hostname=first.name, sysName=first.name, os="idrac", ip=""))),
+            (5482, self._validate(_device_payload(5482, hostname=second.name, sysName=second.name, os="idrac", ip=""))),
+        ]
+        assert [validation["oob_candidate"]["device"] for _id, validation in rows] == [owner, owner]
+
+        groups = detect_bulk_collisions(
+            [{"device_id": device_id, "device_name": f"row-{device_id}", "validation": v} for device_id, v in rows]
+        )
+
+        assert [group["nb_device_pk"] for group in groups] == [owner.pk]
+
+    def test_a_serial_match_at_the_oob_ip_of_the_chassis_owner_is_the_controller(self):
+        """The row matches a member by serial; its address is the OOB IP of the chassis owner."""
+        owner = make_device("validation-owner-ip-master")
+        member = make_device("validation-owner-ip-member", serial="A184-SN")
+        make_virtual_chassis("validation-owner-ip-chassis", owner, member)
+        seed_mapping(owner, SERVER_KEY, own=7184)
+        owner.oob_ip = make_ip("198.18.30.84/32", assigned_object=make_interface(owner, "idrac0"))
+        owner.save()
+        payload = _device_payload(5484, hostname="validation-owner-ip-row", serial="A184-SN", ip="198.18.30.84")
+
+        result = self._validate(payload)
+
+        assert (result["existing_device"], result["existing_match_type"]) == (member, "serial")
+        assert result["row_is_oob_controller"] is True
+        assert (result["oob_candidate"]["device"], result["oob_candidate"]["matched_by"]) == (owner, "oob_ip")
+
     def test_the_classifier_reads_the_server_of_the_given_api(self, librenms_api):
         """The API names the server; the host's OOB link is on that server only."""
         from netbox_librenms_plugin.import_utils.device_operations import (

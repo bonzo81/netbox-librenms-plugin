@@ -591,19 +591,25 @@
             — LibreNMS device <strong>{{ libre_device.sysName|default:libre_device.hostname }}</strong>
             (<strong>{{ validation.oob_candidate.type }}</strong>{% if validation.oob_candidate.ip %}, {{ validation.oob_candidate.ip }}{% endif %})
             appears to be the OOB management controller of
-            <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>{% include "netbox_librenms_plugin/htmx/_existing_librenms_link_status.html" %}
+            {% with target=validation.oob_candidate.device %}
+              {# The offer's device is its OOB target: the owner of the matched device's LibreNMS links. #}
+              <a href="{% url 'dcim:device' pk=target.pk %}" target="_blank" rel="noopener noreferrer">{{ target.name }}</a>{% if target.pk == validation.existing_device.pk %}{% include "netbox_librenms_plugin/htmx/_existing_librenms_link_status.html" %}{% else %},
+              the chassis member that holds the LibreNMS links of
+              <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>.{% endif %}
+            {% endwith %}
           </span>
         {% else %}
-          <span class="badge bg-info-lt me-1"><i class="mdi mdi-chip"></i> OOB Already Linked</span>
+          {# No offer: the warnings below give the reason (an OOB link exists, or the target is out of scope). #}
+          <span class="badge bg-info-lt me-1" data-oob-controller-no-offer><i class="mdi mdi-chip"></i> OOB controller</span>
           <span class="text-muted ms-1">
-            — This LibreNMS device is an OOB controller, and
-            <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>
-            already has an OOB controller linked{% include "netbox_librenms_plugin/htmx/_existing_librenms_link_status.html" %}
+            — This LibreNMS device is an OOB controller of
+            <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>; no OOB action is offered.
           </span>
         {% endif %}
       </div>
       {% if validation.oob_candidate and existing_device_model_name == "device" %}
-        <div class="mb-3">
+        {# The request carries the naming rules of this dialog, so Add as OOB validates the row as this dialog did. #}
+        <div class="mb-3" hx-vals='{"use_sysname": "{{ use_sysname|yesno:"true,false" }}", "strip_domain": "{{ strip_domain|yesno:"true,false" }}"}'>
           {% include "netbox_librenms_plugin/htmx/_add_as_oob_form.html" %}
         </div>
       {% endif %}
@@ -840,8 +846,9 @@
           <div>
             <div class="d-flex align-items-center gap-2 mb-1">
               <i class="mdi mdi-swap-horizontal"></i>
+              {# The offer's device is its OOB target; the disclosure gate withdraws an offer whose target is hidden. #}
               <strong>OOB attach effect on
-                <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>
+                <a href="{% url 'dcim:device' pk=validation.oob_candidate.device.pk %}" target="_blank" rel="noopener noreferrer">{{ validation.oob_candidate.device.name }}</a>
               </strong>
             </div>
             <table class="table table-sm table-borderless mb-1" style="width:auto;">
@@ -856,9 +863,9 @@
               <tbody>
                 <tr>
                   <td class="py-0 pe-3"><span class="badge bg-info-lt"><i class="mdi mdi-server"></i> Host</span></td>
-                  <td class="py-0 pe-3 text-muted">{% if validation.existing_librenms_link.host_id %}#{{ validation.existing_librenms_link.host_id }}{% else %}--{% endif %}</td>
+                  <td class="py-0 pe-3 text-muted">{% if validation.oob_candidate.target_host_id %}#{{ validation.oob_candidate.target_host_id }}{% else %}--{% endif %}</td>
                   <td class="py-0 pe-3 text-muted"><i class="mdi mdi-arrow-right"></i></td>
-                  <td class="py-0 text-muted">{% if validation.existing_librenms_link.host_id %}#{{ validation.existing_librenms_link.host_id }} <span class="text-muted">(unchanged)</span>{% else %}-- <span class="text-muted">(unchanged)</span>{% endif %}</td>
+                  <td class="py-0 text-muted">{% if validation.oob_candidate.target_host_id %}#{{ validation.oob_candidate.target_host_id }} <span class="text-muted">(unchanged)</span>{% else %}-- <span class="text-muted">(unchanged)</span>{% endif %}</td>
                 </tr>
                 <tr>
                   <td class="py-0 pe-3"><span class="badge bg-purple-lt"><i class="mdi mdi-chip"></i> OOB</span></td>
@@ -874,7 +881,8 @@
             </div>
           </div>
         </div>
-        <div class="mb-3">
+        {# The request carries the naming rules of this dialog, so Add as OOB validates the row as this dialog did. #}
+        <div class="mb-3" hx-vals='{"use_sysname": "{{ use_sysname|yesno:"true,false" }}", "strip_domain": "{{ strip_domain|yesno:"true,false" }}"}'>
           {% include "netbox_librenms_plugin/htmx/_add_as_oob_form.html" %}
         </div>
       </div>

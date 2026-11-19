@@ -63,6 +63,7 @@ from netbox_librenms_plugin.import_utils.device_operations import (
     effective_import_device_type,
     match_import_device_type,
     resolve_device_by_host_ip,
+    row_at_oob_target_ip,
 )
 from netbox_librenms_plugin.import_utils.disclosure import serial_conflict_text
 from netbox_librenms_plugin.import_utils.naming import _resolve_device_name
@@ -2114,12 +2115,14 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
             # oob_ip be interface-assigned). Offer the device's interfaces with a
             # sensible default pre-selected.
             if validation.get("oob_candidate") and existing._meta.model_name == "device":
-                oob_interfaces = list(_oob_interface_queryset(request.user, existing))
+                # The offer's device is its OOB target, the Device whose interface the POST resolves.
+                oob_target = validation["oob_candidate"]["device"]
+                oob_interfaces = list(_oob_interface_queryset(request.user, oob_target))
                 context["oob_interfaces"] = oob_interfaces
                 (
                     context["oob_suggested_interface_id"],
                     context["oob_default_new_name"],
-                ) = _suggest_oob_interface(existing, validation["oob_candidate"], interfaces=oob_interfaces)
+                ) = _suggest_oob_interface(oob_target, validation["oob_candidate"], interfaces=oob_interfaces)
 
         return render(
             request,
@@ -3109,23 +3112,18 @@ class AddAsOOBView(
         oob_candidate = validation.get("oob_candidate") if validation else None
         if not oob_candidate:
             return _htmx_error_response("No OOB candidate found in validation data")
-        if oob_candidate["device"].pk != existing_device.pk:
+        validated_existing = validation.get("existing_device")
+        if validated_existing is None or validated_existing.pk != existing_device.pk:
             return _htmx_error_response("Device ID mismatch: existing_device_id does not match OOB candidate")
 
         server_key = self.librenms_api.server_key
 
-        # Resolve the VC sync device up front: LibreNMS treats a Virtual Chassis as one logical
-        # device, so the host librenms_id and OOB link live on the single sync member
-        # (get_librenms_sync_device) — which may differ from the user-selected member the OOB
-        # candidate matched (matched by the controller's shared chassis serial / primary IP).
-        # Every reader (interfaces/cables/modules) resolves the sync device before
-        # reading the OOB entry, so the link — and the lock, guards, IP set, and save around it — must
-        # target the sync device too: writing to a non-sync member stores the OOB where no reader
-        # looks and, since that member holds no host id, orphans it under no host link. For a
-        # non-VC device (or when the selected member IS the sync device) this resolves to the same
-        # row, so the common path is unchanged. The candidate-match check above stays on the
-        # user-selected existing_device (it validates the POST, not the linkage target).
-        sync_device = librenms_link_owner(existing_device, server_key)
+        # The offer's device is its OOB target: the owner of the LibreNMS links of the matched device
+        # (librenms_link_owner), because every reader looks for the OOB link and the OOB IP there. The lock,
+        # guards, IP set and save below target it; the check under the lock reads the owner again.
+        sync_device = oob_candidate["device"]
+        if sync_device.pk != librenms_link_owner(existing_device, server_key).pk:
+            return _htmx_error_response("Device ID mismatch: existing_device_id does not match OOB candidate")
         # The sync device is DERIVED (a VC sibling of the scoped existing_device), and the block
         # below locks and saves it. Authorize it too, or a grant covering only the selected member
         # writes the OOB link onto a sibling it cannot see. Skipped when they are the same row.
@@ -3197,6 +3195,9 @@ class AddAsOOBView(
             elif matched_by == "hostname":
                 if (existing_device.name or "").lower() != (validation.get("resolved_name") or "").lower():
                     return _htmx_error_response(_HOSTNAME_MATCH_LOST)
+            elif matched_by == "oob_ip":
+                if not row_at_oob_target_ip(existing_device, libre_device, server_key):
+                    return _htmx_error_response(_IP_MATCH_LOST)
             else:
                 matched, ambiguous = resolve_device_by_host_ip(oob_ip_str)
                 if ambiguous or matched is None or matched.pk != existing_device.pk or not isinstance(matched, Device):
