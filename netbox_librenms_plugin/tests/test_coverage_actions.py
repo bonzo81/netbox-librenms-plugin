@@ -1632,6 +1632,22 @@ class TestDeviceValidationDetailsView:
         assert "details-live-row" in content
         assert "details-cached-other-row" not in content
 
+    def test_a_rejected_cache_entry_with_an_unavailable_librenms_reports_unavailable(self):
+        """The import cache of device 1 holds the row of device 2, and LibreNMS answers 503 for device 1."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+
+        cache.set(get_import_device_cache_key(1, "default"), {"device_id": 2, "hostname": "details-stale-other"})
+        self.primary_server.register("/api/v0/devices/1", {"status": "error", "message": "busy"}, status=503)
+
+        _view, response = self._get("default")
+
+        content = response.content.decode()
+        assert response.status_code == 200
+        assert "alert-warning" in content
+        assert "alert-danger" not in content
+
     def test_a_serial_that_cannot_be_compared_shows_the_reason_not_a_match(self):
         from dcim.models import Device, VirtualChassis
         from django.utils.html import escape
