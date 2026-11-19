@@ -57,6 +57,7 @@ from ..platform_versions import (
 )
 from ..utils import (
     cached_row_matches,
+    row_identity_matches,
     exception_text_for,
     find_matching_location,
     find_matching_site,
@@ -2340,7 +2341,8 @@ def fetch_device_with_cache(
     cache_key = get_import_device_cache_key(device_id, server_key or api.server_key)
     libre_device = cache.get(cache_key)
 
-    if not libre_device:
+    # The live read checks the device ID of its row, so a cached row of another device counts as a miss.
+    if not row_identity_matches(libre_device, device_id):
         # Fallback to API fetch. Read LIVE: both this function's caches (the pre-fetched dict and the
         # import Django cache) have already missed, so the fallback must reflect current LibreNMS
         # state — not the separate 60s get_device_info snapshot a sync-tab render may have populated —

@@ -1611,6 +1611,27 @@ class TestDeviceValidationDetailsView:
         assert ("not found in LibreNMS" in content) is (status == 404)
         assert ("Try again" in content) is (status == 503)
 
+    def test_a_cached_row_of_another_device_is_not_shown(self):
+        """The import cache of device 1 holds the row of device 2, so the dialog reads device 1 live."""
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+
+        cache.set(
+            get_import_device_cache_key(1, "default"),
+            {"device_id": 2, "hostname": "details-cached-other-row", "sysName": "details-cached-other-row"},
+        )
+        self.primary_server.device_info_response(
+            device_id=1, hostname="details-live-row", hardware="Test chassis", os="ios", serial="", ip=""
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        content = response.content.decode()
+        assert "details-live-row" in content
+        assert "details-cached-other-row" not in content
+
     def test_a_serial_that_cannot_be_compared_shows_the_reason_not_a_match(self):
         from dcim.models import Device, VirtualChassis
         from django.utils.html import escape
