@@ -1,5 +1,6 @@
 """Shared cache-consistency contract for the five device sync tabs."""
 
+import hashlib
 import json
 import logging
 import math
@@ -55,15 +56,35 @@ def module_snapshot_serial_context(policy, sync_device):
     return policy.chassis_serial_context()
 
 
-def module_inventory_cache_payload(inventory, librenms_id, oob_librenms_id, *, serial_context) -> dict:
+def module_snapshot_stamp(policy, sync_device) -> str:
     """
-    Return the cached module inventory payload, stamped with the current schema version and serial context.
+    Return the stamp of the module snapshot that *sync_device* owns: the fingerprint of each context its merge reads.
+
+    The merge compares an entity under the Module context of the member that holds it. A chassis whose members
+    all share the snapshot context stamps that context's fingerprint.
+
+    Raises:
+        Device.DoesNotExist: *sync_device* is not a device of *policy*.
+
+    """
+    context = module_snapshot_serial_context(policy, sync_device)
+    members = [] if context.unavailable else policy.vc_members
+    rules = policy.serial_identity_rules
+    others = sorted({rules.for_module_target(member).fingerprint for member in members} - {context.fingerprint})
+    if not others:
+        return context.fingerprint
+    return hashlib.sha256(json.dumps([context.fingerprint, others]).encode()).hexdigest()
+
+
+def module_inventory_cache_payload(inventory, librenms_id, oob_librenms_id, *, stamp) -> dict:
+    """
+    Return the cached module inventory payload, stamped with the current schema version and serial contexts.
 
     Args:
         inventory (list[dict]): The merged inventory rows.
         librenms_id (int): The LibreNMS device ID the rows came from.
         oob_librenms_id (int | None): The linked OOB controller ID, or None.
-        serial_context (SerialContext): The chassis context that the transceiver merge grouped serials under.
+        stamp (str): The :func:`module_snapshot_stamp` of the serial contexts that the transceiver merge read.
 
     Returns:
         dict: The payload to cache.
@@ -74,7 +95,7 @@ def module_inventory_cache_payload(inventory, librenms_id, oob_librenms_id, *, s
         "inventory": inventory,
         "librenms_id": librenms_id,
         "oob_librenms_id": oob_librenms_id,
-        "serial_context": serial_context.fingerprint,
+        "serial_context": stamp,
     }
 
 
@@ -813,11 +834,12 @@ class SyncCacheConsistency:
                 return False
             try:
                 # The table policy validates every rule, so a rule that empties the table also empties the status.
-                context = module_snapshot_serial_context(load_inventory_policy(self.subject.pk), owner)
+                policy = load_inventory_policy(self.subject.pk)
+                context = module_snapshot_serial_context(policy, owner)
             except (Device.DoesNotExist, RuleConfigurationError):
                 return False
             # The table refuses every row under an Unavailable context, so the status offers no snapshot.
-            return not context.unavailable and payload.get("serial_context") == context.fingerprint
+            return not context.unavailable and payload.get("serial_context") == module_snapshot_stamp(policy, owner)
         return cache.has_key(key)
 
     def status(self, server_key, *, actor_id=None):

@@ -153,7 +153,9 @@ class TestPartialModuleRefreshRendersEmpty:
         cache_key = sync_snapshot_key(device, "inventory", SERVER_KEY)
         cache.set(
             cache_key,
-            module_inventory_cache_payload(INVENTORY, 42, None, serial_context=SerialRules.load().for_device(device)),
+            module_inventory_cache_payload(
+                INVENTORY, 42, None, stamp=SerialRules.load().for_device(device).fingerprint
+            ),
             timeout=300,
         )
         assert cache.get(cache_key) is not None, "the seed never landed, so the drop assertion proves nothing"
@@ -467,12 +469,12 @@ class TestASnapshotReaderKeepsAFreshSnapshot:
         device = make_device(f"fresh-snapshot-{rejected}", librenms_cf={SERVER_KEY: 42})
         make_module_bay(device, "Bay 1")
         context = SerialRules.load().for_device(device)
-        fresh = module_inventory_cache_payload(INVENTORY, 42, None, serial_context=context)
+        fresh = module_inventory_cache_payload(INVENTORY, 42, None, stamp=context.fingerprint)
         old = {
             "malformed": {"version": -1},
-            "other-device": module_inventory_cache_payload(INVENTORY, 43, None, serial_context=context),
+            "other-device": module_inventory_cache_payload(INVENTORY, 43, None, stamp=context.fingerprint),
             "other-serial-context": module_inventory_cache_payload(
-                INVENTORY, 42, None, serial_context=SerialContext(None, (), unavailable="another context")
+                INVENTORY, 42, None, stamp=SerialContext(None, (), unavailable="another context").fingerprint
             ),
         }[rejected]
         key = sync_snapshot_key(device, "inventory", SERVER_KEY)
@@ -501,7 +503,7 @@ class TestASnapshotReaderKeepsAFreshSnapshot:
 
         device = make_device("fresh-snapshot-writer", librenms_cf={SERVER_KEY: 42})
         fresh = module_inventory_cache_payload(
-            INVENTORY, 42, None, serial_context=SerialRules.load().for_device(device)
+            INVENTORY, 42, None, stamp=SerialRules.load().for_device(device).fingerprint
         )
         key = sync_snapshot_key(device, "inventory", SERVER_KEY)
         real_get = self._stored_after_the_read(monkeypatch, key, {"version": -1}, fresh)

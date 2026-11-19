@@ -145,7 +145,7 @@ class TestConfiguredServerCacheScoping:
         request = _request("production")
         key = view.get_cache_key(device, "inventory", "production")
         cache.set(
-            key, module_inventory_cache_payload([], 14, None, serial_context=SerialRules.load().for_device(device))
+            key, module_inventory_cache_payload([], 14, None, stamp=SerialRules.load().for_device(device).fingerprint)
         )
 
         context = _bind(view, request).get_context_data(request, device)

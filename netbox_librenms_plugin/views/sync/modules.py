@@ -71,7 +71,7 @@ from netbox_librenms_plugin.sync_cache import (
     apply_request_cache_transition,
     cached_module_inventory,
     module_inventory_oob_matches,
-    module_snapshot_serial_context,
+    module_snapshot_stamp,
     schedule_request_cache_mutation,
 )
 from netbox_librenms_plugin.transactions import (
@@ -402,7 +402,7 @@ def _authorize_module_grant(view, page_device, server_key, action, token):
     inventory = cached_module_inventory(snapshot)
     try:
         policy = load_inventory_policy(page_device.pk)
-        serial_context = module_snapshot_serial_context(policy, sync_device)
+        stamp = module_snapshot_stamp(policy, sync_device)
     except Device.DoesNotExist as exc:
         raise GrantRefused(GrantRefusal.DESTINATION) from exc
     except RuleConfigurationError as exc:
@@ -410,8 +410,8 @@ def _authorize_module_grant(view, page_device, server_key, action, token):
         raise GrantRefused(GrantRefusal.RULE_ERROR) from exc
     grant = read_module_grant(token, action=action, page_device_id=page_device.pk, server_key=server_key)
     grant.check_state(inventory, policy)
-    # The grant signs the rows and the policy; the merge of those rows must have used the policy's context.
-    if snapshot.get("serial_context") != serial_context.fingerprint:
+    # The grant signs the rows and the policy; the merge of those rows must have used the policy's contexts.
+    if snapshot.get("serial_context") != stamp:
         raise GrantRefused(GrantRefusal.SNAPSHOT)
     return _GrantedInventory(grant, inventory, _inventory_index_map(inventory), policy)
 
