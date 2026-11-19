@@ -34,6 +34,10 @@ OUT_OF_SCOPE_MERGE_MESSAGE = (
     "Ask an administrator to merge them before importing."
 )
 
+OUT_OF_SCOPE_OOB_TARGET_MESSAGE = (
+    "The NetBox device that would receive this OOB controller is outside your view scope, so no OOB action is offered."
+)
+
 _SERIAL_CONFLICT_HIDDEN = (
     "Serial conflict: incoming serial '{serial}' is already assigned to a NetBox device outside "
     "your view scope. Ask an administrator to resolve the duplicate serial."
@@ -211,6 +215,15 @@ def _referenced_objects(validation: dict):
     conflict = validation.get("serial_conflict")
     if isinstance(conflict, dict) and conflict.get("pk") is not None:
         yield "device", conflict["pk"]
+    target = _oob_target(validation)
+    if target is not None:
+        yield target._meta.model_name, target.pk
+
+
+def _oob_target(validation: dict):
+    """Return the OOB target of the row's attach offer: the Device that the offer names, or None."""
+    candidate = validation.get("oob_candidate")
+    return candidate.get("device") if isinstance(candidate, dict) else None
 
 
 def _scope_one(validation: dict, scope: ViewerScope) -> None:
@@ -224,6 +237,8 @@ def _scope_one(validation: dict, scope: ViewerScope) -> None:
         withheld.append(OUT_OF_SCOPE_MERGE_MESSAGE)
     if withheld:
         _block(validation, withheld)
+    else:
+        _scope_oob_target(validation, scope)
     # After the reset in _block, so a serial-conflict owner this viewer MAY see is still reported
     # even when the row's own match was withheld: they are different objects.
     _render_serial_conflict(validation, scope)
@@ -256,6 +271,17 @@ def _scope_existing_match(validation: dict, scope: ViewerScope) -> bool:
     validation["import_as_vm"] = False
     validation["serial_conflict"] = conflict
     return True
+
+
+def _scope_oob_target(validation: dict, scope: ViewerScope) -> None:
+    """Withdraw an attach offer whose OOB target the viewer may not see; the controller flag stays."""
+    target = _oob_target(validation)
+    if target is None or scope.can_see(target._meta.model_name, target.pk):
+        return
+    validation["oob_candidate"] = None
+    if validation.get("serial_action") == "oob_candidate":
+        validation["serial_action"] = None
+    _append_once(validation, "warnings", OUT_OF_SCOPE_OOB_TARGET_MESSAGE)
 
 
 def _scope_merge_candidates(validation: dict, scope: ViewerScope) -> bool:
