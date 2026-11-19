@@ -769,7 +769,15 @@ class LibreNMSAPI:
             )
 
         try:
-            device_data = response.json()["devices"][0]
+            body = response.json()
+        except ValueError:
+            # A body that is no JSON, such as a proxy page, says nothing about the device: unavailable, not cached.
+            logger.warning("LibreNMS answered the request for device %s with a body that is not JSON", device_id)
+            return False, LibreNMSLookupError(
+                "LibreNMS answered with a body that is not JSON for this device.", response.status_code
+            )
+        try:
+            device_data = body["devices"][0]
             if isinstance(device_data, dict) and not row_identity_matches(device_data, device_id):
                 # A row for another device ID leaves this device's existence unknown: unavailable, and not cached.
                 logger.warning("LibreNMS answered the request for device %s with another device", device_id)
@@ -788,8 +796,8 @@ class LibreNMSAPI:
             result = (True, device_data)
             cache.set(cache_key, result, timeout=DEVICE_INFO_CACHE_TIMEOUT)
             return result
-        except (ValueError, IndexError, KeyError, TypeError):
-            # A 2xx whose body carries no usable device is treated as absent, as before.
+        except (IndexError, KeyError, TypeError):
+            # A JSON body that carries no usable device is treated as absent, as before.
             return False, None
 
     def _raw_get(self, path: str, params: dict | None = None) -> tuple[int, object]:
