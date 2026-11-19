@@ -2351,11 +2351,8 @@ class DeviceConflictActionView(
         if validation.get("device_type_mismatch") and force:
             librenms_device_type = validation.get("device_type", {}).get("device_type")
 
-        # coerce_librenms_id centralizes the bool/int/str/positive checks (rejects bools,
-        # non-numeric strings, zero/negatives) in one place.
+        # The live read refused a row that does not carry the requested device ID, so this is that ID.
         librenms_id = coerce_librenms_id(libre_device.get("device_id"))
-        if librenms_id is None:
-            return _htmx_error_response("Invalid or missing LibreNMS device_id in payload")
 
         # The confirmation names one proposed host ID; a LibreNMS payload that no longer reports it
         # would replace the mapping with something the user never saw.
