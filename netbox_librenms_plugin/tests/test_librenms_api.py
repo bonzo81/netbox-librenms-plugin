@@ -1541,27 +1541,32 @@ def local_librenms_api(mock_librenms_api, librenms_server):
 class TestGetDeviceInfoResponseShape:
     """Cover response-shape branches in get_device_info()."""
 
-    def test_non_dict_device_entry_returns_failure(self, local_librenms_api, librenms_server):
-        """A non-dict entry in the devices list must not propagate as truthy data."""
-        librenms_server.register(
-            "/api/v0/devices/1",
+    @pytest.mark.parametrize(
+        "body",
+        [
             {"status": "ok", "devices": ["not-a-dict"]},
-            method="GET",
-        )
+            {"status": "ok"},
+            {"status": "error", "message": "database unavailable"},
+            {"status": "ok", "devices": {"device_id": 1}},
+        ],
+        ids=["non-dict-row", "missing-devices", "error-body", "non-list-devices"],
+    )
+    def test_a_body_without_a_device_row_is_unavailable_not_absent(self, local_librenms_api, librenms_server, body):
+        """Only an empty device list says that the device is absent; another shape says nothing about it."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSLookupError
+
+        librenms_server.register("/api/v0/devices/1", body, method="GET")
 
         success, data = local_librenms_api.get_device_info(device_id=1)
 
         assert success is False
-        assert data is None
+        assert isinstance(data, LibreNMSLookupError)
+        assert data.status_code == 200
 
-    def test_missing_devices_key_returns_failure(self, local_librenms_api, librenms_server):
-        """KeyError on missing 'devices' must be caught and return (False, None)."""
-        librenms_server.register("/api/v0/devices/1", {"status": "ok"}, method="GET")
+    def test_an_empty_device_list_is_absent(self, local_librenms_api, librenms_server):
+        librenms_server.register("/api/v0/devices/1", {"status": "ok", "devices": []}, method="GET")
 
-        success, data = local_librenms_api.get_device_info(device_id=1)
-
-        assert success is False
-        assert data is None
+        assert local_librenms_api.get_device_info(device_id=1) == (False, None)
 
 
 class TestGetDeviceTransceiversResponseShape:
