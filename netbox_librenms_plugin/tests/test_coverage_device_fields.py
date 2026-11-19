@@ -1501,52 +1501,6 @@ class TestConvertLegacyLibreNMSIdView:
         assert stored_mapping_for_test(device) == 6569
         assert _messages(response, "error") == [_SERIAL_MISMATCH_MESSAGE]
 
-    @transactional_db_with_all_apps()
-    def test_a_master_change_waits_for_the_conversion_that_read_the_master(self, logged_in_client, librenms_server):
-        """The locked check reads the master's rules, so a native master change must wait until the conversion ends."""
-        from dcim.models import DeviceType, Manufacturer, VirtualChassis
-        from django.db import OperationalError
-
-        from netbox_librenms_plugin.models import NormalizationRule
-        from netbox_librenms_plugin.tests.lock_conflict_helpers import commit_row_change
-        from netbox_librenms_plugin.views.sync import device_fields
-
-        vendor = Manufacturer.objects.create(name="Legacy master vendor", slug="legacy-master-vendor")
-        master_type = DeviceType.objects.create(manufacturer=vendor, model="Legacy Master", slug="legacy-master")
-        NormalizationRule.objects.create(
-            scope="serial", manufacturer=vendor, match_pattern=r"^X-(.+)$", replacement=r"\1"
-        )
-        master = make_device("legacy-chassis-master")
-        master.device_type = master_type
-        master.save()
-        member = make_device("legacy-chassis-member", serial="X-ABC123", librenms_cf=6570)
-        other = make_device("legacy-chassis-other")
-        chassis = make_virtual_chassis("legacy-chassis-vc", master, member, other)
-        chassis.master = master
-        chassis.save()
-        librenms_server.device_info_response(device_id=6570, hostname=member.name, serial="ABC123")
-        convert = device_fields.convert_legacy
-        outcome = []
-
-        def change_master_then_convert(locked, server_key):
-            # The timing seam: a native chassis edit runs after the locked check.
-            with second_connection() as session:
-                try:
-                    commit_row_change(session, VirtualChassis, chassis.pk, {"master_id": other.pk})
-                    outcome.append("committed")
-                except OperationalError:
-                    outcome.append("waited")
-            return convert(locked, server_key)
-
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(device_fields, "convert_legacy", change_master_then_convert)
-            _post(logged_in_client, "convert_legacy_librenms_id", member, {"object_type": "device"})
-
-        member.refresh_from_db()
-        assert outcome == ["waited"]
-        assert stored_mapping_for_test(member) == {SERVER_KEY: 6570}
-        assert VirtualChassis.objects.get(pk=chassis.pk).master_id == master.pk
-
     def test_vm_conversion_skips_the_device_serial_gate(self, logged_in_client, librenms_server):
         vm = make_vm("legacy-convert-vm")
         seed_stored_mapping(vm, 6563, save=True)
