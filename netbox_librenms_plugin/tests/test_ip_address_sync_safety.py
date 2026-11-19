@@ -633,7 +633,7 @@ def test_device_import_host_match_accepts_prefixed_management_addresses(address)
     interface = make_interface(device, "Ethernet1", iface_type="1000base-t")
     IPAddress.objects.create(address=address, assigned_object=interface)
 
-    matched, ambiguous, _rows = resolve_device_by_host_ip(address)
+    matched, ambiguous = resolve_device_by_host_ip(address)
 
     assert matched == device
     assert ambiguous is False
