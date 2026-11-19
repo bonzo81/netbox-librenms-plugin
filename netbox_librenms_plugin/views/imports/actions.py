@@ -2922,23 +2922,8 @@ class CreatePlatformFromImportView(
         if err := _rebind_or_htmx_error(self, request):
             return err
 
-        # Re-resolve the matched NetBox object via current validation. This
-        # tells us which model (Device vs VirtualMachine) to assign to and
-        # protects against a stale/spoofed hidden device_pk: we only mutate an
-        # existing object when current validation unambiguously resolves it
-        # (and the supplied device_pk, if any, agrees with that resolution).
-        try:
-            validated_device, validation, _ = self.get_validated_device_with_selections(device_id, request)
-        except Exception:
-            logger.exception(
-                "CreatePlatformFromImportView: failed to resolve assignment target for device_id=%s",
-                device_id,
-            )
-            return _htmx_error_response("Unable to confirm the target object for platform assignment.")
-        if validated_device is None:
-            return _htmx_error_response("Device not found in LibreNMS.")
-        target_model, target_pk = self._assignment_target(request, validation)
-        if error := self._require_create_permissions(request, target_model):
+        # The platform and manufacturer permissions come before the live device read.
+        if error := self._require_create_permissions(request, None):
             return error
         platform_name = (request.POST.get("platform_name") or "").strip()
         if not platform_name:
@@ -2947,17 +2932,22 @@ class CreatePlatformFromImportView(
         if error:
             return error
 
-        # LibreNMS facts are read live after the local checks, as in Create & Sync: the import row is a cache.
+        # The target, the facts and the serial come from one live read: the import row is a cache. Current
+        # validation resolves the target model and protects against a stale or spoofed hidden device_pk.
         cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
-        found, live_device = self.librenms_api.get_device_info(device_id, use_cache=False)
-        if not found:
-            if live_device is None:
-                cache.delete(cache_key)
-            return _htmx_error_response(
-                "Device not found in LibreNMS."
-                if live_device is None
-                else "Failed to retrieve device info from LibreNMS."
+        try:
+            live_device, validation, _ = self.get_validated_device_with_selections(device_id, request, live=True)
+        except Exception:
+            logger.exception(
+                "CreatePlatformFromImportView: failed to resolve assignment target for device_id=%s",
+                device_id,
             )
+            return _htmx_error_response("Unable to confirm the target object for platform assignment.")
+        if live_device is None:
+            return _htmx_error_response("Device not found in LibreNMS.")
+        target_model, target_pk = self._assignment_target(request, validation)
+        if error := self._require_create_permissions(request, target_model):
+            return error
         facts = PlatformFacts.from_librenms(live_device.get("os"), live_device.get("version"))
 
         tracking = platform_version_tracking_enabled()
