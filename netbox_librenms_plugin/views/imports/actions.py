@@ -150,6 +150,7 @@ from netbox_librenms_plugin.utils import (
     coerce_model_pk,
     coerce_positive_int,
     resolve_naming_preferences,
+    row_identity_matches,
     same_host,
     save_interface_name_preference,
     save_user_pref,
@@ -2042,11 +2043,12 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         if error := _invalid_import_intent_response(request, device_id):
             return error
 
-        # A cached row renders as before; on a miss the live read tells an unavailable LibreNMS from an absent device.
+        # One cache read decides: a row of this device renders, else the live read tells unavailable from absent.
         cached = cache.get(get_import_device_cache_key(device_id, self.librenms_api.server_key))
+        cached_row = cached if row_identity_matches(cached, device_id) else None
         try:
             libre_device, validation, selections = self.get_validated_device_with_selections(
-                device_id, request, live=not cached
+                device_id, request, libre_device=cached_row, live=cached_row is None
             )
         except _LibreNMSDeviceUnavailable as exc:
             return HttpResponse(f'<div class="alert alert-warning">{escape(exc.message)}</div>', status=200)
