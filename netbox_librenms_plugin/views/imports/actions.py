@@ -282,6 +282,20 @@ def _row_is_oob_controller(validation) -> bool:
     return bool(validation) and validation.get("row_is_oob_controller") is True
 
 
+# A write needs a match that validation verified; an error or a failed re-check leaves it unverified.
+_UNVERIFIED_MATCH_REFUSED = "The match of this LibreNMS device to the NetBox device is not verified. Refresh and retry."
+
+
+def _match_unverified(validation) -> bool:
+    """Return whether validation left its match unverified, so no write may target the matched object."""
+    return bool(validation) and validation.get("match_verified") is False
+
+
+def _unverified_match_response(validation) -> HttpResponse | None:
+    """Return the refusal of a write to an unverified match, or None when the match is verified."""
+    return _htmx_error_response(_UNVERIFIED_MATCH_REFUSED) if _match_unverified(validation) else None
+
+
 _TRUTHY_VALUES = {"1", "true", "on", "yes"}
 _FALSY_VALUES = {"0", "false", "off", "no", ""}
 
@@ -2367,6 +2381,8 @@ class DeviceConflictActionView(
             return _htmx_error_response("Device ID mismatch: existing_device_id does not match validated device")
         if _row_is_oob_controller(validation) and action in _PAYLOAD_COPY_ACTIONS:
             return _htmx_error_response(_OOB_ROW_REFUSED)
+        if refusal := _unverified_match_response(validation):
+            return refusal
 
         # Require force flag when device type mismatches, but only for actions that use it
         force = replacement_intent.force if replacement_intent is not None else request.POST.get("force") == "on"
@@ -2992,8 +3008,8 @@ class CreatePlatformFromImportView(
         except ValueError:
             pass
         existing_obj = validation.get("existing_device") if validation else None
-        # An OOB match selects the host, but the row's OS is the controller's: no platform is assigned to the host.
-        if _row_is_oob_controller(validation):
+        # An OOB match selects the host, but the row's OS is the controller's; an unverified match is no target.
+        if _row_is_oob_controller(validation) or _match_unverified(validation):
             existing_obj = None
         if existing_obj is not None and (device_pk is None or device_pk == existing_obj.pk):
             return type(existing_obj), existing_obj.pk
@@ -3109,6 +3125,8 @@ class AddAsOOBView(
         if not libre_device:
             return _htmx_error_response("LibreNMS device not found")
 
+        if refusal := _unverified_match_response(validation):
+            return refusal
         oob_candidate = validation.get("oob_candidate") if validation else None
         if not oob_candidate:
             return _htmx_error_response("No OOB candidate found in validation data")
@@ -3790,6 +3808,8 @@ class PromoteToHostView(
         if not libre_device:
             return _htmx_error_response("LibreNMS device not found")
 
+        if refusal := _unverified_match_response(validation):
+            return refusal
         promote = validation.get("promote_to_host") if validation else None
         if not promote:
             return _htmx_error_response("Promotion is not applicable for this device")
@@ -3985,6 +4005,8 @@ class MergeNetBoxDevicesView(
         if not libre_device:
             return _htmx_error_response("LibreNMS device not found")
 
+        if refusal := _unverified_match_response(validation):
+            return refusal
         candidate_pks = merge_candidate_pks(validation)
         # Derive the donor from the selected winner. The merge is always between this fixed pair
         # of candidates, so the donor is unambiguously the other candidate and no client-supplied

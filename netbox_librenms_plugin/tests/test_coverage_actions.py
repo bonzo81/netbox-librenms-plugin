@@ -3673,6 +3673,41 @@ class TestDeviceConflictActionMigrateLibreNMSId:
         assert b"Serial number not confirmed" in response.content
         assert stored_mapping_for_test(VirtualMachine.objects.get(pk=vm.pk)) == 42
 
+    @pytest.mark.parametrize("force", [True, False], ids=["forced", "not-forced"])
+    def test_a_legacy_id_whose_serial_holders_cannot_be_checked_converts_only_with_force(self, force):
+        """The legacy ID proves the match; another maker's broken rule stops the lookup of the other serial holders."""
+        from dcim.models import Device, Manufacturer
+
+        from netbox_librenms_plugin.models import NormalizationRule
+
+        view = self._make_view()
+        device = make_device(f"migrate-unchecked-holders-{force}".lower(), serial="LEGACY-A214-SN", librenms_cf=42)
+        other = Manufacturer.objects.create(name="Migrate broken maker", slug="migrate-broken-maker")
+        rule = NormalizationRule.objects.create(
+            scope="serial", manufacturer=other, match_pattern=r"^OTHER-(.+)$", replacement=r"\1"
+        )
+        NormalizationRule.objects.filter(pk=rule.pk).update(replacement=r"KEY-\1")
+        self._register_device(42, device.name, serial="LEGACY-A214-SN")
+        data = {"server_key": self.server_key, "action": "migrate_librenms_id", "existing_device_id": str(device.pk)}
+        if force:
+            data["force"] = "on"
+        request = make_view_request(
+            "post",
+            data,
+            user=make_view_user(f"migrate-unchecked-{force}-user".lower(), [("change", Device)]),
+            HTTP_HX_REQUEST="true",
+        )
+
+        response = post_view(view, request, device_id=42)
+
+        stored = stored_mapping_for_test(Device.objects.get(pk=device.pk))
+        if force:
+            assert response.get("HX-Trigger") == "closeModal", response.content.decode()[:600]
+            assert stored == {self.server_key: 42}
+        else:
+            assert response.headers.get("HX-Reswap") == "none"
+            assert stored == 42
+
     def test_migrates_a_device_and_persists_the_dict_format(self):
         """Migrate a confirmed Device mapping and render the updated import row."""
         from dcim.models import Device
@@ -4856,6 +4891,27 @@ class TestDeviceConflictActionBranches:
 
         assert _OOB_ROW_REFUSED in response.content.decode()
         assert Device.objects.get(pk=member.pk).name == "branches-owner-ip-member"
+
+    def test_an_unverified_hostname_match_is_not_linked(self):
+        """Two Devices share the name; a broken serial rule stops validation before its duplicate check."""
+        from dcim.models import Device, Site
+
+        from netbox_librenms_plugin.tests.test_coverage_device_operations import _member_of_a_broken_rule_vendor
+        from netbox_librenms_plugin.views.imports.actions import _UNVERIFIED_MATCH_REFUSED
+
+        first = make_device("branches-unverified-node", serial="FIRST-A206")
+        other_site = Site.objects.create(name="branches-unverified-site", slug="branches-unverified-site")
+        Device.objects.create(
+            name=first.name, device_type=first.device_type, role=first.role, site=other_site, status="active"
+        )
+        for device in Device.objects.filter(name=first.name):
+            _member_of_a_broken_rule_vendor(device, f"branches-unverified-{device.pk}")
+        self._register_device(66, first.name, serial="REAL-A206")
+
+        response = post_view(self._make_view(), self._request("link", first, "unverified-user"), device_id=66)
+
+        assert _UNVERIFIED_MATCH_REFUSED in response.content.decode()
+        assert not any(stored_mapping_for_test(device) for device in Device.objects.filter(name=first.name))
 
     def test_a_live_serial_with_a_second_holder_links_no_device(self):
         """Only the target's maker strips "TAG-": the live "TAG-ABC" names the target and a Device that stores it."""
@@ -6245,6 +6301,31 @@ class TestCreatePlatformAssignmentIndependence:
 
         host.refresh_from_db()
         assert host.platform is None
+
+    def test_an_unverified_hostname_match_gets_no_platform(self):
+        """Two Devices share the name; a broken serial rule stops validation before its duplicate check."""
+        from dcim.models import Device, Site
+
+        from netbox_librenms_plugin.tests.test_coverage_device_operations import _member_of_a_broken_rule_vendor
+
+        first = make_device("platform-unverified-node", serial="FIRST-PLATFORM")
+        other_site = Site.objects.create(name="platform-unverified-site", slug="platform-unverified-site")
+        Device.objects.create(
+            name=first.name, device_type=first.device_type, role=first.role, site=other_site, status="active"
+        )
+        for device in Device.objects.filter(name=first.name):
+            _member_of_a_broken_rule_vendor(device, f"platform-unverified-{device.pk}")
+        self.librenms_server.device_info_response(
+            device_id=42, hostname=first.name, os="test-os", serial="REAL-PLATFORM", ip=""
+        )
+        self.librenms_server.vc_inventory_callable(42, [], {})
+
+        first.refresh_from_db()
+
+        # The platform has the manufacturer of the device's type, so only the unverified match can refuse it.
+        self._post(first, "Unverified OS", first.device_type.manufacturer_id)
+
+        assert not Device.objects.filter(name=first.name, platform__isnull=False).exists()
 
     def test_a_live_row_that_names_another_device_gets_no_platform_on_the_cached_target(self):
         """The cached hostname selected one Device; the live row for the same LibreNMS ID now names another."""

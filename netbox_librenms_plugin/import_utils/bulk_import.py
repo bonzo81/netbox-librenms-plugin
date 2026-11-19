@@ -909,6 +909,8 @@ def _refresh_existing_device(
         serial_rules (SerialRules | None): The batch's serial rules; None reads them when the serial re-check runs.
 
     """
+    # Each refresh verifies the match again; a failed reload or re-check clears the flag.
+    validation["match_verified"] = True
     _refresh_match(validation, libre_device, server_key, serial_rules=serial_rules)
     classify_oob_controller(validation, libre_device, server_key)
 
@@ -1043,6 +1045,8 @@ def _refresh_match(  # noqa: C901
         except Exception as e:
             existing_id = getattr(existing, "pk", "unknown") if existing else "none"
             logger.error("Failed to refresh existing device (pk=%s): %s", existing_id, e)
+            # The cached match was not read again, so it is not verified.
+            validation["match_verified"] = False
             return
 
     # Re-evaluate the match under current DB state. Reached when existing_device was None at
@@ -1392,6 +1396,7 @@ def _block_failed_recheck(validation: dict) -> None:
     """Block a row whose refresh re-check did not run; a later refresh retries it."""
     validation["can_import"] = False
     validation["is_ready"] = False
+    validation["match_verified"] = False
     message = "Duplicate re-check failed (transient lookup error); import blocked. Refresh to retry."
     # Append to issues (not just a warning) — a later recalculate_validation_status()
     # recomputes can_import from the issues list, so anything weaker would be silently

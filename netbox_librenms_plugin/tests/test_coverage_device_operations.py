@@ -686,6 +686,7 @@ class TestValidateDeviceForImport:
             "librenms_id_needs_migration",
             "oob_candidate",
             "row_is_oob_controller",
+            "match_verified",
             "existing_librenms_link",
             "merge_candidates",
             "name_matches",
@@ -1694,6 +1695,108 @@ class TestValidateDeviceForImport:
         assert (result["existing_device"], result["existing_match_type"]) == (member, "serial")
         assert result["row_is_oob_controller"] is True
         assert (result["oob_candidate"]["device"], result["oob_candidate"]["matched_by"]) == (owner, "oob_ip")
+
+    def test_a_row_blocked_by_a_failed_serial_recheck_gets_no_attach_offer(self):
+        """The refresh cannot verify the serial holder, so it blocks the row; the classifier builds no offer."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        host = make_device("validation-recheck-failed-host", serial="REAL-A195-SN")
+        payload = _device_payload(
+            5495, hostname="validation-recheck-failed-row", os="idrac", serial="REAL-A195-SN", ip=""
+        )
+        result = self._validate(payload)
+        assert result["serial_action"] == "oob_candidate"
+        _member_of_a_broken_rule_vendor(host, "refresh-recheck")
+
+        _refresh_existing_device(result, libre_device=payload, server_key=SERVER_KEY)
+
+        assert result["can_import"] is False
+        # The OS evidence keeps the controller flag, so host writes stay refused; the unverified match gets no offer.
+        assert result["row_is_oob_controller"] is True
+        assert result["oob_candidate"] is None
+        assert result["serial_action"] != "oob_candidate"
+
+    def test_a_provisional_hostname_match_of_an_error_path_gets_no_attach_offer(self):
+        """Two Devices share the name; a broken serial rule stops validation before its duplicate check."""
+        from dcim.models import Device, Site
+
+        from netbox_librenms_plugin.import_utils.device_operations import VALIDATION_ERROR_ISSUE_PREFIX
+
+        first = make_device("validation-provisional-node", serial="FIRST-A199")
+        other_site = Site.objects.create(name="validation-provisional-site", slug="validation-provisional-site")
+        Device.objects.create(
+            name=first.name, device_type=first.device_type, role=first.role, site=other_site, status="active"
+        )
+        for device in Device.objects.filter(name=first.name):
+            _member_of_a_broken_rule_vendor(device, f"provisional-{device.pk}")
+        payload = _device_payload(5499, hostname=first.name, sysName=first.name, os="idrac", serial="REAL-A199", ip="")
+
+        result = self._validate(payload)
+
+        assert [issue for issue in result["issues"] if issue.startswith(VALIDATION_ERROR_ISSUE_PREFIX)]
+        assert result["oob_candidate"] is None
+        assert result["serial_action"] != "oob_candidate"
+
+    def test_a_failed_reload_in_the_refresh_gets_no_attach_offer(self, monkeypatch):
+        """The refresh cannot read the matched Device again, so the cached offer is not verified."""
+        from netbox_librenms_plugin.import_utils import bulk_import
+
+        host = make_device("validation-reload-failed-host")
+        host.oob_ip = make_ip("198.18.33.1/32", assigned_object=make_interface(host, "mgmt"))
+        host.save()
+        payload = _device_payload(5501, hostname=host.name, sysName=host.name, serial="-", ip="198.18.33.1")
+        result = self._validate(payload)
+        assert result["serial_action"] == "oob_candidate"
+
+        def fail_linkage(*_args, **_kwargs):
+            raise RuntimeError("database read failed")
+
+        # Error injection: a transient read failure inside the reload.
+        monkeypatch.setattr(bulk_import, "_refresh_librenms_linkage", fail_linkage)
+
+        bulk_import._refresh_existing_device(result, libre_device=payload, server_key=SERVER_KEY)
+
+        assert result["oob_candidate"] is None
+        assert result["serial_action"] != "oob_candidate"
+
+    def test_a_refresh_rebuilds_the_offer_for_the_current_chassis_owner(self):
+        """The chassis owner of the matched member changes between validation and refresh."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        first_owner = make_device("validation-owner-change-a")
+        second_owner = make_device("validation-owner-change-b")
+        member = make_device("validation-owner-change-member", serial="A202-SN")
+        make_virtual_chassis("validation-owner-change-chassis", first_owner, second_owner, member)
+        seed_mapping(first_owner, SERVER_KEY, own=7202)
+        payload = _device_payload(5502, hostname="validation-owner-change-row", os="idrac", serial="A202-SN", ip="")
+        result = self._validate(payload)
+        assert result["oob_candidate"]["device"] == first_owner
+        seed_stored_mapping(first_owner, {}, save=True)
+        seed_mapping(second_owner, SERVER_KEY, own=7203)
+
+        _refresh_existing_device(result, libre_device=payload, server_key=SERVER_KEY)
+
+        assert result["oob_candidate"]["device"] == second_owner
+
+    def test_a_refresh_gives_a_serial_match_the_role_offer_of_a_fresh_validation(self):
+        """The host gains a link to another LibreNMS ID between validation and refresh."""
+        from netbox_librenms_plugin.import_utils.bulk_import import _refresh_existing_device
+
+        host = make_device("validation-gains-link-host", serial="A210-SN")
+        payload = _device_payload(5510, hostname="validation-gains-link-row", serial="A210-SN", ip="")
+        result = self._validate(payload)
+        assert result["oob_candidate"] is None
+        seed_mapping(host, SERVER_KEY, own=9210)
+        fresh = self._validate(payload)
+
+        _refresh_existing_device(result, libre_device=payload, server_key=SERVER_KEY)
+
+        assert fresh["oob_candidate"] is not None
+        assert (result["serial_action"], result["serial_role_choice_available"]) == (
+            fresh["serial_action"],
+            fresh["serial_role_choice_available"],
+        )
+        assert result["oob_candidate"]["device"] == fresh["oob_candidate"]["device"]
 
     def test_the_classifier_reads_the_server_of_the_given_api(self, librenms_api):
         """The API names the server; the host's OOB link is on that server only."""
