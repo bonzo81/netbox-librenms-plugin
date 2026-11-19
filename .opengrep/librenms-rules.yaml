@@ -2112,3 +2112,24 @@ rules:
       - pattern-not-inside: |
           class MemberSerials:
               ...
+
+  - id: oob-controller-flag-has-one-writer
+    languages: [python]
+    severity: ERROR
+    message: >-
+      This sets row_is_oob_controller outside classify_oob_controller(). A second writer of the flag
+      lets one match path or the cached-row refresh decide the OOB controller by its own rule. Record
+      the match facts and let classify_oob_controller() decide. Limits: it matches only a subscript
+      assignment of the "row_is_oob_controller" key.
+    metadata:
+      category: correctness
+    paths:
+      exclude:
+        - "**/tests/**"
+    patterns:
+      - pattern: $R["row_is_oob_controller"] = $VALUE
+      # A view copies the decision into its template context.
+      - pattern-not: context["row_is_oob_controller"] = $VALUE
+      - pattern-not-inside: |
+          def classify_oob_controller(...):
+              ...

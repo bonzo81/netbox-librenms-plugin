@@ -77,6 +77,7 @@ unchecked until that review.
 | `rule-error-message-needs-projection` | error | A `str()`, `repr()`, f-string or `format()` conversion, or an `args` read, of the rule error bound by the module-context walrus check, or the exception parameter in `RuleConfigurationErrorMiddleware.process_exception`. These paths use `public_message`. Other aliases and handlers are outside this check. |
 | `post-write-scope-through-helper` | error | An inline `restrict(user, "add"/"change")` or `restricted_queryset(model, "add"/"change")` existence check of a row that the same block saved or created before. Call `transactions.saved_in_scope()`. |
 | `sync-script-reads-page-server-key` | error | A package script calls `document.querySelector`, `querySelectorAll` or `getElementsByName` for `server_key`. A lookup inside one form is allowed. Vendored and minified files are excluded. |
+| `oob-controller-flag-has-one-writer` | error | A write of `row_is_oob_controller` outside `classify_oob_controller()`. Only a subscript assignment of the key is checked. |
 
 ## Scope
 

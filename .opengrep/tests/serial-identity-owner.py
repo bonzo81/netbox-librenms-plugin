@@ -141,3 +141,17 @@ class MemberSerials:
     def __init__(self, members, member_context):
         # ok: member-serials-under-own-context
         self._groups = tuple(group(found, context, serial=lambda member: member.serial) for context, found in members)
+
+
+def hostname_branch_marks_the_controller(result):
+    # ruleid: oob-controller-flag-has-one-writer
+    result["row_is_oob_controller"] = True
+    # ok: oob-controller-flag-has-one-writer
+    result["existing_match_type"] = "hostname"
+    # ok: oob-controller-flag-has-one-writer
+    context["row_is_oob_controller"] = result["row_is_oob_controller"]
+
+
+def classify_oob_controller(result, libre_device, server_key):
+    # ok: oob-controller-flag-has-one-writer
+    result["row_is_oob_controller"] = bool(libre_device)
