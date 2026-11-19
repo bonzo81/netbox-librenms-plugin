@@ -317,6 +317,27 @@ class TestUpdateDeviceSerialView:
         found, row = LibreNMSAPI(server_key=SERVER_KEY).get_device_info(6516)
         assert (found, row["device_id"]) == (True, 6516)
 
+    @pytest.mark.parametrize("serial", ["ABC\ud800DEF", "ABC\x00DEF"], ids=["surrogate", "nul"])
+    def test_a_serial_that_the_database_cannot_hold_is_refused_with_a_message(
+        self, logged_in_client, librenms_server, serial
+    ):
+        """PostgreSQL text holds no NUL and no text that UTF-8 cannot encode, so the update refuses it."""
+        from dcim.models import Device
+
+        from netbox_librenms_plugin.serial_identity import serial_refusal
+
+        device = _linked_device(f"serial-unstorable-{len(serial)}-{ord(serial[3])}", 6518, serial="KEPT-SERIAL")
+        librenms_server.device_info_response(device_id=6518, hostname=device.name, serial=serial)
+
+        response = _post(logged_in_client, "update_device_serial", device)
+
+        device.refresh_from_db()
+        assert response.status_code == 302
+        assert device.serial == "KEPT-SERIAL"
+        refusal = serial_refusal(serial, Device)
+        assert refusal
+        assert any(refusal in text for text in _messages(response, "error"))
+
     def test_first_serial_uses_the_set_message(self, logged_in_client, librenms_server):
         device = _linked_device("serial-first", 6513)
         librenms_server.device_info_response(device_id=6513, hostname=device.name, serial="FIRST-SERIAL")

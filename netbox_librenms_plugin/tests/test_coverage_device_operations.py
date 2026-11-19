@@ -759,9 +759,11 @@ class TestValidateDeviceForImport:
         assert result["cluster"]["found"] is True
         assert result["is_ready"] is False
 
-    @pytest.mark.parametrize("serial", [True, "S" * 51], ids=["boolean", "too-long"])
+    @pytest.mark.parametrize(
+        "serial", [True, "S" * 51, "ABC\ud800DEF", "ABC\x00DEF"], ids=["boolean", "too-long", "surrogate", "nul"]
+    )
     def test_a_serial_that_the_create_refuses_keeps_a_new_device_from_being_ready(self, serial):
-        """The create refuses a serial that is not text or a number, or too long, so the row must not be ready."""
+        """The create refuses a serial that is not text or a number, that the database cannot hold, or too long."""
         from dcim.models import Device
 
         from netbox_librenms_plugin.import_validation_helpers import apply_role_to_validation
