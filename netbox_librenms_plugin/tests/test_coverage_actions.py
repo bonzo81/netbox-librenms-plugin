@@ -5335,6 +5335,58 @@ class TestCreatePlatformAssignmentIndependence:
         assert b"Selected manufacturer not found" in response.content
         assert not Platform.objects.filter(name="Missing Manufacturer OS").exists()
 
+    @pytest.mark.parametrize("live_serial", ["PLATFORM-NEW-SERIAL", None, "missing"], ids=["other", "null", "missing"])
+    def test_replaced_hardware_behind_the_librenms_id_gets_no_platform_on_the_old_serial_holder(self, live_serial):
+        """The cached row matched the target by its serial; the live read that decides the target reports another or none."""
+        from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        target = make_device("platform-serial-target", serial="PLATFORM-OLD-SERIAL")
+
+        def register(serial):
+            self.librenms_server.device_info_response(
+                device_id=42, hostname="platform-serial-source", os="test-os", serial=serial, ip=""
+            )
+
+        register(target.serial)
+        self.librenms_server.vc_inventory_callable(42, [], {})
+        # The import search cached the row with the serial of the old hardware.
+        assert fetch_device_with_cache(42, LibreNMSAPI(server_key=self.server_key))["serial"] == target.serial
+        if live_serial == "missing":
+            register(None)
+            _status, body = self.librenms_server.routes["/api/v0/devices/42"]
+            del body["devices"][0]["serial"]
+        else:
+            register(live_serial)
+
+        self._post(target, "Replacement OS", target.device_type.manufacturer_id)
+
+        target.refresh_from_db()
+        assert target.platform is None
+
+    def test_a_live_row_that_names_another_device_gets_no_platform_on_the_cached_target(self):
+        """The cached hostname selected one Device; the live row for the same LibreNMS ID now names another."""
+        from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
+        from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+
+        cached_target = make_device("platform-host-cached")
+        live_target = make_device("platform-host-live")
+
+        def register(hostname):
+            self.librenms_server.device_info_response(device_id=42, hostname=hostname, os="test-os", ip="")
+
+        register(cached_target.name)
+        self.librenms_server.vc_inventory_callable(42, [], {})
+        # The import search cached the row under the hostname of the first Device.
+        assert fetch_device_with_cache(42, LibreNMSAPI(server_key=self.server_key))["hostname"] == cached_target.name
+        register(live_target.name)
+
+        self._post(cached_target, "Renamed Host OS", cached_target.device_type.manufacturer_id)
+
+        cached_target.refresh_from_db()
+        live_target.refresh_from_db()
+        assert (cached_target.platform, live_target.platform) == (None, None)
+
     def test_device_platform_manufacturer_match_assigns_and_renders_updates(self):
         from dcim.models import Platform
 
