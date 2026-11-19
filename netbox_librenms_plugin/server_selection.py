@@ -271,6 +271,11 @@ def get_librenms_sync_device(device, server_key: str | None = None):  # noqa: C9
         return None
 
 
+def librenms_link_owner(device, server_key: str | None):
+    """Return the Device that holds the LibreNMS links of *device*: its chassis sync device, else *device* itself."""
+    return get_librenms_sync_device(device, server_key=server_key) or device
+
+
 def resolve_object_server(page_object, requested_key=None, installation_default_key=None) -> ObjectServerSelection:  # noqa: C901
     """Resolve the active server for an object page without contacting LibreNMS."""
     requested_key = requested_key.strip() if isinstance(requested_key, str) else None

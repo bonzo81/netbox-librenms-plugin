@@ -142,7 +142,11 @@ from netbox_librenms_plugin.server_mappings import (
     promote_to_host,
     read_mapping,
 )
-from netbox_librenms_plugin.server_selection import get_librenms_sync_device, parse_configured_server_key
+from netbox_librenms_plugin.server_selection import (
+    get_librenms_sync_device,
+    librenms_link_owner,
+    parse_configured_server_key,
+)
 from netbox_librenms_plugin.tables.device_status import DeviceImportTable
 from netbox_librenms_plugin.transactions import (
     atomic_with_events,
@@ -3194,7 +3198,7 @@ class AddAsOOBView(
         # non-VC device (or when the selected member IS the sync device) this resolves to the same
         # row, so the common path is unchanged. The candidate-match check above stays on the
         # user-selected existing_device (it validates the POST, not the linkage target).
-        sync_device = get_librenms_sync_device(existing_device, server_key=server_key) or existing_device
+        sync_device = librenms_link_owner(existing_device, server_key)
         # The sync device is DERIVED (a VC sibling of the scoped existing_device), and the block
         # below locks and saves it. Authorize it too, or a grant covering only the selected member
         # writes the OOB link onto a sibling it cannot see. Skipped when they are the same row.
@@ -3225,7 +3229,7 @@ class AddAsOOBView(
             serial_rules = SerialRules.load()
             # The evidence that found the controller is checked again under the locks.
             matched_by = oob_candidate.get("matched_by")
-            serial_match = matched_by not in ("oob_ip", "hostname")
+            serial_match = matched_by not in ("oob_ip", "primary_ip", "hostname")
             # Hold a serial-matched row that is not the sync row; a serial writer locks a member before its master.
             hold_matched = serial_match and existing_device.pk != sync_device.pk
             matched_is_master = hold_matched and VirtualChassis.objects.filter(master_id=existing_device.pk).exists()
