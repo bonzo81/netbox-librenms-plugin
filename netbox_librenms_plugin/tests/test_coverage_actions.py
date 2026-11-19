@@ -1599,6 +1599,18 @@ class TestDeviceValidationDetailsView:
         assert response.content.count(existing.serial.encode()) >= 2
         assert b"mdi-check-circle" in response.content
 
+    @pytest.mark.parametrize("status", [404, 503], ids=["absent", "unavailable"])
+    def test_a_cold_cache_tells_an_unavailable_librenms_from_an_absent_device(self, status):
+        """On a cache miss the dialog says 'not found' only for a 404; a 503 is reported as unavailable."""
+        self.primary_server.register("/api/v0/devices/1", {"status": "error"}, status=status)
+
+        _view, response = self._get("default")
+
+        content = response.content.decode()
+        assert response.status_code == 200
+        assert ("not found in LibreNMS" in content) is (status == 404)
+        assert ("Try again" in content) is (status == 503)
+
     def test_a_serial_that_cannot_be_compared_shows_the_reason_not_a_match(self):
         from dcim.models import Device, VirtualChassis
         from django.utils.html import escape
