@@ -598,7 +598,8 @@ class _LibreNMSDeviceUnavailable(Exception):
 
     def __init__(self, error):
         super().__init__(error.message)
-        self.response = _htmx_error_response(f"{error.message} Try again.")
+        self.message = f"{error.message} Try again."
+        self.response = _htmx_error_response(self.message)
 
 
 def _hold_device_row(device_pk) -> None:
@@ -2041,7 +2042,14 @@ class DeviceValidationDetailsView(LibreNMSPermissionMixin, LibreNMSAPIMixin, Dev
         if error := _invalid_import_intent_response(request, device_id):
             return error
 
-        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request)
+        # A cached row renders as before; on a miss the live read tells an unavailable LibreNMS from an absent device.
+        cached = cache.get(get_import_device_cache_key(device_id, self.librenms_api.server_key))
+        try:
+            libre_device, validation, selections = self.get_validated_device_with_selections(
+                device_id, request, live=not cached
+            )
+        except _LibreNMSDeviceUnavailable as exc:
+            return HttpResponse(f'<div class="alert alert-warning">{escape(exc.message)}</div>', status=200)
 
         if not libre_device:
             # 200, not 404 — HTMX fragment swapped into the validation-details modal; a 4xx makes
