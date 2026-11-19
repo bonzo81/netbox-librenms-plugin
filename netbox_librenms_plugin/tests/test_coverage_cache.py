@@ -271,6 +271,21 @@ class TestGetActiveCachedSearches:
         assert result[0]["display_filters"] == {}
         assert cache.get(get_cache_index_key(server_key)) == [cache_key]
 
+    def test_a_search_of_other_serial_rules_is_hidden_but_stays_in_the_index(self, server_key):
+        """A rebuild under the current rules reuses the key, so a listing must not drop it from the index."""
+        from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches, get_cache_index_key
+
+        now = datetime.now(timezone.utc).isoformat()
+        cache_key = _store_indexed_search(server_key, _metadata(server_key, now, {"hostname": "x"}, serial_rules="old"))
+
+        assert get_active_cached_searches(server_key, _no_serial_rules()) == []
+        assert cache.get(get_cache_index_key(server_key)) == [cache_key]
+
+        cache.set(cache_key, _metadata(server_key, now, {"hostname": "x"}), timeout=3600)
+        assert [search["cache_key"] for search in get_active_cached_searches(server_key, _no_serial_rules())] == [
+            cache_key
+        ]
+
     def test_naive_future_timestamp_is_treated_as_utc(self, server_key):
         from netbox_librenms_plugin.import_utils.cache import get_active_cached_searches
 

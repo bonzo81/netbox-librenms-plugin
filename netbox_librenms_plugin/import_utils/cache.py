@@ -132,10 +132,7 @@ def get_active_cached_searches(server_key: str, serial_rules) -> list[dict]:
 
     for cache_key in cache_index:
         metadata = cache.get(cache_key)
-        # A search that validated under other serial rules has no rows to reopen, so it is not listed.
-        if _is_valid_cached_search_metadata(metadata, server_key) and search_metadata_is_current(
-            metadata, serial_rules
-        ):
+        if _is_valid_cached_search_metadata(metadata, server_key):
             metadata = metadata.copy()
             # Cache still exists, calculate time remaining
             cache_timeout = metadata.get("cache_timeout", 300)
@@ -157,6 +154,11 @@ def get_active_cached_searches(server_key: str, serial_rules) -> list[dict]:
             remaining_seconds = max(0, cache_timeout - age_seconds)
 
             if remaining_seconds > 0:
+                # The index keeps a search of other serial rules: a rebuild under the current rules reuses its key.
+                valid_cache_keys.append(cache_key)
+                # A search that validated under other serial rules has no rows to reopen, so it is not listed.
+                if not search_metadata_is_current(metadata, serial_rules):
+                    continue
                 # Add remaining time and cache key
                 metadata["remaining_seconds"] = int(remaining_seconds)
                 metadata["cache_key"] = cache_key
@@ -176,7 +178,6 @@ def get_active_cached_searches(server_key: str, serial_rules) -> list[dict]:
                 metadata["display_filters"] = display_filters
 
                 active_searches.append(metadata)
-                valid_cache_keys.append(cache_key)
 
     # Clean up index if any keys have expired
     if len(valid_cache_keys) < len(cache_index):
