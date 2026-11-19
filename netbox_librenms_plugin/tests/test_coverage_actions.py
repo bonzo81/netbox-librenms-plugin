@@ -4796,6 +4796,30 @@ class TestDeviceConflictActionBranches:
         assert "LibreNMS device not found" not in unescape(response.content.decode())
         assert self.server_key not in (stored_mapping_for_test(Device.objects.get(pk=target.pk)) or {})
 
+    def test_a_live_answer_that_is_not_json_keeps_the_cached_row(self):
+        """A proxy answers HTTP 200 with an HTML page: the device may exist, so the row stays and Link refuses."""
+        from html import unescape
+
+        from dcim.models import Device
+        from django.core.cache import cache
+
+        from netbox_librenms_plugin.import_utils.cache import get_import_device_cache_key
+        from netbox_librenms_plugin.import_utils.device_operations import fetch_device_with_cache
+
+        view = self._make_view()
+        target = make_device("branches-live-not-json", serial="SERIAL-LIVE-NOT-JSON")
+        self._register_device(42, f"{target.name}-source", serial=target.serial)
+        # The import search cached the row.
+        assert fetch_device_with_cache(42, view.librenms_api) is not None
+        self.librenms_server.register_raw("/api/v0/devices/42", "<html>gateway</html>", content_type="text/html")
+
+        response = post_view(view, self._request("link", target, f"{target.name}-user"), device_id=42)
+
+        assert response.headers.get("HX-Reswap") == "none"
+        assert "LibreNMS device not found" not in unescape(response.content.decode())
+        assert cache.get(get_import_device_cache_key(42, self.server_key)) is not None
+        assert self.server_key not in (stored_mapping_for_test(Device.objects.get(pk=target.pk)) or {})
+
     def test_a_live_serial_with_a_second_holder_links_no_device(self):
         """Only the target's maker strips "TAG-": the live "TAG-ABC" names the target and a Device that stores it."""
         from dcim.models import Device, DeviceType, Manufacturer
