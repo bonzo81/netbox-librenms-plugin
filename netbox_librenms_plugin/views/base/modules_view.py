@@ -35,6 +35,7 @@ from netbox_librenms_plugin.serial_identity import (
     compare,
     display,
     is_identity,
+    is_serial_value,
     plain_context,
     resolve_modules,
     stored_form_differs,
@@ -246,6 +247,11 @@ def _own_ignore_action(item, index_map, ignore_contexts, default_rules, default_
         return None
     parent = index_map.get(item.get("entPhysicalContainedIn")) if index_map else None
     return _check_ignore_rules(item, parent, rules, index_map, identity)
+
+
+def _inventory_serial_well_formed(item: dict) -> bool:
+    """Return whether an inventory item's serial is absent, text, or a JSON number."""
+    return is_serial_value(item.get("entPhysicalSerialNum"))
 
 
 def _inventory_item_offsettable(item: dict) -> bool:
@@ -922,6 +928,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 False,
                 "inventory payload has a negative or non-integer entPhysicalIndex or entPhysicalContainedIn",
             )
+        # A module writer locks and resolves the raw serial, so a list or an object must not reach the snapshot.
+        if success and not all(_inventory_serial_well_formed(item) for item in inventory_data):
+            success, inventory_data = (
+                False,
+                "inventory payload has an entPhysicalSerialNum that is not text or a number",
+            )
 
         # Treat transport errors, invalid containers, and invalid index types as fetch failures.
         if not success:
@@ -1022,7 +1034,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             # get_device_inventory guarantees a list of dicts on success, but not the TYPE of
             # entPhysicalIndex/entPhysicalContainedIn: a numeric string would crash the offset
             # loop below (TypeError on "5" + offset), so fail closed to a host-only snapshot.
-            if oob_success and all(_inventory_item_offsettable(item) for item in oob_inventory):
+            if oob_success and all(
+                _inventory_item_offsettable(item) and _inventory_serial_well_formed(item) for item in oob_inventory
+            ):
                 main_max_idx = max(
                     (idx for item in inventory_data if (idx := item.get("entPhysicalIndex")) is not None),
                     default=0,
