@@ -117,7 +117,7 @@ class TestWritersCheckTheOobLinkOfTheSnapshot:
         cache.set(
             view.get_cache_key(device, "inventory", server_key="default"),
             module_inventory_cache_payload(
-                inventory, 7, cached_oob, stamp=SerialRules.load().for_device(device).fingerprint
+                inventory, 7, cached_oob, serial_context=SerialRules.load().for_device(device)
             ),
         )
         self._link(device, link)
@@ -385,7 +385,7 @@ class TestTrustedPayloadMatchesTheDeviceMapping:
         payload = trusted_module_inventory_payload(device, [{"index": 1}], librenms_id=9)
 
         assert payload == module_inventory_cache_payload(
-            [{"index": 1}], 9, None, stamp=SerialRules.load().for_device(device).fingerprint
+            [{"index": 1}], 9, None, serial_context=SerialRules.load().for_device(device)
         )
 
     def test_a_written_mapping_refreshes_the_cached_custom_field_value(self):
@@ -399,36 +399,5 @@ class TestTrustedPayloadMatchesTheDeviceMapping:
         payload = trusted_module_inventory_payload(device, [{"index": 1}], librenms_id=9)
 
         assert payload == module_inventory_cache_payload(
-            [{"index": 1}], 9, None, stamp=SerialRules.load().for_device(device).fingerprint
+            [{"index": 1}], 9, None, serial_context=SerialRules.load().for_device(device)
         )
-
-
-@pytest.mark.django_db
-def test_the_snapshot_stamp_covers_the_module_rules_of_each_member():
-    """The merge compares a member's entity under that member's rules, so a rule of its maker makes the rows stale."""
-    from dcim.models import Device, DeviceType, Manufacturer, VirtualChassis
-
-    from netbox_librenms_plugin.inventory_policy import load_inventory_policy
-    from netbox_librenms_plugin.models import NormalizationRule
-    from netbox_librenms_plugin.sync_cache import module_snapshot_serial_context, module_snapshot_stamp
-    from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
-
-    master = make_device("stamp-mixed-master")
-    member = make_device("stamp-mixed-member")
-    chassis = make_virtual_chassis("stamp-mixed-vc", master, member)
-    VirtualChassis.objects.filter(pk=chassis.pk).update(master=master)
-    NormalizationRule.objects.create(
-        scope="serial", manufacturer=master.device_type.manufacturer, match_pattern=r"^S/N (.+)$", replacement=r"\1"
-    )
-    maker = Manufacturer.objects.create(name="Stamp member maker", slug="stamp-member-maker")
-    member_type = DeviceType.objects.create(manufacturer=maker, model="Stamp member", slug="stamp-member")
-    policy = load_inventory_policy(master.pk)
-    shared = module_snapshot_stamp(policy, master)
-    assert shared == module_snapshot_serial_context(policy, master).fingerprint
-
-    Device.objects.filter(pk=member.pk).update(device_type=member_type)
-    mixed = module_snapshot_stamp(load_inventory_policy(master.pk), master)
-    NormalizationRule.objects.create(scope="serial", manufacturer=maker, match_pattern=r"^TAG (.+)$", replacement=r"\1")
-    ruled = module_snapshot_stamp(load_inventory_policy(master.pk), master)
-
-    assert len({shared, mixed, ruled}) == 3

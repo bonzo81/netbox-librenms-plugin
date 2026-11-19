@@ -573,7 +573,7 @@ class TestUpdateModuleSerialView:
         rows = [_item(11, module.module_type.model, "Slot 1", entPhysicalSerialNum="NEW-SERIAL")]
         key = view.get_cache_key(device, "inventory", server_key="default")
         other = SerialContext(None, (), unavailable="another context")
-        cache.set(key, module_inventory_cache_payload(rows, 68, None, stamp=other.fingerprint), timeout=300)
+        cache.set(key, module_inventory_cache_payload(rows, 68, None, serial_context=other), timeout=300)
         grant = sign_module_grant(
             page_device_id=device.pk,
             device_id=device.pk,

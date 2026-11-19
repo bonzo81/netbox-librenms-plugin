@@ -1404,76 +1404,6 @@ class TestPostInventoryRefresh:
         assert optic["entPhysicalModelName"] == "SFP-10G-LR"
         assert optic["entPhysicalSerialNum"] == "TAG OPTIC-7"
 
-    def test_post_compares_a_member_entity_with_an_optic_under_the_member_module_rules(
-        self, librenms_server, server_keys
-    ):
-        """Only the master's maker strips "TAG ", so the member's entity and the optic are two parts."""
-        from dcim.models import Device, DeviceType, Manufacturer, VirtualChassis
-        from django.core.cache import cache
-
-        from netbox_librenms_plugin.inventory_policy import load_inventory_policy
-        from netbox_librenms_plugin.models import NormalizationRule
-        from netbox_librenms_plugin.sync_cache import module_snapshot_stamp
-        from netbox_librenms_plugin.tests.conftest import make_device, make_virtual_chassis
-        from netbox_librenms_plugin.tests.view_test_helpers import make_request, post
-        from netbox_librenms_plugin.views.object_sync.devices import DeviceModuleTableView
-
-        server_key, _ = server_keys
-        master = _mapped_device("mixed-maker-master", server_key)
-        member = make_device("mixed-maker-member", serial="MEMBER-SN")
-        member_maker = Manufacturer.objects.create(name="Mixed member maker", slug="mixed-member-maker")
-        member_type = DeviceType.objects.create(manufacturer=member_maker, model="Mixed member", slug="mixed-member")
-        chassis = make_virtual_chassis("mixed-maker-vc", master, member)
-        Device.objects.filter(pk=member.pk).update(device_type=member_type)
-        VirtualChassis.objects.filter(pk=chassis.pk).update(master=master)
-        NormalizationRule.objects.create(
-            scope="serial",
-            manufacturer=master.device_type.manufacturer,
-            match_pattern=r"^TAG (.+)$",
-            replacement=r"\1",
-        )
-        member_chassis = {
-            "entPhysicalIndex": 2,
-            "entPhysicalClass": "chassis",
-            "entPhysicalName": "Member chassis",
-            "entPhysicalSerialNum": "MEMBER-SN",
-            "entPhysicalContainedIn": 0,
-        }
-        port = {
-            "entPhysicalIndex": 300,
-            "ifIndex": 7,
-            "entPhysicalClass": "port",
-            "entPhysicalName": "Member port",
-            "entPhysicalModelName": "",
-            "entPhysicalSerialNum": "TAG OPTIC-7",
-            "entPhysicalContainedIn": 2,
-        }
-        self._register_successful_refresh(
-            librenms_server,
-            inventory=[member_chassis, port],
-            transceivers=[
-                {
-                    "entity_physical_index": 400,
-                    "port_id": 42,
-                    "model": "SFP-10G-LR",
-                    "serial": "OPTIC-7",
-                    "type": "SFP+",
-                }
-            ],
-            ports=[{"port_id": 42, "ifIndex": 7, "ifName": "xe-1/0/0", "ifDescr": "uplink"}],
-        )
-        view = DeviceModuleTableView()
-
-        response = post(view, make_request("post", {"server_key": server_key}), pk=master.pk)
-
-        assert response.status_code == 200
-        snapshot = cache.get(view.get_cache_key(master, "inventory", server_key=server_key))
-        rows = {item["entPhysicalIndex"]: item for item in snapshot["inventory"]}
-        assert "_librenms_port_id" not in rows[300]
-        assert rows[300]["entPhysicalModelName"] == ""
-        assert (rows[400]["entPhysicalSerialNum"], rows[400]["_librenms_port_id"]) == ("OPTIC-7", 42)
-        assert snapshot["serial_context"] == module_snapshot_stamp(load_inventory_policy(master.pk), master)
-
     def test_post_deduplicates_an_optic_with_the_device_manufacturer_serial_rules(self, librenms_server, server_keys):
         from django.core.cache import cache
 
@@ -1842,7 +1772,7 @@ class TestPostInventoryRefresh:
         # only reason the snapshot is rejected.
         cache.set(
             cache_key,
-            module_inventory_cache_payload([None], 1, None, stamp=SerialRules.load().for_device(device).fingerprint),
+            module_inventory_cache_payload([None], 1, None, serial_context=SerialRules.load().for_device(device)),
         )
         request = make_request("get", {"server_key": server_key})
 
@@ -2104,8 +2034,7 @@ class TestPostInventoryRefresh:
         view = DeviceModuleTableView()
         cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
         cache.set(
-            cache_key,
-            module_inventory_cache_payload([], 1, None, stamp=SerialRules.load().for_device(device).fingerprint),
+            cache_key, module_inventory_cache_payload([], 1, None, serial_context=SerialRules.load().for_device(device))
         )
         inventory_requests = []
 
@@ -7219,8 +7148,7 @@ class TestGetContextDataOOBCacheFingerprint:
         view = DeviceModuleTableView()
         cache_key = view.get_cache_key(device, "inventory", server_key=server_key)
         cache.set(
-            cache_key,
-            module_inventory_cache_payload([], 1, None, stamp=SerialRules.load().for_device(device).fingerprint),
+            cache_key, module_inventory_cache_payload([], 1, None, serial_context=SerialRules.load().for_device(device))
         )
         request = make_request("get", {"server_key": server_key})
 

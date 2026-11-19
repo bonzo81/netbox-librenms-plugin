@@ -32,7 +32,6 @@ from netbox_librenms_plugin.serial_identity import (
     Comparison,
     ResolutionKind,
     SerialContext,
-    SerialGroups,
     compare,
     display,
     is_identity,
@@ -40,6 +39,7 @@ from netbox_librenms_plugin.serial_identity import (
     resolve_modules,
     stored_form_differs,
 )
+from netbox_librenms_plugin.serial_identity import group as group_serials
 from netbox_librenms_plugin.server_mappings import (
     name_match_may_be_port,
     port_holders,
@@ -54,7 +54,6 @@ from netbox_librenms_plugin.sync_cache import (
     module_inventory_snapshot_matches,
     module_snapshot_host_id,
     module_snapshot_serial_context,
-    module_snapshot_stamp,
     request_actor_id,
 )
 from netbox_librenms_plugin.utils import (
@@ -846,17 +845,6 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             if interface.name in template_types and interface.type != template_types[interface.name]
         ]
 
-    @classmethod
-    def _entity_module_contexts(cls, policy, sync_device, snapshot_context, inventory_data):
-        """Return a function that gives the Module context of the device that holds a main inventory entity."""
-        if snapshot_context.unavailable or not policy.vc_members:
-            return lambda _item: snapshot_context
-        # The snapshot owner, not the page, takes an unowned row, so every member caches one merge.
-        owners = cls._attribute_to_members(policy.member(sync_device.pk), inventory_data, policy.vc_members, policy)
-        rules = policy.serial_identity_rules
-        contexts = {key: rules.for_module_target(device) for key, (device, _source) in owners.items()}
-        return lambda item: contexts[_inventory_item_key(item)]
-
     @staticmethod
     def _attribute_to_members(obj, inventory_data, vc_members, policy):
         """Return ``{item key: (Device, source)}`` for the main inventory, with *obj* for an unowned row."""
@@ -975,16 +963,12 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         from netbox_librenms_plugin.models import RuleConfigurationError
 
         try:
-            # One policy read: the merge compares each entity under its member's Module context, the snapshot
-            # records those contexts, and the table uses the policy.
+            # One policy read: the merge groups serials under the snapshot owner's context, the snapshot records
+            # that context, and the table uses the policy.
             policy = load_inventory_policy(obj.pk)
             serial_context = module_snapshot_serial_context(policy, sync_device)
-            snapshot_stamp = module_snapshot_stamp(policy, sync_device)
             inventory_data, txr_error = self._merge_transceiver_data(
-                inventory_data,
-                ports_data=ports_data,
-                serial_context=serial_context,
-                entity_context=self._entity_module_contexts(policy, sync_device, serial_context, inventory_data),
+                inventory_data, ports_data=ports_data, serial_context=serial_context
             )
         except (Device.DoesNotExist, RuleConfigurationError) as exc:
             # The page device changed while the policy was read, or a rule does not work: no table and no snapshot.
@@ -1070,7 +1054,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         else:
             cache.set(
                 self.get_cache_key(sync_device, "inventory", server_key=server_key),
-                module_inventory_cache_payload(inventory_data, self.librenms_id, oob_id, stamp=snapshot_stamp),
+                module_inventory_cache_payload(inventory_data, self.librenms_id, oob_id, serial_context=serial_context),
                 timeout=self.librenms_api.cache_timeout,
             )
 
@@ -1264,7 +1248,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             sync_device (Device | None): The device that owns the cached snapshot.
             policy (InventoryPolicy | None): The policy inputs of *obj*, loaded here when None.
             pin_to (Device | None): A member that every row is attributed to, as the verify view renders it.
-            snapshot_serial_context (str | None): The serial context stamp of a cached snapshot; None for fresh rows.
+            snapshot_serial_context (str | None): The serial context fingerprint of a cached snapshot; None for fresh rows.
 
         Returns:
             dict: The module sync context.
@@ -1317,9 +1301,10 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         """Build the module table context of ``_build_context``; raise RuleConfigurationError for a broken rule."""
         if policy is None:
             policy = load_inventory_policy(obj.pk)
-        # The refresh compared transceiver serials under the stamped contexts; another stamp makes the snapshot stale.
-        if snapshot_serial_context is not None and snapshot_serial_context != module_snapshot_stamp(
-            policy, sync_device
+        # The refresh grouped transceiver serials under the owner's context; another context makes the snapshot stale.
+        if (
+            snapshot_serial_context is not None
+            and snapshot_serial_context != module_snapshot_serial_context(policy, sync_device).fingerprint
         ):
             raise _StaleInventorySnapshot()
         if policy.vc_members and (unavailable := policy.chassis_serial_context().unavailable):
@@ -2272,9 +2257,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     child_item
                 )
 
-    def _merge_transceiver_data(  # noqa: C901
-        self, inventory_data, ports_data=None, *, serial_context: SerialContext, entity_context=None
-    ):
+    def _merge_transceiver_data(self, inventory_data, ports_data=None, *, serial_context: SerialContext):  # noqa: C901
         """
         Merge transceiver API data with entity inventory.
 
@@ -2290,21 +2273,11 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         - For transceivers NOT in inventory: create synthetic inventory items
           so they appear in the modules table
 
-        An entity's serial is compared under ``entity_context(entity)``, the Module context of the device
-        that holds it; without *entity_context* every entity belongs to the device of *serial_context*.
-        A synthetic row uses *serial_context*.
-
         Returns:
             (inventory_data, error_message) — error_message is None on success
             or a string when the transceiver API call failed.
 
         """
-
-        def context_of(item):
-            return (
-                serial_context if entity_context is None or item.get("_from_transceiver_api") else entity_context(item)
-            )
-
         success, transceivers = self.librenms_api.get_device_transceivers(self.librenms_id)
         if not success:
             return inventory_data, str(transceivers) if transceivers else "unknown error"
@@ -2328,14 +2301,9 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
         inv_by_index = {
             idx: item for item in inventory_data if (idx := _coerce_idx(item.get("entPhysicalIndex"))) is not None
         }
-        # One group per context: the optic serial names an entity only under that entity's own context.
-        inv_serials = {}
-
-        def remember_serial(item, value, context):
-            inv_serials.setdefault(context.fingerprint, SerialGroups(context)).add(value, item)
-
-        for item in inventory_data:
-            remember_serial(item, item.get("entPhysicalSerialNum"), context_of(item))
+        inv_serials = group_serials(
+            inventory_data, serial_context, serial=lambda item: item.get("entPhysicalSerialNum")
+        )
         inv_by_ifindex = {}
         for item in inventory_data:
             if (if_index := _coerce_idx(item.get("ifIndex"))) is not None:
@@ -2366,13 +2334,13 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
             index_taken = existing is not None
             if existing is not None and (
                 _never_an_optic(existing)
-                or _names_another_part(existing, txr, context_of(existing))
+                or _names_another_part(existing, txr, serial_context)
                 or (port_ifindex is not None and _coerce_idx(existing.get("ifIndex")) not in {None, port_ifindex})
             ):
                 existing = None
             if existing is None and port_ifindex is not None:
                 by_ifindex = inv_by_ifindex.get(port_ifindex)
-                if by_ifindex is not None and _ifindex_entity_is_the_optic(by_ifindex, txr, context_of(by_ifindex)):
+                if by_ifindex is not None and _ifindex_entity_is_the_optic(by_ifindex, txr, serial_context):
                     existing = by_ifindex
             if existing is None and index_taken:
                 # A synthetic row would duplicate the unrelated entity's index.
@@ -2398,7 +2366,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 existing_serial = _clean_librenms_value(existing.get("entPhysicalSerialNum"))
                 if not existing_serial and serial:
                     existing["entPhysicalSerialNum"] = serial
-                    remember_serial(existing, serial, context_of(existing))
+                    inv_serials.add(serial, existing)
                 if port_id:
                     existing["_librenms_port_id"] = port_id
                 if ifname:
@@ -2407,7 +2375,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                     existing["_librenms_ifdescr"] = ifdescr
             else:
                 # Skip if serial already exists in ENTITY-MIB data (avoid duplicates)
-                if any(groups.find(serial) for groups in inv_serials.values()):
+                if inv_serials.find(serial):
                     continue
                 # Create synthetic inventory item for SFPs not in entity inventory
                 if ifname:
@@ -2435,7 +2403,7 @@ class BaseModuleTableView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjec
                 inventory_data.append(synthetic)
                 # Update dedupe maps so subsequent iterations skip this entry
                 inv_by_index[ent_idx] = synthetic
-                remember_serial(synthetic, serial, serial_context)
+                inv_serials.add(serial, synthetic)
 
         # Nest synthetic transceivers under their parent inventory item by
         # matching the leading slash-separated path components of the synthetic
