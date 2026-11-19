@@ -796,12 +796,8 @@ class TestLibreNMSAPIDeviceOperations:
         assert device_data["device_id"] == 123
 
     def test_get_device_info_not_found(self, local_librenms_api, librenms_server):
-        """Empty devices list returns (False, None) without raising."""
-        librenms_server.register(
-            "/api/v0/devices/1",
-            {"status": "ok", "devices": []},
-            method="GET",
-        )
+        """A 404 is the one answer that says the device is absent."""
+        librenms_server.register("/api/v0/devices/1", {"status": "error"}, status=404, method="GET")
 
         success, result = local_librenms_api.get_device_info(1)
         assert success is False
@@ -1563,10 +1559,17 @@ class TestGetDeviceInfoResponseShape:
         assert isinstance(data, LibreNMSLookupError)
         assert data.status_code == 200
 
-    def test_an_empty_device_list_is_absent(self, local_librenms_api, librenms_server):
-        librenms_server.register("/api/v0/devices/1", {"status": "ok", "devices": []}, method="GET")
+    @pytest.mark.parametrize("status", ["ok", "error"])
+    def test_an_empty_device_list_is_unavailable_not_absent(self, local_librenms_api, librenms_server, status):
+        """LibreNMS answers a missing device with a 404, so an empty list on a 200 confirms nothing."""
+        from netbox_librenms_plugin.librenms_api import LibreNMSLookupError
 
-        assert local_librenms_api.get_device_info(device_id=1) == (False, None)
+        librenms_server.register("/api/v0/devices/1", {"status": status, "devices": []}, method="GET")
+
+        success, data = local_librenms_api.get_device_info(device_id=1)
+
+        assert success is False
+        assert isinstance(data, LibreNMSLookupError)
 
 
 class TestGetDeviceTransceiversResponseShape:
