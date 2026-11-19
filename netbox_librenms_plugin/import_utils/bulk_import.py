@@ -51,6 +51,7 @@ from .device_operations import (
     VALIDATION_ERROR_ISSUE_PREFIX,
     DeviceTypeOverrideError,
     _describe_existing_librenms_link,
+    classify_oob_controller,
     effective_import_device_type,
     import_single_device,
     resolve_device_by_host_ip,
@@ -894,7 +895,24 @@ def _reassert_new_import_blockers(validation: dict) -> None:
                 validation["issues"].append(msg)
 
 
-def _refresh_existing_device(  # noqa: C901
+def _refresh_existing_device(
+    validation: dict, libre_device: dict = None, server_key: str = "default", *, serial_rules=None
+) -> None:
+    """
+    Refresh the match of a cached row from the DB, then decide again whether the row is the match's OOB controller.
+
+    Args:
+        validation (dict): The cached validation state, mutated in place.
+        libre_device (dict | None): The LibreNMS device data used to re-evaluate the match.
+        server_key (str): The active LibreNMS server key.
+        serial_rules (SerialRules | None): The batch's serial rules; None reads them when the serial re-check runs.
+
+    """
+    _refresh_match(validation, libre_device, server_key, serial_rules=serial_rules)
+    classify_oob_controller(validation, libre_device, server_key)
+
+
+def _refresh_match(  # noqa: C901
     validation: dict, libre_device: dict = None, server_key: str = "default", *, serial_rules=None
 ) -> None:
     """
@@ -1257,7 +1275,7 @@ def _refresh_existing_device(  # noqa: C901
                     # Shared resolver (scans interface-assignment + oob_ip-FK across all duplicate
                     # net_host rows, fails closed on >1 distinct device) — same helper
                     # validate_device_for_import() uses, so the two paths can't drift.
-                    matched_object, ip_ambiguous, _matching_ips = resolve_device_by_host_ip(primary_ip)
+                    matched_object, ip_ambiguous = resolve_device_by_host_ip(primary_ip)
                     if ip_ambiguous:
                         ambiguous_fallback = True
                     elif matched_object:
