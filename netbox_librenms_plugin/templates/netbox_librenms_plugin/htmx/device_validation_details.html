@@ -512,39 +512,7 @@
 
   {# Status & Actions #}
   {% if validation.existing_device %}
-    {% if row_is_oob_controller %}
-      {# A controller row is only attached to its host: no control here writes the row's data on the host. #}
-      <div class="alert alert-info py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
-        {% if validation.existing_match_type == 'librenms_oob' %}
-          <span class="badge bg-info-lt me-1"><i class="mdi mdi-chip"></i> OOB linked</span>
-          <span class="text-muted ms-1">
-            — LibreNMS ID {{ libre_device.device_id }} is already linked as the OOB controller for
-            <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>.
-          </span>
-        {% elif validation.oob_candidate %}
-          <span class="badge bg-purple-lt me-1"><i class="mdi mdi-chip"></i> OOB Detected</span>
-          <span class="text-muted ms-1">
-            — LibreNMS device <strong>{{ libre_device.sysName|default:libre_device.hostname }}</strong>
-            (<strong>{{ validation.oob_candidate.type }}</strong>{% if validation.oob_candidate.ip %}, {{ validation.oob_candidate.ip }}{% endif %})
-            appears to be the OOB management controller of
-            <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>{% include "netbox_librenms_plugin/htmx/_existing_librenms_link_status.html" %}
-          </span>
-        {% else %}
-          <span class="badge bg-info-lt me-1"><i class="mdi mdi-chip"></i> OOB Already Linked</span>
-          <span class="text-muted ms-1">
-            — This LibreNMS device is an OOB controller, and
-            <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>
-            already has an OOB controller linked{% include "netbox_librenms_plugin/htmx/_existing_librenms_link_status.html" %}
-          </span>
-        {% endif %}
-      </div>
-      {% if validation.oob_candidate and existing_device_model_name == "device" %}
-        <div class="mb-3">
-          {% include "netbox_librenms_plugin/htmx/_add_as_oob_form.html" %}
-        </div>
-      {% endif %}
-
-    {% elif validation.serial_action == 'merge_netbox_devices' %}
+    {% if validation.serial_action == 'merge_netbox_devices' %}
       {# Stage 2: two NetBox devices appear to represent the same physical box. #}
       <div class="alert alert-warning py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
         <span class="badge bg-warning text-dark me-1"><i class="mdi mdi-merge"></i> Two NetBox devices</span>
@@ -607,6 +575,38 @@
           <i class="mdi mdi-merge"></i> Merge donor into selected winner
         </button>
       </form>
+
+    {% elif row_is_oob_controller %}
+      {# A controller row is only attached to its host: no control here writes the row's data on the host. #}
+      <div class="alert alert-info py-2 mb-3 d-flex flex-wrap align-items-center gap-1">
+        {% if validation.existing_match_type == 'librenms_oob' %}
+          <span class="badge bg-info-lt me-1"><i class="mdi mdi-chip"></i> OOB linked</span>
+          <span class="text-muted ms-1">
+            — LibreNMS ID {{ libre_device.device_id }} is already linked as the OOB controller for
+            <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>.
+          </span>
+        {% elif validation.oob_candidate %}
+          <span class="badge bg-purple-lt me-1"><i class="mdi mdi-chip"></i> OOB Detected</span>
+          <span class="text-muted ms-1">
+            — LibreNMS device <strong>{{ libre_device.sysName|default:libre_device.hostname }}</strong>
+            (<strong>{{ validation.oob_candidate.type }}</strong>{% if validation.oob_candidate.ip %}, {{ validation.oob_candidate.ip }}{% endif %})
+            appears to be the OOB management controller of
+            <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>{% include "netbox_librenms_plugin/htmx/_existing_librenms_link_status.html" %}
+          </span>
+        {% else %}
+          <span class="badge bg-info-lt me-1"><i class="mdi mdi-chip"></i> OOB Already Linked</span>
+          <span class="text-muted ms-1">
+            — This LibreNMS device is an OOB controller, and
+            <a href="{{ existing_device_url }}" target="_blank" rel="noopener noreferrer">{{ validation.existing_device.name }}</a>
+            already has an OOB controller linked{% include "netbox_librenms_plugin/htmx/_existing_librenms_link_status.html" %}
+          </span>
+        {% endif %}
+      </div>
+      {% if validation.oob_candidate and existing_device_model_name == "device" %}
+        <div class="mb-3">
+          {% include "netbox_librenms_plugin/htmx/_add_as_oob_form.html" %}
+        </div>
+      {% endif %}
 
     {% elif validation.existing_match_type == 'librenms_id' %}
       <div class="alert alert-info py-2 mb-3 d-flex flex-wrap align-items-center gap-1">

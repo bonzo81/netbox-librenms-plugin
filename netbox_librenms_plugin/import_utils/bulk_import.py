@@ -48,6 +48,7 @@ from .cache import (
 from .collisions import detect_bulk_collisions, scope_bulk_collisions
 from .device_operations import (
     SERIAL_UNAVAILABLE_ISSUE_MARKER,
+    NAME_MATCH_TYPES,
     VALIDATION_ERROR_ISSUE_PREFIX,
     DeviceTypeOverrideError,
     _describe_existing_librenms_link,
@@ -1187,11 +1188,8 @@ def _refresh_match(  # noqa: C901
             # hostname path); a single-model hit binds and wins over any lower-priority candidate.
             # The librenms_id match above already short-circuited, so this only does the
             # name/hostname/sysName fallbacks.
-            for value, mt in (
-                (validation.get("resolved_name"), "resolved_name"),
-                (hostname, "hostname"),
-                (sys_name, "sysname"),
-            ):
+            # The match types come from the list that the OOB-controller classifier reads.
+            for value, mt in zip((validation.get("resolved_name"), hostname, sys_name), NAME_MATCH_TYPES, strict=True):
                 if not value:
                     continue
                 model_match, model_amb = _lookup_value(Model, value)

@@ -1,6 +1,7 @@
 """Device validation, import, and fetch operations."""
 
 import logging
+from typing import NamedTuple
 
 from dcim.models import Device, DeviceRole, DeviceType, Rack, Site, VirtualChassis
 from django.core.cache import cache
@@ -34,6 +35,7 @@ from ..serial_identity import (
     serial_refusal,
     stored_form,
 )
+from ..server_selection import librenms_link_owner
 from ..transactions import atomic_with_events
 from ..platform_versions import (
     HIDDEN_PLATFORM,
@@ -494,10 +496,51 @@ def _flag_ambiguous_librenms_id(result, librenms_id, exc):
         result["issues"].append(message)
 
 
+# The match types of a match by a name: the resolved name, the LibreNMS hostname or the sysName.
+NAME_MATCH_TYPES = ("resolved_name", "hostname", "sysname")
+
+# The match type and the matched_by of an attach offer that the serial role makes.
+_SERIAL_ROLE_OFFER = ("serial", "serial")
+
 # The warning of a controller row whose host already has an OOB link.
 OOB_ALREADY_LINKED_WARNING = (
     "The matched NetBox device already has an OOB controller linked. Re-import will update the existing OOB entry."
 )
+
+
+def _reported_oob_type(libre_device) -> str | None:
+    """Return the OOB type that the row's OS or hardware text names; a value that is not text names none."""
+    os_text, hardware_text = (
+        value if isinstance(value, str) else "" for value in (libre_device.get("os"), libre_device.get("hardware"))
+    )
+    return normalize_oob_type(os_text, hardware_text)
+
+
+def _short_name(name: str) -> str:
+    """Return *name* in lower case without its domain; an IP address stays whole."""
+    try:
+        parse_host_address(name)
+    except ValueError:
+        return name.split(".")[0].lower()
+    return name.lower()
+
+
+def _row_name_oob_type(libre_device, device) -> str | None:
+    """
+    Return the OOB type that a name of the row names, when that name is not the NetBox *device*'s own name.
+
+    The names are the current sysName and hostname of the row; a value that is not text is no name. A name
+    that is the device's own name tells nothing about the row: the same full name, or one full name that is the
+    short form, without the domain, of the other. Two FQDNs with one short name are two names.
+    """
+    own_full = (device.name or "").lower()
+    own_short = _short_name(device.name or "")
+    for name in _name_candidates(libre_device):
+        if not name or own_full in (name.lower(), _short_name(name)) or name.lower() == own_short:
+            continue
+        if oob_type := _detect_oob_type_from_name(name):
+            return oob_type
+    return None
 
 
 def _oob_candidate(device, libre_device, matched_by) -> dict:
@@ -505,13 +548,11 @@ def _oob_candidate(device, libre_device, matched_by) -> dict:
     Return the attach offer of the LibreNMS row as the OOB controller of *device*.
 
     The type comes from the row's OS or hardware, then its name, then "oob". *matched_by* ("oob_ip",
-    "serial" or "hostname") names the evidence that Add as OOB checks again under its locks.
+    "primary_ip", "serial" or "hostname") names the match that Add as OOB checks again under its locks.
     """
     return {
         "device": device,
-        "type": normalize_oob_type(libre_device.get("os", ""), libre_device.get("hardware", ""))
-        or _detect_oob_type_from_name(libre_device.get("hostname") or libre_device.get("sysName") or "")
-        or "oob",
+        "type": _reported_oob_type(libre_device) or _row_name_oob_type(libre_device, device) or "oob",
         "version": libre_device.get("version") or None,
         "ip": libre_device.get("ip") or None,
         "matched_by": matched_by,
@@ -546,29 +587,61 @@ def _oob_controller_evidence(result, libre_device) -> bool:
     """
     Return whether the evidence shows that the LibreNMS row is the OOB controller of the matched object.
 
-    Evidence is an OOB-ID link, a host that already has an OOB link, the row at the host's OOB IP, or an OOB
-    signal of the row itself on a hostname, serial or IP match. An own-ID link, a merge of two NetBox
-    devices, the ambiguous serial-role default and a NetBox device whose own name looks like a controller's
-    are no evidence.
+    One rule for every match type: evidence is the row's OOB-ID link, or, on a name, serial or IP match of a
+    Device, the row at the Device's OOB IP or an OOB signal of the row itself (its OS or hardware, or a name
+    that is not the Device's own name). A cached action, an own-ID link, the serial role's ambiguous default
+    and a Device whose own name looks like a controller's are no evidence.
     """
     matched = result.get("existing_device")
     match_type = result.get("existing_match_type")
-    if matched is None or result.get("serial_action") == "merge_netbox_devices":
+    if matched is None:
         return False
-    if match_type == "librenms_oob" or result.get("serial_action") == "oob_already_linked":
+    if match_type == "librenms_oob":
         return True
-    if not isinstance(matched, Device) or match_type not in ("hostname", "serial", "primary_ip"):
+    if not isinstance(matched, Device) or match_type not in (*NAME_MATCH_TYPES, "serial", "primary_ip"):
         return False
     if _row_at_oob_ip(matched, libre_device):
         return True
-    oob_type = normalize_oob_type(libre_device.get("os", ""), libre_device.get("hardware", ""))
-    if match_type == "primary_ip":
-        # An address on a host interface is the host's own unless the host has no primary IP.
-        return bool(oob_type) and not (matched.primary_ip4_id or matched.primary_ip6_id)
-    # A row name that is the NetBox device's own name tells nothing about the row.
-    row_name = libre_device.get("hostname") or libre_device.get("sysName") or ""
-    name_signal = row_name.lower() != (matched.name or "").lower() and bool(_detect_oob_type_from_name(row_name))
-    return bool(oob_type) or name_signal
+    return bool(_reported_oob_type(libre_device) or _row_name_oob_type(libre_device, matched))
+
+
+def _serial_role_offers_oob(result, candidate, libre_device, server_key) -> bool:
+    """Return whether the serial role offers the row as the OOB controller of its serial match from the current evidence."""
+    if (result.get("existing_match_type"), candidate.get("matched_by")) != _SERIAL_ROLE_OFFER:
+        return False
+    facts = _serial_role_facts(
+        result["existing_device"],
+        result.get("existing_librenms_link"),
+        _current_resolved_name(result, libre_device),
+        libre_device,
+        server_key,
+    )
+    return facts.oob_possible
+
+
+def _current_resolved_name(result, libre_device) -> str:
+    """Return the name of the current row under the naming rules that the validation of *result* used."""
+    criteria = result.get("naming_criteria") or {}
+    name, _source = _resolve_device_name(
+        libre_device,
+        use_sysname=criteria.get("use_sysname", True),
+        strip_domain=criteria.get("strip_domain", False),
+        device_id=libre_device.get("device_id"),
+    )
+    return name
+
+
+def _withdraw_controller_state(result, libre_device, server_key) -> None:
+    """Remove the controller state of a row without controller evidence; a current serial-role offer stays."""
+    candidate = result.get("oob_candidate")
+    if candidate and not _serial_role_offers_oob(result, candidate, libre_device, server_key):
+        result["oob_candidate"] = None
+        if result.get("serial_action") == "oob_candidate":
+            result["serial_action"] = None
+    if result.get("serial_action") == "oob_already_linked":
+        result["serial_action"] = None
+    if OOB_ALREADY_LINKED_WARNING in result.get("warnings", []):
+        result["warnings"] = [warning for warning in result["warnings"] if warning != OOB_ALREADY_LINKED_WARNING]
 
 
 def classify_oob_controller(result, libre_device, server_key) -> None:
@@ -576,13 +649,14 @@ def classify_oob_controller(result, libre_device, server_key) -> None:
     Decide once whether the LibreNMS row is the OOB controller of the matched object, and set the state of that decision.
 
     It sets ``row_is_oob_controller``. A controller row gets no host-side name sync, serial update, host
-    promotion, type mismatch or host warnings. A Device host gets the attach offer when it has no OOB link,
-    and the already-linked warning when it has one. Validation and the cached-row refresh both call it, so
-    the rule has one definition.
+    promotion, type mismatch or host warnings. A merge suggestion stays as it is. Else a Device host gets the
+    attach offer when the owner of its LibreNMS links has no OOB link, and the already-linked warning when it
+    has one. Validation and the cached-row refresh both call it, so the rule has one definition.
     """
     libre_device = libre_device or {}
     result["row_is_oob_controller"] = _oob_controller_evidence(result, libre_device)
     if not result["row_is_oob_controller"]:
+        _withdraw_controller_state(result, libre_device, server_key)
         return
     matched = result["existing_device"]
     result["name_sync_available"] = False
@@ -598,9 +672,11 @@ def classify_oob_controller(result, libre_device, server_key) -> None:
         _device_type_mismatch_warning(result["device_type"].get("device_type")),
     }
     result["warnings"] = [warning for warning in result["warnings"] if warning not in host_warnings]
+    if result["serial_action"] == "merge_netbox_devices":
+        return
     if result["existing_match_type"] == "librenms_oob" or not isinstance(matched, Device):
         return
-    if read_mapping(matched).has_oob(server_key):
+    if read_mapping(librenms_link_owner(matched, server_key)).has_oob(server_key):
         if result["serial_action"] == "oob_candidate":
             result["serial_action"] = None
         result["oob_candidate"] = None
@@ -609,10 +685,14 @@ def classify_oob_controller(result, libre_device, server_key) -> None:
         return
     if result["serial_action"] == "oob_candidate" and result["oob_candidate"]:
         return
-    if _row_at_oob_ip(matched, libre_device) or result["existing_match_type"] == "primary_ip":
+    if _row_at_oob_ip(matched, libre_device):
         matched_by = "oob_ip"
+    elif result["existing_match_type"] == "primary_ip":
+        matched_by = "primary_ip"
+    elif result["existing_match_type"] in NAME_MATCH_TYPES:
+        matched_by = "hostname"
     else:
-        matched_by = result["existing_match_type"]
+        matched_by = "serial"
     result["serial_action"] = "oob_candidate"
     result["oob_candidate"] = _oob_candidate(matched, libre_device, matched_by)
 
@@ -625,50 +705,25 @@ def _serial_differs_warning(incoming_serial) -> str:
     )
 
 
-def _incoming_oob_signal(libre_device) -> bool:
-    """Return whether the LibreNMS row itself reports an OOB controller: by its OS or hardware, or by its name."""
-    return bool(
-        normalize_oob_type(libre_device.get("os", ""), libre_device.get("hardware", ""))
-        or _detect_oob_type_from_name(libre_device.get("hostname") or libre_device.get("sysName") or "")
-    )
+class _SerialRoleFacts(NamedTuple):
+    """The evidence of the serial role: what LibreNMS and NetBox report about a row and its serial match."""
+
+    oob_type_from_libre: str | None
+    existing_oob_recorded: bool
+    existing_oob_from_name: str | None
+    oob_possible: bool
+    host_possible: bool
 
 
-def _detect_serial_match_role(existing_by_serial, existing_link, hostname, serial, libre_device, server_key):
-    """
-    Decide the role an incoming LibreNMS device plays against a NetBox device matched by serial.
-
-    Pure decision step for the serial-match branch of :func:`validate_device_for_import`:
-    reads NetBox/LibreNMS state but does **not** mutate ``result``. Computes whether the
-    incoming device is an OOB-controller candidate, a host-promotion, a plain link, or a
-    hostname-differs case, and returns the keyword arguments for
-    :func:`apply_oob_detection_result` (``serial_action``, ``oob_candidate``,
-    ``promote_to_host``, ``serial_role_choice_available``, ``warnings``).
-
-    Args:
-        existing_by_serial (Device): The NetBox Device matched by serial.
-        existing_link (dict | None): The ``_describe_existing_librenms_link`` result for
-            *existing_by_serial*.
-        hostname (str): The incoming LibreNMS hostname (already resolved).
-        serial (str): The incoming serial (for warning text only). The matched device's own
-            identity never reaches a warning: the serial lookup is unrestricted, so only the
-            display gate may name it (see ``import_utils/disclosure.py``).
-        libre_device (dict): The raw LibreNMS device payload.
-        server_key (str): The active LibreNMS server key.
-
-    Returns:
-        dict: The keyword arguments for :func:`apply_oob_detection_result`.
-
-    """
+def _serial_role_facts(existing_by_serial, existing_link, hostname, libre_device, server_key) -> _SerialRoleFacts:
+    """Return the serial-role evidence of the row against *existing_by_serial*; see :func:`_detect_serial_match_role`."""
     # Compute both possible roles for the incoming LibreNMS device against
     # the existing NetBox device, then pick a heuristic default. The UI
     # offers a manual toggle whenever both roles are feasible so the user
     # can override the heuristic (e.g. mark a "linux"-OS device as OOB or
     # demote an apparent host into the OOB slot).
-    oob_type_from_libre = normalize_oob_type(
-        libre_device.get("os", ""),
-        libre_device.get("hardware", ""),
-    )
-    existing_oob_recorded = read_mapping(existing_by_serial).has_oob(server_key)
+    oob_type_from_libre = _reported_oob_type(libre_device)
+    existing_oob_recorded = read_mapping(librenms_link_owner(existing_by_serial, server_key)).has_oob(server_key)
 
     # Only treat this as a possible host/OOB chassis-pair situation when
     # there is a real ambiguity: either the existing NetBox device's name
@@ -699,7 +754,7 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
     # signal (incoming os/hardware or hostname looks OOB, or the existing device's name looks OOB)
     # or an existing link to a DIFFERENT id before treating a name mismatch as a chassis pair.
     existing_oob_from_name = _detect_oob_type_from_name(existing_by_serial.name)
-    incoming_oob_signal = _incoming_oob_signal(libre_device)
+    incoming_oob_signal = bool(oob_type_from_libre or _row_name_oob_type(libre_device, existing_by_serial))
     has_oob_signal = incoming_oob_signal or bool(existing_oob_from_name)
     # A name match normally means "just link" — but not when LibreNMS itself reports the incoming
     # device as an OOB controller (os/hardware → oob_type_from_libre). An iDRAC/iLO/IPMI sharing the
@@ -714,6 +769,39 @@ def _detect_serial_match_role(existing_by_serial, existing_link, hostname, seria
 
     oob_possible = chassis_pair_likely and not existing_oob_recorded
     host_possible = chassis_pair_likely and bool(linked_to_other_id and not existing_link.get("oob_id"))
+    return _SerialRoleFacts(
+        oob_type_from_libre, existing_oob_recorded, existing_oob_from_name, oob_possible, host_possible
+    )
+
+
+def _detect_serial_match_role(existing_by_serial, existing_link, hostname, serial, libre_device, server_key):
+    """
+    Decide the role an incoming LibreNMS device plays against a NetBox device matched by serial.
+
+    Pure decision step for the serial-match branch of :func:`validate_device_for_import`:
+    reads NetBox/LibreNMS state but does **not** mutate ``result``. Computes whether the
+    incoming device is an OOB-controller candidate, a host-promotion, a plain link, or a
+    hostname-differs case, and returns the keyword arguments for
+    :func:`apply_oob_detection_result` (``serial_action``, ``oob_candidate``,
+    ``promote_to_host``, ``serial_role_choice_available``, ``warnings``).
+
+    Args:
+        existing_by_serial (Device): The NetBox Device matched by serial.
+        existing_link (dict | None): The ``_describe_existing_librenms_link`` result for
+            *existing_by_serial*.
+        hostname (str): The incoming LibreNMS hostname (already resolved).
+        serial (str): The incoming serial (for warning text only). The matched device's own
+            identity never reaches a warning: the serial lookup is unrestricted, so only the
+            display gate may name it (see ``import_utils/disclosure.py``).
+        libre_device (dict): The raw LibreNMS device payload.
+        server_key (str): The active LibreNMS server key.
+
+    Returns:
+        dict: The keyword arguments for :func:`apply_oob_detection_result`.
+
+    """
+    facts = _serial_role_facts(existing_by_serial, existing_link, hostname, libre_device, server_key)
+    oob_type_from_libre, existing_oob_recorded, existing_oob_from_name, oob_possible, host_possible = facts
 
     # --- Compute all values before mutating result ---
     oob_candidate_data = _oob_candidate(existing_by_serial, libre_device, "serial") if oob_possible else None
@@ -919,6 +1007,8 @@ def validate_device_for_import(
         ...     import_single_device(libre_device['device_id'])
 
     """
+    # The matcher and the classifier read the mappings of the same server.
+    server_key = api.server_key if api is not None else server_key
     result = _match_and_validate(
         libre_device,
         import_as_vm,
@@ -1065,8 +1155,6 @@ def _match_and_validate(  # noqa: C901
             f"librenms_id={librenms_id} (type={type(librenms_id).__name__}), "
             f"hostname={hostname}"
         )
-
-        server_key = api.server_key if api is not None else server_key
 
         # Check for existing VM first (by librenms_id custom field).
         # find_mapping() covers both the new per-server JSON format
