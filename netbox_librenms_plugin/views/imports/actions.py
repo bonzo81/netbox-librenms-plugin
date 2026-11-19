@@ -84,7 +84,7 @@ from netbox_librenms_plugin.import_validation_helpers import (
 )
 from netbox_librenms_plugin.ip_addressing import parse_host_address
 from netbox_librenms_plugin.ip_rules import ip_rules_for_request
-from netbox_librenms_plugin.librenms_api import LibreNMSAPI
+from netbox_librenms_plugin.librenms_api import LibreNMSAPI, LibreNMSLookupError
 from netbox_librenms_plugin.librenms_ids import coerce_librenms_id
 from netbox_librenms_plugin.models import RuleConfigurationError
 from netbox_librenms_plugin.platform_versions import (
@@ -600,6 +600,14 @@ def _oob_ip_is_reassignable(candidate, interface) -> bool:
 _SERIAL_MATCH_LOST = "The serial no longer identifies this device alone. Refresh the validation and retry."
 
 
+class _LibreNMSDeviceUnavailable(Exception):
+    """A live device read got no answer about the device: LibreNMS failed, or it answered for another device."""
+
+    def __init__(self, error):
+        super().__init__(error.message)
+        self.response = _htmx_error_response(f"{error.message} Try again.")
+
+
 def _hold_device_row(device_pk) -> None:
     """Lock the Device row *device_pk* ``FOR NO KEY UPDATE`` until the transaction ends; a deleted row locks nothing."""
     from dcim.models import Device
@@ -933,19 +941,25 @@ class DeviceImportHelperMixin:
 
         Returns:
             tuple: The LibreNMS device, validation, and parsed intent. The first two
-                values are None when the device is not found, or a live read describes another device.
+                values are None when the device is not found.
+
+        Raises:
+            _LibreNMSDeviceUnavailable: A live read got no answer about the device; its ``response`` says so.
 
         """
         # Reuse a caller-supplied device, else read it live or from the row cache of the table load.
         if libre_device is None and live:
+            cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
             # The client refuses a row for another device ID, so a row here describes this one.
-            libre_device = get_librenms_device_by_id(self.librenms_api, device_id, use_cache=False)
-            if libre_device is not None:
-                cache.set(
-                    get_import_device_cache_key(device_id, self.librenms_api.server_key),
-                    libre_device,
-                    timeout=self.librenms_api.cache_timeout,
-                )
+            found, libre_device = self.librenms_api.get_device_info(device_id, use_cache=False)
+            if isinstance(libre_device, LibreNMSLookupError):
+                raise _LibreNMSDeviceUnavailable(libre_device)
+            if found:
+                cache.set(cache_key, libre_device, timeout=self.librenms_api.cache_timeout)
+            else:
+                # LibreNMS confirmed that the device is absent, so the row cache must not reopen the old row.
+                cache.delete(cache_key)
+                libre_device = None
         elif libre_device is None:
             libre_device = fetch_device_with_cache(device_id, self.librenms_api)
 
@@ -2325,7 +2339,12 @@ class DeviceConflictActionView(
         except (existing_model.DoesNotExist, ValueError):
             return _htmx_error_response("Existing device not found")
 
-        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request, live=True)
+        try:
+            libre_device, validation, selections = self.get_validated_device_with_selections(
+                device_id, request, live=True
+            )
+        except _LibreNMSDeviceUnavailable as exc:
+            return exc.response
         if not libre_device:
             return _htmx_error_response("LibreNMS device not found")
 
@@ -2937,6 +2956,8 @@ class CreatePlatformFromImportView(
         cache_key = get_import_device_cache_key(device_id, self.librenms_api.server_key)
         try:
             live_device, validation, _ = self.get_validated_device_with_selections(device_id, request, live=True)
+        except _LibreNMSDeviceUnavailable as exc:
+            return exc.response
         except Exception:
             logger.exception(
                 "CreatePlatformFromImportView: failed to resolve assignment target for device_id=%s",
@@ -3097,7 +3118,12 @@ class AddAsOOBView(
         except (Device.DoesNotExist, ValueError):
             return _htmx_error_response("Existing device not found")
 
-        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request, live=True)
+        try:
+            libre_device, validation, selections = self.get_validated_device_with_selections(
+                device_id, request, live=True
+            )
+        except _LibreNMSDeviceUnavailable as exc:
+            return exc.response
         if not libre_device:
             return _htmx_error_response("LibreNMS device not found")
 
@@ -3774,7 +3800,12 @@ class PromoteToHostView(
             except (Platform.DoesNotExist, ValueError, TypeError):
                 return _htmx_error_response("Invalid override_platform_id")
 
-        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request, live=True)
+        try:
+            libre_device, validation, selections = self.get_validated_device_with_selections(
+                device_id, request, live=True
+            )
+        except _LibreNMSDeviceUnavailable as exc:
+            return exc.response
         if not libre_device:
             return _htmx_error_response("LibreNMS device not found")
 
@@ -3968,7 +3999,12 @@ class MergeNetBoxDevicesView(
         except (TypeError, ValueError):
             return _htmx_error_response("Invalid winner_pk")
 
-        libre_device, validation, selections = self.get_validated_device_with_selections(device_id, request, live=True)
+        try:
+            libre_device, validation, selections = self.get_validated_device_with_selections(
+                device_id, request, live=True
+            )
+        except _LibreNMSDeviceUnavailable as exc:
+            return exc.response
         if not libre_device:
             return _htmx_error_response("LibreNMS device not found")
 
