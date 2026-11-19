@@ -1012,12 +1012,19 @@ def validate_device_for_import(  # noqa: C901
                     result["serial_confirmed"] = True
                     # The legacy ID converts on the serial only for its one holder; the POST checks it again under lock.
                     if result["librenms_id_needs_migration"]:
-                        # Unreadable until the lookup returns: a broken serial rule raises out of it.
-                        result["legacy_id_serial_unavailable"] = True
-                        holders = resolve_device(incoming_serial, rules=serial_rules)
-                        holder = holders.object
-                        result["legacy_id_serial_confirmed"] = holder is not None and holder.pk == existing_device.pk
-                        result["legacy_id_serial_unavailable"] = holders.kind is ResolutionKind.UNAVAILABLE
+                        try:
+                            holders = resolve_device(incoming_serial, rules=serial_rules)
+                        except RuleConfigurationError as exc:
+                            # Another maker's broken rule leaves only the holder Unavailable; the type check still runs.
+                            result["legacy_id_serial_unavailable"] = True
+                            detail = exception_text_for(exc, Device, None)
+                            result["issues"].append(f"{VALIDATION_ERROR_ISSUE_PREFIX} {detail}")
+                        else:
+                            holder = holders.object
+                            result["legacy_id_serial_confirmed"] = (
+                                holder is not None and holder.pk == existing_device.pk
+                            )
+                            result["legacy_id_serial_unavailable"] = holders.kind is ResolutionKind.UNAVAILABLE
                 elif drift is Comparison.UNAVAILABLE:
                     result["warnings"].append(f"The serial cannot be compared: {UNAVAILABLE_MASTER_LINK}")
                 elif is_identity(incoming_serial, context) and display(existing_device.serial):

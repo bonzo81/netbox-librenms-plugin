@@ -1479,6 +1479,35 @@ class TestValidateDeviceForImport:
         assert result["device_type_mismatch"] is True
         assert any("Device type mismatch" in warning for warning in result["warnings"])
 
+    def test_a_broken_rule_in_the_legacy_holder_lookup_keeps_the_device_type_mismatch(self):
+        """The holder lookup reads every maker's rules; its failure marks the serial Unavailable, not the type."""
+        from dcim.models import DeviceType, Manufacturer
+
+        from netbox_librenms_plugin.import_utils.device_operations import VALIDATION_ERROR_ISSUE_PREFIX
+
+        device = make_device("validation-legacy-type-drift", serial="LEGACY-TYPE-SN", librenms_cf=5438)
+        _broken_serial_rule("legacy-type-drift")
+        manufacturer = Manufacturer.objects.create(name="Legacy drift maker", slug="legacy-drift-maker")
+        reported_type = DeviceType.objects.create(
+            manufacturer=manufacturer, model="Legacy drift type", slug="legacy-drift-type"
+        )
+
+        result = self._validate(
+            _device_payload(
+                5438,
+                hostname=device.name,
+                sysName=device.name,
+                hardware=reported_type.model,
+                location=device.site.name,
+                serial="LEGACY-TYPE-SN",
+            )
+        )
+
+        assert result["librenms_id_needs_migration"] is True
+        assert (result["legacy_id_serial_confirmed"], result["legacy_id_serial_unavailable"]) == (False, True)
+        assert result["device_type_mismatch"] is True
+        assert [issue for issue in result["issues"] if issue.startswith(VALIDATION_ERROR_ISSUE_PREFIX)]
+
 
 @pytest.mark.django_db
 class TestValidationWithRealLibreNMS:
