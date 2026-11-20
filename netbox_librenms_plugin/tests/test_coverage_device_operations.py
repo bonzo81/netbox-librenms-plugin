@@ -671,6 +671,7 @@ class TestValidateDeviceForImport:
             "serial_confirmed",
             "legacy_id_serial_confirmed",
             "legacy_id_serial_unavailable",
+            "legacy_id_serial_shared",
             "serial_duplicate",
             "serial_conflict",
             "serial_role_choice_available",
@@ -1504,7 +1505,8 @@ class TestValidateDeviceForImport:
         )
 
         assert result["librenms_id_needs_migration"] is True
-        assert (result["legacy_id_serial_confirmed"], result["legacy_id_serial_unavailable"]) == (False, True)
+        flags = ("legacy_id_serial_confirmed", "legacy_id_serial_unavailable", "legacy_id_serial_shared")
+        assert tuple(result[flag] for flag in flags) == (False, True, False)
         assert result["device_type_mismatch"] is True
         # The legacy ID names the Device, so the result is complete and the bulk precheck keeps the row.
         assert not [issue for issue in result["issues"] if issue.startswith(VALIDATION_ERROR_ISSUE_PREFIX)]

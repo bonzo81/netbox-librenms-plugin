@@ -688,6 +688,7 @@ def validate_device_for_import(  # noqa: C901
                 'serial_confirmed': bool,  # librenms_id match and serial matches
                 'legacy_id_serial_confirmed': bool,  # Legacy-linked device is the one holder of the serial
                 'legacy_id_serial_unavailable': bool,  # The holder lookup of that serial cannot read every row
+                'legacy_id_serial_shared': bool,  # The holder lookup found another Device with that serial
                 'serial_duplicate': bool,  # Incoming serial already on a different device
                 'serial_role_choice_available': bool,  # Both oob_candidate and promote_to_host valid
                 'oob_candidate': dict or None,  # {device, type, version, ip} when detected (devices only)
@@ -777,6 +778,7 @@ def validate_device_for_import(  # noqa: C901
         "serial_confirmed": False,  # True when librenms_id match and serial matches
         "legacy_id_serial_confirmed": False,  # True when the legacy-linked device is the one holder of the serial
         "legacy_id_serial_unavailable": False,  # True when the holder lookup of that serial cannot read every row
+        "legacy_id_serial_shared": False,  # True when the holder lookup found another Device with that serial
         "serial_duplicate": False,  # True when incoming serial is already on a different device
         # {"pk", "serial", "phase"} for the device already holding the incoming serial. The
         # lookup is unrestricted, so only the display gate may name it (see disclosure.py).
@@ -1012,19 +1014,21 @@ def validate_device_for_import(  # noqa: C901
                     result["serial_confirmed"] = True
                     # The legacy ID converts on the serial only for its one holder; the POST checks it again under lock.
                     if result["librenms_id_needs_migration"]:
+                        # Unavailable until the lookup returns, so a failed lookup never reads as a shared serial.
+                        result["legacy_id_serial_unavailable"] = True
                         try:
                             holders = resolve_device(incoming_serial, rules=serial_rules)
                         except RuleConfigurationError as exc:
                             # The legacy ID names the Device, so another maker's broken rule hides only the other holders.
-                            result["legacy_id_serial_unavailable"] = True
                             detail = exception_text_for(exc, Device, None)
                             result["warnings"].append(f"The other holders of the serial cannot be checked: {detail}")
                         else:
                             holder = holders.object
-                            result["legacy_id_serial_confirmed"] = (
-                                holder is not None and holder.pk == existing_device.pk
-                            )
-                            result["legacy_id_serial_unavailable"] = holders.kind is ResolutionKind.UNAVAILABLE
+                            confirmed = holder is not None and holder.pk == existing_device.pk
+                            unavailable = holders.kind is ResolutionKind.UNAVAILABLE
+                            result["legacy_id_serial_confirmed"] = confirmed
+                            result["legacy_id_serial_unavailable"] = unavailable
+                            result["legacy_id_serial_shared"] = not confirmed and not unavailable
                 elif drift is Comparison.UNAVAILABLE:
                     result["warnings"].append(f"The serial cannot be compared: {UNAVAILABLE_MASTER_LINK}")
                 elif is_identity(incoming_serial, context) and display(existing_device.serial):

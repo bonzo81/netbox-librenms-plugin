@@ -1664,10 +1664,11 @@ class TestDeviceValidationDetailsView:
         reason = RuleConfigurationError(rule, "replacement").public_message
         assert escape(reason) in re.sub(r"<[^>]*>", "", serial_row)
 
-    @pytest.mark.parametrize("holders", ["sole", "shared", "unavailable", "broken-rule"])
+    @pytest.mark.parametrize("holders", ["sole", "shared", "unavailable", "broken-rule", "query-error"])
     def test_the_legacy_id_conversion_offers_the_force_checkbox_unless_the_device_holds_the_serial_alone(self, holders):
         """The conversion POST needs the one holder of the serial; a second or an unreadable holder needs force."""
         from dcim.models import Manufacturer
+        from django.db import OperationalError
 
         from netbox_librenms_plugin.models import NormalizationRule
         from netbox_librenms_plugin.tests.test_coverage_device_operations import _stray_chassis_member
@@ -1695,7 +1696,14 @@ class TestDeviceValidationDetailsView:
         )
         self.primary_server.vc_inventory_callable(1, [], {})
 
-        _view, response = self._get("default")
+        def holder_query_fails(execute, sql, params, many, context):
+            # Error injection at the database: the holder lookup times out after the pairwise comparison.
+            if holders == "query-error" and "BTRIM" in sql and '"dcim_device"' in sql:
+                raise OperationalError("canceling statement due to statement timeout")
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(holder_query_fails):
+            _view, response = self._get("default")
 
         assert response.status_code == 200
         content = response.content.decode()
@@ -1707,6 +1715,7 @@ class TestDeviceValidationDetailsView:
         # One serial badge, and it names the state of the other holders.
         badge = {"sole": "confirmed", "shared": "shared"}.get(holders, "unavailable")
         assert re.findall(r'data-serial-state="([a-z]+)"', content) == [badge]
+        assert re.findall(r'data-force-reason="([a-z]+)"', form) == ([] if holders == "sole" else [badge])
 
     def test_a_serial_without_identity_shows_no_match_and_no_sync_action(self):
         existing = make_device("details-no-identity", serial="ABC123", librenms_cf={"default": {"id": 1}})
