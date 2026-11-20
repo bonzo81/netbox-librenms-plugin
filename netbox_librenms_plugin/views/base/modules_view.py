@@ -136,8 +136,12 @@ def _clean_librenms_value(value) -> str:
 
 
 def _names_another_part(item: dict, transceiver: dict, context: SerialContext) -> bool:
-    """Return whether an entity and a transceiver both have a real serial and the serials differ."""
-    return compare(item.get("entPhysicalSerialNum"), transceiver.get("serial"), context) is Comparison.DIFFERENT
+    """Return whether an entity reports a serial that is not the transceiver's: another one, or one without an identity."""
+    serial = item.get("entPhysicalSerialNum")
+    if is_identity(serial, context):
+        return compare(serial, transceiver.get("serial"), context) is Comparison.DIFFERENT
+    # A reported serial without an identity still names a part.
+    return bool(display(serial))
 
 
 # ENTITY-MIB classes of hardware that is never an optic; a port, module, container or other entity can be.
@@ -151,13 +155,12 @@ def _never_an_optic(item: dict) -> bool:
 
 def _ifindex_entity_is_the_optic(item: dict, transceiver: dict, context: SerialContext) -> bool:
     """Return whether an entity matched only by port ifIndex has the optic's serial, or neither model nor serial."""
-    if _never_an_optic(item):
+    if _never_an_optic(item) or _names_another_part(item, transceiver, context):
         return False
     serial = item.get("entPhysicalSerialNum")
     if is_identity(serial, context):
         return compare(serial, transceiver.get("serial"), context) is Comparison.SAME
-    # A reported serial without an identity still names a part, so only a blank entity is the optic's holder.
-    return not display(serial) and not _clean_librenms_value(item.get("entPhysicalModelName"))
+    return not _clean_librenms_value(item.get("entPhysicalModelName"))
 
 
 # Physical classes whose entities only hold hardware when they report no serial.

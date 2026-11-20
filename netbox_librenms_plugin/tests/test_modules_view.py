@@ -1111,6 +1111,41 @@ class TestMergeTransceiverDataPortIdentity:
             for item in inventory[1:]
         ] == [(77, "OPTIC123", 9)]
 
+    def test_a_coincident_entity_index_does_not_merge_onto_a_short_reported_serial(self, settings, librenms_server):
+        """Junos reports the port ifIndex as the optic index; a port entity with that index and a short serial is another part."""
+        view = _real_api_view(settings, librenms_server, librenms_id=110)
+        librenms_server.register(
+            "/api/v0/devices/110/transceivers",
+            {
+                "status": "ok",
+                "transceivers": [
+                    {"entity_physical_index": 50, "model": "SFP-10G-SR", "serial": "OPTIC123", "port_id": 9}
+                ],
+            },
+            method="GET",
+        )
+        librenms_server.register(
+            "/api/v0/devices/110/ports",
+            {"status": "ok", "ports": [{"port_id": 9, "ifName": "Eth9", "ifIndex": 50}]},
+            method="GET",
+        )
+        inventory_seed = [
+            {
+                "entPhysicalIndex": 50,
+                "entPhysicalName": "Port 9",
+                "entPhysicalClass": "port",
+                "entPhysicalSerialNum": "AB-12",
+                "ifIndex": 50,
+            }
+        ]
+
+        inventory, error = view._merge_transceiver_data(
+            deepcopy(inventory_seed), serial_context=SerialRules.load().context(None)
+        )
+
+        assert error is None
+        assert inventory == inventory_seed
+
     def test_a_replay_of_the_anonymized_recording_merges_the_optic_as_the_live_data_does(
         self, settings, librenms_server
     ):
