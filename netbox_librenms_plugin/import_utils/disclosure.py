@@ -253,21 +253,18 @@ def _scope_existing_match(validation: dict, scope: ViewerScope) -> bool:
     # The serial conflict is a DIFFERENT object, whose visibility is decided on its own, so carry
     # it across the teardown below (which clears it along with the rest of the match state).
     conflict = validation.get("serial_conflict")
-    # The same teardown every branch that drops a match performs (``bulk_import``'s refresh
-    # branches). The role and cluster matter most here: the validator copies them OFF the matched
+    # The role and cluster matter most here: the validator copies them OFF the matched
     # object, and the modal falls back to printing validation["device_role"] exactly when
     # existing_device is absent, so leaving them would disclose the withheld object's role.
     clear_match_derived_action_fields(validation)
-    # The shared helper leaves match-type demotion and linkage to its callers. This teardown is
-    # terminal (no fresh lookup follows it, unlike bulk_import's refresh), so it demotes them here.
+    # The shared helper leaves match-type demotion and linkage to its callers. This teardown is terminal, so it demotes them here.
     validation["existing_match_type"] = None
     validation["existing_librenms_link"] = None
     validation["librenms_id_needs_migration"] = False
     validation["device_type_mismatch"] = False
     reset_device_role(validation)
     reset_cluster(validation)
-    # This teardown goes further than the refresh one, which keeps the row's mode: a VM-only
-    # Cluster row in the modal would tell the viewer that the withheld object is a VM.
+    # The row's mode goes too: a VM-only Cluster row in the modal would tell the viewer that the withheld object is a VM.
     validation["import_as_vm"] = False
     validation["serial_conflict"] = conflict
     return True

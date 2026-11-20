@@ -130,7 +130,7 @@ While using a settings model for access control may seem unconventional, it prov
 
 ### Cached LibreNMS Data and NetBox Objects
 
-LibreNMS API responses and validation data are cached plugin data rather than NetBox database models, so NetBox cannot apply queryset-based object permissions directly to those cache entries. The LibreNMS Settings permissions therefore gate access to the integration and its cached data.
+LibreNMS API responses are cached plugin data rather than NetBox database models, so NetBox cannot apply queryset-based object permissions directly to those cache entries. The LibreNMS Settings permissions therefore gate access to the integration and its cached data.
 
 When a page also reads or presents NetBox objects, both permission tiers apply. For example, the import page requires plugin View and `dcim.view_device`; Device and VM status pages require plugin View plus `dcim.view_device` or `virtualization.view_virtualmachine`. This preserves the integration gate without allowing a cached-data feature to bypass the user's NetBox object scope.
 
