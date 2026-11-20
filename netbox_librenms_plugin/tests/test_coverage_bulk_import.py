@@ -213,19 +213,33 @@ class TestCollisionDetection:
         assert collisions == []
         assert unresolved == []
 
-    def test_a_legacy_row_with_an_unreadable_holder_lookup_still_collides_by_its_legacy_id(self, live_librenms):
-        """The legacy ID names the Device, so another maker's broken rule must not drop the row from the grouping."""
+    @pytest.mark.parametrize("failure", ["broken-rule", "query-timeout"])
+    def test_a_legacy_row_with_an_unreadable_holder_lookup_still_collides_by_its_legacy_id(
+        self, live_librenms, failure
+    ):
+        """The legacy ID names the Device, so a failed holder lookup must not drop the row from the grouping."""
+        from django.db import connection
+
         from netbox_librenms_plugin.import_utils.bulk_import import detect_collisions_for_device_ids
         from netbox_librenms_plugin.tests.test_coverage_device_operations import _broken_serial_rule
 
         target = make_device("collision-legacy-target", serial="LEGACY-COLLIDE", librenms_cf=53)
-        _broken_serial_rule("collision-legacy")
+        if failure == "broken-rule":
+            _broken_serial_rule("collision-legacy")
         legacy = _libre_device(53, "collision-legacy-other-name", serial="LEGACY-COLLIDE")
         by_name = _libre_device(54, target.name)
         _register_device(live_librenms, legacy)
         _register_device(live_librenms, by_name)
 
-        collisions, unresolved = detect_collisions_for_device_ids([53, 54], live_librenms.api)
+        def holder_query_times_out(execute, sql, params, many, context):
+            if failure == "query-timeout" and "BTRIM" in sql and '"dcim_device"' in sql:
+                # A real server timeout, so the error aborts the transaction as a slow holder query does.
+                execute("SET LOCAL statement_timeout = 1", None, False, context)
+                return execute("SELECT pg_sleep(1)", None, False, context)
+            return execute(sql, params, many, context)
+
+        with connection.execute_wrapper(holder_query_times_out):
+            collisions, unresolved = detect_collisions_for_device_ids([53, 54], live_librenms.api)
 
         assert unresolved == []
         assert [collision["nb_device_pk"] for collision in collisions] == [target.pk]

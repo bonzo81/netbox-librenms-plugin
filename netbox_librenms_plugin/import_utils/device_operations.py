@@ -4,6 +4,7 @@ import logging
 
 from dcim.models import Device, DeviceRole, DeviceType, Rack, Site, VirtualChassis
 from django.core.cache import cache
+from django.db import DatabaseError, transaction
 from django.db.models import Q
 from django.utils import timezone
 from tenancy.models import Tenant
@@ -1017,9 +1018,11 @@ def validate_device_for_import(  # noqa: C901
                         # Unavailable until the lookup returns, so a failed lookup never reads as a shared serial.
                         result["legacy_id_serial_unavailable"] = True
                         try:
-                            holders = resolve_device(incoming_serial, rules=serial_rules)
-                        except RuleConfigurationError as exc:
-                            # The legacy ID names the Device, so another maker's broken rule hides only the other holders.
+                            # A savepoint keeps the connection usable after a database error of the query.
+                            with transaction.atomic():
+                                holders = resolve_device(incoming_serial, rules=serial_rules)
+                        except (RuleConfigurationError, DatabaseError) as exc:
+                            # The legacy ID names the Device, so a failed lookup hides only the other holders.
                             detail = exception_text_for(exc, Device, None)
                             result["warnings"].append(f"The other holders of the serial cannot be checked: {detail}")
                         else:
