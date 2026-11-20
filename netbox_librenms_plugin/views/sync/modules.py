@@ -431,6 +431,10 @@ class _SerialConflictAmbiguous(Exception):
 class _SerialConflictUnavailable(Exception):
     """Abort replacement when a serial conflict is outside the caller's delete scope."""
 
+    MESSAGE = (
+        "Serial '{serial}' is assigned to a module you cannot remove. Ask an administrator to resolve the conflict."
+    )
+
     def __init__(self, serial):
         super().__init__(serial)
         self.serial = serial
@@ -3190,11 +3194,7 @@ class ReplaceModuleView(LibreNMSPermissionMixin, LibreNMSAPIMixin, NetBoxObjectP
                 "Please resolve the conflict manually.",
             )
         except _SerialConflictUnavailable as exc:
-            messages.error(
-                request,
-                f"Serial '{exc.serial}' is assigned to a module you cannot remove. "
-                "Ask an administrator to resolve the conflict.",
-            )
+            messages.error(request, exc.MESSAGE.format(serial=exc.serial))
         except (AbortRequest, ValidationError, IntegrityError) as e:
             if classify_conflict(e):
                 raise

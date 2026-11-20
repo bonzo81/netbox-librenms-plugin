@@ -2670,10 +2670,9 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         from django.core.cache import cache
 
         from netbox_librenms_plugin.librenms_api import LibreNMSAPI
-        from netbox_librenms_plugin.module_grants import GrantRefusal
         from netbox_librenms_plugin.tests.conftest import make_device, make_module_bay, make_module_type
         from netbox_librenms_plugin.tests.view_test_helpers import message_texts, rendered_modal_form
-        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView
+        from netbox_librenms_plugin.views.sync.modules import ReplaceModuleView, _SerialConflictUnavailable
 
         device = make_device("scope-replace-kept")
         other_device = make_device("scope-replace-kept-holder")
@@ -2730,8 +2729,8 @@ class TestGatedViewsRefuseOutOfScopeObjects:
         target.refresh_from_db()
         holder.refresh_from_db()
         assert (target.serial, holder.serial) == ("OLD-KEPT", "INCOMING-KEPT")
-        errors = message_texts(request, "error")
-        assert len(errors) == 1 and errors != [GrantRefusal.STALE.message]
+        # The refusal of the holder's delete scope, not an earlier refusal of the preview.
+        assert message_texts(request, "error") == [_SerialConflictUnavailable.MESSAGE.format(serial="INCOMING-KEPT")]
 
     def test_module_preview_does_not_expose_a_hidden_serial_conflict(self):
         """The preview must not render the location or id of a conflict outside view scope."""
