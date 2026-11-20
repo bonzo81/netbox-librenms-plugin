@@ -1773,6 +1773,29 @@ class TestDeviceValidationDetailsView:
         assert re.findall(r'data-serial-state="([a-z]+)"', content) == [badge]
         assert re.findall(r'data-force-reason="([a-z]+)"', form) == ([] if holders == "sole" else [badge])
 
+    def test_a_json_boolean_serial_confirms_no_legacy_id_conversion(self):
+        """The device stores "True" and LibreNMS sends `serial: true`: the text matches, but the value is no serial."""
+        existing = make_device("details-legacy-boolean", serial="True", librenms_cf=1)
+        self.primary_server.device_info_response(
+            device_id=1,
+            hostname=existing.name,
+            hardware=existing.device_type.model,
+            os="ios",
+            serial=True,
+            ip="198.18.0.6",
+        )
+        self.primary_server.vc_inventory_callable(1, [], {})
+
+        _view, response = self._get("default")
+
+        assert response.status_code == 200
+        content = response.content.decode()
+        start = content.index('value="migrate_librenms_id"')
+        form = content[start : content.index("</form>", start)]
+        assert 'name="force"' in form
+        assert " disabled" in re.search(r"<button[^>]*migrate-btn[^>]*>", form).group(0)
+        assert "confirmed" not in re.findall(r'data-serial-state="([a-z]+)"', content)
+
     def test_a_serial_without_identity_shows_no_match_and_no_sync_action(self):
         existing = make_device("details-no-identity", serial="ABC123", librenms_cf={"default": {"id": 1}})
         self.primary_server.device_info_response(
