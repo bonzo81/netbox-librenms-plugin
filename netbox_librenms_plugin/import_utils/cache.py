@@ -335,6 +335,11 @@ def get_import_device_cache_key(device_id: int | str, server_key: str) -> str:
     return f"import_device_data_{server_key}_{device_id}"
 
 
+def get_chassis_inventory_cache_key(device_id: int | str, server_key: str) -> str:
+    """Return the cache key of the chassis-class inventory that the DeviceType fallback reads for a device."""
+    return f"librenms_chassis_inventory_{server_key}_{device_id}"
+
+
 def get_import_search_cache_key(server_key: str, api_filters: dict, client_filters: dict) -> str:
     """
     Generate a deterministic cache key for a LibreNMS device search result.
